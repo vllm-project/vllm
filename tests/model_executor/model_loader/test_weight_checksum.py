@@ -11,8 +11,6 @@ from vllm.config import ParallelConfig
 from vllm.model_executor import parameter
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
-    select_reset_weights,
-    zero_selected_weights,
     zero_weights,
 )
 from vllm.v1.worker import gpu_worker
@@ -80,154 +78,26 @@ def test_tensor_subclass_inner_tensors_are_hashed_and_reset():
     )
 
 
-@pytest.mark.parametrize("model", ["target", "draft", "both"])
-def test_reset_covers_selected_model_weights(model):
-    target = nn.Module()
-    target.embed_tokens = nn.Embedding(4, 2)
-    target.lm_head = nn.Linear(2, 4, bias=False)
-    target.private = nn.Parameter(torch.full((2,), 3.0))
-    nn.init.ones_(target.embed_tokens.weight)
-    nn.init.ones_(target.lm_head.weight)
+def test_zero_weights_preserves_shared_parameters():
+    target, draft = nn.Linear(2, 2), nn.Linear(2, 2)
+    shared = target.weight
+    draft.weight = shared
+    nn.init.ones_(shared)
+    nn.init.ones_(target.bias)
+    nn.init.ones_(draft.bias)
+    address = shared.untyped_storage().data_ptr()
 
-    draft = nn.Module()
-    draft.embed_tokens = target.embed_tokens
-    draft.lm_head = nn.Linear(2, 4, bias=False)
-    draft.lm_head.weight = nn.Parameter(target.lm_head.weight.detach())
-    # Equal values in separate storage do not make this a shared weight.
-    draft.private = nn.Parameter(target.private.detach().clone())
-    draft.already_zero = nn.Parameter(torch.zeros(1))
-    before_target = compute_tensor_digests(target)
-    before_draft = compute_tensor_digests(draft)
-    addresses = [
-        p.data_ptr() for module in (target, draft) for p in module.parameters()
-    ]
-    shared = {"embed_tokens.weight", "lm_head.weight"}
-    assert all(before_target[name] == before_draft[name] for name in shared)
+    zero_weights(draft)
+    torch.testing.assert_close(target.weight, torch.zeros_like(shared))
+    torch.testing.assert_close(draft.bias, torch.zeros_like(draft.bias))
+    torch.testing.assert_close(target.bias, torch.ones_like(target.bias))
+    draft_digests = compute_tensor_digests(draft)
 
-    plan = select_reset_weights(target, draft, model)
-    assert not isinstance(plan, str)
-    zero_selected_weights(plan)
-
-    assert addresses == [
-        p.data_ptr() for module in (target, draft) for p in module.parameters()
-    ]
-    assert draft.embed_tokens is target.embed_tokens
-    assert draft.lm_head.weight.data_ptr() == target.lm_head.weight.data_ptr()
-    after_target = compute_tensor_digests(target)
-    after_draft = compute_tensor_digests(draft)
-    assert {key for key in after_target if after_target[key] != before_target[key]} == (
-        set(before_target) if model != "draft" else shared
-    )
-    assert {key for key in after_draft if after_draft[key] != before_draft[key]} == (
-        shared | ({"private"} if model != "target" else set())
-    )
-    for weight in plan:
-        torch.testing.assert_close(weight, torch.zeros_like(weight))
-
-
-def test_target_reset_without_draft():
-    target = _Model()
-    plan = select_reset_weights(target, None, "target")
-    assert not isinstance(plan, str)
-    zero_selected_weights(plan)
-    assert all(torch.count_nonzero(weight) == 0 for weight in target.parameters())
-    assert target.k_scale.item() == 2.0
-
-
-@pytest.mark.parametrize("model", ["draft", "both"])
-def test_reset_accepts_a_draft_with_only_shared_weights(model):
-    target = nn.Linear(2, 2, bias=False)
-    nn.init.ones_(target.weight)
-    draft = nn.Sequential(target)
-    address = target.weight.data_ptr()
-    plan = select_reset_weights(target, draft, model)
-    assert not isinstance(plan, str)
-    zero_selected_weights(plan)
-    zero_selected_weights(plan)
-    assert draft[0].weight is target.weight
-    assert target.weight.data_ptr() == address
-    torch.testing.assert_close(target.weight, torch.zeros_like(target.weight))
-
-
-def test_draft_only_reset_requires_nonempty_weights():
-    target = nn.Linear(2, 2, bias=False)
-    draft = nn.Module()
-    draft.weight = nn.Parameter(torch.empty(0))
-    assert select_reset_weights(target, draft, "draft") == (
-        "Weight Checker found no resettable draft weights."
-    )
-
-
-@pytest.mark.parametrize("writer", ["target", "draft"])
-def test_reset_checks_shared_writes_against_the_other_models_buffers(writer):
-    target = nn.Linear(2, 2, bias=False)
-    draft = nn.Module()
-    draft.weight = target.weight
-    other = target if writer == "draft" else draft
-    other.register_buffer("alias", target.weight.detach())
-    before = other.alias.clone()
-
-    for model in (writer, "both"):
-        error = select_reset_weights(target, draft, model)
-        assert isinstance(error, str)
-        assert f"{writer} parameter 'weight' overlaps buffer 'alias'" in error
-    torch.testing.assert_close(other.alias, before)
-
-
-@pytest.mark.parametrize("model", ["target", "draft", "both"])
-def test_reset_rejects_partial_overlap_before_mutation(model):
-    storage = torch.ones(8)
-    target, draft = nn.Module(), nn.Module()
-    target.weight = nn.Parameter(storage[:5])
-    draft.weight = nn.Parameter(storage[4:])
-    error = select_reset_weights(target, draft, model)
-    assert isinstance(error, str) and "ambiguous overlapping storage" in error
-    torch.testing.assert_close(storage, torch.ones(8))
-
-
-def test_reset_allows_views_with_disjoint_address_ranges():
-    storage = torch.ones(2, 4)
-    left, right = storage[0], storage[1]
-    target, draft = nn.Module(), nn.Module()
-    target.weight = nn.Parameter(left)
-    draft.weight = nn.Parameter(right)
-    plan = select_reset_weights(target, draft, "draft")
-    assert not isinstance(plan, str)
-    zero_selected_weights(plan)
-    torch.testing.assert_close(target.weight, torch.ones_like(left))
-    torch.testing.assert_close(draft.weight, torch.zeros_like(right))
-
-
-@pytest.mark.parametrize("kind", ["interleaved", "columns"])
-def test_reset_conservatively_rejects_strided_views_with_overlapping_ranges(kind):
-    storage = torch.ones(2, 4)
-    if kind == "interleaved":
-        left, right = storage[:, ::2], storage[:, 1::2]
-    else:
-        left, right = storage[:, :2], storage[:, 2:]
-    target, draft = nn.Module(), nn.Module()
-    target.weight = nn.Parameter(left)
-    draft.weight = nn.Parameter(right)
-    error = select_reset_weights(target, draft, "draft")
-    assert isinstance(error, str) and "ambiguous overlapping storage" in error
-    torch.testing.assert_close(storage, torch.ones_like(storage))
-
-
-@pytest.mark.parametrize("owner", ["target", "draft"])
-def test_reset_rejects_a_write_through_the_other_models_buffer(owner):
-    target, draft = nn.Linear(2, 2, bias=False), nn.Linear(2, 2, bias=False)
-    selected, other = (target, draft) if owner == "target" else (draft, target)
-    other.register_buffer("alias", selected.weight.detach())
-    before = other.alias.clone()
-    for model in (owner, "both"):
-        error = select_reset_weights(target, draft, model)
-        assert isinstance(error, str) and "overlaps buffer 'alias'" in error
-    other_plan = select_reset_weights(
-        target, draft, "draft" if owner == "target" else "target"
-    )
-    assert not isinstance(other_plan, str)
-    zero_selected_weights(other_plan)
-    torch.testing.assert_close(other.alias, before)
+    zero_weights(target)
+    assert draft.weight is target.weight is shared
+    assert shared.untyped_storage().data_ptr() == address
+    assert compute_tensor_digests(draft) == draft_digests
+    torch.testing.assert_close(target.bias, torch.zeros_like(target.bias))
 
 
 def test_dense_dp_replicas_get_distinct_key_prefixes(monkeypatch):

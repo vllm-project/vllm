@@ -85,9 +85,9 @@ from vllm.model_executor.model_loader.base_loader import (
 )
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
+    _weights,
     compute_tensor_digests,
-    select_reset_weights,
-    zero_selected_weights,
+    zero_weights,
 )
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
@@ -492,19 +492,14 @@ class Worker(WorkerBase):
             )
         return checksums
 
-    def _weight_reset_plan(
-        self, model: WeightCheckerModel
-    ) -> tuple[torch.Tensor, ...] | str:
+    def reset_weights(self, model: WeightCheckerModel = "target") -> str | None:
         if error := _validate_weight_checker_model(model):
             return error
-        if model != "target" and self.parallel_config.pipeline_parallel_size > 1:
-            return "Cannot reset draft weights with pipeline parallelism."
 
-        if model == "target":
-            draft = (
-                self.get_draft_model() if self.speculative_config is not None else None
-            )
-        else:
+        draft = None
+        if model != "target":
+            if self.parallel_config.pipeline_parallel_size > 1:
+                return "Cannot reset draft weights with pipeline parallelism."
             draft, error = self._resolve_weight_checker_draft()
             if error is not None:
                 return error
@@ -516,17 +511,14 @@ class Worker(WorkerBase):
                     "Cannot reset draft weights with model-specific derived weights "
                     "that require a target update to refresh."
                 )
-        return select_reset_weights(self.get_model(), draft, model)
+            if not any(weight.numel() for _, weight in _weights(draft)):
+                return "Weight Checker found no resettable draft weights."
 
-    def _zero_reset_weights(self, weights: tuple[torch.Tensor, ...]) -> None:
-        zero_selected_weights(weights)
+        if model != "draft":
+            zero_weights(self.get_model())
+        if draft is not None:
+            zero_weights(draft)
         self.synchronize_device()
-
-    def reset_weights(self, model: WeightCheckerModel = "target") -> str | None:
-        weights = self._weight_reset_plan(model)
-        if isinstance(weights, str):
-            return weights
-        self._zero_reset_weights(weights)
         return None
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:

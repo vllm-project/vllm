@@ -208,7 +208,8 @@ def test_weight_checker_rejects_a_draft_without_weight_parameters():
         target = checksums(url)
         assert weight_checker(url, "checksum", model="draft").status_code == 409
         assert weight_checker(url, "compare", {}, model="draft").status_code == 409
-        assert weight_checker(url, "reset", model="both").status_code == 409
+        for model in ("draft", "both"):
+            assert weight_checker(url, "reset", model=model).status_code == 409
         assert checksums(url) == target
 
 

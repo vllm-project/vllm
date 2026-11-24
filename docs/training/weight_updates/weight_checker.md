@@ -34,25 +34,22 @@ parameters. Checksum and compare cover all parameters visible to the selected
 model, including borrowed weights. With `both`, a shared weight appears under
 both models' keys.
 
+Reset is a destructive debugging operation. It clears the selected model's
+weights in place, and aliases in the other model reflect the same writes.
+Restore all affected weights before resuming inference.
+
 | Reset selection | Weights cleared | Recovery |
 | --- | --- | --- |
 | `target` | All visible target weights, including shared weights | Transfer target weights. The draft's aliases see the restored values. |
 | `draft` | All visible draft weights, including shared weights | Include shared parameters in the draft transfer to verify that the draft update restores them. |
-| `both` | All visible target and draft weights. Clearing a shared tensor from both models is idempotent. | Complete the target transfer, then transfer the draft-private weights. |
+| `both` | All visible target and draft weights. A shared tensor can be cleared twice with the same result. | Complete the target transfer, then transfer the draft-private weights. |
 
 Draft reset also clears the target's view of shared parameters. If the draft
 transfer omits them, compare reports any omitted weight whose baseline differs
 from zero. Restore omitted shared parameters through a target weight update
 before resuming inference.
 
-Draft-only reset returns HTTP 409 if there are no resettable draft weights.
-Reset allows exact shared parameter mappings and views with disjoint address
-ranges. Nonidentical strided views with overlapping address ranges return HTTP
-409 even when their individual elements are disjoint.
-
-Every selected parameter is checked against the other model's buffers before
-any local write. Overlapping address ranges return HTTP 409, including when
-both models are selected and the parameter is shared.
+Draft and both resets return HTTP 409 if there are no resettable draft weights.
 
 Private quantized copies created with `draft_lm_head_quantization` are refreshed
 in place after a target reload or weight update, and after a draft weight update.
@@ -123,13 +120,15 @@ trainer.send_weights()
 
 - Stay paused from `checksum` to `compare`: the weights are invalid between
   `reset` and the transfer, and EPLB moves experts while serving.
-- Reset validates local writes before each worker mutates its weights. A
+- Each worker validates the selected models before clearing its weights. A
   different worker may already have reset its weights when the server reports a
   conflict. Keep inference paused until recovery and comparison succeed.
 - A request covers the engines managed by the API server it reaches. With
   several API servers (for example `--data-parallel-external-lb`), send it to
   each one.
-- Buffers and LoRA adapters are excluded from checksum and reset.
+- Checksum covers model parameters and can miss changes to ordinary buffers or
+  LoRA adapters. Reset writes through aliases of the parameters it clears, so
+  verify any affected buffer state separately.
 - Restoring a draft requires an existing weight transfer backend and topology
   that support draft weight updates. With pipeline parallelism, target reset
   supports target-owned sharing on the last stage. `draft` and `both` support

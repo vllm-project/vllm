@@ -20,8 +20,7 @@ from vllm.model_executor.model_loader.reload import (
 )
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
-    select_reset_weights,
-    zero_selected_weights,
+    zero_weights,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
@@ -99,9 +98,7 @@ def test_refresh_follows_target_update(
     drafter.lm_head = quantized_lm_head_copy(head, quantization)
     ptrs = {k: t.data_ptr() for k, t in _tensors(drafter.lm_head).items()}
     draft_before = compute_tensor_digests(drafter)
-    plan = select_reset_weights(target, drafter, "target")
-    assert not isinstance(plan, str)
-    zero_selected_weights(plan)
+    zero_weights(target)
     assert compute_tensor_digests(drafter) == draft_before
 
     new_weight = _target_head(monkeypatch, seed=1).weight.detach()
@@ -183,9 +180,7 @@ def test_draft_reset_recovers_quantized_head_without_loading_source(
     draft_before = compute_tensor_digests(drafter)
     private_weight = drafter.private.weight.detach().clone()
 
-    plan = select_reset_weights(target, drafter, "draft")
-    assert not isinstance(plan, str)
-    zero_selected_weights(plan)
+    zero_weights(drafter)
     assert (
         compute_tensor_digests(drafter)["lm_head.weight"]
         != draft_before["lm_head.weight"]
