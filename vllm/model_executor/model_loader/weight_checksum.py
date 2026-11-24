@@ -43,13 +43,5 @@ def zero_weights(model: nn.Module) -> None:
         weight.data.zero_()
 
 
-def reset_model_weights(
-    target: nn.Module | None, draft: nn.Module | None
-) -> str | None:
-    """Validate the selected draft before clearing either model."""
-    if draft is not None and not any(weight.numel() for _, weight in _weights(draft)):
-        return "Weight Checker found no resettable draft weights."
-    for model in (target, draft):
-        if model is not None:
-            zero_weights(model)
-    return None
+def has_weight_data(model: nn.Module) -> bool:
+    return any(weight.numel() for _, weight in _weights(model))

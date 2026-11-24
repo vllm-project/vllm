@@ -86,7 +86,8 @@ from vllm.model_executor.model_loader.base_loader import (
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
-    reset_model_weights,
+    has_weight_data,
+    zero_weights,
 )
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
@@ -458,8 +459,8 @@ class Worker(WorkerBase):
         draft = self.get_draft_model()
         if draft is None and get_pp_group().is_last_rank:
             return f"Missing resident draft model on {self._weight_checksum_prefix()}"
-        if draft is not None and next(draft.parameters(), None) is None:
-            return "Weight Checker requires a draft model with weight parameters."
+        if draft is not None and not has_weight_data(draft):
+            return "Weight Checker requires a draft model with nonempty weights."
         return draft
 
     def compute_weight_checksums(
@@ -500,9 +501,12 @@ class Worker(WorkerBase):
                 "Cannot reset draft weights with model-specific derived weights "
                 "that require a target update to refresh."
             )
-        target = self.get_model() if model != "draft" else None
-        if error := reset_model_weights(target, draft):
-            return error
+        if draft is not None and not self.supports_draft_weight_updates():
+            return "Draft reset requires a backend that supports draft weight updates."
+        if model != "draft":
+            zero_weights(self.get_model())
+        if draft is not None:
+            zero_weights(draft)
         self.synchronize_device()
         return None
 

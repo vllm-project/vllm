@@ -13,6 +13,7 @@ Enable it with `VLLM_SERVER_DEV_MODE=1`. All operations use
 | Request | Response |
 | --- | --- |
 | `{"action": "checksum"}` | `{"checksums": {key: sha256_hex}}` |
+| `{"action": "checksum", "model": "both"}` | `{"checksums": {"target:...": sha256_hex, "draft:...": sha256_hex}}` |
 | `{"action": "reset"}` | `{"status": "reset"}` |
 | `{"action": "compare", "baseline": {key: sha256_hex}}` | `{"match": bool, "mismatches": [key]}` |
 
@@ -21,13 +22,15 @@ All three actions accept `"model": "target"`, `"draft"`, or `"both"`. Omitting
 
 For a single model, keys have the form `dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:{tensor_name}`.
 Selecting `both` adds a `target:` or `draft:` prefix to each key. With pipeline
-parallelism, draft keys come from the last stage. Save the `checksums` mapping
-from the response and pass it as `baseline` when comparing.
+parallelism, the draft's `pp` rank identifies the last target stage, where the
+draft resides. Save the `checksums` mapping from the response and pass it as
+`baseline` when comparing.
 
 A completed comparison returns HTTP 200 even when `match` is `false`.
 `mismatches` lists keys whose digest changed and keys missing from either side.
 An explicit `"model": null` or a compare request without a baseline returns
-HTTP 400. Selecting a draft without resident draft weights returns HTTP 409.
+HTTP 400. Selecting `draft` or `both` requires a resident draft with at least
+one nonempty weight tensor. Otherwise, the request returns HTTP 409.
 
 ## Shared weights and reset scope
 
@@ -51,7 +54,9 @@ transfer omits them, compare reports any omitted weight whose baseline differs
 from zero. Restore omitted shared parameters through a target weight update
 before resuming inference.
 
-Draft and both resets return HTTP 409 if there are no resettable draft weights.
+Resetting `draft` or `both` requires a weight transfer backend that supports
+draft updates. A worker with an absent or unsupported backend rejects the
+reset before clearing either model, and the request returns HTTP 409.
 
 Private quantized copies created with `draft_lm_head_quantization` are refreshed
 in place after a target reload or weight update, and after a draft weight update.
@@ -153,11 +158,10 @@ trainer.send_weights()
 - Checksum covers model parameters and can miss changes to ordinary buffers or
   LoRA adapters. Reset writes through aliases of the parameters it clears, so
   verify any affected buffer state separately.
-- Restoring a draft requires an existing weight transfer backend and topology
-  that support draft weight updates. With pipeline parallelism, target reset
-  supports target-owned sharing on the last stage. `draft` and `both` support
-  checksum and compare and return HTTP 409 for reset, since draft weight transfer
-  requires PP size 1.
+- With pipeline parallel size greater than 1, `draft` and `both` support
+  checksum and compare. Resetting either selection returns HTTP 409 because
+  draft weight transfer requires PP size 1. Target reset still covers shared
+  weights on the last stage.
 - CPU backends that repack linear weights hide them from the checker.
 - compressed-tensors online transforms are not supported: their Hadamard
   weights are normalized once per storage, so restored copies differ.

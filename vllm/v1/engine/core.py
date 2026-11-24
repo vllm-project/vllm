@@ -1222,7 +1222,10 @@ class EngineCore:
 
     def reset_weights(self, model: WeightCheckerModel) -> str | None:
         errors: list[str | None] = self.collective_rpc("reset_weights", args=(model,))
-        return next((error for error in errors if error is not None), None)
+        for error in errors:
+            if error is not None:
+                return f"{error} In distributed runs, other workers may have reset."
+        return None
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)

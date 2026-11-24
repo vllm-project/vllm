@@ -20,7 +20,7 @@ from transformers import (
     LlamaConfig,
     LlamaForCausalLM,
     LlamaModel,
-    PreTrainedTokenizerFast,
+    TokenizersBackend,
 )
 
 from tests.entrypoints.rl.conftest import (
@@ -120,7 +120,12 @@ class TestSingleGPU:
         for action in ("checksum", "reset", "compare"):
             response = weight_checker(server_url, action, baseline={}, model=model)
             assert response.status_code == 409, response.text
-            assert "resident speculative draft model" in response.text
+            error = response.json()["error"]
+            assert error["type"] == "Conflict" and error["code"] == 409
+            assert error["param"] is None
+            assert "resident speculative draft model" in error["message"]
+            if action == "reset":
+                assert "other workers may have reset" in error["message"]
         assert checksums(server_url) == target
 
     def test_checksum_is_stable_and_compare_reports_differences(self, server_url):
@@ -187,7 +192,8 @@ def test_ipc_weight_transfer_restores_reset_weights():
     ],
 )
 def test_checksum_and_reset_cover_every_worker(args, expected):
-    with server(extra_args=[*draft_args(), *args], port=8771, timeout=600) as url:
+    args = [*draft_args(), *args, "--weight-transfer-config", '{"backend": "nccl"}']
+    with server(extra_args=args, port=8771, timeout=600) as url:
         requests.post(f"{url}/pause?mode=abort", timeout=30).raise_for_status()
         assert ranks(checksums(url)) == expected
         reset_reload_and_compare(url)
@@ -220,14 +226,17 @@ def test_weight_checker_rejects_a_draft_without_weight_parameters():
     ]
     with server(extra_args=args) as url:
         target = checksums(url)
-        assert weight_checker(url, "checksum", model="draft").status_code == 409
-        assert weight_checker(url, "compare", {}, model="draft").status_code == 409
-        for model in ("draft", "both"):
-            assert weight_checker(url, "reset", model=model).status_code == 409
+        for action, model in (
+            ("checksum", "draft"),
+            ("compare", "draft"),
+            ("reset", "draft"),
+            ("reset", "both"),
+        ):
+            response = weight_checker(url, action, baseline={}, model=model)
+            assert response.status_code == 409, response.text
+            message = response.json()["error"]["message"]
+            assert "draft model with nonempty weights" in message
         assert checksums(url) == target
-
-
-DRAFT_MODEL = "Qwen/Qwen3-0.6B"
 
 
 def draft_args():
@@ -236,11 +245,23 @@ def draft_args():
         json.dumps(
             {
                 "method": "draft_model",
-                "model": DRAFT_MODEL,
+                "model": MODEL_NAME,
                 "num_speculative_tokens": 2,
             }
         ),
     ]
+
+
+def test_draft_reset_requires_a_supported_weight_transfer_backend():
+    with server(extra_args=draft_args()) as url:
+        requests.post(f"{url}/pause?mode=abort", timeout=30).raise_for_status()
+        baseline = checksums(url, "both")
+        for model in ("draft", "both"):
+            response = weight_checker(url, "reset", model=model)
+            assert response.status_code == 409, response.text
+            message = response.json()["error"]["message"]
+            assert "backend that supports draft weight updates" in message
+        assert checksums(url, "both") == baseline
 
 
 class DraftWeightSyncClient(HTTPVLLMWeightSyncClient):
@@ -273,6 +294,9 @@ def test_ipc_transfer_restores_target_and_draft_weights():
         assert checksums(url) == target
         assert checksums(url, "both") == both
 
+        trainer_model = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME, torch_dtype=torch.bfloat16
+        )
         for model, baseline, restored_models in (
             ("target", target, ("target",)),
             ("draft", draft, ("draft",)),
@@ -289,12 +313,7 @@ def test_ipc_transfer_restores_target_and_draft_weights():
                 assert checksums(url, "target") == target
 
             for restored_model in restored_models:
-                is_draft = restored_model == "draft"
-                trainer_model = AutoModelForCausalLM.from_pretrained(
-                    DRAFT_MODEL if is_draft else MODEL_NAME, torch_dtype=torch.bfloat16
-                )
-                send_ipc_weights(url, trainer_model, is_draft=is_draft)
-                del trainer_model
+                send_ipc_weights(url, trainer_model, is_draft=restored_model == "draft")
 
             comparison = weight_checker(url, "compare", baseline, model=model)
             comparison.raise_for_status()
@@ -339,7 +358,7 @@ def eagle_checkpoints(tmp_path):
     vocab.update({f"token{i}": i for i in range(4, config.vocab_size)})
     tokenizer = Tokenizer(WordLevel(vocab, unk_token="<unk>"))
     tokenizer.pre_tokenizer = Whitespace()
-    PreTrainedTokenizerFast(
+    TokenizersBackend(
         tokenizer_object=tokenizer,
         pad_token="<pad>",
         bos_token="<s>",

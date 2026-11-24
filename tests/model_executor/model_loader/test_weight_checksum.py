@@ -11,7 +11,7 @@ from vllm.config import ParallelConfig
 from vllm.model_executor import parameter
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
-    reset_model_weights,
+    has_weight_data,
     zero_weights,
 )
 from vllm.v1.worker import gpu_worker
@@ -59,6 +59,7 @@ def test_shared_weight_partitions_are_hashed_and_reset(monkeypatch):
     model.transform.add_partition(0, object(), 2, 2)
     model.transform.partitions[0].data.fill_(3.0)
 
+    assert has_weight_data(model)
     before = compute_tensor_digests(model)
     zero_weights(model)
     assert set(before) == {"transform.0"}
@@ -101,16 +102,11 @@ def test_zero_weights_preserves_shared_parameters():
     torch.testing.assert_close(target.bias, torch.zeros_like(target.bias))
 
 
-def test_empty_draft_reset_preserves_target_weights():
-    target = _Model()
-    draft = nn.Module()
-    draft.weight = nn.Parameter(torch.empty(0))
-    before = compute_tensor_digests(target)
-
-    assert reset_model_weights(target, draft) == (
-        "Weight Checker found no resettable draft weights."
-    )
-    assert compute_tensor_digests(target) == before
+def test_empty_parameters_have_no_weight_data():
+    model = nn.Module()
+    assert not has_weight_data(model)
+    model.weight = nn.Parameter(torch.empty(0))
+    assert not has_weight_data(model)
 
 
 def test_dense_dp_replicas_get_distinct_key_prefixes(monkeypatch):
