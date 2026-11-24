@@ -10,7 +10,7 @@ import time
 from collections import OrderedDict, defaultdict
 from collections.abc import Collection
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
@@ -188,6 +188,52 @@ class _WriteRecv:
     finished: bool = False
     deadline: float = math.inf
     phase: _WriteRecvPhase = _WriteRecvPhase.WAITING
+
+
+@dataclass(slots=True)
+class _WriteRecvTimeoutTracker:
+    """Tracker of potentially timed out writes to the WRITE consumer.
+
+    A timed out request is handled based on whether this worker has reported
+    a write for it (successful or failed), since only then can no more writes
+    land in its KV blocks. If the write receive timeout triggers:
+    - if no write has been reported: report the request as done and failed,
+      but don't release the blocks; its late write is then the release.
+    - if a write has been reported: also release the blocks.
+    """
+
+    _timed_out: set[ReqId] = field(default_factory=set)
+    # Reported (done, failed or timed out) while the scheduler maps them; the
+    # aggregator counts one finished_recving per worker.
+    _reported: set[ReqId] = field(default_factory=set)
+
+    def note_timed_out(self, req_ids: set[ReqId]) -> None:
+        self._timed_out |= req_ids
+
+    def prune(self, live_req_ids: set[ReqId]) -> None:
+        self._reported &= live_req_ids
+
+    def report(self, results: KVConnectorTransferResults) -> KVConnectorTransferResults:
+        # Reported already, so only a timed-out one: its late write_done (or
+        # write_failed) releases it.
+        released = results.finished_recving & self._reported
+        done_recving = results.finished_recving - released
+        failed_recving = results.failed_recving - released
+        self._reported |= done_recving
+        for req_id in self._timed_out:
+            if req_id in self._reported:
+                released.add(req_id)
+            else:
+                done_recving.add(req_id)
+                failed_recving.add(req_id)
+                # So its late write_done counts as the release.
+                self._reported.add(req_id)
+        self._timed_out = set()
+        return KVConnectorTransferResults(
+            finished_sending=results.finished_sending | released,
+            finished_recving=done_recving,
+            failed_recving=failed_recving,
+        )
 
 
 def _describe_memory(memory_desc: Any) -> str:
@@ -2132,11 +2178,12 @@ class MoRIIOConnectorWorker:
         # Retried each step until the mapping is established.
         self._unmatched_write_completions: set[str] = set()
         self._unmatched_write_failures: OrderedDict[TransferId, None] = OrderedDict()
-        # Timed-out receives from start_load_kv, for the next get_transfer_results.
-        self._write_recv_timed_out: set[ReqId] = set()
-        # Receives this worker reported, done, failed or timed out, while the
-        # scheduler maps them.
-        self._write_recv_reported: set[ReqId] = set()
+        # None while the write_recv_timeout timer is off.
+        self._write_recv_tracker = (
+            _WriteRecvTimeoutTracker()
+            if self.moriio_config.write_recv_timeout is not None
+            else None
+        )
         # Producer-side READ-mode ACK fan-in. When decode TP is larger than
         # prefill TP, multiple decode ranks can read from one prefill rank and
         # notify the same transfer_id. Blocks are reusable only after all ACKs.
@@ -3269,49 +3316,15 @@ class MoRIIOConnectorWorker:
             while len(pending) > _MAX_UNMATCHED_WRITE_FAILURES:
                 pending.popitem(last=False)
             done_recving |= failed_recving
-            if self.moriio_config.write_recv_timeout is not None:
-                done_sending |= self._report_write_recv_timeouts(
-                    done_recving, failed_recving
-                )
 
-        return KVConnectorTransferResults(
+        results = KVConnectorTransferResults(
             finished_sending=done_sending,
             finished_recving=done_recving,
             failed_recving=failed_recving,
         )
-
-    def _report_write_recv_timeouts(
-        self, done_recving: set[ReqId], failed_recving: set[ReqId]
-    ) -> set[ReqId]:
-        """Report the receives the scheduler timed out (`write_recv_timeout`).
-
-        Every worker reports a receive in finished_recving once, as the
-        aggregator counts. A timed-out one this worker has not reported is
-        reported now, as failed, so the request fails while the scheduler
-        holds its blocks. Its write_done comes later as a release in
-        finished_sending; one this worker had already completed is released
-        at once.
-
-        Returns:
-            The receives this worker releases, for finished_sending.
-
-        """
-        # Reported already, so only a timed-out one: its late write_done (or
-        # write_failed) releases it.
-        released = done_recving & self._write_recv_reported
-        done_recving -= released
-        failed_recving -= released
-        # Every report so far, a producer write_failed included: each counted once.
-        self._write_recv_reported |= done_recving
-        for req_id in self._write_recv_timed_out:
-            if req_id in self._write_recv_reported:
-                released.add(req_id)
-            else:
-                done_recving.add(req_id)
-                failed_recving.add(req_id)
-                self._write_recv_reported.add(req_id)
-        self._write_recv_timed_out = set()
-        return released
+        if self._write_recv_tracker is not None:
+            results = self._write_recv_tracker.report(results)
+        return results
 
     def _pop_done_transfers(self) -> set[str]:
         done_req_ids: set[str] = set()
@@ -3696,10 +3709,13 @@ class MoRIIOConnectorWorker:
             self.moriio_wrapper.async_wait_reqid()
             return
         if self.mode == MoRIIOMode.WRITE:
-            if self.moriio_config.write_recv_timeout is not None:
-                live_req_ids = set(self.transfer_id_to_request_id.values())
-                self._write_recv_reported &= live_req_ids
-                self._write_recv_timed_out |= metadata.write_recv_timed_out_req_ids
+            if self._write_recv_tracker is not None:
+                self._write_recv_tracker.prune(
+                    set(self.transfer_id_to_request_id.values())
+                )
+                self._write_recv_tracker.note_timed_out(
+                    metadata.write_recv_timed_out_req_ids
+                )
             return
 
         # Handshake every referenced remote prefill rank up front, before any

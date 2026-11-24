@@ -108,9 +108,9 @@ def _make_consumer_worker() -> MoRIIOConnectorWorker:
         pop_failed_write_req_ids=pop_failed_write_req_ids, shutdown=lambda: None
     )
     worker._unmatched_write_failures = OrderedDict()
-    worker.moriio_config = SimpleNamespace(write_recv_timeout=TIMEOUT_S)
-    worker._write_recv_timed_out = set()
-    worker._write_recv_reported = set()
+    # Absent on main, where the reproducer runs too.
+    tracker = getattr(moriio_connector, "_WriteRecvTimeoutTracker", None)
+    worker._write_recv_tracker = tracker() if tracker else None
     worker.write_done = set()
 
     def get_finished():
