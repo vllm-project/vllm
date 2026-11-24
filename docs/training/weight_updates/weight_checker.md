@@ -90,6 +90,31 @@ jq --arg model "$MODEL" '{action:"compare", model:$model, baseline:.checksums}' 
 curl -X POST "$URL/resume"
 ```
 
+Pass a target baseline to `/finish_weight_update` to finish and compare in one
+request.
+
+```bash
+jq '{baseline: .checksums}' baseline.json | \
+  curl --fail-with-body -X POST "$URL/finish_weight_update" \
+    -H 'Content-Type: application/json' -d @-
+```
+
+For a draft or both-model baseline, use the matching `model` selection in a
+separate `/weight_checker` compare after the required updates have finished.
+
+With a trainer-side weight transfer engine, which finishes the update inside
+`send_weights()`, bind the target baseline to the HTTP client. `finish_weight_update`
+then raises `RuntimeError` on a mismatch:
+
+```python
+from functools import partial
+
+client = HTTPVLLMWeightSyncClient(URL)
+client.finish_weight_update = partial(client.finish_weight_update, baseline=baseline)
+trainer = WeightTransferTrainerFactory.trainer_init(init_info, client=client, source=source)
+trainer.send_weights()
+```
+
 ## Limitations
 
 - Stay paused from `checksum` to `compare`: the weights are invalid between
