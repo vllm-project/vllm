@@ -1,0 +1,37 @@
+name: Reusable pre-commit
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pre-commit:
+    if: github.repository_owner == 'vllm-project' && (github.event_name == 'pull_request' || github.event_name == 'push')
+    runs-on: [self-hosted, linux, x64, vllm-runners]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+      - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
+      - run: echo "::add-matcher::.github/workflows/matchers/markdownlint.json"
+      - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
+      - run: echo "::add-matcher::.github/workflows/matchers/shellcheck.json"
+      # Replaces pre-commit/action, whose latest release (v3.0.1) uses the node20 actions/cache@v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-uv|${{ runner.os }}|${{ env.UV_PYTHON }}|${{ hashFiles('.pre-commit-config.yaml') }}
+      - run: >-
+          uvx pre-commit run --show-diff-on-failure --color=always --all-files --hook-stage manual
+        env:
+          SKIP: pip-compile
+      - name: pip-compile (only if its inputs changed)
+        if: ${{ !cancelled() }}
+        run: >-
+          uvx pre-commit run pip-compile --show-diff-on-failure --color=always --hook-stage manual --from-ref HEAD^1 --to-ref HEAD
