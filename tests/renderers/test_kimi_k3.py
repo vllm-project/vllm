@@ -345,21 +345,31 @@ def test_render_messages_returns_token_prompt():
 
 
 @pytest.mark.asyncio
-async def test_render_messages_keeps_text_only_content_as_string():
-    """Messages without images reach K3's encoder as the same strings as
-    before image parts were kept in place."""
+async def test_render_messages_keeps_text_parts_separate():
+    """K3's encoder joins text parts with no separator, like the checkpoint's
+    and the Rust frontend's rendering, so they must not arrive pre-joined."""
     tokenizer = StubTokenizer([1, 2, 3])
     renderer = _make_renderer(tokenizer)
+    parts = [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]
     messages = [
+        {"role": "user", "content": parts},
         {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "first"},
-                {"type": "text", "text": "second"},
+            "role": "assistant",
+            "content": None,
+            "refusal": "I cannot help.",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
             ],
         },
-        {"role": "assistant", "content": None, "refusal": "I cannot help."},
-        {"role": "user", "content": []},
+        {
+            "role": "tool",
+            "tool_call_id": "call_0",
+            "content": [{**part, "type": "input_text"} for part in parts],
+        },
     ]
 
     renderer.render_messages(messages, ChatParams())
@@ -367,9 +377,9 @@ async def test_render_messages_keeps_text_only_content_as_string():
 
     for conversation in tokenizer.conversations:
         assert [message["content"] for message in conversation] == [
-            "first\nsecond",
-            "I cannot help.",
-            "",
+            parts,
+            [{"type": "text", "text": "I cannot help."}],
+            parts,
         ]
 
 

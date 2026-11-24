@@ -244,6 +244,18 @@ def _render_chat(messages: list[dict]) -> tuple[dict, int]:
             ],
             id="markup_text_in_history",
         ),
+        pytest.param(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe"},
+                        {"type": "text", "text": " nothing."},
+                    ],
+                },
+            ],
+            id="text_parts_without_images",
+        ),
     ],
 )
 def test_chat_prompt_matches_hf_processor(messages: list[dict]):

@@ -14,6 +14,10 @@ from vllm.renderers.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.renderers.chat_utils.chat_message import (
+    TEXT_PART_TYPES,
+    parse_chat_message_content_mm_part,
+)
 from vllm.tokenizers.hf import HfTokenizer, ThreadSafeHFTokenizerMixin
 from vllm.transformers_utils.processors.kimi_k3 import encode_k3_text_prompt
 from vllm.utils.async_utils import make_async
@@ -71,27 +75,47 @@ def _apply_k3_thinking_kwargs(
         )
 
 
-def _keep_k3_image_parts_in_place(conversation: list[ConversationMessage]) -> None:
-    """Flatten parsed message content, keeping image messages as part lists.
-
-    K3's encoder renders a part list in order with no separators, which is
-    where the checkpoint expects images. Messages without images keep the
-    newline-joined string.
-    """
-    for message in conversation:
-        content = message.get("content")
-        if not isinstance(content, list):
+def _k3_text_parts(content: list[Any]) -> list[dict[str, str]] | None:
+    """Text parts as parsing reads them, or None if `content` has others."""
+    parts = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append({"type": "text", "text": part})
             continue
-        parts = [
-            {"type": "text", "text": part["name"]}
-            if part["type"] == "tool_reference"
-            else part
-            for part in content
-        ]
-        if all(part["type"] == "text" for part in parts):
-            message["content"] = "\n".join(part["text"] for part in parts)
-        else:
-            message["content"] = parts  # type: ignore[typeddict-item]
+        part_type, text = parse_chat_message_content_mm_part(part)
+        if part_type not in TEXT_PART_TYPES:
+            return None
+        if text is not None:
+            parts.append({"type": "text", "text": cast(str, text)})
+    return parts
+
+
+def _keep_k3_content_parts(
+    messages: list[ChatCompletionMessageParam],
+    conversation: list[ConversationMessage],
+) -> None:
+    """Pass message content to K3's encoder as part lists.
+
+    The encoder renders and tokenizes each part in order with no separator.
+    Parsing joins the text parts of a tool message with newlines, so those are
+    taken from the request instead.
+    """
+    for request_message, message in zip(messages, conversation, strict=True):
+        content = message.get("content")
+        request_content = request_message.get("content")
+        if (
+            message["role"] == "tool"
+            and isinstance(content, str)
+            and isinstance(request_content, list)
+        ):
+            message["content"] = _k3_text_parts(request_content) or content
+        elif isinstance(content, list):
+            message["content"] = [  # type: ignore[typeddict-item]
+                {"type": "text", "text": part["name"]}
+                if part["type"] == "tool_reference"
+                else part
+                for part in content
+            ]
 
 
 def _normalize_k3_tool_messages(
@@ -254,7 +278,7 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        _keep_k3_image_parts_in_place(conversation)
+        _keep_k3_content_parts(messages, conversation)
         rendered_conversation = _normalize_k3_tool_messages(conversation)
         prompt = parse_dec_only_prompt(
             self._apply_chat_template(rendered_conversation, params)
@@ -279,7 +303,7 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        _keep_k3_image_parts_in_place(conversation)
+        _keep_k3_content_parts(messages, conversation)
         rendered_conversation = _normalize_k3_tool_messages(conversation)
         token_ids = await self._apply_chat_template_async(rendered_conversation, params)
         prompt = parse_dec_only_prompt(token_ids)
