@@ -1052,6 +1052,18 @@ if has_flashinfer():
         mutates_args=["k"],  # k tensor is modified in-place
     )
 
+    # On GB10 (SM121), FlashInfer's CUTLASS NVFP4 GEMMs slow down past about
+    # 4096 rows (an 8192 x 34816 x 5120 GEMM runs at 214 TFLOP/s against 280 in
+    # 2048-row pieces, an 8192 x 5120 x 17408 one at 117 against 267). Rows are
+    # independent and the swizzled block scales are laid out in 128-row tiles,
+    # so larger problems run as 2048-row GEMMs into slices of one output.
+    _GB10_FP4_MAX_ROWS = 4096
+    _GB10_FP4_ROW_CHUNK = 2048
+
+    @functools.cache
+    def _is_gb10() -> bool:
+        return current_platform.is_device_capability((12, 1))
+
     def _flashinfer_mm_fp4(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -1065,6 +1077,31 @@ if has_flashinfer():
         use_nvfp4: bool = True,
     ) -> torch.Tensor:
         from flashinfer import mm_fp4 as flashinfer_mm_fp4_
+
+        m = A.shape[0]
+        if (
+            backend == "cutlass"
+            and m > _GB10_FP4_MAX_ROWS
+            and not use_8x4_sf_layout
+            and _is_gb10()
+        ):
+            out = torch.empty(m, B.shape[1], dtype=dtype, device=A.device)
+            for start in range(0, m, _GB10_FP4_ROW_CHUNK):
+                rows = min(_GB10_FP4_ROW_CHUNK, m - start)
+                flashinfer_mm_fp4_(
+                    A[start : start + rows],
+                    B,
+                    A_scale[start : start + cdiv(rows, 128) * 128],
+                    B_scale,
+                    g_scale,
+                    dtype,
+                    out=out[start : start + rows],
+                    block_size=block_size,
+                    use_8x4_sf_layout=use_8x4_sf_layout,
+                    use_nvfp4=use_nvfp4,
+                    backend=backend,
+                )
+            return out
 
         return flashinfer_mm_fp4_(
             A,

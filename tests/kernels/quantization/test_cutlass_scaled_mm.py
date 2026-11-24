@@ -40,6 +40,13 @@ MNK_FACTORS = [
     (512, 24576, 128),
 ]
 
+# More rows than the GB10 FP8 path runs in one GEMM (3072); it splits them into
+# 1024-row GEMMs, and 4100 leaves a partial last one.
+MANY_ROWS_MNK_FACTORS = [
+    (3073, 512, 256),
+    (4100, 1024, 512),
+]
+
 # Shapes with N or K not divisible by 16.  These exercise the padding path
 # inside CutlassFP8ScaledMMLinearKernel.apply_scaled_mm (e.g. Qwen2.5-VL
 # vision MLP dims).
@@ -160,6 +167,24 @@ def cutlass_int8_gemm_helper(
     reason="FP8 is not supported on this GPU type.",
 )
 def test_cutlass_fp8_gemm(
+    m: int, n: int, k: int, a_scale_group_shape, b_scale_group_shape, use_bias: bool
+):
+    cutlass_fp8_gemm_helper(m, n, k, a_scale_group_shape, b_scale_group_shape, use_bias)
+
+
+@pytest.mark.parametrize("m,n,k", MANY_ROWS_MNK_FACTORS)
+@pytest.mark.parametrize(
+    "a_scale_group_shape", [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
+)
+@pytest.mark.parametrize(
+    "b_scale_group_shape", [PER_OUT_CH_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
+)
+@pytest.mark.parametrize("use_bias", [True, False])
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(89),
+    reason="FP8 is not supported on this GPU type.",
+)
+def test_cutlass_fp8_gemm_many_rows(
     m: int, n: int, k: int, a_scale_group_shape, b_scale_group_shape, use_bias: bool
 ):
     cutlass_fp8_gemm_helper(m, n, k, a_scale_group_shape, b_scale_group_shape, use_bias)
