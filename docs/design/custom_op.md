@@ -339,6 +339,12 @@ To override the class the Transformers backend builds on either path, obtain it 
 
 `VLLM_USE_HW_AGNOSTIC` only affects the Transformers backend. Models with a native vLLM implementation build the in-tree class even when it is set, so a plugin that also serves those models registers its override for the in-tree class as well.
 
+The hw-agnostic layers support fewer features than the in-tree ones. With `VLLM_USE_HW_AGNOSTIC=1`, a model on the Transformers backend:
+
+- Rejects LoRA (`--enable-lora`) when the model is built, because LoRA wraps the in-tree linear classes, which the hw-agnostic ones do not derive from.
+- Rejects quantization (`--quantization` or a quantized checkpoint) when the model is built, because the hw-agnostic linear layers are unquantized.
+- Runs unquantized GEMMs through `torch.nn.functional.linear`, or oneDNN on CPU. It does not use the CUDA skinny GEMMs, the FlashInfer BF16 GEMMs, the ROCm skinny GEMMs and weight padding, or the zentorch and AMX CPU kernels. `--linear-backend` is ignored with a warning. A plugin that needs a device-specific GEMM overrides the linear layer.
+
 The Transformers backend builds its norms as `TPAwareRMSNorm` and `TPAwareGemmaRMSNorm`, subclasses of `RMSNorm` and `GemmaRMSNorm`. Overrides are keyed on the exact class name, so an `RMSNorm` or `GemmaRMSNorm` override does not reach them yet.
 
 Type checkers do not accept a variable as a base class, so plugins that run mypy can import the in-tree class for type checking only:

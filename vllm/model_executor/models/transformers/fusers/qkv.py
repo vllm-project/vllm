@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, ClassVar
 from torch import fx, nn
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor import hw_agnostic
 from vllm.model_executor.models.transformers.fusers.base import (
     StackedFuser,
     fused_head_size,
@@ -173,6 +173,7 @@ class QKVFuser(StackedFuser):
         head_size = fused_head_size(module, vllm_config)
         q = module.get_submodule(self.q_name)
         k = module.get_submodule(self.k_name)
+        QKVParallelLinear = hw_agnostic.resolve("linear", "QKVParallelLinear")
         merged = QKVParallelLinear(
             hidden_size=q.in_features,
             head_size=head_size,

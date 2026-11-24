@@ -19,6 +19,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import supports_any_eagle
@@ -1159,6 +1160,28 @@ def maybe_prefix(prefix: str, name: str) -> str:
 
     """
     return name if not prefix else f"{prefix}.{name}"
+
+
+def recursive_replace_linear(
+    model: nn.Module,
+    quant_config: "QuantizationConfig | None",
+    prefix: str = "",
+) -> None:
+    """Replace every `nn.Linear` in `model` with a `ReplicatedLinear`."""
+    for child_name, child_module in model.named_children():
+        qual_name = maybe_prefix(prefix, child_name)
+        if isinstance(child_module, nn.Linear):
+            new_module = ReplicatedLinear(
+                input_size=child_module.in_features,
+                output_size=child_module.out_features,
+                bias=child_module.bias is not None,
+                quant_config=quant_config,
+                prefix=qual_name,
+                return_bias=False,
+            )
+            setattr(model, child_name, new_module)
+        else:
+            recursive_replace_linear(child_module, quant_config, prefix=qual_name)
 
 
 def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | None":
