@@ -109,6 +109,14 @@ variants:
         extra_args:
           - "--max-num-seqs"
           - "8"
+      arc_pro_b60:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
+      arc_pro_b70:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
   fp8:
     model_id: "Qwen/Qwen3.6-35B-A3B-FP8"
     precision: fp8
@@ -365,7 +373,7 @@ guide: |
   - **CUDA graph / Mamba cache size error:** reduce `--max-cudagraph-capture-size`
     (default 512). See [vLLM PR #34571](https://github.com/vllm-project/vllm/pull/34571).
   - **Reasoning disable:** add `--default-chat-template-kwargs '{"enable_thinking": false}'`.
-  - **Prefix Caching (Mamba):** currently experimental in "align" mode.
+  - **Prefix Caching (Mamba):** currently experimental.
 
   ## References
 

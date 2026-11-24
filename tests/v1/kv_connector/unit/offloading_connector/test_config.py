@@ -25,12 +25,14 @@ from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
+    HiSparseResidentManager,
     MambaManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     HiddenStateCacheSpec,
+    HiSparsePageSpec,
     KVCacheConfig,
     KVCacheGroup,
     KVCacheGroupRole,
@@ -252,7 +254,7 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
     )
 
 
-_MAMBA_ALIGN = MambaManager.config(mamba_cache_mode="align")
+_MAMBA_ALIGN = MambaManager.config(enable_prefix_caching=True)
 
 
 def _mamba_spec() -> MambaSpec:
@@ -556,6 +558,28 @@ def test_hisparse_offloads_only_indexer_group():
     assert [group.group_idx for group in scheduler_config.kv_group_configs] == [1]
 
 
+def test_hisparse_indexer_tier_is_single_copy_under_tp():
+    """The resident groups' raw pages carry no TP metadata; they must not
+    force a copy of the replicated indexer per rank."""
+    source = make_kv_cache_group(["source"], _mla_spec(), host_resident=True)
+    indexer = make_kv_cache_group(
+        ["indexer"], _mla_spec(head_size=128), role=KVCacheGroupRole.HISPARSE_INDEXER
+    )
+    resident = make_kv_cache_group(
+        ["source.hisparse_resident"],
+        HiSparsePageSpec(block_size=16, page_size=_MLA_PAGE),
+        manager_cls=HiSparseResidentManager,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[source, indexer, resident],
+        hisparse_host_num_blocks=4,
+    )
+
+    assert _replicated_layout(kv_cache_config)
+
+
 def test_hisparse_partial_group_size_survives_scheduler_flattening():
     """Worker and scheduler representations must produce identical mmap rows."""
     layer_specs = {name: _full_attention_spec() for name in ("indexer.0", "indexer.1")}
@@ -632,7 +656,6 @@ def test_dcp_scales_attention_but_not_mamba_group_blocks():
         alignment_tokens=scheduler_config.alignment_tokens,
         block_size=mamba_group.block_size,
         manager_config=mamba_group.manager_config,
-        use_eagle=mamba_group.is_eagle_group,
     )
     assert block_mask is None or [i for i in range(4) if block_mask[i]] == [1, 3]
 

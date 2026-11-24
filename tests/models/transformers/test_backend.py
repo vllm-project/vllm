@@ -6,6 +6,7 @@ import ast
 import contextlib
 import os
 import tempfile
+from collections import Counter
 from functools import partial
 from types import SimpleNamespace
 from typing import Any
@@ -18,6 +19,7 @@ from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
+    AutoModelForMultimodalLM,
     PreTrainedConfig,
 )
 
@@ -61,15 +63,9 @@ def count_modules(model, cls: type) -> int:
     return sum(isinstance(m, cls) for m in model.modules())
 
 
-def get_num_fused(model) -> tuple[int, int]:
-    from vllm.model_executor.layers.linear import (
-        MergedColumnParallelLinear,
-        QKVParallelLinear,
-    )
-
-    glu = count_modules(model, MergedColumnParallelLinear)
-    qkv = count_modules(model, QKVParallelLinear)
-    return glu, qkv
+def count_fusers(model) -> dict[str, int]:
+    counts = Counter(type(f).__name__ for fs in model.fusers.values() for f in fs)
+    return dict(counts)
 
 
 def check_implementation(
@@ -79,9 +75,11 @@ def check_implementation(
     model: str,
     kwargs_ref: dict[str, Any] | None = None,
     kwargs_test: dict[str, Any] | None = None,
-    num_fused: tuple[int, int] = (1, 1),
+    num_fused: dict[str, int] | None = None,
     **kwargs,
 ):
+    if num_fused is None:
+        num_fused = {"GLUFuser": 1, "QKVFuser": 1}
     if kwargs_ref is None:
         kwargs_ref = {}
     if kwargs_test is None:
@@ -97,10 +95,9 @@ def check_implementation(
         assert model_config.using_transformers_backend()
 
         num_layers = model_config.hf_config.get_text_config().num_hidden_layers
-        expected_glu, expected_qkv = num_fused
-        for num_glu, num_qkv in model_test.apply_model(get_num_fused):
-            assert num_glu == expected_glu * num_layers
-            assert num_qkv == expected_qkv * num_layers
+        expected = {name: n * num_layers for name, n in num_fused.items()}
+        for counts in model_test.apply_model(count_fusers):
+            assert {name: counts.get(name, 0) for name in expected} == expected
 
         tp_size = kwargs_test.get("tensor_parallel_size", 1)
         from vllm.model_executor.layers.attention import Attention
@@ -127,9 +124,9 @@ def check_implementation(
 @pytest.mark.parametrize(
     "model,model_impl,num_fused,trust_remote_code",
     [
-        ("meta-llama/Llama-3.2-1B-Instruct", "transformers", (1, 1), False),
-        ("vllm-project/Ilama-3.2-1B", "auto", (1, 1), True),
-        ("allenai/OLMoE-1B-7B-0924", "transformers", (0, 1), False),  # MoE
+        ("meta-llama/Llama-3.2-1B-Instruct", "transformers", None, False),
+        ("vllm-project/Ilama-3.2-1B", "auto", None, True),
+        ("allenai/OLMoE-1B-7B-0924", "transformers", {"QKVFuser": 1}, False),  # MoE
     ],
 )
 def test_models(
@@ -138,7 +135,7 @@ def test_models(
     example_prompts: list[str],
     model: str,
     model_impl: str,
-    num_fused: tuple[int, int],
+    num_fused: dict[str, int] | None,
     trust_remote_code: bool,
 ) -> None:
     check_implementation(
@@ -204,7 +201,8 @@ def test_eagle3_mm(vllm_runner: type[VllmRunner], tmp_path) -> None:
 
 
 def test_infer_dynamic_arg_dims():
-    """Only unannotated and (legacy) tensor arguments are dynamic."""
+    """Unannotated and tensor arguments are dynamic, unless a non-`None` default
+    means they are passed as a plain value (e.g. Gemma 4's `logits_to_keep=0`)."""
 
     class Encoder(nn.Module):
         def forward(
@@ -214,12 +212,15 @@ def test_infer_dynamic_arg_dims():
             mask: torch.BoolTensor | None = None,
             grid: tuple[int, int] = (1, 1),
             tiles: list[torch.Tensor] | None = None,
+            use_cache=False,
+            logits_to_keep: int | torch.Tensor = 0,
             **kwargs,
         ):
             pass
 
-    expected = {"pixel_values": 0, "position_ids": 0, "mask": 0}
-    assert infer_dynamic_arg_dims(Encoder) == expected
+    dynamic = ("pixel_values", "position_ids", "mask")
+    assert infer_dynamic_arg_dims(Encoder) == dict.fromkeys(dynamic, 0)
+    assert infer_dynamic_arg_dims(Encoder, dim=1) == dict.fromkeys(dynamic, 1)
 
 
 def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
@@ -273,8 +274,8 @@ def test_sinks(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner]) -> None
     """
     from vllm.platforms import current_platform
 
-    if not current_platform.has_device_capability(90):
-        pytest.skip("Attention sinks need FlashAttention 3 or TRTLLM attention")
+    if not (current_platform.is_xpu() or current_platform.has_device_capability(90)):
+        pytest.skip("Attention sinks need FlashAttention 3, TRTLLM or XPU attention")
 
     model = "tiny-random/gpt-oss-bf16"
     with vllm_runner(
@@ -319,18 +320,29 @@ def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "model, num_fused",
+    [
+        ("meta-llama/Llama-3.2-1B-Instruct", None),
+        # Packed qkv_proj sliced with global offsets in the forward
+        ("microsoft/Phi-4-mini-instruct", {"PackedQKVFuser": 1}),
+    ],
+)
 def test_distributed(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
     example_prompts,
+    model: str,
+    num_fused: dict[str, int] | None,
 ):
     kwargs = {"model_impl": "transformers", "tensor_parallel_size": 2}
     check_implementation(
         hf_runner,
         vllm_runner,
         example_prompts,
-        "meta-llama/Llama-3.2-1B-Instruct",
+        model,
         kwargs_test=kwargs,
+        num_fused=num_fused,
     )
 
 
@@ -991,6 +1003,47 @@ def test_mtp_draft_loads_mtp_weights(model_type, tmp_path, tp_init, monkeypatch)
                 layer.get_parameter(param_name).cpu(),
                 weights[f"{mtp}.{ckpt_name}"].to(torch.bfloat16),
             )
+
+
+def test_mtp_draft_for_multimodal_model(tmp_path, tp_init):
+    """A multimodal model, which is not an `AutoModelForCausalLM`, gets an MTP draft
+    from the MTP layers in its checkpoint (loading fails if any are missing)."""
+    model_info = HF_EXAMPLE_MODELS.get_hf_info("GraniteDoclingForConditionalGeneration")
+    model_info.check_transformers_version(on_fail="skip")
+    from transformers.modeling_layers import MtpModel
+
+    num_mtp_layers = 2
+    # With fewer decoder than MTP layers, `MtpModel` would rename `mtp.layers` too
+    sizes = dict(hidden_size=64, intermediate_size=128, num_hidden_layers=2)
+    heads = dict(num_attention_heads=2, num_key_value_heads=2)
+    text_config = dict(vocab_size=128, pad_token_id=0, num_mtp_layers=num_mtp_layers)
+    config = AutoConfig.for_model(
+        "granite_docling",
+        text_config=sizes | heads | text_config,
+        vision_config=sizes | heads | dict(out_hidden_size=64),
+    )
+    main_model = AutoModelForMultimodalLM.from_config(config)
+    main_model.save_pretrained(tmp_path)
+    # Granite Docling stores MTP layer `k` under `mtp.layers.{k}`
+    weights = load_file(tmp_path / "model.safetensors")
+    for name, param in MtpModel(main_model, num_mtp_layers).named_parameters():
+        if name.startswith("layers."):
+            weights[f"mtp.{name.replace('.mtp_block.', '.')}"] = param.detach()
+    save_file(weights, tmp_path / "model.safetensors", {"format": "pt"})
+
+    target = ModelConfig(str(tmp_path), model_impl="transformers", dtype="bfloat16")
+    speculative_config = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=num_mtp_layers,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    )
+    draft = speculative_config.draft_model_config
+    assert draft.architecture == "TransformersForMTP"
+    vllm_config = VllmConfig(model_config=target, speculative_config=speculative_config)
+    with set_current_vllm_config(vllm_config):
+        model = model_loader.get_model(vllm_config=vllm_config, model_config=draft)
+    assert len(model.model.layers) == num_mtp_layers
 
 
 def test_init_parameters_keeps_declared_dtype_and_requires_grad():
