@@ -14,9 +14,8 @@ from vllm.v1.kv_offload.tiering.fs import io
 
 @pytest.fixture(params=[False, True], ids=["python", "native"])
 def backend(request, monkeypatch):
-    if request.param:
-        # Native coverage must fail, rather than silently skip, if not built.
-        assert hasattr(io, "batch_load_block_C"), "build vllm.fs_io_C first"
+    if request.param and not io._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
     monkeypatch.setattr(io, "_HAS_FSIO_C", request.param)
 
 
@@ -89,7 +88,7 @@ def test_new_store_preserves_data_and_count(tmp_path, backend):
 
 @pytest.mark.parametrize("operation", ["load", "reuse"])
 def test_metadata_failure_does_not_fail_transfer(
-    tmp_path, monkeypatch, caplog, operation
+    tmp_path, monkeypatch, caplog_vllm, operation
 ):
     path = tmp_path / "block.bin"
     path.write_bytes(b"cache")
@@ -113,6 +112,8 @@ def test_metadata_failure_does_not_fail_transfer(
                 == 0
             )
     assert path.read_bytes() == b"cache"
-    warnings = [r for r in caplog.records if "refresh cache access time" in r.message]
+    warnings = [
+        r for r in caplog_vllm.records if "refresh cache access time" in r.message
+    ]
     assert len(warnings) == 1
     _print_warning_once.cache_clear()

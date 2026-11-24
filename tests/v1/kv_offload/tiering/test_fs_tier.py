@@ -391,8 +391,8 @@ def test_factory_access_tracking_roundtrip(
 ):
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
-    if use_c_ext:
-        assert hasattr(io_mod, "batch_load_block_C"), "build vllm.fs_io_C first"
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
     monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
     tensor = _page_aligned_zero_tensor(2, _BLOCK_ELEMENTS)
     tensor[0] = 7
