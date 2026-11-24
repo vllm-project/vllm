@@ -1352,7 +1352,9 @@ def test_sparse_attn_decode_split_k_kernel(
     extra_indices: torch.Tensor | None = None
     extra_indptr: torch.Tensor | None = None
     if with_extra:
-        rows = [[1, 3, 0, 5, 2, 4], [3, 0, 6]]
+        # 70 entries reach the paired-tile loop of the extra segment; runs of
+        # one slot make a dropped tile change the result.
+        rows = [[(i // 10) % 7 for i in range(70)], [3, 0, 6]]
         extra_kv = torch.randn(7, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
         extra_rows = rows
         extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size, use_fnuz=False)
