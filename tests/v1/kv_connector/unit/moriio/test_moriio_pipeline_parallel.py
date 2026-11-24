@@ -4,7 +4,6 @@
 
 import itertools
 import socket
-import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -475,15 +474,9 @@ def test_first_stage_failure_fails_the_transfer_once():
 
 def _write_done_fields(pp_rank: int, pp_size: int) -> list:
     sent = []
-    wrapper = SimpleNamespace(
-        lock=threading.Lock(),
-        done_req_ids=[],
-        done_remote_allocate_req_dict={},
-        waiting_for_transfer_complete=lambda statuses: None,
-        _mark_transfer_terminal_locked=lambda transfer_id: None,
-        send_notify=lambda *args, message_type, message_fields=None: sent.append(
-            message_fields
-        ),
+    wrapper = MoRIIOWrapper()
+    wrapper.send_notify = lambda *args, message_type, message_fields=None: sent.append(
+        message_fields
     )
     writer = make_moriio_writer(
         SimpleNamespace(
