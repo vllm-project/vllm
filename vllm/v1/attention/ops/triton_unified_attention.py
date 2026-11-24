@@ -946,17 +946,17 @@ def kv_tile_alignment(k: torch.Tensor, v: torch.Tensor) -> tuple[int, int, int]:
 
     Returns:
         `(k_align, v_align, v_delta)`: the powers of two, at most 16, dividing
-        the K strides and the V strides and `v_delta`, the offset of `v` from
-        `k`. `v_align` is 1 unless `v` starts inside `k`.
+        the K address and strides, and also the V strides and `v_delta`, the
+        offset of `v` from `k`. `v_align` is 1 unless `v` starts inside `k`.
 
     """
     if k.element_size() != 1:
         return 1, 1, 0
-    k_align = math.gcd(16, *k.stride()[:3])
+    k_align = math.gcd(16, k.data_ptr(), *k.stride()[:3])
     v_delta = v.data_ptr() - k.data_ptr()
     if not 0 < v_delta < k.stride(0) * k.shape[0]:
         return k_align, 1, 0
-    return k_align, math.gcd(16, v_delta, *v.stride()[:3]), v_delta
+    return k_align, math.gcd(k_align, v_delta, *v.stride()[:3]), v_delta
 
 
 def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
