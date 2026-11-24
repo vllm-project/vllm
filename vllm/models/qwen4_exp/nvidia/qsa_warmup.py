@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Connect loaded Qwen4Exp QSA modules to their kernel-owned warmup."""
+"""Warm up Qwen4Exp QSA kernels."""
 
-import sys
 from typing import TYPE_CHECKING
 
 import torch
@@ -10,28 +9,16 @@ import torch
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
+    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
 
 
-def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
+def warmup_qsa_kernels(owner: "Qwen4ExpQSAAttention", worker: "Worker") -> None:
     """Warm every reachable QSA specialization: indexer decode-query-length
     profiles plus the sparse attention split-K/merge configs."""
-    qsa_module = sys.modules.get("vllm.models.qwen4_exp.nvidia.qsa_indexer")
-    attn_module = sys.modules.get("vllm.models.qwen4_exp.nvidia.qsa")
-    if qsa_module is None or attn_module is None:
-        return
-    indexer = None
-    owner = None
-    for layer in worker.get_model().modules():
-        if indexer is None and isinstance(layer, qsa_module.QSAIndexer):
-            indexer = layer
-        elif owner is None and isinstance(layer, attn_module.Qwen4ExpQSAAttention):
-            owner = layer
-    if indexer is None or owner is None:
-        return
-
+    indexer = owner.indexer
     runner = worker.model_runner
 
     def block_table_for(prefix: str) -> torch.Tensor:

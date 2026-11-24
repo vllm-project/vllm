@@ -452,7 +452,7 @@ def test_kda_qkvg_autotune_enables_full_overlap(
         lambda: backend,
     )
 
-    k3_gemm.autotune_kda_qkvg(kda)
+    k3_gemm.autotune_kda_qkvg([kda])
 
     expected_calls = []
     if backend is not None:

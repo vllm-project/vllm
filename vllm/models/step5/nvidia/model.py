@@ -5,7 +5,7 @@
 import copy
 import typing
 from collections.abc import Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any, Self
 
 import regex as re
 import torch
@@ -75,6 +75,7 @@ from vllm.model_executor.models.utils import (
     skip_spec_layers,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, ModelWeightParameter
+from vllm.model_executor.warmup.layer_warmup import LayerWarmup
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -98,6 +99,9 @@ from .layernorm import (
 )
 from .ops.add import add_fp32
 from .ops.attention_gate import headwise_sigmoid_gate
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
 
@@ -843,7 +847,13 @@ def _step5_moe_reduce_policy(tp_size: int, dp_size: int) -> tuple[bool, bool]:
     return fuse_all_reduce, not fuse_all_reduce
 
 
-class Step5Attention(nn.Module):
+class Step5Attention(nn.Module, LayerWarmup):
+    @classmethod
+    def warmup_model_runs(cls, layers: list[Self], worker: "Worker") -> None:
+        from .warmup import step5_dsa_warmup
+
+        step5_dsa_warmup(layers, worker)
+
     def __init__(
         self,
         hidden_size: int,

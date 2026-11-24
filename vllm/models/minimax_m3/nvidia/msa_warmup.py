@@ -80,17 +80,7 @@ def _msa_prebuild_kwargs(
 
 
 @instrument(span_name="MiniMax M3 MSA warmup")
-def minimax_m3_msa_warmup(worker: "Worker") -> None:
-    sparse_module = next(
-        (
-            module
-            for module in worker.get_model().modules()
-            if isinstance(module, MiniMaxM3SparseAttention)
-        ),
-        None,
-    )
-    if sparse_module is None:
-        return
+def warmup_msa(sparse_module: MiniMaxM3SparseAttention, worker: "Worker") -> None:
     if not (
         current_platform.is_cuda() and current_platform.is_device_capability_family(100)
     ):

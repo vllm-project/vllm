@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, Self
 
 import torch
 from einops import rearrange
@@ -49,6 +49,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.parameter import BasevLLMParameter, BlockQuantScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.warmup.layer_warmup import LayerWarmup
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
@@ -82,6 +83,9 @@ from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
 
@@ -559,7 +563,19 @@ def _make_decode_norm_weight_loader(
     return weight_loader
 
 
-class KimiK3DeltaAttention(GatedDeltaNetAttention):
+class KimiK3DeltaAttention(GatedDeltaNetAttention, LayerWarmup):
+    @classmethod
+    def warmup_jit_kernels(cls, layers: list[Self], worker: "Worker") -> None:
+        from .triton_warmup import warmup_kda_triton_kernels
+
+        warmup_kda_triton_kernels(layers[0], worker)
+
+    @classmethod
+    def autotune_kernels(cls, layers: list[Self]) -> None:
+        from .low_latency_gemm import autotune_kda_qkvg
+
+        autotune_kda_qkvg(layers)
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return KimiK3KDAAttentionBackend
 

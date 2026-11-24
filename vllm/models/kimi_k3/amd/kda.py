@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING, Self
+
 import torch
 from einops import rearrange
 from torch import nn
@@ -43,6 +45,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.warmup.layer_warmup import LayerWarmup
 from vllm.models.kimi_k3.amd.kda_metadata import (
     PREFILL_CONV_BLOCK_M,
     KimiK3ROCmKDABackend,
@@ -67,10 +70,19 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_worker import Worker
+
 logger = init_logger(__name__)
 
 
-class KimiK3DeltaAttention(GatedDeltaNetAttention):
+class KimiK3DeltaAttention(GatedDeltaNetAttention, LayerWarmup):
+    @classmethod
+    def warmup_jit_kernels(cls, layers: list[Self], worker: "Worker") -> None:
+        from .triton_warmup import warmup_kda_triton_kernels
+
+        warmup_kda_triton_kernels(layers[0], worker.model_config.dtype)
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return KimiK3ROCmKDABackend
 

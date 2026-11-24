@@ -35,12 +35,7 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
-from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
-    kimi_k3_triton_warmup,
-)
-from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
-    qwen4_exp_qsa_triton_warmup,
-)
+from vllm.model_executor.warmup.layer_warmup import run_layer_warmups
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.qwen_vl_triton_warmup import qwen_vl_triton_warmup
 from vllm.model_executor.warmup.replayssm_warmup import (
@@ -241,12 +236,6 @@ def _warmup_gemm_rs_ar() -> None:
         logger.info_once("Warmed up %d GEMM-RS/AR variants.", compiled)
 
 
-def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
-    module = sys.modules.get("vllm.models.kimi_k3.nvidia.low_latency_gemm")
-    if module is not None:
-        module.autotune_kda_qkvg(model)
-
-
 def _aiter_gemm_m_buckets(max_m: int) -> list[int]:
     """One token count per AITER tuned-GEMM bucket up to `max_m`.
 
@@ -291,8 +280,6 @@ def _rocm_aiter_gemm_warmup(worker: "Worker") -> None:
 
 
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
-    from vllm.model_executor.warmup.step5_dsa_warmup import step5_dsa_warmup
-
     enable_jit_warmup = worker.vllm_config.kernel_config.enable_jit_warmup
     if enable_jit_warmup:
         logger.info("JIT kernel warmup starting.")
@@ -323,9 +310,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     # Run next so input-prep kernels JIT against pristine runner state.
     if enable_jit_warmup:
-        kimi_k3_triton_warmup(worker)
+        run_layer_warmups(worker.get_model(), "warmup_jit_kernels", worker)
         watermark_sample_warmup(worker)
-        qwen4_exp_qsa_triton_warmup(worker)
 
     if enable_jit_warmup and current_platform.is_device_capability_family(100):
         _warmup_bf16x3_router_gemm(
@@ -358,7 +344,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
-    step5_dsa_warmup(worker)
 
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
@@ -374,14 +359,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     b12x_warmup(worker, cudagraph_capture_sizes)
 
-    # The MSA kernels, and the CuTe DSL their modules import, are CUDA-only.
-    # Only MiniMax-M3 has MSA layers, and its package is loaded iff it is served.
-    if current_platform.is_cuda() and "vllm.models.minimax_m3" in sys.modules:
-        from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
-            minimax_m3_msa_warmup,
-        )
-
-        minimax_m3_msa_warmup(worker)
+    run_layer_warmups(worker.get_model(), "warmup_model_runs", worker)
 
     # Allocate the exact decode-sized workspace, autotune cache misses, and
     # resolve every CUDA Graph bucket before capture begins.
@@ -696,7 +674,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
                 _run_flashinfer_autotune_mm_encoder(runner)
             replayssm_autotune_warmup(runner)
-            _autotune_kimi_k3_kda_qkvg(runner.get_model())
+            run_layer_warmups(runner.get_model(), "autotune_kernels")
     finally:
         set_autotune_process_group(None)
 

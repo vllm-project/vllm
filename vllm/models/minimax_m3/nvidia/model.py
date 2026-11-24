@@ -14,7 +14,7 @@ The MiniMax-M3-preview config selects a single set of branches:
 
 from collections.abc import Iterable
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 import torch
 from torch import nn
@@ -105,6 +105,7 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
+from vllm.model_executor.warmup.layer_warmup import LayerWarmup
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -143,6 +144,7 @@ from .specialized_decode import specialized_decode_config
 
 if TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
+    from vllm.v1.worker.gpu_worker import Worker
 
     from .specialized_decode.runtime.decode import DecodeStep, SpecializedDecode
 
@@ -840,7 +842,7 @@ class MiniMaxM3Attention(nn.Module):
         return output
 
 
-class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
+class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase, LayerWarmup):
     """Block-sparse attention layer with the lightning-indexer branch.
 
     This is a merged attention layer: it owns the projections (qkv + index
@@ -855,6 +857,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     projections (`sparse_disable_index_value` set for every sparse layer), so
     `index_{v,o}_proj` are never created.
     """
+
+    @classmethod
+    def warmup_model_runs(cls, layers: list[Self], worker: "Worker") -> None:
+        from .msa_warmup import warmup_msa
+
+        warmup_msa(layers[0], worker)
 
     def __init__(
         self,

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, Self, cast
 
 import torch
 from torch import nn
@@ -37,6 +37,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
 )
+from vllm.model_executor.warmup.layer_warmup import LayerWarmup
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
@@ -73,6 +74,9 @@ from ..common.qsa_indexer import QSAIndexerMetadata, qsa_kv_cache_dtype
 from . import model
 from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
 from .qsa_indexer import QSAIndexer
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_worker import Worker
 
 
 @dataclass
@@ -475,10 +479,16 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
         )
 
 
-class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
+class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase, LayerWarmup):
     """Merged Qwen full-attention owner with a QSA indexer branch."""
 
     supports_dcp = False
+
+    @classmethod
+    def warmup_jit_kernels(cls, layers: list[Self], worker: Worker) -> None:
+        from .qsa_warmup import warmup_qsa_kernels
+
+        warmup_qsa_kernels(layers[0], worker)
 
     def __init__(
         self,

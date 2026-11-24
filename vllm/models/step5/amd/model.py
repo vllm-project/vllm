@@ -3,6 +3,7 @@
 """Step5 on ROCm: compressed sparse attention (CSA) and an FP32 residual."""
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING, Self
 
 import torch
 from torch import nn
@@ -47,6 +48,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     skip_spec_layers,
 )
+from vllm.model_executor.warmup.layer_warmup import LayerWarmup
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import get_cdna_version, on_gfx1250
 from vllm.sequence import IntermediateTensors
@@ -63,6 +65,9 @@ from ..common.ops.indexer_norm_rope import indexer_norm_rope
 from .checks import validate_parallel_geometry, verify_kv_transfer_compatibility
 from .csa_attention import step5_csa_attention
 from .csa_cache import Step5CSASummaryCacheLayer
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_worker import Worker
 
 
 class Step5SparseIndexer(nn.Module):
@@ -344,7 +349,13 @@ def _layer_rope_parameters(config: Step5Config, layer_idx: int) -> dict | None:
     return getattr(config, "rope_parameters", None)
 
 
-class Step5Attention(nn.Module):
+class Step5Attention(nn.Module, LayerWarmup):
+    @classmethod
+    def warmup_model_runs(cls, layers: list[Self], worker: "Worker") -> None:
+        from .warmup import step5_csa_warmup
+
+        step5_csa_warmup(layers, worker)
+
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
