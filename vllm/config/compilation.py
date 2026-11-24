@@ -1024,6 +1024,17 @@ class CompilationConfig:
             "static_forward_context",
         }
 
+        if self.mode == CompilationMode.NONE and not self.compile_mm_encoder:
+            # Custom Inductor passes can read their source from disk in uuid().
+            ignored_factors.update(
+                {
+                    "compile_cache_save_format",
+                    "compile_ranges_endpoints",
+                    "dynamic_shapes_config",
+                    "inductor_passes",
+                    "inductor_compile_config",
+                }
+            )
         return get_compile_factors(self, ignored_factors)
 
     def __repr__(self) -> str:

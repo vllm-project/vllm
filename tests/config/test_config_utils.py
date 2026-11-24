@@ -232,6 +232,66 @@ def test_ir_config_hash_initializes_provider_and_tracks_implementation(monkeypat
     assert hash_config(config) != first_hash
 
 
+def test_eager_fingerprint_avoids_compiler_source_reads():
+    import subprocess
+    import sys
+
+    # Check the hashing step in isolation from config construction and from
+    # kernels already registered by earlier tests in this process.
+    code = """
+import builtins
+from pathlib import Path
+from unittest.mock import patch
+
+from vllm.config import CompilationConfig, CompilationMode, VllmConfig
+from vllm.config.utils import hash_config
+from vllm.platforms import current_platform
+
+config = VllmConfig(compilation_config=CompilationConfig(mode=CompilationMode.NONE))
+original_import = builtins.__import__
+def guard_import(name, *args, **kwargs):
+    assert not name.startswith("vllm.ir"), name
+    return original_import(name, *args, **kwargs)
+
+with (
+    patch.object(current_platform, "import_ir_kernels", side_effect=AssertionError),
+    patch("vllm.ir.op.hash_source", side_effect=AssertionError),
+    patch("builtins.__import__", guard_import),
+    patch.object(Path, "read_text", side_effect=AssertionError),
+):
+    class UnusedPass:
+        def uuid(self):
+            raise AssertionError("hashed an unused compiler pass")
+    options = config.compilation_config.inductor_compile_config
+    options["post_grad_custom_post_pass"] = UnusedPass()
+    digest = hash_config(config)
+    assert len(bytes.fromhex(digest)) == 32
+    assert hash_config(config) == digest
+    config.kernel_config.ir_op_priority.rms_norm = ["other"]
+    assert hash_config(config) != digest
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+@pytest.mark.parametrize("mode,encoder", [("VLLM_COMPILE", False), ("NONE", True)])
+def test_compiled_config_hash_tracks_ir_implementation(mode, encoder, monkeypatch):
+    from vllm.config import CompilationConfig, CompilationMode
+    from vllm.ir.op import IrOp
+
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode[mode], compile_mm_encoder=encoder
+        ),
+    )
+    # CPU platform defaults may select DYNAMO_TRACE_ONCE at construction.
+    config.compilation_config.mode = CompilationMode[mode]
+    config.kernel_config.ir_op_priority.rms_norm = ["native"]
+    implementation = IrOp.registry["rms_norm"].impls["native"]
+    first = hash_config(config)
+    monkeypatch.setattr(implementation, "uuid", lambda: "changed")
+    assert hash_config(config) != first
+
+
 def test_get_attr_docs_includes_inherited_fields():
     """get_attr_docs must collect attribute docstrings inherited from base
     classes, not just those declared in the class's own body."""
