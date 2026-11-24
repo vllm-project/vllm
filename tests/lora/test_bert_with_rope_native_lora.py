@@ -13,9 +13,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-import vllm
 from vllm import EmbeddingRequestOutput, PoolingParams
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
@@ -88,10 +86,12 @@ def _transformers_outputs(case: str, path: Path) -> tuple[torch.Tensor, torch.Te
     return base, merged
 
 
-def _vllm_outputs(case: str, lora: str) -> tuple[torch.Tensor, torch.Tensor]:
+def _vllm_outputs(
+    vllm_runner, case: str, lora: str
+) -> tuple[torch.Tensor, torch.Tensor]:
     model_id, architecture, task = MODELS[case]
-    llm = vllm.LLM(
-        model=model_id,
+    with vllm_runner(
+        model_id,
         hf_overrides={"architectures": [architecture]},
         runner="pooling",
         trust_remote_code=True,
@@ -101,34 +101,36 @@ def _vllm_outputs(case: str, lora: str) -> tuple[torch.Tensor, torch.Tensor]:
         enable_lora=True,
         max_lora_rank=RANK,
         gpu_memory_utilization=0.3,
-    )
-    params = PoolingParams(task=task, use_activation=False)
-    results = []
-    for request in [None, LoRARequest(case, 1, lora)]:
-        if task == "embed":
-            embeds = cast(
-                list[EmbeddingRequestOutput],
-                llm.embed(
+        enable_chunked_prefill=None,
+    ) as runner:
+        params = PoolingParams(task=task, use_activation=False)
+        results = []
+        for request in [None, LoRARequest(case, 1, lora)]:
+            if task == "embed":
+                embeds = cast(
+                    list[EmbeddingRequestOutput],
+                    runner.llm.embed(
+                        PROMPTS,
+                        pooling_params=params,
+                        lora_request=request,
+                        use_tqdm=False,
+                    ),
+                )
+                results.append(torch.tensor([o.outputs.embedding for o in embeds]))
+            else:
+                logits = runner.llm.classify(
                     PROMPTS, pooling_params=params, lora_request=request, use_tqdm=False
-                ),
-            )
-            results.append(torch.tensor([o.outputs.embedding for o in embeds]))
-        else:
-            logits = llm.classify(
-                PROMPTS, pooling_params=params, lora_request=request, use_tqdm=False
-            )
-            results.append(torch.tensor([o.outputs.probs for o in logits]))
-    del llm
-    cleanup_dist_env_and_memory()
-    return results[0], results[1]
+                )
+                results.append(torch.tensor([o.outputs.probs for o in logits]))
+        return results[0], results[1]
 
 
 @pytest.mark.parametrize("case", list(MODELS))
-def test_native_lora_matches_transformers(tmp_path, case):
+def test_native_lora_matches_transformers(vllm_runner, tmp_path, case):
     if not hasattr(transformers, MODELS[case][1]):
         pytest.skip(f"Transformers has no native {MODELS[case][1]}")
     hf_base, hf_merged = _transformers_outputs(case, tmp_path / "lora")
-    base, lora = _vllm_outputs(case, str(tmp_path / "lora"))
+    base, lora = _vllm_outputs(vllm_runner, case, str(tmp_path / "lora"))
 
     signal = (hf_merged - hf_base).abs().mean()
     assert signal > 1e-2

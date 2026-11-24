@@ -12,6 +12,7 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 from vllm.models.hy_v4.nvidia.hc import HYV4HCLayer
@@ -19,69 +20,26 @@ from vllm.models.hy_v4.nvidia.model import (
     HYV4DecoderLayer,
     HYV4ForCausalLM,
     HYV4Model,
+    IHCCarry,
 )
+from vllm.models.hy_v4.nvidia.mrope import set_token_rope
+from vllm.models.hy_v4.weight_utils import HYV4_MLP_MAPPER, HYV4_WEIGHTS_MAPPER
 from vllm.models.hy_v4_flash.configs import HYV4FlashConfig
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from .attention import HYV4FlashAttention
 from .moe import HYV4FlashFeedForward, HYV4FlashMoE
 
 _EXPERT_WEIGHT = re.compile(
-    r"(.*\.experts)\.(?:(\d+)\.)?(gate_proj|up_proj|down_proj|gate_up_proj)"
+    r"(.*)\.experts\.(?:(\d+)\.)?(gate_proj|up_proj|down_proj|gate_up_proj)"
     r"(\.weight(?:_packed|_scale(?:_inv)?)?|_scale(?:_inv)?)?"
 )
 
 
-def validate_runtime(vllm_config: VllmConfig) -> None:
-    config = vllm_config.model_config.hf_text_config
-    config.validate_flash_config()
-    config.verify_parallel_config(vllm_config.parallel_config)
+def validate_platform() -> None:
     if not current_platform.is_cuda():
         raise NotImplementedError("HYV4 Flash requires NVIDIA CUDA")
-    if vllm_config.model_config.dtype != torch.bfloat16:
-        raise ValueError("HYV4 Flash requires bfloat16 compute")
-    if (
-        vllm_config.kv_transfer_config is not None
-        or vllm_config.lora_config is not None
-    ):
-        raise ValueError("HYV4 Flash does not support KV transfer or LoRA")
-    spec = vllm_config.speculative_config
-    if spec is not None and spec.method != "dfly":
-        raise ValueError("HYV4 Flash supports only DFly speculative decoding")
-    if vllm_config.cache_config.cache_dtype not in ("auto", "bfloat16", "fp8_ds_mla"):
-        raise ValueError("HYV4 Flash requires BF16 or fp8_ds_mla KV storage")
-    if config.index_topk % 128 or config.index_topk < config.sliding_window:
-        raise ValueError("index_topk must be 128-aligned and cover sliding_window")
-    if config.engram_layer_ids and not config.enable_ihc:
-        raise ValueError("Flash Engram requires the iHC residual stream")
-    quantization = vllm_config.model_config.quantization
-    if quantization == "compressed-tensors":
-        from vllm.models.hy_v4.dfly_config import _validate_checkpoint_quantization
-
-        _validate_checkpoint_quantization(
-            vllm_config.model_config.model_arch_config.quantization_config
-        )
-    elif quantization == "fp8":
-        fp8_quant = vllm_config.quant_config
-        if list(getattr(fp8_quant, "weight_block_size", None) or []) != [128, 128]:
-            raise ValueError("HYV4 Flash requires FP8 128x128 weight blocks")
-    elif quantization == "online":
-        from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
-        from vllm.model_executor.layers.quantization.utils.quant_utils import (
-            kFp8Static128BlockSym,
-        )
-
-        quant = vllm_config.model_config.quantization_config
-        if isinstance(quant, dict):
-            quant = QuantizationConfigArgs(**quant)
-        if quant != QuantizationConfigArgs(moe=QuantSpec(weight=kFp8Static128BlockSym)):
-            raise ValueError(
-                "Flash online quantization requires MoE-only fp8_per_block"
-            )
-    elif quantization is not None:
-        raise ValueError(
-            "HYV4 Flash supports blockwise FP8 or compressed-tensors MXFP4"
-        )
 
 
 class HYV4FlashDecoderLayer(HYV4DecoderLayer):
@@ -95,8 +53,6 @@ class HYV4FlashDecoderLayer(HYV4DecoderLayer):
         topk_indices_buffer: torch.Tensor | None = None,
         ihc_sequence_parallel: bool = False,
     ) -> None:
-        from .attention import HYV4FlashAttention
-
         nn.Module.__init__(self)
         self.config = config
         self.hidden_size = config.hidden_size
@@ -123,6 +79,7 @@ class HYV4FlashDecoderLayer(HYV4DecoderLayer):
         self.hc_mlp_layer = HYV4HCLayer(
             config, self.layer_idx, prefix=f"{prefix}.hc_mlp_layer"
         )
+        self.init_ihc_boundaries()
 
 
 class HYV4FlashModel(HYV4Model):
@@ -149,6 +106,14 @@ class HYV4FlashModel(HYV4Model):
         self.token_lookback_depth = (
             self.config.engram_max_ngram_size - 1 if self.engram_hash is not None else 0
         )
+        # SWA and sparse layers rotate with different thetas, and each rotary
+        # module holds its own per-forward rows for the fused RoPE kernels.
+        self.rotary_embs = list(
+            {
+                id(layer.self_attn.rotary_emb): layer.self_attn.rotary_emb
+                for layer in self.layers
+            }.values()
+        )
 
     def forward(
         self,
@@ -158,17 +123,18 @@ class HYV4FlashModel(HYV4Model):
         inputs_embeds: torch.Tensor | None = None,
         lookback_token_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.engram_hash is None:
-            return super().forward(
-                input_ids, positions, intermediate_tensors, inputs_embeds
-            )
-        if input_ids is None:
-            raise ValueError("Flash Engram requires original input token IDs")
         hidden = (
             inputs_embeds
             if inputs_embeds is not None
             else self.embed_input_ids(input_ids)
         )
+        for rotary_emb in self.rotary_embs[1:]:
+            set_token_rope(rotary_emb, positions, hidden)
+        if self.engram_hash is None:
+            return super().forward(input_ids, positions, intermediate_tensors, hidden)
+        if input_ids is None:
+            raise ValueError("Flash Engram requires original input token IDs")
+        set_token_rope(self.rotary_embs[0], positions, hidden)
         hashes = input_ids.new_empty(
             (
                 len(self.config.engram_layer_ids),
@@ -187,11 +153,21 @@ class HYV4FlashModel(HYV4Model):
             layer_id - 1: index
             for index, layer_id in enumerate(self.config.engram_layer_ids)
         }
+        fused = self.uses_fused_ihc(use_ihc_sequence_parallel=False)
+        carry: IHCCarry | None = None
         for index, layer in enumerate(self.layers):
             if index in hash_indices:
+                if carry is not None:
+                    hidden = self.layers[index - 1].hc_mlp_layer.post(*carry)
+                    carry = None
                 hidden = layer.hc_attn_layer.prepare_input(hidden)
                 hidden = layer.engram_layer(hidden, hashes[hash_indices[index]])
-            hidden, _ = layer(positions, hidden, None)
+            if fused:
+                carry = layer.forward_ihc_fused(positions, hidden, carry)
+            else:
+                hidden, _ = layer(positions, hidden, None)
+        if carry is not None:
+            hidden = layer.hc_mlp_layer.post(*carry)
         return self.norm(self.hc_head(hidden))
 
     def _record_part(self, name: str, part: Any) -> None:
@@ -202,8 +178,12 @@ class HYV4FlashModel(HYV4Model):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         parameters = dict(self.named_parameters())
+        expert_mapping = {
+            weight_name: (param_name, expert_id, shard)
+            for param_name, weight_name, expert_id, shard in self.get_expert_mapping()
+        }
         loaded: set[str] = set()
-        for name, value in weights:
+        for name, value in HYV4_WEIGHTS_MAPPER.apply(weights):
             engram = re.fullmatch(r"layers\.(\d+)\.engram_layer\.(.+)", name)
             if engram is not None:
                 assert self.engram_hash is not None
@@ -214,32 +194,22 @@ class HYV4FlashModel(HYV4Model):
                     self._record_part(name, None)
                     self.engram_hash.load_lookup(value)
                     continue
-                if leaf in (
-                    "multi_head_embedding.embedding.weight",
-                    "multi_head_embedding.embedding.weight_scale_inv",
-                ):
-                    self._record_part(name, None)
-                    embedding = self.layers[
-                        int(layer)
-                    ].engram_layer.multi_head_embedding
-                    embedding.load_weight(leaf.rsplit(".", 1)[1], value)
-                    loaded.add(name)
-                    continue
+                filled = self.layers[int(layer)].engram_layer.load_weight(leaf, value)
+                if filled is not None:
+                    local_name, part = filled
+                    target = f"layers.{layer}.engram_layer.{local_name}"
+                    self._record_part(target, part)
+                    loaded.add(target)
+                continue
             expert = _EXPERT_WEIGHT.fullmatch(name)
             if expert:
                 prefix, expert_id, projection, suffix = expert.groups()
-                shards = {
-                    "gate_proj": ("w1",),
-                    "up_proj": ("w3",),
-                    "down_proj": ("w2",),
-                    "gate_up_proj": ("w1", "w3"),
-                }[projection]
+                projections = (
+                    ("gate_proj", "up_proj")
+                    if projection == "gate_up_proj"
+                    else (projection,)
+                )
                 suffix = (suffix or "").removeprefix(".weight")
-                param_name = "w2_weight" if projection == "down_proj" else "w13_weight"
-                target = f"{prefix}.routed_experts.{param_name}{suffix}"
-                if target not in parameters:
-                    raise ValueError(f"Unknown Flash expert weight: {name}")
-                parameter = parameters[target]
                 if expert_id is None:
                     if value.ndim != 3 or value.shape[0] != self.config.num_experts:
                         raise ValueError(
@@ -252,34 +222,27 @@ class HYV4FlashModel(HYV4Model):
                     if not 0 <= index < self.config.num_experts:
                         raise ValueError(f"Expert index out of range: {name}")
                     tensor = value[index] if expert_id is None else value
-                    pieces = tensor.chunk(len(shards), dim=-2)
-                    for shard, piece in zip(shards, pieces):
+                    pieces = tensor.chunk(len(projections), dim=-2)
+                    for projection, piece in zip(projections, pieces):
+                        param_name, mapped_expert, shard = expert_mapping[
+                            f"experts.{index}.{projection}."
+                        ]
+                        target = f"{prefix}.{param_name}weight{suffix}"
+                        if target not in parameters:
+                            raise ValueError(f"Unknown Flash expert weight: {name}")
+                        parameter = parameters[target]
                         success = parameter.weight_loader(
                             parameter,
                             piece,
                             target,
                             shard_id=shard,
-                            expert_id=index,
+                            expert_id=mapped_expert,
                             return_success=True,
                         )
                         if success:
-                            self._record_part(target, (index, shard))
+                            self._record_part(target, (mapped_expert, shard))
                             loaded.add(target)
                 continue
-            if name.endswith((".hc_fn", ".hc_head_fn")):
-                name += ".weight"
-            name = name.replace(".gate.e_score_correction_bias", ".expert_bias")
-            name = name.replace(".router.gate.", ".gate.")
-            if ".engram_layer.lookup_per_head_norms." in name:
-                prefix, suffix = name.split(".lookup_per_head_norms.")
-                head, leaf = suffix.split(".", 1)
-                embedding = self.get_submodule(prefix).multi_head_embedding
-                if not head.isdigit() or not 0 <= int(head) < embedding.n_hash_cols:
-                    raise ValueError(f"Invalid Engram hash head weight: {name}")
-                if not embedding.head_start <= int(head) < embedding.head_end:
-                    continue
-                local_head = int(head) - embedding.head_start
-                name = f"{prefix}.lookup_per_head_norms.{local_head}.{leaf}"
             if name not in parameters:
                 raise ValueError(f"Unknown Flash checkpoint weight: {name}")
             parameter = parameters[name]
@@ -323,8 +286,11 @@ class HYV4FlashModel(HYV4Model):
                 )
                 shards = ("w1", "w3") if leaf.startswith("w13_") else ("w2",)
                 expected = {(i, s) for i in local_ids for s in shards}
-            else:
+            elif hasattr(module, "output_sizes"):
                 expected = set(range(len(module.output_sizes)))
+            else:
+                # Engram stacks one checkpoint tensor per parameter row.
+                expected = set(range(getattr(module, leaf).shape[0]))
             if parts != expected:
                 raise ValueError(f"Incomplete Flash checkpoint shards: {name}")
 
@@ -335,18 +301,16 @@ class HYV4FlashForCausalLM(HYV4ForCausalLM):
     supports_pp = False  # type: ignore[assignment]
     requires_raw_input_tokens = True
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_stacked={
-            ".mlp.gate_proj": (".mlp.gate_up_proj", 0),
-            ".mlp.up_proj": (".mlp.gate_up_proj", 1),
-            ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
-            ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
-        },
+    hf_to_vllm_mapper = HYV4_MLP_MAPPER | WeightsMapper(
         orig_to_new_substr={".compressed_indexer.": ".indexer."},
+        orig_to_new_stacked={
+            ".indexer.key_value_projection.": (".indexer.key_projection.", 0),
+            ".indexer.key_gate_projection.": (".indexer.key_projection.", 1),
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        validate_runtime(vllm_config)
+        validate_platform()
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.token_lookback_depth = self.model.token_lookback_depth
         self._weight_loading_depth = 0
@@ -388,10 +352,6 @@ class HYV4FlashForCausalLM(HYV4ForCausalLM):
         try:
             yield
             if outermost:
-                from vllm.model_executor.model_loader.default_loader import (
-                    DefaultModelLoader,
-                )
-
                 required = {
                     name
                     for name, _ in self.named_parameters()
