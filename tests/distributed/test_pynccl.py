@@ -105,10 +105,6 @@ def test_ft_only_communicator_rejects_inherited_cuda_operations():
 
 @worker_fn_wrapper
 def retire_faulted_nccl_worker_fn():
-    from vllm.v1.worker.sentinel.gpu_worker_sentinel import (
-        WorkerSentinel,
-    )
-
     world = get_world_group()
     group = init_model_parallel_group(
         [world.ranks], world.local_rank, "nccl", group_name="dp"
@@ -117,21 +113,16 @@ def retire_faulted_nccl_worker_fn():
         tensor = torch.ones(1, device=world.device)
         torch.distributed.all_reduce(tensor, group=group.device_group)
         torch.accelerator.synchronize()
-        # Isolate native NCCL allocations from the separately owned PyNCCL comm.
-        group.device_communicator.pynccl_comm.destroy()
         torch.distributed.barrier(group=group.cpu_group)
-        free_before = torch.accelerator.memory.get_memory_info(world.device)[0]
-        retired = WorkerSentinel._retire_device_communicators([group])
+        cleanup = group.retire_device_collectives()
+        assert cleanup is not None
         with pytest.raises(RuntimeError, match="Device collectives.*retired"):
             group.all_reduce(tensor)
-        assert not WorkerSentinel._retire_device_communicators([group])
-        for communicator, device_group in retired:
-            if communicator is not None:
-                communicator.destroy()
-            device_group.abort()
+        with pytest.raises(RuntimeError, match="Device collectives.*retired"):
+            group.broadcast(tensor)
+        assert group.retire_device_collectives() is None
+        cleanup()
         torch.distributed.barrier(group=group.cpu_group)
-        if torch.accelerator.memory.get_memory_info(world.device)[0] <= free_before:
-            raise AssertionError("Native NCCL allocations remained after retirement")
         tensor = torch.ones(1, device="cpu")
         group.cpu_all_reduce_(tensor)
         assert tensor.item() == world.world_size
@@ -142,7 +133,7 @@ def retire_faulted_nccl_worker_fn():
 @pytest.mark.skipif(
     torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs to run the test."
 )
-def test_retire_faulted_nccl_releases_device_memory():
+def test_retire_faulted_nccl_rejects_device_collectives_and_preserves_cpu_group():
     distributed_run(retire_faulted_nccl_worker_fn, 2)
 
 

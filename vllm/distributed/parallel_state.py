@@ -53,6 +53,7 @@ from vllm.distributed.utils import (
     cpu_all_reduce_,
     create_tcp_store,
     get_cached_tcp_store_client,
+    stateless_destroy_torch_distributed_process_group,
 )
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -422,6 +423,21 @@ direct_register_custom_op(
     op_func=patched_fused_scaled_matmul_reduce_scatter,
     fake_impl=patched_fused_scaled_matmul_reduce_scatter_fake,
 )
+
+
+class _RetiredDeviceGroup(ProcessGroup):
+    """Placeholder rejecting access to a retired device process group."""
+
+    def __init__(self, original: ProcessGroup, unique_name: str):
+        super().__init__(original.rank(), original.size())
+        self._retired_message = f"Device collectives for {unique_name!r} are retired"
+
+    def __getattribute__(self, name: str) -> Any:
+        raise RuntimeError(super().__getattribute__("_retired_message"))
+
+    def __hash__(self) -> int:
+        # PyTorch looks up rank mappings before invoking some collectives.
+        raise RuntimeError(super().__getattribute__("_retired_message"))
 
 
 class GroupCoordinator:
@@ -1417,6 +1433,30 @@ class GroupCoordinator:
             raise ValueError("No device communicator found")
         return self.device_communicator.recv(size, dtype, src)
 
+    def retire_device_collectives(self) -> Callable[[], None] | None:
+        """Retire device collectives and return a task to destroy old resources."""
+        device_group = self.device_group
+        if isinstance(device_group, _RetiredDeviceGroup):
+            return None
+        replacement = _RetiredDeviceGroup(device_group, self.unique_name)
+        communicator = self.device_communicator
+        if communicator is not None:
+            self.device_communicator = communicator.retire_device_collectives()
+        self.device_group = replacement
+
+        def cleanup() -> None:
+            from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
+
+            if communicator is not None:
+                communicator.destroy()
+            device_group.abort()
+            if isinstance(self, StatelessGroupCoordinator):
+                stateless_destroy_torch_distributed_process_group(device_group)
+            else:
+                torch.distributed.destroy_process_group(device_group)
+
+        return cleanup
+
     def destroy(self):
         # Device communicators can own collective workspaces whose teardown
         # uses these process groups (for example FlashInfer PCIe IPC barriers).
@@ -1424,7 +1464,9 @@ class GroupCoordinator:
         if self.device_communicator is not None:
             self.device_communicator.destroy()
         if hasattr(self, "device_group"):
-            torch.distributed.destroy_process_group(self.device_group)
+            device_group = self.device_group
+            if not isinstance(device_group, _RetiredDeviceGroup):
+                torch.distributed.destroy_process_group(device_group)
             del self.device_group
         if hasattr(self, "cpu_group"):
             torch.distributed.destroy_process_group(self.cpu_group)

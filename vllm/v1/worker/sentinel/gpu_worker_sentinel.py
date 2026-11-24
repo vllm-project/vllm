@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -41,9 +41,6 @@ from vllm.v1.worker.sentinel.eplb_redistribute import (
 )
 
 if TYPE_CHECKING:
-    from vllm.distributed.device_communicators.base_device_communicator import (
-        DeviceCommunicatorBase,
-    )
     from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -217,13 +214,16 @@ class WorkerSentinel:
             newly_dead_ep_ranks = compute_dead_ep_ranks(
                 ft_request.params["newly_dead_dp_ranks"], tp_size, pcp_size
             )
-            get_ep_all2all_manager().disconnect_ranks(sorted(newly_dead_ep_ranks))
+            get_ep_all2all_manager().disconnect_failed_ranks(
+                sorted(newly_dead_ep_ranks)
+            )
 
         self._redistribute_experts(dead_ep_ranks)
 
-        retired = self._retire_device_communicators(
-            (get_dp_group(), get_ep_group(), get_eplb_group())
-        )
+        retired = []
+        for group in (get_dp_group(), get_ep_group(), get_eplb_group()):
+            if (cleanup := group.retire_device_collectives()) is not None:
+                retired.append(cleanup)
         self._device_cleanup_executor.submit(self._run_device_cleanup, retired)
 
         logger.info(
@@ -236,36 +236,16 @@ class WorkerSentinel:
 
     def _run_device_cleanup(
         self,
-        retired: Sequence[
-            tuple["DeviceCommunicatorBase | None", torch.distributed.ProcessGroup]
-        ],
+        retired: Sequence[Callable[[], None]],
     ) -> None:
         try:
             device = self.worker.device
             assert device is not None
             current_platform.set_device(device)
-            for communicator, device_group in retired:
-                if communicator is not None:
-                    communicator.destroy()
-                device_group.abort()
+            for cleanup in retired:
+                cleanup()
         except Exception:
             logger.exception("[FT] Failed to retire device communicators")
-
-    @staticmethod
-    def _retire_device_communicators(
-        groups: Sequence["GroupCoordinator"],
-    ) -> list[tuple["DeviceCommunicatorBase | None", torch.distributed.ProcessGroup]]:
-        """Replace active communicators before queuing cleanup of their old state."""
-        retired = []
-        for group in groups:
-            communicator = group.device_communicator
-            if communicator is not None:
-                replacement = communicator.retire_device_collectives()
-                if replacement is communicator:
-                    continue
-                group.device_communicator = replacement
-            retired.append((communicator, group.device_group))
-        return retired
 
     def query_mask(self, ft_request: FaultToleranceRequest) -> dict:
         """Query the mask on a side stream."""
