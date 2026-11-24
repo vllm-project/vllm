@@ -227,8 +227,11 @@ def test_minicpmv4_6_video_budget_covers_largest_frames():
     assert budget == num_frames * 720
     assert sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"]) <= budget
     assert _num_video_embeds(processor, _video_item(num_frames, 1265, 1112)) == budget
-    for width, height in ((1265, 1112), (7566, 266)):
-        video = _process_video(processor, _video_item(num_frames, width, height))
+    thin_frames = budget // _num_video_embeds(processor, _video_item(1, 7566, 266))
+    for frames, width, height in ((num_frames, 1265, 1112), (thin_frames, 7566, 266)):
+        video = _process_video(processor, _video_item(frames, width, height))
+        num_embeds = sum(p.get_num_embeds() for p in video["mm_placeholders"]["video"])
+        assert num_embeds <= budget
         assert _padded_patches(dummy, "video") >= _padded_patches(video, "video")
 
 

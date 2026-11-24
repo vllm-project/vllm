@@ -768,19 +768,19 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> tuple[ImageSize, int]:
         canvas = super().get_video_frame_size_with_most_features()
+        num_videos = max(mm_counts.get("video", 0), 1)
         if self._hint_keeps_canvas("video", canvas):
             return self._get_video_size_and_frames(
-                seq_len, mm_counts, _MAX_FRAMES_PER_VIDEO, [canvas]
+                seq_len // num_videos, _MAX_FRAMES_PER_VIDEO, [canvas]
             )
         video_options = self.ctx.get_mm_config().limit_per_prompt.get("video")
-        max_frames = getattr(video_options, "num_frames", None) or _MAX_FRAMES_PER_VIDEO
+        max_tokens = self.get_max_video_tokens(seq_len, mm_counts)
         sizes = [*self._hinted_video_sizes_by_tokens.values()]
         if self._get_size_hint("video") == (None, None):
             sizes += self._get_thin_sizes("video")
         return self._get_video_size_and_frames(
-            seq_len,
-            mm_counts,
-            min(max_frames, _MAX_FRAMES_PER_VIDEO),
+            max_tokens,
+            getattr(video_options, "num_frames", None) or max_tokens,
             sizes,
             padded=True,
         )
@@ -791,8 +791,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> int:
         size, num_frames = self._get_video_size_and_frames(
-            seq_len,
-            mm_counts,
+            seq_len // max(mm_counts.get("video", 0), 1),
             _MAX_FRAMES_PER_VIDEO,
             (self._video_sizes_by_tokens | self._hinted_video_sizes_by_tokens).values(),
         )
@@ -800,17 +799,14 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
 
     def _get_video_size_and_frames(
         self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
+        max_tokens: int,
         max_frames: int,
         sizes: Iterable[ImageSize],
         padded: bool = False,
     ) -> tuple[ImageSize, int]:
-        num_videos = max(mm_counts.get("video", 0), 1)
-
         def num_frames(size: ImageSize) -> int:
             frame_tokens = self._get_frame_tokens(size, "video")
-            return max(min(seq_len // frame_tokens // num_videos, max_frames), 1)
+            return max(min(max_tokens // frame_tokens, max_frames), 1)
 
         def key(size: ImageSize) -> tuple[int, int, int]:
             frame_tokens = self._get_frame_tokens(size, "video")

@@ -683,7 +683,7 @@ def test_video_tokens_match_the_transformers_processor(
         (reference["input_ids"] == video_token_id).sum()
     )
     assert budget is not None
-    assert dummy_embeds == budget["video"]
+    assert dummy_embeds <= budget["video"]
 
 
 @pytest.mark.parametrize("kwargs_on_init", [True, False])
