@@ -6,3 +6,7 @@ vLLM provides comprehensive benchmarking tools for performance testing and evalu
 - **[Parameter Sweeps](./sweeps.md)**: Automate `vllm bench` runs for multiple configurations, useful for [optimization and tuning](../configuration/optimization.md).
 - **[Performance Dashboard](./dashboard.md)**: Automated CI that publishes benchmarks on each commit.
 - **[Benchmark using vLLM Recipes](../../tools/recipes/README.md)**: Use the Recipe conversion tool to generate `config.yaml` and `env.sh` from [vLLM Recipes](https://recipes.vllm.ai/) for Benchmarking.
+
+The [multi-turn serving benchmark](../../benchmarks/multi_turn/README.md) supports
+`--no-stream` for endpoints that return a single JSON chat completion. In this
+mode, time to first token is reported as the end-to-end request latency.

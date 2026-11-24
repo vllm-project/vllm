@@ -297,7 +297,12 @@ async def send_request(
         url=chat_url, json=payload, headers=request_headers, timeout=timeout
     ) as response:
         http_status = HTTPStatus(response.status)
-        if http_status == HTTPStatus.OK:
+        if http_status == HTTPStatus.OK and not stream:
+            data = json.loads(await response.read())
+            message = data["choices"][0]["message"]
+            assert message["role"] == "assistant"
+            generated_text += message["content"]
+        elif http_status == HTTPStatus.OK:
             async for chunk_bytes in response.content:
                 chunk_bytes = chunk_bytes.strip()
                 if not chunk_bytes:
@@ -307,11 +312,6 @@ async def send_request(
                 if chunk == "[DONE]":
                     # End of stream
                     latency = time.perf_counter_ns() - start_time
-                elif stream is False:
-                    data = json.loads(chunk)
-                    message = data["choices"][0]["message"]
-                    assert message["role"] == "assistant"
-                    generated_text += message["content"]
                 else:
                     timestamp: int = time.perf_counter_ns()
                     data = json.loads(chunk)
