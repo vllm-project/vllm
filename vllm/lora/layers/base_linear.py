@@ -155,12 +155,20 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             )
             for _ in range(self.n_slices)
         )
+        self.lora_a_ranks = torch.zeros(
+            (self.n_slices, max_loras), dtype=torch.int32, device=self.device
+        )
+        self.lora_b_ranks = torch.zeros(
+            (self.n_slices, max_loras), dtype=torch.int32, device=self.device
+        )
         self.output_slices = (self.lora_b_stacked[0].shape[2],)
 
     def reset_lora(self, index: int):
         for s_index in range(self.n_slices):
             self.lora_a_stacked[s_index][index] = 0
             self.lora_b_stacked[s_index][index] = 0
+        self.lora_a_ranks[:, index] = 0
+        self.lora_b_ranks[:, index] = 0
 
     def set_lora(
         self,
@@ -189,6 +197,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[0][index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
             lora_b, non_blocking=True
         )
+        self.lora_a_ranks[0, index] = lora_a.shape[0]
+        self.lora_b_ranks[0, index] = lora_b.shape[1]
 
     def _get_quant_method(self) -> QuantizeMethodBase:
         quant_method = self.base_layer.quant_method
@@ -233,7 +243,14 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             x = x.flatten(0, 1)
 
         lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
-            output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
+            output,
+            x,
+            self.lora_a_stacked,
+            self.lora_b_stacked,
+            1.0,
+            self.output_slices,
+            lora_a_ranks=self.lora_a_ranks,
+            lora_b_ranks=self.lora_b_ranks,
         )
         if not current_platform.can_update_inplace():
             output = lora_output
@@ -283,6 +300,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 1.0,
                 self.output_slices,
                 add_inputs=False,
+                lora_a_ranks=self.lora_a_ranks,
+                lora_b_ranks=self.lora_b_ranks,
             )
             return lora_output
 

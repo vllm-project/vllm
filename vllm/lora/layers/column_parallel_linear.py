@@ -54,7 +54,7 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
     buffers.zero_()
 
     shrunk_buffers: torch.Tensor | None = layer.punica_wrapper.add_shrink(
-        buffers, x, layer.lora_a_stacked, 1.0
+        buffers, x, layer.lora_a_stacked, 1.0, lora_ranks=layer.lora_a_ranks
     )
 
     if not current_platform.can_update_inplace():
@@ -69,6 +69,7 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
         layer.output_slices,
         offset_start=0,
         add_input=True,
+        lora_ranks=layer.lora_b_ranks,
     )
 
     if not current_platform.can_update_inplace():
@@ -246,6 +247,12 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             )
             for output_size in self.output_slices
         )
+        self.lora_a_ranks = torch.zeros(
+            (self.n_slices, max_loras), dtype=torch.int32, device=self.device
+        )
+        self.lora_b_ranks = torch.zeros(
+            (self.n_slices, max_loras), dtype=torch.int32, device=self.device
+        )
 
     def slice_lora_a(
         self, lora_a: list[torch.Tensor | None]
@@ -355,10 +362,12 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 self.lora_a_stacked[i][
                     index, 0, : lora_a_i.shape[0], : lora_a_i.shape[1]
                 ].copy_(lora_a_i, non_blocking=True)
+                self.lora_a_ranks[i, index] = lora_a_i.shape[0]
             if (lora_b_i := lora_b[i]) is not None:
                 self.lora_b_stacked[i][
                     index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
                 ].copy_(lora_b_i, non_blocking=True)
+                self.lora_b_ranks[i, index] = lora_b_i.shape[1]
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         merged_cls = maybe_get_oot_by_class(MergedColumnParallelLinear)

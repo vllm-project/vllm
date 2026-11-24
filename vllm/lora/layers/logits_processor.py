@@ -111,6 +111,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             device=self.device,
         )
 
+        self.lora_a_ranks = torch.zeros(
+            (1, max_loras), dtype=torch.int32, device=self.device
+        )
+        self.lora_b_ranks = torch.zeros(
+            (1, max_loras), dtype=torch.int32, device=self.device
+        )
+
         if self.sharded_to_full_mapping is not None:
             self.sharded_to_full_mapping_gpu = torch.tensor(
                 self.sharded_to_full_mapping, device=self.device, dtype=torch.long
@@ -121,6 +128,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
+        self.lora_a_ranks[:, index] = 0
+        self.lora_b_ranks[:, index] = 0
 
     def set_lora(
         self,
@@ -137,6 +146,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
             lora_b, non_blocking=True
         )
+        self.lora_a_ranks[0, index] = lora_a.shape[0]
+        self.lora_b_ranks[0, index] = lora_b.shape[1]
 
     def _get_logits(
         self,
@@ -190,7 +201,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             logits = logits[:, self.sharded_to_full_mapping_gpu]
 
         lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_logits(
-            logits, hidden_states, self.lora_a_stacked, self.lora_b_stacked, 1.0
+            logits,
+            hidden_states,
+            self.lora_a_stacked,
+            self.lora_b_stacked,
+            1.0,
+            lora_a_ranks=self.lora_a_ranks,
+            lora_b_ranks=self.lora_b_ranks,
         )
 
         if not current_platform.can_update_inplace():

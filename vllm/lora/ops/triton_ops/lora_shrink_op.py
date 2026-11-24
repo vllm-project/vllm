@@ -31,6 +31,8 @@ def _lora_shrink_reduce_kernel(
     num_tokens_per_lora,
     lora_token_start_loc,
     lora_ids,
+    lora_ranks_ptr,
+    lora_ranks_d0_stride,
     scaling,
     partial_d0_stride,
     partial_d1_stride,
@@ -43,6 +45,7 @@ def _lora_shrink_reduce_kernel(
     BLOCK_N: tl.constexpr,
     SPLIT_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    HAS_LORA_RANKS: tl.constexpr = False,
 ):
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
@@ -60,6 +63,19 @@ def _lora_shrink_reduce_kernel(
     if lora_id == -1:
         return
 
+    if HAS_LORA_RANKS:
+        cur_N = tl.minimum(
+            N,
+            tl.maximum(
+                0,
+                tl.load(lora_ranks_ptr + slice_id * lora_ranks_d0_stride + lora_id),
+            ),
+        )
+        if pid_n * BLOCK_N >= cur_N:
+            return
+    else:
+        cur_N = N
+
     lora_m_size = tl.load(num_tokens_per_lora + lora_idx)
     cta_m_offset = pid_m * BLOCK_M
     if cta_m_offset >= lora_m_size:
@@ -74,7 +90,7 @@ def _lora_shrink_reduce_kernel(
     ram = tl.load(cta_lora_seq_indices + offset_m)
     offset_n = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
     offset_cm = tl.arange(0, BLOCK_M)
-    mask = (offset_cm[:, None] < cta_m_len) & (offset_n[None, :] < N)
+    mask = (offset_cm[:, None] < cta_m_len) & (offset_n[None, :] < cur_N)
 
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for split_id in range(SPLIT_K):
@@ -108,6 +124,8 @@ def _lora_shrink_kernel(
     num_tokens_per_lora,
     lora_token_start_loc,
     lora_ids,
+    lora_ranks_ptr,
+    lora_ranks_d0_stride,
     scaling,
     input_d0_stride,
     input_d1_stride,
@@ -126,6 +144,7 @@ def _lora_shrink_kernel(
     SLICE_NUM: tl.constexpr,
     USE_GDC: tl.constexpr,
     launch_pdl: tl.constexpr,
+    HAS_LORA_RANKS: tl.constexpr = False,
     STORE_PARTIALS: tl.constexpr = False,
     output_split_stride=0,
     PARTIAL_N: tl.constexpr = 0,
@@ -159,6 +178,20 @@ def _lora_shrink_kernel(
         # Early exit for the no-lora case.
         return
 
+    if HAS_LORA_RANKS:
+        cur_N = tl.minimum(
+            N,
+            tl.maximum(
+                0,
+                tl.load(lora_ranks_ptr + slice_id * lora_ranks_d0_stride + lora_id),
+            ),
+        )
+        if pid_n * BLOCK_N >= cur_N:
+            # Early exit CTA for padded zero-rank tiles.
+            return
+    else:
+        cur_N = N
+
     lora_m_size = tl.load(num_tokens_per_lora + lora_idx)
 
     cta_m_offset = pid_m * BLOCK_M
@@ -187,6 +220,7 @@ def _lora_shrink_kernel(
         lora_ptr,
         out_ptr,
         N,
+        cur_N,
         K,
         cta_m_len,
         ram,  # array identifying the rows of Input ptr to operate on
@@ -228,6 +262,7 @@ def _lora_shrink(
     num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     scaling: float,
     split_k_reduction: str = "atomic",
+    lora_ranks: torch.Tensor | None = None,
 ) -> None:
     """Args:
     inputs (torch.Tensor): Input tensor
@@ -253,6 +288,10 @@ def _lora_shrink(
         torch.compile treats it as dynamic rather than a constant.
     scaling (float): Scaling factor.
     split_k_reduction (str): `atomic` or a separate `kernel` reduction.
+    lora_ranks (torch.Tensor | None, optional): Optional contiguous int32
+        tensor of shape ``[num_lora_slots]`` or
+        ``[num_slices, num_lora_slots]`` giving each adapter's effective rank
+        for early-exiting padded N tiles. Defaults to None.
 
     """
     assert no_lora_flag_cpu.numel() == 1
@@ -301,6 +340,30 @@ def _lora_shrink(
     N, K = lora_a_weights[0].shape[-2:]  # K=hidden_size,N=rank
     NUM_SLICES = len(lora_a_weights)
     MAX_LORAS = lora_ids.size(0)
+    num_lora_slots = lora_a_weights[0].size(0)
+
+    if lora_ranks is not None:
+        assert lora_ranks.dtype == torch.int32
+        assert lora_ranks.is_contiguous()
+        if lora_ranks.ndim == 1:
+            assert lora_ranks.size(0) == num_lora_slots
+            lora_ranks_d0_stride = 0
+        elif lora_ranks.ndim == 2:
+            assert (
+                lora_ranks.size(0) == NUM_SLICES
+                and lora_ranks.size(1) == num_lora_slots
+            )
+            lora_ranks_d0_stride = lora_ranks.stride(0)
+        else:
+            raise ValueError(
+                f"Expected 1D or 2D lora_ranks tensor, got {lora_ranks.ndim}D."
+            )
+        has_lora_ranks = True
+        lora_ranks_ptr = lora_ranks
+    else:
+        has_lora_ranks = False
+        lora_ranks_ptr = lora_ids
+        lora_ranks_d0_stride = 0
 
     # Triton kernel configs
     kernel_config = get_lora_op_configs(
@@ -361,6 +424,8 @@ def _lora_shrink(
         num_tokens_per_lora,
         lora_token_start_loc,
         lora_ids,
+        lora_ranks_ptr,
+        lora_ranks_d0_stride,
         scaling,
         inputs.stride(0),
         inputs.stride(1),
@@ -382,6 +447,7 @@ def _lora_shrink(
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,
         launch_pdl=use_gdc,
+        HAS_LORA_RANKS=has_lora_ranks,
         **partial_args,
     )
     if partials is not None:
@@ -394,6 +460,8 @@ def _lora_shrink(
             num_tokens_per_lora,
             lora_token_start_loc,
             lora_ids,
+            lora_ranks_ptr,
+            lora_ranks_d0_stride,
             scaling,
             *partials.stride(),
             *output_tensor.stride(),
@@ -401,6 +469,7 @@ def _lora_shrink(
             BLOCK_N,
             SPLIT_K,
             GROUP_SIZE_M,
+            HAS_LORA_RANKS=has_lora_ranks,
             num_warps=NUM_WARPS,
             num_stages=NUM_STAGES,
         )

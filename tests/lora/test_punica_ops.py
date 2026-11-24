@@ -708,3 +708,205 @@ def test_torch_ops_bgmv_skips_no_lora_tokens():
     )
     assert torch.equal(ys[1], torch.full((out_dim + offset,), 5.0))
     torch.testing.assert_close(ys[0, offset : offset + out_dim], xe[0] @ b[0].T)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("add_inputs", [True, False])
+@pytest.mark.parametrize("nslices", [1, 3])
+@pytest.mark.parametrize("per_slice_ranks", [False, True])
+@pytest.mark.parametrize("num_tokens", [33, 144])
+@pytest.mark.parametrize("device", DEVICES)
+def test_lora_shrink_expand_per_adapter_ranks(
+    dtype: torch.dtype,
+    add_inputs: bool,
+    nslices: int,
+    per_slice_ranks: bool,
+    num_tokens: int,
+    device: str,
+):
+    """Verify per-adapter / per-slice lora_ranks early-exit matches full padded
+    execution across both decode (M < 128) and prefill (M >= 128) paths and
+    never touches elements past each adapter's effective rank.
+    """
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+    set_random_seed(0)
+
+    max_loras = 8
+    max_rank = 128
+    hidden_size = 512
+    out_slices = (256,) if nslices == 1 else (256, 128, 128)
+
+    if per_slice_ranks:
+        base_rows = [
+            [0, 1, 7, 8, 17, 32, 48, 128],
+            [8, 0, 16, 31, 0, 64, 96, 128],
+            [16, 4, 0, 33, 64, 1, 128, 8],
+        ]
+        lora_ranks = torch.tensor(base_rows[:nslices], dtype=torch.int32, device=device)
+    else:
+        lora_ranks = torch.tensor(
+            [0, 1, 7, 8, 17, 32, 48, 128], dtype=torch.int32, device=device
+        )
+
+    x = torch.randn((num_tokens, hidden_size), dtype=dtype, device=device) * 0.2
+    lora_a_clean = [
+        torch.zeros((max_loras, 1, max_rank, hidden_size), dtype=dtype, device=device)
+        for _ in range(nslices)
+    ]
+    lora_b_clean = [
+        torch.zeros((max_loras, 1, out_s, max_rank), dtype=dtype, device=device)
+        for out_s in out_slices
+    ]
+    for s in range(nslices):
+        for lid in range(max_loras):
+            r_eff = int(
+                lora_ranks[s, lid].item()
+                if lora_ranks.ndim == 2
+                else lora_ranks[lid].item()
+            )
+            if r_eff > 0:
+                lora_a_clean[s][lid, 0, :r_eff, :].normal_(0, 0.05)
+                lora_b_clean[s][lid, 0, :, :r_eff].normal_(0, 0.05)
+
+    # Poison padded tails with NaN to prove early-exit never reads/writes them.
+    lora_a_poisoned = [w.clone() for w in lora_a_clean]
+    lora_b_poisoned = [w.clone() for w in lora_b_clean]
+    for s in range(nslices):
+        for lid in range(max_loras):
+            r_eff = int(
+                lora_ranks[s, lid].item()
+                if lora_ranks.ndim == 2
+                else lora_ranks[lid].item()
+            )
+            if r_eff < max_rank:
+                lora_a_poisoned[s][lid, 0, r_eff:, :].fill_(float("nan"))
+                lora_b_poisoned[s][lid, 0, :, r_eff:].fill_(float("nan"))
+
+    # Mix no-LoRA (-1) tokens with every adapter slot.
+    mapping = torch.tensor(
+        [
+            -1 if i % (max_loras + 1) == 0 else (i % (max_loras + 1)) - 1
+            for i in range(num_tokens)
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    meta = LoRAKernelMeta.make(
+        max_loras=max_loras, max_num_tokens=num_tokens, device=device
+    )
+    meta.prepare_tensors(mapping)
+    meta_args = meta.meta_args(token_nums=num_tokens, specialize_active_lora=False)
+
+    buf_base = torch.empty((nslices, num_tokens, max_rank), dtype=torch.float32)
+    buf_opt = torch.empty((nslices, num_tokens, max_rank), dtype=torch.float32)
+    y_init = torch.randn((num_tokens, sum(out_slices)), dtype=dtype) * 0.3
+    y_base = y_init.clone()
+    y_opt = y_init.clone()
+
+    with _dict_lock:
+        _LORA_A_PTR_DICT.clear()
+        _LORA_B_PTR_DICT.clear()
+        triton_ops.lora_shrink(x, lora_a_clean, buf_base, *meta_args, 0.5)
+        triton_ops.lora_expand(
+            buf_base,
+            lora_b_clean,
+            y_base,
+            *meta_args,
+            offset_start=0,
+            add_inputs=add_inputs,
+        )
+
+        _LORA_A_PTR_DICT.clear()
+        _LORA_B_PTR_DICT.clear()
+        triton_ops.lora_shrink(x, lora_a_poisoned, buf_opt, *meta_args, 0.5, lora_ranks)
+        assert not torch.isnan(buf_opt).any()
+        for s in range(nslices):
+            for lid in range(max_loras):
+                r_eff = int(
+                    lora_ranks[s, lid].item()
+                    if lora_ranks.ndim == 2
+                    else lora_ranks[lid].item()
+                )
+                tmask = mapping == lid
+                if tmask.any() and r_eff < max_rank:
+                    assert (buf_opt[s, tmask, r_eff:] == 0).all()
+        assert_close(buf_opt, buf_base)
+
+        # Also poison intermediate shrink buffer tails before expand.
+        buf_poisoned = buf_opt.clone()
+        for s in range(nslices):
+            for lid in range(max_loras):
+                r_eff = int(
+                    lora_ranks[s, lid].item()
+                    if lora_ranks.ndim == 2
+                    else lora_ranks[lid].item()
+                )
+                tmask = mapping == lid
+                if tmask.any() and r_eff < max_rank:
+                    buf_poisoned[s, tmask, r_eff:] = float("nan")
+
+        triton_ops.lora_expand(
+            buf_poisoned,
+            lora_b_poisoned,
+            y_opt,
+            *meta_args,
+            offset_start=0,
+            add_inputs=add_inputs,
+            lora_ranks=lora_ranks,
+        )
+        assert not torch.isnan(y_opt).any()
+        assert_close(y_opt, y_base)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lora_shrink_batch_invariant_per_adapter_ranks(
+    monkeypatch: pytest.MonkeyPatch, device: str
+):
+    """Batch-invariant shrink + reduce must remain bitwise exact with
+    per-adapter lora_ranks and never read/write padded rank tails.
+    """
+    import vllm.lora.ops.triton_ops.lora_shrink_op as shrink_mod
+
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+    set_random_seed(0)
+    monkeypatch.setattr(shrink_mod, "is_batch_invariant", True)
+
+    max_loras, max_rank, hidden_size, num_tokens, nslices = 4, 64, 512, 24, 2
+    lora_ranks = torch.tensor(
+        [[8, 0, 32, 64], [16, 7, 0, 48]], dtype=torch.int32, device=device
+    )
+    x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16) * 0.2
+    lora_a_clean = [
+        torch.zeros((max_loras, 1, max_rank, hidden_size), dtype=torch.bfloat16)
+        for _ in range(nslices)
+    ]
+    for s in range(nslices):
+        for lid in range(max_loras):
+            r_eff = int(lora_ranks[s, lid].item())
+            if r_eff > 0:
+                lora_a_clean[s][lid, 0, :r_eff, :].normal_(0, 0.05)
+    lora_a_poisoned = [w.clone() for w in lora_a_clean]
+    for s in range(nslices):
+        for lid in range(max_loras):
+            r_eff = int(lora_ranks[s, lid].item())
+            if r_eff < max_rank:
+                lora_a_poisoned[s][lid, 0, r_eff:, :].fill_(float("nan"))
+
+    mapping = torch.tensor([(i % 5) - 1 for i in range(num_tokens)], dtype=torch.int32)
+    meta = LoRAKernelMeta.make(
+        max_loras=max_loras, max_num_tokens=num_tokens, device=device
+    )
+    meta.prepare_tensors(mapping)
+    meta_args = meta.meta_args(token_nums=num_tokens, specialize_active_lora=False)
+
+    buf_base = torch.empty((nslices, num_tokens, max_rank), dtype=torch.float32)
+    buf_opt = torch.empty((nslices, num_tokens, max_rank), dtype=torch.float32)
+    with _dict_lock:
+        _LORA_A_PTR_DICT.clear()
+        triton_ops.lora_shrink(x, lora_a_clean, buf_base, *meta_args, 0.5)
+        _LORA_A_PTR_DICT.clear()
+        triton_ops.lora_shrink(x, lora_a_poisoned, buf_opt, *meta_args, 0.5, lora_ranks)
+    assert not torch.isnan(buf_opt).any()
+    assert torch.equal(buf_opt, buf_base)

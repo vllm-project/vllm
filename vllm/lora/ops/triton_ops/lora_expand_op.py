@@ -32,6 +32,8 @@ def _lora_expand_kernel(
     num_tokens_per_lora,
     lora_token_start_loc,
     lora_ids,
+    lora_ranks_ptr,
+    lora_ranks_d0_stride,
     slice_start_loc,
     input_d0_stride,
     input_d1_stride,
@@ -52,6 +54,7 @@ def _lora_expand_kernel(
     SAME_STRIDE: tl.constexpr,
     USE_GDC: tl.constexpr,
     launch_pdl: tl.constexpr,
+    HAS_LORA_RANKS: tl.constexpr = False,
 ):
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
@@ -67,6 +70,20 @@ def _lora_expand_kernel(
     if lora_id == -1:
         # Early exit for the no-lora case.
         return
+
+    if HAS_LORA_RANKS:
+        cur_K = tl.minimum(
+            K,
+            tl.maximum(
+                0,
+                tl.load(lora_ranks_ptr + slice_id * lora_ranks_d0_stride + lora_id),
+            ),
+        )
+        if cur_K <= 0 and ADD_INPUTS:
+            # Early exit CTA when adapter does not target this slice.
+            return
+    else:
+        cur_K = K
 
     lora_m_size = tl.load(num_tokens_per_lora + lora_idx)
 
@@ -104,7 +121,7 @@ def _lora_expand_kernel(
         lora_ptr,
         out_ptr,
         curr_N,
-        K,
+        cur_K,
         cta_m_len,
         ram,  # array identifying the rows of Input ptr to operate on
         slice_start_loc,
@@ -129,6 +146,7 @@ def _lora_expand_kernel(
         CAST_TYPE,
         ADD_INPUTS,
         USE_GDC,
+        MASK_K_TAIL=HAS_LORA_RANKS,
     )
 
 
@@ -146,6 +164,7 @@ def _lora_expand(
     num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     offset_start: int = 0,
     add_inputs: bool = False,
+    lora_ranks: torch.Tensor | None = None,
 ) -> None:
     """Args:
     inputs (torch.Tensor): input tensor
@@ -170,6 +189,10 @@ def _lora_expand(
         Defaults to 0.
     add_inputs (bool, optional): Whether to add the input tensor to the
         output tensor. Defaults to False.
+    lora_ranks (torch.Tensor | None, optional): Optional contiguous int32
+        tensor of shape ``[num_lora_slots]`` or
+        ``[num_slices, num_lora_slots]`` giving each adapter's effective rank
+        for early-exiting padded K iterations. Defaults to None.
 
     """
     assert no_lora_flag_cpu.numel() == 1
@@ -207,6 +230,30 @@ def _lora_expand(
     MAX_LORAS = lora_ids.size(0)
     CAST_TYPE = False
     NUM_SLICES = len(lora_b_weights)
+    num_lora_slots = lora_b_weights[0].size(0)
+
+    if lora_ranks is not None:
+        assert lora_ranks.dtype == torch.int32
+        assert lora_ranks.is_contiguous()
+        if lora_ranks.ndim == 1:
+            assert lora_ranks.size(0) == num_lora_slots
+            lora_ranks_d0_stride = 0
+        elif lora_ranks.ndim == 2:
+            assert (
+                lora_ranks.size(0) == NUM_SLICES
+                and lora_ranks.size(1) == num_lora_slots
+            )
+            lora_ranks_d0_stride = lora_ranks.stride(0)
+        else:
+            raise ValueError(
+                f"Expected 1D or 2D lora_ranks tensor, got {lora_ranks.ndim}D."
+            )
+        has_lora_ranks = True
+        lora_ranks_ptr = lora_ranks
+    else:
+        has_lora_ranks = False
+        lora_ranks_ptr = lora_ids
+        lora_ranks_d0_stride = 0
 
     # Triton kernel configs.
     kernel_config = get_lora_op_configs(
@@ -225,7 +272,11 @@ def _lora_expand(
     NUM_CTAS = kernel_config["num_ctas"]
     NUM_STAGES = kernel_config["num_stages"]
 
-    EVEN_K = K % BLOCK_K == 0  # type: ignore
+    # For small decode batches (HBM bandwidth bound), masked loads avoid
+    # fetching padded zero-rank sectors; for larger prefill batches (M >= 128),
+    # keep vectorized unmasked loads when physical K is divisible by BLOCK_K
+    # and zero out-of-rank lanes in registers via MASK_K_TAIL.
+    EVEN_K = (K % BLOCK_K == 0) and (not has_lora_ranks or M >= 128)  # type: ignore
 
     if inputs.dtype == torch.float32 and lora_b_weights[0].dtype in [
         torch.float16,
@@ -259,6 +310,8 @@ def _lora_expand(
         num_tokens_per_lora,
         lora_token_start_loc,
         lora_ids,
+        lora_ranks_ptr,
+        lora_ranks_d0_stride,
         slice_start_tensor,
         inputs.stride(0),
         inputs.stride(1),
@@ -282,6 +335,7 @@ def _lora_expand(
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,
         launch_pdl=use_gdc,
+        HAS_LORA_RANKS=has_lora_ranks,
     )
 
     return

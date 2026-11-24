@@ -119,6 +119,8 @@ class ClassificationHeadWithLoRA(BaseClassificationHeadWithLoRA):
             self.lora_a_stacked[0],
             self.lora_b_stacked[0],
             1.0,
+            lora_a_ranks=self.lora_a_ranks,
+            lora_b_ranks=self.lora_b_ranks,
         )
         if not current_platform.can_update_inplace():
             output = lora_output

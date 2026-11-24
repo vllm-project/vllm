@@ -69,6 +69,8 @@ class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
         self.lora_a_stacked[0][index] = 0
         for lora_b in self.lora_b_stacked:
             lora_b[index] = 0
+        self.lora_a_ranks[:, index] = 0
+        self.lora_b_ranks[:, index] = 0
 
     def set_lora(
         self,
@@ -89,6 +91,8 @@ class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
         for group, rows in enumerate(lora_b.split(group_size)):
             group_b = self.lora_b_stacked[group][index, 0]
             group_b[: rows.shape[0], : rows.shape[1]].copy_(rows, non_blocking=True)
+        self.lora_a_ranks[0, index] = lora_a.shape[0]
+        self.lora_b_ranks[0, index] = lora_b.shape[1]
 
     def grouped_forward(
         self,
@@ -136,6 +140,8 @@ class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
                 (self.lora_b_stacked[group],),
                 1.0,
                 (o_lora_rank,),
+                lora_a_ranks=self.lora_a_ranks,
+                lora_b_ranks=self.lora_b_ranks,
             )
             z[:, group] = group_output
         return z
