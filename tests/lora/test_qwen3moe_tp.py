@@ -66,57 +66,57 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
 
 
-def test_qwen3moe_lora(qwen3moe_lora_files):
+def test_qwen3moe_lora(vllm_runner, qwen3moe_lora_files):
     # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
     # Otherwise, the lora-test will fail due to CUDA OOM.
-    llm = vllm.LLM(
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
         enforce_eager=True,
-        trust_remote_code=True,
         enable_chunked_prefill=True,
         enable_mixed_moe_lora_format=True,
-    )
-
-    generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
-    generate_and_test(llm, qwen3moe_lora_files, lora_id=2)
+    ) as runner:
+        generate_and_test(runner.llm, qwen3moe_lora_files, lora_id=1)
+        generate_and_test(runner.llm, qwen3moe_lora_files, lora_id=2)
 
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("ep", [False, True])
 @pytest.mark.parametrize("enable_mixed_moe_lora_format", [False, True])
-def test_qwen3moe_lora_tp2(ep, qwen3moe_lora_files, enable_mixed_moe_lora_format):
-    llm = vllm.LLM(
+def test_qwen3moe_lora_tp2(
+    vllm_runner, ep, qwen3moe_lora_files, enable_mixed_moe_lora_format
+):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
-        trust_remote_code=True,
         enable_expert_parallel=ep,
         tensor_parallel_size=2,
         enable_mixed_moe_lora_format=enable_mixed_moe_lora_format,
-    )
-
-    generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
-    generate_and_test(llm, qwen3moe_lora_files, lora_id=2)
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, qwen3moe_lora_files, lora_id=1)
+        generate_and_test(runner.llm, qwen3moe_lora_files, lora_id=2)
 
 
 @multi_gpu_test(num_gpus=4)
 @pytest.mark.parametrize("ep", [False, True])
 @pytest.mark.parametrize("enable_mixed_moe_lora_format", [False, True])
-def test_qwen3moe_lora_tp4(ep, qwen3moe_lora_files, enable_mixed_moe_lora_format):
-    llm = vllm.LLM(
+def test_qwen3moe_lora_tp4(
+    vllm_runner, ep, qwen3moe_lora_files, enable_mixed_moe_lora_format
+):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
-        trust_remote_code=True,
         enable_expert_parallel=ep,
         tensor_parallel_size=4,
         enable_mixed_moe_lora_format=enable_mixed_moe_lora_format,
-    )
-
-    generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
-    generate_and_test(llm, qwen3moe_lora_files, lora_id=2)
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, qwen3moe_lora_files, lora_id=1)
+        generate_and_test(runner.llm, qwen3moe_lora_files, lora_id=2)

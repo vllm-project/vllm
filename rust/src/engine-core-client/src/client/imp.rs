@@ -14,7 +14,7 @@ use thiserror_ext::AsReport as _;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, trace, warn};
-use vllm_metrics::METRICS;
+use vllm_metrics::{LoraInfoExporter, METRICS};
 use zeromq::RouterSendHalf;
 
 use crate::client::readiness::{Readiness, RecheckGuard};
@@ -24,26 +24,14 @@ use crate::client::state::{
 use crate::client::stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
-use crate::metrics::{
-    EngineSleepState, IterationMetricHandles, LoraInfoExporter, SchedulerStatsRecorder,
-};
-use crate::protocol::encode_msgpack;
+use crate::metrics::{EngineSleepState, IterationMetricHandles, SchedulerStatsRecorder};
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::{EngineCoreUtilityRequest, UtilityOutput};
+use crate::protocol::{encode_msgpack, msgpack_zero_copy_threshold};
 use crate::transport::{ConnectedEngine, EngineId};
 use crate::{Error, Result, transport};
-
-const MSGPACK_ZERO_COPY_THRESHOLD_ENV: &str = "VLLM_MSGPACK_ZERO_COPY_THRESHOLD";
-const DEFAULT_MSGPACK_ZERO_COPY_THRESHOLD: usize = 256;
-
-fn msgpack_zero_copy_threshold() -> usize {
-    std::env::var(MSGPACK_ZERO_COPY_THRESHOLD_ENV)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_MSGPACK_ZERO_COPY_THRESHOLD)
-}
 
 pub(crate) struct ClientInner {
     input_send: RouterSendHalf,

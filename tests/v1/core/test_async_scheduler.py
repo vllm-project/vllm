@@ -270,9 +270,9 @@ def test_prefix_caching_for_multi_turn():
         block_size=BLOCK_SIZE,
     )
     for i, req in enumerate(next_turn_requests):
-        req.prompt_token_ids = requests[i].prompt_token_ids + list(
-            requests[i].output_token_ids
-        )
+        prompt_token_ids = requests[i].prompt_token_ids
+        assert prompt_token_ids is not None
+        req.prompt_token_ids = prompt_token_ids + list(requests[i].output_token_ids)
         req._all_token_ids = req.prompt_token_ids.copy()
         req.all_token_ids = ConstantList(req._all_token_ids)
         req.block_hashes = []
@@ -317,13 +317,14 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids_dict = None
     scheduler.grammar_compile_error_reqs = {}
     scheduler.encoder_cache_mismatch_reqs = set()
+    scheduler.dropped_streaming_updates = []
     scheduler.vllm_config = Mock()
     scheduler.aux_output_connector = None
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
     scheduler.num_spec_tokens = 0
-    scheduler.make_stats = Mock(return_value=None)
+    scheduler.make_stats = Mock(return_value=None)  # type: ignore[method-assign]
     scheduler.max_model_len = 128
 
     def free_request(req, delay_free_blocks=False):
@@ -331,7 +332,9 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
         scheduler.requests.pop(req.request_id, None)
         return None, None
 
-    scheduler._free_request = Mock(side_effect=free_request)
+    scheduler._free_request = Mock(  # type: ignore[method-assign]
+        side_effect=free_request
+    )
 
     output = SchedulerOutput(
         scheduled_new_reqs=[],
@@ -502,6 +505,7 @@ def _create_async_pp_scheduler(
         block_size=16,
         max_num_batched_tokens=512,
     )
+    assert isinstance(scheduler, AsyncScheduler)
     # Emulate PP at the scheduler level; constructing with
     # pipeline_parallel_size>1 requires that many visible GPUs. Drive with
     # queue_size=pp_size+1 (V2 async PP runs pp_size+1 concurrent batches).
@@ -530,6 +534,37 @@ def _assert_positions_consistent(req, engine: PipelinedEngine) -> None:
             f"output {i} of {req.request_id}: token sampled for position "
             f"{actual}, delivered as position {expected}"
         )
+
+
+@pytest.mark.parametrize("max_tokens", [1, 2, 5])
+@pytest.mark.parametrize("queue_size", [2, 3, 4])
+@pytest.mark.parametrize("num_spec", [0, 3])
+def test_no_steps_past_max_tokens_with_deep_batch_queue(
+    num_spec: int, queue_size: int, max_tokens: int
+):
+    """No step is scheduled past max_tokens with several steps in flight, even
+    when every draft is rejected."""
+    scheduler = _create_async_pp_scheduler(num_spec, pp_size=1, num_blocks=10)
+    (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
+    scheduler.add_request(request)
+
+    num_steps = 0
+    schedule = scheduler.schedule
+
+    def counting_schedule(*args, **kwargs) -> SchedulerOutput:
+        nonlocal num_steps
+        output = schedule(*args, **kwargs)
+        num_steps += request.request_id in output.num_scheduled_tokens
+        return output
+
+    scheduler.schedule = counting_schedule  # type: ignore[method-assign]
+    # The fake runner rejects every draft (no accept_drafts).
+    PipelinedEngine(scheduler, queue_size=queue_size).run()
+
+    assert request.num_output_tokens == max_tokens
+    assert request.num_output_placeholder_steps == 0
+    # One prefill step, then one decode step per remaining output token.
+    assert num_steps == max_tokens
 
 
 @pytest.mark.parametrize("num_spec", [0, 3])
@@ -567,7 +602,7 @@ def test_kv_pressure_preemption_with_inflight_output(num_spec: int):
             preempts_with_inflight_output += 1
         return orig_preempt(request, timestamp, **kwargs)
 
-    scheduler._preempt_request = counting_preempt
+    scheduler._preempt_request = counting_preempt  # type: ignore[method-assign]
 
     def add_requests(step: int, engine: PipelinedEngine):
         if pending:
@@ -628,7 +663,7 @@ def test_reset_prefix_cache_with_inflight_output_under_kv_pressure(pp_size: int)
             repreempts_with_stale += 1
         return orig_preempt(request, timestamp, **kwargs)
 
-    scheduler._preempt_request = counting_preempt
+    scheduler._preempt_request = counting_preempt  # type: ignore[method-assign]
 
     resets = 0
     reset_steps = {6, 14} if pp_size == 1 else {6, 7, 18, 19}

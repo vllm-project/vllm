@@ -177,6 +177,30 @@ def test_parse_chat_messages_video_and_video_embeds_mixed(
         )
 
 
+@pytest.mark.parametrize("count", [0, 1])
+def test_parse_chat_messages_video_embeds_disabled_modality(count):
+    model_config = ModelConfig(
+        QWEN25OMNI_MODEL_ID,
+        runner="generate",
+        limit_mm_per_prompt={"video": {"count": count, "allow_embeds": False}},
+        enable_mm_embeds=True,
+    )
+
+    with pytest.raises(VLLMValidationError, match="`video_embeds` inputs are disabled"):
+        parse_chat_messages(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "video_embeds", "video_embeds": None, "uuid": "x"},
+                    ],
+                }
+            ],
+            model_config,
+            content_format="string",
+        )
+
+
 @pytest.mark.parametrize("json_metadata", [False, True])
 def test_parse_chat_messages_multiple_dict_image_embeds(
     qwen25omni_model_config_image_embeds,
@@ -495,3 +519,118 @@ def test_parse_chat_messages_multiple_modals_with_partial_uuids_multiple_message
     assert_mm_uuids(mm_uuids, 2, modality="image", expected_uuids=["image_123", None])
     assert_mm_uuids(mm_uuids, 1, modality="video", expected_uuids=["video_123"])
     assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[None])
+
+
+def _hf_processor_unavailable(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Models whose HF processor cannot be built on the frontend, as in the
+    scoring unit tests. Returns the (mutable) load count."""
+    from vllm.multimodal.processing import context
+
+    calls = [0]
+
+    def cached_processor_from_config(*args, **kwargs):
+        calls[0] += 1
+        raise OSError("Can't load image processor")
+
+    monkeypatch.setattr(
+        context, "cached_processor_from_config", cached_processor_from_config
+    )
+    return calls
+
+
+def _image_messages(image_url):
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "Describe both."},
+            ],
+        }
+    ]
+
+
+@pytest.fixture(scope="function")
+def qwen3vl_model_config():
+    return ModelConfig(
+        "Qwen/Qwen3-VL-4B-Instruct",
+        runner="generate",
+        limit_mm_per_prompt={"image": 2, "video": 1},
+    )
+
+
+def test_parse_chat_messages_without_video_never_builds_the_hf_processor(
+    qwen3vl_model_config,
+    image_url,
+    monkeypatch,
+):
+    calls = _hf_processor_unavailable(monkeypatch)
+
+    _, mm_data, _ = parse_chat_messages(
+        _image_messages(image_url),
+        qwen3vl_model_config,
+        content_format="string",
+    )
+
+    assert_mm_data_inputs(mm_data, {"image": 2})
+    assert calls == [0]
+
+
+def test_parse_chat_messages_video_passes_the_frame_caps_once(
+    image_url,
+    video_url,
+    monkeypatch,
+):
+    from vllm.multimodal.media.connector import MediaConnector
+    from vllm.multimodal.processing import BaseProcessingInfo
+
+    get_video_frame_limits = BaseProcessingInfo.get_video_frame_limits
+    limits = []
+
+    def counting_get_video_frame_limits(self):
+        limits.append(get_video_frame_limits(self))
+        return limits[-1]
+
+    monkeypatch.setattr(
+        BaseProcessingInfo, "get_video_frame_limits", counting_get_video_frame_limits
+    )
+    seen = []
+
+    def fetch_video(self, video_url, **kwargs):
+        seen.append(kwargs["video_io_defaults"])
+        return "video"
+
+    monkeypatch.setattr(MediaConnector, "fetch_video", fetch_video)
+
+    _, mm_data, _ = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "video_url", "video_url": {"url": video_url}},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "text", "text": "Describe."},
+                ],
+            },
+            {"role": "assistant", "content": "Some stuff."},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "video_url", "video_url": {"url": video_url}},
+                    {"type": "text", "text": "And this?"},
+                ],
+            },
+        ],
+        ModelConfig(
+            QWEN25OMNI_MODEL_ID,
+            runner="generate",
+            limit_mm_per_prompt={"image": 2, "video": 2},
+        ),
+        content_format="string",
+    )
+
+    assert_mm_data_inputs(mm_data, {"image": 2, "video": 2})
+    assert len(limits) == 1 and limits[0]["max_frames"] > 0
+    assert seen == limits * 2

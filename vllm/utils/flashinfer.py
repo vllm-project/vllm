@@ -322,11 +322,18 @@ silu_and_mul_scaled_nvfp4_experts_quantize = _lazy_import_wrapper(
 scaled_fp4_grouped_quantize = _lazy_import_wrapper(
     "flashinfer", "scaled_fp4_grouped_quantize"
 )
+mxfp8_grouped_quantize = _lazy_import_wrapper("flashinfer", "mxfp8_grouped_quantize")
+silu_and_mul_mxfp8_experts_quantize = _lazy_import_wrapper(
+    "flashinfer", "silu_and_mul_mxfp8_experts_quantize"
+)
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer.fp4_quantization", "block_scale_interleave"
 )
 flashinfer_cute_dsl_fused_moe_nvfp4 = _lazy_import_wrapper(
     "flashinfer", "cute_dsl_fused_moe_nvfp4"
+)
+flashinfer_cute_dsl_fused_moe_bf16 = _lazy_import_wrapper(
+    "flashinfer", "cute_dsl_fused_moe_bf16"
 )
 flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
     "flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"
@@ -568,6 +575,34 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
 
 
 @functools.cache
+def has_flashinfer_topk_varlen_gvr2() -> bool:
+    """Return `True` if FlashInfer ships the `gvr_2` varlen top-k backend
+    (self-sampling GVR V2, `flashinfer.top_k_varlen(backend="gvr_2")`).
+
+    Feature-detected on the production entry `run_varlen` (FlashInfer >=
+    0.7.2: per-row `kv_lens`, a capture-stable `max_seq_len` and the
+    hint-free `top_k`) and the band-aware `warmup_varlen` (`row_stride`)
+    that the dispatcher calls.
+    """
+    if not has_flashinfer():
+        return False
+    try:
+        import inspect
+
+        from flashinfer.topk_varlen.kernels import gvr2_topk_host
+
+        run_params = inspect.signature(gvr2_topk_host.run_varlen).parameters
+        warmup_params = inspect.signature(gvr2_topk_host.warmup_varlen).parameters
+    except Exception:
+        # The module imports the CuTe DSL; anything it raises means unusable.
+        return False
+    return {"kv_lens", "max_seq_len", "top_k"} <= set(run_params) and {
+        "num_rows_list",
+        "row_stride",
+    } <= set(warmup_params)
+
+
+@functools.cache
 def has_flashinfer_msa() -> bool:
     """Return `True` if FlashInfer MiniMax Sparse Attention (MSA) ops are
     available. Which architectures they serve depends on the build."""
@@ -773,6 +808,16 @@ def has_flashinfer_localized_moe() -> bool:
         "localized_allow_nonlocalized",
     }
     return required <= params.keys()
+
+
+@functools.cache
+def has_flashinfer_cutedsl_moe_bf16() -> bool:
+    """Return `True` if FlashInfer's SM90 CuTe-DSL unquantized fused MoE
+    (`cute_dsl_fused_moe_bf16`) is available."""
+    if not has_flashinfer_cutedsl():
+        return False
+    mod = _get_submodule("flashinfer")
+    return mod is not None and hasattr(mod, "cute_dsl_fused_moe_bf16")
 
 
 @functools.cache
@@ -1459,9 +1504,12 @@ __all__ = [
     "flashinfer_fp4_quantize",
     "silu_and_mul_scaled_nvfp4_experts_quantize",
     "scaled_fp4_grouped_quantize",
+    "mxfp8_grouped_quantize",
+    "silu_and_mul_mxfp8_experts_quantize",
     "nvfp4_block_scale_interleave",
     "flashinfer_cute_dsl_fused_moe_nvfp4",
     "has_flashinfer_localized_moe",
+    "flashinfer_cute_dsl_fused_moe_bf16",
     "flashinfer_b12x_fused_moe",
     "flashinfer_get_hybrid_num_tokens_buckets",
     "flashinfer_convert_sf_to_mma_layout",
@@ -1482,6 +1530,7 @@ __all__ = [
     "has_flashinfer_recurrent_kda",
     "has_flashinfer_fused_kda_decode",
     "has_flashinfer_cutedsl_moe_nvfp4",
+    "has_flashinfer_cutedsl_moe_bf16",
     "has_flashinfer_bf16_fp4",
     "has_flashinfer_b12x_moe",
     "has_flashinfer_b12x_gemm",

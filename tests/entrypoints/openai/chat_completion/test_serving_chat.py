@@ -531,7 +531,7 @@ BASE_MODEL_PATHS = [
 ]
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
@@ -574,12 +574,12 @@ class MockModelConfig:
         return 50257
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
@@ -1459,7 +1459,7 @@ async def test_streaming_logprobs_kept_when_parser_suppresses_delta(
     assert streamed_tokens == expected_tokens
 
 
-@dataclass
+@dataclass(slots=True)
 class MockEngine:
     model_config: MockModelConfig = field(default_factory=MockModelConfig)
     input_processor: MagicMock = field(default_factory=MagicMock)
@@ -2217,6 +2217,40 @@ async def test_beam_search_preserves_request_priority(header):
     assert isinstance(response, ChatCompletionResponse)
     assert len(response.choices) == 2
     assert priorities == [-9 if header is None else int(header)] * 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header,expected_rank", [(None, None), ("3", 3)])
+async def test_beam_search_preserves_data_parallel_rank(header, expected_rank):
+    """The X-data-parallel-rank header reaches every beam expansion."""
+    engine = _build_mock_engine()
+    ranks = []
+
+    async def generate(*args, data_parallel_rank=None, **kwargs):
+        ranks.append(data_parallel_rank)
+        output = _make_metrics_request_output()
+        output.outputs[0].logprobs = [{100: Logprob(-0.1), 101: Logprob(-0.2)}]
+        yield output
+
+    engine.generate = generate
+    serving = _build_serving_chat(engine)
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Test"}],
+        use_beam_search=True,
+        n=2,
+        max_tokens=2,
+        ignore_eos=True,
+        watermarking=False,
+    )
+    headers = [] if header is None else [(b"x-data-parallel-rank", header.encode())]
+    response = await serving.create_chat_completion(
+        request, Request({"type": "http", "headers": headers})
+    )
+
+    assert isinstance(response, ChatCompletionResponse)
+    assert len(response.choices) == 2
+    assert ranks == [expected_rank] * 3
 
 
 async def _render_chat_prompt_token_ids(

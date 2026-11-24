@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -47,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
+    dequantize_fp8_moe_weights,
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy,
     process_fp8_weight_tensor_strategy_moe,
@@ -158,7 +160,9 @@ class Fp8Config(QuantizationConfig):
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         weight_block_size = cls.get_from_keys_or(config, ["weight_block_size"], None)
-        store_dtype = cls.get_from_keys_or(config, ["store_dtype"], None)
+        store_dtype = cls.get_from_keys_or(
+            config, ["store_dtype", "expert_dtype"], None
+        )
         if not ignored_layers:
             ignored_layers = cls.get_from_keys_or(
                 config, ["modules_to_not_convert"], None
@@ -197,6 +201,16 @@ class Fp8Config(QuantizationConfig):
                 )
 
                 return Mxfp4MoEMethod(layer.moe_config)
+            if (
+                envs.VLLM_FP8_MOE_REQUANT == "mxfp4"
+                and self.weight_block_size is not None
+                and current_platform.is_rocm()
+            ):
+                from vllm.model_executor.layers.quantization.online.fp8_requant import (  # noqa: E501
+                    Fp8BlockExpertsAsMxfp4FusedMoE,
+                )
+
+                return Fp8BlockExpertsAsMxfp4FusedMoE(self, layer)
             return Fp8MoEMethod(self, layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
@@ -464,6 +478,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     """
 
     supports_pre_processed_weights = True
+    accepts_quantized_input = True
 
     def __init__(self, quant_config: Fp8Config, layer: RoutedExperts):
         super().__init__(layer.moe_config)
@@ -505,6 +520,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 activation_key = kFp8DynamicTokenSym
             else:
                 activation_key = kFp8DynamicTensorSym
+        self.weight_quant_key = weight_key
         self.per_act_token_quant = activation_key == kFp8DynamicTokenSym
 
         # Select Fp8 MoE backend
@@ -619,6 +635,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 (intermediate_size_per_partition + block_k - 1) // block_k,
                 dtype=torch.float32,
             )
+        # The block grid the scales were allocated on, which is the refined one when
+        # the TP shard is not block aligned.
+        self.scale_block_size = [block_n, block_k] if self.block_quant else None
         w13_weight_scale = torch.nn.Parameter(w13_scale_data, requires_grad=False)
         w2_weight_scale = torch.nn.Parameter(w2_scale_data, requires_grad=False)
         # Note: name is weight_scale for tensor, weight_scale_inv for block.
@@ -697,7 +716,25 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
         self.moe_kernel.fused_experts.keep_constants(layer)
+
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Yield `(experts, w13, w2)` dequantized FP8 experts, for online
+        requantization."""
+        return dequantize_fp8_moe_weights(
+            layer.w13_weight,
+            getattr(layer, f"w13_{self.weight_scale_name}"),
+            layer.w2_weight,
+            getattr(layer, f"w2_{self.weight_scale_name}"),
+            weight_key=self.weight_quant_key,
+            num_w13_shards=self.moe.w13_num_shards,
+            weight_block_size=self.scale_block_size,
+            static_input_scales=self.quant_config.activation_scheme == "static",
+            out_dtype=layer.orig_dtype,
+        )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if is_weights_pre_processed():
@@ -800,6 +837,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        x_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -817,6 +855,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            a1q_scale=x_scale,
         )
 
     def apply(
