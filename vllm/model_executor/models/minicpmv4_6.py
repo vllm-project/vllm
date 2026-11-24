@@ -1473,7 +1473,7 @@ class MiniCPMV4_6ForConditionalGeneration(
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         # --- Vision tower ---
-        with self._mark_tower_model(vllm_config, {"image"}):
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vpm = Idefics2VisionTransformer(
                 config.vision_config,
                 quant_config=quant_config,
