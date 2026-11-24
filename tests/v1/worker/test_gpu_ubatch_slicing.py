@@ -385,16 +385,16 @@ def test_all_padding_microbatch_skips_attention(monkeypatch, cg_mode):
     runner.ubatch_dcp_local_seq_lens = [None, None]
     runner.dcp_size, runner.dcp_rank, runner.cp_interleave = 1, 0, 1
     runner.attn_groups, runner.kv_cache_config = [], None
-    runner.model_state = cast(
-        ModelState,
-        SimpleNamespace(
-            prepare_attn=lambda ubatch, *args, **kwargs: (
-                built.append(ubatch.num_tokens) or {"attn": ubatch.num_tokens}
-            )
-        ),
-    )
-    runner._make_forward_contexts = lambda slices, attn, slots, padding: list(
-        zip(attn, slots)
+
+    def prepare_attn(ubatch, *args, **kwargs):
+        built.append(ubatch.num_tokens)
+        return {"attn": ubatch.num_tokens}
+
+    runner.model_state = cast(ModelState, SimpleNamespace(prepare_attn=prepare_attn))
+    monkeypatch.setattr(
+        runner,
+        "_make_forward_contexts",
+        lambda slices, attn, slots, padding: list(zip(attn, slots)),
     )
     monkeypatch.setattr(
         gpu_ubatch_utils,
@@ -402,12 +402,16 @@ def test_all_padding_microbatch_skips_attention(monkeypatch, cg_mode):
         lambda slot_mappings, kv_cache_config: {"attn": slot_mappings},
     )
 
-    contexts = runner.prepare(
-        input_batch,
-        (torch.zeros(6, 4, dtype=torch.int32),),
-        torch.zeros(1, 16, dtype=torch.int64),
-        SimpleNamespace(cg_mode=cg_mode, uniform_token_count=None),
-    ).forward_contexts
+    # The patched _make_forward_contexts returns (attn, slots) pairs.
+    contexts = cast(
+        list[tuple[Any, Any]],
+        runner.prepare(
+            input_batch,
+            (torch.zeros(6, 4, dtype=torch.int32),),
+            torch.zeros(1, 16, dtype=torch.int64),
+            SimpleNamespace(cg_mode=cg_mode, uniform_token_count=None),
+        ).forward_contexts,
+    )
 
     if cg_mode == CUDAGraphMode.FULL:
         assert built == [6, 0]
