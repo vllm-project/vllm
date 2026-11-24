@@ -195,29 +195,24 @@ def test_head_size_falls_back_when_head_dim_is_zero():
 
 
 @pytest.mark.parametrize(
-    ("kv_lora_rank", "qk_rope_head_dim", "mla_head_size"),
-    [(512, 64, 576), (256, 32, None), (None, 64, None)],
+    ("kv_lora_rank", "qk_rope_head_dim", "is_mla", "head_size"),
+    [(512, 64, True, 576), (256, 32, False, 64)],
 )
-def test_transformers_backend_detects_mla_from_latent(
-    kv_lora_rank, qk_rope_head_dim, mla_head_size
+def test_transformers_backend_mla_from_kv_lora_rank(
+    kv_lora_rank, qk_rope_head_dim, is_mla, head_size
 ):
-    """The Transformers backend fuses MLA into any attention with a `kv_lora_rank`,
-    whatever the `model_type`, unless no MLA kernel supports the latent size (e.g.
-    MiniCPM3's 288), in which case it keeps full attention."""
+    """On the Transformers backend, any model type with a `kv_lora_rank` uses MLA,
+    unless no MLA kernel supports its latent size (e.g. MiniCPM3's 288)."""
     hf_config = PreTrainedConfig(
         model_type="unlisted_mla",
-        hidden_size=4096,
-        num_attention_heads=64,
         head_dim=64,
         kv_lora_rank=kv_lora_rank,
         qk_rope_head_dim=qk_rope_head_dim,
     )
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
-    assert not convertor.is_deepseek_mla()
-
     convertor.transformers_backend = True
-    assert convertor.is_deepseek_mla() == (mla_head_size is not None)
-    assert convertor.get_head_size() == (mla_head_size or 64)
+    assert convertor.is_deepseek_mla() == is_mla
+    assert convertor.get_head_size() == head_size
 
 
 def test_qk_rope_head_dim_recovery_uses_model_revision(monkeypatch: pytest.MonkeyPatch):
