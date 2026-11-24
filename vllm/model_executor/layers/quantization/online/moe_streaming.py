@@ -59,8 +59,7 @@ class ExpertWeightStream:
     soon as its checkpoint tensors are loaded.
 
     Expert weights are routed here by the layerwise loader. Other tensors (e.g.
-    biases) are loaded as usual, and activation scales of the checkpoint, which
-    online quantization does not use, are dropped.
+    biases, or activation scales of a requantization source) are loaded as usual.
     """
 
     def __init__(self, method: "OnlineMoEMethodBase", device: torch.device) -> None:
@@ -86,8 +85,6 @@ class ExpertWeightStream:
         self.has_loaded = True
         arguments = args.arguments
         if param_name not in self._expert_parameters(layer, param_name):
-            if param_name in self.method.expert_activation_scale_names:
-                return True if arguments.get("return_success") else None
             param = getattr(layer, param_name)
             if param.is_meta:
                 with torch.device(self.device):
@@ -156,7 +153,6 @@ class ExpertWeightStream:
             get_tensor_load_numel(tensor)
             for name, tensor in get_layer_tensors(layer).items()
             if name not in method.expert_weight_names
-            and name not in method.expert_activation_scale_names
             and name not in SKIP_LOAD_TENSORS
             and not name.startswith(_SHARED_PREFIX)
         )

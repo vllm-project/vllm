@@ -1252,7 +1252,6 @@ def test_online_moe_stream_places_routed_then_shared_experts(num_shared: int):
         setattr(layer, name, types.MethodType(getattr(RoutedExperts, name), layer))
     method = SimpleNamespace(
         expert_weight_names=("w13_weight", "w2_weight"),
-        expert_activation_scale_names=(),
         requantization_source=None,
         expert_statistics=lambda w13, w2: {},
         quantize_experts=lambda layer, w13, w2, statistics: (

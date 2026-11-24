@@ -36,10 +36,8 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        # Checkpoint parameters of a routed expert, which `ExpertWeightStream`
-        # decodes, and unused checkpoint activation scales.
+        # Checkpoint weights of a routed expert, which `ExpertWeightStream` decodes.
         self.expert_weight_names: tuple[str, ...] = ("w13_weight", "w2_weight")
-        self.expert_activation_scale_names: tuple[str, ...] = ()
 
     def create_weights(
         self,
@@ -66,12 +64,10 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
                 **extra_weight_attrs,
             )
             layer.num_experts = num_experts
-            names = tuple(self.requantization_source_parameters)
             self.expert_weight_names = tuple(
-                name for name in names if "input" not in name and "bias" not in name
-            )
-            self.expert_activation_scale_names = tuple(
-                name for name in names if "input" in name
+                name
+                for name in self.requantization_source_parameters
+                if "input" not in name and "bias" not in name
             )
             # The source describes its serialized weights (e.g. a block size) on the
             # layer: the target owns the layer's quantization attributes.

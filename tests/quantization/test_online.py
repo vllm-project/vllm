@@ -1621,14 +1621,17 @@ def test_online_requantized_moe_reload(
         assert layer.w2_weight.dtype == expected_dtype
 
         packed_factor = 2 if online_target == "mxfp4" else 1
+        # The target may round the layer's sizes up (MXFP4).
+        hidden = layer.moe_config.hidden_dim
+        intermediate = layer.moe_config.intermediate_size_per_partition
         # Target packing must preserve both gate/up shards and expert count.
         assert layer.w13_weight.shape == (
             2,
-            2 * size,
-            size // packed_factor,
+            2 * intermediate,
+            hidden // packed_factor,
         )
         # Target packing must preserve the down-projection dimensions.
-        assert layer.w2_weight.shape == (2, size, size // packed_factor)
+        assert layer.w2_weight.shape == (2, hidden, intermediate // packed_factor)
         # Initial processing must materialize gate/up weights on the device.
         assert not layer.w13_weight.is_meta
         # Initial processing must materialize down-projection weights on the device.
