@@ -1364,17 +1364,20 @@ _NUM_SMS: int = 0
 
 # Whether the MXFP8 linear kernels run FlashInfer's batch-invariant quantizer
 # and GEMM (the mode, on a part and FlashInfer release that has them): resolved
-# once, so the layers and traced code read a flag.
-_FLASHINFER_QUANTIZERS: bool | None = None
+# once per value of the mode, so the layers read a flag that agrees with the
+# kernel selection, which reads the mode live.
+_FLASHINFER_QUANTIZERS: tuple[bool, bool] | None = None
 
 
 def flashinfer_quantizers_enabled() -> bool:
     global _FLASHINFER_QUANTIZERS
-    if _FLASHINFER_QUANTIZERS is None:
-        _FLASHINFER_QUANTIZERS = bool(
-            envs.VLLM_BATCH_INVARIANT and has_flashinfer_batch_invariant_quantizers()
+    mode = bool(envs.VLLM_BATCH_INVARIANT)
+    if _FLASHINFER_QUANTIZERS is None or _FLASHINFER_QUANTIZERS[0] != mode:
+        _FLASHINFER_QUANTIZERS = (
+            mode,
+            mode and has_flashinfer_batch_invariant_quantizers(),
         )
-    return _FLASHINFER_QUANTIZERS
+    return _FLASHINFER_QUANTIZERS[1]
 
 
 def _resolve_block_sizes():

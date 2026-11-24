@@ -39,6 +39,7 @@ from cutlass import (
 from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.cute.runtime import make_fake_stream, make_fake_tensor
 
+import vllm.envs as envs
 from vllm.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
 from vllm.cute_utils.cvt import fp32x4_to_fp8x4
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
@@ -569,7 +570,9 @@ def can_fuse_gemm1(gate_up_proj, down_proj, act_fn) -> bool:
         current_platform.is_cuda() and current_platform.is_device_capability_family(100)
     ):
         return False
-    if not isinstance(act_fn, SiluAndMulWithClamp):
+    # Batch-invariant runs keep the unfused chain: the fusion switches by token
+    # count and quantizes the activation itself.
+    if envs.VLLM_BATCH_INVARIANT or not isinstance(act_fn, SiluAndMulWithClamp):
         return False
     # The kernel reads gate_up's fp8 weight and F8_128x4-swizzled weight
     # scale directly, so it depends on these kernels' weight layout.

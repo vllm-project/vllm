@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
+from vllm.utils.flashinfer import flashinfer_batch_invariant_quantizer_fits
 
 
 class Mxfp8OnlineLinearMethod(OnlineLinearBase):
@@ -103,9 +104,13 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
 
         weight = self.get_weight_for_quantization(layer)
         # Under the mode the weights are quantized by the same batch-invariant
-        # quantizer as the activations.
+        # quantizer as the activations, where its row rule allows.
         weight_fp8, weight_scale = mxfp8_e4m3_quantize(
-            weight.contiguous(), batch_invariant=flashinfer_quantizers_enabled()
+            weight.contiguous(),
+            batch_invariant=flashinfer_quantizers_enabled()
+            and flashinfer_batch_invariant_quantizer_fits(
+                weight.shape[-1], weight.dtype, MXFP8_BLOCK_SIZE
+            ),
         )
 
         layer.input_scale = None

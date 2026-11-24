@@ -3,19 +3,18 @@
 """The MX linear kernels used under batch invariance must not depend on the
 number of rows."""
 
-import functools
-
 import pytest
 import torch
 from utils import requires_mx, skip_if_not_cuda
 
+import vllm.envs as envs
+import vllm.model_executor.determinism.batch_invariant as bi
 from vllm.model_executor.kernels.linear import (
     EmulationMxfp8LinearKernel,
+    FlashInferCutedslMxfp8LinearKernel,
+    FlashInferCutlassMxfp8LinearKernel,
     HummingMxfp8LinearKernel,
     init_mxfp8_linear_kernel,
-)
-from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
-    _FlashInferMmMxfp8LinearKernel,
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
@@ -188,45 +187,61 @@ requires_flashinfer_batch_invariant = pytest.mark.skipif(
     ">= 0.7.4 on SM100 / SM103 / SM107",
 )
 
+_FLASHINFER_MXFP8_KERNELS = {
+    "flashinfer_cutedsl": FlashInferCutedslMxfp8LinearKernel,
+    "flashinfer_cutlass": FlashInferCutlassMxfp8LinearKernel,
+}
+# Both sides of the FlashInfer dispatcher's 64-row boundary, both tile regimes
+# and a tile-unaligned count; the full MXFP8_TOKEN_COUNTS compiles one kernel
+# per configuration and would take minutes.
+_FLASHINFER_MXFP8_TOKEN_COUNTS = [1, 32, 64, 65, 128, 257, 1024, 2048]
+_MXFP8_QUANT_CONFIG = ModelOptMxFp8Config(
+    is_checkpoint_mxfp8_serialized=True, kv_cache_quant_algo=None, exclude_modules=[]
+)
 
-@skip_if_not_cuda
-@requires_flashinfer_batch_invariant
-def test_flashinfer_mxfp8_linear_is_batch_invariant(default_vllm_config, dist_init):
-    """Under VLLM_BATCH_INVARIANT (set by conftest) on SM100-family parts the
-    layer selects the FlashInfer MXFP8 kernel, whose quantizer is the one a
-    direct `flashinfer.mxfp8_quantize(..., batch_invariant=True)` call runs, and
-    row 0 alone gives the bits it has inside a 257-row batch: quantizer codes
-    and scales, and the GEMM output."""
-    from flashinfer import mxfp8_quantize
 
-    n, k = 4096, 2048
-    set_random_seed(SEED)
+def _mxfp8_column_linear(n: int, k: int, prefix: str) -> ColumnParallelLinear:
+    """An MXFP8 ColumnParallelLinear with the weights of `_mxfp8_weights`,
+    built under the current value of VLLM_BATCH_INVARIANT."""
     layer = ColumnParallelLinear(
         input_size=k,
         output_size=n,
         bias=False,
         params_dtype=torch.bfloat16,
-        quant_config=ModelOptMxFp8Config(
-            is_checkpoint_mxfp8_serialized=True,
-            kv_cache_quant_algo=None,
-            exclude_modules=[],
-        ),
-        prefix="model.layers.0.self_attn.o_proj",
+        quant_config=_MXFP8_QUANT_CONFIG,
+        prefix=prefix,
         disable_tp=True,
     ).cuda()
-    kernel = getattr(layer.quant_method, "kernel", None)
-    assert isinstance(kernel, _FlashInferMmMxfp8LinearKernel), type(kernel)
     weight, weight_scale = _mxfp8_weights(n, k)
     layer.weight.data.copy_(weight)
     layer.weight_scale.data.copy_(weight_scale)
     layer.quant_method.process_weights_after_loading(layer)
-    x = torch.randn(257, k, device="cuda", dtype=torch.bfloat16)
+    return layer
 
-    # the layer's quantizer: FlashInfer's batch-invariant one, row 0 alone == inside
-    quantize = functools.partial(
-        mxfp8_e4m3_quantize, is_sf_swizzled_layout=True, batch_invariant=True
+
+@skip_if_not_cuda
+@requires_flashinfer_batch_invariant
+@pytest.mark.parametrize("n,k", MXFP8_CASES)
+@pytest.mark.parametrize("linear_backend", sorted(_FLASHINFER_MXFP8_KERNELS))
+def test_flashinfer_mxfp8_linear_is_batch_invariant(
+    default_vllm_config, dist_init, n: int, k: int, linear_backend: str
+):
+    """Under VLLM_BATCH_INVARIANT (set by conftest) on SM100-family parts the
+    layer selects the requested FlashInfer MXFP8 kernel, whose quantizer is the
+    one a direct `flashinfer.mxfp8_quantize(..., batch_invariant=True)` call
+    runs, and the leading rows of `apply` do not depend on the row count."""
+    from flashinfer import mxfp8_quantize
+
+    default_vllm_config.kernel_config.linear_backend = linear_backend
+    set_random_seed(SEED)
+    layer = _mxfp8_column_linear(n, k, "model.layers.0.self_attn.o_proj")
+    kernel = getattr(layer.quant_method, "kernel", None)
+    assert type(kernel) is _FLASHINFER_MXFP8_KERNELS[linear_backend]
+    x = torch.randn(max(_FLASHINFER_MXFP8_TOKEN_COUNTS), k, device="cuda").to(
+        torch.bfloat16
     )
-    codes, sf = quantize(x)
+
+    codes, sf = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=True, batch_invariant=True)
     ref_codes, ref_sf = mxfp8_quantize(
         x,
         is_sf_swizzled_layout=True,
@@ -236,30 +251,77 @@ def test_flashinfer_mxfp8_linear_is_batch_invariant(default_vllm_config, dist_in
     )
     assert torch.equal(codes.view(torch.uint8), ref_codes.view(torch.uint8))
     assert torch.equal(sf, ref_sf)
-    codes_0, sf_0 = quantize(x[:1])
-    assert torch.equal(codes_0[0].view(torch.uint8), codes[0].view(torch.uint8))
-    # row 0's scale bytes sit in the first 128-row tile of the swizzled buffer
-    first_tile = sf[: sf_0.numel()]
-    assert torch.equal(
-        sf_0.view(-1, 32, 4, 4)[:, 0, 0], first_tile.view(-1, 32, 4, 4)[:, 0, 0]
+
+    probes = {
+        num_tokens: _probe(layer.quant_method.apply(layer, x[:num_tokens]))
+        for num_tokens in _FLASHINFER_MXFP8_TOKEN_COUNTS
+    }
+    failures = _variant_rows(probes)
+    assert not failures, (
+        f"FlashInfer MXFP8 linear depends on the row count "
+        f"(N={n}, K={k}, {linear_backend}):\n  " + "\n  ".join(failures)
     )
-    # the layer path (quantizer + GEMM)
-    out = layer.quant_method.apply(layer, x)
-    out_0 = layer.quant_method.apply(layer, x[:1])
-    assert torch.equal(out_0[0], out[0])
 
 
 @skip_if_not_cuda
 @requires_flashinfer_batch_invariant
 def test_flashinfer_mxfp8_selection_under_mode(default_vllm_config):
-    """Under the mode the FlashInfer MXFP8 kernel is selected for a layer inside
+    """Under the mode a FlashInfer MXFP8 kernel is selected for a layer inside
     its shape rules; K % 32 != 0, N or K below 128 and activation rows over
     128 KiB keep the Emulation fallback."""
     kernel = init_mxfp8_linear_kernel(weight_shape=(4096, 2048))
-    assert isinstance(kernel, _FlashInferMmMxfp8LinearKernel), type(kernel)
+    assert isinstance(kernel, tuple(_FLASHINFER_MXFP8_KERNELS.values())), type(kernel)
     for weight_shape in [(4096, 4112), (64, 4096), (4096, 64), (256, 65568)]:
         kernel = init_mxfp8_linear_kernel(weight_shape=weight_shape)
         assert type(kernel) is EmulationMxfp8LinearKernel, weight_shape
+
+
+@skip_if_not_cuda
+@requires_flashinfer_batch_invariant
+def test_flashinfer_quantizers_flag_follows_the_mode(default_vllm_config, monkeypatch):
+    """The resolved flag the layers read agrees with the kernel selection,
+    which reads the mode live, when the mode changes within one process."""
+    assert bi.flashinfer_quantizers_enabled()
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+    assert not bi.flashinfer_quantizers_enabled()
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    assert bi.flashinfer_quantizers_enabled()
+    kernel = init_mxfp8_linear_kernel(weight_shape=(4096, 2048))
+    assert isinstance(kernel, tuple(_FLASHINFER_MXFP8_KERNELS.values()))
+
+
+@skip_if_not_cuda
+@requires_flashinfer_batch_invariant
+def test_minimax_m3_fused_gemm1_off_under_batch_invariance(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """MiniMax-M3's fused GEMM1 switches by token count and quantizes the
+    activation itself; with the FlashInfer MXFP8 kernels selected under the mode
+    it must stay off, while the same layers take it with the mode off."""
+    from vllm.model_executor.layers.activation import SiluAndMulWithClamp
+    from vllm.model_executor.layers.linear import RowParallelLinear
+    from vllm.models.minimax_m3.nvidia.ops.dense_gemm1_mxfp8 import can_fuse_gemm1
+
+    act_fn = SiluAndMulWithClamp(swiglu_limit=7.0, alpha=1.702, beta=1.0)
+
+    def layers():
+        gate_up = _mxfp8_column_linear(2 * 768, 1024, "model.layers.0.mlp.gate_up")
+        down = RowParallelLinear(
+            input_size=768,
+            output_size=1024,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=_MXFP8_QUANT_CONFIG,
+            prefix="model.layers.0.mlp.down_proj",
+            disable_tp=True,
+        ).cuda()
+        return gate_up, down
+
+    gate_up, down = layers()
+    assert not can_fuse_gemm1(gate_up, down, act_fn)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+    gate_up, down = layers()
+    assert can_fuse_gemm1(gate_up, down, act_fn)
 
 
 @skip_if_not_cuda

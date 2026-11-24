@@ -169,7 +169,11 @@ def _supports_qkv_fused_epilogue(attn: "MiniMaxM3SparseAttention") -> bool:
         FlashInferCutlassMxfp8LinearKernel,
     )
 
-    if not current_platform.is_device_capability_family(100):
+    # Batch-invariant runs keep qkv_proj's own path: the fused epilogue
+    # switches by token count.
+    if envs.VLLM_BATCH_INVARIANT or not current_platform.is_device_capability_family(
+        100
+    ):
         return False
     # Both keep the weight K-major and its scales F8_128x4-swizzled.
     kernel = getattr(attn.qkv_proj.quant_method, "kernel", None)
@@ -327,7 +331,8 @@ def _consumes_mxfp8_128x4(linear: nn.Module) -> bool:
     """Whether `linear` takes a pre-quantized MXFP8 activation whose UE8M0
     scales are in FlashInfer's 128x4 swizzled layout (what the MXFP8 norm
     kernels write)."""
-    if get_input_quant_key(linear) != kMxfp8Dynamic:
+    # Batch-invariant runs keep the linear's own quantizer.
+    if envs.VLLM_BATCH_INVARIANT or get_input_quant_key(linear) != kMxfp8Dynamic:
         return False
     from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
         FlashInferCutedslMxfp8LinearKernel,
@@ -1510,7 +1515,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             supports_fused_moe_finalize,
         )
 
-        if not supports_fused_moe_finalize(vllm_config):
+        # Batch-invariant runs keep the stock finalize: the fused one switches
+        # by token count and quantizes the next layer's input itself.
+        if envs.VLLM_BATCH_INVARIANT or not supports_fused_moe_finalize(vllm_config):
             return
         from .specialized_decode import fused_finalize_max_tokens
 

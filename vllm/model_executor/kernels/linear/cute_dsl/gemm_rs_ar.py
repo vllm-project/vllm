@@ -38,6 +38,7 @@ from cutlass.cute.runtime import make_fake_stream, make_fake_tensor, make_ptr, n
 from cutlass.cutlass_dsl import dsl_user_op
 from cutlass.utils import get_smem_capacity_in_bytes
 
+import vllm.envs as envs
 from vllm.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
 from vllm.distributed import get_tp_group
 from vllm.distributed.device_communicators.nvlink_fabric import (
@@ -956,6 +957,10 @@ class GemmRsAr:
             FlashInferCutlassMxfp8LinearKernel,
         )
 
+        # Batch-invariant runs keep the linear followed by the reduce-scatter:
+        # the fused kernel switches by token count.
+        if envs.VLLM_BATCH_INVARIANT:
+            return False
         # Called before weight loading; online quantization starts on meta.
         if isinstance(linear.quant_method, UnquantizedLinearMethod):
             dtype, k_alignment = "bf16", 64
