@@ -395,25 +395,55 @@ def _glm5_mla_params() -> dict:
     }
 
 
-def test_glm5next_attn_loader_renames_weight_scale():
-    # Some exporters name the block scale ``weight_scale``; under Fp8Config
-    # the projection's scale parameter is ``weight_scale_inv``.
+@pytest.mark.parametrize("lora_wrapped", [False, True])
+def test_glm5next_attn_loader_renames_weight_scale(model_config, lora_wrapped):
+    """Quark-named scales reach the FP8 projection through LoRA and model prefixes."""
     from transformers import Glm5NextTextConfig
 
+    from vllm.config.lora import LoRAConfig
+    from vllm.lora.layers import MergedColumnParallelLinearWithLoRA
+    from vllm.lora.utils import from_layer
     from vllm.models.glm5next.common.model import _mla_proj_checkpoint_tensor
 
-    config = Glm5NextTextConfig(kv_lora_rank=512)
-    scale = torch.rand(4, 2)
-    name, tensor = _mla_proj_checkpoint_tensor(
-        "layers.3.self_attn.kv_a_proj_with_mqa.weight_scale",
-        scale,
-        _glm5_mla_params(),
-        config,
-        0,
+    model = _MlaModel("block")
+    if lora_wrapped:
+        model.qkv_a = from_layer(
+            model.qkv_a,
+            2,
+            LoRAConfig(max_loras=2, max_lora_rank=8, lora_dtype=torch.bfloat16),
+            ["q_a_proj", "kv_a_proj_with_mqa"],
+        )
+        assert isinstance(model.qkv_a, MergedColumnParallelLinearWithLoRA)
+    projection = model.qkv_a
+    prefix = "layers.3.self_attn"
+    params = {
+        f"language_model.model.{prefix}.fused_qkv_a_proj.{name}": param
+        for name, param in projection.named_parameters()
+    }
+    config = Glm5NextTextConfig(kv_lora_rank=_OUT[1])
+    checkpoint = _mla_checkpoint(53, "block")
+    data_ptr = projection.weight.data_ptr()
+    for shard, part in enumerate(("q_a_proj", "kv_a_proj_with_mqa")):
+        for leaf in ("weight_scale_inv", "weight"):
+            tensor = checkpoint[f"qkv_a.{shard}.{leaf}"]
+            name, loaded = _mla_proj_checkpoint_tensor(
+                f"{prefix}.{part}.{leaf.removesuffix('_inv')}",
+                tensor,
+                params,
+                config,
+                0,
+            )
+            assert name == f"{prefix}.{part}.{leaf}"
+            assert loaded is tensor
+            param = getattr(projection, leaf)
+            param.weight_loader(param, loaded, shard)
+    process_weights_after_loading(projection, model_config, _DEVICE)
+    torch.testing.assert_close(
+        projection.weight, _mla_expected(checkpoint)["qkv_a"], rtol=0, atol=0
     )
-    assert name == "layers.3.self_attn.kv_a_proj_with_mqa.weight_scale_inv"
-    assert tensor is scale
+    assert projection.weight.data_ptr() == data_ptr
     # a projection the model does not load from block-FP8 keeps its name
+    scale = checkpoint["qkv_a.0.weight_scale_inv"]
     name, _ = _mla_proj_checkpoint_tensor(
         "layers.0.self_attn.o_proj.weight_scale", scale, {}, config, 0
     )
