@@ -41,23 +41,6 @@ Now you can send requests to the proxy server through port 8000.
 For multimodal Encode-Prefill-Decode (encoder embeddings rather than KV
 cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 
-### Different pipeline partitions with replicated MLA
-
-When P and D use different pipeline-parallel sizes, Mooncake matches each
-transferable cache by its full layer name and region occurrence. Group numbers
-are local to each endpoint: a matched SWA view can use P group 0 and D group 3.
-Each side must run the updated connector and use the same checkpoint, cache
-dtype, logical page format, and cache-manager policy. PCP and DCP must both be 1,
-and logical blocks must not require splitting into smaller kernel blocks.
-
-This path copies individual contiguous MLA pages, including SWA and indexer
-pages, and replicated compressor circular-buffer state. It retains each
-logical view of a shared allocation and uses each endpoint's own block table
-and row stride. It does not promote a view to a whole-row transfer. Missing
-source pages and incompatible page metadata fail the transfer; opaque packed
-rows cannot be transferred across PP sizes. Decode waits for the existing
-per-stage completion notifications before consuming the imported cache.
-
 ## Environment Variables
 
 - `VLLM_MOONCAKE_BOOTSTRAP_PORT`: Port for Mooncake bootstrap server
