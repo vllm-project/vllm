@@ -25,6 +25,18 @@ def _reference(peers, i):
     x = (
         (peers[0].float() + peers[1].float()) + (peers[2].float() + peers[3].float())
     ).bfloat16()
+    if current_platform.is_device_capability_family(90):
+        from vllm.model_executor.kernels.mhc.tilelang import (
+            mhc_fused_post_pre_tilelang,
+        )
+
+        # The deployed TileLang path computes small-batch mix coefficients
+        # from the FP32 post output, and norm variance before BF16 collapse.
+        return mhc_fused_post_pre_tilelang(
+            x, i["residual"], i["post"], i["comb"], i["fn"].float(),
+            i["scale"], i["base"], EPS, EPS, EPS, 2.0, SINKHORN,
+            norm_weight=i["norm"], norm_eps=EPS,
+        )  # fmt: skip
     residual = mhc_post_torch(x, i["residual"], i["post"], i["comb"])
     post, comb, collapsed = mhc_pre_torch(
         residual, i["fn"].float(), i["scale"], i["base"],
@@ -131,10 +143,192 @@ def _boundary(rank, device):
         for a, b in zip(fused, plain):
             assert torch.equal(a, b)
 
+    # Connected boundaries exercise the next call's reads of the preceding
+    # residual and side-stream coefficients, rather than reusing fixed inputs.
+    i = _inputs(6, rank, device)
+
+    def connected(check_each=False):
+        state = i
+        for _ in range(4):
+            outputs = op(
+                *(state[k] for k in ("x", "residual", "post", "comb")),
+                *(i[k] for k in ("fn", "scale", "base", "norm")),
+            )
+            if check_each:
+                op.join()
+                check(outputs, state)
+            residual, post, comb, normalized = outputs
+            state = dict(
+                i, x=normalized * ((rank + 1) / 16),
+                residual=residual, post=post, comb=comb,
+            )  # fmt: skip
+        op.join()
+        return outputs
+
+    expected = connected(check_each=True)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = connected()
+    for _ in range(100):
+        graph.replay()
+    for actual, want in zip(captured, expected):
+        assert torch.equal(actual, want)
+    i["x"].mul_(0.5)
+    i["residual"].mul_(2)
+    expected = connected(check_each=True)
+    graph.replay()
+    for actual, want in zip(captured, expected):
+        assert torch.equal(actual, want)
+
 
 @pytest.mark.distributed(num_gpus=4)
 @pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100), reason="Requires SM100"
+    not current_platform.is_cuda()
+    or not (
+        current_platform.is_device_capability_family(90)
+        or current_platform.is_device_capability_family(100)
+    ),
+    reason="Requires SM90 or SM100 with NVLink multicast",
 )
 def test_all_reduce_mhc_boundary_matches_reference():
     run_tp4(_boundary)
+
+
+@pytest.fixture
+def hopper_model_config(tmp_path):
+    from transformers import Glm5NextTextConfig
+
+    from vllm.models.glm5next.nvidia.specialized_decode.runtime import GEOMETRY
+
+    Glm5NextTextConfig(
+        **GEOMETRY,
+        architectures=["Glm5NextForCausalLM"],
+        num_hidden_layers=2,
+        layer_types=["linear_attention"] * 2,
+        mlp_layer_types=["dense"] * 2,
+        intermediate_size=512,
+        vocab_size=256,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+        mhc=True,
+        quantization_config={
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [128, 128],
+            "modules_to_not_convert": [
+                f"model.layers.{layer}.self_attn.{name}"
+                for layer in range(2)
+                for name in (
+                    "q_proj",
+                    "in_proj_qkvbfg_a",
+                    "k_proj",
+                    "v_proj",
+                    "b_proj",
+                    "f_a_proj",
+                    "g_a_proj",
+                    "f_b_proj",
+                    "g_b_proj",
+                    "o_proj",
+                )
+            ],
+        },
+    ).save_pretrained(tmp_path)
+    return str(tmp_path)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.is_device_capability_family(90),
+    reason="Hopper defaults",
+)
+@pytest.mark.parametrize("mode", ["auto", "stock", "eager", "unsupported_policy"])
+def test_hopper_default_uses_only_boundaries_with_stock_kv(hopper_model_config, mode):
+    """Stock BF16 KV must permit fusion, without enabling Blackwell stages."""
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.models.glm5next.nvidia.specialized_decode.policy import Policy
+    from vllm.models.glm5next.nvidia.specialized_decode.runtime import (
+        specialized_decode_config,
+    )
+
+    extra = {}
+    if mode == "stock":
+        extra["decode_backend"] = "stock"
+    if mode == "unsupported_policy":
+        extra["policy"] = {"kda": "1-64:split"}
+    config = EngineArgs(
+        model=hopper_model_config,
+        skip_tokenizer_init=True,
+        tensor_parallel_size=4,
+        distributed_executor_backend="mp",
+        dtype="bfloat16",
+        max_model_len=128,
+        max_num_seqs=4,
+        enforce_eager=mode == "eager",
+        additional_config=extra,
+    ).create_engine_config()
+    decode = specialized_decode_config(config)
+    if mode != "auto":
+        assert decode is None
+        return
+    assert decode is not None and decode.boundary_only
+    assert config.cache_config.cache_dtype == "auto"
+    policy = Policy(dict(decode.policy))
+    assert policy("boundary", 1) == 1
+    assert policy("boundary", 64) == 5
+    assert all(
+        not table for stage, table in policy.tables.items() if stage != "boundary"
+    )
+
+
+def _specialized_decode_enabled(model):
+    return model.specialized_decode is not None
+
+
+@pytest.mark.distributed(num_gpus=4)
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.is_device_capability_family(90)
+    or torch.accelerator.device_count() < TP,
+    reason="Requires four Hopper GPUs with NVLink multicast",
+)
+def test_hopper_default_preserves_generation(
+    vllm_runner, hopper_model_config, enable_pickle
+):
+    """Exercise default dispatch and graph replay through LLM.generate."""
+    from tests.models.utils import check_logprobs_close
+    from vllm import SamplingParams
+
+    sampling = SamplingParams(
+        temperature=0, max_tokens=8, ignore_eos=True, logprobs=5, detokenize=False
+    )
+    prompts = [{"prompt_token_ids": [11, 17, 23]}, {"prompt_token_ids": [29, 31]}]
+    outputs = []
+    for backend in ("stock", "auto"):
+        with vllm_runner(
+            hopper_model_config,
+            load_format="dummy",
+            skip_tokenizer_init=True,
+            tensor_parallel_size=TP,
+            dtype="bfloat16",
+            max_model_len=128,
+            max_num_seqs=4,
+            max_num_batched_tokens=128,
+            gpu_memory_utilization=0.1,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=False,
+            compilation_config={"cudagraph_capture_sizes": [1, 2, 4]},
+            additional_config={"decode_backend": backend},
+            seed=256,
+        ) as runner:
+            enabled = runner.apply_model(_specialized_decode_enabled)
+            assert enabled == [backend == "auto"] * TP
+            outputs.append(
+                runner.generate_w_logprobs(prompts, sampling, use_tqdm=False)
+            )
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="stock",
+        name_1="Hopper default",
+    )
