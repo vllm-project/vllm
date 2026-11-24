@@ -59,7 +59,7 @@ For further details on metrics, please refer to [this page](../design/metrics.md
 
 ## Weight Transfer APIs (RL Training)
 
-For further details on Weight Transfer, please refer to [this page](../training/weight_transfer/README.md).
+For further details on Weight Transfer, please refer to [this page](../training/weight_updates/README.md).
 
 - `LLM.init_weight_transfer_engine` - Initializes the weight transfer engine for RL training.
 - `LLM.start_weight_update` - Starts a new weight update cycle.

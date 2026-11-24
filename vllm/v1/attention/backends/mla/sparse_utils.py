@@ -3,6 +3,7 @@
 """Utility functions for sparse MLA backends."""
 
 from dataclasses import dataclass, replace
+from enum import Enum
 from typing import Any
 
 import numpy as np
@@ -23,6 +24,22 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec, get_block_table_width
+
+
+class SparseMLAPrefillRoute(Enum):
+    """How a sparse MLA step runs its prefill tokens.
+
+    - DENSE_MHA: every prefill fits in the top-k, so MHA over all keys.
+    - MASKED_MHA: MHA with the top-k as a per-query key mask.
+    - SPARSE_MQA: the prefill tokens run in forward_mqa, like the decodes.
+
+    Set once per step by SparseMLACommonMetadataBuilder._prefill_route;
+    readers use it as is instead of re-deriving it.
+    """
+
+    DENSE_MHA = "dense_mha"
+    MASKED_MHA = "masked_mha"
+    SPARSE_MQA = "sparse_mqa"
 
 
 def request_row_bounds(req_idx: np.ndarray) -> np.ndarray:
@@ -316,7 +333,7 @@ class ConvertReqIndexToGlobalIndexKernel(
                     DCP_INTERLEAVE=dcp_interleave,
                 )
             )
-        return self._trace_dispatch(self.dispatch)(
+        keys = self._trace_dispatch(self.dispatch)(
             zip_inputs(
                 dict(
                     HAS_PREFILL_WORKSPACE=False,
@@ -372,6 +389,28 @@ class ConvertReqIndexToGlobalIndexKernel(
             NUM_TOPK_TOKENS=num_topk_tokens,
             max_num_blocks_per_req=max_num_blocks_per_req,
         )
+        if dcp_size > 1 and vllm_config.attention_config.sparse_mla_shard_q:
+            from vllm.v1.attention.ops.dcp_shardq import PAGE_TOKENS, TABLE_PAGES_ALIGN
+
+            # DCP ShardQ steps remap onto the gathered context's pages, without
+            # DCP (vllm.v1.attention.ops.dcp_shardq).
+            keys.append(
+                self.dispatch(
+                    BLOCK_SIZE=PAGE_TOKENS,
+                    BLOCK_STRIDE_ROWS=PAGE_TOKENS,
+                    BLOCK_N=128,
+                    NUM_TOPK_TOKENS=num_topk_tokens,
+                    HAS_PREFILL_WORKSPACE=False,
+                    HAS_IDX_MAPPING=False,
+                    COUNT_VALID=True,
+                    COMPACT_TO_FRONT=True,
+                    DCP_SIZE=1,
+                    DCP_RANK=0,
+                    DCP_INTERLEAVE=1,
+                    max_num_blocks_per_req=TABLE_PAGES_ALIGN,
+                )
+            )
+        return keys
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
