@@ -1206,6 +1206,7 @@ def test_online_gate_up_proj_target_disables_fse(
 def test_online_moe_stream_places_routed_then_shared_experts(num_shared: int):
     """Experts loaded in any order land in their slots: routed experts first and
     the staged fused shared experts last."""
+    import inspect
     import types
 
     from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -1262,6 +1263,7 @@ def test_online_moe_stream_places_routed_then_shared_experts(num_shared: int):
         ),
     )
     stream = ExpertWeightStream(method, torch.device("cpu"))
+    signature = inspect.signature(RoutedExperts.weight_loader)
 
     # Every element of expert `e` is `e`, so its slot is recoverable.
     shared_experts = range(num_routed, num_experts)
@@ -1272,9 +1274,9 @@ def test_online_moe_stream_places_routed_then_shared_experts(num_shared: int):
             ("w2_weight", "w2", (hidden, intermediate)),
             ("w13_weight", "w3", (intermediate, hidden)),
         ):
-            stream._load_expert(
-                layer, prefix + name, expert, shard_id, torch.full(shape, expert * 1.0)
-            )
+            weight = torch.full(shape, expert * 1.0)
+            args = signature.bind(layer, None, weight, name, shard_id, expert)
+            stream.load(layer, prefix + name, RoutedExperts.weight_loader, args)
     assert stream.is_complete(layer)
     w13_q, w13_scale, w2_q, w2_scale = stream.quantized_weights(layer)
 

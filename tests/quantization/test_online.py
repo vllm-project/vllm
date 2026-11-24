@@ -1047,6 +1047,21 @@ def _make_nvfp4_moe_source(source_format: str, moe, monkeypatch):
     return ModelOptNvFp4FusedMoE(config, moe)
 
 
+def _moe_checkpoint(tensors: dict[str, torch.Tensor]) -> list[tuple[str, torch.Tensor]]:
+    """The `<expert>.<projection>.<suffix>` checkpoint tensors of stacked
+    `w13_<suffix>` and `w2_<suffix>` MoE tensors, for `RoutedExperts.load_weights`.
+    """
+    checkpoint = []
+    for name, tensor in tensors.items():
+        stem, suffix = name.split("_", 1)
+        projections = ("gate_proj", "up_proj") if stem == "w13" else ("down_proj",)
+        for expert, expert_tensor in enumerate(tensor):
+            parts = expert_tensor.chunk(2, dim=0) if stem == "w13" else (expert_tensor,)
+            for projection, part in zip(projections, parts, strict=True):
+                checkpoint.append((f"{expert}.{projection}.{suffix}", part))
+    return checkpoint
+
+
 def _nvfp4_moe_checkpoint_tensors(
     source_format: str,
     w1: torch.Tensor,
@@ -1302,16 +1317,7 @@ def test_weight_loading_requantization_moe(
         "quark": "w13_input_scale_2",
     }[source_format]
     tensors[input_name] = torch.tensor([[0.25, 0.5], [0.75, 1.0]])
-    checkpoint = []
-    for name, tensor in tensors.items():
-        stem, suffix = name.split("_", 1)
-        projections = ("gate_proj", "up_proj") if stem == "w13" else ("down_proj",)
-        for expert in range(2):
-            parts = (
-                tensor[expert].chunk(2, dim=0) if stem == "w13" else (tensor[expert],)
-            )
-            for projection, part in zip(projections, parts, strict=True):
-                checkpoint.append((f"{expert}.{projection}.{suffix}", part))
+    checkpoint = _moe_checkpoint(tensors)
     # Input scales first: they must neither complete an expert nor the layer.
     checkpoint.sort(key=lambda item: "input" not in item[0])
 
@@ -1450,15 +1456,11 @@ def test_online_requantized_moe_reload(
         online_fp8.per_block_cast_to_fp8.__wrapped__,
     )
 
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
     default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
 
-    moe = SimpleNamespace(
-        w13_num_shards=2,
-        has_bias=False,
-        is_act_and_mul=True,
-        tp_size=1,
-        use_mxfp4_w4a4_dsv4=False,
-    )
+    moe = make_dummy_moe_config(num_experts=2, hidden_dim=128, intermediate_size=128)
     target_methods = {
         "fp8_per_tensor": (Fp8PerTensorOnlineMoEMethod, "fp8"),
         "fp8_per_block": (Fp8PerBlockOnlineMoEMethod, "fp8"),
@@ -1508,42 +1510,39 @@ def test_online_requantized_moe_reload(
     device = current_platform.device_type
     size = 128
 
-    def create_layer() -> tuple[torch.nn.Module, Any]:
-        method = method_cls(moe=moe)
+    def resolve_quant_method(quant_config, layer, prefix):
+        method = method_cls(moe=layer.moe_config)
         monkeypatch.setattr(
             method, "get_fused_moe_quant_config", lambda layer: object()
         )
         method.set_requantization_source(source)
-        layer = torch.nn.Module()
-        layer.local_num_experts = 2
-        layer.num_experts = 2
-        layer.expert_map_manager = SimpleNamespace(num_fused_shared_experts=0)
-        layer._expert_routing_tables = lambda: None
-        layer.moe_config = SimpleNamespace(
-            hidden_dim_unpadded=size,
-            intermediate_size_per_partition_unpadded=size,
-            hidden_dim=size,
-            intermediate_size_per_partition=size,
-            is_act_and_mul=True,
-            moe_parallel_config=SimpleNamespace(tp_size=1),
+        return method
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.routed_experts.resolve_quant_method",
+        resolve_quant_method,
+    )
+    quant_config = Mock(packed_modules_mapping={}, online_quantization_config=None)
+    quant_config.get_name.return_value = source_format
+
+    def create_layer() -> tuple[RoutedExperts, Any]:
+        layer = RoutedExperts(
+            "model.layers.0.mlp.experts",
+            torch.bfloat16,
+            moe,
+            quant_config,
+            expert_map_manager=SimpleNamespace(
+                local_num_experts=2,
+                num_fused_shared_experts=0,
+                placement_strategy="linear",
+                expert_map=None,
+                expert_mask=None,
+                routing_tables=None,
+                map_global_to_local=lambda index: index,
+            ),
         )
-        layer._get_hidden_dim = RoutedExperts._get_hidden_dim
-        layer._narrow_expert_data_for_padding = (
-            RoutedExperts._narrow_expert_data_for_padding
-        )
-        layer.quant_method = method
-        layer.quant_config = SimpleNamespace(online_quantization_config=None)
-        method.create_weights(
-            layer,
-            num_experts=2,
-            hidden_size=size,
-            intermediate_size_per_partition=size,
-            params_dtype=torch.bfloat16,
-            weight_loader=default_weight_loader,
-        )
-        _materialize_requantization_source(layer)
         record_metadata_for_reloading(layer)
-        return layer, method
+        return layer, layer.quant_method
 
     with torch.device(device):
         layer, method = create_layer()
@@ -1588,42 +1587,13 @@ def test_online_requantized_moe_reload(
             return tensors
 
         def load_serialized_weights(
-            layer: torch.nn.Module, weights: dict[str, torch.Tensor], *, reload: bool
+            layer: RoutedExperts, weights: dict[str, torch.Tensor]
         ) -> None:
-            # As model loaders do: the layer is processed as soon as its experts
-            # are loaded, before its unused activation scales.
-            parameters = dict(layer.named_parameters())
-            for name, loaded_weight in weights.items():
-                parameter = parameters[name]
-                if reload:
-                    parameter.weight_loader(parameter, loaded_weight)
-                elif name in (packed_w13_name, "w2_weight", "w2_weight_packed"):
-                    for expert in range(2):
-                        if name == packed_w13_name:
-                            gate, up = loaded_weight[expert].chunk(2, dim=0)
-                            for shard_id, shard_weight in (("w1", gate), ("w3", up)):
-                                RoutedExperts._load_w13(
-                                    layer,
-                                    parameter.data[expert],
-                                    0,
-                                    shard_id,
-                                    shard_weight,
-                                    0,
-                                )
-                        else:
-                            RoutedExperts._load_w2(
-                                layer,
-                                parameter.data[expert],
-                                1,
-                                loaded_weight[expert],
-                                0,
-                            )
-                else:
-                    parameter.data.copy_(loaded_weight)
+            list(layer.load_weights(_moe_checkpoint(weights)))
 
-        # Initial loading replaces NVFP4 staging weights with online target weights.
-        load_serialized_weights(layer, serialized_weights(0.25), reload=False)
-        method.process_weights_after_loading(layer)
+        # Initial loading replaces NVFP4 staging weights with online target weights,
+        # processing the layer once its last expert is loaded.
+        load_serialized_weights(layer, serialized_weights(0.25))
         finalize_layerwise_reload(layer, default_vllm_config.model_config)
         # Initial processing must invoke backend-format conversion exactly once.
         converter.assert_called_once()
@@ -1673,8 +1643,7 @@ def test_online_requantized_moe_reload(
         }
         second_checkpoint = serialized_weights(0.75)
         fresh_layer, fresh_method = create_layer()
-        load_serialized_weights(fresh_layer, second_checkpoint, reload=False)
-        fresh_method.process_weights_after_loading(fresh_layer)
+        load_serialized_weights(fresh_layer, second_checkpoint)
         finalize_layerwise_reload(fresh_layer, default_vllm_config.model_config)
         expected_parameters = dict(fresh_layer.named_parameters())
         # Fresh conversion must produce the same target parameter schema.
@@ -1694,7 +1663,7 @@ def test_online_requantized_moe_reload(
         # Reload must recreate every NVFP4 source parameter on the meta device.
         assert all(getattr(layer, name).is_meta for name in source_names)
 
-        load_serialized_weights(layer, second_checkpoint, reload=True)
+        load_serialized_weights(layer, second_checkpoint)
         finalize_layerwise_reload(layer, default_vllm_config.model_config)
         # Reload must reconvert checkpoint B rather than reuse checkpoint A's weights.
         converter.assert_called_once()

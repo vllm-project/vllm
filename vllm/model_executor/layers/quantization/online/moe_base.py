@@ -176,11 +176,9 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
         one expert at a time from their materialized weights.
         """
         info = get_layerwise_info(layer)
-        stream = info.weight_stream
-        if not isinstance(stream, ExpertWeightStream) or stream.method is not self:
-            stream = ExpertWeightStream(self, info.restore_device)
+        stream = info.weight_stream or ExpertWeightStream(self, info.restore_device)
         outputs = stream.quantized_weights(layer)
-        if (loader := getattr(layer, "shared_expert_online_loader", None)) is not None:
+        if (loader := layer.shared_expert_online_loader) is not None:
             loader.release_staging(layer)
         return outputs
 
