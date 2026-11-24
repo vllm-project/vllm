@@ -149,13 +149,23 @@ def _video_item(num_frames: int, width: int, height: int) -> tuple:
     )
 
 
-def _num_video_embeds(processor, video: tuple) -> int:
-    processed = processor(
+def _process_video(processor, video: tuple):
+    return processor(
         processor.info.video_pattern,
         mm_items=processor.info.parse_mm_data({"video": [video]}),
         hf_processor_mm_kwargs={},
     )
+
+
+def _num_video_embeds(processor, video: tuple) -> int:
+    processed = _process_video(processor, video)
     return sum(p.get_num_embeds() for p in processed["mm_placeholders"]["video"])
+
+
+def _padded_patches(inputs, modality: str) -> int:
+    key = "pixel_values" if modality == "image" else "video_pixel_values"
+    pixel_values = inputs["mm_kwargs"].get_data()[key]
+    return pixel_values.shape[-4] * pixel_values.shape[-1] // pixel_values.shape[-2]
 
 
 @pytest.mark.parametrize(
@@ -192,8 +202,9 @@ def test_minicpmv4_6_image_budget_covers_largest_image(
     )
 
     assert budget == num_tokens
-    assert dummy["mm_placeholders"]["image"][0].get_num_embeds() == budget
+    assert dummy["mm_placeholders"]["image"][0].get_num_embeds() <= budget
     assert processed["mm_placeholders"]["image"][0].get_num_embeds() == budget
+    assert _padded_patches(dummy, "image") >= _padded_patches(processed, "image")
 
 
 def test_minicpmv4_6_video_budget_covers_largest_frames():
@@ -214,8 +225,11 @@ def test_minicpmv4_6_video_budget_covers_largest_frames():
     dummy = processor.get_dummy_mm_inputs({"video": 1})
 
     assert budget == num_frames * 720
-    assert sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"]) == budget
+    assert sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"]) <= budget
     assert _num_video_embeds(processor, _video_item(num_frames, 1265, 1112)) == budget
+    for width, height in ((1265, 1112), (7566, 266)):
+        video = _process_video(processor, _video_item(num_frames, width, height))
+        assert _padded_patches(dummy, "video") >= _padded_patches(video, "video")
 
 
 @pytest.mark.parametrize(
@@ -374,7 +388,7 @@ def test_minicpmv4_6_budget_follows_configured_kwargs(
 
     dummy_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"][modality])
 
-    assert dummy_embeds == budget
+    assert dummy_embeds <= budget
     assert budget >= num_embeds
 
 
@@ -480,7 +494,7 @@ def test_minicpmv4_6_video_budget_fills_short_context(
     dummy = processor.get_dummy_mm_inputs({"video": 1})
 
     assert previous_budget <= budget <= max_model_len
-    assert sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"]) == budget
+    assert sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"]) <= budget
 
 
 def test_minicpmv4_6_video_dummy_follows_num_frames_hint():
@@ -499,7 +513,8 @@ def test_minicpmv4_6_video_dummy_follows_num_frames_hint():
     dummy_embeds = sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"])
     budget = info.get_max_video_tokens(ctx.model_config.max_model_len, {"video": 1})
 
-    assert dummy_embeds >= _num_video_embeds(
-        processor, _video_item(num_frames, 1265, 1112)
-    )
+    video = _process_video(processor, _video_item(num_frames, 1265, 1112))
+
+    assert budget >= sum(p.get_num_embeds() for p in video["mm_placeholders"]["video"])
     assert budget >= dummy_embeds
+    assert _padded_patches(dummy, "video") >= _padded_patches(video, "video")

@@ -734,10 +734,21 @@ def test_image_budget_covers_the_largest_image(mm_processor_kwargs):
             dense_text[y : y + 4, x : x + 3] = 0
 
     assert budget is not None
-    assert dummy_embeds == budget["image"]
+    assert dummy_embeds <= budget["image"]
     assert budget["image"] >= _num_embeds(
         processor, "image", PIL.Image.fromarray(dense_text)
     )
+    dummy_pixels = dummy["mm_kwargs"].get_data()["pixel_values"]
+    for image in (PIL.Image.fromarray(dense_text), PIL.Image.new("RGB", (126, 14334))):
+        processed = processor(
+            processor.info.image_pattern,
+            mm_items=processor.info.parse_mm_data({"image": [image]}),
+            hf_processor_mm_kwargs={},
+        )
+        pixels = processed["mm_kwargs"].get_data()["pixel_values"]
+        assert dummy_pixels.shape[-4] * dummy_pixels.shape[-1] >= (
+            pixels.shape[-4] * pixels.shape[-1]
+        )
 
 
 # --------------------------------------------------------------------------

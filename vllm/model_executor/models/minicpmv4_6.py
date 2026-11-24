@@ -745,7 +745,15 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         if self._hint_keeps_canvas("image", canvas):
             return canvas
         sizes = self._hinted_image_sizes_by_tokens
-        return sizes[max(sizes)]
+        if self._get_size_hint("image") != (None, None):
+            return sizes[max(sizes)]
+        return max(
+            [*sizes.values(), *self._get_thin_sizes("image")],
+            key=lambda size: (
+                self._get_padded_tokens(size, "image"),
+                self._get_frame_tokens(size, "image"),
+            ),
+        )
 
     def get_video_frame_size_with_most_features(self) -> ImageSize:
         canvas = super().get_video_frame_size_with_most_features()
@@ -761,20 +769,20 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
     ) -> tuple[ImageSize, int]:
         canvas = super().get_video_frame_size_with_most_features()
         if self._hint_keeps_canvas("video", canvas):
-            max_slice_nums, downsample_mode = self._get_slicing_kwargs("video")
-            frame_tokens = self.get_num_image_tokens(
-                canvas, max_slice_nums=max_slice_nums, downsample_mode=downsample_mode
-            )
             return self._get_video_size_and_frames(
-                seq_len, mm_counts, _MAX_FRAMES_PER_VIDEO, {frame_tokens: canvas}
+                seq_len, mm_counts, _MAX_FRAMES_PER_VIDEO, [canvas]
             )
         video_options = self.ctx.get_mm_config().limit_per_prompt.get("video")
         max_frames = getattr(video_options, "num_frames", None) or _MAX_FRAMES_PER_VIDEO
+        sizes = [*self._hinted_video_sizes_by_tokens.values()]
+        if self._get_size_hint("video") == (None, None):
+            sizes += self._get_thin_sizes("video")
         return self._get_video_size_and_frames(
             seq_len,
             mm_counts,
             min(max_frames, _MAX_FRAMES_PER_VIDEO),
-            self._hinted_video_sizes_by_tokens,
+            sizes,
+            padded=True,
         )
 
     def get_max_video_tokens(
@@ -786,27 +794,67 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             seq_len,
             mm_counts,
             _MAX_FRAMES_PER_VIDEO,
-            self._video_sizes_by_tokens | self._hinted_video_sizes_by_tokens,
+            (self._video_sizes_by_tokens | self._hinted_video_sizes_by_tokens).values(),
         )
-        max_slice_nums, downsample_mode = self._get_slicing_kwargs("video")
-        return num_frames * self.get_num_image_tokens(
-            size, max_slice_nums=max_slice_nums, downsample_mode=downsample_mode
-        )
+        return num_frames * self._get_frame_tokens(size, "video")
 
     def _get_video_size_and_frames(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
         max_frames: int,
-        sizes: dict[int, ImageSize],
+        sizes: Iterable[ImageSize],
+        padded: bool = False,
     ) -> tuple[ImageSize, int]:
         num_videos = max(mm_counts.get("video", 0), 1)
 
-        def num_frames(frame_tokens: int) -> int:
+        def num_frames(size: ImageSize) -> int:
+            frame_tokens = self._get_frame_tokens(size, "video")
             return max(min(seq_len // frame_tokens // num_videos, max_frames), 1)
 
-        frame_tokens = max(sizes, key=lambda t: (num_frames(t) * t, t))
-        return sizes[frame_tokens], num_frames(frame_tokens)
+        def key(size: ImageSize) -> tuple[int, int, int]:
+            frame_tokens = self._get_frame_tokens(size, "video")
+            padded_tokens = self._get_padded_tokens(size, "video") if padded else 0
+            return (
+                num_frames(size) * padded_tokens,
+                num_frames(size) * frame_tokens,
+                frame_tokens,
+            )
+
+        size = max(sizes, key=key)
+        return size, num_frames(size)
+
+    def _get_frame_tokens(self, size: ImageSize, modality: str) -> int:
+        max_slice_nums, downsample_mode = self._get_slicing_kwargs(modality)
+        return self.get_num_image_tokens(
+            size, max_slice_nums=max_slice_nums, downsample_mode=downsample_mode
+        )
+
+    def _get_padded_tokens(self, size: ImageSize, modality: str) -> int:
+        max_slice_nums, downsample_mode = self._get_slicing_kwargs(modality)
+        grids, source_tokens, patch_tokens = self._compute_visual_tokens(
+            size, max_slice_nums, downsample_mode=downsample_mode
+        )
+        return (1 + grids[0] * grids[1]) * max(source_tokens, patch_tokens)
+
+    def _get_thin_sizes(self, modality: str) -> list[ImageSize]:
+        max_slice_nums, _ = self._get_slicing_kwargs(modality)
+        max_ratio = _MAX_ASPECT_RATIO[modality]
+        scale_resolution = self.get_image_processor().scale_resolution
+        area = scale_resolution * scale_resolution
+        scale = math.isqrt(max(max_slice_nums - 1, 0)) + 1
+        return [
+            size
+            for height in range(
+                math.floor(scale_resolution / math.sqrt(max_ratio)),
+                scale_resolution + 1,
+            )
+            for size in (
+                ImageSize(width=area // height * scale, height=height * scale),
+                ImageSize(width=height * scale, height=area // height * scale),
+            )
+            if max(size) <= max_ratio * min(size)
+        ]
 
     def _get_slicing_kwargs(self, modality: str) -> tuple[int, str]:
         merged = self._merge_and_resolve_mm_processor_kwargs({})
