@@ -492,11 +492,10 @@ def test_mismatched_float_kv_cache_is_rejected(cache_dtype, model_dtype, should_
 
 
 @pytest.mark.parametrize("dcp_size", [1, 2])
-def test_nvfp4_ds_mla_rejects_decode_context_parallelism(dcp_size):
-    # The nvfp4_ds_mla chunked-context gather is not validated under DCP, so
-    # the combination fails at startup instead of on the first request that
-    # carries cached context.
-    kwargs = dict(
+def test_nvfp4_ds_mla_accepts_decode_context_parallelism(dcp_size):
+    # The nvfp4_ds_mla chunked-context gather reads each rank's local context
+    # from its chunk start, as fp8_ds_mla does, so DCP is supported.
+    VllmConfig(
         cache_config=CacheConfig(cache_dtype="nvfp4_ds_mla"),
         device_config=DeviceConfig(device="cpu"),
         parallel_config=ParallelConfig(
@@ -505,11 +504,6 @@ def test_nvfp4_ds_mla_rejects_decode_context_parallelism(dcp_size):
             distributed_executor_backend="mp",
         ),
     )
-    if dcp_size > 1:
-        with pytest.raises(ValueError, match="decode context parallelism"):
-            VllmConfig(**kwargs)
-    else:
-        VllmConfig(**kwargs)
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():
@@ -2275,12 +2269,18 @@ _PEER_GROUP = {
 
 
 @pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(current_platform.is_xpu(), reason="CUDA Only Test")
 @pytest.mark.parametrize(
     "options,parallel,error",
     [
         ({"cpu_offload": False, "peer_group_size": 4}, {}, "set together"),
         ({"cpu_offload": False, "peer_group_store": "/p"}, {}, "set together"),
-        (_PEER_GROUP | {"cpu_offload": True}, {}, "peer_group_transport='rdma'"),
+        (_PEER_GROUP | {"cpu_offload": True}, {}, None),
+        (
+            _PEER_GROUP | {"cpu_offload": True, "dp_shared_memory": True},
+            {},
+            "does not support dp_shared_memory",
+        ),
         (_PEER_GROUP | {"cpu_offload": True, "peer_group_transport": "rdma"}, {}, None),
         (_PEER_GROUP, {"tensor_parallel_size": 2}, "TP=1"),
         (_PEER_GROUP, {"pipeline_parallel_size": 2}, "PP=1"),
@@ -2304,14 +2304,46 @@ def test_engram_peer_group_validation(options, parallel, error, monkeypatch):
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "architecture,layer_field,supported",
+    "architecture,layer_field,options,error",
     [
-        ("DeepseekV41ForCausalLM", "engram_layer_ids", True),
-        ("Qwen4ExpForCausalLM", "ple_layer_ids", False),
+        ("DeepseekV41ForCausalLM", "engram_layer_ids", {}, None),
+        ("Qwen4ExpForConditionalGeneration", "ple_layer_ids", {}, None),
+        (
+            "Qwen4ExpForConditionalGeneration",
+            "ple_layer_ids",
+            {"peer_group_transport": "rdma"},
+            None,
+        ),
+        (
+            "Qwen4ExpForConditionalGeneration",
+            "ple_layer_ids",
+            {"peer_group_transport": "rdma", "cpu_offload": True},
+            None,
+        ),
+        (
+            "Qwen4ExpForCausalLM",
+            "ple_layer_ids",
+            {"peer_group_fetch": "async"},
+            "peer_group_fetch",
+        ),
+        (
+            "Qwen4ExpForCausalLM",
+            "ple_layer_ids",
+            {"embedding_across_dp": True},
+            "embedding_across_dp",
+        ),
+        (
+            "Qwen4ExpForCausalLM",
+            "ple_layer_ids",
+            {"disk_offload": True},
+            "incompatible with disk_offload",
+        ),
     ],
 )
-def test_engram_peer_group_requires_pool_support(architecture, layer_field, supported):
-    """Qwen4Exp's tables ignore peer groups, so they would not be split."""
+def test_engram_peer_group_model_options(
+    architecture, layer_field, options, error, monkeypatch
+):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     model = cast(
         ModelConfig,
         SimpleNamespace(
@@ -2319,10 +2351,41 @@ def test_engram_peer_group_requires_pool_support(architecture, layer_field, supp
             hf_text_config=SimpleNamespace(**{layer_field: [1]}),
         ),
     )
-    config = EngramConfig(**_PEER_GROUP)
-    rejects = pytest.raises(ValueError, match="pool support")
-    with nullcontext() if supported else rejects:
+    config = EngramConfig(**(_PEER_GROUP | options))
+    with pytest.raises(ValueError, match=error) if error else nullcontext():
         config.verify_model_config(model)
+
+
+@pytest.mark.parametrize(
+    "parallel,load_format,transfer,error",
+    [
+        ({"enable_dbo": True}, "auto", None, "DBO"),
+        ({}, "ipc_cache", None, "ipc_cache"),
+        ({}, "sharded_state", None, "sharded_state"),
+        ({}, "auto", True, "weight transfer"),
+    ],
+)
+def test_qwen_ple_pool_rejects_unsupported_engine_options(
+    monkeypatch, parallel, load_format, transfer, error
+):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "has_device_capability", lambda _: True)
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            model_config=SimpleNamespace(
+                architecture="Qwen4ExpForConditionalGeneration",
+                hf_text_config=SimpleNamespace(ple_layer_ids=[1]),
+            ),
+            speculative_config=None,
+            engram_config=EngramConfig(**_PEER_GROUP),
+            parallel_config=ParallelConfig(**parallel),
+            load_config=SimpleNamespace(load_format=load_format),
+            weight_transfer_config=transfer,
+        ),
+    )
+    with pytest.raises(ValueError, match=error):
+        VllmConfig._resolve_and_verify_engram_config(config)
 
 
 @pytest.mark.skip_global_cleanup
