@@ -1041,6 +1041,7 @@ def test_mooncake_warmup_cache_store_e2e(vllm_runner, tmp_path, monkeypatch):
             "1",
         ],
     )
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     # The baseline engine tunes from scratch in its own empty cache root.
     monkeypatch.setenv(
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path / "engine_baseline")
