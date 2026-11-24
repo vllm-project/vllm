@@ -42,11 +42,7 @@ class ClassifierWithReshape(nn.Module):
     def forward(self, *args, **kwargs):
         if len(args) > 0:
             args = (args[0].unsqueeze(1), *args[1:])
-        output = super().forward(*args, **kwargs)
-        # Heads that select their own token (e.g. RoBERTa's) return
-        # (num_seqs, num_labels); heads applied at every position (e.g.
-        # CTRL's `nn.Linear` `classifier`) return (num_seqs, 1, num_labels)
-        return output.squeeze(1) if output.dim() == 3 else output
+        return super().forward(*args, **kwargs)
 
 
 class EmbeddingMixin(VllmModelForPooling, Base):
@@ -102,13 +98,16 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling, Ba
             )
         self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
 
-        # Order `ClassifierWithReshape` ahead of the classifier's own class so that
-        # its `super().forward(...)` reaches the original implementation.
-        self.classifier.__class__ = type(
-            "ClassifierWithReshape",
-            (ClassifierWithReshape, type(self.classifier)),
-            {},
-        )
+        # Only heads that select their own token (e.g. RoBERTa's) need the
+        # sequence dim back. Order `ClassifierWithReshape` ahead of the
+        # classifier's own class so that its `super().forward(...)` reaches the
+        # original implementation.
+        if not isinstance(self.classifier, nn.Linear):
+            self.classifier.__class__ = type(
+                "ClassifierWithReshape",
+                (ClassifierWithReshape, type(self.classifier)),
+                {},
+            )
 
         self.pooler = DispatchPooler.for_seq_cls(
             pooler_config,
