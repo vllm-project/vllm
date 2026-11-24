@@ -44,7 +44,7 @@ def maybe_share_tensor_memory(tensor: torch.Tensor) -> torch.Tensor:
             logger.warning_once(
                 "Could not move a tensor to shared memory (%s); "
                 "sending it with msgpack instead.",
-                e,
+                str(e),
             )
     return tensor
 

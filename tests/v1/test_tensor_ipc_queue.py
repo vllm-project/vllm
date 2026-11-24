@@ -297,6 +297,22 @@ def test_msgpack_encoder_decoder_with_ipc():
     assert torch.allclose(decoded.tensor, tensor)
 
 
+def test_tensor_requiring_grad_over_ipc():
+    """The queue pickles in a feeder thread, where a non-leaf tensor that
+    requires grad (e.g. `prompt_embeds` joined from parts that require grad)
+    fails silently; the sender must detach it, or the receiver waits forever."""
+    tensor_queue = _MP_CTX.Queue()
+    sender = TensorIpcSender(tensor_queue)
+    encoder = MsgpackEncoder(size_threshold=0, oob_tensor_consumer=sender)
+    receiver = TensorIpcReceiver(tensor_queue)
+    decoder = MsgpackDecoder(TensorEnvelope, oob_tensor_provider=receiver)
+    tensor = torch.randn(2, 3, requires_grad=True) * 2
+
+    decoded = decoder.decode(encoder.encode(TensorEnvelope(tensor, "grad")))
+
+    assert torch.equal(decoded.tensor, tensor.detach())
+
+
 def test_share_failure_falls_back_to_msgpack(monkeypatch):
     """If the tensor cannot be moved to shared memory (e.g. /dev/shm is full),
     the request is still served, with the tensor inline in the message."""
@@ -306,7 +322,8 @@ def test_share_failure_falls_back_to_msgpack(monkeypatch):
 
     monkeypatch.setattr(torch.Tensor, "share_memory_", fail)
     tensor_queue = _MP_CTX.Queue()
-    encoder = MsgpackEncoder(oob_tensor_consumer=TensorIpcSender(tensor_queue))
+    sender = TensorIpcSender(tensor_queue)
+    encoder = MsgpackEncoder(size_threshold=0, oob_tensor_consumer=sender)
     decoder = MsgpackDecoder(TensorEnvelope)
     tensor = torch.randn(2, 3)
 
