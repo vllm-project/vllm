@@ -318,6 +318,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         skip_model_name_validation: false,
                         server_dev_mode: false,
                         max_n_sequences: None,
+                        max_audio_clip_filesize_mb: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -1132,6 +1133,7 @@ fn args_json_reads_env_only_settings_from_env() {
 
     let args = apply(&[]).unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_secs(10)));
+    assert_eq!(args.api_server_options().max_audio_clip_filesize_mb, 25);
     assert!(!args.disable_request_id_randomization);
     assert!(!args.keep_alive_on_engine_death);
     assert!(!args.api_server_options().skip_model_name_validation);
@@ -1150,6 +1152,7 @@ fn args_json_reads_env_only_settings_from_env() {
         ("VLLM_SKIP_MODEL_NAME_VALIDATION", " TRUE "),
         ("VLLM_SERVER_DEV_MODE", " 1"),
         ("VLLM_MAX_N_SEQUENCES", " 8 "),
+        ("VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", "50"),
     ])
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
@@ -1158,6 +1161,7 @@ fn args_json_reads_env_only_settings_from_env() {
     assert!(args.api_server_options().skip_model_name_validation);
     assert!(args.api_server_options().server_dev_mode);
     assert_eq!(args.api_server_options().max_n_sequences, 8);
+    assert_eq!(args.api_server_options().max_audio_clip_filesize_mb, 50);
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(1024 * 1024)
@@ -2380,6 +2384,7 @@ fn frontend_args_accept_json() {
                         skip_model_name_validation: false,
                         server_dev_mode: false,
                         max_n_sequences: None,
+                        max_audio_clip_filesize_mb: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -3472,6 +3477,7 @@ fn serve_args_accept_handshake_aliases() {
                         skip_model_name_validation: false,
                         server_dev_mode: false,
                         max_n_sequences: None,
+                        max_audio_clip_filesize_mb: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -3780,6 +3786,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                     33554432,
                 ),
                 max_n_sequences: 16384,
+                max_audio_clip_filesize_mb: 25,
             },
             fingerprint_mode: Full,
             cors: CorsConfig {
@@ -3918,6 +3925,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                     33554432,
                 ),
                 max_n_sequences: 16384,
+                max_audio_clip_filesize_mb: 25,
             },
             fingerprint_mode: Full,
             cors: CorsConfig {
@@ -4169,6 +4177,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                     33554432,
                 ),
                 max_n_sequences: 16384,
+                max_audio_clip_filesize_mb: 25,
             },
             fingerprint_mode: Full,
             cors: CorsConfig {

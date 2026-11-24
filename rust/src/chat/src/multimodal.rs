@@ -305,6 +305,18 @@ struct AudioModalitySupport {
     spec: ResolvedMultimodalSpec,
     placeholder: ResolvedPlaceholder,
     processor: Arc<dyn AudioPreProcessor>,
+    input: AudioInputConfig,
+}
+
+/// The audio a model's feature extractor expects, as speech-to-text serving
+/// reads it to resample and split long audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioInputConfig {
+    /// Sample rate in Hz (`sampling_rate`).
+    pub sample_rate: Option<usize>,
+    /// Length of audio the feature extractor takes at once, in seconds
+    /// (`chunk_length`).
+    pub chunk_length_s: Option<usize>,
 }
 
 /// Model-repo config file locations consumed by multimodal support.
@@ -443,6 +455,16 @@ struct PreparedItem {
 }
 
 impl MultimodalModelInfo {
+    /// The loaded model's Hugging Face `model_type`.
+    pub fn model_type(&self) -> Option<&str> {
+        self.context.model_type.as_deref()
+    }
+
+    /// The audio the model's feature extractor expects, when it takes audio.
+    pub fn audio_input(&self) -> Option<AudioInputConfig> {
+        self.audio.as_ref().map(|audio| audio.input)
+    }
+
     /// Load and resolve multimodal support from model files.
     ///
     /// Returns `Ok(None)` for a text-only model: no registered model spec and
@@ -740,6 +762,10 @@ impl MultimodalModelInfo {
             spec: ResolvedMultimodalSpec::new(raw_spec, Modality::Audio),
             placeholder: ResolvedPlaceholder::resolve(raw_spec, context, Modality::Audio)?,
             processor,
+            input: AudioInputConfig {
+                sample_rate: preprocessor_config.get_extra("sampling_rate"),
+                chunk_length_s: preprocessor_config.get_extra("chunk_length"),
+            },
         }))
     }
 

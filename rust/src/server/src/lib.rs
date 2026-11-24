@@ -33,9 +33,9 @@ use axum::extract::ConnectInfo;
 use axum::http::Request;
 pub use config::{
     AccessLogConfig, ApiServerOptions, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES,
-    DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, HttpListenerMode, LoraModulePath,
-    OutputLogConfig, OutputLogging, TlsConfig,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_AUDIO_CLIP_FILESIZE_MB,
+    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, HttpListenerMode,
+    LoraModulePath, OutputLogConfig, OutputLogging, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
 use hyper::body::Incoming;
@@ -168,6 +168,14 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     })
     .await
     .context("failed to connect to engine core")?;
+    // Python's API server resolves the same tasks at startup to decide which
+    // task-specific routes to register.
+    let supported_tasks = client
+        .get_supported_tasks()
+        .await
+        .context("failed to query the engine's supported tasks")?
+        .to_vec();
+    info!(?supported_tasks, "engine supported tasks");
     let server_info = ServerInfoSnapshot::new(config, &client);
     let system_fingerprint = config
         .fingerprint_mode
@@ -205,6 +213,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_cors(config.cors.clone())
             .with_access_log(config.access_log.clone())
             .with_profiler(config.profiler.clone())
+            .with_supported_tasks(supported_tasks)
             .with_default_mm_lora_modalities(config.default_mm_loras.keys().copied().collect()),
     );
 

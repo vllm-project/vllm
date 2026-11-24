@@ -31,6 +31,8 @@ const OFFLOADED_PATHS: &[&str] = &[
     "/detokenize",
     "/inference/v1/generate",
     "/generative_scoring",
+    "/v1/audio/transcriptions",
+    "/v1/audio/translations",
     // gRPC routes:
     "/vllm.Inference/Generate",
     "/vllm.Inference/GenerateStream",

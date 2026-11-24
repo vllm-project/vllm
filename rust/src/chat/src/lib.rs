@@ -465,7 +465,12 @@ impl ChatLlm {
 
     /// Whether the loaded backend has a registered multimodal processor.
     pub fn supports_multimodal(&self) -> bool {
-        self.processor.backend.multimodal_model_info().is_some()
+        self.multimodal_model_info().is_some()
+    }
+
+    /// The loaded backend's multimodal processor, if it has one.
+    pub fn multimodal_model_info(&self) -> Option<&multimodal::MultimodalModelInfo> {
+        self.processor.backend.multimodal_model_info()
     }
 
     /// Prepare media for an already-tokenized request.

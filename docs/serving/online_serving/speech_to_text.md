@@ -187,6 +187,17 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/speech_to_text/transcription/protocol.py:transcription-extra-params"
     ```
 
+### Rust Frontend
+
+The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) serves the Transcriptions and
+Translations APIs for Qwen3-ASR models such as `Qwen/Qwen3-ASR-1.7B`, with `json`
+and `text` responses. It rejects `stream=true` and `use_beam_search=true` with a 400,
+and answers 501 for other speech-to-text models; serve those with the Python
+frontend (`VLLM_USE_RUST_FRONTEND=0`). It does not enforce
+`VLLM_MAX_AUDIO_DECODE_DURATION_S` yet. The official Qwen3-ASR checkpoints ship no
+`tokenizer.json`, which the Rust frontend needs: save one with
+`AutoTokenizer.from_pretrained(model).save_pretrained(path)` and pass `--tokenizer path`.
+
 ## Translations API
 
 Our Translation API is compatible with [OpenAI's Translations API](https://platform.openai.com/docs/api-reference/audio/createTranslation);

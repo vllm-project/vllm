@@ -40,6 +40,10 @@ pub const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 /// Default upper bound on a request's `n`, like Python's `VLLM_MAX_N_SEQUENCES`.
 pub const DEFAULT_MAX_N_SEQUENCES: i64 = 16384;
 
+/// Default upper bound on a speech-to-text audio upload, in MiB, like Python's
+/// `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB`.
+pub const DEFAULT_MAX_AUDIO_CLIP_FILESIZE_MB: i64 = 25;
+
 /// How the HTTP or gRPC server obtains its listening socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum HttpListenerMode {
@@ -109,6 +113,10 @@ pub struct ApiServerOptions {
     /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`, default 16384).
     #[educe(Default(expression = DEFAULT_MAX_N_SEQUENCES))]
     pub max_n_sequences: i64,
+    /// Upper bound on a speech-to-text audio upload, in MiB
+    /// (`VLLM_MAX_AUDIO_CLIP_FILESIZE_MB`, default 25).
+    #[educe(Default(expression = DEFAULT_MAX_AUDIO_CLIP_FILESIZE_MB))]
+    pub max_audio_clip_filesize_mb: i64,
 }
 
 /// Which generated outputs to log, like Python's `--enable-log-outputs` and

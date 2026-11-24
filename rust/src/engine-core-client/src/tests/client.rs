@@ -42,6 +42,7 @@ use crate::protocol::output::{
 use crate::protocol::request::{BlockHash, EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::stats::{KvConnectorStats, SchedulerStats};
+use crate::protocol::task::{EngineTask, GenerationTask};
 use crate::protocol::tensor::{WireArrayData, WireTensor};
 use crate::protocol::utility::{PauseMode, SleepLevel, UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
@@ -2025,6 +2026,79 @@ async fn is_sleeping_wrapper_sends_typed_request_and_returns_typed_response() {
 
     let result = client.is_sleeping().await.unwrap();
     assert!(result);
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_supported_tasks_asks_engine_once_and_returns_typed_tasks() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-supported-tasks".to_vec();
+    let (utility_seen_tx, utility_seen_rx) = oneshot::channel();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
+                let Value::Array(array) = decode_value(&utility[1]) else {
+                    panic!("expected utility payload array");
+                };
+                assert_eq!(array[2], Value::from("get_supported_tasks"));
+                assert_eq!(array[3], Value::Array(Vec::new()));
+                let call_id = array[1].as_u64().expect("call_id");
+
+                send_outputs(
+                    push,
+                    UtilityCallOutput {
+                        engine_index: 0,
+                        timestamp: 0.0,
+                        output: UtilityOutput {
+                            call_id: call_id.into(),
+                            failure_message: None,
+                            result: Some(utility_result_value(vec!["generate", "transcription"])),
+                        },
+                    }
+                    .into(),
+                )
+                .await;
+                utility_seen_tx.send(()).unwrap();
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    let expected = [
+        EngineTask::Generation(GenerationTask::Generate),
+        EngineTask::Generation(GenerationTask::Transcription),
+    ];
+    assert_eq!(client.get_supported_tasks().await.unwrap(), expected);
+    utility_seen_rx.await.unwrap();
+    // The mock engine answers a single utility call and never a second one, so
+    // this returning at all proves the result is cached.
+    let cached = timeout(Duration::from_secs(5), client.get_supported_tasks())
+        .await
+        .expect("a cached call must not wait for the engine");
+    assert_eq!(cached.unwrap(), expected);
+    assert_eq!(client.pending_utility_call_count(), 0);
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
