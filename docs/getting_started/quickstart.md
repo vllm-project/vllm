@@ -330,7 +330,7 @@ Some of the available backend options include:
 
 - On NVIDIA CUDA: `FLASH_ATTN` or `FLASHINFER`.
 - On AMD ROCm: `TRITON_ATTN`, `ROCM_ATTN`, `ROCM_AITER_FA`, `ROCM_AITER_UNIFIED_ATTN`, `TRITON_MLA`, `ROCM_AITER_MLA` or `ROCM_AITER_TRITON_MLA`.
-- On Intel XPU: `FLASH_ATTN`, `TRITON_ATTN`, `TRITON_MLA`, `XPU_MLA_SPARSE`, `TORCH_SDPA` or `TURBOQUANT`.
+- On Intel XPU: `FLASH_ATTN`, `TRITON_ATTN`, `XPU_ATTN`, `TRITON_MLA`, `XPU_MLA_SPARSE`, `TORCH_SDPA` or `TURBOQUANT`.
 
 !!! tip
     FlashInfer is installed with vLLM, but its precompiled kernels are not. Run `vllm download-kernels` after installing or upgrading vLLM so they are not downloaded and compiled at startup.
