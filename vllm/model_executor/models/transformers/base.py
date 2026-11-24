@@ -439,7 +439,7 @@ class Base(
         """
         orig_to_new_renaming: list[WeightRenaming] = []
         orig_to_new_regex: dict[re.Pattern, str | None] = {}
-        splits: list[WeightConverter] = []
+        weight_converters: list[WeightConverter] = []
 
         for mapping in self._weight_conversions():
             # Handle weights which have been renamed in Transformers
@@ -450,7 +450,7 @@ class Base(
             elif isinstance(mapping, WeightConverter) and all(
                 type(op).__name__ in ("Chunk", "Split") for op in mapping.operations
             ):
-                splits.append(mapping)
+                weight_converters.append(mapping)
             # TODO: Handle other WeightConverters to enable layer merging
 
         # Standardise base model prefix
@@ -488,7 +488,7 @@ class Base(
         # `Split` looks targets up by their names before vLLM's fusions are mapped
         mapper = self.hf_to_vllm_mapper
         split_weights: list[WeightsTransformFn] = [
-            SplitWeights(c, mapper, self) for c in splits
+            SplitWeights(c, mapper, self) for c in weight_converters
         ]
         self.hf_to_vllm_mapper |= WeightsMapper(weights_transforms=split_weights)
 
