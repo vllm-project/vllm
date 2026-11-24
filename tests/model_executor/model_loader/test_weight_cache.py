@@ -431,94 +431,10 @@ def test_weight_cache_backend_llm_restart(vllm_runner, tmp_path, monkeypatch, ba
             )
 
 
-def _save_tiny_qwen4_exp_checkpoint(path: Path) -> None:
-    from tokenizers import Tokenizer
-    from tokenizers.models import WordLevel
-    from tokenizers.pre_tokenizers import WhitespaceSplit
-    from transformers import (
-        Qwen4ExpForCausalLM,
-        Qwen4ExpTextConfig,
-        TokenizersBackend,
-    )
-
-    config = Qwen4ExpTextConfig(
-        architectures=["Qwen4ExpForCausalLM"],
-        vocab_size=128,
-        hidden_size=256,
-        num_hidden_layers=2,
-        num_attention_heads=24,
-        num_key_value_heads=2,
-        head_dim=64,
-        max_position_embeddings=128,
-        layer_types=["linear_attention", "full_attention"],
-        linear_num_key_heads=2,
-        linear_num_value_heads=4,
-        linear_key_head_dim=64,
-        linear_value_head_dim=64,
-        num_experts=4,
-        num_experts_per_tok=2,
-        moe_intermediate_size=64,
-        shared_expert_intermediate_size=64,
-        hc_count=4,
-        hc_lowrank=28,
-        ple_layer_ids=[1],
-        ple_embed_dim=64,
-        ngram_size=2,
-        heads_per_ngram=2,
-        ngram_vocab_size_base=32,
-        make_ngram_vocab_size_divisible_by=8,
-        split_ngram_parts=4,
-        eos_token_id=1,
-        indexer_n_heads=8,
-        indexer_kv_heads=1,
-        indexer_head_dim=128,
-        indexer_budget=2048,
-        indexer_compress_ratio=4,
-        output_gate_type="sigmoid",
-        dtype="bfloat16",
-    )
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(0)
-        model = Qwen4ExpForCausalLM(config).to(torch.bfloat16)
-    model.save_pretrained(path)
-    del model
-
-    vocab = {
-        "[PAD]": 0,
-        "[EOS]": 1,
-        "[UNK]": 2,
-        **{f"tok{i}": i for i in range(3, 128)},
-    }
-    backend = Tokenizer(WordLevel(vocab, unk_token="[UNK]"))
-    backend.pre_tokenizer = WhitespaceSplit()
-    tokenizer = TokenizersBackend(
-        tokenizer_object=backend,
-        unk_token="[UNK]",
-        eos_token="[EOS]",
-        pad_token="[PAD]",
-    )
-    tokenizer.save_pretrained(path)
-
-
 @pytest.mark.distributed(num_gpus=1)
-def test_ipc_cache_tiny_qwen4_exp_private_pinned_restart(
-    vllm_runner, tmp_path, enable_pickle
-):
+def test_ipc_cache_tiny_qwen4_exp_private_pinned_restart(vllm_runner, enable_pickle):
     """A memfd-backed PLE table serves the same outputs as the GPU-resident table."""
-    from safetensors import safe_open
-
-    _save_tiny_qwen4_exp_checkpoint(tmp_path)
-    with safe_open(tmp_path / "model.safetensors", framework="pt") as checkpoint:
-        ple_shards = [
-            name
-            for name in checkpoint.keys()  # noqa: SIM118
-            if ".ple.ple_embedding.ngram_embedding.shard_" in name
-        ]
-        assert len(ple_shards) == 4
-        assert all(
-            checkpoint.get_slice(name).get_dtype() == "BF16" for name in ple_shards
-        )
-
+    model = "tiny-random/qwen3.8-flash-next"
     engram_config = {
         "cpu_offload": True,
         "dp_shared_memory": False,
@@ -551,11 +467,9 @@ def test_ipc_cache_tiny_qwen4_exp_private_pinned_restart(
         detokenize=False,
         logprobs=1,
     )
-    prompt = "tok3 tok4 tok5"
-    (table_path,) = {name.rsplit(".shard_", 1)[0] for name in ple_shards}
-    with vllm_runner(
-        str(tmp_path), engram_config={"cpu_offload": False}, **kwargs
-    ) as runner:
+    prompt = [3, 4, 5]
+    table_path = "language_model.model.layers.1.ple.ple_embedding.ngram_embedding"
+    with vllm_runner(model, engram_config={"cpu_offload": False}, **kwargs) as runner:
         assert runner.apply_model(
             lambda model: model.get_submodule(table_path).weight.device.type
         ) == ["cuda"]
@@ -585,7 +499,7 @@ def test_ipc_cache_tiny_qwen4_exp_private_pinned_restart(
         ), "The PLE weight does not belong to a weight-cache memfd"
 
     with WeightCacheDaemon(
-        str(tmp_path),
+        model,
         tp_size=1,
         extra_args=[
             "--disable-flashinfer-autotune",
@@ -611,7 +525,7 @@ def test_ipc_cache_tiny_qwen4_exp_private_pinned_restart(
         daemon.wait_until_ready()
         extra_config = {"socket_dir": daemon.socket_dir, "fallback": False}
         with vllm_runner(
-            str(tmp_path),
+            model,
             load_format="ipc_cache",
             model_loader_extra_config=extra_config,
             engram_config=engram_config,
