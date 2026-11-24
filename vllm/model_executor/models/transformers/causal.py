@@ -246,11 +246,13 @@ class CausalMixin(VllmModelForTextGeneration, Base):
             vllm_config=vllm_config, prefix=prefix
         )
 
+        output_head = self._output_head
         if not self.pp_group.is_last_rank:
             self.lm_head = PPMissingLayer()
+            if output_head is not None and output_head.model is not None:
+                setattr(self, OUTPUT_HEAD_ATTR, PPMissingLayer())
             return
 
-        output_head = self._output_head
         vocab_size = self.text_config.vocab_size
         if output_head is None:
             in_features = self.text_config.hidden_size
@@ -284,9 +286,7 @@ class CausalMixin(VllmModelForTextGeneration, Base):
     def _create_hf_to_vllm_mapper(self):
         super()._create_hf_to_vllm_mapper()
         # Created here so the quantization config also gets the head's renames
-        self._output_head = None
-        if self.pp_group.is_last_rank:
-            self._output_head = self._create_output_head()
+        self._output_head = self._create_output_head()
         if self._output_head is not None:
             # Before the base model's mappings, which expect the base model's names
             mapper = self._output_head.weights_mapper()
