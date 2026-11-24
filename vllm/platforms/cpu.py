@@ -171,7 +171,9 @@ class CpuPlatform(Platform):
                     and selected_backend != AttentionBackendEnum.AMX_MLA
                 ):
                     logger.info("Cannot use %s backend on CPU.", selected_backend)
-                logger.info_once("Using %s backend.", AttentionBackendEnum.AMX_MLA.name)
+                logger.debug_once(
+                    "Using %s backend.", AttentionBackendEnum.AMX_MLA.name
+                )
                 return AttentionBackendEnum.AMX_MLA.get_path()
             # Reference MLA implementation on CPU. Performance is not the
             # goal here; the backend simply wires the CPU decode kernel
@@ -183,7 +185,7 @@ class CpuPlatform(Platform):
                 AttentionBackendEnum.AMX_MLA,
             ):
                 logger.info("Cannot use %s backend on CPU.", selected_backend)
-            logger.info_once("Using %s backend.", AttentionBackendEnum.CPU_MLA.name)
+            logger.debug_once("Using %s backend.", AttentionBackendEnum.CPU_MLA.name)
             return AttentionBackendEnum.CPU_MLA.get_path()
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
@@ -238,10 +240,9 @@ class CpuPlatform(Platform):
         # which is still being resolved while this platform class is loading.
         from vllm.triton_utils import HAS_TRITON
 
+        # Non-x86 CPUs without Triton use the standalone CPU model runner.
         if cls.get_cpu_architecture() == CpuArchEnum.X86 and not HAS_TRITON:
-            logger.warning_once(
-                "Triton is not installed. triton-cpu is expected on x86 CPUs."
-            )
+            raise RuntimeError("vLLM on x86 CPUs requires Triton (triton-cpu).")
 
         cache_config = vllm_config.cache_config
 
@@ -364,7 +365,7 @@ class CpuPlatform(Platform):
             logger.warning_once("Dual-Batch Overlap is not supported on CPU, disabled.")
             parallel_config.enable_dbo = False
 
-        # Note: workaround for v1 gpu_model_runner
+        # CPU doesn't capture CUDA graphs. compile_sizes can expand these sizes.
         from vllm.config import CompilationMode
 
         vllm_config.compilation_config.cudagraph_capture_sizes = []
@@ -535,6 +536,14 @@ class CpuPlatform(Platform):
             and model_config.use_mla
             and not amx_mla_or_dsv4_enabled
         ):
+            if (
+                model_config.is_hybrid
+                and vllm_config.cache_config.enable_prefix_caching
+            ):
+                raise ValueError(
+                    "MLA on a non-GPU platform does not support prefix caching "
+                    "for hybrid Mamba models; pass --no-enable-prefix-caching."
+                )
             logger.info_once(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled."
@@ -698,60 +707,6 @@ class CpuPlatform(Platform):
                 import vllm._C  # noqa: F401
             except ImportError as e:
                 logger.warning_once("Failed to import from vllm._C: %s", repr(e))
-
-    @classmethod
-    def register_triton_kernel_overrides(cls) -> None:
-        """Fallback C++ implementations for core Triton kernels.
-
-        Used when the Triton-CPU backend is unavailable. When Triton-CPU is
-        present, the Triton kernels can run natively and the overrides
-        would only shadow them, so registration is skipped.
-        """
-        from vllm.triton_utils import HAS_TRITON
-
-        if HAS_TRITON:
-            return
-
-        from vllm.triton_utils.dispatcher import register_kernels
-        from vllm.utils import cpu_triton_utils as cpu_tl
-
-        register_kernels(
-            {
-                "vllm.v1.worker.block_table.ComputeSlotMappingKernel.kernel": (
-                    cpu_tl._compute_slot_mapping_kernel_impl
-                ),
-                "vllm.v1.spec_decode.utils.eagle_step_slot_mapping_metadata_kernel": (
-                    cpu_tl._eagle_step_slot_mapping_metadata_kernel_impl
-                ),
-                "vllm.v1.spec_decode.utils.eagle_prepare_inputs_padded_kernel": (
-                    cpu_tl._eagle_prepare_inputs_padded_kernel_impl
-                ),
-                "vllm.v1.spec_decode.utils.eagle_prepare_next_token_padded_kernel": (
-                    cpu_tl._eagle_prepare_next_token_padded_kernel_impl
-                ),
-                "vllm.v1.spec_decode.utils.copy_and_expand_eagle_inputs_kernel": (
-                    cpu_tl._copy_and_expand_eagle_inputs_kernel_impl
-                ),
-                "vllm.v1.spec_decode.utils.copy_and_expand_dflash_inputs_kernel": (
-                    cpu_tl._copy_and_expand_dflash_inputs_kernel_impl
-                ),
-                "vllm.v1.sample.rejection_sampler.rejection_greedy_sample_kernel": (
-                    cpu_tl._rejection_greedy_sample_kernel_impl
-                ),
-                "vllm.v1.sample.rejection_sampler.rejection_random_sample_kernel": (
-                    cpu_tl._rejection_random_sample_kernel_impl
-                ),
-                "vllm.v1.sample.rejection_sampler.expand_kernel": (
-                    cpu_tl._expand_kernel_impl
-                ),
-                "vllm.v1.sample.rejection_sampler.sample_recovered_tokens_kernel": (
-                    cpu_tl._sample_recovered_tokens_kernel_impl
-                ),
-                "vllm.v1.worker.mamba_utils.batch_memcpy_kernel": (
-                    cpu_tl._batch_memcpy_impl
-                ),
-            }
-        )
 
     @classmethod
     def pack_kv_cache(

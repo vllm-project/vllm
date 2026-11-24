@@ -32,7 +32,7 @@ def _gelu_tanh_and_mul(x: torch.Tensor) -> torch.Tensor:
 
 
 def _prepack_experts(w: torch.Tensor) -> torch.Tensor:
-    """VNNI-prepack expert weights via ``convert_weight_packed``."""
+    """VNNI-prepack expert weights via `convert_weight_packed`."""
     return torch.ops._C.convert_weight_packed(w)
 
 
@@ -660,7 +660,7 @@ def test_mxfp4_cpu_zero_codes_stay_zero(zero_byte, e8m0):
     produces a small finite number instead of zero. Both are special-cased, and
     this is the invariant that special case exists for.
 
-    Worth pinning separately from ``test_mxfp4_cpu_fused_moe``: there the zero
+    Worth pinning separately from `test_mxfp4_cpu_fused_moe`: there the zero
     codes are a small fraction of random weights and a broken special case
     would stay inside the 1e-2 tolerance for the low exponents. Here every
     weight is a zero, so the output is exactly zero or it is not.
@@ -1258,7 +1258,7 @@ INT8_MOE_CONFIGS = [
 def test_int8_w8a8_cpu_fused_moe(M, N, K, E, topk, seed, is_vnni, inplace):
     """Test fused_experts_cpu INT8 W8A8 against torch reference.
 
-    ``inplace`` exercises writing into a fresh output buffer vs. aliasing
+    `inplace` exercises writing into a fresh output buffer vs. aliasing
     the input tensor as the output buffer.
     """
     set_random_seed(seed)

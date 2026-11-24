@@ -56,7 +56,7 @@ def terse_type_name(dt):
     }[dt]
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkTensors:
     w_ref: torch.Tensor
     a: torch.Tensor
@@ -70,7 +70,7 @@ class BenchmarkTensors:
     w_tok_s: torch.Tensor | None
 
 
-@dataclass
+@dataclass(slots=True)
 class TypeConfig:
     act_type: torch.dtype
     weight_type: ScalarType
@@ -210,7 +210,7 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
         w_zp = torch.empty(0, dtype=torch.int, device=device)
     else:
         w_zp = marlin_zero_points(
-            bt.w_g_zp, bt.w_ref.shape[0], bt.w_ref.shape[1], bt.wtype.size_bits
+            bt.w_g_zp, bt.w_g_zp.shape[0], bt.w_ref.shape[1], bt.wtype.size_bits
         )
 
     if bt.group_size is None:
@@ -651,7 +651,7 @@ Benchmark Machete GEMM.
     )
     parser.add_argument(
         "--group-zero-type",
-        type=to_torch_dtype,
+        action=ToTorchDtype,
         choices=["bfloat16", "float16"],
     )
     parser.add_argument(

@@ -61,8 +61,6 @@ steps:
     - vllm/v1/core/encoder_cache_manager.py
     - vllm/v1/core/sched/
     - vllm/v1/engine/
-    - vllm/v1/worker/ec_connector_model_runner_mixin.py
-    - vllm/v1/worker/gpu_model_runner.py
     - vllm/v1/worker/gpu_worker.py
     - vllm/v1/worker/gpu/ec_connector.py
     - vllm/v1/worker/gpu/model_runner.py
@@ -81,7 +79,6 @@ steps:
     PYTHON_BIN: "/vllm-workspace/.venv/bin/python"
     PYTHONUNBUFFERED: "1"
     VLLM_HOST_IP: "127.0.0.1"
-    VLLM_USE_V2_MODEL_RUNNER: "1"
     E_CUDAGRAPH_MM_ENCODER: "1"
     # FA padding NaNs are tracked separately in #57136.
     E_MM_ENCODER_ATTN_BACKEND: "TRITON_ATTN"
@@ -94,7 +91,7 @@ steps:
     BASELINE_FILE: "/tmp/mooncake-ec-e2e/baseline.json"
   commands:
     # Mooncake comes from the CI image (requirements/test/kv_connectors_cuda.txt).
-    - uv venv --system-site-packages --python 3.12 .venv
+    - uv venv --system-site-packages --python python3 .venv
     - bash .buildkite/scripts/check-kv-connectors.sh
     - bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh
   mirror:
@@ -116,8 +113,6 @@ steps:
       - vllm/v1/core/encoder_cache_manager.py
       - vllm/v1/core/sched/
       - vllm/v1/engine/
-      - vllm/v1/worker/ec_connector_model_runner_mixin.py
-      - vllm/v1/worker/gpu_model_runner.py
       - vllm/v1/worker/gpu_worker.py
       - vllm/v1/worker/gpu/ec_connector.py
       - vllm/v1/worker/gpu/model_runner.py

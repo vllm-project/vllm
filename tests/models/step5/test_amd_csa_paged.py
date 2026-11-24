@@ -30,7 +30,7 @@ def _paged(
     seqs: list[torch.Tensor], rows_per_page: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Scatter each request's rows into shared pages behind its own row of a
-    shuffled ``[requests, pages]`` block table."""
+    shuffled `[requests, pages]` block table."""
     pages = [-(-x.shape[0] // rows_per_page) for x in seqs]
     perm = torch.randperm(sum(pages) + 3, device=DEVICE).int()
     table = torch.zeros(len(seqs), max(pages), dtype=torch.int32, device=DEVICE)

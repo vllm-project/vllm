@@ -4,7 +4,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek's first experimental multimodal V4 model — the V4-Flash MoE backbone plus a 32-layer vision tower, 1M context, and a fused DSpark draft module."
   date_added: 2026-09-01
-  date_updated: 2026-09-14
+  date_updated: 2026-11-17
   tasks:
     - text
     - multimodal
@@ -28,10 +28,8 @@ meta:
 
 model:
   model_id: "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp"
-  # Support targets the next release; nothing has shipped yet, so the pinned
-  # image below is the only runnable path.
+  # v0.30.0 is the first release that resolves this checkpoint to the vision class.
   min_vllm_version: "0.30.0"
-  nightly_required: true
   docker_image:
     nvidia: "vllm/vllm-openai:deepseekv4-flash-vision"
     amd: "vllm/vllm-openai-rocm:nightly"
@@ -111,8 +109,6 @@ hardware_overrides:
     extra_args:
       - "--tensor-parallel-size"
       - "2"
-      - "--gpu-memory-utilization"
-      - "0.9"
       - "--max-model-len"
       - "32768"
     extra_env:
@@ -189,7 +185,7 @@ guide: |
   `--tensor-parallel-size 8 --enable-expert-parallel`. The language backbone is the one
   the [DeepSeek-V4-Flash](/deepseek-ai/DeepSeek-V4-Flash) recipe already runs there, but
   the vision path has no published run on those GPUs — expect to tune
-  `--gpu-memory-utilization` and `--max-num-seqs`. The Blackwell
+  `--max-num-seqs`. The Blackwell
   `--attention_config.indexer_kv_dtype mxfp4` / `--moe-backend deep_gemm_mega_moe` tweaks
   the text recipe applies are deliberately not set here: the verified vision run did not
   use them.
@@ -221,7 +217,6 @@ guide: |
     deepseek-ai/DeepSeek-V4-Flash-Vision-Exp \
     --tensor-parallel-size 2 \
     --kv-cache-dtype fp8 --block-size 256 \
-    --gpu-memory-utilization 0.9 \
     --max-model-len 32768
   ```
 
