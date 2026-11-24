@@ -2141,6 +2141,7 @@ class MiniCPMV2_5(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
             all_pixel_values,
             patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=None,
+            use_varlen=True,
         )
 
         return self.resampler(vision_embedding, tgt_sizes)
@@ -2241,6 +2242,7 @@ class MiniCPMV2_6(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
             all_pixel_values,
             patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=tgt_sizes,
+            use_varlen=True,
         )
 
         return self.resampler(vision_embedding, tgt_sizes)
@@ -2340,6 +2342,7 @@ class MiniCPMV4_0(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
             all_pixel_values,
             patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=tgt_sizes,
+            use_varlen=True,
         )
 
         return self.resampler(vision_embedding, tgt_sizes)
@@ -2444,6 +2447,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values,
             patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=tgt_sizes,
+            use_varlen=True,
         )
 
         return self.resampler(vision_embedding, tgt_sizes, all_temporal_ids)
