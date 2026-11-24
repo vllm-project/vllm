@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.envs as envs
-from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import (
     CompileFactors,
     Range,
@@ -1134,6 +1133,11 @@ class CompilationConfig:
             ):
                 self.inductor_compile_config.setdefault(key, enable_asserts)
 
+        if self.inductor_passes:
+            from vllm.compilation.passes.inductor_pass import (
+                CallableInductorPass,
+                InductorPass,
+            )
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
                 assert callable(v), f"pass {k} should be callable or a qualified name"
