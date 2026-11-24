@@ -6,6 +6,7 @@ import threading
 import time
 from contextlib import ExitStack
 from http import HTTPStatus
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
@@ -809,13 +810,13 @@ async def test_mid_stream_cancellation(
 class MockLoggingStatLogger(LoggingStatLogger):
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         super().__init__(vllm_config, engine_index)
-        self.log = MagicMock()
+        self.log: MagicMock = MagicMock()
 
 
 class MockAggregatedStatLogger(AggregatedLoggingStatLogger):
     def __init__(self, vllm_config: VllmConfig, engine_indexes: list[int]):
         super().__init__(vllm_config, engine_indexes)
-        self.log = MagicMock()
+        self.log: MagicMock = MagicMock()
 
 
 @pytest.mark.asyncio
@@ -834,7 +835,9 @@ async def test_customize_loggers(monkeypatch):
 
         await engine.do_log_stats()
 
-        stat_loggers = engine.logger_manager.stat_loggers
+        logger_manager = engine.logger_manager
+        assert logger_manager is not None
+        stat_loggers: Any = logger_manager.stat_loggers
         assert (
             len(stat_loggers) == 3
         )  # MockLoggingStatLogger + LoggingStatLogger +  Promethus Logger
@@ -861,7 +864,9 @@ async def test_customize_aggregated_loggers():
 
         await engine.do_log_stats()
 
-        stat_loggers = engine.logger_manager.stat_loggers
+        logger_manager = engine.logger_manager
+        assert logger_manager is not None
+        stat_loggers: Any = logger_manager.stat_loggers
         assert len(stat_loggers) == 4
         #  MockLoggingStatLogger + MockAggregatedStatLogger
         # + LoggingStatLogger + PrometheusStatLogger
@@ -1048,6 +1053,7 @@ async def test_abort_final_output(output_kind: RequestOutputKind):
 
         # Verify num_cached_tokens is set correctly
         assert hasattr(final_output, "num_cached_tokens")
+        assert final_output.num_cached_tokens is not None
         assert final_output.num_cached_tokens >= 0
 
         # If we got intermediate outputs, verify they are consistent
