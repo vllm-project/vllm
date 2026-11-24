@@ -10,6 +10,7 @@ from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
     ProcessGroupInfo,
     parallel_launch_with_config,
 )
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
@@ -285,7 +286,8 @@ def test_substituted_routed_experts_adds_constant_on_one_tp_rank(tp_rank, padded
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like platform"
 )
-def test_standard_fused_moe_model_discovers_substitution(dist_init):
+@override_parallel_groups(SingleRankGroup())
+def test_standard_fused_moe_model_discovers_substitution():
     vllm_config = VllmConfig()
     vllm_config.model_config = _model_config(
         {"0": [1]}, dtype=torch.bfloat16, is_moe=True
@@ -326,7 +328,8 @@ def test_standard_fused_moe_model_discovers_substitution(dist_init):
         ),
     ],
 )
-def test_fused_moe_combines_compact_experts_and_substitution(dist_init, moe_backend):
+@override_parallel_groups(SingleRankGroup())
+def test_fused_moe_combines_compact_experts_and_substitution(moe_backend):
     hidden_size = 256
     vllm_config = VllmConfig()
     vllm_config.model_config = _model_config(

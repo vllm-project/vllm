@@ -265,6 +265,25 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
             ) from None
 
 
+def init_ray(*args, **kwargs) -> None:
+    """Call `ray.init()` and keep the caller's Python SIGTERM handler.
+
+    `ray.init()` replaces it with `sys.exit()` and Ray's C++ failure handler,
+    which aborts the process 3 s after SIGTERM, so the caller's graceful
+    shutdown would not get to kill its Ray actors.
+    """
+    sigterm_handler = (
+        signal.getsignal(signal.SIGTERM)
+        if threading.current_thread() is threading.main_thread()
+        else None
+    )
+    try:
+        ray.init(*args, **kwargs)
+    finally:
+        if callable(sigterm_handler):
+            signal.signal(signal.SIGTERM, sigterm_handler)
+
+
 def initialize_ray_cluster(
     parallel_config: ParallelConfig,
     ray_address: str | None = None,
@@ -318,19 +337,19 @@ def initialize_ray_cluster(
     elif current_platform.is_rocm() or current_platform.is_xpu():
         # Try to connect existing ray instance and create a new one if not found
         try:
-            ray.init("auto")
+            init_ray("auto")
         except ConnectionError:
             logger.warning(
                 "No existing RAY instance detected. "
                 "A new instance will be launched with current node resources."
             )
-            ray.init(
+            init_ray(
                 address=ray_address,
                 num_gpus=current_platform.device_count(),
                 runtime_env=parallel_config.ray_runtime_env,
             )
     else:
-        ray.init(address=ray_address, runtime_env=parallel_config.ray_runtime_env)
+        init_ray(address=ray_address, runtime_env=parallel_config.ray_runtime_env)
 
     if callable(sigterm_handler):
         signal.signal(signal.SIGTERM, sigterm_handler)

@@ -330,7 +330,7 @@ class MambaStateShapeCalculator:
 @dataclass(slots=True)
 class MambaCopySpec:
     """Data class specifying the memory-copy parameters for Mamba states used for
-    prefix caching in align mode.
+    prefix caching.
 
     Attributes:
         start_addr (int): Starting address for the memory copy operation.
