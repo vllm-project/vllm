@@ -246,7 +246,7 @@ def test_scheduled_encoder_input_stats_disabled_without_log_stats(
     monkeypatch: pytest.MonkeyPatch,
 ):
     scheduler = create_scheduler()
-    scheduler.log_stats = False
+    scheduler.collect_stats = False
     scheduler.observability_config.enable_logging_iteration_details = True
     make_stats = Mock(side_effect=AssertionError("stats should not be computed"))
     monkeypatch.setattr("vllm.v1.core.sched.scheduler.IterationDetails", make_stats)
@@ -4651,7 +4651,7 @@ def create_scheduler_with_priority(
     scheduler = Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
-        log_stats=True,
+        collect_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
         hash_block_size=block_size,
@@ -8556,7 +8556,7 @@ def _create_hybrid_mamba_connector_scheduler(
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
         hash_block_size=block_size,
-        log_stats=True,
+        collect_stats=True,
     )
 
 
