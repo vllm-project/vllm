@@ -521,22 +521,6 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
     def load(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
         return self._submit_load(tuple(plans))
 
-    def _ready_events(self) -> list[torch.Event]:
-        """Events for the caller stream's queued work on the KV buffers.
-
-        A transfer thread touches KV pages the caller stream may still have
-        kernels queued against: a store would copy out bytes the forward pass
-        has not written yet, and a load's pages can be overwritten by a kernel
-        that was enqueued before it.
-        """
-        ready_events: list[torch.Event] = []
-        for device in self._gpu_devices:
-            with torch.device(f"cuda:{device}"):
-                event = torch.Event()
-                event.record(torch.accelerator.current_stream())
-                ready_events.append(event)
-        return ready_events
-
     def _submit_load(
         self,
         plans: tuple[BlockTransferPlan, ...] | BlockLoadBatch,
@@ -545,10 +529,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
     ) -> TransferJobState:
         job = TransferJobState(plans, plan_bytes=plan_bytes)
         job.start()
-        ready_events = self._ready_events()
-        future = self._executor.submit(
-            self._load_sync, job, plans, ready_events, range_args
-        )
+        future = self._executor.submit(self._load_sync, job, plans, range_args)
         with self._job_lock:
             self._futures[id(job)] = future
         return job
@@ -557,14 +538,10 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         self,
         job: TransferJobState,
         plans: tuple[BlockTransferPlan, ...] | BlockLoadBatch,
-        ready_events: list[torch.Event],
         range_args: _LoadArgs | None = None,
     ) -> TransferJobState:
-        # Timed from here: a load queued behind others has not stalled.
         with self._job_lock:
             self._load_deadlines[id(job)] = time.monotonic() + self._timeout_s
-        for event in ready_events:
-            event.synchronize()
         if not plans:
             job.complete()
             return job
@@ -625,7 +602,12 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
     ) -> TransferJobState:
         job = TransferJobState(plans, plan_bytes=plan_bytes)
         job.start()
-        ready_events = self._ready_events()
+        ready_events: list[torch.Event] = []
+        for device in self._gpu_devices:
+            with torch.device(f"cuda:{device}"):
+                event = torch.Event()
+                event.record(torch.accelerator.current_stream())
+                ready_events.append(event)
         future = self._executor.submit(
             self._store_sync, job, plans, ready_events, range_args
         )
