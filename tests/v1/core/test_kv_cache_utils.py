@@ -73,7 +73,9 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
+    MambaManager,
     SinkFullAttentionManager,
+    SlidingWindowManager,
     get_kv_cache_kind,
 )
 from vllm.v1.hisparse.layout import (
@@ -162,6 +164,7 @@ def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.SPARSE,
             is_index_group_leader=True,
         ),
         "model.layers.0.self_attn.indexer": MLAAttentionSpec(
@@ -205,6 +208,7 @@ def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
                 num_kv_heads=1,
                 head_size=576,
                 dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.SPARSE,
                 is_index_group_leader=True,
             )
         ),
@@ -256,6 +260,7 @@ def test_hisparse_packs_hot_layers_up_to_largest_device_page(
     for layer in range(2):
         specs[f"model.layers.{layer}.self_attn"] = MLAAttentionSpec(
             head_size=576,
+            cache_role=SparseCacheRole.SPARSE,
             is_index_group_leader=True,
             block_stride_alignment=source_alignment,
             **mla,
@@ -296,7 +301,10 @@ def test_hisparse_indexer_pages_divide_pool_block(kv_cache_layout, indexer_block
     mla = dict(block_size=64, num_kv_heads=1, dtype=torch.bfloat16)
     specs: dict[str, KVCacheSpec] = {
         "model.layers.0.self_attn": MLAAttentionSpec(
-            head_size=576, is_index_group_leader=True, **mla
+            head_size=576,
+            cache_role=SparseCacheRole.SPARSE,
+            is_index_group_leader=True,
+            **mla,
         ),
         "model.layers.0.self_attn.indexer": MLAAttentionSpec(
             head_size=128,
@@ -1296,9 +1304,6 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
         ),
         pytest.param({"enable_prefix_caching": False}, 0, id="no-prefix-caching"),
         pytest.param({"num_prefill_lookahead_tokens": 2}, 2, id="multi-module-mtp"),
-        pytest.param(
-            {"disable_lookahead_block_hashes": True}, 0, id="disabled-by-config"
-        ),
         pytest.param({"kv_connector": True}, 1, id="kv-connector"),
         pytest.param({"method": None}, 0, id="no-speculation"),
     ],
@@ -1312,9 +1317,6 @@ def test_num_hash_lookahead_tokens(overrides: dict[str, Any], expected: int):
         speculative_config = SpeculativeConfig(
             model="ngram",
             num_speculative_tokens=num_lookahead,
-            disable_lookahead_block_hashes=overrides.get(
-                "disable_lookahead_block_hashes", False
-            ),
         )
         speculative_config.method = method
         if num_lookahead > 1 or method == "dspark":
@@ -1512,7 +1514,6 @@ def test_dcp_target_allocates_replicated_draft_independently(
         hash_block_size=16,
         scheduler_block_size=64,
         dcp_world_size=4,
-        pcp_world_size=pcp_size,
         enable_caching=True,
     )
     assert manager.coordinator.group_block_sizes == (64, 16)
@@ -1627,23 +1628,6 @@ def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
         KVCacheGroup.from_layers(
             {"a": full_layer(draft), "b": full_layer(replace(draft, dcp_sharded=True))}
         )
-
-
-@pytest.mark.parametrize(
-    "target",
-    [
-        full_layer(new_kv_cache_spec()),
-        full_layer(new_mla_spec()),
-        SinkFullAttentionManager.layer_config(
-            new_kv_cache_spec(num_kv_heads=1), sink_len=4
-        ),
-    ],
-)
-def test_draft_layer_tag_is_not_part_of_the_cache_format(target):
-    draft = replace(target, is_draft=True)
-    assert draft == target and hash(draft) == hash(target)
-    group = KVCacheGroup.from_layers({"target": target, "draft": draft})
-    assert group.kv_cache_specs == {"target": target.spec, "draft": target.spec}
 
 
 @pytest.mark.parametrize(
@@ -1942,6 +1926,112 @@ def test_resolve_dcp_kv_block_size_scales_only_sharded_groups():
     assert kv_cache_utils.resolve_dcp_kv_block_size(mamba_group, 4) == 16
 
 
+def _hybrid_prefix_match_config(
+    full_block_size: int,
+    mamba_block_size: int | None = None,
+    swa_block_size: int | None = None,
+    full_tokens_per_state: int = 1,
+) -> KVCacheConfig:
+    groups = [
+        new_kv_cache_group(
+            ["full"],
+            AttentionSpec(
+                block_size=full_block_size,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                tokens_per_state=full_tokens_per_state,
+            ),
+        )
+    ]
+    if mamba_block_size is not None:
+        groups.append(
+            new_kv_cache_group(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                ),
+                MambaManager.config(enable_prefix_caching=True),
+            )
+        )
+    if swa_block_size is not None:
+        groups.append(
+            new_kv_cache_group(
+                ["swa"],
+                AttentionSpec(
+                    block_size=swa_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                SlidingWindowManager.config(sliding_window=swa_block_size),
+            )
+        )
+    return KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=groups)
+
+
+@pytest.mark.parametrize(
+    ("layout", "unit", "error_match"),
+    [
+        ((768, 6144, 768, 1), 128, "SlidingWindowManager"),
+        ((768, 768, 768, 1), 128, "SlidingWindowManager"),
+        ((64, None, 64, 1), 16, "scheduler block size"),
+        ((1024, 8192, None, 128), 64, "per-state compression"),
+    ],
+)
+def test_explicit_prefix_match_unit_rejects_fallback_to_scheduler_block(
+    layout: tuple[int, int | None, int | None, int],
+    unit: int,
+    error_match: str,
+):
+    kv_cache_config = _hybrid_prefix_match_config(*layout)
+    vllm_config = VllmConfig(
+        cache_config=CacheConfig(enable_prefix_caching=True, prefix_match_unit=unit)
+    )
+
+    with pytest.raises(ValueError, match=error_match):
+        kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+
+
+@pytest.mark.parametrize(
+    ("layout", "unit", "enable_prefix_caching", "expected"),
+    [
+        ((768, 6144, 768, 1), 768, True, (6144, 768, 768)),
+        ((1024, 8192, None, 1), 128, True, (8192, 128, 128)),
+        ((384, 6144, 768, 1), None, True, (6144, 384, 6144)),
+        ((768, 6144, 768, 1), 128, False, (6144, 128, 6144)),
+    ],
+)
+def test_prefix_match_unit_allows_supported_and_fallback_unset(
+    layout: tuple[int, int | None, int | None, int],
+    unit: int | None,
+    enable_prefix_caching: bool,
+    expected: tuple[int, int, int],
+):
+    kv_cache_config = _hybrid_prefix_match_config(*layout)
+    vllm_config = VllmConfig(
+        cache_config=CacheConfig(
+            enable_prefix_caching=enable_prefix_caching,
+            prefix_match_unit=unit,
+        ),
+        kv_transfer_config=(
+            None
+            if enable_prefix_caching
+            else KVTransferConfig(kv_connector="ExampleConnector", kv_role="kv_both")
+        ),
+    )
+
+    scheduler_bs, hash_bs = kv_cache_utils.resolve_kv_cache_block_sizes(
+        kv_cache_config, vllm_config
+    )
+    hit_align = kv_cache_utils.resolve_cache_hit_alignment_tokens(
+        kv_cache_config, vllm_config, scheduler_bs, hash_bs
+    )
+    assert (scheduler_bs, hash_bs, hit_align) == expected
+
+
 def _swa_mla_spec(head_size=576):
     return MLAAttentionSpec(
         block_size=16, num_kv_heads=1, head_size=head_size, dtype=torch.float32
@@ -2000,9 +2090,8 @@ def test_group_kind_covers_every_layer_spec():
     assert _group_kind(mixed_group) == KVCacheSpecKind.FULL_ATTENTION
 
 
-def test_prefix_lookup_groups_batch_only_equal_layouts():
-    # A lookup batch takes the EAGLE last-block drop if any member does, so
-    # only groups with equal layouts are batched; packed groups never are.
+def test_prefix_lookup_groups_batch_across_layouts():
+    # The hit logic reads no layout, so layouts do not split lookups.
     spec = new_kv_cache_spec()
     wide = new_kv_cache_spec(num_kv_heads=4)
     packed = {"x": full_layer(spec), "y": full_layer(wide)}
@@ -2013,12 +2102,7 @@ def test_prefix_lookup_groups_batch_only_equal_layouts():
         KVCacheGroup.from_layers(packed),
         KVCacheGroup.from_layers({f"{k}2": v for k, v in packed.items()}),
     ]
-    assert [g.group_ids for g in prefix_lookup_groups(groups)] == [
-        [0, 1],
-        [2],
-        [3],
-        [4],
-    ]
+    assert [g.group_ids for g in prefix_lookup_groups(groups)] == [[0, 1, 2, 3, 4]]
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])

@@ -72,7 +72,11 @@ pub fn lower_text_request(
     tokenizer: &dyn Tokenizer,
 ) -> Result<PreparedTextRequest> {
     let prompt_len = prompt_token_ids.len() as u32;
-    validate_prompt_token_ids(&prompt_token_ids, &sampling_limits)?;
+    validate_prompt_token_ids(
+        &prompt_token_ids,
+        request.mm_features.is_some(),
+        &sampling_limits,
+    )?;
     let skip_special_tokens = &mut request.decode_options.skip_special_tokens;
     *skip_special_tokens = skip_special_tokens.or(sampling_hints.default_skip_special_tokens);
 
@@ -960,49 +964,59 @@ mod tests {
     }
 
     #[test]
-    fn lower_text_request_uses_union_vocab_for_prompt_token_ids() {
-        lower_text_request(
-            sample_request(),
-            vec![1500],
-            sample_sampling_hints(),
-            SamplingLimits {
-                model_vocab_size: 2000,
-                tokenizer_vocab_size: 1000,
-                ..sample_sampling_limits()
-            },
-            StructuredOutputBackend::Xgrammar,
-            &stub_tokenizer(),
-        )
-        .expect("model vocab extends prompt token range");
+    fn lower_text_request_bounds_prompt_token_ids_by_model_vocab() {
+        fn lower(
+            prompt_token_ids: Vec<u32>,
+            model_vocab_size: usize,
+            tokenizer_vocab_size: usize,
+            has_multimodal_inputs: bool,
+        ) -> Result<PreparedTextRequest> {
+            let mut request = sample_request();
+            if has_multimodal_inputs {
+                request.mm_features = Some(vec![MmFeatureSpec {
+                    data: None,
+                    modality: MmModality::Image,
+                    identifier: "image-1".to_string(),
+                    mm_position: PlaceholderRange {
+                        offset: 0,
+                        length: 1,
+                        is_embed: None,
+                    },
+                    mm_hash: Some("hash-1".to_string()),
+                }]);
+            }
+            lower_text_request(
+                request,
+                prompt_token_ids,
+                sample_sampling_hints(),
+                SamplingLimits {
+                    model_vocab_size,
+                    tokenizer_vocab_size,
+                    ..sample_sampling_limits()
+                },
+                StructuredOutputBackend::Xgrammar,
+                &stub_tokenizer(),
+            )
+        }
 
-        lower_text_request(
-            sample_request(),
-            vec![1500],
-            sample_sampling_hints(),
-            SamplingLimits {
-                model_vocab_size: 1000,
-                tokenizer_vocab_size: 2000,
-                ..sample_sampling_limits()
-            },
-            StructuredOutputBackend::Xgrammar,
-            &stub_tokenizer(),
-        )
-        .expect("tokenizer vocab extends prompt token range");
+        lower(vec![1500], 2000, 1000, false).expect("ids the model embeds are accepted");
 
-        let error = lower_text_request(
-            sample_request(),
-            vec![2000],
-            sample_sampling_hints(),
-            SamplingLimits {
-                model_vocab_size: 1000,
-                tokenizer_vocab_size: 2000,
-                ..sample_sampling_limits()
-            },
-            StructuredOutputBackend::Xgrammar,
-            &stub_tokenizer(),
-        )
-        .unwrap_err();
+        // A text-only prompt embeds every id, so tokenizer-only ids past the
+        // model vocab are rejected.
+        let error = lower(vec![999, 1000, 1999], 1000, 2000, false).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::OutOfVocab {
+                parameter: "prompt",
+                token_ids,
+                vocab_size: 1000,
+            }) if token_ids == vec![1000, 1999]
+        ));
 
+        // Multimodal placeholders are replaced before the embedding lookup, so
+        // the tokenizer vocab extends the range.
+        lower(vec![1500], 1000, 2000, true).expect("tokenizer vocab extends prompt token range");
+        let error = lower(vec![2000], 1000, 2000, true).unwrap_err();
         assert!(matches!(
             error,
             Error::TokenIds(TokenIdsError::OutOfVocab {
@@ -1727,6 +1741,44 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&params);
+    }
+
+    #[test]
+    fn neutral_sampling_params_ignore_generation_defaults() {
+        let lower = |sampling_params: SamplingParams, sampling_hints| {
+            lower_sampling_params(
+                SamplingParams {
+                    max_tokens: Some(1),
+                    ..sampling_params
+                },
+                sampling_hints,
+                sample_sampling_limits(),
+                StructuredOutputBackend::Xgrammar,
+                3,
+                &stub_tokenizer(),
+            )
+            .unwrap()
+        };
+        // Every hint is listed, so a new generation default fails to compile
+        // here until `SamplingParams::neutral` decides on it.
+        let generation_defaults = SamplingHints {
+            primary_eos_token_id: None,
+            extra_eos_token_ids: BTreeSet::new(),
+            default_temperature: Some(0.8),
+            default_top_p: Some(0.9),
+            default_top_k: Some(12),
+            default_min_p: Some(0.1),
+            default_repetition_penalty: Some(1.2),
+            default_presence_penalty: Some(1.5),
+            default_frequency_penalty: Some(0.5),
+            default_max_tokens: Some(DefaultMaxTokens::Fallback(128)),
+            default_skip_special_tokens: Some(false),
+        };
+
+        assert_eq!(
+            lower(SamplingParams::neutral(), generation_defaults),
+            lower(SamplingParams::default(), SamplingHints::default()),
+        );
     }
 
     #[test]
