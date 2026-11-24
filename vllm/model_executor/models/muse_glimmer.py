@@ -165,7 +165,9 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         processor = self.get_hf_processor()
         image_processor = processor.image_processor
         video_processor = processor.video_processor
-        num_frames = self.get_num_frames_with_most_features(seq_len, mm_counts)
+        num_frames = self.get_num_frames_with_most_features(
+            seq_len, mm_counts.get("video", 0)
+        )
         return {
             "image": int(image_processor.max_image_tokens),
             "video": (
@@ -185,11 +187,9 @@ class MuseGlimmerProcessingInfo(BaseProcessingInfo):
         )
         return ImageSize(width=side, height=side)
 
-    def get_num_frames_with_most_features(
-        self, seq_len: int, mm_counts: Mapping[str, int]
-    ) -> int:
+    def get_num_frames_with_most_features(self, seq_len: int, num_videos: int) -> int:
         video_processor = self.get_hf_processor().video_processor
-        num_videos = max(mm_counts.get("video", 0), 1)
+        num_videos = max(num_videos, 1)
         groups = max(
             1,
             seq_len // num_videos // int(video_processor.max_video_frame_tokens),
@@ -231,7 +231,7 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
                 width=video_size,
                 height=video_size,
                 num_frames=self.info.get_num_frames_with_most_features(
-                    seq_len, mm_counts
+                    seq_len, mm_counts.get("video", 0)
                 ),
                 num_videos=mm_counts.get("video", 0),
                 overrides=mm_options.get("video"),
