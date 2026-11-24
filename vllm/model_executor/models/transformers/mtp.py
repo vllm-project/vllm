@@ -20,13 +20,13 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 import torch
-from transformers import AutoModelForCausalLM
 from transformers.conversion_mapping import WeightTransform
 
 from vllm.distributed import in_single_pp_stage
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.offloader import BaseOffloader, NoopOffloader
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.dynamic_module import get_transformers_model_class
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel
@@ -52,7 +52,15 @@ class MTPMixin(CausalMixin):
         self.check_version("5.20.0", "MTP")
         from transformers.modeling_layers import MtpModel
 
-        main_model = AutoModelForCausalLM.from_config(**self._from_config_kwargs)
+        # The draft's architectures name the vLLM draft class, so use the target's
+        target = self.vllm_config.model_config
+        architectures = target.hf_config.architectures or []
+        for architecture in architectures:
+            if model_cls := get_transformers_model_class(architecture, target):
+                break
+        else:
+            raise ValueError(f"No Transformers class for {architectures}")
+        main_model = model_cls._from_config(self.config, dtype=self.model_config.dtype)
         num_mtp_layers = getattr(self.text_config, "num_mtp_layers", None)
         mtp_model = MtpModel(main_model, num_mtp_layers)
         self.mtp_weights = MtpModel.get_mtp_weights_regex(main_model)
