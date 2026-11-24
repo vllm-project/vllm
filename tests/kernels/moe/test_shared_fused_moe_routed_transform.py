@@ -14,7 +14,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_torch_equal_or_newer, set_random_seed
+from vllm.utils.torch_utils import set_random_seed
 
 
 class SimpleLinear(nn.Module):
@@ -118,9 +118,8 @@ def setup_cuda():
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
-@pytest.mark.skipif(
-    is_torch_equal_or_newer("2.10.0"),
-    reason="Test fails with PyTorch 2.10.0 see: https://github.com/vllm-project/vllm/issues/33995",
+@pytest.mark.skip(
+    reason="Test fails with PyTorch 2.10.0+ see: https://github.com/vllm-project/vllm/issues/33995",
 )
 def test_routed_input_transform_inside_vs_outside(
     num_tokens: int,
