@@ -567,6 +567,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
+        base_prompt_extras = dict(ctx.prompt_extras) if ctx.prompt_extras else {}
+        if request.chat_template_kwargs is not None:
+            base_prompt_extras["chat_template_kwargs"] = request.chat_template_kwargs
+        prompt_extras = base_prompt_extras or None
+
         requests = [
             ScoringRenderParams(
                 data_1=data_1[i],
@@ -578,7 +583,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 chat_template_content_format=self.chat_template_content_format,
                 max_tokens_per_query=max_tokens_per_query,
                 max_tokens_per_doc=max_tokens_per_doc,
-                prompt_extras=ctx.prompt_extras,
+                prompt_extras=prompt_extras,
                 params=ctx.pooling_params,
                 lora_requests=seq_lora_requests[i],
                 priorities=seq_priority[i],
@@ -610,9 +615,24 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         cmpl_tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
         chat_tok_params = ctx.build_tok_params(self.renderer.default_chat_tok_params)
 
-        prompt_extras = ctx.build_prompt_extras(
-            ctx.pooling_params, self.model_config.multimodal_config
+        prompt_extras = dict(
+            ctx.build_prompt_extras(
+                ctx.pooling_params, self.model_config.multimodal_config
+            )
         )
+        pooling_extra_kwargs = (
+            ctx.pooling_params.extra_kwargs
+            if ctx.pooling_params and ctx.pooling_params.extra_kwargs
+            else None
+        )
+        if (
+            pooling_extra_kwargs
+            and pooling_extra_kwargs.get("chat_template_kwargs") is not None
+            and "chat_template_kwargs" not in prompt_extras
+        ):
+            prompt_extras["chat_template_kwargs"] = pooling_extra_kwargs[
+                "chat_template_kwargs"
+            ]
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
@@ -668,7 +688,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
         tok_params = render_params["tok_params"]
         params = render_params["params"]
-        prompt_extras = render_params["prompt_extras"]
+        prompt_extras = render_params["prompt_extras"] or {}
 
         # Leave room for the tokens that post_process_tokens appends after
         # truncation (e.g. the JinaVL score token), so the limits count them.
@@ -683,9 +703,8 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             chat_template_content_format=render_params["chat_template_content_format"],
             max_tokens_per_query=render_params["max_tokens_per_query"],
             max_tokens_per_doc=render_params["max_tokens_per_doc"],
-            chat_template_kwargs=prompt_extras.get("chat_template_kwargs")
-            if prompt_extras
-            else None,
+            chat_template_kwargs=prompt_extras.get("chat_template_kwargs"),
+            media_io_kwargs=prompt_extras.get("media_io_kwargs"),
         )
 
         tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
@@ -705,21 +724,17 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 "compressed_token_type_ids": compressed,
             }
 
-        prompt_extras = (
-            {
-                k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
-                if (v := prompt_extras.get(k)) is not None
-            }
-            if prompt_extras
-            else None
-        )
+        prompt_extras = {
+            k: v
+            for k in ("mm_processor_kwargs", "cache_salt", "skip_mm_cache")
+            if (v := prompt_extras.get(k)) is not None
+        }
 
         if prompt_extras:
             target_prompt = extract_target_prompt(self.model_config, engine_prompt)
             target_prompt.update(prompt_extras)
 
-        skip_mm_cache = (prompt_extras or {}).pop("skip_mm_cache", False)
+        skip_mm_cache = prompt_extras.pop("skip_mm_cache", False)
         engine_input = self.renderer.process_for_engine(
             engine_prompt, arrival_time, skip_mm_cache=skip_mm_cache
         )
@@ -741,6 +756,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_doc: int = 0,
         chat_template_kwargs: dict[str, Any] | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption | None = None,
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     ):
         model_config = self.model_config
         tokenizer = self.tokenizer
@@ -767,7 +783,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             )
 
         conversation, mm_data, mm_uuids = parse_score_messages(
-            data_1, data_2, model_config, content_format
+            data_1, data_2, model_config, content_format, media_io_kwargs
         )
 
         # Limit text before composing the pair, preserving image blocks.
@@ -862,7 +878,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 prompt_inputs = tokenizer(full_prompt, **encode_kwargs)
             except ChatTemplateResolutionError:
                 conversation, mm_data, mm_uuids = parse_score_messages(
-                    data_1, data_2, model_config
+                    data_1, data_2, model_config, media_io_kwargs=media_io_kwargs
                 )
                 prompt_1, prompt_2 = (message["content"] for message in conversation)
                 assert isinstance(prompt_1, str) and isinstance(prompt_2, str)

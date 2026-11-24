@@ -9,8 +9,10 @@ from fastapi import Request
 from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
+from vllm.config import MultiModalConfig
 from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.outputs import LateChunkingMetadata
 from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.chat_utils import (
@@ -20,8 +22,7 @@ from vllm.renderers.chat_utils import (
 from vllm.renderers.inputs import DictPrompt
 from vllm.tasks import PoolingTask
 
-from ...config import MultiModalConfig
-from ...multimodal.media.connector import merge_media_io_kwargs
+from ..generate.base.protocol import validate_cache_salt
 from .classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -167,8 +168,10 @@ class OfflineInputsContext:
         return default_tok_params.with_kwargs(**tok_kwargs)
 
     def build_prompt_extras(
-        self, params: PoolingParams | None, mm_config: MultiModalConfig | None = None
-    ):
+        self,
+        params: PoolingParams | None,
+        mm_config: MultiModalConfig | None = None,
+    ) -> dict[str, Any]:
         prompt_extras: dict[str, Any] = dict(
             params.extra_kwargs if params and params.extra_kwargs else {}
         )
@@ -179,9 +182,16 @@ class OfflineInputsContext:
         }
 
         default_media_io_kwargs = mm_config.media_io_kwargs if mm_config else None
-        merged["media_io_kwargs"] = merge_media_io_kwargs(
-            default_media_io_kwargs, merged["media_io_kwargs"]
+        req_media_io_kwargs = (
+            self.media_io_kwargs
+            if self.media_io_kwargs is not None
+            else prompt_extras.get("media_io_kwargs")
         )
+        merged_media_io_kwargs = merge_media_io_kwargs(
+            default_media_io_kwargs, req_media_io_kwargs
+        )
+        if merged_media_io_kwargs is not None:
+            merged["media_io_kwargs"] = merged_media_io_kwargs
 
         if self.skip_mm_cache is not None:
             merged["skip_mm_cache"] = self.skip_mm_cache
@@ -191,6 +201,11 @@ class OfflineInputsContext:
 
         if self.mm_processor_kwargs is not None:
             merged["mm_processor_kwargs"] = self.mm_processor_kwargs
+
+        # Validate the final resolved `cache_salt` (from context or `extra_kwargs`)
+        # before passing `prompt_extras` downstream.
+        if "cache_salt" in merged:
+            validate_cache_salt(merged["cache_salt"])
 
         return merged
 

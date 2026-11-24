@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
 from itertools import groupby
-from typing import cast
+from typing import Any, cast
 
 import torch
 
@@ -255,11 +255,12 @@ def parse_score_messages(
     data_2: ScoreData,
     model_config: ModelConfig,
     content_format: ChatTemplateContentFormat = "string",
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[
     list[ConversationMessage], MultiModalDataDict | None, MultiModalUUIDDict | None
 ]:
     """Parse a scoring pair, retaining content blocks for OpenAI-format templates."""
-    mm_tracker = MultiModalItemTracker(model_config)
+    mm_tracker = MultiModalItemTracker(model_config, media_io_kwargs)
     conversation = _parse_score_content("query", data_1, mm_tracker, content_format)
     conversation += _parse_score_content("document", data_2, mm_tracker, content_format)
     mm_items, mm_uuids = mm_tracker.resolve_items()

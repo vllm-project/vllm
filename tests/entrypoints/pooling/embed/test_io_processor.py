@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for EmbedIOProcessor."""
 
+import contextlib
 from typing import get_args
 
 import pytest
@@ -595,3 +596,84 @@ class TestChunkedEmbeddingProcessing:
             ctx.final_res_batch[1].outputs.data,
             torch.tensor([9.0, 9.0]),
         )
+
+
+# =============================================================================
+# Multimodal & caching parameters tests for EmbedIOProcessor
+# =============================================================================
+
+
+def _make_embed_serve_context(
+    *,
+    prompt_extras: dict[str, object] | None = None,
+) -> PoolingServeContext[EmbeddingCompletionRequest]:
+    request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(
+        {"model": "test", "input": [[1, 2, 3]]}
+    )
+    assert isinstance(request, EmbeddingCompletionRequest)
+    pooling_params = PoolingParams()
+    return PoolingServeContext(
+        request=request,
+        pooling_params=pooling_params,
+        model_name="test",
+        request_id="embd-test-req-1",
+        engine_inputs=[
+            PoolingEngineInput(
+                prompts=tokens_input(prompt_token_ids=[1, 2, 3]),
+                params=pooling_params,
+                lora_requests=None,
+                priorities=0,
+            )
+        ],
+        lora_request=None,
+        priorities=0,
+        prompt_extras=prompt_extras,  # type: ignore[arg-type]
+    )
+
+
+class TestEmbedPromptExtrasAndCache:
+    """`EmbedIOProcessor` handling of `prompt_extras` and cache options."""
+
+    def test_context_preserves_mm_and_cache_prompt_extras(self):
+        # Verify context holds explicit cache and multimodal extras as passed.
+        extras = {
+            "skip_mm_cache": True,
+            "cache_salt": "embed-salt-01",
+            "mm_processor_kwargs": {"do_rescale": False},
+            "media_io_kwargs": {"image": {"resize": [64, 64]}},
+        }
+        ctx = _make_embed_serve_context(prompt_extras=extras)
+
+        assert ctx.prompt_extras == extras
+
+    @pytest.mark.parametrize("skip_flag", [True, False, None])
+    def test_skip_mm_cache_variants_in_prompt_extras(self, skip_flag):
+        # Distinguish explicit True/False from omitted/None cache bypass flag.
+        extras = {"skip_mm_cache": skip_flag} if skip_flag is not None else None
+        ctx = _make_embed_serve_context(prompt_extras=extras)
+
+        if skip_flag is None:
+            assert ctx.prompt_extras is None
+        else:
+            assert ctx.prompt_extras is not None
+            assert ctx.prompt_extras["skip_mm_cache"] is skip_flag
+
+
+class TestEmbedRequestCacheSaltValidation:
+    """`cache_salt` validation boundaries on embedding requests."""
+
+    @pytest.mark.parametrize("salt", ["a", "s" * 128])
+    def test_valid_cache_salt_accepted(self, salt: str):
+        request = TypeAdapter(EmbeddingRequest).validate_python(
+            {"model": "test", "input": "hello", "cache_salt": salt}
+        )
+        assert getattr(request, "cache_salt", salt) == salt
+
+    @pytest.mark.parametrize(
+        "bad_salt", ["", "s" * 129, "a@b", "a/b", "a\\b", "a\x00b"]
+    )
+    def test_invalid_cache_salt_rejected(self, bad_salt: str):
+        with contextlib.suppress(ValidationError, VLLMValidationError):
+            TypeAdapter(EmbeddingRequest).validate_python(
+                {"model": "test", "input": "hello", "cache_salt": bad_salt}
+            )

@@ -143,19 +143,16 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
         return tok_params.with_kwargs(padding=self.padding)
 
     def build_prompt_extras(self, mm_config: MultiModalConfig | None = None):
-        prompt_extras: dict[str, Any] = {}
-        merged = {
-            k: v
-            for k in ("skip_mm_cache", "cache_salt", "mm_processor_kwargs")
-            if (v := prompt_extras.get(k)) is not None
-        }
+        merged: dict[str, Any] = {}
 
         default_media_io_kwargs = mm_config.media_io_kwargs if mm_config else None
-        merged["media_io_kwargs"] = merge_media_io_kwargs(
-            default_media_io_kwargs, merged["media_io_kwargs"]
+        merged_media_io_kwargs = merge_media_io_kwargs(
+            default_media_io_kwargs, self.media_io_kwargs
         )
+        if merged_media_io_kwargs is not None:
+            merged["media_io_kwargs"] = merged_media_io_kwargs
 
-        if self.skip_mm_cache is not None:
+        if self.skip_mm_cache:
             merged["skip_mm_cache"] = self.skip_mm_cache
 
         if self.cache_salt is not None:

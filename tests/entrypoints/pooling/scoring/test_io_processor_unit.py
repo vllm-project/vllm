@@ -252,8 +252,9 @@ def test_truncation_keeps_jinavl_score_token(
     processor = llm_reranker_processor
     processor.supports_score_template = True
     processor.model = JinaVLForSequenceClassification
-    processor.renderer = SimpleNamespace(process_for_engine=lambda prompt, _: prompt)
-
+    processor.renderer = SimpleNamespace(
+        process_for_engine=lambda prompt, _, skip_mm_cache=False: prompt
+    )
     engine_input = processor.render(
         ScoringRenderParams(
             data_1="a",
@@ -559,3 +560,192 @@ def test_scoring_detects_structured_content_with_saved_template(
         "a", "bc", {}, chat_template_content_format="auto"
     )
     assert prompt == "query:adocument:bc"
+
+
+# =============================================================================
+# Multimodal & caching parameters tests for CrossEncoderIOProcessor
+# =============================================================================
+
+
+def _make_render_params_with_extras(
+    *,
+    prompt_extras: dict[str, object] | None = None,
+) -> ScoringRenderParams:
+    return ScoringRenderParams(
+        data_1="a",
+        data_2="bc",
+        chat_template=None,
+        chat_template_content_format="string",
+        max_tokens_per_query=0,
+        max_tokens_per_doc=0,
+        tok_params=TokenizeParams(max_total_tokens=32),
+        prompt_extras=prompt_extras,  # type: ignore[arg-type]
+        params=PoolingParams(task="classify"),
+        lora_requests=None,
+        priorities=0,
+    )
+
+
+def _call_get_score_prompt_with_media_io(
+    processor: CrossEncoderIOProcessor,
+    media_io_kwargs: dict[str, dict[str, object]] | None,
+    *,
+    chat_template: str | None = None,
+):
+    return processor.get_score_prompt(
+        "a",
+        "bc",
+        {},
+        chat_template=chat_template,
+        media_io_kwargs=media_io_kwargs,  # type: ignore[arg-type]
+    )
+
+
+class TestCrossEncoderMediaIoKwargsFallback:
+    """`media_io_kwargs` reaches `parse_score_messages` on normal and fallback paths."""
+
+    def test_get_score_prompt_forwards_media_io_kwargs_on_template_fallback(
+        self, llm_reranker_processor: CrossEncoderIOProcessor, monkeypatch
+    ):
+        from vllm.entrypoints.pooling.scoring import io_processor as score_io_mod
+
+        seen_kwargs: list[object] = []
+        orig_parse = score_io_mod.parse_score_messages
+
+        def _spy_parse(
+            data_1,
+            data_2,
+            model_config,
+            content_format="string",
+            media_io_kwargs=None,
+        ):
+            seen_kwargs.append(media_io_kwargs)
+            return orig_parse(
+                data_1,
+                data_2,
+                model_config,
+                content_format=content_format,
+                media_io_kwargs=media_io_kwargs,
+            )
+
+        def _raise_template_error(*args, **kwargs):
+            raise score_io_mod.ChatTemplateResolutionError("fallback to default")
+
+        monkeypatch.setattr(score_io_mod, "parse_score_messages", _spy_parse)
+        monkeypatch.setattr(
+            score_io_mod, "safe_apply_chat_template", _raise_template_error
+        )
+
+        media_kwargs = {"image": {"resize": [32, 32]}}
+        _call_get_score_prompt_with_media_io(
+            llm_reranker_processor,
+            media_kwargs,
+            chat_template="{{ messages }}",
+        )
+
+        assert len(seen_kwargs) == 2
+        assert seen_kwargs[0] == media_kwargs
+        assert seen_kwargs[1] == media_kwargs
+
+
+class TestCrossEncoderRenderExtrasAndCacheFlags:
+    """`CrossEncoderIOProcessor.render` preserves `skip_mm_cache` and prompt extras."""
+
+    @pytest.mark.parametrize("skip_mm_cache", [True, False])
+    def test_render_forwards_skip_mm_cache_to_process_for_engine(
+        self,
+        llm_reranker_processor: CrossEncoderIOProcessor,
+        monkeypatch,
+        skip_mm_cache,
+    ):
+        from vllm.entrypoints.pooling.scoring import io_processor as score_io_mod
+
+        seen_flags: list[bool] = []
+        monkeypatch.setattr(score_io_mod, "extract_target_prompt", lambda mc, ep: ep)
+        llm_reranker_processor.renderer = SimpleNamespace(
+            process_for_engine=lambda prompt, arrival_time, skip_mm_cache=False: (
+                seen_flags.append(skip_mm_cache) or prompt
+            )
+        )
+
+        render_params = _make_render_params_with_extras(
+            prompt_extras={"skip_mm_cache": skip_mm_cache}
+        )
+        llm_reranker_processor.render(render_params)
+
+        assert seen_flags == [skip_mm_cache]
+
+    def test_render_attaches_mm_processor_kwargs_and_cache_salt(
+        self, llm_reranker_processor: CrossEncoderIOProcessor, monkeypatch
+    ):
+        from vllm.entrypoints.pooling.scoring import io_processor as score_io_mod
+
+        target_prompt: dict[str, object] = {}
+        monkeypatch.setattr(
+            score_io_mod, "extract_target_prompt", lambda mc, ep: target_prompt
+        )
+        llm_reranker_processor.renderer = SimpleNamespace(
+            process_for_engine=lambda prompt, arrival_time, skip_mm_cache=False: prompt
+        )
+
+        render_params = _make_render_params_with_extras(
+            prompt_extras={
+                "mm_processor_kwargs": {"do_rescale": False},
+                "cache_salt": "tenant-salt-01",
+            }
+        )
+        llm_reranker_processor.render(render_params)
+
+        assert target_prompt["mm_processor_kwargs"] == {"do_rescale": False}
+        assert target_prompt["cache_salt"] == "tenant-salt-01"
+
+
+class TestOfflineScoreContextForwarding:
+    """`PoolingOfflineMixin.score` forwards new multimodal and cache options."""
+
+    def test_score_forwards_mm_and_cache_kwargs_to_context(self, monkeypatch):
+        from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
+
+        captured: list[OfflineScoringInputsContext] = []
+
+        class _StubScoringProcessor(CrossEncoderIOProcessor):
+            def __init__(self):
+                pass
+
+            def valid_inputs(self, data_1, data_2):
+                d1 = data_1 if isinstance(data_1, list) else [data_1]
+                d2 = data_2 if isinstance(data_2, list) else [data_2]
+                return ScoringData(data_1=d1, data_2=d2)
+
+            def get_request_factory_offline(self, ctx):
+                captured.append(ctx)
+                return (lambda: iter(()), 0)
+
+            def post_process_offline(self, ctx):
+                return []
+
+        llm = PoolingOfflineMixin.__new__(PoolingOfflineMixin)
+        llm.runner_type = "pooling"
+        llm.pooling_task = "classify"
+        llm.model_config = SimpleNamespace(hf_config=SimpleNamespace(num_labels=1))
+        llm.pooling_io_processors = {"cross-encoder": _StubScoringProcessor()}
+        monkeypatch.setattr(llm, "_run_tiling_engine", lambda *args, **kwargs: [])
+
+        media_kwargs = {"image": {"fps": 1}}
+        mm_kwargs = {"do_crop": True}
+        llm.score(
+            "a",
+            "bc",
+            skip_mm_cache=True,
+            cache_salt="score-salt",
+            media_io_kwargs=media_kwargs,
+            mm_processor_kwargs=mm_kwargs,
+            use_tqdm=False,
+        )
+
+        assert len(captured) == 1
+        ctx = captured[0]
+        assert ctx.skip_mm_cache is True
+        assert ctx.cache_salt == "score-salt"
+        assert ctx.media_io_kwargs == media_kwargs
+        assert ctx.mm_processor_kwargs == mm_kwargs
