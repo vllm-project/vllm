@@ -20,8 +20,8 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
+from vllm.models.hy_v4.common.mrope import fused_mrope_norm, rope_into
 from vllm.models.hy_v4.nvidia.attention import HYV4MLAAttention
-from vllm.models.hy_v4.nvidia.mrope import fused_mrope_norm, rope_into
 from vllm.models.hy_v4_flash.configs import SLIDING_ATTENTION
 from vllm.platforms import current_platform
 

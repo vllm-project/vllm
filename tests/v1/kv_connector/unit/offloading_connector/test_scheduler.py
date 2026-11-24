@@ -904,10 +904,11 @@ def test_handoff_partial_tail_excludes_sliding_window_groups(with_swa_group: boo
     """The hand-off handler reports no live chunk: its partial tail reads the
     request's block ids only for groups that are not CoW sources, and the
     scheduler zeroes only sliding-window groups. A sliding-window group that is
-    not a CoW source must therefore turn the partial tail off.
+    not a CoW source must therefore turn the partial tail off, even when core
+    otherwise reports fine-grained hits.
     """
     vllm_config = _make_vllm_config()
-    vllm_config.cache_config.prefix_match_unit = 4
+    vllm_config.cache_config.prefix_match_unit = 16 if with_swa_group else 4
     vllm_config.speculative_config = None
     kv_cache_config = _make_mamba_hybrid_kv_cache_config()
     kv_cache_config.cache_hit_alignment_tokens = 4
