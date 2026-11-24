@@ -853,15 +853,6 @@ class MoRIIOConnectorScheduler:
         # WRITE consumer: seconds a receive waits for its write_done; None while
         # the timer is off.
         self._write_recv_timeout = get_write_recv_timeout(self.kv_transfer_config)
-        if (
-            self.mode == MoRIIOMode.WRITE
-            and self.kv_transfer_config.kv_role == "kv_consumer"
-            and self._write_recv_timeout is None
-        ):
-            logger.warning(
-                "MoRI-IO WRITE-mode consumer: write_recv_timeout is disabled; "
-                "it requires kv_load_failure_policy='fail'."
-            )
 
         if self.is_producer:
             set_role(ROLE.PRODUCER)
