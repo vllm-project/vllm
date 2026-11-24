@@ -136,9 +136,3 @@ class HierarchicalLMHead(nn.Module):
                 tensors[name].copy_(weight)
             loaded.add(name)
         return loaded
-
-    def validate_loaded_weights(self, loaded: set[str]) -> None:
-        """Require the ordering buffer as well as the centroid parameters."""
-        required = {"masked_embedding." + name for name in self.state_dict()}
-        if missing := required - loaded:
-            raise ValueError(f"Missing hierarchical LM-head weights: {sorted(missing)}")

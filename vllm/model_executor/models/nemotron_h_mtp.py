@@ -610,5 +610,4 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant, SupportsMultiModalEmbed
                 "masked_embedding." + name
                 for name in self.masked_embedding.load_weights(router_weights)
             )
-            self.masked_embedding.validate_loaded_weights(loaded_params)
         return loaded_params

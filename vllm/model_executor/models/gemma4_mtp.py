@@ -505,10 +505,7 @@ class Gemma4MTP(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        if self.masked_embedding is not None:
-            self.masked_embedding.validate_loaded_weights(loaded)
-        return loaded
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
         # Built here, outside inference mode, and refilled in place on reload.

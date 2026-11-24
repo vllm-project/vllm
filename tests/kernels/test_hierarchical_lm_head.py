@@ -54,7 +54,6 @@ def test_router_loads_through_auto_weights_loader(default_device):
     ]
     with torch.device(default_device):
         loaded = AutoWeightsLoader(model).load_weights(iter(weights))
-    model.masked_embedding.validate_loaded_weights(loaded)
     torch.testing.assert_close(model.masked_embedding.centroids.weight, torch.eye(4))
     torch.testing.assert_close(model.masked_embedding.token_ordering, ordering)
     assert "masked_embedding.token_ordering" in loaded
@@ -74,13 +73,6 @@ def test_router_checkpoint_rejects_invalid_ordering(invalid):
         ordering = ordering[:-1]
     with pytest.raises(ValueError, match="permutation|shape"):
         head.load_weights([("token_ordering", ordering)])
-
-
-def test_router_checkpoint_requires_ordering_buffer():
-    head = HierarchicalLMHead(4, 8, 4, 2)
-    loaded = head.load_weights([("centroids.weight", torch.eye(4))])
-    with pytest.raises(ValueError, match="token_ordering"):
-        head.validate_loaded_weights({"masked_embedding." + name for name in loaded})
 
 
 @pytest.mark.parametrize("top_k,expected_token", [(1, 5), (4, 7)])

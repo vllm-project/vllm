@@ -69,5 +69,5 @@ vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 \
 NemotronH currently requires TP=1 and unquantized vocabulary weights shared with
 the target. Gemma4 retains its existing embedding-sharing and vocabulary-weight
 gathering behavior. The scorer requires floating-point vocabulary weights
-matching the draft hidden-state dtype. Missing router tensors, incompatible
-shapes and invalid vocabulary permutations are rejected during loading.
+matching the draft hidden-state dtype. Incompatible shapes and invalid vocabulary
+permutations are rejected during loading.
