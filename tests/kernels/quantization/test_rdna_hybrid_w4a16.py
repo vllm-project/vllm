@@ -105,7 +105,7 @@ def _rdna_hybrid_w4a16_reference(
 @pytest.mark.parametrize("has_zp", [False, True])
 @pytest.mark.parametrize(
     "M",
-    [1, MAX_SKINNY_BATCH_SIZE, MAX_SKINNY_BATCH_SIZE + 1, 8, 9, 64, MIN_DENSE_M],
+    [1, MAX_SKINNY_BATCH_SIZE, MAX_SKINNY_BATCH_SIZE + 1, 8, 9, 64, 256],
     ids=[
         "M=1_decode",
         "M=5_decode",
@@ -223,29 +223,39 @@ def test_rdna_hybrid_w4a16_apply_with_bias(dtype, M):
 
 
 @pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
-    "M,has_dense,expected_path",
+    "dense_offset,has_dense,expected_path",
     [
-        (MAX_SKINNY_BATCH_SIZE, True, "triton"),
-        (MIN_DENSE_M - 1, True, "triton"),
-        (MIN_DENSE_M, True, "dense"),
-        (MIN_DENSE_M, False, "triton"),
+        (None, True, "triton"),
+        (-1, True, "triton"),
+        (0, True, "dense"),
+        (0, False, "triton"),
     ],
     ids=["skinny_past_lds", "below_dense_threshold", "at_dense_threshold", "off"],
 )
-def test_rdna_hybrid_w4a16_dense_dispatch(M, has_dense, expected_path, monkeypatch):
+def test_rdna_hybrid_w4a16_dense_dispatch(
+    dtype, dense_offset, has_dense, expected_path, monkeypatch
+):
     """Memory-bound batches must stay on int4, including decode batches that
     miss the skinny path on the LDS limit (e.g. spec-decode verify).
+
+    `dense_offset` is M relative to the dtype's dense threshold; None is a
+    decode batch.
     """
     import vllm._custom_ops as ops
 
     N, K, G = 16, 16384, 128
+    if dense_offset is None:
+        M = MAX_SKINNY_BATCH_SIZE
+    else:
+        M = MIN_DENSE_M[dtype] + dense_offset
     assert M > MAX_SKINNY_BATCH_SIZE or K * M > MEDIUM_SKINNY_LIMIT_ELEMENTS
 
-    x_mk = torch.empty((M, K), dtype=torch.float16)
+    x_mk = torch.empty((M, K), dtype=dtype)
     w_q = torch.empty((N, K // 2), dtype=torch.int8)
-    scales = torch.empty((N, K // G), dtype=torch.float16)
-    w_dequant = torch.empty((N, K), dtype=torch.float16) if has_dense else None
+    scales = torch.empty((N, K // G), dtype=dtype)
+    w_dequant = torch.empty((N, K), dtype=dtype) if has_dense else None
     called = []
 
     def fake(path):
