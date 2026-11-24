@@ -23,6 +23,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_ep_group
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
@@ -421,6 +422,11 @@ class DeepGemmMegaMoEExperts(nn.Module):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    @staticmethod
+    def _group() -> GroupCoordinator:
+        """The ranks one launch dispatches to and shares the symmetric buffer with."""
+        return get_ep_group()
 
     @property
     def has_fused_shared_experts(self) -> bool:
@@ -838,7 +844,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
-        group = get_ep_group().device_group
+        group = self._group().device_group
         key = (
             id(group),
             torch.accelerator.current_device_index(),
@@ -893,7 +899,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
 
         deep_gemm = _import_deep_gemm()
         args = (
-            get_ep_group().world_size,
+            self._group().world_size,
             self.num_experts,
             self.get_symm_buffer().num_max_tokens_per_rank,
             num_tokens,
@@ -953,7 +959,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         return extract_layer_index(self.prefix)
 
     def _synchronize_first_launch(self) -> None:
-        ep_group = get_ep_group()
+        ep_group = self._group()
         key = (id(ep_group.cpu_group), torch.accelerator.current_device_index())
         if key in self._synchronized_ep_groups:
             return
