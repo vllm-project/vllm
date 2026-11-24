@@ -1711,17 +1711,16 @@ class ShortConvStateManager(DFlashSlidingWindowManager):
         """Which blocks of `[start_block, end_block)` end on a reachable hit."""
         if start_block >= end_block:
             return []
-        mask = None
-        if self.enable_caching:
-            mask = self.reachable_block_mask(
-                start_block=start_block,
-                end_block=end_block,
-                alignment_tokens=self.cache_hit_alignment_tokens,
-                block_size=self.group_block_size,
-                manager_config=self.manager_config,
-                retention_interval=0,
-                reachable_boundaries=self._reachable_boundaries.get(request_id, ()),
-            )
+        # An offloader can return a prefix even if local prefix caching is off.
+        mask = self.reachable_block_mask(
+            start_block=start_block,
+            end_block=end_block,
+            alignment_tokens=self.cache_hit_alignment_tokens,
+            block_size=self.group_block_size,
+            manager_config=self.manager_config,
+            retention_interval=0,
+            reachable_boundaries=self._reachable_boundaries.get(request_id, ()),
+        )
         return [False] * (end_block - start_block) if mask is None else mask
 
     def get_num_blocks_to_allocate(

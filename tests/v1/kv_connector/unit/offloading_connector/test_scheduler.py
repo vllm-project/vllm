@@ -7102,14 +7102,16 @@ def test_retention_interval_zero_stores_only_replay_boundaries(
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
+@pytest.mark.parametrize("enable_prefix_caching", [True, False])
 def test_short_conv_history_stores_and_loads_only_reachable_tails(
-    request_runner, async_scheduling: bool
+    request_runner, async_scheduling: bool, enable_prefix_caching: bool
 ):
     spec_kwargs: dict[str, Any] = dict(num_kv_heads=1, head_size=1, dtype=torch.float32)
     runner = request_runner(
         block_size=4,
         num_gpu_blocks=200,
         async_scheduling=async_scheduling,
+        enable_prefix_caching=enable_prefix_caching,
         kv_cache_groups=[
             make_kv_cache_group(["full"], AttentionSpec(block_size=16, **spec_kwargs)),
             make_kv_cache_group(

@@ -126,6 +126,9 @@ def _supports_sparse_history(vllm_config: VllmConfig) -> bool:
     """Whether every reader of the conv history tolerates discarded rows."""
     if vllm_config.cache_config.prefix_cache_retention_interval != 0:
         return False
+    # A later microbatch can read conv rows from inside the same scheduler step.
+    if vllm_config.parallel_config.use_ubatching:
+        return False
     kv_transfer_config = vllm_config.kv_transfer_config
     if kv_transfer_config is None:
         return True

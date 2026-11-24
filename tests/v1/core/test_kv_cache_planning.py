@@ -54,6 +54,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     HiSparseHotManager,
     HiSparseResidentManager,
     MambaManager,
+    ShortConvStateManager,
     SlidingWindowManager,
     get_kv_cache_kind,
 )
@@ -2246,6 +2247,36 @@ def test_kv_cache_reserves_null_block_for_max_model_len(use_override):
         vllm_config, [{"layer1": full_layer(spec)}], available_memory
     )
     assert configs[0].num_blocks == 33
+
+
+def test_short_conv_cache_reserves_the_discard_block():
+    from vllm.v1.worker.worker_base import CompilationTimes
+
+    config = VllmConfig(model_config=ModelConfig(max_model_len=512))
+    config.cache_config.kv_cache_layout = "LBHNC"
+    spec = new_kv_cache_spec(block_size=16)
+    layers = {
+        "attn": full_layer(spec),
+        "conv": ShortConvStateManager.layer_config(
+            spec, sliding_window=4, max_in_flight_steps=2
+        ),
+    }
+    # 32 full-attention blocks, 9 conv blocks and two reserved IDs.
+    page = spec.page_size_bytes
+    with pytest.raises(ValueError, match="max seq len"):
+        get_kv_cache_configs(config, [layers], [42 * page])
+    caches = get_kv_cache_configs(config, [layers], [43 * page])
+    with pytest.raises(ValueError, match="max seq len"):
+        kv_cache_planning.shrink_kv_cache_configs(config, caches, 42)
+
+    config.model_config.original_max_model_len = -1
+    caches = get_kv_cache_configs(config, [layers], [43 * page])
+    assert config.model_config.max_model_len == 512
+    scheduler_cache = generate_scheduler_kv_cache_config(caches)
+    kv_cache_planning.finalize_extensible_kv_cache(
+        config, caches, scheduler_cache, [CompilationTimes(0.0, 0.0, num_kv_blocks=42)]
+    )
+    assert config.model_config.max_model_len == 496
 
 
 def test_auto_fit_max_model_len_reserves_null_block():

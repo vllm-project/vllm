@@ -291,6 +291,7 @@ class RequestRunner:
         worker_count: int = 1,
         retention_interval: int | None = None,
         speculative_config: Any | None = None,
+        enable_prefix_caching: bool = True,
     ):
         assert blocks_per_chunk == 1 or all(
             group.block_size == block_size for group in kv_cache_groups or ()
@@ -311,6 +312,7 @@ class RequestRunner:
         vllm_config.scheduler_config.async_scheduling = async_scheduling
         vllm_config.parallel_config.world_size = worker_count
         vllm_config.cache_config.prefix_cache_retention_interval = retention_interval
+        vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
         if speculative_config is not None:
             vllm_config.speculative_config = speculative_config
 
@@ -807,6 +809,7 @@ def request_runner():
         worker_count=1,
         retention_interval=None,
         speculative_config=None,
+        enable_prefix_caching=True,
     ):
         runner = RequestRunner(
             block_size=block_size,
@@ -818,6 +821,7 @@ def request_runner():
             worker_count=worker_count,
             retention_interval=retention_interval,
             speculative_config=speculative_config,
+            enable_prefix_caching=enable_prefix_caching,
         )
         runners.append(runner)
         return runner
