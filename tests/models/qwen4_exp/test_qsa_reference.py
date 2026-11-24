@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 import itertools
 import math
+import os
+import subprocess
+import sys
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -1279,6 +1284,226 @@ def test_qsa_sparse_paged_attention_correctness(
     expected = expected * torch.sigmoid(output_gate)
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@requires_qsa_kernels
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="PrimTS QSA runs on sm_100/sm_103",
+)
+# Per-rank heads at TP1 and TP4.
+@pytest.mark.parametrize("heads, kv_heads", [(24, 2), (6, 1)], ids=["tp1", "tp4"])
+def test_qsa_primts_matches_sparse_attention(heads: int, kv_heads: int) -> None:
+    """Prefill steps through FlashInfer PrimTS write what the Triton kernel
+    writes without blocking the host. Steps of different row buckets share the
+    builder's buffers, and the plans do not outlive them."""
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_primts import (
+        PrimTSBuffers,
+        build_primts_routes,
+        primts_attention,
+    )
+    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAImpl
+
+    torch.manual_seed(0)
+    head_dim, page_size, budget, ratio, pages = 256, 1600, 2048, 4, 6
+    kv_rows = torch.randn(
+        4 * pages, page_size, kv_heads, 2 * head_dim, device="cuda"
+    ).to(torch.bfloat16)
+    kv_cache = kv_rows.transpose(1, 2)  # QSAImpl's view
+    block_table = torch.randperm(4 * pages, device="cuda").view(4, pages).int()
+    impl = Qwen4ExpQSAImpl(
+        num_heads=heads,
+        head_size=head_dim,
+        scale=head_dim**-0.5,
+        num_kv_heads=kv_heads,
+        kv_cache_dtype="auto",
+    )
+    buffers = PrimTSBuffers(max_num_reqs=64, block_size=ratio)
+    # (cached prefix, new rows) per request. A lone 32-row prompt fills the
+    # smallest bucket; the mixed step has a decode with three draft rows, a short
+    # and a long fresh prefill (past the selection budget) and a chunked prefill.
+    # Alternating them grows the shared workspace, then reuses each plan after
+    # the other bucket has overwritten it.
+    short = [(0, 32)]
+    mixed = [(5000, 4), (0, 300), (0, 3000), (2500, 1500)]
+    for requests in (short, mixed, short, mixed):
+        query_lens = torch.tensor([n for _, n in requests])
+        seq_lens = torch.tensor([p + n for p, n in requests], dtype=torch.int32).cuda()
+        query_start_loc = torch.zeros(len(requests) + 1, dtype=torch.int32)
+        query_start_loc[1:] = query_lens.cumsum(0)
+        query_start_loc = query_start_loc.cuda()
+        num_rows = int(query_lens.sum())
+        token_to_req = torch.repeat_interleave(
+            torch.arange(len(requests), dtype=torch.int32), query_lens
+        ).cuda()
+        positions = torch.cat([torch.arange(p, p + n) for p, n in requests]).cuda()
+        q = torch.randn(num_rows, heads, head_dim, device="cuda", dtype=torch.bfloat16)
+        output_gate = torch.randn_like(q)
+        # Top-k of random block scores: every visible block while they fit.
+        visible_blocks = ((positions + 1) // ratio).int()
+        scores = torch.rand(num_rows, pages * page_size // ratio, device="cuda")
+        blocks = torch.arange(scores.shape[1], device="cuda")
+        scores[blocks >= visible_blocks.unsqueeze(1)] = -1
+        top_scores, block_indices = scores.topk(budget // ratio, dim=1)
+        block_indices = torch.where(top_scores >= 0, block_indices, -1).int()
+        selected = torch.empty(
+            num_rows, budget + ratio, device="cuda", dtype=torch.int32
+        )
+        qsa_indexer_ops.expand_qsa_block_indices(
+            block_indices, positions, visible_blocks, ratio, budget, selected
+        )
+        tables = block_table[: len(requests)]
+        expected = torch.empty_like(q)
+        impl.attend(
+            None,
+            q,
+            kv_cache,
+            selected,
+            tables,
+            token_to_req,
+            True,
+            expected,
+            output_gate,
+        )
+        actual = torch.full_like(q, torch.nan)
+        # The first call may plan; the second must not block the host.
+        for sync_mode in ("default", "error"):
+            torch.cuda.set_sync_debug_mode(sync_mode)
+            try:
+                routes = build_primts_routes(
+                    query_start_loc, seq_lens, token_to_req, tables, num_rows, buffers
+                )
+                primts_attention(
+                    "layer",
+                    q,
+                    kv_cache,
+                    selected,
+                    routes,
+                    impl.scale,
+                    output_gate,
+                    actual,
+                )
+            finally:
+                torch.cuda.set_sync_debug_mode("default")
+        torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+    # Prepared plans reference the KV cache, so they must go with the buffers.
+    cache = weakref.ref(kv_rows)
+    del kv_rows, kv_cache, buffers, routes
+    gc.collect()
+    assert cache() is None
+
+
+@requires_qsa_kernels
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="PrimTS QSA runs on sm_100/sm_103",
+)
+@pytest.mark.parametrize(
+    "block_size, block_topk, head_dim, heads, kv_heads",
+    [
+        (4, 512, 256, 24, 2),  # Qwen3.8-Flash-Next at TP1
+        (4, 512, 256, 6, 1),  # and at TP4
+        (2, 512, 256, 24, 2),  # unsupported block size
+        (4, 512, 32, 24, 2),  # unsupported head size
+        (4, 512, 256, 32, 1),  # 8 rows x 32 heads exceed a 128-row tile
+    ],
+)
+def test_qsa_primts_selection_matches_flashinfer(
+    block_size: int, block_topk: int, head_dim: int, heads: int, kv_heads: int
+) -> None:
+    """PrimTS is selected exactly for the geometries FlashInfer can plan, so
+    other QSA configs keep the Triton kernel instead of failing at runtime."""
+    from flashinfer.attention.prims_ts import (
+        QTokenKvBlockSparsePagedTSWrapper,
+        get_q_token_kv_block_sparse_workspace_size,
+    )
+
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_primts import (
+        GROUP_SIZE,
+        primts_supported,
+    )
+
+    rows, page_size = 64, 1600
+    q = torch.empty(rows, heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    k_cache = torch.empty(
+        1, kv_heads, page_size, head_dim, device="cuda", dtype=torch.bfloat16
+    )
+    block_table = torch.zeros(1, 1, device="cuda", dtype=torch.int32)
+    qo_indptr = torch.arange(0, rows + 1, GROUP_SIZE, device="cuda", dtype=torch.int32)
+    try:
+        workspace = torch.empty(
+            get_q_token_kv_block_sparse_workspace_size(
+                q,
+                k_cache,
+                block_table,
+                block_topk=block_topk,
+                max_seq_len_kv=page_size,
+                qo_indptr=qo_indptr,
+                group_size=GROUP_SIZE,
+                kv_block_size=block_size,
+                split_kv=False,
+            ),
+            dtype=torch.uint8,
+            device="cuda",
+        )
+        QTokenKvBlockSparsePagedTSWrapper().plan(
+            qo_indptr.numel() - 1,
+            heads,
+            kv_heads,
+            head_dim,
+            block_size,
+            page_size,
+            block_topk,
+            page_size,
+            device=q.device,
+            workspace_buffer=workspace,
+            group_size=GROUP_SIZE,
+            packed_query=True,
+            split_kv=False,
+            q_dtype=q.dtype,
+        )
+        planned = True
+    except (ValueError, NotImplementedError):
+        planned = False
+    assert (
+        primts_supported(block_size, block_topk, head_dim, heads, kv_heads) == planned
+    )
+
+
+@requires_qsa_kernels
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="PrimTS QSA runs on sm_100/sm_103",
+)
+# A local JIT build of the metadata module is refused too: FlashInfer only
+# loads it through a ninja check, which FLASHINFER_DISABLE_JIT forbids.
+@pytest.mark.parametrize("local_build", [False, True], ids=["empty", "local_build"])
+def test_qsa_primts_needs_its_jit_module(tmp_path, local_build: bool) -> None:
+    """With FlashInfer's JIT disabled, PrimTS is not selected unless its
+    metadata module ships precompiled, so the first prefill runs on Triton
+    instead of raising MissingJITCacheError."""
+    code = (
+        "from flashinfer.jit import "
+        "gen_prims_ts_q_token_kv_block_sparse_metadata_module\n"
+        "from vllm.utils.flashinfer import has_flashinfer_prims_ts_qsa\n"
+        "spec = gen_prims_ts_q_token_kv_block_sparse_metadata_module()\n"
+        f"if {local_build}:\n"
+        "    spec.get_library_path().parent.mkdir(parents=True, exist_ok=True)\n"
+        "    spec.get_library_path().touch()\n"
+        "print(has_flashinfer_prims_ts_qsa(), spec.is_aot)"
+    )
+    env = {
+        **os.environ,
+        "FLASHINFER_DISABLE_JIT": "1",
+        "FLASHINFER_WORKSPACE_BASE": str(tmp_path),
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    selected, precompiled = result.stdout.split()[-2:]
+    assert selected == precompiled
 
 
 @requires_qsa_kernels

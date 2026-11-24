@@ -496,6 +496,8 @@ steps:
   - vllm/models/qwen4_exp/nvidia/ops/qsa.py
   - vllm/models/qwen4_exp/nvidia/ops/qsa_fp8.py
   - vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py
+  - vllm/models/qwen4_exp/nvidia/ops/qsa_primts.py
+  - vllm/models/qwen4_exp/nvidia/qsa.py
   - tests/models/qwen4_exp/test_hc_ops.py
   - tests/models/qwen4_exp/test_mega_moe.py
   - tests/models/qwen4_exp/test_qsa_reference.py
