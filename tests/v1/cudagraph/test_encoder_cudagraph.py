@@ -171,6 +171,15 @@ class _MockModel(SupportsEncoderCudaGraph):
         return {}
 
 
+class _MockAudioModel(_MockModel):
+    """Audio-only variant: the vision item cap must not apply."""
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        config = super().get_encoder_cudagraph_config()
+        config.modalities = ["audio"]
+        return config
+
+
 def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     """Create a minimal EncoderCudaGraphManager with only token_budgets set.
 
@@ -1995,6 +2004,16 @@ class TestDefaultBudgetTable:
     def test_user_budgets_override_default_table(self):
         mgr = self._make_mgr(token_budgets=[64, 256])
         assert mgr.token_budgets == [64, 256]
+
+    def test_audio_only_model_ignores_vision_item_cap(self):
+        mgr = EncoderCudaGraphManager(
+            vllm_config=_MockVllmConfig(max_mm_items=8),
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            model=_MockAudioModel(min_budget=64, max_budget=2048),
+        )
+        assert mgr.max_batch_size == 2048 // 64
+        assert mgr.token_budgets == EncoderCudaGraphManager._generate_budgets(64, 2048)
 
 
 # ---------------------------------------------------------------------------

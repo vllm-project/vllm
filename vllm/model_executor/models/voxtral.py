@@ -776,7 +776,8 @@ class VoxtralEncoderModel(nn.Module):
             # Use `clamp` to avoid gpu<->cpu sync.
             log_spec = torch.clamp(log_spec, min=global_log_mel_max - 8.0)
         else:
-            log_spec_max = log_spec.max()
+            # Per waveform, so batched waveforms are normalized independently.
+            log_spec_max = log_spec.amax(dim=(-2, -1), keepdim=True)
             log_spec = torch.maximum(log_spec, log_spec_max - 8.0)
         log_spec = (log_spec + 4.0) / 4.0
         return log_spec.to(input_dtype)

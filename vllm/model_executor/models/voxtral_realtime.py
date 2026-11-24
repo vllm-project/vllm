@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import itertools
 import math
-from collections.abc import AsyncGenerator, Iterable, Iterator, Mapping
+from collections.abc import AsyncGenerator, Hashable, Iterable, Iterator, Mapping
+from typing import Any
 
 import numpy as np
 import torch
@@ -18,7 +20,11 @@ from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
+    SupportsRealtime,
+)
 from vllm.model_executor.models.voxtral import (
     VoxtralDummyInputsBuilder,
     VoxtralForConditionalGeneration,
@@ -33,13 +39,64 @@ from vllm.multimodal.processing.processor import (
     MultiModalProcessingResult,
     PlaceholderFeaturesInfo,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.utils.math_utils import round_up_to
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.v1.worker.encoder_cudagraph_defs import (
+    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG,
+    EncoderCudaGraphCaptureInputs,
+    EncoderCudaGraphConfig,
+    EncoderCudaGraphPathConfig,
+    EncoderCudaGraphReplayBuffers,
+    EncoderItemSpec,
+)
 
 from .utils import _flatten_embeddings
 
 logger = init_logger(__name__)
+
+# Largest audio graph batch. Streaming frames arrive one per session per
+# step, so larger batches are rare and their launch overhead is amortized.
+_MAX_AUDIO_GRAPH_BATCH = 32
+
+
+def _streaming_prompt_tokens(tokenizer: MistralTokenizer) -> list[int]:
+    """The prefix (BOS, left padding, delay) the first audio frame covers."""
+    instruct = tokenizer.instruct
+    return instruct.start() + instruct.audio_encoder.encode_streaming_tokens()
+
+
+def _ms_to_samples(config: AudioConfig, ms: float) -> int:
+    len_ = config.sampling_rate * ms / 1000
+    assert len_.is_integer(), len_
+    return int(len_)
+
+
+def _stream_frames(
+    config: AudioConfig, num_prompt_tokens: int
+) -> Iterator[tuple[int, int]]:
+    """Yield (frame size in samples, new tokens) for each streaming step.
+
+    The first frame covers the prompt, each later one a single step; frames
+    extend into their neighbours by the look-back and look-ahead.
+    """
+    look_ahead = _ms_to_samples(config, config.streaming_look_ahead_ms)
+    look_back = _ms_to_samples(config, config.streaming_look_back_ms)
+    streaming_step_size = _ms_to_samples(config, 1000 / config.frame_rate)
+    start = 0
+    end = num_prompt_tokens * config.raw_audio_length_per_tok
+    while True:
+        frame_start = max(start - look_back, 0)
+        frame_end = end + look_ahead
+        frame_size = frame_end - frame_start
+        num_tokens = (end - start) / config.raw_audio_length_per_tok
+        assert num_tokens.is_integer()
+        yield frame_size, int(num_tokens)
+        start = end
+        end += streaming_step_size
 
 
 class VoxtralRealtimeMultiModalProcessor(VoxtralMultiModalProcessor):
@@ -133,11 +190,9 @@ class VoxtralRealtimeProcessingInfo(VoxtralProcessingInfo):
         # chunk cached until it resumes, and a cache sized to one chunk
         # deadlocks a few concurrent sessions.
         tokenizer = self.get_tokenizer()
-        audio_encoder = tokenizer.instruct.audio_encoder
-        prompt_tokens = (
-            tokenizer.instruct.start() + audio_encoder.encode_streaming_tokens()
-        )
-        return len(prompt_tokens) * audio_encoder.audio_config.raw_audio_length_per_tok
+        audio_config = tokenizer.instruct.audio_encoder.audio_config
+        num_prompt_tokens = len(_streaming_prompt_tokens(tokenizer))
+        return num_prompt_tokens * audio_config.raw_audio_length_per_tok
 
 
 class VoxtralRealtimeBuffer:
@@ -150,38 +205,21 @@ class VoxtralRealtimeBuffer:
         self._config = config
         self._max_model_len = max_model_len
 
-        _look_ahead_in_ms = self._config.streaming_look_ahead_ms
-        _look_back_in_ms = self._config.streaming_look_back_ms
-        self._look_ahead_in_samples = self._ms_to_samples(_look_ahead_in_ms)
-        self._look_back_in_samples = self._ms_to_samples(_look_back_in_ms)
+        self._look_ahead_in_samples = _ms_to_samples(
+            config, config.streaming_look_ahead_ms
+        )
+        self._look_back_in_samples = _ms_to_samples(
+            config, config.streaming_look_back_ms
+        )
 
         # None signals the end
         self._audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
         self._leftover: np.ndarray | None = None
         self._token_queue: asyncio.Queue[int] = asyncio.Queue()
 
-        self._initial_end = len(prompt_tokens) * self._config.raw_audio_length_per_tok
+        self._num_prompt_tokens = len(prompt_tokens)
         for token in prompt_tokens:
             self._token_queue.put_nowait(token)
-
-    def _generate_frame_size_and_num_tokens(self) -> Iterator[tuple[int, int]]:
-        streaming_step_size = self._ms_to_samples(1000 / self._config.frame_rate)
-        start = 0
-        end = self._initial_end
-        while True:
-            frame_start = max(start - self._look_back_in_samples, 0)
-            frame_end = end + self._look_ahead_in_samples
-            frame_size = frame_end - frame_start
-            num_tokens = (end - start) / self._config.raw_audio_length_per_tok
-            assert num_tokens.is_integer()
-            yield frame_size, int(num_tokens)
-            start = end
-            end += streaming_step_size
-
-    def _ms_to_samples(self, ms: float) -> int:
-        len_ = self._config.sampling_rate * ms / 1000
-        assert len_.is_integer(), len_
-        return int(len_)
 
     async def append_audio(self, audio_array: np.ndarray | None) -> None:
         await self._audio_queue.put(audio_array)
@@ -192,7 +230,9 @@ class VoxtralRealtimeBuffer:
 
     async def get_input_stream(self) -> AsyncGenerator[TokensPrompt]:
         n_tokens = 0
-        for frame_size, num_tokens in self._generate_frame_size_and_num_tokens():
+        for frame_size, num_tokens in _stream_frames(
+            self._config, self._num_prompt_tokens
+        ):
             n_tokens += num_tokens
             if self._max_model_len is not None and n_tokens >= self._max_model_len:
                 logger.warning(
@@ -237,7 +277,9 @@ class VoxtralRealtimeBuffer:
     dummy_inputs=VoxtralDummyInputsBuilder,
 )
 @support_torch_compile
-class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
+class VoxtralRealtimeGeneration(
+    VoxtralForConditionalGeneration, SupportsRealtime, SupportsEncoderCudaGraph
+):
     requires_raw_input_tokens = True
     # transformers' currently has limited support for MistralCommon backend
     # and cached_get_processor. Let's skip until fixed
@@ -263,6 +305,161 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         audio_config = self.tokenizer.instruct.audio_encoder.audio_config
         self.n_delay_tokens = audio_config.get_num_delay_tokens()
 
+        # Audio CUDA graphs cover the two frame lengths a stream produces:
+        # the startup frame, which covers the prompt, and the steady frame.
+        num_prompt_tokens = len(_streaming_prompt_tokens(self.tokenizer))
+        (startup, startup_tokens), (steady, _) = itertools.islice(
+            _stream_frames(audio_config, num_prompt_tokens), 2
+        )
+        self._audio_graph_lengths = (steady, startup)
+        self._audio_graph_startup_tokens = startup_tokens
+        batch = min(_MAX_AUDIO_GRAPH_BATCH, vllm_config.scheduler_config.max_num_seqs)
+        buckets = [1 << i for i in range(batch.bit_length()) if 1 << i < batch]
+        self._audio_graph_batch_sizes = (*buckets, batch)
+        max_tokens = batch * startup_tokens
+        compilation = vllm_config.compilation_config
+        self._audio_graph_token_budget = (
+            max(compilation.encoder_cudagraph_token_budgets)
+            if compilation.encoder_cudagraph_token_budgets
+            else max(
+                startup_tokens,
+                min(
+                    max_tokens,
+                    compilation.encoder_cudagraph_max_token_budget or max_tokens,
+                ),
+            )
+        )
+        # The configurations the graphs were validated against.
+        self._audio_graph_enabled = (
+            current_platform.is_cuda()
+            and vllm_config.model_config.dtype == torch.bfloat16
+            and vllm_config.lora_config is None
+        )
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["audio"] if self._audio_graph_enabled else [],
+            buffer_keys=["audio_arrays"],
+            out_hidden_size=self.config.audio_config.d_model
+            * self.config.audio_config.block_pool_size,
+            # The axes fully specify the layout; capture one aggregate budget.
+            paths={
+                "default": EncoderCudaGraphPathConfig(
+                    min_token_budget=self._audio_graph_token_budget
+                )
+            },
+            capture_axes=(
+                self._audio_graph_batch_sizes,
+                self._audio_graph_lengths,
+            ),
+        )
+
+    def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
+        return "audio"
+
+    def get_encoder_cudagraph_budget_range(
+        self, vllm_config: VllmConfig
+    ) -> tuple[int, int]:
+        startup_tokens = self._audio_graph_startup_tokens
+        return startup_tokens, startup_tokens * self._audio_graph_batch_sizes[-1]
+
+    def get_encoder_cudagraph_item_specs(
+        self, mm_kwargs: dict[str, Any]
+    ) -> list[EncoderItemSpec]:
+        audios = self._parse_and_validate_audio_arrays(**mm_kwargs)
+        if audios is None:
+            return []
+        stride = int(self.audio_config.raw_audio_length_per_tok)
+        return [
+            EncoderItemSpec(
+                input_size=audio.numel(),
+                output_tokens=max(1, audio.numel() // stride),
+                batch_key=audio.numel(),
+            )
+            for audio in audios
+        ]
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        audios = self._parse_and_validate_audio_arrays(**mm_kwargs)
+        assert audios is not None
+        selected = [audios[i] for i in indices]
+        batch = round_up_to(list(self._audio_graph_batch_sizes), len(selected))
+        length = selected[0].numel() if selected else None
+        return {
+            "audio_arrays": selected,
+            ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: (batch, length),
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> EncoderCudaGraphCaptureInputs:
+        assert axis_keys is not None
+        batch, length = axis_keys
+        assert isinstance(batch, int) and isinstance(length, int)
+        return EncoderCudaGraphCaptureInputs(
+            values={
+                "audio_arrays": torch.zeros(
+                    (batch, length), device=device, dtype=torch.float32
+                ),
+            }
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> EncoderCudaGraphReplayBuffers:
+        audios = self._parse_and_validate_audio_arrays(**mm_kwargs)
+        assert audios is not None
+        return EncoderCudaGraphReplayBuffers(
+            values={"audio_arrays": torch.stack(audios)}
+        )
+
+    def encoder_cudagraph_forward(
+        self, inputs: dict[str, torch.Tensor], path: str = "default"
+    ) -> torch.Tensor:
+        return self._embed_audio(inputs["audio_arrays"])
+
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        outputs = self.embed_multimodal(**mm_kwargs)
+        assert isinstance(outputs, (list, tuple))
+        return torch.cat(outputs, dim=0)
+
+    def _embed_audio(self, audio: torch.Tensor) -> torch.Tensor:
+        """Log-mel, causal convs and block pooling of one waveform
+        `(num_samples,)` or a batch of equal-length waveforms
+        `(batch, num_samples)`.
+
+        Returns `(num_tokens, d_model * block_pool_size)`, with the items'
+        tokens concatenated in order. Shared by the eager and CUDA graph paths.
+        """
+        whisper = self.whisper_encoder
+        assert isinstance(whisper.whisper_encoder, WhisperCausalEncoder)
+        mel = whisper.compute_whisper_melspec(audio).to(whisper.dtype)
+        # Drop the leftmost mel frame if the frame count is odd.
+        mel = mel[..., mel.shape[-1] % 2 :]
+        hidden = whisper.whisper_encoder.forward_conv(mel)
+        # Drop the leftmost frames that don't fill a pooling block.
+        pool = self.config.audio_config.block_pool_size
+        hidden = hidden[..., hidden.shape[-2] % pool :, :]
+        assert hidden.shape[-2] > 0, (
+            f"Audio of {audio.shape[-1]} samples is too short to embed"
+        )
+        return hidden.reshape(-1, pool * hidden.shape[-1])
+
     # for realtime transcription
     @classmethod
     async def buffer_realtime_audio(
@@ -276,9 +473,7 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         config = audio_encoder.audio_config
 
         # Get prompt tokens (streaming prefix tokens) without encoding audio
-        prompt_tokens = (
-            tokenizer.instruct.start() + audio_encoder.encode_streaming_tokens()
-        )
+        prompt_tokens = _streaming_prompt_tokens(tokenizer)
 
         # Get left/right padding audio
         left_pad, right_pad = audio_encoder.get_padding_audio()
@@ -432,53 +627,7 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
             )
             return []
 
-        def _truncate_left(
-            sample: torch.Tensor, mult_of: int, pos: int
-        ) -> torch.Tensor:
-            assert pos in [0, 1], pos
-            if (ctx := sample.shape[pos] % mult_of) != 0:
-                sample = sample[ctx:] if pos == 0 else sample[:, ctx:]
-                assert sample.shape[pos] > 0, (
-                    f"Sample is empty after truncation with ctx {ctx}"
-                )
-
-            return sample
-
-        mel_features = [
-            self.whisper_encoder.compute_whisper_melspec(audio).to(
-                self.whisper_encoder.dtype
-            )
-            for audio in audio_inputs
-        ]
-
-        # we truncate the left most mel feature
-        # if the sequence length in impair
-        mel_features = [_truncate_left(mel, 2, 1) for mel in mel_features]
-
-        seq_lens = [mel.shape[1] for mel in mel_features]
-        # [total_num_20ms_frames, hidden_size]
-        assert isinstance(self.whisper_encoder.whisper_encoder, WhisperCausalEncoder)
-        audio_embeddings = self.whisper_encoder.whisper_encoder.forward_conv(
-            mel_features
-        )
-        conv_stride = self.whisper_encoder.whisper_encoder.total_stride
-        audio_embeddings_per_sample = audio_embeddings.split(
-            [s // conv_stride for s in seq_lens], dim=0
-        )
-
-        # audio_embeddings per sample need to be divisible by 4
-        pool_size = self.config.audio_config.block_pool_size
-
-        audio_embeddings_per_sample = [
-            _truncate_left(sample, pool_size, 0)
-            for sample in audio_embeddings_per_sample
-        ]
-
-        audio_embeddings_per_sample = [
-            e.view(e.shape[0] // pool_size, e.shape[1] * pool_size)
-            for e in audio_embeddings_per_sample
-        ]
-        return audio_embeddings_per_sample
+        return [self._embed_audio(audio) for audio in audio_inputs]
 
     @classmethod
     def get_speech_to_text_config(
