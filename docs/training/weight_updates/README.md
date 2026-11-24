@@ -52,6 +52,7 @@ applies, else [layerwise reload](layerwise.md).
 | [sharded_rdt](engines/sharded_rdt.md) | NIXL / Ray Direct Transport (pull-based) | Very large models where each worker needs only its own slice (MoE with expert parallelism) |
 | [nccl_m2n](engines/m2n.md) | NCCL M2N reshard | Trainer and inference use different sharding layouts |
 | [ModelExpress](engines/modelexpress.md) | ModelExpress version-based transfer | Install immutable published weight versions, including object-storage checkpoints and deltas |
+| [Connex](engines/connex.md) | One-sided RDMA reads with tree fan-out | Elastic rollout pools where engines join, leave or fail during updates |
 
 ## Quickstart
 
