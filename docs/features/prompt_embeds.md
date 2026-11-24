@@ -95,3 +95,9 @@ vllm serve meta-llama/Llama-3.2-1B-Instruct --runner generate \
 Then, you can use the OpenAI client as follows:
 
 [examples/features/prompt_embed/prompt_embed_inference_with_openai_client.py](../../examples/features/prompt_embed/prompt_embed_inference_with_openai_client.py)
+
+## Memory
+
+With prompt embeds enabled (`enable_prompt_embeds=True` or `--enable-prompt-embeds`), each worker keeps the prompt embeddings of requests whose prompts are still being computed in pinned host memory, and copies to the GPU only the embeddings each step computes. At startup it allocates a GPU buffer for `max_num_batched_tokens` embeddings of `hidden_size` × the model dtype size each, so the KV cache gets that much less memory: for example 64 MiB per GPU for `hidden_size` 4096 in bfloat16 and `--max-num-batched-tokens 8192`, whatever `--max-model-len` is. Workers are sent only the embeddings of tokens not computed yet, so prefix-cache hits and KV loaded by a KV connector take no memory, and they free a request's embeddings once its prompt is computed.
+
+The pinned host memory grows with the prompts being prefilled, on each worker that reads prompt embeddings (every tensor-parallel rank of the first pipeline stage). For example, 64 concurrent 24,000-token prompts with `hidden_size` 4096 in bfloat16 pin about 12 GiB per worker, up to about 16 GiB because PyTorch rounds pinned allocations up. PyTorch keeps pinned memory it frees for reuse, so the peak stays reserved while the server runs.

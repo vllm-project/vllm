@@ -611,6 +611,72 @@ def test_max_num_active_seqs_caps_admission():
     assert scheduler.max_num_running_reqs == 16
 
 
+def _prompt_embeds_request(request_id: str, num_rows: int) -> Request:
+    sampling_params = SamplingParams(max_tokens=4)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+    return Request(
+        request_id=request_id,
+        prompt_token_ids=None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+        prompt_embeds=torch.zeros(num_rows, 8),
+    )
+
+
+def _new_req_ids(output: SchedulerOutput) -> list[str]:
+    return [req.req_id for req in output.scheduled_new_reqs]
+
+
+def test_prompt_embeds_requests_do_not_wait_for_gpu_memory():
+    """Workers stage only one step's prompt_embeds rows on the GPU, so the rows
+    of requests still in prefill do not limit admission. Eight 1000-row prompts
+    prefilled in 32-token chunks fill the step, holding far more rows than one
+    max-length prompt plus a step."""
+    scheduler = create_scheduler(
+        max_model_len=1024,
+        max_num_batched_tokens=256,
+        long_prefill_token_threshold=32,
+        enable_prompt_embeds=True,
+    )
+    request_ids = [str(i) for i in range(8)]
+    for request_id in request_ids:
+        scheduler.add_request(_prompt_embeds_request(request_id, 1000))
+
+    assert _new_req_ids(scheduler.schedule()) == request_ids
+
+
+def test_prompt_embeds_sends_only_uncached_rows():
+    """Workers get only the rows past a prefix-cache hit: B shares two cached
+    16-row blocks with A and is sent 16 of its 48 rows, from position 32."""
+    scheduler = create_scheduler(
+        max_model_len=64, enable_prompt_embeds=True, enable_prefix_caching=True
+    )
+    init_none_hash(sha256)
+    block_hasher = get_request_block_hasher(16, sha256)
+    shared = torch.randn(40, 8)
+
+    def request(request_id: str, prompt_embeds: torch.Tensor) -> Request:
+        sampling_params = SamplingParams(max_tokens=4)
+        sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+        return Request(
+            request_id=request_id,
+            prompt_token_ids=None,
+            sampling_params=sampling_params,
+            pooling_params=None,
+            prompt_embeds=prompt_embeds,
+            block_hasher=block_hasher,
+        )
+
+    scheduler.add_request(request("a", torch.cat([shared, torch.randn(8, 8)])))
+    assert _new_req_ids(scheduler.schedule()) == ["a"]
+
+    scheduler.add_request(request("b", torch.cat([shared, torch.randn(8, 8)])))
+    (new_b,) = scheduler.schedule().scheduled_new_reqs
+
+    assert new_b.prompt_embeds_offset == 32
+    assert new_b.prompt_embeds is not None and len(new_b.prompt_embeds) == 16
+
+
 def _bind_hisparse_connector(scheduler):
     connector = object.__new__(HiSparseConnector)
     connector.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)
