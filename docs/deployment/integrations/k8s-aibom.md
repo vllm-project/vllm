@@ -8,7 +8,7 @@ It is read-only toward your cluster: it watches workloads through the Kubernetes
 
 ```bash
 helm install k8s-aibom oci://ghcr.io/googlecloudplatform/charts/k8s-aibom \
-  --version 1.6.0 \
+  --version 1.7.0 \
   --namespace k8s-aibom-system --create-namespace
 ```
 
