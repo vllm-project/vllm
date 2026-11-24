@@ -4812,10 +4812,15 @@ def test_early_recv_leaves_lease_lapsed_reads_to_the_step(
 
 
 @pytest.mark.cpu_test
-def test_early_recv_falls_back_when_notify_fails(recv_worker):
-    """A failed early notify returns the completed load to ordinary step output."""
+@pytest.mark.parametrize("notify_raises", [False, True])
+def test_early_recv_falls_back_when_notify_fails(recv_worker, notify_raises):
+    """A failed or raising early notify returns the completed load to ordinary
+    step output instead of losing it."""
     worker = recv_worker
     notifier = _FakeEarlyNotifier(succeed=False)
+    if notify_raises:
+        notifier = MagicMock(sent=[])
+        notifier.try_notify.side_effect = RuntimeError
     worker.bind_early_recv(notifier)
     worker._recving_transfers["request"] = [101]
     worker._handoff_to_early_recv(
@@ -4855,6 +4860,29 @@ def test_early_recv_tracks_inflight_engines_and_reclaims_on_unregister(recv_work
     worker.unregister_kv_caches()
     assert worker._early_poller_thread is None
     assert worker._recving_transfers["request"] == [101]
+    assert "remote-engine-1" in worker._engines_with_inflight_transfers()
+
+
+@pytest.mark.cpu_test
+def test_early_recv_handed_back_handles_keep_engine_inflight(recv_worker):
+    """Handles the poller hands back on an error may still be live, so their
+    engine is not released before the main thread collects them."""
+    worker = recv_worker
+    worker.bind_early_recv(_FakeEarlyNotifier())
+    meta = worker._recving_metadata["request"]
+    meta.remote.engine_id = "remote-engine-1"
+    meta.remote.blocks_expiry_time = None
+    worker._recving_transfers["request"] = [101, 102]
+    worker._handoff_to_early_recv("request", meta, start_thread=False)
+    worker.nixl_wrapper.check_xfer_state.return_value = "ERR"
+
+    assert worker._poll_early_once() is False
+    assert "request" not in worker._recving_transfers
+    assert "remote-engine-1" in worker._engines_with_inflight_transfers()
+    worker.nixl_wrapper.release_xfer_handle.assert_not_called()
+
+    worker._drain_early_recv_state()
+    assert worker._recving_transfers["request"] == [101, 102]
     assert "remote-engine-1" in worker._engines_with_inflight_transfers()
 
 

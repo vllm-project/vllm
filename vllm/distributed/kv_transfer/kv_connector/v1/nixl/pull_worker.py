@@ -85,7 +85,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     "(nixl_thread_sync_t)."
                 )
         super().__init__(vllm_config, engine_id, kv_cache_config)
-        self._init_early_recv_state()
+        if self.kv_transfer_config.enable_early_recv:
+            self._init_early_recv_state()
         # Registration generation of each remote engine's loaded agent.
         self._remote_registration_generations: dict[EngineId, int] = {}
 
@@ -274,7 +275,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         if notifying:
             notifier = self._early_recv_notifier
             req_ids = [req_id for req_id, _ in notifying]
-            sent = notifier is not None and notifier.try_notify(req_ids)
+            try:
+                sent = notifier is not None and notifier.try_notify(req_ids)
+            except Exception:
+                logger.exception("Early KV receive notify failed")
+                sent = False
             with self._early_recv_lock:
                 if sent:
                     for req_id, entry in notifying:
@@ -321,6 +326,13 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             with self._early_recv_lock:
                 engines.update(
                     entry.engine_id for entry in self._early_recving_transfers.values()
+                )
+                engines.update(
+                    meta.remote.engine_id
+                    for req_id, handles, _ in self._early_fallback
+                    if handles
+                    and (meta := self._recving_metadata.get(req_id)) is not None
+                    and meta.remote is not None
                 )
         return engines
 
