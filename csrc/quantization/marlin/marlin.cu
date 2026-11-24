@@ -379,6 +379,17 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
       }
     }
     if (profile_rows) {
+      // Narrower tiles can avoid padded rows and cross-CTA K reductions.
+      if (bolt_output && profile_m_blocks == 4) {
+        int tiles32 = div_ceil(profile_rows, 32);
+        int tiles64 = div_ceil(profile_rows, 64);
+        int n_tiles = prob_n / 128;
+        if (tiles32 * 32 < tiles64 * 64 &&
+            (tiles32 * n_tiles) % (2 * sms) == 0 &&
+            (tiles64 * n_tiles) % (2 * sms) != 0) {
+          profile_m_blocks = 2;
+        }
+      }
       int tile_m = profile_m_blocks * 16;
       int profile_stages = profile_m_blocks == 2 ? 4 : 3;
       if (is_valid_config({64, 128, 128}, profile_m_blocks, profile_rows,
