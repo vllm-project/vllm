@@ -98,7 +98,7 @@ def create_scheduler(max_model_len: int = 1024) -> Scheduler:
     return Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
-        log_stats=True,
+        collect_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=16,
         hash_block_size=16,
