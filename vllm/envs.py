@@ -219,6 +219,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
+    VLLM_FLASHINFER_MIXED_KV_QMUL: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -1753,6 +1754,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ["auto", "trtllm", "mnnvl"],
     ),
     # Control the workspace buffer size for the FlashInfer backend.
+    "VLLM_FLASHINFER_MIXED_KV_QMUL": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_MIXED_KV_QMUL", "0"))
+    ),
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
         os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(394 * 1024 * 1024))
     ),

@@ -684,6 +684,14 @@ class FlashInferTrtllmAPIDecode:
 
 
 @dataclass
+class MixedQmulBatch:
+    block_table: torch.Tensor
+    seq_lens: torch.Tensor
+    query_start_loc: torch.Tensor
+    max_query_len: int
+
+
+@dataclass
 class FlashInferMetadata:
     num_actual_tokens: int
     """Total number of tokens in the batch (excluding padding)."""
@@ -723,6 +731,7 @@ class FlashInferMetadata:
     """
 
     cascade_wrapper: MultiLevelCascadeAttentionWrapper | None
+    mixed_qmul: MixedQmulBatch | None = None
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -826,7 +835,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.is_kvcache_nvfp4 or self.is_kvcache_fp8_k_nvfp4_v
             )
             if self.uses_nvfp4_cache:
-                if (
+                if not (
+                    self.is_kvcache_fp8_k_nvfp4_v and envs.VLLM_FLASHINFER_MIXED_KV_QMUL
+                ) and (
                     force_use_trtllm_attention() is False
                     or not supports_trtllm_attention(is_prefill=True)
                     or not supports_trtllm_attention(is_prefill=False)
@@ -867,8 +878,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # Prefer TRTLLM/XQA for decoding whenever supported. The decode kernel
         # must be selected statically for FULL cudagraph capture.
-        can_use_xqa_or_trtllm_gen_decode = can_use_trtllm_attention(
-            self.num_qo_heads, self.num_kv_heads, is_prefill=False
+        self.use_mixed_qmul = (
+            self.is_kvcache_fp8_k_nvfp4_v and envs.VLLM_FLASHINFER_MIXED_KV_QMUL
+        )
+        can_use_xqa_or_trtllm_gen_decode = (
+            not self.use_mixed_qmul
+            and can_use_trtllm_attention(
+                self.num_qo_heads, self.num_kv_heads, is_prefill=False
+            )
         )
         # Page sizes >= 128 require the trtllm-gen GQA/MQA path (guaranteed by
         # get_supported_kernel_block_sizes).
@@ -974,6 +991,21 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if self.flashinfer_trtllm_api_decode_kernel is not None
             else "flashinfer-native"
         )
+        if self.use_mixed_qmul:
+            if (
+                speculative_config
+                or self.has_sinks
+                or self.logits_soft_cap
+                or (
+                    self.q_data_type_prefill != FP8_DTYPE
+                    or self.q_data_type_decode != FP8_DTYPE
+                )
+            ):
+                raise NotImplementedError(
+                    "Mixed QMUL requires FP8 queries and dense causal attention "
+                    "without speculative masks, sinks or logit soft caps"
+                )
+            decode_backend = "flashinfer-native-mixed-qmul"
         logger.info_once(
             "FlashInfer resolved query dtypes: prefill=%s, decode=%s, "
             "decode_backend=%s, kv_cache_dtype=%s, arch=%s",
@@ -1366,6 +1398,33 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         causal = common_attn_metadata.causal
+        if self.use_mixed_qmul:
+            if not causal:
+                raise NotImplementedError("Mixed QMUL supports causal attention only")
+            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+                split_decodes_and_prefills(common_attn_metadata, decode_threshold=1)
+            )
+            return FlashInferMetadata(
+                num_actual_tokens=num_actual_tokens,
+                slot_mapping=common_attn_metadata.slot_mapping,
+                q_data_type_prefill=self.q_data_type_prefill,
+                q_data_type_decode=self.q_data_type_decode,
+                num_decodes=num_decodes,
+                num_prefills=num_prefills,
+                num_decode_tokens=num_decode_tokens,
+                num_prefill_tokens=num_prefill_tokens,
+                causal=True,
+                prefill=None,
+                decode=None,
+                use_cascade=False,
+                cascade_wrapper=None,
+                mixed_qmul=MixedQmulBatch(
+                    common_attn_metadata.block_table_tensor[:num_reqs],
+                    common_attn_metadata.seq_lens[:num_reqs],
+                    common_attn_metadata.query_start_loc[: num_reqs + 1],
+                    common_attn_metadata.max_query_len,
+                ),
+            )
         route_decode = causal or self.use_dedicated_xqa
         if route_decode:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
@@ -1939,6 +1998,7 @@ class FlashInferImpl(AttentionImpl):
         self._trtllm_multi_ctas_kv_counter_buffer = None
         if (
             self.is_kvcache_fp8_k_nvfp4_v
+            and not envs.VLLM_FLASHINFER_MIXED_KV_QMUL
             and self.supports_xqa_or_trtllm_gen_decode
             and vllm_config is not None
             and current_platform.is_device_capability_family(100)
@@ -2210,6 +2270,27 @@ class FlashInferImpl(AttentionImpl):
             key_data, value_data, value_scales = fp8_k_nvfp4_v_cache_split_views(
                 kv_cache_permute, hs
             )
+            if (batch := attn_metadata.mixed_qmul) is not None:
+                from flashinfer.attention.mixed_kv import paged_fp8_k_nvfp4_v_fmha
+
+                if get_flashinfer_layout_string(self.kv_cache_layout) == "NHD":
+                    key_data = key_data.transpose(1, 2)
+                    value_data = value_data.transpose(1, 2)
+                    value_scales = value_scales.transpose(1, 2)
+                paged_fp8_k_nvfp4_v_fmha(
+                    self.maybe_quant_query(query, FP8_DTYPE, layer._q_scale),
+                    key_data,
+                    value_data,
+                    value_scales,
+                    batch.block_table,
+                    batch.seq_lens,
+                    batch.query_start_loc,
+                    max_q_len=batch.max_query_len,
+                    out=output,
+                    qk_scale=self.bmm1_scale,
+                    v_scale=self.bmm2_scale,
+                )
+                return output_padded
             packed_kv_data = (key_data, value_data)
             packed_kv_block_scales = (None, value_scales)
             kv_cache_tuple = packed_kv_data
