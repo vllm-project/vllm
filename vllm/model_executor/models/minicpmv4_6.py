@@ -846,7 +846,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         return [
             size
             for height in range(
-                math.floor(scale_resolution / math.sqrt(max_ratio)),
+                max(math.floor(scale_resolution / math.sqrt(max_ratio)), 1),
                 scale_resolution + 1,
             )
             for size in (
@@ -925,8 +925,8 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         scale_resolution = self.get_image_processor().scale_resolution
         area = scale_resolution * scale_resolution
         heights = range(
-            math.ceil(scale_resolution / math.sqrt(max_ratio)),
-            math.floor(scale_resolution * math.sqrt(max_ratio)) + 1,
+            max(math.ceil(scale_resolution / math.sqrt(max_ratio)), 1),
+            min(math.floor(scale_resolution * math.sqrt(max_ratio)), area) + 1,
         )
         sizes = [
             ImageSize(width=num_slices // rows * (area // height), height=rows * height)
