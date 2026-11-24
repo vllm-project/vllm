@@ -1323,8 +1323,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         actual benchmarking cost.
 
         All kernels including ``chunk_fwd_kernel_o`` now use a fixed
-        ``BT = chunk_size`` (64).  A single warmup pass with T = 64
-        is sufficient to populate the autotuner cache.
+        ``BT = chunk_size`` (64), so a single warmup pass populates the
+        autotuner cache. With the Triton backend the pass uses
+        ``max_num_batched_tokens`` tokens, so the autotuners pick configs for
+        full prefill steps.
 
         The decode path uses ``gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule``
         which has fixed kernel parameters (no autotuning), so only the
@@ -1343,11 +1345,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_v_heads = self.num_v_heads // self.tp_size
         _, state_dtype = self.get_state_dtype()
 
-        # All kernels use BT = chunk_size, so a single pass with T = chunk_size
-        # is sufficient to populate every autotuner cache. Mirror the real
-        # prefill path here: build q/k/v/g/beta via fused_post_conv_prep and
-        # then run chunk_gated_delta_rule with in-kernel L2 norm disabled.
+        # All kernels use BT = chunk_size, so one pass populates every autotuner
+        # cache, and the autotune keys do not depend on the token count: the
+        # config that wins for this pass is used for every prefill. The Triton
+        # backend therefore warms up with max_num_batched_tokens tokens (the
+        # largest prefill step) instead of one chunk; the other backends do not
+        # autotune and keep one chunk. Mirror the real prefill path here: build
+        # q/k/v/g/beta via fused_post_conv_prep and then run
+        # chunk_gated_delta_rule with in-kernel L2 norm disabled.
         T = FLA_CHUNK_SIZE
+        if self.gdn_prefill_backend == "triton":
+            T = max(T, self.vllm_config.scheduler_config.max_num_batched_tokens)
         dummy_mixed_qkv = torch.randn(
             T, qkv_or_qkvz.shape[-1] - v_dim, device=device, dtype=dtype
         )

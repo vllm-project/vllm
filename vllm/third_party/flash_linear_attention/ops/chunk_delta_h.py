@@ -10,6 +10,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
@@ -19,6 +20,14 @@ from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
 _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
+_CHUNK_DELTA_H_NUM_WARPS = [2, 4]
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_rdna
+
+    if on_rdna():
+        # With 2-4 warps the BV x 128 state tile needs more than 256 VGPRs on
+        # RDNA and spills; with 8 warps it fits.
+        _CHUNK_DELTA_H_NUM_WARPS.append(8)
 
 
 @triton.heuristics(
@@ -34,7 +43,7 @@ _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
 @triton.autotune(
     configs=[
         triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in NUM_WARPS
+        for num_warps in _CHUNK_DELTA_H_NUM_WARPS
         for num_stages in _CHUNK_DELTA_H_NUM_STAGES
         for BV in [32, 64]
     ],
