@@ -223,7 +223,7 @@ RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 # Build them into a wheel with tools/vllm-rocm/amdsmi: a pyproject.toml, and a patch
 # so the loader finds the SDK's libamd_smi from outside the SDK tree.
 FROM base AS build_amdsmi
-COPY tools/vllm-rocm/amdsmi /app/amdsmi
+COPY tools/vllm-rocm/amdsmi/amdsmi_wrapper.patch tools/vllm-rocm/amdsmi/pyproject.toml /app/amdsmi/
 RUN --mount=type=cache,target=/root/.cache/pip cd /app/amdsmi \
     && cp -r "${SDK_CORE}/share/amd_smi/amdsmi" . \
     && patch --batch --forward -p1 --input=amdsmi_wrapper.patch \
