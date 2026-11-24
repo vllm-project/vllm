@@ -405,7 +405,6 @@ th {
 | `DomynEdgeForCausalLM` | Domyn Edge | `domyn/Domyn-Edge-Base`, `domyn/Domyn-Edge-SFT`, etc. | | |
 | `DoryForCausalLM` | Dory | `nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16` | | |
 | `DotsOCRForCausalLM` | [dots_ocr](../usage/troubleshooting.md#gpu-cpu-synchronization-errors) | `rednote-hilab/dots.ocr` | ✅︎ | ✅︎ |
-| `Ernie4_5ForCausalLM` | Ernie4.5 | `baidu/ERNIE-4.5-0.3B-PT`, etc. | ✅︎ | ✅︎ |
 | `Ernie4_5_MoeForCausalLM` | Ernie4.5MoE | `baidu/ERNIE-4.5-21B-A3B-PT`, `baidu/ERNIE-4.5-300B-A47B-PT`, etc. | ✅︎ | ✅︎ |
 | `ExaoneForCausalLM` | EXAONE-3 | `LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `ExaoneMoeForCausalLM` | K-EXAONE, K-EXAONE-2 | `LGAI-EXAONE/K-EXAONE-236B-A23B`, `LGAI-EXAONE/K-EXAONE-2.0-750B-A37B`, etc. | | |
@@ -490,6 +489,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
 | `ArceeForCausalLM` | Arcee (AFM) | `arcee-ai/AFM-4.5B-Base`, etc. | ✅︎ | ✅︎ |
 | `CwmForCausalLM` | CWM | `facebook/cwm`, etc. | ✅︎ | ✅︎ |
+| `Ernie4_5ForCausalLM` | Ernie4.5 | `baidu/ERNIE-4.5-0.3B-PT`, etc. | ✅︎ | ✅︎ |
 | `FlexOlmoForCausalLM` | FlexOlmo | `allenai/FlexOlmo-7x7B-1T`, `allenai/FlexOlmo-7x7B-1T-RT`, etc. | ✅︎ | ✅︎ |
 | `GemmaForCausalLM` | Gemma | `google/gemma-2b`, `google/gemma-1.1-2b-it`, etc. | ✅︎ | ✅︎ |
 | `GlmForCausalLM` | GLM-4 | `zai-org/glm-4-9b-chat-hf`, etc. | ✅︎ | ✅︎ |
@@ -693,6 +693,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | ------------ | ------ | ------ | ----------------- | --------------------------- | --------------------------------------- |
 | `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | ✅︎ | ✅︎ |
 | `Emu3ForConditionalGeneration` | Emu3 | T + I<sup>+</sup> | `BAAI/Emu3-Chat-hf` | ✅︎ | ✅︎ |
+| `GraniteDoclingForConditionalGeneration` | Granite Docling | T + I<sup>+</sup> | `ibm-granite/granite-for-docling-2b`, etc. | ✅︎ | ✅︎ |
 | `HunYuanVLForConditionalGeneration` | HunyuanOCR | T + I<sup>E+</sup> | `tencent/HunyuanOCR`, etc. | ✅︎ | ✅︎ |
 | `VibeVoiceAsrForConditionalGeneration` | VibeVoice-ASR | T + A<sup>+</sup> | `microsoft/VibeVoice-ASR-HF` | ✅︎ | ✅︎ |
 
@@ -743,6 +744,12 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     - Gemma 4 Unified assistant checkpoints (`model_type: gemma4_unified_assistant`) use the same MTP path as the tower-based variant. See the [Gemma 4 assistant model MTP example](../features/speculative_decoding/mtp.md#gemma-4-assistant-models).
 
 !!! note
+    `GraniteDoclingForConditionalGeneration` checkpoints with a fine connector path (`vision_config.use_fine_route`)
+    accept `fine_route=True` in `--mm-processor-kwargs` or per request, for four times as many image tokens per tile.
+    To choose the route of each page with the checkpoint's density router, see
+    [examples/generate/multimodal/granite_docling_density_router_online.py](../../examples/generate/multimodal/granite_docling_density_router_online.py).
+
+!!! note
     For `InternVLChatModel`, only InternVL2.5 with Qwen2.5 text backbone (`OpenGVLab/InternVL2.5-1B` etc.), InternVL3 and InternVL3.5 have video inputs support currently.
 
 !!! note
@@ -771,6 +778,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     image and video only, as do the Nemotron 3.5 Super VL checkpoints.
     `NemotronH_Omni_Reasoning_V3` checkpoints load without `--trust-remote-code`
     on `transformers>=5.18.0`; older versions still require the flag.
+    The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) serves image and video inputs
+    for these checkpoints. Audio inputs need the Python frontend.
 
 !!! note
     On ROCm, `Step5ForConditionalGeneration` requires CDNA3 or newer (MI300 series
