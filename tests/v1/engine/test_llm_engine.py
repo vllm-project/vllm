@@ -267,6 +267,7 @@ def test_parallel_sampling_num_cached_tokens(vllm_runner) -> None:
         [warm] = llm.generate(prompt, params)
         [warm_n1] = llm.generate(prompt, SamplingParams(max_tokens=1))
 
+    assert warm_n1.num_cached_tokens is not None
     assert warm_n1.num_cached_tokens > 0
     assert cold.num_cached_tokens == 0
     assert cold.num_cache_creation_tokens == warm_n1.num_cached_tokens
