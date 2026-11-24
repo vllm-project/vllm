@@ -41,6 +41,9 @@ from .factory import UMBPRuntimeConfig
 
 logger = init_logger(__name__)
 
+# How long poll() reuses a count of blocked transfers.
+_BLOCKED_CACHE_S = 0.001
+
 _UNIX_SCHEME = "unix://"
 _FAILURE_LOG_INTERVAL_S = 30.0
 
@@ -345,6 +348,8 @@ class _SharedPoolWorkerHandle(_MoriWorkerHandle):
         super().__init__(*args, **kwargs)
         self._last_refusal_log = float("-inf")
         self._storages: dict[int, torch.UntypedStorage] = {}
+        # (time, count) of the last _blocked_transfers() in poll().
+        self._blocked_cache = (float("-inf"), 0)
 
     def _create_executor(self, max_workers: int) -> Executor:
         return _DaemonTransferPool(max_workers, f"umbp-{self.mode}-transfer")
@@ -371,6 +376,16 @@ class _SharedPoolWorkerHandle(_MoriWorkerHandle):
             and not future.done()
         )
 
+    def _recent_blocked_transfers(self) -> int:
+        # poll() runs for every pending job, and each count scans all of them.
+        # Deadlines are timeout_ms long, so a count this recent is as good.
+        now = time.monotonic()
+        computed_at, blocked = self._blocked_cache
+        if now - computed_at >= _BLOCKED_CACHE_S:
+            blocked = self._blocked_transfers()
+            self._blocked_cache = (now, blocked)
+        return blocked
+
     def load(self, plans: Sequence[BlockTransferPlan]) -> TransferJobState:
         refused = self._refuse_while_blocked(plans)
         return refused if refused is not None else super().load(plans)
@@ -395,7 +410,7 @@ class _SharedPoolWorkerHandle(_MoriWorkerHandle):
         with self._job_lock:
             future = self._futures.get(id(job))
         if future is not None and not future.done():
-            if self._blocked_transfers() and self._fail_if_queued(job):
+            if self._recent_blocked_transfers() and self._fail_if_queued(job):
                 return job
             return None
         return super().poll(job)

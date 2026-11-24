@@ -121,11 +121,11 @@ class ActiveKVConnector(KVConnector):
 
         # With polling, transfer results are held until an output takes them
         # after its step's GPU work.
-        parallel_config = vllm_config.parallel_config
+        model_config = vllm_config.model_config
         self._polls = (
             self.kv_connector.supports_transfer_polling
-            and parallel_config.pipeline_parallel_size == 1
-            and vllm_config.model_config.runner_type != "pooling"
+            and vllm_config.parallel_config.pipeline_parallel_size == 1
+            and (model_config is None or model_config.runner_type != "pooling")
         )
         self._results_lock = threading.Lock()
         self._held_results = KVConnectorOutput()

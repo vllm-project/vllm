@@ -93,6 +93,10 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return True
 
+    @property
+    def supports_transfer_polling(self) -> bool:
+        return True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -410,10 +414,6 @@ class NixlPullConnector(NixlBaseConnector):
         assert isinstance(self.connector_worker, NixlPullConnectorWorker)
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
-
-    @property
-    def supports_transfer_polling(self) -> bool:
-        return True
 
 
 class NixlPushConnector(NixlBaseConnector):

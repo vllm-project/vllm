@@ -75,6 +75,7 @@ class MockConnector(KVConnectorBase_V1):
         mock.supports_divergent_local_hybrid_hits = (
             cls._supports_divergent_local_hybrid_hits
         )
+        mock.supports_transfer_polling = False
         # Override just build_kv_connector_stats
         mock.build_kv_connector_stats = cls.build_kv_connector_stats
         mock.get_kv_connector_stats.return_value = None
@@ -119,6 +120,7 @@ class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
         mock.supports_divergent_local_hybrid_hits = (
             cls._supports_divergent_local_hybrid_hits
         )
+        mock.supports_transfer_polling = False
         mock.get_kv_connector_stats.return_value = None
         return mock
 
@@ -1462,6 +1464,16 @@ def test_divergent_local_hybrid_hit_capability_is_conservative():
 
     mixed = _make_multi_connector(["MockDivergentHMAConnector", "MockHMAConnector"])
     assert mixed.supports_divergent_local_hybrid_hits is False
+
+
+def test_transfer_polling_needs_every_child():
+    multi = _make_multi_connector(["MockConnector", "MockConnector"])
+    assert multi.supports_transfer_polling is False
+    first, second = multi._connectors
+    first.supports_transfer_polling = True
+    assert multi.supports_transfer_polling is False
+    second.supports_transfer_polling = True
+    assert multi.supports_transfer_polling is True
 
 
 @pytest.mark.cpu_test

@@ -79,6 +79,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         # future cache miss, so opt out of the producer-role default.
         return False
 
+    @property
+    def supports_transfer_polling(self) -> bool:
+        return True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -142,7 +146,6 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
         return self.connector_worker.get_finished(finished_req_ids)
 
     def get_transfer_results(

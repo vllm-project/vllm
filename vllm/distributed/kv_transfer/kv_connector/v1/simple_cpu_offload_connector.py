@@ -73,6 +73,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         # future cache miss, so opt out of the producer-role default.
         return False
 
+    @property
+    def supports_transfer_polling(self) -> bool:
+        return True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
