@@ -1448,6 +1448,7 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step = False
 
         self._flush_pending_promotions()
+        self._promotion_failed_requests.difference_update(context.preempted_req_ids)
         # The demand budget is per step: a request's next lookup walk starts
         # from the primary tier's availability at that time.
         for req_state in self._req_state.values():
