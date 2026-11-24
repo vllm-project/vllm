@@ -16,7 +16,7 @@ permissions:
 jobs:
   run-ci-command:
     if: >-
-      github.repository_owner == 'vllm-project' &&
+      github.repository == 'vllm-project/vllm' &&
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
       (startsWith(github.event.comment.body, '/ci') ||
