@@ -1091,8 +1091,8 @@ class ModelConfig:
             self.hf_config,
             self.hf_text_config,
             revision=getattr(self, "revision", None),
-            transformers_backend=getattr(self, "_transformers_backend", False),
         )
+        convertor.transformers_backend = getattr(self, "_transformers_backend", False)
         return convertor.convert(
             supports_multimodal=self._supports_multimodal_for_mm_prefix()
         )
