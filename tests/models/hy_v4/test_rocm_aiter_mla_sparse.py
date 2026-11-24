@@ -241,8 +241,8 @@ def _requires_gfx950():
 @pytest.mark.parametrize("triton_sparse_mla", [1], indirect=True)
 @pytest.mark.parametrize(
     ("num_heads", "width", "block_stride"),
-    [(8, 128, 64), (64, 2176, 64), (16, 256, 192), (128, 384, 64)],
-    ids=["tp8_minwidth", "tp1_draftwidth", "strided_cache", "128heads"],
+    [(8, 128, 64), (4, 128, 64), (64, 2176, 64), (16, 256, 192), (128, 384, 64)],
+    ids=["tp8_minwidth", "flash_tp8", "tp1_draftwidth", "strided_cache", "128heads"],
 )
 @torch.inference_mode()
 def test_triton_sparse_mla_matches_torch_reference(

@@ -272,7 +272,7 @@ class _E2ECase:
     logprob_atol: float
     engine_kwargs: dict
 
-    def runner_kwargs(self, graphs: bool, dfly: bool) -> dict:
+    def runner_kwargs(self, graphs: bool, dfly: bool, tp: int = 1) -> dict:
         return dict(
             load_format="dummy",
             dtype="bfloat16",
@@ -281,6 +281,7 @@ class _E2ECase:
             enable_prefix_caching=False,
             enforce_eager=not graphs,
             disable_log_stats=not dfly,
+            tensor_parallel_size=tp,
             speculative_config={"method": "dfly"} if dfly else None,
             compilation_config=CompilationConfig(
                 mode=CompilationMode.NONE,
@@ -430,27 +431,46 @@ def hyv4_recipe_env(monkeypatch, enable_pickle):
 
 
 @pytest.fixture(scope="module")
-def eager_target_outputs() -> dict[str, list]:
-    """Per-module cache of eager target-only greedy outputs, keyed by case."""
+def eager_target_outputs() -> dict[tuple[str, int], list]:
+    """Per-module cache of eager target-only greedy outputs.
+
+    Keyed by `(case_id, tp)`: dummy weights are generated per rank, so each TP
+    size is a different model.
+    """
     return {}
 
 
-def _eager_target(vllm_runner, cache: dict[str, list], case_id: str) -> list:
-    if case_id not in cache:
+def _eager_target(
+    vllm_runner, cache: dict[tuple[str, int], list], case_id: str, tp: int = 1
+) -> list:
+    if (case_id, tp) not in cache:
         case = _E2E_CASES[case_id]
         with vllm_runner(
-            case.model, **case.runner_kwargs(graphs=False, dfly=False)
+            case.model, **case.runner_kwargs(graphs=False, dfly=False, tp=tp)
         ) as model:
             _reinit_head(model)
-            cache[case_id] = _greedy(model, case)
-    return cache[case_id]
+            cache[case_id, tp] = _greedy(model, case)
+    return cache[case_id, tp]
+
+
+# Flash-FP8 is TP1 only: at TP2 even two eager runs flip FP8 near-tie tokens.
+_TP2 = multi_gpu_marks(num_gpus=2)
+_DFLY_PARAMS = [
+    pytest.param(case_id, graphs, 1, id=f"{graphs_id}-{case_id}")
+    for case_id in _E2E_CASES
+    for graphs, graphs_id in ((False, "eager"), (True, "full-decode-graphs"))
+] + [pytest.param("hy4", True, 2, id="tp2-full-decode-graphs-hy4", marks=_TP2)]
 
 
 @requires_gfx950
-@pytest.mark.parametrize("case_id", list(_E2E_CASES))
-@pytest.mark.parametrize("graphs", [False, True], ids=["eager", "full-decode-graphs"])
+@pytest.mark.parametrize("case_id,graphs,tp", _DFLY_PARAMS)
 def test_hyv4_dfly_greedy_matches_target(
-    vllm_runner, hyv4_recipe_env, eager_target_outputs, case_id: str, graphs: bool
+    vllm_runner,
+    hyv4_recipe_env,
+    eager_target_outputs,
+    case_id: str,
+    graphs: bool,
+    tp: int,
 ) -> None:
     """Greedy DFly must reproduce the eager target, run after run.
 
@@ -459,8 +479,8 @@ def test_hyv4_dfly_greedy_matches_target(
     FULL_DECODE_ONLY replay metadata on padded decode batches.
     """
     case = _E2E_CASES[case_id]
-    expected = _eager_target(vllm_runner, eager_target_outputs, case_id)
-    with vllm_runner(case.model, **case.runner_kwargs(graphs, dfly=True)) as model:
+    expected = _eager_target(vllm_runner, eager_target_outputs, case_id, tp)
+    with vllm_runner(case.model, **case.runner_kwargs(graphs, True, tp)) as model:
         if graphs:
             assert all(n > 0 for n in model.collective_rpc(_num_captured_graphs))
         _reinit_head(model)
@@ -474,17 +494,21 @@ def test_hyv4_dfly_greedy_matches_target(
 
 
 @requires_gfx950
-@pytest.mark.parametrize("case_id", list(_E2E_CASES))
+@pytest.mark.parametrize(
+    "case_id,tp",
+    [pytest.param(case_id, 1, id=case_id) for case_id in _E2E_CASES]
+    + [pytest.param("hy4", 2, id="tp2-hy4", marks=_TP2)],
+)
 def test_hyv4_full_decode_graphs_match_eager(
-    vllm_runner, hyv4_recipe_env, eager_target_outputs, case_id: str
+    vllm_runner, hyv4_recipe_env, eager_target_outputs, case_id: str, tp: int
 ) -> None:
     """FULL_DECODE_ONLY graph replay must decode like eager for the target."""
     case = _E2E_CASES[case_id]
-    expected = _eager_target(vllm_runner, eager_target_outputs, case_id)
+    expected = _eager_target(vllm_runner, eager_target_outputs, case_id, tp)
     with vllm_runner(
-        case.model, **case.runner_kwargs(graphs=True, dfly=False)
+        case.model, **case.runner_kwargs(graphs=True, dfly=False, tp=tp)
     ) as model:
-        assert model.collective_rpc(_num_captured_graphs) == [4]
+        assert model.collective_rpc(_num_captured_graphs) == [4] * tp
         _reinit_head(model)
         actual = _greedy(model, case)
 
