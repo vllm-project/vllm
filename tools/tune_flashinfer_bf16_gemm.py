@@ -18,10 +18,13 @@ the file into `vllm/model_executor/layers/gemmbf16_configs` and start vLLM with
 Usage:
     python tools/tune_flashinfer_bf16_gemm.py --model M --tp 1 --out F.json
     python tools/tune_flashinfer_bf16_gemm.py --model M --tp 4 --mtp 1 2 3 --out F.json
-    python tools/tune_flashinfer_bf16_gemm.py --model M --tp 1 4 --gpus 4 ...
+    python tools/tune_flashinfer_bf16_gemm.py --model M --tp 1 4 --out F.json
+    python tools/tune_flashinfer_bf16_gemm.py --model M --tp 1 --gpus 8 --out F.json
 
-With --gpus N the shapes are split over N worker processes, one per GPU, and the
-results are merged into one file.
+--tp only selects the shapes (how the weights are split); the GEMMs are tuned one
+at a time, so any TP size can be tuned on one GPU. With --gpus N the shapes are
+split over N worker processes, one per GPU, and the results are merged into one
+file.
 
 If the output file already exists, the (N, K, M) points it holds are kept and only
 the missing ones are measured, so the script can be restarted after an
