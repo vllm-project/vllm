@@ -4580,3 +4580,18 @@ fn mm_processor_kwargs_reach_frontend_engine_and_render() {
     };
     assert_eq!(args.into_config().mm_processor_kwargs, expected);
 }
+
+#[test]
+fn serve_ignores_empty_max_tokenize_tokens_env() {
+    for empty_val in ["", "   "] {
+        unsafe { std::env::set_var("VLLM_MAX_TOKENIZE_TOKENS", empty_val) };
+        let parsed = Cli::try_parse_from(["vllm-rs", "serve", "meta-llama/Llama-3.2-1B"]);
+        unsafe { std::env::remove_var("VLLM_MAX_TOKENIZE_TOKENS") };
+
+        let cli = parsed.expect("empty VLLM_MAX_TOKENIZE_TOKENS should not fail CLI parsing");
+        let Command::Serve(serve) = cli.command else {
+            panic!("expected Serve command");
+        };
+        assert_eq!(serve.runtime.max_tokenize_tokens, None);
+    }
+}

@@ -779,11 +779,13 @@ pub struct SharedRuntimeArgs {
     #[arg(
         long,
         env = "VLLM_MAX_TOKENIZE_TOKENS",
-        value_parser = parse_int,
+        value_parser = parse_optional_int,
+        hide_default_value = true,
+        default_value = "",
         allow_negative_numbers = true
     )]
     #[serde(default)]
-    pub max_tokenize_tokens: Option<i64>,
+    pub max_tokenize_tokens: OptionalInt,
 
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
@@ -1041,11 +1043,9 @@ impl SharedRuntimeArgs {
         }
         if self.max_tokenize_tokens.is_none()
             && let Some(value) = lookup("VLLM_MAX_TOKENIZE_TOKENS")
-            && !value.trim().is_empty()
         {
-            let max_tokenize_tokens = parse_int(&value)
-                .map_err(|error| format!("invalid VLLM_MAX_TOKENIZE_TOKENS: {error}"))?;
-            self.max_tokenize_tokens = Some(max_tokenize_tokens);
+            self.max_tokenize_tokens = parse_optional_int(&value)
+                .map_err(|error| format!("invalid VLLM_MAX_TOKENIZE_TOKENS: {error}"))?
         }
         Ok(())
     }
@@ -1415,6 +1415,16 @@ impl FromStr for LogStatsInterval {
 /// decimal integers in the `i64` range.
 fn parse_int(value: &str) -> Result<i64, String> {
     value.trim().parse().map_err(|_| format!("`{value}` is not an integer"))
+}
+
+/// Parse an optional integer environment variable, treating empty or
+/// whitespace-only strings as unset (`None`).
+type OptionalInt = Option<i64>;
+fn parse_optional_int(value: &str) -> Result<Option<i64>, String> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    parse_int(value).map(Some)
 }
 
 /// Parse an integer flag environment variable as Python's `bool(int(value))`,
