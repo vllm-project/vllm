@@ -11,7 +11,7 @@ permissions:
 jobs:
   notify:
     if: >-
-      github.repository_owner == 'vllm-project' &&
+      github.repository == 'vllm-project/vllm' &&
       ((github.event_name == 'pull_request_target' &&
       github.event.action == 'labeled' &&
       (github.event.label.name == 'ready' ||

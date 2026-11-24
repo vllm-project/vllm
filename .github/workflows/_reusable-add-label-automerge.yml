@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   add-label-on-auto-merge:
-    if: github.repository_owner == 'vllm-project' && github.event_name == 'pull_request_target'
+    if: github.repository == 'vllm-project/vllm' && github.event_name == 'pull_request_target'
     runs-on: [self-hosted, linux, x64, vllm-runners]
     steps:
       - name: Add label
