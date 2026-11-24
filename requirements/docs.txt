@@ -10,21 +10,22 @@ babel==2.18.0 \
     # via
     #   mkdocs-git-revision-date-localized-plugin
     #   mkdocs-material
-backrefs==8.0 \
-    --hash=sha256:4a627b817fd2dce43b79ab48da63613340509381cd8ce0897078a0bce79a2ab8 \
-    --hash=sha256:601ce68ca12385dbda06ce264406b4c4210cf5b79fd0fd627592365c92f29a88 \
-    --hash=sha256:87f0fae8c5f207fe9f4b2887efc71d42f4900ac78faa1af08d675ef303692dc5 \
-    --hash=sha256:9ec96efa080938be92323e8e730e57718c9c88eb15ad70bbef4e1766df591408 \
-    --hash=sha256:b556cd7d36c3a3a2f256b89590b176b8eddfb73bcfaee3a3ddd84ea66d21ce50 \
-    --hash=sha256:f0c35cf0102ba6b6070c12a492be3c1c1d3f5839529784b9a9565d6d04569a01
+backrefs==8.3.1 \
+    --hash=sha256:4f49546f237131515ed25943d1af4c79956425733bb199cb879da56d79ebb77a \
+    --hash=sha256:5e3fec5e2d2405da135c8b480df12005e2245500c12a60ffd3f496e4acb7cd79 \
+    --hash=sha256:7b76f39c09d29740a6323be8d613cd9abee3068321c98ba8eb871ed23428eb20 \
+    --hash=sha256:c27c66419b126ecf4d54966ad92f0e3c2a8aff0eac1687f57fe2a1b04fa4d244 \
+    --hash=sha256:cecce5f4290b0eae0cb30a6e216c539465393218e6596ed164d82d20f2d96a54 \
+    --hash=sha256:d818aea8a704e41c0ce60c619e23e136fd5fe87f0fdf0b601107473c35d2d407 \
+    --hash=sha256:f3013ec3cc3ceb1069fa31c0432c73c2d72d652c03d082b96089745c290e7a10
     # via mkdocs-material
-bracex==3.0.1 \
-    --hash=sha256:4e38e32392e4a4780fe15d644bfc7c8514057cfc3861e060b11814ce829c25e4 \
-    --hash=sha256:6523ad83aeb5098a4ee597cff0f964442ff74e460bd3fafaffab6a013ff2288c
+bracex==3.2.4 \
+    --hash=sha256:82e9e738b63fca213c33211d30b0b1ca330896a1091736e78da2c1bcda93ab30 \
+    --hash=sha256:c1e67eb59f81445dee15b2c588b7c81352b697cfbd6c4931a2943ea6b71eb5ea
     # via wcmatch
-certifi==2026.10.19 \
-    --hash=sha256:035c1e85572b141bf1c3a3eff0e33a8eb74917522f2559075ff8d2fea780a1ae \
-    --hash=sha256:42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b
+certifi==2026.11.20 \
+    --hash=sha256:7422df25243767b9877031a2248cb14d09ddac9beee846f4cef3d5c9191d488f \
+    --hash=sha256:af1cb240a8133f105aa52684a3a3258339d7f2fd0bd4e2812698ff5cf5588c4e
     # via
     #   -r requirements/docs.in
     #   requests
@@ -228,9 +229,9 @@ gitpython==3.2.1 \
     # via
     #   -r requirements/docs.in
     #   mkdocs-git-revision-date-localized-plugin
-griffelib==2.3.0 \
-    --hash=sha256:1b8f9cd525681c26b1d6d574faa1371651e8459ca51d209684f50b8096ae06e0 \
-    --hash=sha256:7b0952caf5bca6afa4bb5ee8c6a2d183fe3f21b62efc5f6c7243cb2b26d2d115
+griffelib==2.4.1 \
+    --hash=sha256:40c028dd2e623f464423f0e11e3c553158f1cf4f1368239a370534d73e1407ff \
+    --hash=sha256:76bc562f936ad1ce198d2cf6d0731bd5c92a7d934b69ef828ef22ee0ffdb62ce
     # via mkdocstrings-python
 idna==3.20 \
     --hash=sha256:a7db850025b95ded1eae8a46181a1a6c56c92c96f0e2b005d9ff8dc0210cab44 \
@@ -244,9 +245,9 @@ jinja2==3.1.6 \
     #   mkdocs-material
     #   mkdocstrings
     #   properdocs
-markdown==3.10.3 \
-    --hash=sha256:3589362618f743188b4d955b874402bc814f4f83f544dc207719f4baa7d9c45f \
-    --hash=sha256:fa6c92a00a4a3c98b22728c64a935ae1928250ae65058a6ded814d2cc29a4cea
+markdown==3.11.3 \
+    --hash=sha256:81eb91631dc97ad1efbc76019ef0f80fe90ca49ddf81546752d79989c3bfff3e \
+    --hash=sha256:e1a31a112232504d753e5c01bb8c2de90d3f0ba986b063e10770cf7695b09e73
     # via
     #   mkdocs
     #   mkdocs-autorefs
@@ -391,17 +392,17 @@ mkdocs-get-deps==0.2.2 \
     --hash=sha256:8ee8d5f316cdbbb2834bc1df6e69c08fe769a83e040060de26d3c19fad3599a1 \
     --hash=sha256:e7878cbeac04860b8b5e0ca31d3abad3df9411a75a32cde82f8e44b6c16ff650
     # via mkdocs
-mkdocs-git-revision-date-localized-plugin==1.6.0 \
-    --hash=sha256:469af4b344a4d493a6402aa92eec87a6138e1dac444e9551c1af06991453954b \
-    --hash=sha256:88b2d524d24c49a05cd6c9b1456f7dc0c8fa5e233b09ecf8a1dd12aebc127990
+mkdocs-git-revision-date-localized-plugin==1.7.0 \
+    --hash=sha256:5ab222ea025342c797d9323c13ab1d65c80e20f7e9fcaaff156356e520879ff0 \
+    --hash=sha256:b6ac037275056dec3ab4227c51e6fde443299defebf13da852c877206f4f8625
     # via -r requirements/docs.in
 mkdocs-glightbox==0.5.2 \
     --hash=sha256:23a431ea802b60b1030c73323db2eed6ba859df1a0822ce575afa43e0ea3f47e \
     --hash=sha256:c7622799347c32310878e01ccf14f70648445561010911c80590cec0353370ac
     # via -r requirements/docs.in
-mkdocs-material==9.7.7 \
-    --hash=sha256:8ea9bb1737a5b524a5f9dcf2e1b4ebda8274ae3008aa7845720a97083bef708f \
-    --hash=sha256:c0649c065b1b0512d60aad8c10f947f8e455284475239b364b610f2deb4d0855
+mkdocs-material==9.8.2 \
+    --hash=sha256:005d942bdbfa22efa049f4818c31d42fb36bed6d362adb641dd7a2e948078f9d \
+    --hash=sha256:ef1414cab33d64fcc13387e972af5ba4620f55f93482d1842933399ed2c69b02
     # via -r requirements/docs.in
 mkdocs-material-extensions==1.3.1 \
     --hash=sha256:10c9511cea88f568257f960358a467d12b970e1f7b2c0e5fb2bb48cab1928443 \
@@ -870,25 +871,25 @@ requests==2.34.2 \
     --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0 \
     --hash=sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed
     # via mkdocs-material
-ruff==0.16.8 \
-    --hash=sha256:15e7d226246961db9235098333caa13063906d3851136b84c2900b82f5daa1df \
-    --hash=sha256:34508983c70665578dab88f5223d8e6228307e1135398ca8bfc8b7e9501e282b \
-    --hash=sha256:359a1e5b495448ee1e91018064382ebc86f90e8aac2fed222c7d0e4e8df85fd2 \
-    --hash=sha256:3a79b795469fef7fc6e908b218eed2eb17332afd85031db6480dc864560e69b2 \
-    --hash=sha256:3fdc5563cdc50555e6fba39322850860e9267c1b3d12c26a74729d8604c3c812 \
-    --hash=sha256:42ed6b878ed61e3acca92f2730a17acff39286944ea82398544696366a6f925e \
-    --hash=sha256:55793ba85c69921e89be061426d91a78652d6e50317c962240922747a4eb713f \
-    --hash=sha256:59e8f5681349474110b24d62e93cfda6593f5fa3473446ca3705200cac1a08b9 \
-    --hash=sha256:644bb578569e0ffc575741232bd385dacdd6fbe123f1a729e7a225f54aa3957f \
-    --hash=sha256:6ca111ba0849539165e9e59d2b442542f3c1e8060ebbdea82494f1ffbccb1e1f \
-    --hash=sha256:6ffbd6d87383c1edf5f6fa890f10200950240d7c1a16052a19a09d3a2307dd38 \
-    --hash=sha256:7ea781c7f2afba8c6a505ea0fb3f994020249e0c450635f5381286fea6b46170 \
-    --hash=sha256:8efeae3bbe414a5efefda11a792dfb51ef90ac48d50c4830de2f644caf3e8659 \
-    --hash=sha256:9247bf92b5f04d825c8639a4fe423ec2e4222acd9222e58412b0dab7e442798b \
-    --hash=sha256:a2bf6bc3e9ebdd4449abc6f06cf64b98051a2c61cf94d2fe9596518c881f1a1e \
-    --hash=sha256:a6b85621fd3c81e31fc5f5add09c9c078b430db3595ca632efafdec9e64ebfaa \
-    --hash=sha256:d075e820af612102ce217f07cc93e69f9490b10ec13ea85fa87bd03d996cef8a \
-    --hash=sha256:efa3e7a16d1baaa79957888dfdf8be9ef2e44db81cb032af06d76632ab59e773
+ruff==0.17.6 \
+    --hash=sha256:0692088e6b33455572fb18465e891b443f196e98dc1986825685c77ff6f4c5ac \
+    --hash=sha256:084d9c8f5ec718e7eba007dba339e7cb4f7571d2f267558ae080bf428fb6a69b \
+    --hash=sha256:1939b3d701c7b6981b7cf93473de5bf88b129b9ba84efaed5154cc517c44634d \
+    --hash=sha256:1a0bea6aa1216e0ec4cd35d3dbccec0d772a7c2aad28ec9c6e82571dff2c20b0 \
+    --hash=sha256:2b04276561331300325040bdca21460770029ec574d4c479099e39e8ad1ed43c \
+    --hash=sha256:3db61f5015600543a581b07fa7f6f64afa0eeedefe16034cadd88c4074087582 \
+    --hash=sha256:435241c61af5909a022f76219d3d1bf24730dc1bf0acabb5ddf4b569ab3cbb30 \
+    --hash=sha256:6a12c50a33936dc00db2be21ba25fb168a8b95c55eda2a3ac85005af69885e4b \
+    --hash=sha256:9cd2fd9923e9806b8b6b67a3469e2258e84bd4d21e45d5a1a690afdfb9c8e57d \
+    --hash=sha256:9d44ef2140402043fd6f689ef541858b80883a8b0a02e38539ef0614ebe57d0c \
+    --hash=sha256:9fbddc08577592e283c265d865e0182de6e33db185494db7b06290d989d888e5 \
+    --hash=sha256:aa3b08254a732acba246891089a152c47c5733dc36b8ecb76ce8602f8326e5e4 \
+    --hash=sha256:b5aba93b3db4b70c5697e4fee6e0d5b9c8452a9a3a03679611cadc25915a2173 \
+    --hash=sha256:c2f4af6670b7a0501904e881bb3f1f24bd0d964dec1eedbd85f0eb73786e1128 \
+    --hash=sha256:d006bbb2945edb17b0ce6a0c1b5f5a8d81ba11dbac294a0a925effa22ce34feb \
+    --hash=sha256:d8b14e1473dc86ab9069cf7a2ba5041dc012f59110201844ed04cfddf07055a0 \
+    --hash=sha256:fb589e032806bb942e4fb526f30b80a1a64112147ed9f1d38cc3de2e255b6f45 \
+    --hash=sha256:fd661702202a89c00a4c9d0339008805fa5876bfa1c57e165495c2e62230dfbf
     # via -r requirements/docs.in
 selectolax==0.4.12 \
     --hash=sha256:03b3938566cf853dc034f8e1f8b30bf05475c9ea77c682a9d1f976f220f617a6 \

@@ -1,5 +1,5 @@
 mkdocs<2.0.0
-certifi>=2026.10.19
+certifi>=2026.11.20
 gitpython>=3.2.1
 mkdocs-api-autonav
 mkdocs-material

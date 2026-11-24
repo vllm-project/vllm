@@ -3,7 +3,7 @@
 
 setuptools==78.1.1 # this version can reuse CMake build dir; >=78.1.1 for GHSA-5rjg-fvgr-3xxf
 
-numba == 0.65.0 # Required for N-gram speculative decoding
+numba == 0.68.1 # Required for N-gram speculative decoding
 
 # Dependencies for CPUs
 torch==2.14.0+cpu; platform_machine == "x86_64" or platform_machine == "s390x" or platform_machine == "aarch64"
