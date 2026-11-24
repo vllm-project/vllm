@@ -644,16 +644,24 @@ def cuda_skinny_unquantized_gemm_impl(
     from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm_plans import (
         get_skinny_gemm_plan,
     )
+    from vllm.model_executor.kernels.linear.triton_skinny_gemm import (
+        TritonSkinnyGemmConfig,
+        triton_skinny_gemm,
+    )
 
     plan = get_skinny_gemm_plan(weight.shape[0], weight.shape[1])
     config = None if plan is None else plan.get(x.shape[0])
     if (
-        config is not None
-        and x.dtype == torch.bfloat16
-        and weight.is_cuda
-        and weight.is_contiguous()
-        and row_stride_ok(x, config)
+        config is None
+        or x.dtype != torch.bfloat16
+        or not weight.is_cuda
+        or not weight.is_contiguous()
     ):
+        return torch.nn.functional.linear(x, weight)
+    if isinstance(config, TritonSkinnyGemmConfig):
+        if x.stride(1) == 1:
+            return triton_skinny_gemm(x, weight, config)
+    elif row_stride_ok(x, config):
         return shape_dynamic_skinny_gemm(x, weight, config)
     return torch.nn.functional.linear(x, weight)
 
