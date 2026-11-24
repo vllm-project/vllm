@@ -83,7 +83,7 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
     }
 )
 VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
-    {"glm_4_7", "hermes", "hy_v4", "kimi_k3", "longcat", "plamo3"}
+    {"glm_4_7", "hermes", "hy_v4", "kimi_k3", "longcat", "muse", "plamo3"}
 )
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
@@ -276,6 +276,21 @@ def limit_to_single_tool_call(tag: StructuralTag) -> StructuralTag:
 
     visit(tag.format)
     return tag
+
+
+@register_vllm_structural_tag("muse")
+def get_muse_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+    token_suffix: str = "",
+) -> StructuralTag:
+    """Build a Muse ATEM envelope grammar for canonical function names."""
+    del builtin_tools, reasoning, token_suffix
+    from vllm.parser.muse_grammar import muse_tool_structural_tag
+
+    return muse_tool_structural_tag(tools, tool_choice)
 
 
 def _dump_tool_for_xgrammar(

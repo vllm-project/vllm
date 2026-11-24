@@ -608,6 +608,9 @@ class DelegatingParser(Parser):
             request.text = None
         else:
             request.response_format = None
+        # Some model tags contain their own reasoning prefix and start at token 0.
+        if getattr(tool_parser, "structural_tag_includes_reasoning", False):
+            request._grammar_from_parser = True
         return request
 
     def extract_reasoning_streaming(
