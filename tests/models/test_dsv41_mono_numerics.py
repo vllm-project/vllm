@@ -1018,6 +1018,9 @@ def _check_largestep_hook(rank: int, tp: int, device, rows: int, image: bool) ->
         moe.experts.router.bias_vl = moe.gate.bias_vl
         moe.experts.router.image_sentinel_lo = lo
     process_weights_after_loading(moe, vc.model_config, device)
+    # The decoder layer is only read by `takes`, which this test does not call
+    # (it calls `forward` directly), so a bare module whose weak reference
+    # dies at once is enough.
     hook = LargeStepHook(torch.nn.Module(), moe, tp, device)
 
     g = torch.Generator(device=device).manual_seed(3000 + rows)

@@ -390,6 +390,34 @@ def test_quant_x_matches_reference_bytes(rows: int):
         assert torch.equal(got, want)
 
 
+@needs_gfx942
+@pytest.mark.parametrize("tp", TPS)
+@pytest.mark.parametrize(
+    "picks", [pytest.param(6, id="P6"), pytest.param(1536, id="P1536-max")]
+)
+def test_quant_h_matches_reference_bytes(tp: int, picks: int):
+    """`moe_small.build_quant_h` writes, for the intermediate h, the bytes and
+    codes of `quant_rows`, the same rule as the x quantization at width 5120,
+    including an all-zero 32-value block."""
+    _flydsl()
+    from vllm.models.deepseek_v41.amd.largestep.moe_small import build_quant_h
+
+    inter = 2304 // tp
+    dev = torch.device("cuda:0")
+    g = torch.Generator(device=dev).manual_seed(picks + tp)
+    h = (torch.randn(picks, inter, generator=g, device=dev) * 3).to(torch.bfloat16)
+    h[0, :32] = 0
+    bufs = [torch.zeros(picks, n, dtype=torch.uint8, device=dev)
+            for n in (inter, inter // 32)]  # fmt: skip
+    build_quant_h(inter)(
+        h.data_ptr(), *[b.data_ptr() for b in bufs], picks * (inter // 32)
+    )
+    torch.accelerator.synchronize()
+    hb, hs = R.quant_rows(h)
+    for got, want in zip(bufs, (hb, hs), strict=True):
+        assert torch.equal(got, want)
+
+
 @pytest.mark.parametrize(
     "rows,prefills,decodes,decode_tokens,takes",
     [

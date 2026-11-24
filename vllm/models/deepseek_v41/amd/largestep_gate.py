@@ -5,6 +5,7 @@
 `--monokernel` is on and the gfx942 weight copies `mono942` exist), the GPU
 is gfx942 with 304 CUs (MI300X and MI325X, the parts it is measured on: the
 stage kernels launch one CTA a CU), the model runs in bf16, TP is 4 or 8, and
+VLLM_BATCH_INVARIANT is off, and
 the layer has the shapes the kernels are built for (`largestep.shapes`: 384
 experts, top 6, hidden 5120). The block then
 takes the decode steps the mono decode layer is too small for
@@ -23,6 +24,12 @@ def build(layer):
     from vllm.platforms.rocm import get_cdna_version
 
     if get_cdna_version() != 3:
+        return None
+    import vllm.envs as envs
+
+    # The block quantizes activations to MXFP8 for steps of 43 to 256 rows
+    # only, so a request's numerics would depend on the batch it lands in.
+    if envs.VLLM_BATCH_INVARIANT:
         return None
     from vllm.models.deepseek_v41.amd.largestep.moe_ug import BLOCKS
 

@@ -627,7 +627,12 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
             i: ["whole" if i in WHOLE else "ffn", True, copies] for i in WHOLE + FFN
         }, rank
         if large:
-            assert all(n >= STEPS for n in rank["large_steps"].values()), rank
+            # enforce_eager and equal max_tokens: one block call a decode step,
+            # STEPS of them. The scheduler may split a step when requests
+            # arrive late, so this bounds the count from both sides.
+            assert all(STEPS <= n <= 2 * STEPS for n in rank["large_steps"].values()), (
+                rank
+            )
         else:
             assert rank["epoch"] >= launches * STEPS, rank
             assert rank["epoch"] % launches == 0, rank

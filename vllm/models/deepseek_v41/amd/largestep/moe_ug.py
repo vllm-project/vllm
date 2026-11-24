@@ -7,6 +7,8 @@ picks. A CTA has 8 waves, each a 640-wide K slice, and the partial sums
 meet in LDS. Output `h` bf16 [P, I], as vLLM's AITER stage 1 stores it.
 """
 
+import functools
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
@@ -119,6 +121,10 @@ def _byte(words, i):
     return (words[i // 4] >> (8 * (i % 4))) & 0xFF
 
 
+# One launcher a shape for the process: the 40 layers share it, and it stays
+# alive as long as the CUDA graphs that launch it (FlyDSL unloads a kernel's
+# code object when its launcher is collected).
+@functools.cache
 def build_moe_ug(tp: int, experts: int = EXPERTS, inter: int | None = None):
     """The stage 1 launch for one TP rank: intermediate width `inter` (MOE_INTER /
     tp by default), `experts` experts. Launch with one CTA a unit stride:

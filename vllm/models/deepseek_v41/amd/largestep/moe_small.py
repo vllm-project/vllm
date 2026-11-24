@@ -7,6 +7,8 @@
 token's 6 weighted rows summed in f32 in top-k order, to bf16.
 """
 
+import functools
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
@@ -29,6 +31,10 @@ _STREAM = fx.Stream(None)
 THREADS = 256
 
 
+# One launcher a shape for the process: the 40 layers share it, and it stays
+# alive as long as the CUDA graphs that launch it (FlyDSL unloads a kernel's
+# code object when its launcher is collected).
+@functools.cache
 def build_quant_h(inter: int):
     """MXFP8 of h [P, I]: grid (P * I / 32 / 4,), 4 waves a CTA, a wave a
     32-column block. Each 8-value chunk even K first, for the routed experts'
@@ -96,6 +102,10 @@ def build_quant_h(inter: int):
     return launch
 
 
+# One launcher a shape for the process: the 40 layers share it, and it stays
+# alive as long as the CUDA graphs that launch it (FlyDSL unloads a kernel's
+# code object when its launcher is collected).
+@functools.cache
 def build_combine():
     """out[t] = bf16(sum over k of y[6 t + k]) in f32, top-k order: grid
     (S * 5120 / 8 / THREADS,), a thread 8 columns of one token."""

@@ -25,6 +25,10 @@ from .moe_ug import build_moe_ug
 from .moe_xq import build_quant_x
 from .shapes import EXPERTS, GROUP, HIDDEN, TOPK
 
+# The steps the block takes: smaller ones run the mono decode layer, larger
+# ones vLLM's MoE.
+MIN_ROWS = MAX_ROWS_GFX942 + 1
+
 
 class _Scratch:
     """Scratch of one block call for the largest step (MAX_ROWS rows),
@@ -107,10 +111,6 @@ class LargeStepMoE:
         # and the model discards padding rows, so they are not cleared.
         self.combine(b.y.data_ptr(), b.routed.data_ptr(), s, st)
         return b.routed[:s]
-
-
-# Smaller steps run the mono decode layer.
-MIN_ROWS = MAX_ROWS_GFX942 + 1
 
 
 class LargeStepHook:

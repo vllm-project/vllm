@@ -7,6 +7,8 @@ partial sums cross waves. Output `y` bf16 [P, 5120], combined per token by
 `moe_small.build_combine`.
 """
 
+import functools
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
@@ -123,6 +125,10 @@ def _h_loads(hq, hqs, pick, inter, lane):
     return bx, cw
 
 
+# One launcher a shape for the process: the 40 layers share it, and it stays
+# alive as long as the CUDA graphs that launch it (FlyDSL unloads a kernel's
+# code object when its launcher is collected).
+@functools.cache
 def build_moe_down(tp: int, experts: int = EXPERTS, inter: int | None = None):
     """The stage 2 launch for one TP rank: `BLOCKS` CTAs, each running units
     bid, bid + BLOCKS, ... of n_groups x CHUNKS units."""

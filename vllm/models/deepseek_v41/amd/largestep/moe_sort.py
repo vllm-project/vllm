@@ -7,6 +7,8 @@ graph. Table int32 [G, 4 + 16]: the
 expert, three zeros, then 16 picks (-1 past the last). `count` gets G.
 """
 
+import functools
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
@@ -24,6 +26,10 @@ MAX_PICKS = MAX_ROWS * TOPK
 _STREAM = fx.Stream(None)
 
 
+# One launcher a shape for the process: the 40 layers share it, and it stays
+# alive as long as the CUDA graphs that launch it (FlyDSL unloads a kernel's
+# code object when its launcher is collected).
+@functools.cache
 def build_moe_sort(experts: int = EXPERTS):
     assert experts <= THREADS
     name = kernel_symbol("dsv41_ls_moe_sort", e=experts)

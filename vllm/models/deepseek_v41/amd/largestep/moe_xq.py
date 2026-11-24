@@ -4,6 +4,8 @@
 for the routed FP4 weights (`fp4x8_fnuz` order).
 """
 
+import functools
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
@@ -25,6 +27,10 @@ _STREAM = fx.Stream(None)
 GROUPS = HIDDEN // 32
 
 
+# One launcher a shape for the process: the 40 layers share it, and it stays
+# alive as long as the CUDA graphs that launch it (FlyDSL unloads a kernel's
+# code object when its launcher is collected).
+@functools.cache
 def build_quant_x():
     name = kernel_symbol("dsv41_ls_quant_x", h=HIDDEN)
 
