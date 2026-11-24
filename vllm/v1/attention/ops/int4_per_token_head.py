@@ -16,6 +16,7 @@ from typing import Any
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
@@ -35,6 +36,8 @@ from vllm.v1.attention.ops.triton_unified_attention import (
     kv_tile_alignment,
     reduce_segments,
 )
+
+logger = init_logger(__name__)
 
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
@@ -720,7 +723,10 @@ def _launch_packed_attn(
     into `out` (directly for 2D; via the segm buffers for 3D).
     """
     import vllm.envs as envs
-    from vllm.v1.attention.ops.triton_unified_attention import _get_tile_size
+    from vllm.v1.attention.ops.triton_unified_attention import (
+        MAX_3D_QUERY_LEN,
+        _get_tile_size,
+    )
 
     is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 
@@ -759,10 +765,13 @@ def _launch_packed_attn(
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
-        or num_seqs > seq_threshold_3D
+        or (max_seqlen_q > 1 and (max_seqlen_q > MAX_3D_QUERY_LEN or use_mm_prefix))
+        or num_seqs * triton.cdiv(max_seqlen_q, BLOCK_Q) > seq_threshold_3D
         or is_batch_invariant
     )
+    if use_3d and softmax_segm_max.shape[0] < q.shape[0]:
+        logger.debug_once("Split-K scratch rows < query tokens; using 2D.")
+        use_3d = False
 
     # 3D never reads ``output_ptr`` and 2D never reads the segm tensors,
     # but Triton needs a non-null pointer everywhere; reuse ``out`` as
