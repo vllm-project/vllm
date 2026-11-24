@@ -27,10 +27,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import KVCacheGroup
 from vllm.v1.request import Request
-from vllm.v1.sample.ops.topk_topp_sampler import (
-    flashinfer_sampler_supported,
-    xpu_sampler_supported,
-)
 from vllm.v1.worker.extensible_kv_cache import (
     ensure_kv_cache_blocks,
     num_committable_kv_blocks,
@@ -556,6 +552,10 @@ def warmup_kernels(
     """
     with _fixed_draft_counts(model_runner):
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
+        if not getattr(model_runner, "is_pooling_model", False):
+            _warmup_kernels(
+                model_runner, worker_execute_model, worker_sample_tokens, seeded=True
+            )
         # All PP ranks must run the same forwards to match sends and receives.
         if model_runner.speculative_config is not None:
             # Greedy batches skip logits processing, so rejection kernels
@@ -563,25 +563,6 @@ def warmup_kernels(
             _warmup_kernels(
                 model_runner, worker_execute_model, worker_sample_tokens, greedy=True
             )
-        if not model_runner.is_pooling_model:
-            # All PP ranks must execute matching warmup passes to avoid pipeline
-            # deadlocks (#62129). Non-last PP ranks have sampler=None, so gate on
-            # backend support rather than rank-local self.sampler.
-            sampler = getattr(model_runner, "sampler", None)
-            use_fused_sampler = (
-                (sampler.use_flashinfer or sampler.use_xpu_sampler)
-                if sampler is not None
-                else (flashinfer_sampler_supported() or xpu_sampler_supported())
-            )
-            if use_fused_sampler:
-                # Seeded requests bypass fused sampling (e.g. FlashInfer), falling back
-                # to PyTorch-native top-k/top-p and Gumbel sampling (#54425).
-                _warmup_kernels(
-                    model_runner,
-                    worker_execute_model,
-                    worker_sample_tokens,
-                    seeded=True,
-                )
 
     adaptive_verification = model_runner.adaptive_verification
     if adaptive_verification is not None:
@@ -671,14 +652,12 @@ def _warmup_kernels(
         pooling_params = PoolingParams(task=pooling_task)
         pooling_params.verify(model_runner.model_config)
     else:
-        if greedy:
-            sampling_params = SamplingParams(temperature=0)
-        elif seeded:
-            sampling_params = SamplingParams(
-                temperature=0.9, top_p=0.9, top_k=50, seed=42
-            )
-        else:
-            sampling_params = SamplingParams.for_sampler_warmup()
+        seed = 42 if seeded else None
+        sampling_params = (
+            SamplingParams(temperature=0)
+            if greedy
+            else SamplingParams.for_sampler_warmup(seed=seed)
+        )
         pooling_params = None
 
     # Assign distinct block IDs per request per group. 0 null block, start from 1.

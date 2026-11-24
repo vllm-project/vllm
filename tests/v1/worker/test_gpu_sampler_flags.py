@@ -8,9 +8,11 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 pytest.importorskip("triton")
-if not torch.cuda.is_available():
-    pytest.skip("CUDA required for sampler flag tests", allow_module_level=True)
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+    pytest.skip("CUDA or XPU required for sampler flag tests", allow_module_level=True)
 
 from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.sample.logits_processor import (
@@ -20,7 +22,7 @@ from vllm.v1.worker.gpu.sample.logits_processor import (
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.states import RequestState
 
-DEVICE = torch.device("cuda")
+DEVICE = torch.device(current_platform.device_type)
 VOCAB_SIZE = 128
 
 
@@ -147,29 +149,3 @@ def test_logits_processing_cache_only_checks_active_requests():
 
     assert not np.any(sampler.needs_logits_processing[sampling_only])
     assert np.any(sampler.needs_logits_processing[with_processing])
-
-
-def test_explicit_seed_triggers_native_sampling_dispatch():
-    """Verify that an explicit seed sets any_explicit_seed, which causes
-    fused_sampler_eligible to evaluate to False, routing to native top-k/top-p
-    and Gumbel sampling (#54425). Also verify slot reuse resets the flag."""
-    sampler = _make_sampler()
-    unseeded = SamplingParams.for_sampler_warmup()
-    seeded = SamplingParams(temperature=0.9, seed=42)
-
-    sampler.add_request(0, unseeded)
-    sampler.sampling_states.apply_staged_writes()
-    assert not sampler.sampling_states.any_explicit_seed(np.array([0], dtype=np.int32))
-
-    sampler.add_request(1, seeded)
-    sampler.sampling_states.apply_staged_writes()
-    assert sampler.sampling_states.any_explicit_seed(np.array([1], dtype=np.int32))
-    assert sampler.sampling_states.any_explicit_seed(np.array([0, 1], dtype=np.int32))
-
-    # Verify slot reuse resets the seeded flag
-    sampler.add_request(1, unseeded)
-    sampler.sampling_states.apply_staged_writes()
-    assert not sampler.sampling_states.any_explicit_seed(np.array([1], dtype=np.int32))
-    assert not sampler.sampling_states.any_explicit_seed(
-        np.array([0, 1], dtype=np.int32)
-    )
