@@ -6,6 +6,7 @@ from collections.abc import Callable
 import pytest
 
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 
 from .utils import (
@@ -394,3 +395,32 @@ def test_block_level_load_failure_fails_closed_with_multiple_groups():
 
     with pytest.raises(RuntimeError, match="failed_recving"):
         scheduler._handle_invalid_blocks({1}, {})
+
+
+def test_lost_all_kv_retries_inflight_async_load(scheduler: Scheduler):
+    """With lost_all_kv, an async load still in progress may have written
+    into the lost cache: it is retried (recomputed) once it completes."""
+    request = create_request(num_tokens=3 * scheduler.block_size)
+    scheduler.add_request(request)
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.get_loaded_kv_cache_group_ids.return_value = (0,)
+    scheduler.connector.get_num_new_matched_tokens.side_effect = [
+        (2 * scheduler.block_size, True),
+        (0, False),
+    ]
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    output = create_model_runner_output([])
+    output.kv_connector_output = KVConnectorOutput(lost_all_kv=True)
+    scheduler.update_from_output(scheduler_output, output)
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert request.num_computed_tokens == 0
+
+    scheduler_output = scheduler.schedule()
+    output = create_model_runner_output([], finished_recving={request.request_id})
+    scheduler.update_from_output(scheduler_output, output)
+    next_output = scheduler.schedule()
+    assert next_output.num_scheduled_tokens[request.request_id] == request.num_tokens
