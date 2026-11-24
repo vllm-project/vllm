@@ -197,8 +197,8 @@ def test_cache_partial_block_kv_cache_events():
 def test_cache_partial_block_event_keeps_every_mm_feature():
     """The event window can reach into more than one multimodal feature.
 
-    ``cache_partial_block`` builds the ``BlockStored`` extra keys over
-    ``[(num_hash_blocks - 1) * hash_block_size, num_tokens)``. Starting that
+    `cache_partial_block` builds the `BlockStored` extra keys over
+    `[(num_hash_blocks - 1) * hash_block_size, num_tokens)`. Starting that
     scan at the last feature drops any earlier one that also reaches into the
     window, so two requests differing only in that feature would be published
     under the same key.

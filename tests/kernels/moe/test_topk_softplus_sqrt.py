@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 import vllm._custom_ops as ops
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
@@ -122,8 +123,8 @@ def _dsv4_moe_config(monkeypatch, default_vllm_config, has_hash_routing, backend
         ("triton_unfused", "UnfusedOAITritonExperts"),
     ],
 )
+@override_parallel_groups(SingleRankGroup())
 def test_hash_routing_backend_selection(
-    dist_init,
     default_vllm_config,
     monkeypatch,
     has_hash_routing,
@@ -146,8 +147,9 @@ def test_hash_routing_backend_selection(
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
+@override_parallel_groups(SingleRankGroup())
 def test_hash_routing_rejects_monolithic_without_support(
-    dist_init, default_vllm_config, monkeypatch
+    default_vllm_config, monkeypatch
 ):
     """A monolithic kernel that does not implement hash routing is rejected."""
     from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
@@ -190,14 +192,15 @@ def test_hash_routing_rejects_monolithic_without_support(
     ],
     ids=["naive_ep", "eplb", "dp_ep_ag_rs", "dp_ep_hash_routing", "dp_ep_deepep"],
 )
+@override_parallel_groups(SingleRankGroup())
 def test_aiter_w4a16_expert_parallel_selection(
-    dist_init, default_vllm_config, monkeypatch, ep_config, has_hash_routing, rejection
+    default_vllm_config, monkeypatch, ep_config, has_hash_routing, rejection
 ):
     """EP selects the AITER W4A16 monolithic kernel, on its own and under DP.
 
     DP + EP rides the naive allgather/reduce-scatter prepare/finalize, so it
     stays on this kernel; EPLB and a dispatching all2all do not. Hash routing
-    stays rejected under DP, whose all-gather does not carry ``input_ids``.
+    stays rejected under DP, whose all-gather does not carry `input_ids`.
     """
     from dataclasses import replace
 

@@ -3,14 +3,14 @@
 """Routing support for the AITER Triton MXFP4 W4A16 MoE backend.
 
 MiMo-V2.6 uses an ungrouped sigmoid router with a per-expert correction bias
-(``scoring_func=sigmoid``, ``topk_method=noaux_tc``, ``n_group == 1``), which
-``get_routing_method_type`` classifies as ``RoutingMethodType.DeepSeekV3``.
-``AiterW4A16ExpertsMonolithic`` used to reject that router ("kernel does not
+(`scoring_func=sigmoid`, `topk_method=noaux_tc`, `n_group == 1`), which
+`get_routing_method_type` classifies as `RoutingMethodType.DeepSeekV3`.
+`AiterW4A16ExpertsMonolithic` used to reject that router ("kernel does not
 support routing method ..."), and on gfx942 it is the only MXFP4 kernel whose
 device gate accepts the card, so the checkpoint could not be served natively at
 all.
 
-aiter's *flat* top-k handles that router natively (``score_mode="sigmoid"`` plus
+aiter's *flat* top-k handles that router natively (`score_mode="sigmoid"` plus
 a correction bias), so the backend only has to ask for it. This module covers
 both halves: the gate accepts the router family, and the routing the wrapper
 requests reproduces the model's own math.
@@ -52,9 +52,9 @@ def mimo_routing_method() -> RoutingMethodType:
 
 
 def dp_parallel_config(dp_size: int = 2) -> FusedMoEParallelConfig:
-    """DP attention without expert parallelism (``-tp 1 -dp N``).
+    """DP attention without expert parallelism (`-tp 1 -dp N`).
 
-    ``use_ep`` is False, so no all2all kernels are involved and TP is flattened
+    `use_ep` is False, so no all2all kernels are involved and TP is flattened
     across the DP ranks.
     """
     return FusedMoEParallelConfig(
@@ -76,9 +76,9 @@ def dp_parallel_config(dp_size: int = 2) -> FusedMoEParallelConfig:
 def dp_ep_parallel_config(
     dp_size: int = 2, all2all_backend: str = "allgather_reducescatter"
 ) -> FusedMoEParallelConfig:
-    """DP attention with expert parallelism (``-dp N --enable-expert-parallel``).
+    """DP attention with expert parallelism (`-dp N --enable-expert-parallel`).
 
-    ``use_ep`` is True and ``dp_size > 1``, so ``use_all2all_kernels`` is set
+    `use_ep` is True and `dp_size > 1`, so `use_all2all_kernels` is set
     and the backend decides whether the kernel can serve the deployment.
     """
     return FusedMoEParallelConfig(
@@ -149,7 +149,7 @@ def test_aiter_w4a16_dp_ep_support_follows_all2all_backend(
     """DP + EP is only servable when the all2all is allgather/RS.
 
     That backend resolves to the same naive monolithic prepare/finalize as
-    DP-without-EP, so the only delta is the ``expert_map`` the kernel already
+    DP-without-EP, so the only delta is the `expert_map` the kernel already
     consumes for TP + EP. A dispatching backend instead hands the kernel a
     layout it cannot read.
     """
@@ -162,10 +162,10 @@ def test_aiter_w4a16_dp_ep_support_follows_all2all_backend(
 
 
 def test_aiter_w4a16_rejects_ep_with_silu_on_gfx1250(monkeypatch) -> None:
-    """SILU on gfx1250 runs the a8w4 kernel, which takes no ``expert_map``.
+    """SILU on gfx1250 runs the a8w4 kernel, which takes no `expert_map`.
 
     The gate has to reject it, otherwise the oracle picks this backend and the
-    forward pass raises ``NotImplementedError`` mid-step.
+    forward pass raises `NotImplementedError` mid-step.
     """
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: True)
     moe_config = dataclasses.replace(
@@ -189,8 +189,8 @@ def test_aiter_w4a16_rejects_ep_with_silu_on_gfx1250(monkeypatch) -> None:
 def test_aiter_w4a16_rejects_hash_routing_under_dp() -> None:
     """Hash routing plus DP must stay rejected.
 
-    The naive DP prepare/finalize gathers router logits but not ``input_ids``,
-    so the kernel would route ``sum(T_dp)`` logits against ``T_local`` ids.
+    The naive DP prepare/finalize gathers router logits but not `input_ids`,
+    so the kernel would route `sum(T_dp)` logits against `T_local` ids.
     """
     moe_config = dataclasses.replace(
         mimo_moe_config(),
@@ -239,10 +239,10 @@ def test_flat_sigmoid_routing_matches_mimo_reference(num_experts: int) -> None:
     """The routing the wrapper requests must equal MiMo's own router math.
 
     MiMo's router is ungrouped: sigmoid scores, selection on
-    ``sigmoid(logits) + bias``, weights = the *unbiased* sigmoid scores, then
+    `sigmoid(logits) + bias`, weights = the *unbiased* sigmoid scores, then
     renormalized. Both checkpoints use it — 256 experts is Flash, 384 is Pro.
 
-    The ``sigmoid`` score mode comes from ROCm/aiter#4688 (aiter >= 0.1.20).
+    The `sigmoid` score mode comes from ROCm/aiter#4688 (aiter >= 0.1.20).
     """
     aiter_routing = pytest.importorskip(
         "aiter.ops.triton.moe.moe_routing.routing"

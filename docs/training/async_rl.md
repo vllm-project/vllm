@@ -37,6 +37,12 @@ such as `sleep`, keep queueing new requests.
 
 The `clear_cache` parameter controls whether to clear the KV cache and prefix cache after pausing.
 
+`clear_cache=True` also resets a configured KV connector's cache. To clear only the local caches,
+pause with `clear_cache=False`, then call
+`reset_prefix_cache(reset_running_requests=True, reset_connector=False)`. Block hashes do not cover
+the weights, so keep the connector's cache only if the weights do not change, or give requests a
+`cache_salt` per weight version.
+
 ### resume_generation
 
 ```python
@@ -44,6 +50,8 @@ await engine.resume_generation()
 ```
 
 Resumes the scheduler after a pause. Any requests frozen with `mode="keep"` will continue generating.
+
+Wait for `pause_generation()` to finish before resuming, since a data-parallel MoE engine can reject an early resume. Once generation resumes, calling `resume_generation()` again has no effect.
 
 ### HTTP Endpoints
 
@@ -64,7 +72,7 @@ A typical async RL loop with weight syncing looks like this:
 
 1. Start generating rollouts from the current policy
 2. Once trainer has new weights to update to, pause generation with `mode="keep"`
-3. Sync the updated weights from the trainer to the inference engine (see [Weight Transfer](weight_transfer/README.md)) and set their weight version
+3. Sync the updated weights from the trainer to the inference engine (see [Weight Transfer](weight_updates/README.md)) and set their weight version
 4. Resume generation -- in-flight requests continue with the new weights
 5. Repeat
 

@@ -157,7 +157,6 @@ async fn responses_rejects_invalid_controls_before_inference() {
         ("top_logprobs", json!(1)),
         ("reasoning", json!({"summary": "unknown"})),
         ("text", json!({"verbosity": "unknown"})),
-        ("spaces_between_special_tokens", json!(false)),
         ("media_io_kwargs", json!({"image": {}})),
         ("mm_processor_kwargs", json!({})),
         ("enable_response_messages", json!(true)),
@@ -470,6 +469,39 @@ async fn responses_watermarking_defaults_and_opt_out_reach_engine_core() {
         assert_eq!(response.status(), StatusCode::OK);
         to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
         engine_task.await.expect("mock engine task");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_thinking_token_budget_reaches_engine_core() {
+    for (budget, expected) in [(None, None), (Some(256), Some(256)), (Some(-1), None)] {
+        // Assert after the response drains, so a mismatch fails the test
+        // instead of stalling the mock engine mid-request.
+        let (budget_tx, budget_rx) = std::sync::mpsc::channel();
+        let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+            Arc::new(FakeChatBackend::new()),
+            move |request| {
+                let params = request.sampling_params.as_ref().expect("sampling params");
+                budget_tx.send(params.thinking_token_budget).expect("send budget");
+            },
+        )
+        .await;
+
+        let mut body = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": "hello",
+            "stream": true,
+        });
+        if let Some(budget) = budget {
+            body["thinking_token_budget"] = json!(budget);
+        }
+        let response = responses_call(&app, body).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+        engine_task.await.expect("mock engine task");
+        assert_eq!(budget_rx.recv().expect("engine request"), expected);
     }
 }
 
@@ -1051,6 +1083,10 @@ async fn responses_streaming_emits_ordered_event_sequence() {
     .await;
 
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").and_then(|value| value.to_str().ok()),
+        Some("text/event-stream; charset=utf-8")
+    );
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
@@ -1293,6 +1329,51 @@ async fn responses_namespace_tool_call_reports_function_name_and_namespace() {
         assert_eq!(call["name"], "get_app_state", "{json}");
         assert_eq!(call["namespace"], "mcp__computer_use", "{json}");
         assert_eq!(call["arguments"], "{\"app\":\"Chrome\"}", "{json}");
+        assert_eq!(json["tools"], json!([computer_use_namespace_tool()]));
+    }
+}
+
+/// Codex declares its tools through an `additional_tools` input item instead
+/// of `tools`; they reach the model and the echo like top-level tools.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn responses_additional_tools_item_declares_tools() {
+    for stream in [false, true] {
+        let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+            Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+            namespaced_tool_call_output_specs(),
+        )
+        .await;
+        let request = json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [computer_use_namespace_tool()]
+                },
+                {"role": "user", "content": "Inspect Google Chrome."}
+            ],
+        });
+        let json = if stream {
+            responses_stream_terminal(&app, request).await
+        } else {
+            let response = responses_call(&app, request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+            serde_json::from_slice(&body).expect("decode json")
+        };
+        engine_task.await.expect("mock engine task");
+
+        let call = json["output"]
+            .as_array()
+            .expect("output items")
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .unwrap_or_else(|| panic!("function call item: {json}"));
+        assert_eq!(call["name"], "get_app_state", "{json}");
+        assert_eq!(call["namespace"], "mcp__computer_use", "{json}");
+        assert_eq!(json["tool_choice"], "auto", "{json}");
         assert_eq!(json["tools"], json!([computer_use_namespace_tool()]));
     }
 }
