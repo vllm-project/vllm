@@ -108,8 +108,10 @@ class AuxOutputSchedulerConnector:
         self._rowless: dict[ExternalBlockHash, BlockHash] = {}
         # First token each active request computes here.
         self._computed_from: dict[str, int] = {}
-        # KV blocks of each active opted-out request already checked.
+        # KV blocks of each active opted-out request already checked, and the
+        # ones it marked rowless, kept until it finishes.
         self._skip_marked: dict[str, int] = {}
+        self._skip_rowless: dict[str, list[ExternalBlockHash]] = {}
         self._capacity = num_objects // (self._block_size // self._hash_block_size)
         self._retained_hashes: list[bytes] = []
         self._released_hashes: list[bytes] = []
@@ -220,10 +222,12 @@ class AuxOutputSchedulerConnector:
     def _release_unheld(self) -> None:
         loading = set().union(*self._loading.values())
         if len(self._rowless) > self._capacity:
+            # An opted-out request may cache its marked blocks only later.
+            held = loading.union(*self._skip_rowless.values())
             self._rowless = {
                 block: block_hash
                 for block, block_hash in self._rowless.items()
-                if block in loading or self._gpu_cached(block_hash)
+                if block in held or self._gpu_cached(block_hash)
             }
         excess = len(self._kv_cached) - self._capacity
         if excess <= 0:
@@ -298,6 +302,7 @@ class AuxOutputSchedulerConnector:
         """Queue a request's terminal event and final block hashes."""
         if self._skips(request):
             self._skip_marked.pop(request.request_id, None)
+            self._skip_rowless.pop(request.request_id, None)
             return
         request_id = request.request_id
         self._loading.pop(request_id, None)
@@ -328,10 +333,12 @@ class AuxOutputSchedulerConnector:
         num_checked = self._skip_marked.get(request.request_id, 0)
         step = self._block_size // self._hash_block_size
         hashes = request.block_hashes
+        marked = self._skip_rowless.setdefault(request.request_id, [])
         for block, keys in self._kv_blocks(hashes[num_checked * step :]):
             if block in self._kv_cached or (hits_cache and self._gpu_cached(keys[-1])):
                 continue
             self._rowless[block] = keys[-1]
+            marked.append(block)
         self._skip_marked[request.request_id] = len(hashes) // step
 
     @staticmethod
