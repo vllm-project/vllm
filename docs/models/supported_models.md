@@ -515,6 +515,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | `StableLmForCausalLM` | StableLM | `stabilityai/stablelm-3b-4e1t`, `stabilityai/stablelm-base-alpha-7b-v2`, etc. | ✅︎ | ✅︎ |
 | `Starcoder2ForCausalLM` | Starcoder2 | `bigcode/starcoder2-3b`, `bigcode/starcoder2-7b`, `bigcode/starcoder2-15b`, etc. | ✅︎ | ✅︎ |
 | `VaultGemmaForCausalLM` | VaultGemma | `google/vaultgemma-1b` | ✅︎ | ✅︎ |
+| `YoutuForCausalLM` | Youtu-LLM | `tencent/Youtu-LLM-2B`, etc. | ✅︎ | ✅︎ |
 
 !!! note
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
@@ -693,6 +694,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | ------------ | ------ | ------ | ----------------- | --------------------------- | --------------------------------------- |
 | `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | ✅︎ | ✅︎ |
 | `Emu3ForConditionalGeneration` | Emu3 | T + I<sup>+</sup> | `BAAI/Emu3-Chat-hf` | ✅︎ | ✅︎ |
+| `GraniteDoclingForConditionalGeneration` | Granite Docling | T + I<sup>+</sup> | `ibm-granite/granite-for-docling-2b`, etc. | ✅︎ | ✅︎ |
 | `HunYuanVLForConditionalGeneration` | HunyuanOCR | T + I<sup>E+</sup> | `tencent/HunyuanOCR`, etc. | ✅︎ | ✅︎ |
 | `VibeVoiceAsrForConditionalGeneration` | VibeVoice-ASR | T + A<sup>+</sup> | `microsoft/VibeVoice-ASR-HF` | ✅︎ | ✅︎ |
 
@@ -743,6 +745,12 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     - Gemma 4 Unified assistant checkpoints (`model_type: gemma4_unified_assistant`) use the same MTP path as the tower-based variant. See the [Gemma 4 assistant model MTP example](../features/speculative_decoding/mtp.md#gemma-4-assistant-models).
 
 !!! note
+    `GraniteDoclingForConditionalGeneration` checkpoints with a fine connector path (`vision_config.use_fine_route`)
+    accept `fine_route=True` in `--mm-processor-kwargs` or per request, for four times as many image tokens per tile.
+    To choose the route of each page with the checkpoint's density router, see
+    [examples/generate/multimodal/granite_docling_density_router_online.py](../../examples/generate/multimodal/granite_docling_density_router_online.py).
+
+!!! note
     For `InternVLChatModel`, only InternVL2.5 with Qwen2.5 text backbone (`OpenGVLab/InternVL2.5-1B` etc.), InternVL3 and InternVL3.5 have video inputs support currently.
 
 !!! note
@@ -771,6 +779,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     image and video only, as do the Nemotron 3.5 Super VL checkpoints.
     `NemotronH_Omni_Reasoning_V3` checkpoints load without `--trust-remote-code`
     on `transformers>=5.18.0`; older versions still require the flag.
+    The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) serves image and video inputs
+    for these checkpoints. Audio inputs need the Python frontend.
 
 !!! note
     On ROCm, `Step5ForConditionalGeneration` requires CDNA3 or newer (MI300 series
