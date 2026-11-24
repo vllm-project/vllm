@@ -508,6 +508,63 @@ def flashinfer_bf16_mm(
     return out
 
 
+# (FlashInfer backend, pdl) of the BF16 GEMMs that dispatch_unquantized_gemm sent to
+# FlashInfer, for warmup_flashinfer_bf16_gemms().
+_bf16_warmup_call: tuple[str, bool] | None = None
+
+
+def register_flashinfer_bf16_warmup(backend: str, pdl: bool) -> None:
+    """Remember how the model calls FlashInfer's BF16 GEMM, for the warmup."""
+    global _bf16_warmup_call
+    _bf16_warmup_call = (backend, pdl)
+
+
+@torch.inference_mode()
+def warmup_flashinfer_bf16_gemms(device: torch.device | str) -> int:
+    """Run every GEMM of the loaded BF16 tuning file once.
+
+    A process pays for the first call of every (M bucket, N, K) it sees: about
+    25 ms each, up to 1-2 s for some cuDNN and CuTe-DSL tactics. Nothing of it is
+    cached on disk (the tuning file only picks the tactic), so a server would pay
+    it in the first requests that reach a bucket the CUDA graph capture did not
+    run. Running the GEMMs of the file here moves that to startup.
+
+    The inputs are zeros, one weight per (N, K) at a time. A point that does not
+    fit in memory is skipped. Returns the number of GEMMs run.
+    """
+    if _bf16_warmup_call is None or not _bf16_tuning_files_loaded:
+        return 0
+    backend, pdl = _bf16_warmup_call
+    m_by_shape: dict[tuple[int, int], list[int]] = {}
+    for m, n, k in sorted(_bf16_tuning_points):
+        m_by_shape.setdefault((n, k), []).append(m)
+
+    done = skipped = 0
+    for (n, k), ms in sorted(m_by_shape.items()):
+        try:
+            weight = torch.zeros(n, k, dtype=torch.bfloat16, device=device)
+            x = torch.zeros(max(ms), k, dtype=torch.bfloat16, device=device)
+        except torch.OutOfMemoryError:
+            skipped += len(ms)
+            continue
+        for m in ms:
+            try:
+                _flashinfer_bf16_mm(x[:m], weight.t(), None, pdl, backend)
+            except torch.OutOfMemoryError:
+                skipped += 1
+            else:
+                done += 1
+        del weight, x
+    torch.accelerator.synchronize()
+    if skipped:
+        logger.warning(
+            "FlashInfer BF16 GEMM warmup skipped %d of %d GEMMs: out of memory.",
+            skipped,
+            done + skipped,
+        )
+    return done
+
+
 # This is the storage path for the cubins, it can be replaced
 # with a local path for testing.
 # Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35

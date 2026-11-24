@@ -657,3 +657,52 @@ def test_tuning_file_copy_gets_the_capability_of_this_gpu(
     expected = {k: v for k, v in expected.items() if k != "_metadata"}
     assert loaded == expected
     assert json.loads(source.read_text()) == _capability_configs(10, 0)
+
+
+def _fake_bf16_mm(monkeypatch: pytest.MonkeyPatch, calls: list, fail=lambda m: False):
+    def fake_mm(a, b, bias, pdl, backend):
+        if fail(a.shape[0]):
+            raise torch.OutOfMemoryError("out of memory")
+        calls.append((a.shape[0], b.shape[1], a.shape[1], pdl, backend))
+        return a
+
+    monkeypatch.setattr(fi, "_flashinfer_bf16_mm", fake_mm)
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda *a, **k: None)
+
+
+def test_warmup_runs_every_point_of_the_tuning_file(monkeypatch):
+    points = frozenset({(1, 64, 32), (8, 64, 32), (8, 16, 32), (4, 16, 24)})
+    monkeypatch.setattr(fi, "_bf16_tuning_files_loaded", True)
+    monkeypatch.setattr(fi, "_bf16_tuning_points", points)
+    monkeypatch.setattr(fi, "_bf16_warmup_call", ("auto", True))
+    calls: list = []
+    _fake_bf16_mm(monkeypatch, calls)
+
+    assert fi.warmup_flashinfer_bf16_gemms("cpu") == len(points)
+    # (M, N, K, pdl, backend), the way the model calls it
+    assert sorted(calls) == sorted((m, n, k, True, "auto") for m, n, k in points)
+
+
+def test_warmup_does_nothing_without_a_loaded_file_or_registered_call(monkeypatch):
+    calls: list = []
+    _fake_bf16_mm(monkeypatch, calls)
+    monkeypatch.setattr(fi, "_bf16_tuning_points", frozenset({(1, 64, 32)}))
+    monkeypatch.setattr(fi, "_bf16_warmup_call", ("auto", True))
+    monkeypatch.setattr(fi, "_bf16_tuning_files_loaded", False)
+    assert fi.warmup_flashinfer_bf16_gemms("cpu") == 0
+    monkeypatch.setattr(fi, "_bf16_tuning_files_loaded", True)
+    monkeypatch.setattr(fi, "_bf16_warmup_call", None)
+    assert fi.warmup_flashinfer_bf16_gemms("cpu") == 0
+    assert calls == []
+
+
+def test_warmup_skips_points_that_do_not_fit_in_memory(monkeypatch, caplog):
+    points = frozenset({(1, 64, 32), (8, 64, 32), (16, 64, 32)})
+    monkeypatch.setattr(fi, "_bf16_tuning_files_loaded", True)
+    monkeypatch.setattr(fi, "_bf16_tuning_points", points)
+    monkeypatch.setattr(fi, "_bf16_warmup_call", ("auto", False))
+    calls: list = []
+    _fake_bf16_mm(monkeypatch, calls, fail=lambda m: m == 8)
+
+    assert fi.warmup_flashinfer_bf16_gemms("cpu") == 2
+    assert sorted(c[0] for c in calls) == [1, 16]

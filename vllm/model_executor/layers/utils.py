@@ -21,8 +21,10 @@ from vllm.utils.flashinfer import (
     is_flashinfer_auto_bf16_gemm_supported,
     is_flashinfer_bf16_gemm_supported,
     is_flashinfer_bf16_gemm_tuned,
+    is_flashinfer_bf16_tuning_loaded,
     is_flashinfer_cutedsl_bf16_gemm_supported,
     load_flashinfer_bf16_tuning_for_current_model,
+    register_flashinfer_bf16_warmup,
     warn_flashinfer_bf16_untuned,
 )
 from vllm.utils.platform_utils import num_compute_units
@@ -1013,6 +1015,10 @@ def dispatch_unquantized_gemm(
             )
         return cuda_unquantized_gemm
     init_flashinfer_bf16_tuning_buckets()
+    if is_flashinfer_bf16_tuning_loaded():
+        register_flashinfer_bf16_warmup(
+            backend_spec.flashinfer_backend, current_platform.is_arch_support_pdl()
+        )
     logger.info_once(
         "Using FlashInfer %s for eligible unquantized BF16 GEMMs.",
         backend_spec.flashinfer_backend,

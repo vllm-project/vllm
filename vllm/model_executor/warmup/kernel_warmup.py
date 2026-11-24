@@ -56,6 +56,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer,
     is_flashinfer_bf16_tuning_loaded,
     reload_flashinfer_bf16_tuning,
+    warmup_flashinfer_bf16_gemms,
 )
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
@@ -407,7 +408,27 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         with _outside_kv_cache_transient_window(worker):
             flashinfer_autotune(worker.model_runner)
 
+    if enable_jit_warmup:
+        _warmup_flashinfer_bf16_gemms(worker)
+
     _warmup_flashinfer_attention(worker)
+
+
+def _warmup_flashinfer_bf16_gemms(worker: "Worker") -> None:
+    """Run the BF16 GEMMs of the loaded FlashInfer tuning file once.
+
+    Runs after the autotune pass, which may have cleared and reloaded the file's
+    tactics (see `flashinfer_autotune`).
+    """
+    if not is_flashinfer_bf16_tuning_loaded():
+        return
+    start = time.perf_counter()
+    count = warmup_flashinfer_bf16_gemms(worker.device)
+    logger.info(
+        "FlashInfer BF16 GEMM warmup ran %d GEMMs in %.2fs.",
+        count,
+        time.perf_counter() - start,
+    )
 
 
 def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
