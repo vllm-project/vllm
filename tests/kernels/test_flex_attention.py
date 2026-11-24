@@ -65,6 +65,27 @@ def test_flex_attention_explicit_block_sizes_override_encoder_defaults():
     assert block_sizes == (64, 32)
 
 
+@pytest.mark.parametrize("cache_block_size", [576, 1024])
+def test_flex_attention_hybrid_block_size_gets_bounded_kernel_tile(
+    cache_block_size: int,
+):
+    """Hybrid models align the KV block to large multiples of 16, which the
+    kernel must cover with a bounded power-of-2 tile to fit in shared memory."""
+    from vllm.v1.attention.backends.flex_attention import get_kernel_options
+
+    q_block_size, kv_block_size = FlexAttentionMetadataBuilder._get_block_sizes(
+        AttentionConfig(),
+        supports_small_blocks=True,
+        cache_block_size=cache_block_size,
+        uses_paged_kv=True,
+    )
+    assert kv_block_size == cache_block_size
+
+    query = torch.empty(0, dtype=torch.bfloat16)
+    block_n = get_kernel_options(query, q_block_size, kv_block_size, True)["BLOCK_N"]
+    assert block_n == 64
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
     reason="CUDA not available or PyTorch version < 2.7",
@@ -235,6 +256,39 @@ def test_flex_attention_vs_default_backend(vllm_runner):
     check_logprobs_close(
         outputs_0_lst=output_flex,
         outputs_1_lst=output_default,
+        name_0="flex",
+        name_1="default",
+    )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
+    reason="CUDA not available or PyTorch version < 2.7",
+)
+def test_flex_attention_hybrid_vs_default_backend(vllm_runner):
+    """Hybrid models align the KV block size to a non-power-of-2 multiple of
+    16, which FlexAttention must run and match the default backend on."""
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+    ]
+    outputs = []
+    for backend_kwargs in (
+        {"attention_config": {"backend": "FLEX_ATTENTION"}},
+        {"gpu_memory_utilization": 0.85},
+    ):
+        with vllm_runner(
+            "tiny-random/qwen3-next-moe",
+            runner="generate",
+            enable_chunked_prefill=True,
+            **backend_kwargs,
+        ) as llm:
+            outputs.append(llm.generate_greedy_logprobs(prompts, 24, 5))
+
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
         name_0="flex",
         name_1="default",
     )

@@ -57,6 +57,8 @@ create_block_mask_compiled = torch.compile(
 )
 flex_attention_compiled = torch.compile(flex_attention, fullgraph=True)
 
+_MAX_DIRECT_BUILD_BLOCK_N = 64
+
 
 def _offsets_to_doc_ids_tensor(
     offsets_cpu: torch.Tensor, device: torch.device
@@ -967,12 +969,12 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             )
 
         kv_block_size = attn_cfg.flex_attn_kv_block_size or kv_block_size
-        if (kv_block_size & (kv_block_size - 1)) != 0 or (
+        if kv_block_size % 16 != 0 or (
             attn_cfg.flex_attn_block_n is not None
             and kv_block_size % attn_cfg.flex_attn_block_n != 0
         ):
             raise ValueError(
-                f"flex_attn_kv_block_size must be a power of 2 "
+                f"flex_attn_kv_block_size must be a multiple of 16 "
                 f"and divisible by flex_attn_block_n, got "
                 f"{kv_block_size}, {attn_cfg.flex_attn_block_n}"
             )
@@ -1436,7 +1438,7 @@ def get_kernel_options(
 
     if use_direct_build:
         kernel_options["BLOCK_M"] = block_m
-        kernel_options["BLOCK_N"] = block_n
+        kernel_options["BLOCK_N"] = math.gcd(block_n, _MAX_DIRECT_BUILD_BLOCK_N)
         return kernel_options
     else:
         preferred_block = 32 if query.dtype == torch.float32 else 64
