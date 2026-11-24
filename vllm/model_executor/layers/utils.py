@@ -19,6 +19,7 @@ from vllm.utils.flashinfer import (
     flashinfer_bf16_unusable_tuning_file,
     init_flashinfer_bf16_tuning_buckets,
     is_flashinfer_auto_bf16_gemm_supported,
+    is_flashinfer_bf16_gemm_outside_cuda_graphs,
     is_flashinfer_bf16_gemm_supported,
     is_flashinfer_bf16_gemm_tuned,
     is_flashinfer_bf16_tuning_loaded,
@@ -196,6 +197,8 @@ def _can_use_flashinfer_bf16(
     # than torch, so those stay on torch.
     k = weight.shape[1]
     m = x.numel() // k
+    if is_flashinfer_bf16_gemm_outside_cuda_graphs(m):
+        return False
     if is_flashinfer_bf16_gemm_tuned(m, weight.shape[0], k):
         return True
     warn_flashinfer_bf16_untuned(m, weight.shape[0], k)

@@ -706,3 +706,25 @@ def test_warmup_skips_points_that_do_not_fit_in_memory(monkeypatch, caplog):
 
     assert fi.warmup_flashinfer_bf16_gemms("cpu") == 2
     assert sorted(c[0] for c in calls) == [1, 16]
+
+
+@pytest.mark.parametrize(
+    "max_m, m, expected",
+    [(32, 32, False), (32, 33, True), (32, 16384, True), (None, 16384, False)],
+)
+def test_gemm_outside_cuda_graphs(monkeypatch, max_m, m, expected):
+    monkeypatch.setattr(fi, "_bf16_max_cuda_graph_m", max_m)
+    assert fi.is_flashinfer_bf16_gemm_outside_cuda_graphs(m) is expected
+
+
+def test_warmup_skips_points_above_the_cuda_graph_sizes(monkeypatch):
+    points = frozenset({(8, 64, 32), (32, 64, 32), (16384, 64, 32)})
+    monkeypatch.setattr(fi, "_bf16_tuning_files_loaded", True)
+    monkeypatch.setattr(fi, "_bf16_tuning_points", points)
+    monkeypatch.setattr(fi, "_bf16_warmup_call", ("auto", True))
+    monkeypatch.setattr(fi, "_bf16_max_cuda_graph_m", 32)
+    calls: list = []
+    _fake_bf16_mm(monkeypatch, calls)
+
+    assert fi.warmup_flashinfer_bf16_gemms("cpu") == 2
+    assert sorted(c[0] for c in calls) == [8, 32]

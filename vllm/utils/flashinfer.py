@@ -329,6 +329,8 @@ def load_flashinfer_bf16_tuning_for_current_model() -> bool:
 # M values (CUDA graph capture sizes) at which FlashInfer's bf16 GEMM autotuner
 # profiles and looks up tactics. None means FlashInfer's default buckets.
 _bf16_gemm_tuning_buckets: tuple[int, ...] | None = None
+# Largest CUDA graph capture size; None without CUDA graphs.
+_bf16_max_cuda_graph_m: int | None = None
 
 
 def init_flashinfer_bf16_tuning_buckets() -> None:
@@ -337,20 +339,34 @@ def init_flashinfer_bf16_tuning_buckets() -> None:
     Called while the vLLM config is set (dispatch at model init), because the
     config is not guaranteed to be available when the GEMM runs.
     """
-    global _bf16_gemm_tuning_buckets
+    global _bf16_gemm_tuning_buckets, _bf16_max_cuda_graph_m
     from vllm.config import get_current_vllm_config_or_none
 
+    _bf16_gemm_tuning_buckets = None
+    _bf16_max_cuda_graph_m = None
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:
-        _bf16_gemm_tuning_buckets = None
         return
     sizes = vllm_config.compilation_config.cudagraph_capture_sizes
     if not sizes:
-        _bf16_gemm_tuning_buckets = None
         return
     buckets = set(sizes)
     buckets.add(vllm_config.scheduler_config.max_num_batched_tokens)
     _bf16_gemm_tuning_buckets = tuple(sorted(buckets))
+    _bf16_max_cuda_graph_m = max(sizes)
+
+
+def is_flashinfer_bf16_gemm_outside_cuda_graphs(m: int) -> bool:
+    """Whether a bf16 GEMM with m rows runs outside the CUDA graphs.
+
+    A step with more tokens than the largest capture size runs eagerly, and an
+    eager FlashInfer GEMM costs several times more CPU time than torch's (its
+    tactic lookup and dispatch run on every call). On Qwen3.8-Flash-Next TP2
+    that made the GPUs wait for the CPU in such steps (-18% throughput at
+    concurrency 128 on GB300), while at these M the tuned FlashInfer kernels are
+    within 2% of cuBLAS. Such GEMMs stay on torch.
+    """
+    return _bf16_max_cuda_graph_m is not None and m > _bf16_max_cuda_graph_m
 
 
 def _bf16_lookup_bucket(m: int) -> int | None:
@@ -530,14 +546,16 @@ def warmup_flashinfer_bf16_gemms(device: torch.device | str) -> int:
     run. Running the GEMMs of the file here moves that to startup.
 
     The inputs are zeros, one weight per (N, K) at a time. A point that does not
-    fit in memory is skipped. Returns the number of GEMMs run.
+    fit in memory is skipped, and so is one above the CUDA graph capture sizes,
+    which runs on torch. Returns the number of GEMMs run.
     """
     if _bf16_warmup_call is None or not _bf16_tuning_files_loaded:
         return 0
     backend, pdl = _bf16_warmup_call
     m_by_shape: dict[tuple[int, int], list[int]] = {}
     for m, n, k in sorted(_bf16_tuning_points):
-        m_by_shape.setdefault((n, k), []).append(m)
+        if not is_flashinfer_bf16_gemm_outside_cuda_graphs(m):
+            m_by_shape.setdefault((n, k), []).append(m)
 
     done = skipped = 0
     for (n, k), ms in sorted(m_by_shape.items()):
