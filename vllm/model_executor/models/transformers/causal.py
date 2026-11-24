@@ -131,18 +131,10 @@ class OutputHead:
     """The input size of the output embeddings."""
     output_embeddings: _OutputEmbeddings = field(default_factory=_OutputEmbeddings)
     """Stands in for the output embeddings in `model`."""
-    renames: dict[str, str] = field(default_factory=dict)
-    """Checkpoint name -> vLLM name of the head's weights and their modules."""
+    weights_mapper: WeightsMapper = field(default_factory=WeightsMapper)
+    """Maps the checkpoint names of the head's weights and modules to vLLM's."""
     scale: float = 1.0
     soft_cap: float | None = None
-
-    def weights_mapper(self) -> WeightsMapper:
-        renames = {
-            re.compile(rf"^{re.escape(k)}$"): v
-            for k, v in self.renames.items()
-            if k != v
-        }
-        return WeightsMapper(orig_to_new_regex=renames)
 
 
 def to_output_head(model: PreTrainedModel) -> OutputHead | None:
@@ -183,11 +175,13 @@ def to_output_head(model: PreTrainedModel) -> OutputHead | None:
     for name, new_name in list(renames.items()):
         if "." in name:
             renames.setdefault(name.rpartition(".")[0], new_name.rpartition(".")[0])
+    renames = {k: v for k, v in renames.items() if k != v}
+    exact_names = {re.compile(rf"^{re.escape(k)}$"): v for k, v in renames.items()}
     return OutputHead(
         model=model,
         output_embeddings=output_embeddings,
         in_features=embeddings.in_features,
-        renames=renames,
+        weights_mapper=WeightsMapper(orig_to_new_regex=exact_names),
     )
 
 
@@ -262,7 +256,7 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         # Created here so the quantization config also gets the head's renames
         self._output_head = self._create_output_head()
         # Before the base model's mappings, which expect the base model's names
-        mapper = self._output_head.weights_mapper()
+        mapper = self._output_head.weights_mapper
         self.hf_to_vllm_mapper = mapper | self.hf_to_vllm_mapper
 
     def _create_output_head(self) -> OutputHead:

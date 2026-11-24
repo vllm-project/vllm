@@ -1073,10 +1073,8 @@ def test_output_head_reproduces_logits(model_type, arch, overrides, renames):
         embeddings = model.get_output_embeddings()
         output_head = to_output_head(stub(model))
         assert output_head is not None
-        lm_head_renames = {
-            k: v for k, v in output_head.renames.items() if v.startswith("lm_head.")
-        }
-        assert lm_head_renames == renames
+        mapper = output_head.weights_mapper
+        assert mapper.apply_list(list(renames)) == list(renames.values())
         assert not any(p is embeddings.weight for p in model.parameters())
         output_head.output_embeddings.project = embeddings
         logits = model(inputs_embeds=hidden_states).logits
@@ -1140,7 +1138,7 @@ def test_output_head_renames_modules(model_type, arch, overrides, module_renames
     checkpoint names, so the renames cover modules as well as parameters."""
     model = build_causal_lm(model_type, arch, "meta", **overrides)
     assert (output_head := to_output_head(stub(model)))
-    mapper = output_head.weights_mapper()
+    mapper = output_head.weights_mapper
     assert mapper.apply_list(list(module_renames)) == list(module_renames.values())
 
 
