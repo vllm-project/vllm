@@ -1097,14 +1097,14 @@ def test_split_weights_splits_fused_gqa_qkv():
     fused = torch.arange(12 * 8, dtype=torch.float32).reshape(12, 8)
 
     weights = SplitWeights(converter, mapper, model)
-    other = ("attention.query_key_value_bias", torch.zeros(12))
+    other = ("attention.query_key_value_norm.weight", torch.zeros(12))
     pieces = dict(weights([("attention.query_key_value.weight", fused), other]))
 
     assert list(pieces) == [
         "attention.q_proj.weight",
         "attention.k_proj.weight",
         "attention.v_proj.weight",
-        "attention.query_key_value_bias",
+        "attention.query_key_value_norm.weight",
     ]
     split = [pieces[f"attention.{p}_proj.weight"] for p in "qkv"]
     torch.testing.assert_close(torch.cat(split), fused)
