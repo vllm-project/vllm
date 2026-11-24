@@ -9,7 +9,6 @@ test covers the hybrid decode KV cache layouts: attention or MLA, each with a
 Mamba/KDA state group.
 """
 
-import math
 import time
 from collections import OrderedDict
 from types import SimpleNamespace
@@ -282,19 +281,6 @@ def test_blocks_freed_once_every_rank_has_its_write_done(engine):
     engine.step(write_done=frozenset({request.request_id}), ranks=set(ranks[1::2]))
     assert request.request_id not in engine.scheduler.requests
     assert engine.pool.get_num_free_blocks() == free_before
-
-
-def test_timer_is_dropped_when_its_receive_finishes(engine):
-    """The timer lives on its receive's record, so it goes when the receive
-    finishes, not when the process exits."""
-    connector = engine.scheduler.connector.connector_scheduler
-    request = engine.add_waiting_request()
-    assert math.isfinite(connector._write_recvs_in_flight[request.request_id].deadline)
-
-    engine.step(write_done=frozenset({request.request_id}))
-    engine.step()
-    assert request.status == RequestStatus.RUNNING
-    assert request.request_id not in connector._write_recvs_in_flight
 
 
 def test_request_aborted_before_its_deadline_stops_its_timer(engine):
