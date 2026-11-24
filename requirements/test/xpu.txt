@@ -7276,7 +7276,7 @@ traitlets==5.16.1 \
     # via
     #   jupyter-client
     #   jupyter-core
-transformers @ git+https://github.com/huggingface/transformers.git@14f676276b16a40b23624a5b956cdfccb76d2084
+transformers @ git+https://github.com/huggingface/transformers.git@655ae4b689aa59739b85ddddc2f3eb78cc9dad6c
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
