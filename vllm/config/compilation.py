@@ -838,6 +838,9 @@ class CompilationConfig:
     batches take the prefill graphs. It also bounds adaptive verification's
     token-keyed graphs. None (default): 8192 on SM100 GPUs, otherwise no budget.
     Wider decode graphs take memory from the KV cache."""
+    cudagraph_copy_inputs: bool = False
+    """Deprecated: has no effect and will be removed in v0.36. The model runner
+    already passes persistent input buffers to CUDA graphs."""
     cudagraph_specialize_lora: bool = True
     """Whether to create separate cuda graphs for cases with and without active
     LoRA adapters. When set to False, the LoRA-enabled cuda graph will be used
@@ -996,6 +999,7 @@ class CompilationConfig:
             "enabled_custom_ops",
             "disabled_custom_ops",
             "static_forward_context",
+            "cudagraph_copy_inputs",
         }
 
         return get_compile_factors(self, ignored_factors)
@@ -1092,6 +1096,12 @@ class CompilationConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
+        if self.cudagraph_copy_inputs:
+            logger.warning_once(
+                "`cudagraph_copy_inputs` is deprecated, has no effect and will be "
+                "removed in v0.36."
+            )
+
         # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
         # 1. A bug in PyTorch, fixed in 2.7:
         #    https://github.com/pytorch/pytorch/issues/147924
