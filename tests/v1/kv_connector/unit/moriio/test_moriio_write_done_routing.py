@@ -146,15 +146,7 @@ MLA_FANOUT = compute_write_tp_mapping(1, 2, 4, 1, True, False)
 
 
 def _real_wrapper() -> MoRIIOWrapper:
-    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
-    wrapper.lock = threading.Lock()
-    wrapper.done_req_ids = []
-    wrapper.done_remote_allocate_req_dict = {}
-    wrapper.done_write_cache_req_ids = []
-    wrapper._write_done_senders = {}
-    wrapper.failed_write_cache_req_ids = []
-    wrapper._terminal_transfer_ids = OrderedDict()
-    return wrapper
+    return MoRIIOWrapper()
 
 
 def test_execute_write_task_ip_is_per_task_under_overwrite():
@@ -464,6 +456,7 @@ def _fanout_save_worker(remote_agents: set[str]) -> MoRIIOConnectorWorker:
     worker.mode = MoRIIOMode.WRITE
     worker.tp_rank = 0
     worker.world_size = 1
+    worker.pp_size = 1
     worker.use_mla = True
     worker._has_mamba = False
     worker._remote_agents = {engine_id: {"agent"} for engine_id in remote_agents}
