@@ -600,6 +600,8 @@ class MoRIIOConnectorScheduler:
         )
         self.kv_transfer_config = vllm_config.kv_transfer_config
         self.mode = get_moriio_mode(self.kv_transfer_config)
+        # This launch; the workers use the same one (MoRIIOConnectorWorker).
+        self.incarnation = vllm_config.instance_id
         self._attn_group_ids, self._mamba_group_ids = _split_kv_cache_group_kinds(
             kv_cache_config
         )
@@ -982,6 +984,9 @@ class MoRIIOConnectorScheduler:
             # local == global.
             "decode_rank": self._global_dp_rank,
             "type": "remote_blocks",
+            # Lets the producer notice that this consumer restarted since it
+            # built its sessions (MoRIIOAgentMetadata.incarnation).
+            "incarnation": self.incarnation,
         }
         if num_skip_blocks:
             data["num_skip_blocks"] = num_skip_blocks
@@ -1977,6 +1982,9 @@ class MoRIIOConnectorWorker:
         self._completed_consumer_notifications: set[TransferId] = set()
 
         role = "producer" if self.is_producer else "consumer"
+        # One launch of this engine. The scheduler and the workers share it
+        # through the config, and a restart changes it.
+        self.incarnation = vllm_config.instance_id
         engine_suffix = (
             f"{self.moriio_config.local_ip}:{self.moriio_config.handshake_port}:"
             f"tp{self.tp_rank}:dp{self.dp_rank}"
@@ -1984,6 +1992,11 @@ class MoRIIOConnectorWorker:
         if self.pp_size > 1:
             # MoRI peers address engines by this key; stages need distinct keys.
             engine_suffix += f":pp{self.pp_rank}"
+        # MoRI keeps a peer's QPs and sessions by engine key, and deregistering
+        # the key does not drop them. A restarted engine must therefore come
+        # back under a new key, or its peers would keep posting on QPs whose
+        # other end is gone.
+        engine_suffix += f":{self.incarnation}"
         self.moriio_engine = IOEngine(
             f"{role}:{engine_suffix}",
             IOEngineConfig(
@@ -2210,6 +2223,69 @@ class MoRIIOConnectorWorker:
             tp_mapping=tp_mapping,
         )
         self._writer.schedule_write(task)
+
+    def peer_incarnation(self, remote_engine_id: str) -> str | None:
+        """Incarnation the sessions to this peer were built for; None when
+        there are none (never handshaken, or invalidated)."""
+        meta = self.remote_moriio_metadata.get(remote_engine_id)
+        return None if meta is None else meta.incarnation
+
+    def invalidate_remote_peer(
+        self, remote_engine_id: str, reason: str, current_incarnation: str = ""
+    ) -> None:
+        """Forget every session to a peer so the next request handshakes again.
+
+        remote_engine_id is the peer's base id (host:handshake port); its
+        per-(dp, tp) session keys are dropped with it. A session already built
+        for current_incarnation is kept, so a late report about the old peer
+        cannot undo a handshake with the new one.
+        """
+        prefix = f"{remote_engine_id}_dp"
+        dropped = []
+        with self._handshake_lock:
+            eids = {
+                eid
+                for table in (
+                    self._remote_agents,
+                    self.remote_moriio_metadata,
+                    self.layer_name_to_remote_kv_cache_metadata,
+                    self.built_write_session,
+                )
+                for eid in table
+                if eid == remote_engine_id or eid.startswith(prefix)
+            }
+            for eid in eids:
+                meta = self.remote_moriio_metadata.get(eid)
+                if (
+                    current_incarnation
+                    and meta is not None
+                    and meta.incarnation == current_incarnation
+                ):
+                    continue
+                self.remote_moriio_metadata.pop(eid, None)
+                self._remote_agents.pop(eid, None)
+                self.layer_name_to_remote_kv_cache_metadata.pop(eid, None)
+                self.built_write_session.pop(eid, None)
+                if meta is not None:
+                    try:
+                        self.moriio_wrapper.deregister_remote_engine(
+                            meta.agent_metadata
+                        )
+                    except Exception:
+                        logger.debug(
+                            "MoRIIO: deregistering %s failed", eid, exc_info=True
+                        )
+                dropped.append(eid)
+            if dropped:
+                self.write_ready_flags.pop(remote_engine_id, None)
+                self.load_ready_flag.pop(remote_engine_id, None)
+        if dropped:
+            logger.warning(
+                "MoRIIO: dropped the sessions to %s (%s); the next request "
+                "to it handshakes again",
+                ", ".join(sorted(dropped)),
+                reason,
+            )
 
     def _get_built_session(self, remote_engine_id):
         if remote_engine_id not in self.built_write_session:
@@ -2958,6 +3034,7 @@ class MoRIIOConnectorWorker:
             },
             attention_block_sizes=self.attention_block_sizes,
             layer_base_addr_index=self.layer_base_addr_index,
+            incarnation=self.incarnation,
         )
         ready_event = threading.Event()
         self._moriio_handshake_listener_t = threading.Thread(

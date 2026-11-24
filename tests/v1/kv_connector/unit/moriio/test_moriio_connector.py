@@ -677,7 +677,12 @@ def test_register_kv_caches(mock_parallel_groups):
         )
 
         # Verify engine keys
-        expected_engine_key = f"{ROLE[3:]}:{IP}:{DEFAULT_PORT}:tp{TP_RANK}:dp{DP_RANK}"
+        # The engine key ends with this launch's incarnation (see
+        # test_moriio_peer_restart.py).
+        expected_engine_key = (
+            f"{ROLE[3:]}:{IP}:{DEFAULT_PORT}:tp{TP_RANK}:dp{DP_RANK}"
+            f":{connector.connector_worker.incarnation}"
+        )
         assert (
             MemoryDesc.unpack(
                 connector.connector_worker.layer_name_to_local_kv_cache_metadata[
@@ -1307,7 +1312,9 @@ def test_pipeline_stage_has_its_own_engine_and_ports(mock_parallel_groups, pp_ra
     # One TP rank per stage, so stage s sits at offset s.
     assert worker.side_channel_port == 12347 + pp_rank
     assert worker.notify_port == 12348 + pp_rank
-    assert worker.moriio_engine.get_engine_desc().key.endswith(f":tp0:dp0:pp{pp_rank}")
+    assert worker.moriio_engine.get_engine_desc().key.endswith(
+        f":tp0:dp0:pp{pp_rank}:{worker.incarnation}"
+    )
 
 
 @pytest.mark.parametrize(

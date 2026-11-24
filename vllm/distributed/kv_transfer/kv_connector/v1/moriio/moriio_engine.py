@@ -30,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOError,
     MoRIIOTransferAck,
     RemoteAllocInfo,
+    StalePeerError,
     TransferBatchState,
     TransferError,
     TransferId,
@@ -220,12 +221,8 @@ class MoRIIOWriter:
             # Execute the task
             try:
                 self._execute_write_task(task)
-            except Exception:
-                logger.exception(
-                    "Write task failed for request %s, marking done",
-                    task.request_id,
-                )
-                self._mark_request_done(task.transfer_id)
+            except Exception as e:
+                self._handle_write_error(task, e)
 
     def _process_deferred_tasks(self) -> None:
         """Process tasks that were previously deferred."""
@@ -242,17 +239,24 @@ class MoRIIOWriter:
             if self._is_remote_ready(task):
                 try:
                     self._execute_write_task(task)
-                except Exception:
-                    logger.exception(
-                        "Deferred write task failed for request %s, marking done",
-                        task.request_id,
+                except Exception as e:
+                    self._handle_write_error(task, e)
+            elif now - task.enqueue_time > defer_timeout:
+                if self.worker.moriio_wrapper.fail_unallocated_write(task.transfer_id):
+                    self._notify_write_failed(task, now - task.enqueue_time)
+                    continue
+                info = self.worker.moriio_wrapper.done_remote_allocate_req_dict.get(
+                    task.transfer_id
+                )
+                if info is not None:
+                    # The blocks arrived but the sessions to the peer did not
+                    # come back (they were dropped for a restarted consumer and
+                    # no request has handshaken since).
+                    self._fail_allocated_write(
+                        task, info, "no session to the consumer after the deferral"
                     )
-                    self._mark_request_done(task.transfer_id)
-            elif (
-                now - task.enqueue_time > defer_timeout
-                and self.worker.moriio_wrapper.fail_unallocated_write(task.transfer_id)
-            ):
-                self._notify_write_failed(task, now - task.enqueue_time)
+                else:
+                    still_deferred.append(task)
             else:
                 still_deferred.append(task)
 
@@ -307,7 +311,9 @@ class MoRIIOWriter:
         self._clear_transfer_state(transfer_id)
 
     def _is_remote_ready(self, task: WriteTask) -> bool:
-        """Check if remote blocks are allocated for this task.
+        """Check if remote blocks are allocated for this task, and that there
+        are sessions to every consumer rank it writes to (they are dropped when
+        that consumer restarts, until a request handshakes with it again).
 
         Args:
             task: The write task
@@ -316,9 +322,104 @@ class MoRIIOWriter:
             True if remote blocks are ready
 
         """
-        return (
-            task.transfer_id in self.worker.moriio_wrapper.done_remote_allocate_req_dict
+        info = self.worker.moriio_wrapper.done_remote_allocate_req_dict.get(
+            task.transfer_id
         )
+        if info is None:
+            return False
+        peer_incarnation = getattr(self.worker, "peer_incarnation", None)
+        if peer_incarnation is None or info.block_ids is None:
+            return True
+        return all(
+            peer_incarnation(eid) is not None
+            for eid in self._target_engine_ids(task, info)
+        )
+
+    def _target_engine_ids(self, task: WriteTask, info: RemoteAllocInfo) -> list[str]:
+        """Session keys of the consumer ranks this task writes to."""
+        is_mamba_layer = getattr(self.worker, "_is_mamba_layer", None)
+        is_mamba = bool(is_mamba_layer and is_mamba_layer(task.layer_name))
+        return [
+            self._target_engine_id(task, info.decode_dp_rank, target)
+            for target in self._write_targets(task)
+            if target is None or is_mamba or target.num_heads
+        ]
+
+    def _check_peer_incarnation(self, task: WriteTask, info: RemoteAllocInfo) -> None:
+        """Raise StalePeerError if the consumer that allocated these blocks is
+        not the one the sessions were built for: it restarted, and the old
+        sessions point at memory and QPs that no longer exist."""
+        peer_incarnation = getattr(self.worker, "peer_incarnation", None)
+        if not info.incarnation or peer_incarnation is None:
+            return
+        for eid in self._target_engine_ids(task, info):
+            seen = peer_incarnation(eid)
+            if seen and seen != info.incarnation:
+                raise StalePeerError(
+                    f"consumer {eid} restarted: sessions were built for "
+                    f"incarnation {seen}, the blocks of transfer "
+                    f"{task.transfer_id} come from {info.incarnation}"
+                )
+
+    def _handle_write_error(self, task: WriteTask, exc: Exception) -> None:
+        """Fail a write task. A stale or broken peer also loses its sessions,
+        and the consumer is told so that it frees the blocks it allocated."""
+        info = self.worker.moriio_wrapper.done_remote_allocate_req_dict.get(
+            task.transfer_id
+        )
+        if not isinstance(exc, (StalePeerError, TransferError)) or info is None:
+            logger.error(
+                "Write task failed for request %s, marking done",
+                task.request_id,
+                exc_info=exc,
+            )
+            self._mark_request_done(task.transfer_id)
+            return
+        invalidate = getattr(self.worker, "invalidate_remote_peer", None)
+        if invalidate is not None:
+            invalidate(
+                task.dst_engine_id,
+                f"{type(exc).__name__}: {exc}",
+                current_incarnation=info.incarnation,
+            )
+        self._fail_allocated_write(task, info, f"{type(exc).__name__}: {exc}")
+
+    def _fail_allocated_write(
+        self, task: WriteTask, info: RemoteAllocInfo, reason: str
+    ) -> None:
+        """Free the source blocks of a transfer the consumer allocated blocks
+        for, and send that consumer rank write_failed so it frees them too."""
+        wrapper = self.worker.moriio_wrapper
+        with wrapper.lock:
+            if wrapper._is_transfer_terminal_locked(task.transfer_id):
+                return
+            wrapper._mark_transfer_terminal_locked(task.transfer_id)
+            wrapper.done_req_ids.append(MoRIIOTransferAck(task.transfer_id))
+            wrapper.done_remote_allocate_req_dict.pop(task.transfer_id, None)
+        self._clear_transfer_state(task.transfer_id)
+        logger.error(
+            "Write for request %s (transfer %s) failed: %s",
+            task.request_id,
+            task.transfer_id,
+            reason,
+        )
+        for remote_ip, remote_port in self._resolve_notify_endpoints(
+            task, info.decode_dp_rank
+        ):
+            try:
+                wrapper.send_notify(
+                    task.transfer_id,
+                    remote_ip,
+                    remote_port,
+                    message_type="write_failed",
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to notify %s:%s that transfer %s failed",
+                    remote_ip,
+                    remote_port,
+                    task.transfer_id,
+                )
 
     def _get_remote_alloc_info(self, transfer_id: str) -> RemoteAllocInfo:
         """Get remote allocation info for a request.
@@ -374,6 +475,7 @@ class MoRIIOWriter:
                 task.transfer_id,
             )
             return
+        self._check_peer_incarnation(task, request_info)
 
         # Wait for CUDA event
         # The attention computation of the current layer cannot
@@ -857,6 +959,12 @@ class MoRIIOWrapper:
         self.moriio_engine.register_remote_engine(consumer_engine_metadata)
         return consumer_engine_metadata.key
 
+    def deregister_remote_engine(self, remote_packed_engine_metadata):
+        assert self.moriio_engine is not None, "MoRIIO engine must be set first"
+        self.moriio_engine.deregister_remote_engine(
+            EngineDesc.unpack(remote_packed_engine_metadata)
+        )
+
     def register_local_tensor(self, tensor: torch.Tensor):
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"
         try:
@@ -1159,6 +1267,7 @@ class MoRIIOWrapper:
                 ),
                 num_skip_blocks=int(data.get("num_skip_blocks", 0)),
                 decode_dp_rank=decode_dp_rank,
+                incarnation=str(data.get("incarnation") or ""),
             )
 
     def _handle_write_done_message(self, data: dict):
