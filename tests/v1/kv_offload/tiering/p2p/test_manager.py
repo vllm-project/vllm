@@ -387,20 +387,25 @@ def test_on_new_request_policy(monkeypatch, kv_params, expected):
     ids=["local", "consumer", "producer"],
 )
 def test_primary_store_only_cascades_to_p2p_for_producers(
-    monkeypatch, kv_params, expect_p2p_store
+    monkeypatch, manager_lock, kv_params, expect_p2p_store
 ):
-    p2p = _make_manager()
+    p2p = _make_manager(manager_lock)
     p2p.locality = None
     _attach_fake_transports(p2p)
     monkeypatch.setattr(p2p, "_get_or_create_session", lambda peer_id: None)
     region = _mock_mmap_region(4)
     example = ExampleSecondaryTierManager(
         offloading_spec=SimpleNamespace(),
-        primary_kv_view=region.create_kv_memoryview(),
+        parent_ctx=ParentContext(manager_lock, region.create_kv_memoryview()),
         tier_type="example",
     )
     primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=region)
-    tiering = TieringOffloadingManager(primary, [p2p, example], tier_poll_interval_s=0)
+    tiering = TieringOffloadingManager(
+        lock=manager_lock,
+        primary_tier=primary,
+        secondary_tiers=[p2p, example],
+        tier_poll_interval_s=0,
+    )
     ctx = ReqContext(req_id="req", kv_transfer_params=kv_params)
     keys = [OffloadKey(b"new-chunk")]
     try:
