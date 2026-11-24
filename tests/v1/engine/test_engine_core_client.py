@@ -231,8 +231,7 @@ def test_dplb_weight_checksums_gather_every_engine(model):
     client = _make_dplb_client(num_engines=2)
 
     async def call_utility(method, *args, engine):
-        expected_args = () if model == "target" else (model,)
-        assert (method, args) == ("compute_weight_checksums", expected_args)
+        assert (method, args) == ("compute_weight_checksums", (model,))
         return [{f"dp{engine[0]}:tp{tp}:w": "x"} for tp in (0, 1)]
 
     client._call_utility_async = call_utility

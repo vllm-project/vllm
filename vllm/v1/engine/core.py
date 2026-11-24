@@ -1218,8 +1218,7 @@ class EngineCore:
     def compute_weight_checksums(
         self, model: WeightCheckerModel = "target"
     ) -> list[dict[str, str] | str]:
-        args = () if model == "target" else (model,)
-        return self.collective_rpc("compute_weight_checksums", args=args)
+        return self.collective_rpc("compute_weight_checksums", args=(model,))
 
     def reset_weights(self, model: WeightCheckerModel) -> str | None:
         errors: list[str | None] = self.collective_rpc("reset_weights", args=(model,))

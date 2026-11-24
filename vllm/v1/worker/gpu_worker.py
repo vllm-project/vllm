@@ -85,9 +85,8 @@ from vllm.model_executor.model_loader.base_loader import (
 )
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
-    _weights,
     compute_tensor_digests,
-    zero_weights,
+    reset_model_weights,
 )
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
@@ -170,12 +169,6 @@ def _num_workspace_lanes(vllm_config: VllmConfig) -> int:
     return (
         2 if spec_config is not None and spec_config.uses_separate_workspace_lane else 1
     )
-
-
-def _validate_weight_checker_model(model: object) -> str | None:
-    if model not in get_args(WeightCheckerModel):
-        return f"Invalid Weight Checker model selection: {model!r}"
-    return None
 
 
 def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int | None:
@@ -447,34 +440,34 @@ class Worker(WorkerBase):
         tp = get_tp_group().rank_in_group
         return f"dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:"
 
-    def _resolve_weight_checker_draft(self) -> tuple[nn.Module | None, str | None]:
+    def _resolve_weight_checker_draft(
+        self, model: WeightCheckerModel
+    ) -> nn.Module | str | None:
+        if model == "target":
+            return None
+        if model not in get_args(WeightCheckerModel):
+            return f"Invalid Weight Checker model selection: {model!r}"
         spec = self.speculative_config
         if (
             spec is None
             or spec.draft_model_config is None
             or spec.prefill_context_kv_only
         ):
-            return None, "Weight Checker requires a resident speculative draft model."
+            return "Weight Checker requires a resident speculative draft model."
         # The draft runs on the last PP stage, including when its own PP size is 1.
         draft = self.get_draft_model()
         if draft is None and get_pp_group().is_last_rank:
-            return None, (
-                f"Missing resident draft model on {self._weight_checksum_prefix()}"
-            )
+            return f"Missing resident draft model on {self._weight_checksum_prefix()}"
         if draft is not None and next(draft.parameters(), None) is None:
-            return None, "Weight Checker requires a draft model with weight parameters."
-        return draft, None
+            return "Weight Checker requires a draft model with weight parameters."
+        return draft
 
     def compute_weight_checksums(
         self, model: WeightCheckerModel = "target"
     ) -> dict[str, str] | str:
-        if error := _validate_weight_checker_model(model):
-            return error
-        draft = None
-        if model != "target":
-            draft, error = self._resolve_weight_checker_draft()
-            if error is not None:
-                return error
+        draft = self._resolve_weight_checker_draft(model)
+        if isinstance(draft, str):
+            return draft
 
         models: list[tuple[str, nn.Module]] = []
         if model != "draft":
@@ -493,31 +486,23 @@ class Worker(WorkerBase):
         return checksums
 
     def reset_weights(self, model: WeightCheckerModel = "target") -> str | None:
-        if error := _validate_weight_checker_model(model):
+        if (
+            model in ("draft", "both")
+            and self.parallel_config.pipeline_parallel_size > 1
+        ):
+            return "Cannot reset draft weights with pipeline parallelism."
+        draft = self._resolve_weight_checker_draft(model)
+        if isinstance(draft, str):
+            return draft
+        # This model-specific hook only runs after target updates.
+        if getattr(draft, "refresh_derived_weights", None) is not None:
+            return (
+                "Cannot reset draft weights with model-specific derived weights "
+                "that require a target update to refresh."
+            )
+        target = self.get_model() if model != "draft" else None
+        if error := reset_model_weights(target, draft):
             return error
-
-        draft = None
-        if model != "target":
-            if self.parallel_config.pipeline_parallel_size > 1:
-                return "Cannot reset draft weights with pipeline parallelism."
-            draft, error = self._resolve_weight_checker_draft()
-            if error is not None:
-                return error
-            assert draft is not None
-            # Draft updates refresh quantized LM heads, while this model-specific
-            # hook runs only after target updates.
-            if getattr(draft, "refresh_derived_weights", None) is not None:
-                return (
-                    "Cannot reset draft weights with model-specific derived weights "
-                    "that require a target update to refresh."
-                )
-            if not any(weight.numel() for _, weight in _weights(draft)):
-                return "Weight Checker found no resettable draft weights."
-
-        if model != "draft":
-            zero_weights(self.get_model())
-        if draft is not None:
-            zero_weights(draft)
         self.synchronize_device()
         return None
 

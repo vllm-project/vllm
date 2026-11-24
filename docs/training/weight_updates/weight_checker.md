@@ -60,6 +60,7 @@ reset, while `draft` and `both` resets return HTTP 409.
 ## RL weight-update check
 
 ```bash
+set -eo pipefail
 URL=http://localhost:8000
 MODEL=both  # Use target or draft to verify a single model.
 
@@ -86,16 +87,20 @@ jq --arg model "$MODEL" '{action:"compare", model:$model, baseline:.checksums}' 
 # 5. Compare against the baseline. Resume only after match is true.
 jq --arg model "$MODEL" '{action:"compare", model:$model, baseline:.checksums}' \
   baseline.json | curl --fail-with-body -X POST "$URL/weight_checker" \
-  -H 'Content-Type: application/json' -d @-
-
-curl -X POST "$URL/resume"
+  -H 'Content-Type: application/json' -d @- | jq -e '.match == true' && \
+  curl --fail-with-body -X POST "$URL/resume"
 ```
 
-Pass a target baseline to `/finish_weight_update` to finish and compare in one
-request.
+For a target-only update, save the target baseline while paused and before
+resetting or transferring weights. Pass it to `/finish_weight_update` at the
+end of the transfer.
 
 ```bash
-jq '{baseline: .checksums}' baseline.json | \
+curl --fail-with-body -X POST "$URL/weight_checker" -H 'Content-Type: application/json' \
+  -d '{"action":"checksum","model":"target"}' > target-baseline.json
+
+# After /start_weight_update and /update_weights:
+jq '{baseline: .checksums}' target-baseline.json | \
   curl --fail-with-body -X POST "$URL/finish_weight_update" \
     -H 'Content-Type: application/json' -d @-
 ```

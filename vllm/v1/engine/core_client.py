@@ -1493,9 +1493,8 @@ class AsyncMPClient(MPClient):
     async def compute_weight_checksums_async(
         self, model: WeightCheckerModel = "target"
     ) -> list[dict[str, str] | str]:
-        args = () if model == "target" else (model,)
         per_engine = await self.call_utility_all_async(
-            "compute_weight_checksums", *args
+            "compute_weight_checksums", model
         )
         return [worker for workers in per_engine for worker in workers]
 

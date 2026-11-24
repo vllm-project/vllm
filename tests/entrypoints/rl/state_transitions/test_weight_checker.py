@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import os
+from contextlib import contextmanager
 from functools import partial
 from unittest.mock import patch
 
@@ -29,7 +30,7 @@ from tests.entrypoints.rl.conftest import (
     ok,
     server,
 )
-from tests.utils import RemoteOpenAIServer, multi_gpu_marks, multi_gpu_test
+from tests.utils import RemoteOpenAIServer, multi_gpu_test
 from vllm.distributed.weight_transfer import (
     HTTPVLLMWeightSyncClient,
     ModuleSource,
@@ -335,14 +336,9 @@ def eagle_checkpoints(tmp_path):
     return target_path, draft_path, target, draft
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="IPC weight transfer uses CUDA IPC."
-)
-@pytest.mark.parametrize(
-    "pp_size", [1, pytest.param(2, marks=multi_gpu_marks(num_gpus=2))]
-)
-def test_eagle_shared_weights_reset_and_recover(eagle_checkpoints, pp_size):
-    target_path, draft_path, target, draft = eagle_checkpoints
+@contextmanager
+def paused_eagle_server(eagle_checkpoints, pp_size):
+    target_path, draft_path, _, _ = eagle_checkpoints
     args = [
         "--served-model-name",
         "m",
@@ -372,13 +368,11 @@ def test_eagle_shared_weights_reset_and_recover(eagle_checkpoints, pp_size):
 
         baseline = checksums(url, "both")
         target_keys = {key for key in baseline if key.startswith("target:")}
-        draft_keys = {key for key in baseline if key.startswith("draft:")}
         shared = {
             f"draft:dp0:pp{pp_size - 1}:pcp0:tp0:{name}"
             for name in ("model.embed_tokens.weight", "lm_head.weight")
         }
-        target_shared = {key.replace("draft:", "target:", 1) for key in shared}
-        assert shared < draft_keys
+        assert shared < {key for key in baseline if key.startswith("draft:")}
         assert all(
             baseline[key] == baseline[key.replace("draft:", "target:", 1)]
             for key in shared
@@ -387,60 +381,78 @@ def test_eagle_shared_weights_reset_and_recover(eagle_checkpoints, pp_size):
             key.removeprefix("target:"): baseline[key] for key in target_keys
         }
 
-        expected = {
-            "target": target_keys | shared,
-            "draft": draft_keys | target_shared,
-            "both": target_keys | draft_keys,
-        }
-        for model, mismatches in expected.items():
-            response = weight_checker(url, "reset", model=model)
-            if pp_size > 1 and model != "target":
-                assert response.status_code == 409, response.text
-                assert "pipeline parallelism" in response.text
-            else:
-                response.raise_for_status()
-                compare = weight_checker(url, "compare", baseline, model="both")
-                compare.raise_for_status()
-                assert set(compare.json()["mismatches"]) == mismatches
-
-                if model == "both":
-                    reset_checksums = checksums(url, "both")
-                    weight_checker(url, "reset", model="both").raise_for_status()
-                    assert checksums(url, "both") == reset_checksums
-
-                if pp_size > 1:
-                    requests.post(
-                        f"{url}/collective_rpc",
-                        json={"method": "reload_weights"},
-                        timeout=300,
-                    ).raise_for_status()
-                elif model == "draft":
-                    send_ipc_weights(url, draft, is_draft=True)
-                    compare = weight_checker(url, "compare", baseline, model="both")
-                    compare.raise_for_status()
-                    assert set(compare.json()["mismatches"]) == shared | target_shared
-
-                    draft_with_shared = nn.ModuleDict(
-                        {
-                            **dict(draft.named_children()),
-                            "embed_tokens": target.model.embed_tokens,
-                            "lm_head": target.lm_head,
-                        }
-                    )
-                    send_ipc_weights(url, draft_with_shared, is_draft=True)
-                else:
-                    send_ipc_weights(url, target, is_draft=False)
-                    if model == "both":
-                        send_ipc_weights(url, draft, is_draft=True)
-
-            compare = weight_checker(url, "compare", baseline, model="both")
-            compare.raise_for_status()
-            assert compare.json() == {"match": True, "mismatches": []}
+        yield url, baseline, shared
 
         requests.post(f"{url}/resume", timeout=30).raise_for_status()
         recovered = gen(url, prompt)
         assert ok(recovered)
         assert recovered["choices"][0]["text"] == original["choices"][0]["text"]
+
+
+def assert_eagle_mismatches(url, baseline, expected):
+    comparison = weight_checker(url, "compare", baseline, model="both")
+    comparison.raise_for_status()
+    assert comparison.json() == {"match": not expected, "mismatches": sorted(expected)}
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="IPC weight transfer uses CUDA IPC."
+)
+def test_eagle_shared_weights_reset_and_recover(eagle_checkpoints):
+    _, _, target, draft = eagle_checkpoints
+    with paused_eagle_server(eagle_checkpoints, pp_size=1) as (url, baseline, shared):
+        target_keys = {key for key in baseline if key.startswith("target:")}
+        draft_keys = baseline.keys() - target_keys
+        target_shared = {key.replace("draft:", "target:", 1) for key in shared}
+
+        weight_checker(url, "reset", model="target").raise_for_status()
+        assert_eagle_mismatches(url, baseline, target_keys | shared)
+        send_ipc_weights(url, target, is_draft=False)
+        assert_eagle_mismatches(url, baseline, set())
+
+        weight_checker(url, "reset", model="draft").raise_for_status()
+        assert_eagle_mismatches(url, baseline, draft_keys | target_shared)
+        send_ipc_weights(url, draft, is_draft=True)
+        assert_eagle_mismatches(url, baseline, shared | target_shared)
+        draft_with_shared = nn.ModuleDict(
+            {
+                **dict(draft.named_children()),
+                "embed_tokens": target.model.embed_tokens,
+                "lm_head": target.lm_head,
+            }
+        )
+        send_ipc_weights(url, draft_with_shared, is_draft=True)
+        assert_eagle_mismatches(url, baseline, set())
+
+        weight_checker(url, "reset", model="both").raise_for_status()
+        assert_eagle_mismatches(url, baseline, baseline.keys())
+        cleared = checksums(url, "both")
+        weight_checker(url, "reset", model="both").raise_for_status()
+        assert checksums(url, "both") == cleared
+        send_ipc_weights(url, target, is_draft=False)
+        send_ipc_weights(url, draft, is_draft=True)
+        assert_eagle_mismatches(url, baseline, set())
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="IPC weight transfer uses CUDA IPC."
+)
+@multi_gpu_test(num_gpus=2)
+def test_eagle_target_reset_and_reload_with_pp(eagle_checkpoints):
+    with paused_eagle_server(eagle_checkpoints, pp_size=2) as (url, baseline, shared):
+        target_keys = {key for key in baseline if key.startswith("target:")}
+        weight_checker(url, "reset", model="target").raise_for_status()
+        assert_eagle_mismatches(url, baseline, target_keys | shared)
+        requests.post(
+            f"{url}/collective_rpc", json={"method": "reload_weights"}, timeout=300
+        ).raise_for_status()
+        assert_eagle_mismatches(url, baseline, set())
+
+        for model in ("draft", "both"):
+            response = weight_checker(url, "reset", model=model)
+            assert response.status_code == 409, response.text
+            assert "pipeline parallelism" in response.text
+            assert_eagle_mismatches(url, baseline, set())
 
 
 @multi_gpu_test(num_gpus=4)
