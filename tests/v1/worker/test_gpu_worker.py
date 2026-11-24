@@ -3,15 +3,16 @@
 
 import gc
 import json
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
 
 from tests.utils import create_new_process_for_each_test
 from vllm import LLM
+from vllm.config.compilation import CompilationMode
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
@@ -1182,3 +1183,104 @@ def test_probe_forward_leaves_serving_state(fails):
     assert (error is not None and "injected" in error) == fails
     assert not connector.disabled
     assert not worker.iteration_timer.method_calls
+
+
+@pytest.mark.parametrize(
+    ("mode", "expect_warmup_pass"),
+    [
+        (CompilationMode.VLLM_COMPILE, True),
+        (CompilationMode.NONE, False),
+    ],
+)
+def test_compilation_warmup_before_memory_profiling(mode, expect_warmup_pass):
+    """Ensure compilation warmup runs before memory profiling when
+    torch.compile is active, and is skipped in eager mode.
+    """
+    from vllm.config import get_current_vllm_config_or_none
+
+    worker = _plan_worker()
+    worker.vllm_config.compilation_config = SimpleNamespace(
+        mode=mode,
+        cudagraph_mode=SimpleNamespace(name="NONE"),
+    )
+    worker.cache_config.kv_cache_memory_bytes = None
+    worker.cache_config.gpu_memory_utilization = 0.9
+    worker.model_config = SimpleNamespace(multimodal_config=None)
+    worker.model_runner = SimpleNamespace(
+        model_memory_usage=10 * GiB_bytes,
+        profile_run=MagicMock(),
+        profile_cudagraph_memory=MagicMock(return_value=0),
+    )
+    worker.device = "cuda:0"
+    worker.requested_memory = 70 * GiB_bytes
+    worker.randomize_dummy_inputs = False
+    worker._scoped_allocator_max_split = MagicMock(
+        side_effect=lambda **kwargs: nullcontext()
+    )
+    worker.determine_available_memory = (
+        gpu_worker.Worker.determine_available_memory.__get__(worker)
+    )
+
+    events: list[tuple[str, object]] = []
+
+    def record_profile_run(*args, **kwargs):
+        events.append(("profile_run", get_current_vllm_config_or_none()))
+
+    worker.model_runner.profile_run.side_effect = record_profile_run
+
+    mock_profile_result = _profile_result(consumed=2 * GiB_bytes)
+    mock_profile_result.non_kv_cache_memory = 2 * GiB_bytes
+
+    @contextmanager
+    def mock_mem_profiling(*args, **kwargs):
+        """Yield the mock memory profiling result and track ordering."""
+        events.append(("memory_profiling_enter", get_current_vllm_config_or_none()))
+        yield mock_profile_result
+        events.append(("memory_profiling_exit", None))
+
+    def record_sync():
+        events.append(("sync", None))
+
+    with (
+        patch.object(gpu_worker, "maybe_apply_startup_plan"),
+        patch.object(gpu_worker, "memory_profiling", side_effect=mock_mem_profiling),
+        patch.object(
+            gpu_worker.torch.accelerator, "synchronize", side_effect=record_sync
+        ) as mock_sync,
+        patch.object(gpu_worker, "maybe_save_startup_plan"),
+    ):
+        available_mem = worker.determine_available_memory()
+        assert available_mem == 68 * GiB_bytes
+
+        if expect_warmup_pass:
+            # 1. Warmup runs inside set_current_vllm_config
+            # 2. torch.accelerator.synchronize() ensures kernels finish
+            # 3. memory_profiling context entered
+            # 4. second profile_run inside memory_profiling and config context
+            # 5. memory_profiling exited
+            assert events == [
+                ("profile_run", worker.vllm_config),
+                ("sync", None),
+                ("memory_profiling_enter", None),
+                ("profile_run", worker.vllm_config),
+                ("memory_profiling_exit", None),
+            ]
+            assert worker._scoped_allocator_max_split.call_count == 2
+            assert all(
+                call.kwargs.get("randomize_inputs") is False
+                for call in worker.model_runner.profile_run.call_args_list
+            )
+            mock_sync.assert_called_once()
+        else:
+            # profile_run called only once inside profiler
+            assert events == [
+                ("memory_profiling_enter", None),
+                ("profile_run", worker.vllm_config),
+                ("memory_profiling_exit", None),
+            ]
+            assert worker._scoped_allocator_max_split.call_count == 1
+            assert (
+                worker.model_runner.profile_run.call_args.kwargs.get("randomize_inputs")
+                is False
+            )
+            mock_sync.assert_not_called()
