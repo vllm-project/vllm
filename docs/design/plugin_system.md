@@ -105,6 +105,7 @@ Every plugin has three parts:
     - `check_and_update_config`: This function is called very early in the vLLM's initialization process. It's used for plugins to update the vllm configuration. For example, the block size, graph mode config, etc., can be updated in this function. The most important thing is that the **worker_cls** should be set in this function to let vLLM know which worker class to use for the worker process.
     - `get_attn_backend_cls`: This function should return the attention backend class's fully qualified name.
     - `get_device_communicator_cls`: This function should return the device communicator class's fully qualified name.
+    - `use_sequence_parallel_moe_without_dp`: Return `True` on platforms whose MoE communication backend shards tokens across the tensor-parallel group even when `data_parallel_size == 1` (with `tensor_parallel_size > 1` and `enable_expert_parallel=True`). Defaults to `False`.
 
     For out-of-tree EPLB, implement `supports_eplb()` and `check_and_update_eplb_config(parallel_config)` to select and validate policy and communicator names. An unset policy is `None` until this hook selects the platform default; preserve explicitly configured names. When EPLB is enabled, this hook selects the default communicator and validates names and configuration combinations; `EPLBConfig` enforces field types and numeric bounds. Built-in names retain their existing defaults and async communicator restrictions; a platform override owns validation of its custom names and combinations.
 
