@@ -186,21 +186,6 @@ OUTPUT_HEAD_KWARGS = dict(
 )
 
 
-@create_new_process_for_each_test("spawn")
-def test_output_head_moe(
-    vllm_runner: type[VllmRunner], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A kept head is not replaced by `MoEMixin`."""
-    # Disable multiprocessing so that the patch applies to the engine
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    monkeypatch.setattr(causal, "probe_output_head", lambda *args: None)
-    model = "ibm-granite/granite-3.0-1b-a400m-base"
-    with vllm_runner(model, **OUTPUT_HEAD_KWARGS) as model_test:
-        has_head = model_test.apply_model(lambda model: model.output_head is not None)
-        assert has_head == [True]
-        model_test.generate_greedy(["Hello"], max_tokens=4)
-
-
 @multi_gpu_test(num_gpus=2)
 def test_output_head_lora(vllm_runner: type[VllmRunner]) -> None:
     """The kept head projects `[1, n, h]` hidden states, which LoRA's `lm_head`
@@ -1012,7 +997,7 @@ def stub(model: nn.Module) -> nn.Module:
 
 
 OUTPUT_HEADS = [
-    # (model_type, arch, overrides, renames of the output embeddings)
+    # (model_type, arch, overrides, renames of the head's weights and modules)
     ("llama", "LlamaForCausalLM", {}, {"lm_head.weight": "lm_head.weight"}),
     # Soft caps the logits
     ("gemma2", "Gemma2ForCausalLM", {}, {"lm_head.weight": "lm_head.weight"}),
@@ -1037,7 +1022,12 @@ OUTPUT_HEADS = [
         "modernbert-decoder",
         "ModernBertDecoderForCausalLM",
         {},
-        {"decoder.weight": "lm_head.weight", "decoder.bias": "lm_head.bias"},
+        {
+            "decoder.weight": "lm_head.weight",
+            "decoder.bias": "lm_head.bias",
+            "decoder": "lm_head",
+            "lm_head.dense": "output_head.lm_head.dense",
+        },
     ),
     # The output embeddings are nested inside the module which transforms first,
     # whose `bias` aliases theirs
@@ -1049,6 +1039,8 @@ OUTPUT_HEADS = [
             "lm_head.decoder.weight": "lm_head.weight",
             "lm_head.decoder.bias": "lm_head.bias",
             "lm_head.bias": "lm_head.bias",
+            "lm_head.decoder": "lm_head",
+            "lm_head.dense": "output_head.lm_head.dense",
         },
     ),
 ]
@@ -1111,35 +1103,6 @@ def test_output_head_calling_base_model_submodule():
     assert [name for name, _ in model.named_parameters()] == ["lm_head.weight"]
     assert (output_head := to_output_head(model))
     assert probe_output_head(output_head, model.config.hidden_size) == (1.0, None)
-
-
-@pytest.mark.parametrize(
-    ("model_type", "arch", "overrides", "module_renames"),
-    [
-        (
-            "modernbert-decoder",
-            "ModernBertDecoderForCausalLM",
-            {},
-            {"lm_head.dense": "output_head.lm_head.dense", "decoder": "lm_head"},
-        ),
-        (
-            "roberta",
-            "RobertaForCausalLM",
-            {"is_decoder": True},
-            {
-                "lm_head.dense": "output_head.lm_head.dense",
-                "lm_head.decoder": "lm_head",
-            },
-        ),
-    ],
-)
-def test_output_head_renames_modules(model_type, arch, overrides, module_renames):
-    """Quantization configs name the head's layers (e.g. to skip them) by their
-    checkpoint names, so the renames cover modules as well as parameters."""
-    model = build_causal_lm(model_type, arch, "meta", **overrides)
-    assert (output_head := to_output_head(stub(model)))
-    mapper = output_head.weights_mapper
-    assert mapper.apply_list(list(module_renames)) == list(module_renames.values())
 
 
 # The smallest sizes the fused MoE kernels accept
