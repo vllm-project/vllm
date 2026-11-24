@@ -1077,11 +1077,16 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         must delay freeing/caching of blocks."""
         bounded_replay: bool = False
         """DeepSeek-V4.1: replay the window instead of prefix caching it."""
+        rebuilt_by_replay: bool = False
+        """Left out of prefix caching without a replay window of its own:
+        another group's bounded replay recomputes enough tokens to rebuild it
+        (e.g. the DeepSeek-V4 compressor states under the SWA replay)."""
 
     @classmethod
     def prefix_cacheable(cls, config: ManagerConfig) -> bool:
-        assert isinstance(config.params, SlidingWindowManager.Params)
-        return not config.params.bounded_replay
+        params = config.params
+        assert isinstance(params, SlidingWindowManager.Params)
+        return not (params.bounded_replay or params.rebuilt_by_replay)
 
     @classmethod
     def prefix_replay_tokens(cls, config: ManagerConfig) -> int:
@@ -3053,9 +3058,15 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         assert isinstance(self.manager_config.params, HiSparseHotManager.Params)
         self.blocks_per_request = self.manager_config.params.blocks_per_request
         self.hot_required: set[str] = set()
+        self.preallocated: dict[str, list[KVCacheBlock]] = {}
 
     def require_hot(self, request_id: str) -> None:
         self.hot_required.add(request_id)
+
+    def preallocate(self, request_id: str) -> None:
+        """Allocate Hot ahead of the step's allocation, which then reports it."""
+        self.require_hot(request_id)
+        self.preallocated[request_id] = self.allocate_new_blocks(request_id, 0, 0)
 
     def has_hot(self, request_id: str) -> bool:
         return len(self.req_to_blocks.get(request_id, ())) == self.blocks_per_request
@@ -3117,6 +3128,8 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
     ) -> list[KVCacheBlock]:
         # Cold admissions can bypass add_local_computed_blocks.
         self.num_cached_block[request_id] = 0
+        if (preallocated := self.preallocated.pop(request_id, None)) is not None:
+            return preallocated
         if request_id not in self.hot_required:
             return []
         req_blocks = self.req_to_blocks[request_id]
@@ -3129,6 +3142,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         self.hot_required.discard(request_id)
+        assert request_id not in self.preallocated
         return super().pop_blocks_for_free(request_id)
 
 

@@ -132,7 +132,9 @@ def test_incremental_detokenization(
     dummy_test_vectors,
 ):
     output_processor = OutputProcessor(
-        dummy_test_vectors.tokenizer, log_stats=False, stream_interval=stream_interval
+        dummy_test_vectors.tokenizer,
+        collect_stats=False,
+        stream_interval=stream_interval,
     )
 
     # Make N requests.
@@ -220,7 +222,7 @@ def test_incremental_detokenization(
 def test_request_lists_are_untracked():
     """A request's prompt and output token lists live as long as the request
     and grow with it, so they are hidden from the cyclic GC."""
-    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    output_processor = OutputProcessor(tokenizer=None, collect_stats=False)
     prompt_tokens = [1, 2, 3, 4]
     request = EngineCoreRequest(
         request_id="request-0-int",
@@ -252,7 +254,7 @@ def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
     cache hits (passed via kv_transfer_params) instead of the local count,
     which sees the KVs pulled from the remote prefill as a ~100% hit.
     """
-    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    output_processor = OutputProcessor(tokenizer=None, collect_stats=False)
 
     prompt_tokens = [1, 2, 3, 4, 5, 6, 7, 8]
     kv_transfer_params = {
@@ -309,7 +311,7 @@ def test_request_stream_interval_raises_but_not_below_engine_default(
     request_stream_intervals = [1, 10]
     output_processor = OutputProcessor(
         dummy_test_vectors.tokenizer,
-        log_stats=False,
+        collect_stats=False,
         stream_interval=engine_stream_interval,
     )
 
@@ -708,7 +710,9 @@ def test_logprobs_processor(
     num_prompt_logprobs: int | None,
     dummy_test_vectors,
 ):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer, collect_stats=False
+    )
 
     # Make N requests.
     request_id_list = [
@@ -884,7 +888,9 @@ def test_stop_token(
     )  # '<|end_of_text|>'
     stop_token_ids = [128009] if not is_eos_test else None  # '<|eot_id|>'
 
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer, collect_stats=False
+    )
     # Dummy engine core outputs, with control tokens suffixed to test stops
     suffix_token = [eos_token_id] if is_eos_test else stop_token_ids
     assert suffix_token is not None and isinstance(suffix_token[0], int)
@@ -999,7 +1005,9 @@ def test_stop_string(
     num_sample_logprobs: int | None,
     dummy_test_vectors,
 ):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer, collect_stats=False
+    )
 
     # Make N requests.
     request_id_list = [
@@ -1133,7 +1141,7 @@ def test_stop_string(
 
 
 def test_iteration_stats(dummy_test_vectors):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, collect_stats=True)
     engine_core_timestamp = time.monotonic()
 
     # Make N requests.
@@ -1209,7 +1217,7 @@ def test_iteration_stats(dummy_test_vectors):
 
 def test_watermark_status_partitions_finished_requests(dummy_test_vectors):
     """Each finished request gets exactly one watermark status."""
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, collect_stats=True)
     prompt_token_ids = dummy_test_vectors.prompt_tokens[0]
 
     def make_request(
@@ -1296,11 +1304,11 @@ def test_watermark_status_partitions_finished_requests(dummy_test_vectors):
     assert sum(status.values()) == totals["vllm:request_success_total"]["all"]
 
 
-@pytest.mark.parametrize("log_stats", [True, False])
-def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
+@pytest.mark.parametrize("collect_stats", [True, False])
+def test_lora_request_tracking(collect_stats: bool, dummy_test_vectors):
     """Test LoRA request lifecycle tracking through waiting -> running -> finished."""
     output_processor = OutputProcessor(
-        dummy_test_vectors.tokenizer, log_stats=log_stats
+        dummy_test_vectors.tokenizer, collect_stats=collect_stats
     )
     engine_core_timestamp = time.monotonic()
 
@@ -1348,13 +1356,13 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
             EngineCoreEvent.new_event(EngineCoreEventType.QUEUED, engine_core_timestamp)
         ]
 
-    iteration_stats = IterationStats() if log_stats else None
+    iteration_stats = IterationStats() if collect_stats else None
     output_processor.process_outputs(
         outputs.outputs, engine_core_timestamp, iteration_stats
     )
     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
-    if log_stats:
+    if collect_stats:
         # Verify waiting counts
         assert outputs.scheduler_stats.waiting_lora_adapters.get("lora-1") == 1
         assert outputs.scheduler_stats.waiting_lora_adapters.get("lora-2") == 1
@@ -1365,7 +1373,7 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
         assert "lora-1" in output_processor.lora_states.requests
         assert "lora-2" in output_processor.lora_states.requests
     else:
-        # When log_stats=False, no tracking should occur
+        # When collect_stats=False, no tracking should occur
         assert iteration_stats is None
         assert len(output_processor.lora_states.requests) == 0
 
@@ -1380,13 +1388,13 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
             )
         ]
 
-    iteration_stats = IterationStats() if log_stats else None
+    iteration_stats = IterationStats() if collect_stats else None
     output_processor.process_outputs(
         outputs.outputs, engine_core_timestamp, iteration_stats
     )
     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
-    if log_stats:
+    if collect_stats:
         # Verify running counts
         assert outputs.scheduler_stats.waiting_lora_adapters.get("lora-1") == 0
         assert outputs.scheduler_stats.waiting_lora_adapters.get("lora-2") == 0
@@ -1406,13 +1414,13 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
             output.finish_reason = FinishReason.LENGTH
             break
 
-    iteration_stats = IterationStats() if log_stats else None
+    iteration_stats = IterationStats() if collect_stats else None
     output_processor.process_outputs(
         outputs.outputs, engine_core_timestamp, iteration_stats
     )
     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
-    if log_stats:
+    if collect_stats:
         # lora-1 should be removed since no requests remain
         assert "lora-1" not in output_processor.lora_states.requests
         # lora-2 should still be running
@@ -1431,13 +1439,13 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
             output.finish_reason = FinishReason.LENGTH
             break
 
-    iteration_stats = IterationStats() if log_stats else None
+    iteration_stats = IterationStats() if collect_stats else None
     output_processor.process_outputs(
         outputs.outputs, engine_core_timestamp, iteration_stats
     )
     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
-    if log_stats:
+    if collect_stats:
         # lora-2 should be removed since no requests remain
         assert "lora-2" not in output_processor.lora_states.requests
         assert len(outputs.scheduler_stats.running_lora_adapters) == 0
@@ -1455,7 +1463,7 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
             output.finish_reason = FinishReason.LENGTH
             break
 
-    iteration_stats = IterationStats() if log_stats else None
+    iteration_stats = IterationStats() if collect_stats else None
     output_processor.process_outputs(
         outputs.outputs, engine_core_timestamp, iteration_stats
     )
@@ -1572,7 +1580,7 @@ def test_routed_experts_are_accumulated_until_finish():
         max_tokens_param=2,
         arrival_time=0.0,
         queue=None,
-        log_stats=False,
+        collect_stats=False,
         stream_interval=1,
     )
     prompt_chunk = np.arange(24, dtype=np.uint8).reshape(4, 3, 2)
@@ -1757,7 +1765,7 @@ def _add_streaming_request_with_queued_chunk(
 def test_streaming_input_stop_is_chunk_boundary():
     """STOP is a per-chunk boundary: finished is forced False, the queued
     chunk is applied, and the request state stays alive."""
-    processor = OutputProcessor(None, log_stats=False)
+    processor = OutputProcessor(None, collect_stats=False)
     queue = _add_streaming_request_with_queued_chunk(processor, "stream-req")
 
     processed = processor.process_outputs(
@@ -1785,7 +1793,7 @@ def test_streaming_input_stop_is_chunk_boundary():
 def test_streaming_input_abort_error_is_terminal(finish_reason: FinishReason):
     """ABORT/ERROR is terminal, not a chunk boundary: finished stays True,
     the state is freed, and an abort is routed back to the engine core."""
-    processor = OutputProcessor(None, log_stats=False)
+    processor = OutputProcessor(None, collect_stats=False)
     queue = _add_streaming_request_with_queued_chunk(processor, "stream-req")
 
     processed = processor.process_outputs(
@@ -1809,7 +1817,7 @@ def test_streaming_input_abort_error_is_terminal(finish_reason: FinishReason):
 @pytest.mark.parametrize("runner", ["generate", "pooling"])
 @pytest.mark.parametrize("abort_by", ["internal", "external"])
 def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, collect_stats=True)
     requests = [
         EngineCoreRequest(
             request_id=f"request-{idx}",
@@ -1862,7 +1870,7 @@ def test_request_rejected_by_engine(runner: str, error, exception_type):
     """A request the engine rejects on arrival (e.g. while paused) raises its
     corresponding exception to the caller, leaves no stats behind, and ends a
     streaming-input session, including any input chunks sent since."""
-    output_processor = OutputProcessor(tokenizer=None, log_stats=True)
+    output_processor = OutputProcessor(tokenizer=None, collect_stats=True)
     request = EngineCoreRequest(
         request_id="request-0",
         external_req_id="external-0",
@@ -1955,7 +1963,7 @@ def test_request_output_add_merges_delta_sampling_masks():
 
 @pytest.mark.skip_global_cleanup
 def test_pooling_cache_miss_is_a_request_error_and_batch_continues():
-    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    output_processor = OutputProcessor(tokenizer=None, collect_stats=False)
     requests = [
         EngineCoreRequest(
             request_id=f"request-{idx}-int",
@@ -2004,7 +2012,7 @@ def test_pooling_cache_miss_is_a_request_error_and_batch_continues():
 
 @pytest.mark.skip_global_cleanup
 def test_async_pooling_cache_miss_does_not_fail_output_processor():
-    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    output_processor = OutputProcessor(tokenizer=None, collect_stats=False)
     request = EngineCoreRequest(
         request_id="request-int",
         external_req_id="request",
@@ -2058,7 +2066,7 @@ def test_async_pooling_cache_miss_does_not_fail_output_processor():
     ],
 )
 def test_weight_version_spans(output_kind: RequestOutputKind, steps, expected):
-    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    output_processor = OutputProcessor(tokenizer=None, collect_stats=False)
     queue = RequestOutputCollector(output_kind, request_id="request-0-int")
     request = EngineCoreRequest(
         request_id="request-0-int",
