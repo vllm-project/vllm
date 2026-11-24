@@ -59,14 +59,20 @@ class PublisherConfig:
 
 
 @config
-class KVEventsConfig(PublisherConfig):
-    """Configuration for KV event publishing."""
+class _KVEventsToggle:
+    """The original first positional argument of `KVEventsConfig`."""
 
     enable_kv_cache_events: bool = False
     """If True, enable KV cache events for tracking block storage and removal.
     Events can be published externally by zmq using the event publisher config.
     """
 
+
+@config
+class KVEventsConfig(PublisherConfig, _KVEventsToggle):
+    """Configuration for KV event publishing."""
+
+    # Dataclasses collect base fields in reverse MRO, so the toggle stays first.
     @property
     def enable_events(self) -> bool:
         return self.enable_kv_cache_events
