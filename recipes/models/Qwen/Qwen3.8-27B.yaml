@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "27B-parameter dense hybrid-attention model with linear attention on 48 of 64 layers, a vision tower, a built-in MTP draft head, 262K native context window and extensible to 1M context"
   date_added: 2026-08-14
-  date_updated: 2026-11-04
+  date_updated: 2026-11-24
   tasks:
     - multimodal
     - text
@@ -469,7 +469,9 @@ guide: |
   prefill-dominated (a ~48k-token video prompt against a few hundred output tokens), and the
   unquantized BF16 MTP head stays resident and eats the GPU0 headroom a video prefill needs.
   Turning it off raised the KV pool from 351,637 to 385,367 tokens on the same 6.0 GiB budget
-  with no decode regression.
+  with no decode regression. If you do re-enable it, add `--no-async-scheduling` as well:
+  async scheduling together with speculative decoding corrupts the gated-delta-net recurrent
+  state on this checkpoint (vllm#51508), and the default MTP-off path is unaffected.
 
   Text decode throughput (TP2, MTP off, GPU0 locked to 350 W):
 
