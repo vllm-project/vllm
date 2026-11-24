@@ -6,13 +6,15 @@ private quantized copies of an already-loaded lm_head for speculative-decoding
 drafters (`draft_lm_head_quantization`)."""
 
 from abc import abstractmethod
+from dataclasses import dataclass
 from itertools import chain
-from typing import ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 from weakref import WeakKeyDictionary
 
 import torch
 from torch.nn import Module, Parameter
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MPLinearKernel,
@@ -36,6 +38,9 @@ from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.scalar_type import ScalarType
 from vllm.utils.torch_utils import set_default_torch_dtype
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -211,13 +216,161 @@ class OnlineLMHeadMethodBase(OnlineLinearBase):
         return self.kernel.apply_weights(layer, x, bias)
 
 
-_LM_HEAD_METHODS: dict[str, type[OnlineLinearBase]] = {
-    "fp8": Fp8PtpcOnlineLinearMethod,
-    "nvfp4": Nvfp4WeightOnlyOnlineLinearMethod,
-}
+# The name a drafter's lm_head copy takes in `quantization_config.targets`. It is
+# fixed, whatever prefix the drafter's own modules carry, so one key selects the
+# copy of every drafter that shares the target's head. Shell-style patterns such
+# as `*draft_model.*.lm_head` do not match it.
+DRAFT_LM_HEAD_PREFIX = "draft_model.lm_head"
+
+# `draft_lm_head_quantization` values, as the online shorthands they stand for.
+_DRAFT_LM_HEAD_ALIASES = {"fp8": "fp8_per_channel", "nvfp4": "nvfp4_weight_only"}
 
 
-def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead:
+@dataclass(frozen=True)
+class LMHeadCopySpec:
+    """How to quantize a private copy of an lm_head: an online method class and
+    the activation key it runs with. `build` makes a fresh method each time, as
+    one method instance holds the kernel of one layer."""
+
+    method_cls: type[OnlineLinearBase]
+    activation_quant_key: QuantKey | None
+    name: str
+
+    def build(self) -> OnlineLinearBase:
+        method_cls = cast(Any, self.method_cls)
+        if method_cls.accepts_activation_override:
+            return method_cls(activation_quant_key=self.activation_quant_key)
+        return method_cls()
+
+
+def _check_copy_method(method_cls: type, name: str) -> None:
+    # The copy is built from a loaded shard, so it does not need a method that
+    # loads (the check `supports_lm_head` makes), but it runs on one kernel layout.
+    if not issubclass(
+        method_cls,
+        (
+            Fp8PtpcOnlineLinearMethod,
+            Nvfp4WeightOnlyOnlineLinearMethod,
+            OnlineLMHeadMethodBase,
+        ),
+    ):
+        raise NotImplementedError(
+            f"{name}: {method_cls.__name__} cannot quantize a drafter lm_head "
+            "copy; use `fp8_per_channel`, `nvfp4_weight_only` or an lm_head-only "
+            "weight such as `int4_per_group_32_asym`."
+        )
+
+
+def _alias_copy_spec(quantization: str) -> LMHeadCopySpec:
+    # Imported here: online/base.py imports this module.
+    from vllm.config.quantization import _ONLINE_SHORTHANDS
+    from vllm.model_executor.layers.quantization.online.base import (
+        _ONLINE_LINEAR_METHODS,
+    )
+
+    shorthand = _DRAFT_LM_HEAD_ALIASES.get(quantization)
+    if shorthand is None:
+        raise ValueError(
+            f"Unsupported draft_lm_head_quantization {quantization!r}; supported "
+            f"formats: {sorted(_DRAFT_LM_HEAD_ALIASES)}"
+        )
+    weight_spec = _ONLINE_SHORTHANDS[shorthand].linear
+    assert weight_spec is not None and weight_spec.weight is not None
+    method_cls = cast(
+        type[OnlineLinearBase], _ONLINE_LINEAR_METHODS[weight_spec.weight]
+    )
+    return LMHeadCopySpec(
+        method_cls,
+        method_cls.resolve_activation_quant_key(
+            getattr(method_cls, "activation_quant_key", None), explicit=False
+        ),
+        shorthand,
+    )
+
+
+def resolve_draft_lm_head_copy(
+    vllm_config: "VllmConfig",
+    target_lm_head: Module | None,
+) -> LMHeadCopySpec | None:
+    """The quantized copy a drafter that shares the target's lm_head gets, or
+    None to share the head itself.
+
+    The copy is requested by a `quantization_config.targets` pattern matching
+    `DRAFT_LM_HEAD_PREFIX`, or by the older `draft_lm_head_quantization`; both
+    must agree. A pattern that also names the target's own head, such as
+    `re:.*lm_head$`, quantizes that head instead and the drafter shares it.
+    """
+    from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+    from vllm.model_executor.model_loader.base_loader import (
+        _get_online_quantization_config,
+    )
+
+    speculative_config = vllm_config.speculative_config
+    alias_name = (
+        speculative_config.draft_lm_head_quantization
+        if speculative_config is not None
+        else None
+    )
+    alias = _alias_copy_spec(alias_name) if alias_name is not None else None
+    online_config = _get_online_quantization_config(vllm_config)
+    if online_config is None:
+        # An unquantized target has no quantization config of its own; the
+        # `targets` the user passed are still on the model config.
+        args = getattr(vllm_config.model_config, "quantization_config", None)
+        if isinstance(args, QuantizationConfigArgs) and args.targets is not None:
+            online_config = OnlineQuantizationConfig(args)
+    resolved = (
+        online_config.resolve_quant_method_cls(
+            ParallelLMHead, DRAFT_LM_HEAD_PREFIX, lm_head_copy=True
+        )
+        if online_config is not None and online_config.args.targets is not None
+        else None
+    )
+    if resolved is None:
+        return alias
+    assert online_config is not None
+    _, key, pattern, spec, method_cls = resolved
+    _check_copy_method(method_cls, f"quantization_config.targets[{pattern!r}]")
+    if envs.VLLM_RELOAD_MODE == "direct":
+        raise ValueError(
+            f"quantization_config.targets[{pattern!r}] asks for a quantized "
+            "drafter lm_head copy, which does not support VLLM_RELOAD_MODE=direct."
+        )
+    from_targets = LMHeadCopySpec(method_cls, spec.activation, key)
+    if alias is not None:
+        if (alias.method_cls, alias.activation_quant_key) != (
+            from_targets.method_cls,
+            from_targets.activation_quant_key,
+        ):
+            raise ValueError(
+                f"draft_lm_head_quantization={alias_name!r} ({alias.name}) "
+                f"disagrees with quantization_config.targets[{pattern!r}] "
+                f"({key}) for the drafter lm_head; set one."
+            )
+        return from_targets
+    if target_lm_head is not None and not isinstance(
+        target_lm_head.quant_method,
+        (UnquantizedEmbeddingMethod, UnquantizedLinearMethod),
+    ):
+        target = online_config.resolve_quant_method_cls(
+            ParallelLMHead, target_lm_head.prefix, lm_head_copy=True
+        )
+        if target is not None and target[2] == pattern:
+            # One pattern names both heads: the target head is quantized and
+            # the drafter shares it, as without a drafter key.
+            return None
+        raise ValueError(
+            f"quantization_config.targets[{pattern!r}] asks for a quantized copy "
+            "of the drafter lm_head, which needs an unquantized target lm_head; "
+            f"the target's is {type(target_lm_head.quant_method).__name__}."
+        )
+    return from_targets
+
+
+def _quantize_copy(lm_head: ParallelLMHead, spec: LMHeadCopySpec) -> ParallelLMHead:
     if (
         not isinstance(
             lm_head.quant_method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
@@ -241,7 +394,7 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
             padding_size=lm_head.padding_size,
             prefix=lm_head.prefix,
             disable_tp=lm_head.disable_tp,
-            quant_method=_LM_HEAD_METHODS[quantization](),
+            quant_method=spec.build(),
         )
     # Never loaded: a new param sharing the source storage, never a copy of it.
     head.weight = torch.nn.Parameter(lm_head.weight.data, requires_grad=False)
@@ -256,28 +409,36 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
 
 # Each quantized copy maps to the head it is derived from. Weak keys, and no
 # module attribute, so the copy never owns the source as a submodule.
-_SOURCES: WeakKeyDictionary[Module, tuple[ParallelLMHead, str]] = WeakKeyDictionary()
+_SOURCES: WeakKeyDictionary[Module, tuple[ParallelLMHead, LMHeadCopySpec]] = (
+    WeakKeyDictionary()
+)
 
 
 def quantized_lm_head_copy(
-    lm_head: ParallelLMHead, quantization: Literal["fp8", "nvfp4"]
+    lm_head: ParallelLMHead, quantization: LMHeadCopySpec | str
 ) -> ParallelLMHead:
     """A ParallelLMHead holding this rank's shard of `lm_head`, quantized.
 
-    "fp8" uses per-row weight and per-token activation scales on the platform's
-    FP8 linear kernel; "nvfp4" is weight-only on the
-    platform's W4A16 kernel. `lm_head` is left
+    `quantization` is a `LMHeadCopySpec`, or a `draft_lm_head_quantization`
+    value: "fp8" uses per-row weight and per-token activation scales on the
+    platform's FP8 linear kernel; "nvfp4" is weight-only on the platform's W4A16
+    kernel. `lm_head` is left
     unchanged and no bf16 copy of its weight is made. The copy is derived state:
     `refresh_quantized_lm_heads` re-derives it after `lm_head` changes.
     """
-    head = _quantize_copy(lm_head, quantization)
+    spec = (
+        _alias_copy_spec(quantization)
+        if isinstance(quantization, str)
+        else quantization
+    )
+    head = _quantize_copy(lm_head, spec)
     # Keep it out of layerwise reload, which would re-run
     # process_weights_after_loading on the already-quantized weight.
     get_layerwise_info(head).reset()
-    _SOURCES[head] = (lm_head, quantization)
+    _SOURCES[head] = (lm_head, spec)
     logger.info(
         "Quantized a %s copy of the lm_head (%d x %d per rank).",
-        quantization,
+        spec.name,
         head.output_size_per_partition,
         head.input_size_per_partition,
     )

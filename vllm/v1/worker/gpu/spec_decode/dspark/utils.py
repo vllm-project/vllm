@@ -81,6 +81,9 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     draft_model_config = speculative_config.draft_model_config
 
     from vllm.compilation.backends import set_model_tag
+    from vllm.model_executor.layers.quantization.online.lm_head import (
+        resolve_draft_lm_head_copy,
+    )
     from vllm.model_executor.model_loader import get_model
     from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
     from vllm.model_executor.models.utils import get_draft_quant_config
@@ -146,10 +149,11 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         getattr(draft_model_config.hf_config, "draft_vocab_size", None)
         or draft_model_config.get_vocab_size()
     )
+    target_lm_head = get_target_lm_head(target_model, target_language_model)
     share_target_lm_head(
         draft_model,
-        get_target_lm_head(target_model, target_language_model),
-        speculative_config.draft_lm_head_quantization,
+        target_lm_head,
+        resolve_draft_lm_head_copy(vllm_config, target_lm_head),
         can_share=draft_output_vocab_size == target_vocab_size,
     )
 

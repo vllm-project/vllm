@@ -537,6 +537,9 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
         qweight = _fp8_quant_per_channel(weight, weight_scale)
 
         replace_parameter(layer, "weight", qweight.t())
+        # Transposed to (K, N); the param keeps its checkpoint dims. Kernels
+        # that repack the weight (Humming) read this to undo the transpose.
+        layer.processed_weight_dims = (0, 1)
         replace_parameter(layer, "weight_scale", weight_scale)
 
         self.fp8_linear.process_weights_after_loading(layer)

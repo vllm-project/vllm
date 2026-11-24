@@ -342,13 +342,21 @@ class OnlineQuantizationConfig(QuantizationConfig):
         return cls
 
     def resolve_quant_method_cls(
-        self, layer_cls: type[torch.nn.Module], prefix: str
+        self,
+        layer_cls: type[torch.nn.Module],
+        prefix: str,
+        *,
+        lm_head_copy: bool = False,
     ) -> tuple[OnlineQuantizationSource, str, str | None, QuantSpec, type] | None:
         """Resolve quantization metadata and method class without instantiating it.
 
         Args:
             layer_cls: Type of layer for which to resolve online quantization.
             prefix: Fully qualified layer name.
+            lm_head_copy: Resolve for a private quantized copy of an already
+                loaded lm_head (a drafter's), which is not loaded through the
+                method and so skips the load-time `supports_lm_head` check.
+                The caller validates the method class.
 
         Returns:
             A tuple of source, quantization key string, target pattern, spec
@@ -392,8 +400,10 @@ class OnlineQuantizationConfig(QuantizationConfig):
             return None
         assert quant_spec is not None
         assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
-        if issubclass(layer_cls, ParallelLMHead) and not getattr(
-            quant_method_cls, "supports_lm_head", False
+        if (
+            issubclass(layer_cls, ParallelLMHead)
+            and not lm_head_copy
+            and not getattr(quant_method_cls, "supports_lm_head", False)
         ):
             # Per-tensor reduces its amax across TP ranks and per-block assumes
             # 128-aligned shards, neither validated on a padded, sharded vocab.

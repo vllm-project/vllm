@@ -7,10 +7,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.online.lm_head import (
+    DRAFT_LM_HEAD_PREFIX,
     quantized_lm_head_copy,
     refresh_quantized_lm_heads,
+    resolve_draft_lm_head_copy,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.reload import (
@@ -32,6 +36,13 @@ requires_nvfp4 = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="nvfp4 needs a CUDA W4A16 kernel"
 )
 NVFP4 = pytest.param("nvfp4", marks=requires_nvfp4)
+# The "fp8" alias runs W8A8 and needs an FP8 GEMM (SM89+); weight-only FP8 is
+# covered separately by the targets-key test.
+requires_fp8_gemm = pytest.mark.skipif(
+    current_platform.is_cuda() and not current_platform.has_device_capability(89),
+    reason="the fp8 alias is W8A8 and needs SM89+",
+)
+FP8 = pytest.param("fp8", marks=requires_fp8_gemm)
 
 
 def _target_head(monkeypatch, seed: int = 0) -> ParallelLMHead:
@@ -54,7 +65,10 @@ def _tensors(module: torch.nn.Module) -> dict[str, torch.Tensor]:
 @requires_cuda
 @pytest.mark.parametrize(
     ("quantization", "max_rel_err", "min_top1"),
-    [("fp8", 0.05, 0.9), pytest.param("nvfp4", 0.15, 0.75, marks=requires_nvfp4)],
+    [
+        pytest.param("fp8", 0.05, 0.9, marks=requires_fp8_gemm),
+        pytest.param("nvfp4", 0.15, 0.75, marks=requires_nvfp4),
+    ],
 )
 def test_tracks_bf16_head_through_logits_processor(
     default_vllm_config, dist_init, monkeypatch, quantization, max_rel_err, min_top1
@@ -80,7 +94,41 @@ def test_tracks_bf16_head_through_logits_processor(
 
 
 @requires_cuda
-@pytest.mark.parametrize("quantization", ["fp8", NVFP4])
+def test_targets_key_weight_only_fp8_tracks_bf16_head(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """A `draft_model.lm_head` key with `activation: null` builds a W8A16 copy
+    on any CUDA GPU (the W8A8 `"fp8"` alias needs FP8 GEMM hardware). The
+    Humming kernel repacks the weight, so a layout slip shows as wrong logits."""
+    head = _target_head(monkeypatch)
+    spec = resolve_draft_lm_head_copy(
+        SimpleNamespace(
+            quant_config=OnlineQuantizationConfig(
+                QuantizationConfigArgs(
+                    targets={
+                        DRAFT_LM_HEAD_PREFIX: QuantSpec(
+                            weight="fp8_per_channel_static", activation=None
+                        )
+                    }
+                )
+            ),
+            speculative_config=SimpleNamespace(draft_lm_head_quantization=None),
+        ),
+        head,
+    )
+    assert spec is not None
+    draft_head = quantized_lm_head_copy(head, spec)
+
+    logits_processor = LogitsProcessor(VOCAB)
+    hidden = torch.randn(2048, HIDDEN, device="cuda", dtype=torch.bfloat16)
+    ref = logits_processor(head, hidden).float()
+    out = logits_processor(draft_head, hidden).float()
+    assert ((out - ref).norm() / ref.norm()).item() < 0.05
+    assert (out.argmax(-1) == ref.argmax(-1)).float().mean().item() > 0.9
+
+
+@requires_cuda
+@pytest.mark.parametrize("quantization", [FP8, NVFP4])
 def test_refresh_follows_target_update(
     default_vllm_config, dist_init, monkeypatch, quantization
 ):
@@ -128,14 +176,15 @@ def _draft_update_worker(vllm_config, drafter: torch.nn.Module, **engine) -> Wor
 
 
 @requires_cuda
+@pytest.mark.parametrize("quantization", [FP8, NVFP4])
 def test_draft_weight_update_refreshes_copy(
-    default_vllm_config, dist_init, monkeypatch
+    default_vllm_config, dist_init, monkeypatch, quantization
 ):
     """A draft weight update can write a target weight the drafter shares, such
     as an embedding tied to the lm_head; the copy must follow it."""
     head = _target_head(monkeypatch)
     drafter = torch.nn.Module()
-    drafter.lm_head = quantized_lm_head_copy(head, "fp8")
+    drafter.lm_head = quantized_lm_head_copy(head, quantization)
     worker = _draft_update_worker(
         default_vllm_config,
         drafter,
@@ -147,13 +196,13 @@ def test_draft_weight_update_refreshes_copy(
     head.weight.data.copy_(_target_head(monkeypatch, seed=1).weight)
     worker.finish_weight_update()
 
-    expected = _tensors(quantized_lm_head_copy(head, "fp8"))
+    expected = _tensors(quantized_lm_head_copy(head, quantization))
     for name, tensor in _tensors(drafter.lm_head).items():
         assert torch.equal(tensor, expected[name]), name
 
 
 @requires_cuda
-@pytest.mark.parametrize("quantization", ["fp8", NVFP4])
+@pytest.mark.parametrize("quantization", [FP8, NVFP4])
 def test_draft_weight_update_loads_lm_head(
     default_vllm_config, dist_init, monkeypatch, quantization
 ):
