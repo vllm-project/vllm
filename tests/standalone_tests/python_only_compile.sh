@@ -175,9 +175,12 @@ cd /vllm-workspace/
 
 # Without a git checkout setuptools-scm cannot derive the version for the
 # source install below, so reuse the version of the wheel the image came with.
-if [[ ! -e .git ]]; then
-    SETUPTOOLS_SCM_PRETEND_VERSION="$(python3 -c 'from importlib.metadata import version; print(version("vllm"))')"
-    export SETUPTOOLS_SCM_PRETEND_VERSION
+# Use VLLM_VERSION_OVERRIDE (handled by setup.py) rather than exporting
+# SETUPTOOLS_SCM_PRETEND_VERSION, which would leak into dependency source builds.
+if [[ ! -e .git && -z "${VLLM_VERSION_OVERRIDE:-}" ]]; then
+    VLLM_VERSION_OVERRIDE="$(python3 -P -c 'from importlib.metadata import version; print(version("vllm"))')"
+    [[ -n "${VLLM_VERSION_OVERRIDE}" ]] || exit 1
+    export VLLM_VERSION_OVERRIDE
 fi
 
 # uninstall vllm
