@@ -1658,14 +1658,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_v_heads = self.num_v_heads // self.tp_size
         _, state_dtype = self.get_state_dtype()
 
-        # All kernels use BT = chunk_size, so one pass populates every autotuner
-        # cache, and the autotune keys do not depend on the token count: the
-        # config that wins for this pass is used for every prefill. The Triton
-        # backend therefore warms up with max_num_batched_tokens tokens (the
-        # largest prefill step) instead of one chunk; the other backends do not
-        # autotune and keep one chunk. Mirror the real prefill path here: build
-        # q/k/v/g/beta via fused_post_conv_prep and then run
-        # chunk_gated_delta_rule with in-kernel L2 norm disabled.
+        # Every prefill kernel splits the tokens into chunks of BT = chunk_size
+        # (64) for any prompt length, so its autotune key (heads, head size, BT,
+        # dtypes) is the same for every prefill call. The autotuner therefore
+        # benchmarks only on the first call -- this warmup -- and every later
+        # prefill reuses the configs picked here. To pick configs for real
+        # prefill steps rather than for a single chunk, the Triton backend warms
+        # up with max_num_batched_tokens tokens (the largest prefill step). The
+        # other backends do not autotune and keep one chunk.
+        # The inputs are built like the real prefill path (fused_post_conv_prep,
+        # then chunk_gated_delta_rule with in-kernel L2 norm off), so this call
+        # has the same autotune key as real prefills.
         T = FLA_CHUNK_SIZE
         if self.gdn_prefill_backend == "triton":
             T = max(T, self.vllm_config.scheduler_config.max_num_batched_tokens)
