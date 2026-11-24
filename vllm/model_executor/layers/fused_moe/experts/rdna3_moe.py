@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused MoE W4A16 experts on the RDNA3 (gfx1100) HIP kernel.
 
-``moe_gptq_gemm_rdna3`` is a single HIP kernel launch per GEMM that handles
+`moe_gptq_gemm_rdna3` is a single HIP kernel launch per GEMM that handles
 expert routing + W4A16 dequant + dot product with atomic output accumulation.
 
 Weight format (per expert, same as the dense RDNA3 W4A16 kernel):
-  - Packed int32 ``[E, K/8, N]`` with exllama shuffle
-  - Scales ``[E, groups, N]`` in activation dtype
-  - Zero points ``[E, groups, N/8]`` packed int32 (synthesized, symmetric only)
+  - Packed int32 `[E, K/8, N]` with exllama shuffle
+  - Scales `[E, groups, N]` in activation dtype
+  - Zero points `[E, groups, N/8]` packed int32 (synthesized, symmetric only)
 """
 
 import torch
@@ -53,13 +53,13 @@ def rdna3_moe_kernel_available() -> bool:
 
 
 class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
-    """W4A16 experts backed by ``moe_gptq_gemm_rdna3`` (gfx1100).
+    """W4A16 experts backed by `moe_gptq_gemm_rdna3` (gfx1100).
 
     Both GEMMs accumulate atomically, so their destinations are zeroed first.
-    The second GEMM is given ``output_topk``, which makes it reduce over the
-    top-k dimension while it accumulates — the ``moe_sum`` launch and the
-    ``[M * top_k, K]`` intermediate are fused away, hence
-    ``TopKWeightAndReduceNoOP``.
+    The second GEMM is given `output_topk`, which makes it reduce over the
+    top-k dimension while it accumulates — the `moe_sum` launch and the
+    `[M * top_k, K]` intermediate are fused away, hence
+    `TopKWeightAndReduceNoOP`.
     """
 
     def __init__(

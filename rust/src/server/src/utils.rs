@@ -2,18 +2,29 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::convert::Infallible;
+use std::fmt::{Debug, Display};
+use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use asynk_strim_attr::{TryYielder, try_stream};
 use axum::BoxError;
-use axum::http::HeaderMap;
+use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderMap, HeaderValue};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use futures::Stream;
+use futures::{Stream, StreamExt as _, pin_mut};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use thiserror_ext::AsReport;
+use tracing::trace;
 use uuid::Uuid;
 
 use crate::error::{ApiError, bail_invalid_request};
+
+mod npy;
+pub(crate) use npy::npy_base64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResolvedRequestContext {
@@ -44,17 +55,85 @@ where
     E: Into<BoxError>,
 {
     let sse = Sse::new(stream);
-    match keep_alive_interval {
+    let mut response = match keep_alive_interval {
         Some(interval) => sse
             .keep_alive(KeepAlive::new().interval(interval).text("keep-alive"))
             .into_response(),
         None => sse.into_response(),
+    };
+    // axum sends a bare `text/event-stream`. Name the charset like Python
+    // (Starlette appends it to every `text/*` type), since clients such as
+    // `requests` otherwise decode a `text/*` body as ISO-8859-1.
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream; charset=utf-8"),
+    );
+    response
+}
+
+#[easy_ext::ext(EventExt)]
+impl Event {
+    /// Set the event's data field to `payload` serialized as compact JSON.
+    ///
+    /// Writes the same bytes as [`Event::json_data`], which is about 2.5x slower
+    /// because it runs axum's newline scan on each of serde_json's small writes.
+    pub fn json(self, payload: &impl Serialize) -> Event {
+        self.data(serde_json::to_string(payload).expect("SSE payload must serialize to JSON"))
     }
+}
+
+/// Convert one chunk stream into OpenAI-style SSE events.
+///
+/// OpenAI-style streaming errors are encoded as ordinary `data: {"error": ...}`
+/// events followed by `data: [DONE]`, so the transport stream itself stays
+/// infallible even when generation fails after the HTTP response has started.
+#[try_stream]
+pub async fn openai_sse_stream<T: Serialize + Debug>(
+    stream: impl Stream<Item = Result<T, ApiError>>,
+    mut y: TryYielder<Event, Infallible>,
+) -> Result<(), Infallible> {
+    pin_mut!(stream);
+
+    while let Some(next) = stream.next().await {
+        match next {
+            Ok(chunk) => {
+                trace!(?chunk, "emitting chunk");
+                y.yield_ok(Event::default().json(&chunk)).await;
+            }
+            Err(error) => {
+                let response = error.to_error_response();
+                trace!(?response, "emitting error");
+                y.yield_ok(Event::default().json(&response)).await;
+                break;
+            }
+        }
+    }
+
+    trace!("emitting done");
+    y.yield_ok(Event::default().data("[DONE]")).await;
+    Ok(())
 }
 
 /// Construct an API error for a failed utility call to the engine core.
 pub fn utility_call_error(method: &str, error: impl AsReport) -> ApiError {
     ApiError::server_error(format!("failed to call {method}: {}", error.as_report()))
+}
+
+/// Deserialize a boolean query parameter with the spellings FastAPI accepts.
+///
+/// Query values are text, and serde's `bool` only takes lowercase `true` and
+/// `false`, while clients of the Python server also send others: `requests`
+/// encodes Python's `True` as `True`.
+pub(crate) fn deserialize_query_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "t" | "yes" | "y" | "on" | "1" => Ok(true),
+        "false" | "f" | "no" | "n" | "off" | "0" => Ok(false),
+        _ => Err(D::Error::custom(format!("invalid boolean value `{value}`"))),
+    }
 }
 
 /// Merge `kv_transfer_params` into the `vllm_xargs` map, mirroring the Python
@@ -150,31 +229,37 @@ pub fn convert_logit_bias(
 pub fn resolve_request_context(
     headers: &HeaderMap,
     request_id: Option<&str>,
-) -> ResolvedRequestContext {
-    // `None` when the header is absent or cannot be parsed as a `u32`.
-    let data_parallel_rank = headers
-        .get("X-data-parallel-rank")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse().ok());
-    let priority = headers
-        .get("X-Vllm-Priority")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse().ok());
+) -> Result<ResolvedRequestContext, ApiError> {
+    let request_id_header: Option<String> = header_value(headers, "X-Request-Id")?;
+    Ok(ResolvedRequestContext {
+        request_id: resolve_base_request_id(request_id_header.as_deref(), request_id),
+        data_parallel_rank: header_value(headers, "X-data-parallel-rank")?,
+        priority: header_value(headers, "X-Vllm-Priority")?,
+        session_id: header_value(headers, "X-Session-ID")?,
+    })
+}
 
-    // Extract request id from header.
-    let request_id_header = headers.get("X-Request-Id").and_then(|value| value.to_str().ok());
-    let request_id = resolve_base_request_id(request_id_header, request_id);
-    let session_id = headers
-        .get("X-Session-ID")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned);
-
-    ResolvedRequestContext {
-        request_id,
-        data_parallel_rank,
-        priority,
-        session_id,
+/// Read one request header as `T`: `None` when it is absent or empty, a 400
+/// when it is present but not visible ASCII or does not parse, so a malformed
+/// value is never silently dropped.
+pub(crate) fn header_value<T>(headers: &HeaderMap, name: &str) -> Result<Option<T>, ApiError>
+where
+    T: FromStr,
+    T::Err: Display,
+{
+    let Some(value) = headers.get(name) else {
+        return Ok(None);
+    };
+    let Ok(value) = value.to_str() else {
+        bail_invalid_request!("Invalid {name} header: not a visible ASCII string.");
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    match value.parse() {
+        Ok(value) => Ok(Some(value)),
+        Err(error) => bail_invalid_request!("Invalid {name} header {value:?}: {error}."),
     }
 }
 
@@ -195,10 +280,46 @@ pub fn resolve_base_request_id(
 mod tests {
     use std::convert::Infallible;
 
+    use axum::extract::Query;
+    use axum::http::{HeaderName, HeaderValue, Uri};
     use futures::{StreamExt as _, stream};
     use tokio::time::{Instant, sleep};
 
     use super::*;
+
+    /// The spellings FastAPI (pydantic) accepts for a `bool` query parameter,
+    /// probed against a live FastAPI app. Everything else is rejected there too.
+    #[test]
+    fn query_bool_matches_fastapi_spellings() {
+        #[derive(Debug, Deserialize)]
+        struct Params {
+            #[serde(deserialize_with = "deserialize_query_bool")]
+            flag: bool,
+        }
+        let parse = |value: &str| {
+            let uri: Uri = format!("/?flag={value}").parse().expect("valid uri");
+            Query::<Params>::try_from_uri(&uri).map(|Query(params)| params.flag).ok()
+        };
+
+        for value in [
+            "true", "True", "TRUE", "tRuE", "t", "T", "yes", "Yes", "YES", "y", "Y", "on", "On",
+            "ON", "1",
+        ] {
+            assert_eq!(parse(value), Some(true), "{value}");
+        }
+        for value in [
+            "false", "False", "FALSE", "f", "F", "no", "No", "NO", "n", "N", "off", "Off", "OFF",
+            "0",
+        ] {
+            assert_eq!(parse(value), Some(false), "{value}");
+        }
+        for value in [
+            "", "%201", "1%20", "%20true", "2", "-1", "1.0", "0.0", "maybe", "truth", "none",
+            "null",
+        ] {
+            assert_eq!(parse(value), None, "{value}");
+        }
+    }
 
     /// Every key that is not a token ID is named in one error, in a stable
     /// order, instead of only the first one the map yields.
@@ -226,6 +347,59 @@ mod tests {
         let logit_bias = HashMap::from([("7".to_string(), 1.0), ("42".to_string(), -2.5)]);
         let converted = convert_logit_bias(Some(logit_bias)).expect("valid keys");
         assert_eq!(converted, Some(HashMap::from([(7, 1.0), (42, -2.5)])));
+    }
+
+    /// A request header is absent (`None`) when missing or empty, parsed when
+    /// valid, and a 400 when present but unreadable or unparsable.
+    #[test]
+    fn resolve_request_context_header_values() {
+        let resolve = |name: &str, value: HeaderValue| {
+            let mut headers = HeaderMap::new();
+            headers.insert(HeaderName::from_bytes(name.as_bytes()).unwrap(), value);
+            resolve_request_context(&headers, Some("body-id"))
+        };
+
+        let context = resolve("X-Vllm-Priority", HeaderValue::from_static(" -5 ")).unwrap();
+        assert_eq!(context.priority, Some(-5));
+        let context = resolve("X-data-parallel-rank", HeaderValue::from_static("3")).unwrap();
+        assert_eq!(context.data_parallel_rank, Some(3));
+        for name in [
+            "X-Vllm-Priority",
+            "X-data-parallel-rank",
+            "X-Request-Id",
+            "X-Session-ID",
+        ] {
+            let context = resolve(name, HeaderValue::from_static("")).unwrap();
+            assert_eq!(
+                context,
+                ResolvedRequestContext {
+                    request_id: "body-id".to_string(),
+                    ..Default::default()
+                },
+                "{name}"
+            );
+        }
+
+        let errors = [
+            ("X-Vllm-Priority", HeaderValue::from_static("high")),
+            ("X-Vllm-Priority", HeaderValue::from_static("1.5")),
+            ("X-Vllm-Priority", HeaderValue::from_static("2147483648")),
+            ("X-data-parallel-rank", HeaderValue::from_static("-1")),
+            ("X-Request-Id", HeaderValue::from_bytes(b"id-\xe9").unwrap()),
+            ("X-Session-ID", HeaderValue::from_bytes(b"id-\xe9").unwrap()),
+        ]
+        .map(|(name, value)| resolve(name, value).unwrap_err().to_error_response().error.message);
+        expect_test::expect![[r#"
+            [
+                "Invalid X-Vllm-Priority header \"high\": invalid digit found in string.",
+                "Invalid X-Vllm-Priority header \"1.5\": invalid digit found in string.",
+                "Invalid X-Vllm-Priority header \"2147483648\": number too large to fit in target type.",
+                "Invalid X-data-parallel-rank header \"-1\": invalid digit found in string.",
+                "Invalid X-Request-Id header: not a visible ASCII string.",
+                "Invalid X-Session-ID header: not a visible ASCII string.",
+            ]
+        "#]]
+        .assert_debug_eq(&errors);
     }
 
     /// Collect `(elapsed seconds, frame)` pairs from a response whose event

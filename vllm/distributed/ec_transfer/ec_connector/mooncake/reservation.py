@@ -72,7 +72,7 @@ _WRITER_OWNED_STATES = {
 }
 
 
-@dataclass
+@dataclass(slots=True)
 class ConsumerReservation:
     """Own the identity and destination allocation of one remote push."""
 
@@ -91,7 +91,7 @@ class ConsumerReservation:
 class ConsumerReservationManager:
     """Own reservation transitions and destination allocation releases.
 
-    A remote writer owns a ``WRITING`` allocation. Cancellation and expiry are
+    A remote writer owns a `WRITING` allocation. Cancellation and expiry are
     therefore deferred until completion, unless refresh explicitly abandons
     that writer before replacing its reservation.
     """
@@ -373,6 +373,15 @@ class ConsumerReservationManager:
             ):
                 raise RuntimeError(
                     f"Pushed EC tensor is not ready for mm_hash={mm_hash}"
+                )
+            if record.lease is not None and record.lease.invalidated:
+                # The resident this reservation reused was invalidated by a
+                # cache reset; fail the load so the request re-encodes when
+                # re-issued instead of resurrecting the old tensor.
+                self._terminate(record, ConsumerReservationState.CANCELLED)
+                raise RuntimeError(
+                    f"Pushed EC tensor for mm_hash={mm_hash} was invalidated "
+                    "by an encoder-cache reset"
                 )
             allocation = self._memory.publish(mm_hash, record.allocation, record.lease)
             record.allocation = None

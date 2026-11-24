@@ -11,7 +11,6 @@ from vllm.assets.base import get_vllm_public_assets
 from vllm.assets.image import VLM_IMAGES_DIR
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.platforms import current_platform
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import large_gpu_test
@@ -19,8 +18,8 @@ from ...utils import check_embeddings_close
 
 # BC for method that was deleted in Transformers v5.
 # Only needed for generating the HF reference.
-transformers.utils.is_flash_attn_greater_or_equal_2_10 = (
-    lambda: transformers.utils.is_flash_attn_greater_or_equal("2.1.0")
+transformers.utils.is_flash_attn_greater_or_equal_2_10 = lambda: (
+    transformers.utils.is_flash_attn_greater_or_equal("2.1.0")
 )
 
 HF_TEXT_PROMPTS = [
@@ -69,13 +68,15 @@ def _run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
     with vllm_runner(
-        model, runner="pooling", dtype=dtype, enforce_eager=True
+        model, runner="pooling", dtype=dtype, enforce_eager=True, trust_remote_code=True
     ) as vllm_model:
         vllm_outputs = vllm_model.embed(input_texts, images=input_images)
 
     # use eager mode for hf runner, since phi3_v didn't work with flash_attn
     hf_model_kwargs = {"_attn_implementation": "eager"}
-    with hf_runner(model, dtype=dtype, model_kwargs=hf_model_kwargs) as hf_model:
+    with hf_runner(
+        model, dtype=dtype, model_kwargs=hf_model_kwargs, trust_remote_code=True
+    ) as hf_model:
         all_inputs = hf_model.get_inputs(input_texts, images=input_images)
 
         all_outputs = []
@@ -103,15 +104,6 @@ def _run_test(
 
 
 @pytest.mark.core_model
-@pytest.mark.skipif(
-    current_platform.is_xpu(),
-    reason=(
-        "vllm-xpu-kernels paged_decode_default.conf is missing the "
-        "8,96,64,false,true,false tuple needed by VLM2Vec-Full at "
-        "block_size=64. Re-enable once vllm-xpu-kernels ships the updated "
-        "config. See github.com/vllm-project/vllm-xpu-kernels/pull/587."
-    ),
-)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models_text(
@@ -129,7 +121,7 @@ def test_models_text(
         hf_runner,
         vllm_runner,
         input_texts,
-        input_images,  # type: ignore
+        input_images,
         model,
         dtype=dtype,
     )

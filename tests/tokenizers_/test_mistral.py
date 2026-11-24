@@ -2276,7 +2276,10 @@ def test_convert_ids_to_tokens_pre_args_tekken():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("reasoning_effort", [None, "none", "high"])
+@pytest.mark.parametrize(
+    "reasoning_effort",
+    [None, "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+)
 def test_validate_request_params_valid_effort(reasoning_effort: str | None) -> None:
     request = ChatCompletionRequest(
         model="test-model",
@@ -2284,17 +2287,6 @@ def test_validate_request_params_valid_effort(reasoning_effort: str | None) -> N
         reasoning_effort=reasoning_effort,
     )
     assert validate_request_params(request) is None
-
-
-def test_validate_request_params_rejects_unsupported_effort() -> None:
-    request = ChatCompletionRequest(
-        model="test-model",
-        messages=[],
-        reasoning_effort="medium",
-    )
-    with pytest.raises(VLLMValidationError, match="reasoning_effort") as exc_info:
-        validate_request_params(request)
-    assert exc_info.value.parameter == "reasoning_effort"
 
 
 def test_validate_request_params_rejects_chat_template() -> None:
@@ -2354,6 +2346,35 @@ def test_apply_chat_template_forwards_kwargs(
     )
 
     assert captured_kwargs[-1].items() >= extra_kwargs.items()
+
+
+def test_apply_chat_template_drops_template_only_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+    v15_mistral_tokenizer: MistralTokenizer,
+) -> None:
+    """vLLM-injected template kwargs must not reach `from_openai`."""
+    captured_kwargs: list[dict] = []
+
+    def fake_apply_chat_template(**kwargs):
+        captured_kwargs.append(kwargs)
+        return [0]
+
+    monkeypatch.setattr(
+        v15_mistral_tokenizer.transformers_tokenizer,
+        "apply_chat_template",
+        fake_apply_chat_template,
+    )
+
+    v15_mistral_tokenizer.apply_chat_template(
+        messages=_PASSTHROUGH_MESSAGES,
+        cohere_format="cmd4",
+        enable_thinking=True,
+        reasoning_effort="high",
+    )
+
+    assert "cohere_format" not in captured_kwargs[-1]
+    assert "enable_thinking" not in captured_kwargs[-1]
+    assert captured_kwargs[-1]["reasoning_effort"] == "high"
 
 
 def test_apply_chat_template_accepts_renderer_kwargs(

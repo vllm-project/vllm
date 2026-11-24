@@ -24,5 +24,4 @@ def test_distributed_oot_pp_raw_input_tokens(dummy_opt_path: str, enforce_eager:
     run_and_test_dummy_opt_api_server(
         dummy_opt_path,
         extra_args=extra_args,
-        env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1"},
     )

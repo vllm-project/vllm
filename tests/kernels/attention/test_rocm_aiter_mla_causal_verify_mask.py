@@ -2,16 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression test for causal masking in the AITER MLA verify MTP path.
 
-When ``num_heads < 16`` the ROCm AITER MLA backend cannot use the ASM decode
-kernel for a multi-token block, so ``AiterMLAImpl.forward_mqa`` routes verify
-through ``mla_gluon``'s native 4-D MTP entry (``q`` shaped
-``[batch, qlen, nhead, dim]`` with ``use_2d_view=False``). aiter applies the
-causal tail internally: position ``t`` attends KV ``[0, seq_len - qlen + t]``.
+When `num_heads < 16` the ROCm AITER MLA backend cannot use the ASM decode
+kernel for a multi-token block, so `AiterMLAImpl.forward_mqa` routes verify
+through `mla_gluon`'s native 4-D MTP entry (`q` shaped
+`[batch, qlen, nhead, dim]` with `use_2d_view=False`). aiter applies the
+causal tail internally: position `t` attends KV `[0, seq_len - qlen + t]`.
 
-The test drives the real builder and ``forward_mqa`` over a multi-token decode
+The test drives the real builder and `forward_mqa` over a multi-token decode
 batch, intercepts the arguments actually handed to the Gluon kernel, and pins
-that the 4-D MTP contract is used with per-request ``block_table`` and
-``cache_seqlens`` rather than a flattened per-token paged-KV view.
+that the 4-D MTP contract is used with per-request `block_table` and
+`cache_seqlens` rather than a flattened per-token paged-KV view.
 """
 
 import types
@@ -73,7 +73,7 @@ def _seq_lens() -> list[int]:
 def _run_verify_block():
     """Drive the real builder + forward_mqa over one multi-token verify block.
 
-    Returns ``(metadata, captured)`` where ``captured`` holds the Gluon kwargs.
+    Returns `(metadata, captured)` where `captured` holds the Gluon kwargs.
     """
     from tests.v1.attention.utils import (
         BatchSpec,
