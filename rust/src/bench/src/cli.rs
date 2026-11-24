@@ -408,7 +408,10 @@ pub struct BenchServeArgs {
     #[arg(long, default_value_t = false)]
     pub disable_tqdm: bool,
 
-    /// Number of warmup requests.
+    /// Number of warmup requests. Each resends the first request with a
+    /// unique cache_salt, so warmups do not prime the prefix cache for the
+    /// run; if none succeeds and the server rejects any (HTTP 400 or 422),
+    /// they are retried without it.
     #[arg(long, default_value_t = 0)]
     pub num_warmups: usize,
 
@@ -477,7 +480,10 @@ pub struct BenchServeArgs {
     #[arg(long)]
     pub request_id_prefix: Option<String>,
 
-    /// Maximum time to wait for endpoint readiness in seconds.
+    /// Maximum time to wait for endpoint readiness in seconds. Except with
+    /// `--multi-turn`, the check sends the first request with a unique
+    /// cache_salt (unsalted if the server rejects it with HTTP 400 or 422),
+    /// so it does not prime the prefix cache for the run.
     #[arg(long, default_value_t = 0)]
     pub ready_check_timeout_sec: u64,
 
