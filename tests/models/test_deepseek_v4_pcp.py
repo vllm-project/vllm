@@ -50,9 +50,9 @@ def _small_config():
         "hc_eps": 1e-6,
         "hc_sinkhorn_iters": 20,
         "rms_norm_eps": 1e-6,
-        "rope_theta": 10000,
-        "rope_scaling": {
-            "type": "yarn",
+        "rope_parameters": {
+            "rope_type": "yarn",
+            "rope_theta": 10000,
             "factor": 16,
             "original_max_position_embeddings": 65536,
             "beta_fast": 32,

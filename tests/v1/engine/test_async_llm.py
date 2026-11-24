@@ -69,7 +69,7 @@ VISION_PROMPT = {
 
 async def _generate(engine: AsyncLLM, request_id: str, n: int = 1) -> RequestOutput:
     async def run() -> RequestOutput:
-        async for out in engine.generate(
+        async for out in engine.generate(  # noqa: B007
             request_id=request_id,
             prompt=TEXT_PROMPT,
             sampling_params=SamplingParams(max_tokens=5, n=n),
@@ -113,6 +113,25 @@ def _mock_vllm_config() -> MagicMock:
     vllm_config.observability_config.otlp_traces_endpoint = None
     vllm_config.scheduler_config.stream_interval = 1
     return vllm_config
+
+
+def test_tracing_collects_stats_without_stat_loggers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Tracing needs request stats, but disabled stat logging keeps the console
+    and Prometheus stat loggers off."""
+    vllm_config = _mock_vllm_config()
+    vllm_config.observability_config.otlp_traces_endpoint = "localhost:4317"
+    vllm_config.profiler_config.should_profile_frontend = False
+    _mock_async_llm_dependencies(monkeypatch)
+    monkeypatch.setattr(async_llm_module, "init_tracer", MagicMock())
+
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+
+    assert engine.logger_manager is None
+    assert async_llm_module.OutputProcessor.call_args.kwargs["collect_stats"]
+    make_client = async_llm_module.EngineCoreClient.make_async_mp_client
+    assert make_client.call_args.kwargs["collect_stats"]
 
 
 @pytest.mark.parametrize("method", ["generate", "encode"])
@@ -1127,7 +1146,7 @@ async def test_pause_resume_basic():
 
         # Engine should still work after all cycles
         sampling_params = SamplingParams(max_tokens=5)
-        async for out in engine.generate(
+        async for out in engine.generate(  # noqa: B007
             request_id="post-cycles",
             prompt=TEXT_PROMPT,
             sampling_params=sampling_params,
@@ -1238,7 +1257,7 @@ async def test_pause_wait():
 
         async def gen():
             nonlocal request_completed
-            async for out in engine.generate(
+            async for out in engine.generate(  # noqa: B007
                 request_id="test-wait",
                 prompt=TEXT_PROMPT,
                 sampling_params=sampling_params,
@@ -1341,7 +1360,7 @@ async def test_pause_keep_multi_request():
         any_token_generated = asyncio.Event()
 
         async def gen_multi(request_id: str):
-            async for out in engine.generate(
+            async for out in engine.generate(  # noqa: B007
                 request_id=request_id,
                 prompt=TEXT_PROMPT,
                 sampling_params=sampling_params,

@@ -105,7 +105,7 @@ class HYV3ToolParser(ToolParser):
         - oneOf  → return the oneOf list
         - fallback → [{"type": "string"}]
 
-        Note: single ``type`` has the highest priority.
+        Note: single `type` has the highest priority.
         """
         if "type" in arg_schema:
             type_val = arg_schema["type"]
@@ -539,11 +539,11 @@ class HYV3ToolParser(ToolParser):
         Strategy:
         - Track completed args and emit each one as a JSON fragment.
         - For string-typed args, stream the value character-by-character.
-        - Withhold the closing ``}`` until ``</tool_call>`` is seen.
+        - Withhold the closing `}` until `</tool_call>` is seen.
 
         We build JSON manually via fragments rather than using json.dumps
         with a cursor, because json.dumps of partial-vs-full string values
-        produces incompatible prefixes (e.g. ``""}`` vs ``"Hello"}``).
+        produces incompatible prefixes (e.g. `""}` vs `"Hello"}`).
         """
         buf = self._buffer
         is_complete = self.tool_call_end_token in buf

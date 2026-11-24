@@ -34,7 +34,7 @@ class CompressedSlotMappingKernel(
 ):
     TRITON_BLOCK_SIZE = 1024
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         compress_ratio: int
         triton_block_size: int
@@ -107,7 +107,7 @@ class CompressedSlotMappingKernel(
                 compressed_slot_mapping_ptr + query_start + offset, slot_ids, mask=mask
             )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         compress_ratio: int,
@@ -197,16 +197,16 @@ def get_compressed_slot_mapping(
     cp_interleave: int = 1,
     pcp_buffer: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Slot mapping for writing the compressed states of ``num_tokens`` tokens.
+    """Slot mapping for writing the compressed states of `num_tokens` tokens.
 
-    Every ``compress_ratio`` tokens share one compressed state, written by the
+    Every `compress_ratio` tokens share one compressed state, written by the
     last of them: that token maps to the state's slot, the others to PAD. A
-    token whose own ``slot_mapping`` entry is PAD maps to PAD too: SWA bounded
+    token whose own `slot_mapping` entry is PAD maps to PAD too: SWA bounded
     replay recomputes tokens whose KV is cached already, and their compressed
     states must not be rewritten either.
 
-    With ``pcp_buffer``, ``slot_mapping`` contains all ranks' padded slots.
-    Compute this rank's segment in ``out`` and gather into ``pcp_buffer`` to
+    With `pcp_buffer`, `slot_mapping` contains all ranks' padded slots.
+    Compute this rank's segment in `out` and gather into `pcp_buffer` to
     preserve its address for CUDA graph replay. Padding remains PAD.
     """
     total_num_tokens = slot_mapping.numel()

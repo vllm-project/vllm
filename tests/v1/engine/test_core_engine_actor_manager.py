@@ -36,7 +36,7 @@ class _StubEngineCoreActor(EngineCoreActorMixin):
         local_client: bool,
         addresses: EngineZmqAddresses,
         executor_class: type[Any],
-        log_stats: bool,
+        collect_stats: bool,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
@@ -60,8 +60,8 @@ class _StubEngineCoreActor(EngineCoreActorMixin):
     def get_addresses(self) -> tuple[list[str], list[str]]:
         """Return the addresses snapshot the actor was constructed with.
 
-        Used by the Ray-DP regression test to assert that no ``tcp://host:0``
-        placeholders were pickled into the actor at ``.remote()`` time.
+        Used by the Ray-DP regression test to assert that no `tcp://host:0`
+        placeholders were pickled into the actor at `.remote()` time.
         """
         return list(self.addresses.inputs), list(self.addresses.outputs)
 
@@ -175,7 +175,7 @@ def test_coordination_store_held_only_by_the_online_dp_master(
     with launch_core_engines(
         vllm_config,
         executor_class=_DummyExecutor,
-        log_stats=False,
+        collect_stats=False,
         addresses=_make_addresses(),
     ) as engine_launch:
         assert engine_launch.engine_manager is not None
@@ -248,7 +248,7 @@ def test_driver_nixl_side_channel_host_does_not_leak_to_engine_core_actor(
             vllm_config=_make_vllm_config(),
             addresses=_make_addresses(),
             executor_class=_DummyExecutor,
-            log_stats=False,
+            collect_stats=False,
         )
         actor = manager.local_engine_actors[0]
         actor_host = ray.get(actor.get_nixl_side_channel_host.remote())
@@ -285,9 +285,9 @@ def ray_context_dp2():
 
 def _make_vllm_config_ray_dp_multinode() -> SimpleNamespace:
     """Minimal vllm_config that drives the Ray-DP multi-API-server path:
-    ``data_parallel_size != data_parallel_size_local`` forces TCP placeholders
-    (multi-node fan-out), and ``data_parallel_backend="ray"`` routes
-    ``launch_core_engines`` through the Ray branch.
+    `data_parallel_size != data_parallel_size_local` forces TCP placeholders
+    (multi-node fan-out), and `data_parallel_backend="ray"` routes
+    `launch_core_engines` through the Ray branch.
     """
     return SimpleNamespace(
         parallel_config=SimpleNamespace(
@@ -318,8 +318,8 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
 ) -> None:
     """Regression guard for the Ray-DP + multi-API-server hang from PR #42585.
 
-    ``launch_core_engines`` Ray branch pickles ``addresses`` into each engine
-    actor at ``.remote()`` time, and ``EngineCoreActorMixin._perform_handshakes``
+    `launch_core_engines` Ray branch pickles `addresses` into each engine
+    actor at `.remote()` time, and `EngineCoreActorMixin._perform_handshakes`
     is a no-op, so the actor uses that pickled snapshot for the rest of its
     life. The supervisor therefore binds the frontend listeners before actor
     construction and Ray pickles their resolved endpoints. This test asserts
@@ -356,7 +356,7 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
         with launch_core_engines(
             vllm_config,
             executor_class=_DummyExecutor,
-            log_stats=False,
+            collect_stats=False,
             addresses=addresses,
         ) as engine_launch:
             engine_manager = engine_launch.engine_manager
@@ -424,7 +424,7 @@ def ray_2gpu_node(monkeypatch: pytest.MonkeyPatch):
     """Real single-node Ray with 2 virtual GPUs and no dashboard.
 
     Resource maps and placement groups are real. Without the dashboard any
-    ``ray.util.state.list_nodes()`` call fails, the production condition this
+    `ray.util.state.list_nodes()` call fails, the production condition this
     path must survive. Only the platform device key is patched ("" on CPU).
     """
     from ray._private.state import available_resources_per_node
@@ -465,7 +465,7 @@ def _elastic_ep_config(dp_size: int, world_size: int, master_ip: str):
 @pytest.mark.timeout(120)
 def test_add_dp_placement_groups_does_not_require_ray_default(ray_2gpu_node):
     """DP 1 -> 2 on an idle node: one schedulable group pinned to the master,
-    found without the dashboard (``list_nodes`` would fail here)."""
+    found without the dashboard (`list_nodes` would fail here)."""
     ip = ray_2gpu_node.master_ip
 
     pgs, local_ranks = CoreEngineActorManager.add_dp_placement_groups(

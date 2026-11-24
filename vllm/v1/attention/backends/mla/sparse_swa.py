@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
 import torch
 from transformers import DeepseekV4Config
@@ -37,10 +37,10 @@ from vllm.v1.attention.backends.mla.compressor_utils import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
 from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
-    KVCacheSpec,
+    KVCacheLayerConfig,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
     get_kv_quant_mode,
 )
 
@@ -118,7 +118,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         # fp8_ds_mla's UE8M0 paged layout rounds its page up to the decode
         # kernel's TMA stride; contiguous bf16/fp8 cache uses the natural
         # element-size page.
@@ -126,14 +126,12 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             "fp8_ds_mla",
             "nvfp4_ds_mla",
         )
-        return SlidingWindowMLASpec(
-            bounded_replay=self.bounded_replay,
+        spec = MLAAttentionSpec(
             block_size=self.block_size,
             num_kv_heads=1,
             max_tp_shards=1,
             head_size=self.head_dim,
             dtype=self.dtype,
-            sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
             state_content_bytes=(
                 self.packed_bytes_per_token if uses_fp8_ds_mla_layout else None
@@ -145,6 +143,9 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             ),
             model_version="deepseek_v4",
             kv_quant_mode=get_kv_quant_mode(self.cache_config.cache_dtype),
+        )
+        return SlidingWindowManager.layer_config(
+            spec, sliding_window=self.window_size, bounded_replay=self.bounded_replay
         )
 
     def forward(self): ...
@@ -172,6 +173,12 @@ class DeepseekSparseSWABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls() -> type["DeepseekSparseSWAMetadataBuilder"]:
+        if current_platform.is_xpu():
+            from vllm.models.deepseek_v4.xpu.xpu_sparse import (
+                DeepseekV4XPUSparseSWAMetadataBuilder,
+            )
+
+            return DeepseekV4XPUSparseSWAMetadataBuilder
         if current_platform.is_rocm():
             from vllm.models.deepseek_v4.amd.rocm import (
                 DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
@@ -343,7 +350,7 @@ class DeepseekSparseSWAMetadata:
 class ComputePrefillMetadataKernel(
     VllmTritonJitKernel["ComputePrefillMetadataKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         block_size: int
 
@@ -384,7 +391,7 @@ class ComputePrefillMetadataKernel(
 
         tl.store(prefill_gather_lens_ptr + offset, gather_len, mask=mask)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         num_prefills: int,
@@ -454,8 +461,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        assert isinstance(self.kv_cache_spec, SlidingWindowMLASpec | MLAAttentionSpec)
-        mla_spec = cast(SlidingWindowMLASpec | MLAAttentionSpec, self.kv_cache_spec)
+        assert isinstance(self.kv_cache_spec, MLAAttentionSpec)
+        mla_spec = self.kv_cache_spec
         self.head_size = mla_spec.head_size  # Already considered quantization.
         assert isinstance(mla_spec.tokens_per_state, int)
         self.compress_ratio = mla_spec.tokens_per_state
@@ -606,7 +613,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         For prefill, we use chunked prefill to align with the indexer's chunking.
 
-        ``replay_start`` ([num_reqs], SWA bounded replay): the position from
+        `replay_start` ([num_reqs], SWA bounded replay): the position from
         which each request holds window KV; the model state passes it for every
         batch of a replaying group, graph captures pass nothing.
         """
@@ -937,16 +944,16 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     def build_tile_scheduler(
         self, num_decode_tokens: int
     ) -> dict[str, FlashMLASchedMeta | None]:
-        """Allocate one empty ``FlashMLASchedMeta`` per present DeepseekV4 layer type.
+        """Allocate one empty `FlashMLASchedMeta` per present DeepseekV4 layer type.
 
-        Returned instances have ``tile_scheduler_metadata`` / ``num_splits``
-        set to ``None``; the FlashMLA C++ decode path will allocate them and
-        run the tile-scheduler planner on the first ``flash_mla_with_kvcache``
+        Returned instances have `tile_scheduler_metadata` / `num_splits`
+        set to `None`; the FlashMLA C++ decode path will allocate them and
+        run the tile-scheduler planner on the first `flash_mla_with_kvcache`
         call of each type. Subsequent same-type calls reuse the plan because
-        the tensors (and ``have_initialized``) are populated on the struct.
+        the tensors (and `have_initialized`) are populated on the struct.
 
-        Returns all-``None`` when there are no decode tokens this step, so
-        ``_forward_decode`` sees a clean sentinel.
+        Returns all-`None` when there are no decode tokens this step, so
+        `_forward_decode` sees a clean sentinel.
         """
         out: dict[str, FlashMLASchedMeta | None] = {
             _LAYER_TYPE_SWAONLY: None,
@@ -1161,7 +1168,7 @@ def _compute_swa_indices_and_lens_kernel(
 class ComputeSWAIndicesAndLensKernel(
     VllmTritonJitKernel["ComputeSWAIndicesAndLensKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         window_size: int
         index_width: int
@@ -1171,7 +1178,7 @@ class ComputeSWAIndicesAndLensKernel(
 
     kernel = staticmethod(_compute_swa_indices_and_lens_kernel)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         **compile_key_fields: int,
     ) -> CompileKey:
@@ -1260,7 +1267,7 @@ class ComputeSWAIndicesAndLensKernel(
 class ComputeDSparkNoncausalSWAIndicesKernel(
     VllmTritonJitKernel["ComputeDSparkNoncausalSWAIndicesKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         window_size: int
         index_width: int
@@ -1346,7 +1353,7 @@ class ComputeDSparkNoncausalSWAIndicesKernel(
                 mask=offset < index_width,
             )
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         window_size: int,

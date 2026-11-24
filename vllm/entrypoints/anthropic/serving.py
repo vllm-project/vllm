@@ -15,6 +15,7 @@ from typing import Any, Literal, get_args
 import jinja2
 from fastapi import Request
 
+from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicContentBlock,
@@ -53,22 +54,30 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
+from vllm.renderers.chat_utils.types import ConversationMessage
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
     parse_dec_only_prompt,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.renderers.params import ChatParams
+from vllm.renderers.params import (
+    ChatParams,
+    TokenizeParams,
+    apply_max_tokenize_tokens,
+    resolve_max_tokenize_tokens,
+)
 
 logger = init_logger(__name__)
 
 
 class _StreamError(Exception):
     """Carries the ErrorInfo from an upstream ErrorResponse through the stream
-    converter so the SSE ``error`` event can reuse its status code to pick the
+    converter so the SSE `error` event can reuse its status code to pick the
     Anthropic error type."""
 
     def __init__(self, error_info: ErrorInfo) -> None:
@@ -76,23 +85,38 @@ class _StreamError(Exception):
         self.error_info = error_info
 
 
+class _CountTokensChatRequest(ChatCompletionRequest):
+    """Chat request rendered by count_tokens, which counts prompts longer than
+    max_model_len instead of rejecting them, like /tokenize."""
+
+    def build_tok_params(
+        self,
+        model_config: ModelConfig,
+    ) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=None,
+            max_output_tokens=0,
+            add_special_tokens=self.add_special_tokens,
+        )
+
+
 def _build_anthropic_usage(
     usage: UsageInfo | None,
 ) -> AnthropicUsage:
     """Build an AnthropicUsage from UsageInfo.
 
-    Anthropic defines ``total_input == input_tokens + cache_read +
-    cache_creation``.  vLLM's ``prompt_tokens`` is the total, so
-    ``input_tokens = prompt_tokens - cache_read - cache_creation``.
+    Anthropic defines `total_input == input_tokens + cache_read +
+    cache_creation`.  vLLM's `prompt_tokens` is the total, so
+    `input_tokens = prompt_tokens - cache_read - cache_creation`.
 
-    Cache fields are taken from ``UsageInfo.prompt_tokens_details``.
-    When cache info is absent (e.g. ``--enable-prompt-tokens-details``
+    Cache fields are taken from `UsageInfo.prompt_tokens_details`.
+    When cache info is absent (e.g. `--enable-prompt-tokens-details`
     off, or a streaming chunk that hasn't carried it yet), cache fields
-    are left **unset** so ``exclude_unset=True`` serialization omits them
+    are left **unset** so `exclude_unset=True` serialization omits them
     entirely.
 
-    ``completion_tokens`` follows ``UsageInfo`` and may be ``None`` on
-    intermediate stream chunks; we coerce to ``0`` for the wire format.
+    `completion_tokens` follows `UsageInfo` and may be `None` on
+    intermediate stream chunks; we coerce to `0` for the wire format.
     """
     kwargs = {}
     if usage is None:
@@ -124,13 +148,13 @@ def _to_anthropic_stop_reason(
     Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None,
     str | None,
 ]:
-    """Map an OpenAI finish reason to Anthropic ``(stop_reason, stop_sequence)``.
+    """Map an OpenAI finish reason to Anthropic `(stop_reason, stop_sequence)`.
 
-    Anthropic reports ``tool_use`` whenever the model invoked a tool. The chat
-    layer reports ``finish_reason="stop"`` for a named (forced) tool call, so
-    ``tool_used`` records whether a ``tool_use`` block was produced.
-    ``max_tokens`` always wins. A matched stop string wins unless the tool
-    calls are complete (``tool_complete``): a call it cut short must not run.
+    Anthropic reports `tool_use` whenever the model invoked a tool. The chat
+    layer reports `finish_reason="stop"` for a named (forced) tool call, so
+    `tool_used` records whether a `tool_use` block was produced.
+    `max_tokens` always wins. A matched stop string wins unless the tool
+    calls are complete (`tool_complete`): a call it cut short must not run.
     """
     if finish_reason == "length":
         return "max_tokens", None
@@ -175,21 +199,25 @@ class DisabledThinkingEffortResolver:
     async def resolve_for(
         self, request: AnthropicMessagesRequest | AnthropicCountTokensRequest
     ) -> AnthropicDisabledThinkingEffort:
-        if request.thinking is None or request.thinking.type != "disabled":
+        if request.thinking is None or request.thinking.type not in (
+            "disabled",
+            "between_tools",
+        ):
             return "none"
         if self._effort is None:
             self._effort = await self._probe()
             logger.info(
-                "Anthropic thinking.type=disabled maps to reasoning_effort=%r",
+                "Anthropic thinking.type=disabled/between_tools maps to "
+                "reasoning_effort=%r",
                 self._effort,
             )
         return self._effort
 
     async def _probe(self) -> AnthropicDisabledThinkingEffort:
-        """Use ``low`` if the renderer rejects or ignores ``none``.
+        """Use `low` if the renderer rejects or ignores `none`.
 
-        ``none`` is ignored when it renders the same prompt as a thinking
-        effort, e.g. GLM-5.3 treats unknown efforts as ``max``.
+        `none` is ignored when it renders the same prompt as a thinking
+        effort, e.g. GLM-5.3 treats unknown efforts as `max`.
         """
         none_prompt = await self._render_probe_prompt("none")
         if none_prompt is None:
@@ -244,6 +272,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto",
+        max_tokenize_tokens: int | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -267,6 +296,10 @@ class AnthropicServingMessages(OpenAIServingChat):
         self._merge_inline_system = self._should_merge_inline_system(online_renderer)
         self.disabled_thinking_effort_resolver = DisabledThinkingEffortResolver(
             online_renderer, disabled_thinking_effort
+        )
+        self.max_tokenize_tokens = resolve_max_tokenize_tokens(
+            max_tokenize_tokens,
+            self.model_config.max_model_len,
         )
 
     @classmethod
@@ -314,7 +347,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         """Auto-detect whether the chat template requires system-first ordering.
 
         Renders a [system, user, system, user] conversation against the
-        template; if it raises (e.g. Qwen's ``loop.first`` guard), the
+        template; if it raises (e.g. Qwen's `loop.first` guard), the
         model needs inline system messages merged into the leading block.
         """
         if not chat_template:
@@ -691,7 +724,7 @@ class AnthropicServingMessages(OpenAIServingChat):
     ) -> ChatCompletionRequest:
         """Build base ChatCompletionRequest."""
         if isinstance(anthropic_request, AnthropicCountTokensRequest):
-            return ChatCompletionRequest(
+            return _CountTokensChatRequest(
                 model=anthropic_request.model,
                 messages=openai_messages,
                 chat_template_kwargs=anthropic_request.chat_template_kwargs,
@@ -706,6 +739,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             temperature=anthropic_request.temperature,
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
+            min_tokens=anthropic_request.min_tokens,
             watermarking=anthropic_request.watermarking,
             cache_salt=anthropic_request.cache_salt,
             kv_transfer_params=anthropic_request.kv_transfer_params,
@@ -723,14 +757,14 @@ class AnthropicServingMessages(OpenAIServingChat):
     ) -> None:
         """Handle extended-thinking configuration.
 
-        ``display`` is intentionally ignored: suppressing reasoning would mark
+        `display` is intentionally ignored: suppressing reasoning would mark
         it ended for structured outputs and drop it from multi-turn history.
         """
         thinking: AnthropicThinkingConfig | None = anthropic_request.thinking
         if thinking is None:
             return
 
-        if thinking.type == "disabled":
+        if thinking.type in ("disabled", "between_tools"):
             # "none" clears enable_thinking for templates that honor it; models
             # that cannot disable thinking are configured with a low effort.
             req.reasoning_effort = disabled_thinking_effort
@@ -807,7 +841,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         cls,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
     ) -> list[AnthropicTool] | None:
-        """Apply tool_addition/tool_removal blocks in ``messages`` to ``tools``.
+        """Apply tool_addition/tool_removal blocks in `messages` to `tools`.
 
         Chat templates see a single tool list, so this resolves the tools in
         effect at the end of the conversation: a tool added by reference is no
@@ -1320,7 +1354,11 @@ class AnthropicServingMessages(OpenAIServingChat):
             merge_inline_system=self._merge_inline_system,
             disabled_thinking_effort=disabled_thinking_effort,
         )
-        result = await self.render_chat_request(chat_req)
+        result = await self.render_chat_request(
+            chat_req,
+            enforce_max_tokenize_tokens=True,
+        )
+
         if isinstance(result, ErrorResponse):
             return result
 
@@ -1340,3 +1378,19 @@ class AnthropicServingMessages(OpenAIServingChat):
         )
 
         return response
+
+    async def render_chat_request(
+        self,
+        request: ChatCompletionRequest,
+        tok_params: TokenizeParams | None = None,
+        enforce_max_tokenize_tokens: bool = False,
+    ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
+        if enforce_max_tokenize_tokens:
+            try:
+                tok_params = apply_max_tokenize_tokens(
+                    request.build_tok_params(self.model_config),
+                    self.max_tokenize_tokens,
+                )
+            except VLLMValidationError as e:
+                return self.create_error_response(str(e))
+        return await super().render_chat_request(request, tok_params=tok_params)
