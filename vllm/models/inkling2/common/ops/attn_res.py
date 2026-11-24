@@ -12,11 +12,11 @@ returned as is (fp32) without a norm weight.
 
 import torch
 
-from vllm.models.inkling2.common.ops.norm import rsqrt
 from vllm.triton_utils import tl, tldevice, triton
 
+from .intrinsics import rsqrt
 from .pdl import gdc_wait
-from .platform import use_pdl
+from .platform import pdl_launch_kwargs
 
 
 @triton.jit
@@ -294,7 +294,7 @@ def attn_res(
         APPLY_NORM=apply_norm,
         BLOCK_N=triton.next_power_of_2(num_stack + 1),
         enable_fp_fusion=False,
-        launch_pdl=use_pdl(),
+        **pdl_launch_kwargs(),
     )
     # The queries of a token run back to back and share its sources in L2.
     grid = (num_q, num_tokens)

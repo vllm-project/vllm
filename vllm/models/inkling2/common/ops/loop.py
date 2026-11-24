@@ -12,7 +12,7 @@ import torch
 
 from vllm.triton_utils import tl, tldevice, triton
 
-from .norm import rsqrt
+from .intrinsics import rsqrt
 
 
 @triton.jit

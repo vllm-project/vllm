@@ -17,19 +17,12 @@ from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
     _num_warps_bucket,
     bucket_max_seqlen_q,
 )
-from vllm.models.inkling2.common.ops.attention import (
-    _EX2_ASM,
-    _EX2_EMU_ASM,
-    _FA4_BLOCK_N,
-    _LG2_ASM,
-    _RCP_ASM,
-    _VERIFY_BLOCK_M,
-)
-from vllm.triton_utils import gl, gluon
+from vllm.models.inkling2.common.ops.attention import _FA4_BLOCK_N, _VERIFY_BLOCK_M
+from vllm.models.inkling2.common.ops.intrinsics import EX2_ASM as _EX2_ASM
+from vllm.models.inkling2.common.ops.intrinsics import LG2_ASM as _LG2_ASM
+from vllm.triton_utils import gl, gluon, tl
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
-
-_VERIFY_STAGES = 3
 
 # Full-layer FA4 split estimate, fitted on GB200 over uniform and mixed
 # prefill batches (re-fit for other devices): one CTA per 256-row query tile
@@ -255,6 +248,28 @@ class Inkling2FA4RelAttentionKernel(
 
 
 _INKLING2_FA4_REL_ATTENTION_KERNEL = Inkling2FA4RelAttentionKernel()
+
+
+_VERIFY_STAGES = 3
+
+
+# tml_fa4 utils.ex2_emulation_2: degree-3 polynomial on the fraction.
+_EX2_EMU_ASM = tl.constexpr("""{
+    .reg .f32 c, r, rb, f, p;
+    .reg .b32 e;
+    max.ftz.f32 c, $1, 0fC2FE0000;
+    add.rm.ftz.f32 r, c, 0f4B400000;
+    sub.rn.ftz.f32 rb, r, 0f4B400000;
+    sub.rn.ftz.f32 f, c, rb;
+    fma.rn.ftz.f32 p, f, 0f3D9DF09D, 0f3E6906A4;
+    fma.rn.ftz.f32 p, p, f, 0f3F31F519;
+    fma.rn.ftz.f32 p, p, f, 0f3F800000;
+    mov.b32 e, r;
+    shl.b32 e, e, 23;
+    mov.b32 $0, p;
+    add.s32 $0, $0, e;
+    }""")
+_RCP_ASM = tl.constexpr("rcp.approx.ftz.f32 $0, $1;")
 
 
 _bw = gl.nvidia.blackwell

@@ -4,21 +4,10 @@
 
 from vllm.triton_utils import tl, triton
 
+from .intrinsics import sigmoid_ftz as _sigmoid_approx
+from .intrinsics import tanh_approx
+
 FP32_MAX = tl.constexpr(3.4028234663852886e38)
-
-
-@triton.jit
-def _sigmoid_approx(x):
-    return tl.inline_asm_elementwise(
-        "{ .reg .f32 t; mul.rn.f32 t, $1, 0fBFB8AA3B; "
-        "ex2.approx.ftz.f32 t, t; add.rn.f32 t, t, 0f3F800000; "
-        "rcp.approx.ftz.f32 $0, t; }",
-        "=f,f",
-        [x],
-        dtype=tl.float32,
-        is_pure=True,
-        pack=1,
-    )
 
 
 @triton.jit
@@ -38,14 +27,7 @@ def _div_rn(x, DIVISOR: tl.constexpr):
 @triton.jit
 def _softcap(x, CAP: tl.constexpr):
     if CAP > 0:
-        x = CAP * tl.inline_asm_elementwise(
-            "tanh.approx.f32 $0, $1;",
-            "=f,f",
-            [_div_rn(x, CAP)],
-            dtype=tl.float32,
-            is_pure=True,
-            pack=1,
-        )
+        x = CAP * tanh_approx(_div_rn(x, CAP))
     return x
 
 

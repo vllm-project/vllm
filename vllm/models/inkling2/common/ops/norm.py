@@ -10,18 +10,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-
-@triton.jit
-def rsqrt(x):
-    # Non-FTZ rsqrt.approx, as emitted by CuTe's cute.math.rsqrt.
-    return tl.inline_asm_elementwise(
-        "rsqrt.approx.f32 $0, $1;",
-        "=f,f",
-        [x],
-        dtype=tl.float32,
-        is_pure=True,
-        pack=1,
-    )
+from .intrinsics import rsqrt
 
 
 @triton.jit

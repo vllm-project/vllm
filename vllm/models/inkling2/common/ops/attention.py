@@ -11,28 +11,9 @@ from vllm.triton_utils import tl, tldevice, triton
 from vllm.utils.platform_utils import num_compute_units
 
 from .attention_sm90 import MODE_GATED, MODE_PARTIAL, rel_attention
+from .intrinsics import ex2, lg2, sigmoid
 from .pdl import gdc_wait
-from .platform import use_pdl, use_sm100_kernels
-
-
-@triton.jit
-def _sigmoid(x):
-    exp = tl.inline_asm_elementwise(
-        "ex2.approx.f32 $0, $1;",
-        constraints="=f,f",
-        args=[-x * 1.4426950408889634],
-        dtype=tl.float32,
-        is_pure=True,
-        pack=1,
-    )
-    return tl.inline_asm_elementwise(
-        "rcp.approx.f32 $0, $1;",
-        constraints="=f,f",
-        args=[exp + 1.0],
-        dtype=tl.float32,
-        is_pure=True,
-        pack=1,
-    )
+from .platform import pdl_launch_kwargs, use_sm100_kernels
 
 
 @triton.jit
@@ -60,8 +41,8 @@ def _gate_sink_kernel(
     gate = tl.load(Gate + row * stride_gate + col, mask, other=0).to(tl.float32)
     lse = tl.load(LSE + row * stride_lse_t + head * stride_lse_h, mask, other=0)
     sink = tl.load(Sink + row * stride_sink + head, mask, other=0).to(tl.float32)
-    result = x.to(tl.float32) * _sigmoid(gate)
-    result = result * _sigmoid(lse.to(tl.float32) - sink)
+    result = x.to(tl.float32) * sigmoid(gate)
+    result = result * sigmoid(lse.to(tl.float32) - sink)
     tl.store(Y + row * H * D + col, result, mask)
 
 
@@ -99,7 +80,7 @@ def gate_sink(
         width // num_heads,
         512,
         enable_fp_fusion=False,
-        launch_pdl=use_pdl(),
+        **pdl_launch_kwargs(),
     )
 
 
@@ -168,41 +149,6 @@ def plan_decode_attention(
     return max(num_sms // work, min(num_sms // 8, 6 * num_sms // work))
 
 
-_EX2_ASM = tl.constexpr("ex2.approx.ftz.f32 $0, $1;")
-# tml_fa4 utils.ex2_emulation_2: degree-3 polynomial on the fraction.
-_EX2_EMU_ASM = tl.constexpr("""{
-    .reg .f32 c, r, rb, f, p;
-    .reg .b32 e;
-    max.ftz.f32 c, $1, 0fC2FE0000;
-    add.rm.ftz.f32 r, c, 0f4B400000;
-    sub.rn.ftz.f32 rb, r, 0f4B400000;
-    sub.rn.ftz.f32 f, c, rb;
-    fma.rn.ftz.f32 p, f, 0f3D9DF09D, 0f3E6906A4;
-    fma.rn.ftz.f32 p, p, f, 0f3F31F519;
-    fma.rn.ftz.f32 p, p, f, 0f3F800000;
-    mov.b32 e, r;
-    shl.b32 e, e, 23;
-    mov.b32 $0, p;
-    add.s32 $0, $0, e;
-    }""")
-_RCP_ASM = tl.constexpr("rcp.approx.ftz.f32 $0, $1;")
-_LG2_ASM = tl.constexpr("lg2.approx.ftz.f32 $0, $1;")
-
-
-@triton.jit
-def _ex2(x):
-    return tl.inline_asm_elementwise(
-        _EX2_ASM, "=f,f", [x], dtype=tl.float32, is_pure=True, pack=1
-    )
-
-
-@triton.jit
-def _lg2(x):
-    return tl.inline_asm_elementwise(
-        _LG2_ASM, "=f,f", [x], dtype=tl.float32, is_pure=True, pack=1
-    )
-
-
 @triton.jit
 def _rel_decode_combine_kernel(
     OPart,
@@ -241,7 +187,7 @@ def _rel_decode_combine_kernel(
     lse_s = tl.load(LsePart + part, mask=splits < NUM_SPLITS, other=float("-inf"))
     lse_max = tl.max(lse_s)
     lse_max = tl.where(lse_max == float("-inf"), 0.0, lse_max)
-    w = _ex2(lse_s - lse_max)
+    w = ex2(lse_s - lse_max)
     w_sum = tl.sum(w)
     o_s = tl.load(
         OPart + part[:, None] * D + offs_d[None, :],
@@ -251,9 +197,9 @@ def _rel_decode_combine_kernel(
     # Requests without keys (padding) come out zero.
     o = tl.sum(o_s * (w / tl.where(w_sum == 0.0, 1.0, w_sum))[:, None], 0)
     if GATED:
-        lse = (_lg2(w_sum) + lse_max) * 0.6931471805599453
-        o = o * _sigmoid(gate)
-        o = o * _sigmoid(lse - sink)
+        lse = (lg2(w_sum) + lse_max) * 0.6931471805599453
+        o = o * sigmoid(gate)
+        o = o * sigmoid(lse - sink)
     tl.store(y_ptrs, o)
 
 
@@ -452,5 +398,5 @@ def _decode_attention(
         BLOCK_D=block_d,
         GATED=not draft,
         num_warps=num_warps,
-        launch_pdl=use_pdl(),
+        **pdl_launch_kwargs(),
     )
