@@ -1357,3 +1357,10 @@ def test_aiter_fa_metadata_build_does_not_sync(sliding_window):
     assert metadata.prefill_metadata is not None
     assert metadata.extend_metadata.max_seq_len == 80
     assert metadata.prefill_metadata.max_seq_len == 24
+    # The extend row gathers its 80 - 32 cached tokens; through the sliding
+    # window it fetches its 32 new tokens and the 16 - 1 before them, plus one.
+    chunks = metadata.extend_metadata.chunk_context_metadata
+    assert chunks.total_token_per_batch == [48]
+    if sliding_window is not None:
+        assert chunks.swa_metadata is not None
+        assert chunks.swa_metadata.swa_total_tokens == 32 + (16 - 1) + 1

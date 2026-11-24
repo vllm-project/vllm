@@ -33,6 +33,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
@@ -506,6 +507,10 @@ class AiterFlashAttentionMetadataBuilder(
         # populated on first build() call.
         self.aot_sliding_window: tuple[int, int] | None = None
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        # build() reads extend lengths from seq_lens_cpu_upper_bound, which
+        # overshoots on async speculative rows; those rows must stay decodes.
+        assert self.reorder_batch_threshold is not None
+        assert self.reorder_batch_threshold >= max_decode_query_len(vllm_config)
 
         sliding_window_configs: set[tuple[int, int] | None] = set()
         kv_sharing_shape = None
@@ -681,9 +686,9 @@ class AiterFlashAttentionMetadataBuilder(
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
-        # CPU upper bound: exact for prefill / extend rows (the only rows read
-        # from it here); only async-spec decode rows are optimistic. No
-        # device-to-host copy.
+        # Exact for prefill and extend rows, the only rows read from it here.
+        # Async speculative rows overshoot but are always decodes:
+        # supports_spec_as_decode keeps the threshold >= max_decode_query_len.
         seq_lens = (
             common_attn_metadata.seq_lens_cpu_upper_bound
             if num_prefills > 0 or num_extends > 0
