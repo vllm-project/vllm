@@ -210,6 +210,56 @@ fn media_order_tracks_reordered_tool_responses() {
     );
 }
 
+/// User images, reordered tool-result images, and a later user image each get
+/// one placeholder, and `media_order` lists the sources in placeholder order
+/// so the extracted media pair 1-to-1 with the placeholders.
+#[test]
+fn media_order_pairs_with_placeholders_across_user_and_tool_messages() {
+    use crate::renderer::MediaPartSource;
+    let source = |message_index, content_part_index| MediaPartSource {
+        message_index,
+        content_part_index,
+    };
+    let mut request = tool_request(2);
+    request.messages[1] = ChatMessage::user(vec![
+        ChatContentPart::text("compare"),
+        ChatContentPart::image_url("user-1"),
+    ]);
+    request.messages[3] = ChatMessage::tool_response(
+        vec![
+            ChatContentPart::text("second"),
+            ChatContentPart::image_url("tool-1"),
+        ],
+        "call_1",
+    );
+    request.messages[4] =
+        ChatMessage::tool_response(vec![ChatContentPart::image_url("tool-0")], "call_0");
+    request.messages.push(ChatMessage::user(vec![ChatContentPart::image_url(
+        "user-2",
+    )]));
+
+    let native = Glm5NextChatRenderer::default().with_multimodal(true).render(&request).unwrap();
+    let hf = hf_renderer(CHECKPOINT_TEMPLATES[1].1)
+        .with_multimodal(Some(MultimodalRenderInfo {
+            image_token: Some("<|image|>".into()),
+            video_token: Some("<|video|>".into()),
+            audio_token: None,
+        }))
+        .render(&request)
+        .unwrap();
+
+    assert_eq!(native.prompt, hf.prompt);
+    let prompt = native.prompt.into_text().unwrap();
+    assert_eq!(
+        prompt.matches("<|begin_of_image|><|image|><|end_of_image|>").count(),
+        4
+    );
+    assert_eq!(
+        native.media_order.unwrap(),
+        [source(1, 1), source(4, 0), source(3, 1), source(5, 0)]
+    );
+}
+
 #[test]
 fn defaults_request_kwargs_and_typed_effort_have_defined_precedence() {
     let renderer = Glm5NextChatRenderer::new(HashMap::from([
