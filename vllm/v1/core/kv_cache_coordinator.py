@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from math import lcm
 
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -26,11 +28,14 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
+logger = init_logger(__name__)
+
 
 def _validate_prefix_cache_retention_interval(
     retention_interval: int | None,
     scheduler_block_size: int,
     kv_cache_config: KVCacheConfig,
+    enable_caching: bool,
 ) -> None:
     if retention_interval is None:
         return
@@ -56,6 +61,18 @@ def _validate_prefix_cache_retention_interval(
             f"prefix_cache_retention_interval ({retention_interval}) "
             "must be non-negative and a multiple of scheduler_block_size "
             f"({scheduler_block_size})."
+        )
+
+    if retention_interval == 0 and enable_caching:
+        # Silent otherwise: unretained boundary states are filed and never
+        # hashed, while the prefix-cache hit rate still reports non-zero.
+        logger.info(
+            "prefix_cache_retention_interval is 0, so sliding-window and Mamba "
+            "groups retain only semantic checkpoints (the latest replay boundary "
+            "and shared-prefix junctions). Other boundary states are not "
+            "reusable. Set prefix_cache_retention_interval to a multiple of the "
+            "scheduler block size (%d) to retain them periodically.",
+            scheduler_block_size,
         )
 
 
@@ -142,8 +159,12 @@ class KVCacheCoordinator(ABC):
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
         # 0 = keep only the latest replay boundary; None = dense;
         self.retention_interval = kv_cache_config.prefix_cache_retention_interval
+        self.sparse_retention_misses = 0
         _validate_prefix_cache_retention_interval(
-            self.retention_interval, self.scheduler_block_size, kv_cache_config
+            self.retention_interval,
+            self.scheduler_block_size,
+            kv_cache_config,
+            enable_caching,
         )
 
     def get_num_blocks_to_allocate(
@@ -732,6 +753,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             num_request_tokens = max_cache_hit_length + 1
         hit_length = max_cache_hit_length
         longest_hit_length = 0
+        self.sparse_retention_misses = 0
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
 
         # Simple hybrid (1 full attn + 1 other): one iteration suffices.
@@ -772,6 +794,15 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     ].pcp_world_size,
                     num_request_tokens=num_request_tokens,
                 )
+                if issubclass(manager_cls, (SlidingWindowManager, MambaManager)):
+                    # Tokens another group matched that this sparse group has
+                    # no state for. Remainders no aligned block boundary
+                    # covers are not counted.
+                    reusable = round_down(
+                        min(curr_hit_length, longest_hit_length),
+                        lcm(block_size, self._cache_hit_alignment_tokens),
+                    )
+                    self.sparse_retention_misses += max(reusable - _new_hit_length, 0)
                 curr_hit_length = _new_hit_length
                 for group_id, blocks in zip(group_ids, hit_blocks):
                     hit_blocks_by_group[group_id] = blocks

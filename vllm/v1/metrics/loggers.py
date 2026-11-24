@@ -692,6 +692,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_prefix_cache_hits, per_engine_labelvalues
         )
 
+        counter_prefix_cache_sparse_retention_misses = self._counter_cls(
+            name="vllm:prefix_cache_sparse_retention_misses",
+            documentation=(
+                "Shared-prefix tokens another KV cache group matched but that "
+                "were not reused because a Mamba / sliding-window group held no "
+                "state there (sparse retention or eviction). Whole blocks of "
+                "the local lookup, new requests only."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_prefix_cache_sparse_retention_misses = create_metric_per_engine(
+            counter_prefix_cache_sparse_retention_misses, per_engine_labelvalues
+        )
+
         #
         # External - KV connector prefix cache
         #
@@ -1186,6 +1200,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.counter_prefix_cache_hits[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.hits
+            )
+            self.counter_prefix_cache_sparse_retention_misses[engine_idx].inc(
+                scheduler_stats.prefix_cache_stats.sparse_retention_misses
             )
 
             labelvalues = self.per_engine_labelvalues[engine_idx]

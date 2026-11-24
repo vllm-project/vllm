@@ -27,6 +27,7 @@ In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/met
 - `vllm:kv_cache_usage_perc` (Gauge) - Fraction of used KV cache blocks (0–1).
 - `vllm:prefix_cache_queries` (Counter) - Number of prefix cache queries.
 - `vllm:prefix_cache_hits` (Counter) - Number of prefix cache hits.
+- `vllm:prefix_cache_sparse_retention_misses` (Counter) - Shared-prefix tokens another KV cache group matched but that were not reused because a Mamba / sliding-window group held no state there (sparse retention or eviction). Counts whole blocks of the local lookup for new requests, so tokens a KV connector then loads are still counted, and connectors that reconcile per-group hits themselves (e.g. NIXL) report 0.
 - `vllm:prompt_tokens_total` (Counter) - Total number of prompt tokens processed.
 - `vllm:generation_tokens_total` (Counter) - Total number of generated tokens.
 - `vllm:request_success_total` (Counter) - Number of finished requests (by finish reason).
