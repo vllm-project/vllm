@@ -97,7 +97,7 @@ def make_consumer(client=None, backoff: int = 0, threshold: int = THRESHOLD):
     sched._peer_endpoints = {}
     sched._lookup_client = client if client is not None else FakeLookupClient()
     if backoff:
-        sched.vllm_config.num_prefill_lookahead_tokens = backoff + 1
+        sched.vllm_config.num_reprefillable_tokens = backoff
     return sched
 
 

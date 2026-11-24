@@ -793,7 +793,6 @@ class KVCacheManager:
             block_pool=self.block_pool,
             block_size=coordinator.group_block_size,
             manager_config=coordinator.manager_config,
-            drop_eagle_block=False,
             alignment_tokens=coordinator.block_size,
         )
         blocks = tuple(list(group) for group in hit_blocks)

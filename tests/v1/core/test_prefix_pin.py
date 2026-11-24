@@ -37,7 +37,6 @@ def _full_spec() -> AttentionSpec:
 def make_manager(
     groups: list[KVCacheGroup] | None = None,
     enable_caching: bool = True,
-    use_eagle: bool = False,
 ) -> KVCacheManager:
     config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
@@ -50,7 +49,6 @@ def make_manager(
         scheduler_block_size=BLOCK_SIZE,
         hash_block_size=BLOCK_SIZE,
         enable_caching=enable_caching,
-        use_eagle=use_eagle,
     )
 
 
@@ -105,19 +103,6 @@ def test_full_hit_pins_without_last_token_cap():
     again = manager.lookup_and_pin(cached.block_hashes)
     assert again.num_tokens == 48
     manager.release_pin(again)
-
-
-def test_eagle_does_not_drop_the_last_block():
-    manager = make_manager(use_eagle=True)
-    cached = make_request("a", tokens(3))
-    compute_and_free(manager, cached)
-    # A local request drops the last block for EAGLE; a peer reader does not.
-    assert manager.get_computed_blocks(make_request("b", tokens(3) + [7]))[1] == 32
-
-    pin = manager.lookup_and_pin(cached.block_hashes)
-
-    assert (pin.num_tokens, pin.miss) == (48, PrefixPinMiss.NONE)
-    manager.release_pin(pin)
 
 
 def test_partial_hit_stops_at_first_uncached_hash():
