@@ -12,6 +12,7 @@ import pytest
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.observability import ObservabilityConfig
 from vllm.config.watermarking import WatermarkConfig
+from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.buckets import (
     BUCKET_FAMILY_KEYS,
     build_1_2_5_buckets,
@@ -19,6 +20,7 @@ from vllm.v1.metrics.buckets import (
 )
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
+from vllm.v1.metrics.stats import FinishedRequestStats, IterationStats
 
 pytestmark = pytest.mark.cpu_test
 
@@ -329,5 +331,106 @@ def test_watermark_requests_counter_registration(with_config: bool):
         PrometheusStatLogger(config)
         names = {m.name for m in prometheus_client.REGISTRY.collect()}
         assert ("vllm:watermark_requests" in names) == with_config
+    finally:
+        unregister_vllm_metrics()
+
+
+REQUEST_LABEL_MAPPING = {"x-fairness-id": "fairness_id", "x-client-id": "client_id"}
+
+
+def _iteration_stats_with_finished(
+    metrics_labels: dict[str, str] | None,
+) -> IterationStats:
+    iteration_stats = IterationStats()
+    iteration_stats.finished_requests.append(
+        FinishedRequestStats(
+            finish_reason=FinishReason.STOP,
+            e2e_latency=1.5,
+            num_prompt_tokens=4,
+            num_generation_tokens=2,
+            metrics_labels=metrics_labels,
+        )
+    )
+    iteration_stats.time_to_first_tokens_iter.append(0.5)
+    iteration_stats.time_to_first_token_labels.append(metrics_labels)
+    return iteration_stats
+
+
+def _sample_labels(family_name: str, sample_name: str) -> list[dict[str, str]]:
+    for metric in prometheus_client.REGISTRY.collect():
+        if metric.name == family_name:
+            return [
+                dict(sample.labels)
+                for sample in metric.samples
+                if sample.name == sample_name
+            ]
+    raise AssertionError(f"{family_name} not found in registry")
+
+
+def test_request_labels_recorded_on_per_request_families():
+    """Header-derived label values must reach per-request samples, with an
+    empty value for a configured header the request did not carry."""
+    config = build_logger_config(
+        ObservabilityConfig(prometheus_request_labels=dict(REQUEST_LABEL_MAPPING))
+    )
+    try:
+        logger = PrometheusStatLogger(config)
+        logger.record(
+            scheduler_stats=None,
+            iteration_stats=_iteration_stats_with_finished({"fairness_id": "premium"}),
+        )
+
+        expected = {
+            "model_name": TEST_MODEL,
+            "engine": "0",
+            "fairness_id": "premium",
+            "client_id": "",
+        }
+        e2e_count = _sample_labels(
+            "vllm:e2e_request_latency_seconds",
+            "vllm:e2e_request_latency_seconds_count",
+        )
+        assert e2e_count == [expected]
+        ttft_count = _sample_labels(
+            "vllm:time_to_first_token_seconds",
+            "vllm:time_to_first_token_seconds_count",
+        )
+        assert ttft_count == [expected]
+        success = _sample_labels("vllm:request_success", "vllm:request_success_total")
+        assert success == [{**expected, "finished_reason": str(FinishReason.STOP)}]
+
+        # Engine-wide scheduler metrics must not gain the extra labels.
+        running = _sample_labels(
+            "vllm:num_requests_running", "vllm:num_requests_running"
+        )
+        assert running == [{"model_name": TEST_MODEL, "engine": "0"}]
+    finally:
+        unregister_vllm_metrics()
+
+
+def test_request_labels_default_off_keeps_existing_label_sets():
+    """Without prometheus_request_labels, emitted label sets must be exactly
+    what existing deployments and dashboards already see."""
+    config = build_logger_config(ObservabilityConfig())
+    try:
+        logger = PrometheusStatLogger(config)
+        logger.record(
+            scheduler_stats=None,
+            iteration_stats=_iteration_stats_with_finished(None),
+        )
+
+        base = {"model_name": TEST_MODEL, "engine": "0"}
+        assert _sample_labels(
+            "vllm:e2e_request_latency_seconds",
+            "vllm:e2e_request_latency_seconds_count",
+        ) == [base]
+        success_labels = _sample_labels(
+            "vllm:request_success", "vllm:request_success_total"
+        )
+        assert {**base, "finished_reason": str(FinishReason.STOP)} in success_labels
+        assert all(
+            set(labels) == {"model_name", "engine", "finished_reason"}
+            for labels in success_labels
+        )
     finally:
         unregister_vllm_metrics()
