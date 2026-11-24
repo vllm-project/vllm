@@ -131,7 +131,7 @@ MkDocs comes with a built-in dev-server that lets you preview your documentation
 From the root of the repository, run the following. Note that by default, the dev-server will run on `127.0.0.1:8000`. Should you want to run the dev-server on a different port, use `-a` like this `mkdocs serve -a localhost:8090`.
 
 ```bash
-mkdocs serve                           # with API ref (~10 minutes)
+mkdocs serve                           # with API ref (~4 minutes)
 API_AUTONAV_EXCLUDE=vllm mkdocs serve  # API ref off (~15 seconds)
 ```
 

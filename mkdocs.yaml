@@ -76,6 +76,7 @@ plugins:
         - "vllm.vllm_flash_attn"
         - "vllm.transformers_utils.configs"
         - "vllm.transformers_utils.processors"
+        - "vllm.models"
         - !ENV [API_AUTONAV_EXCLUDE, "re:^$"]  # Match nothing by default
   - mkdocstrings:
       handlers:
@@ -83,6 +84,7 @@ plugins:
           options:
             filters: []
             show_overloads: true
+            show_source: false
             signature_crossrefs: true
             # Recommendations from api-autonav
             docstring_section_style: list
