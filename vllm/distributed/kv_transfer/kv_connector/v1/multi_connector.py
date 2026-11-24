@@ -436,7 +436,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> KVConnectorTransferResults:
         for req_id in finished_req_ids:
             self._completed_recving.discard(req_id)
-            self._extra_async_saves.pop(req_id, None)
 
         results = KVConnectorTransferResults()
         for connector in self._connectors:
