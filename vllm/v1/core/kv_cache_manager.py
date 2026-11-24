@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -140,7 +140,6 @@ class KVCacheManager:
         collect_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
         enable_mamba_shared_prefix_checkpoint: bool = False,
@@ -169,7 +168,6 @@ class KVCacheManager:
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.metrics_collector,
@@ -187,6 +185,8 @@ class KVCacheManager:
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+        # Called when an allocation is short; returns True only if it can now proceed.
+        self.reclaim_blocks: Callable[[str, int, int], bool] | None = None
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
             for manager in self.coordinator.single_type_managers
@@ -539,8 +539,9 @@ class KVCacheManager:
         # extends it to resumed requests replaying their output tokens.
         prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
 
+        full_sequence_shortfall = 0
         if full_sequence_must_fit:
-            # First check and fail if the full request sequence won't fit.
+            # First check whether the full request sequence fits.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
 
             num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
@@ -555,7 +556,10 @@ class KVCacheManager:
                 prefill_end=prefill_end,
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
-            if required_blocks > self.block_pool.get_num_free_blocks():
+            full_sequence_shortfall = (
+                required_blocks - self.block_pool.get_num_free_blocks()
+            )
+            if full_sequence_shortfall > 0 and self.reclaim_blocks is None:
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -594,8 +598,19 @@ class KVCacheManager:
         # additional watermark of headroom for waiting/preempted admissions.
         available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
-        if required_blocks > available_blocks:
-            # Cannot allocate new blocks
+        deficit = required_blocks - available_blocks
+        if full_sequence_shortfall > 0:
+            deficit = max(deficit, full_sequence_shortfall)
+        # Blocks taken by the hook could evict this request's untouched hits.
+        if deficit > 0 and (
+            self.reclaim_blocks is None
+            or any(new_computed_block_list)
+            or not self.reclaim_blocks(
+                request.request_id,
+                deficit,
+                available_blocks - watermark_blocks,
+            )
+        ):
             return None
 
         if (

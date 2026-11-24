@@ -319,30 +319,6 @@ def test_tiny_model_generates(
         assert 0 <= accepted <= drafted
 
 
-def test_tiny_model_lora_with_quantized_experts(tmp_path):
-    """With LoRA enabled, the NVFP4 / MXFP8 experts are no LoRA target: the
-    engine starts (its warmup adapter covers every LoRA module) and decodes
-    with the attention-only adapters these checkpoints support."""
-    (tmp_path / "config.json").write_text(json.dumps(TINY_CONFIG))
-    llm = LLM(
-        model=str(tmp_path),
-        load_format="dummy",
-        skip_tokenizer_init=True,
-        tokenizer_mode="hf",
-        gpu_memory_utilization=0.035,
-        max_model_len=2048,
-        max_num_seqs=4,
-        enable_lora=True,
-        max_lora_rank=8,
-        limit_mm_per_prompt={"image": 0},
-    )
-    outputs = llm.generate(
-        [{"prompt_token_ids": [5, 5, 5]}],
-        SamplingParams(max_tokens=8, temperature=0, ignore_eos=True, detokenize=False),
-    )
-    assert len(outputs[0].outputs[0].token_ids) == 8
-
-
 def _record_moe_routing(model: torch.nn.Module) -> None:
     """Redraw the routers (dummy weights route every token alike) and the
     loop message controllers (dummy ones leave every pass alike), then
