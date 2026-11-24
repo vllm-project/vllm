@@ -45,6 +45,7 @@ def rebuild_entries(
         for entry in entries:
             records.append(entry.rebuild(device_index, cache))
     except BaseException:
+        records.clear()
         for base in cache.values():
             close = getattr(base.owner, "close", None)
             if close is not None:

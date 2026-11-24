@@ -481,6 +481,12 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             weight.is_pinned(),
         )
 
+    def process_weights_after_loading(self) -> None:
+        if self.ngram_embedding.supports_prefetch and self._prefetch_ids.is_meta:
+            self._prefetch_ids = torch.empty_like(
+                self._prefetch_ids, device=self.layer_multipliers.device
+            )
+
     @staticmethod
     def _shift_precompute(
         tokens: torch.Tensor, eos_token_id: int

@@ -12,7 +12,6 @@ from typing import cast
 import torch
 
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
-    IPCBackendBase,
     StorageEntry,
     StorageRecord,
     storage_bytes,
@@ -21,7 +20,7 @@ from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils imp
     SharedFileDescriptor,
 )
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.torch_ipc import (
-    TensorEntry,
+    TorchIPCBackend,
 )
 from vllm.platforms import current_platform
 from vllm.utils.vmm_driver import (
@@ -148,7 +147,7 @@ class VmmStorage:
         )
 
 
-class VmmIPCBackend(IPCBackendBase):
+class VmmIPCBackend(TorchIPCBackend):
     """Move canonical GPU storages to exportable VMM allocations after warmup."""
 
     _ALIGNMENT = 512
@@ -231,7 +230,7 @@ class VmmIPCBackend(IPCBackendBase):
 
     def export_storage(self, record: StorageRecord) -> StorageEntry:
         if not record.storage.is_cuda or not record.storage.nbytes():
-            return TensorEntry.from_storage(record.storage)
+            return super().export_storage(record)
 
         owner = cast(VmmAllocation, record.owner)
         assert owner.fd is not None
