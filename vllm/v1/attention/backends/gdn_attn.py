@@ -8,6 +8,7 @@ from typing import Literal
 
 import torch
 
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.mamba.abstract import (
@@ -633,9 +634,17 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             if spec_sequence_masks_cpu is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks_cpu]
                 assert non_spec_query_start_loc_cpu is not None
+            # Under batch invariance decodes are convolved separately.
+            conv_query_start_loc_cpu = (
+                prefill_query_start_loc_cpu
+                if envs.VLLM_BATCH_INVARIANT
+                and spec_sequence_masks is None
+                and num_decodes > 0
+                else non_spec_query_start_loc_cpu
+            )
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
-                    non_spec_query_start_loc_cpu,
+                    conv_query_start_loc_cpu,
                     device=query_start_loc.device,
                 )
             )

@@ -84,6 +84,10 @@ class MambaBase(AttentionLayerBase):
         """
         return None
 
+    def get_prefill_chunk_alignment(self) -> int | None:
+        """Token alignment every non-final prefill chunk must end on, if any."""
+        return None
+
     def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig | None:
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
@@ -105,6 +109,7 @@ class MambaBase(AttentionLayerBase):
             num_speculative_blocks=get_mamba_num_speculative_blocks(vllm_config),
             num_prefill_checkpoint_blocks=int(checkpoint_alignment is not None),
             prefill_checkpoint_alignment=checkpoint_alignment,
+            prefill_chunk_alignment=self.get_prefill_chunk_alignment(),
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
