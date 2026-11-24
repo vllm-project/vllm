@@ -45,10 +45,12 @@ from vllm.v1.engine import (
     FT_STATUS_CALL_ID,
     CheckpointState,
     EEPNotificationType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
+    FinishReason,
     PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
@@ -422,6 +424,9 @@ class InprocClient(EngineCoreClient):
         self._finalizer = weakref.finalize(self, self.engine_core.shutdown)
 
     def get_output(self) -> EngineCoreOutputs:
+        if self.engine_core.inproc_pending_outputs:
+            self.last_step_model_executed = False
+            return self.engine_core.inproc_pending_outputs.popleft()
         outputs, model_executed = self.engine_core.step_fn()
         self.engine_core.post_step(model_executed=model_executed)
         # Read by LLMEngine.step() to keep the DP ranks' collectives aligned.
@@ -433,7 +438,24 @@ class InprocClient(EngineCoreClient):
 
     def add_request(self, request: EngineCoreRequest) -> None:
         req, request_wave = self.engine_core.preprocess_add_request(request)
-        self.engine_core.add_request(req, request_wave)
+        error = self.engine_core.add_request(req, request_wave)
+        if error is not None:
+            self.engine_core.inproc_pending_outputs.append(
+                EngineCoreOutputs(
+                    outputs=[
+                        EngineCoreOutput(
+                            request_id=req.request_id,
+                            new_token_ids=[],
+                            finish_reason=FinishReason.ERROR,
+                            error=error,
+                        )
+                    ],
+                    finished_requests={req.request_id},
+                )
+            )
+            if req.kv_transfer_params:
+                req.abort_immediately = True
+                self.engine_core.add_request(req, request_wave)
 
     def abort_requests(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
@@ -522,6 +544,14 @@ class InprocClient(EngineCoreClient):
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
+        if (
+            method in ("start_weight_update", "start_draft_weight_update")
+            and self.engine_core.vllm_config.parallel_config.data_parallel_size > 1
+        ):
+            raise RuntimeError(
+                "Data-parallel weight updates require multiprocessing so all "
+                "ranks can complete the coordinated pause before weights change"
+            )
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
     def dp_engines_running(self) -> bool:

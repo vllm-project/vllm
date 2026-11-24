@@ -1852,11 +1852,20 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
 
 
 @pytest.mark.parametrize("runner", ["generate", "pooling"])
+@pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize(
     "error,exception_type",
     [
         (
             RequestError(code="engine_paused", message="paused", retryable=True),
+            RetryableRequestError,
+        ),
+        (
+            RequestError(
+                code="weight_update_incomplete",
+                message="update pending",
+                retryable=True,
+            ),
             RetryableRequestError,
         ),
         (
@@ -1866,7 +1875,9 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
     ],
 )
 @pytest.mark.skip_global_cleanup
-def test_request_rejected_by_engine(runner: str, error, exception_type):
+def test_request_rejected_by_engine(
+    runner: str, asynchronous: bool, error, exception_type
+):
     """A request the engine rejects on arrival (e.g. while paused) raises its
     corresponding exception to the caller, leaves no stats behind, and ends a
     streaming-input session, including any input chunks sent since."""
@@ -1884,7 +1895,11 @@ def test_request_rejected_by_engine(runner: str, error, exception_type):
         pooling_params=PoolingParams(task="embed") if runner == "pooling" else None,
         resumable=runner == "generate",
     )
-    queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request.request_id)
+    queue = (
+        RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request.request_id)
+        if asynchronous
+        else None
+    )
     output_processor.add_request(request, None, queue=queue)
     iteration_stats = IterationStats()
 
@@ -1901,8 +1916,14 @@ def test_request_rejected_by_engine(runner: str, error, exception_type):
     assert result.reqs_to_abort == ([request.request_id] if request.resumable else [])
     assert not iteration_stats.finished_requests
     assert not iteration_stats.time_to_first_tokens_iter
-    with pytest.raises(exception_type, match=error.message):
-        queue.get_nowait()
+    if queue is not None:
+        with pytest.raises(exception_type, match=error.message):
+            queue.get_nowait()
+    else:
+        assert len(result.request_outputs) == 1
+        output = result.request_outputs[0]
+        assert output.finished
+        assert output.error == error
 
 
 @pytest.mark.parametrize("output_kind", list(RequestOutputKind))

@@ -27,6 +27,99 @@ from vllm.v1.metrics.stats import IterationStats, MultiModalCacheStats, Schedule
 DP_SIZE = int(os.getenv("DP_SIZE", 2))
 
 
+@pytest.mark.asyncio
+async def test_dp_weight_update_requires_pause_and_collective_recovery(monkeypatch):
+    """A clean DP peer must not resume while another rank's update is dirty."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    engine_args = AsyncEngineArgs(
+        model="vllm-project/tiny-random-DeepseekV2ForCausalLM",
+        dtype="bfloat16",
+        enforce_eager=True,
+        async_scheduling=False,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=2,
+        kv_cache_memory_bytes=64 * 1024 * 1024,
+        enable_prefix_caching=False,
+        data_parallel_size=DP_SIZE,
+        tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
+        data_parallel_backend="mp",
+        enable_expert_parallel=True,
+        weight_transfer_config={"backend": "ipc"},
+    )
+
+    async def generate_tokens(engine, request_id):
+        async for out in engine.generate(
+            request_id=request_id,
+            prompt="Hello",
+            sampling_params=SamplingParams(
+                temperature=0, max_tokens=4, ignore_eos=True
+            ),
+            data_parallel_rank=0,
+        ):
+            if out.finished:
+                return out.outputs[0].token_ids
+        raise AssertionError("Generation ended without a final output")
+
+    def repair_one_rank(worker, rank):
+        if worker.parallel_config.data_parallel_rank != rank:
+            return
+        from vllm.config import set_current_vllm_config
+        from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+
+        if not worker._weight_update_active:
+            worker.start_weight_update()
+        with set_current_vllm_config(worker.vllm_config):
+            transfer = worker.weight_transfer_engine
+            transfer.model.load_weights(
+                DefaultModelLoader(worker.load_config).get_all_weights(
+                    transfer.model_config, transfer.model
+                )
+            )
+        worker.finish_weight_update()
+
+    def fail_rank_zero(worker):
+        if worker.parallel_config.data_parallel_rank == 0:
+            worker.update_weights({"names": ["missing-metadata"]})
+
+    with ExitStack() as after:
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+        expected = await asyncio.wait_for(generate_tokens(engine, "before"), 60)
+        with pytest.raises(Exception, match="completed pause"):
+            await engine.start_weight_update()
+        await asyncio.wait_for(engine.pause_generation(mode="keep"), 60)
+        queued = await engine.add_request(
+            "retained", "Hello", SamplingParams(max_tokens=1), data_parallel_rank=1
+        )
+        with pytest.raises(Exception, match="weight update"):
+            await asyncio.wait_for(engine.start_weight_update(), 30)
+        assert isinstance(engine.engine_core, DPLBAsyncMPClient)
+        pending = await engine.engine_core.call_utility_all_async(
+            "collective_rpc", "has_incomplete_weight_update"
+        )
+        assert len(pending) == DP_SIZE and all(not any(rank) for rank in pending)
+        await asyncio.wait_for(engine.resume_generation(), 30)
+        assert (await asyncio.wait_for(queued.get(), 60)).finished
+        await asyncio.wait_for(engine.pause_generation(mode="abort"), 60)
+        await engine.start_weight_update()
+        with pytest.raises(Exception, match="Invalid update_info"):
+            await engine.collective_rpc(fail_rank_zero)
+        # Every other rank is ready, but rank zero still needs a full update.
+        for rank in range(1, DP_SIZE):
+            await engine.collective_rpc(repair_one_rank, args=(rank,))
+        with pytest.raises(Exception, match="all data-parallel ranks"):
+            await asyncio.wait_for(engine.resume_generation(), 30)
+        assert await engine.is_paused()
+        with pytest.raises(RetryableRequestError, match="Generation is paused"):
+            await asyncio.wait_for(generate_tokens(engine, "pending"), 30)
+        await engine.collective_rpc(repair_one_rank, args=(0,))
+        await asyncio.wait_for(engine.resume_generation(), 30)
+        assert await asyncio.wait_for(generate_tokens(engine, "after"), 60) == expected
+        assert not engine.output_processor.has_unfinished_requests()
+
+
 async def generate(
     engine: AsyncLLM,
     request_id: str,
