@@ -4,8 +4,12 @@
 import numpy as np
 import pytest
 
+from vllm.config.lora import LoRAConfig
 from vllm.lora.request import LoRARequest
-from vllm.v1.worker.gpu.lora_utils import LoraState
+from vllm.v1.worker.gpu.lora_utils import (
+    LoraState,
+    get_num_active_loras_for_dispatch,
+)
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -59,3 +63,20 @@ def test_prompt_lora_mapping_repeats_for_multiple_sampled_tokens():
     )
     assert prompt == (3, 3, 0, 0)
     assert token == (3, 3, 0, 0)
+
+
+def test_num_active_loras_counts_base_requests_with_adapters():
+    """The LoRA kernels count no-LoRA requests as one more active LoRA, so
+    the CUDA graph key must too."""
+    state = LoraState(max_num_reqs=3)
+    state.add_request("req-a", 0, LoRARequest("adapter", 1, "/tmp/adapter"))
+    state.add_request("req-b", 1, None)
+    state.add_request("req-c", 2, None)
+    config = LoRAConfig(max_loras=2)
+
+    def count(req_ids: list[str]) -> int:
+        return get_num_active_loras_for_dispatch(config, state, req_ids, False)
+
+    assert count(["req-a"]) == 1
+    assert count(["req-a", "req-b"]) == 2
+    assert count(["req-b", "req-c"]) == 0

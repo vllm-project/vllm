@@ -147,6 +147,8 @@ class BaseRenderer(ABC, Generic[_T]):
         # multimodal processor receives a deep-copied tokenizer (see #36557)
         # so it is safe to run tokenization and MM preprocessing concurrently.
         pool_workers = config.model_config.renderer_num_workers
+        # Always resolved by `ModelConfig.__post_init__` (None means "auto" there).
+        assert pool_workers is not None
         self._executor = _SwappableExecutor(max_workers=pool_workers)
         self._resources.callback(self._executor.shutdown, wait=False)
 
@@ -226,9 +228,7 @@ class BaseRenderer(ABC, Generic[_T]):
         # Pool last: multimodal processors may add tokens while they are
         # created, and the pooled copies only see tokens added before this.
         if isinstance(self.tokenizer, HfTokenizer):
-            maybe_make_thread_pool(
-                self.tokenizer, config.model_config.renderer_num_workers + 1
-            )
+            maybe_make_thread_pool(self.tokenizer, pool_workers + 1)
 
     def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
         """Modify the renderer's copy of an HF tokenizer before it is pooled.
@@ -496,10 +496,11 @@ class BaseRenderer(ABC, Generic[_T]):
         # See https://github.com/QwenLM/Qwen3/issues/29#issuecomment-1933720399
         # and https://github.com/vllm-project/vllm/pull/22471#discussion_r2312251421
 
-        # Here we take the max of the two to determine if a token id is
-        # truly out-of-vocabulary.
+        # Only multimodal placeholders may exceed the model vocab: they are
+        # replaced before the embedding lookup. A text-only model embeds every
+        # id, so tokenizer-only ids (e.g. Kimi's reserved tokens) are rejected.
         max_token_id = self.model_config.get_vocab_size() - 1
-        if tokenizer is not None:
+        if tokenizer is not None and self.model_config.is_multimodal_model:
             max_token_id = max(tokenizer.max_token_id, max_token_id)
         # A negative id is out of vocabulary just like an over-large one,
         # but is not caught by the upper-bound check below. Reject it here
@@ -1209,13 +1210,18 @@ class BaseRenderer(ABC, Generic[_T]):
         self._truncate_expanded_prompt(engine_input, tok_params)
         return engine_input
 
-    def _get_skip_decoder_start_token(self) -> bool:
-        """Whether the multimodal processor supplies a complete decoder prefix."""
+    def _should_skip_decoder_start_token(
+        self,
+        decoder_prompt_token_ids: list[int],
+    ) -> bool:
+        """Whether the decoder prompt already carries its complete prefix."""
         if self.mm_processor is not None:
             from vllm.multimodal.processing import EncDecMultiModalProcessor
 
             if isinstance(self.mm_processor, EncDecMultiModalProcessor):
-                return self.mm_processor.skip_decoder_start_token
+                return self.mm_processor.should_skip_decoder_start_token(
+                    decoder_prompt_token_ids
+                )
         return False
 
     def _process_enc_dec(
@@ -1237,7 +1243,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 else self._process_singleton(dec_prompt, skip_mm_cache=skip_mm_cache)
             ),
             decoder_start_token_id=self.get_dec_start_token_id(),
-            skip_decoder_start_token=self._get_skip_decoder_start_token(),
+            skip_decoder_start_token=self._should_skip_decoder_start_token,
         )
 
     async def _process_enc_dec_async(
@@ -1264,7 +1270,7 @@ class BaseRenderer(ABC, Generic[_T]):
             encoder_input=encoder_input,
             decoder_input=decoder_input,
             decoder_start_token_id=self.get_dec_start_token_id(),
-            skip_decoder_start_token=self._get_skip_decoder_start_token(),
+            skip_decoder_start_token=self._should_skip_decoder_start_token,
         )
 
     def process_for_engine(
