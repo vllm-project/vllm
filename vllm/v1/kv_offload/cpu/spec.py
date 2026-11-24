@@ -30,11 +30,8 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import (
 logger = init_logger(__name__)
 
 
-def _all_workers_barrier() -> None:
-    """Block until every worker rank has reached this point (gloo cpu group).
-
-    A superset of the node-local mmap openers suffices: once the barrier
-    releases, every worker sharing the region file has mapped it."""
+def _shared_region_barrier() -> None:
+    """Synchronize all ranks that may open the shared mmap region."""
     from vllm.distributed.parallel_state import (
         get_inner_dp_world_group,
         get_world_group,
@@ -215,22 +212,41 @@ class CPUOffloadingSpec(OffloadingSpec):
             current_platform.is_cuda_alike() and not current_platform.is_rocm()
         ) or current_platform.is_xpu()
 
+    @property
+    def worker_rank(self) -> int:
+        """Return this worker's rank within its local engine topology."""
+        worker_world_size = self.config.parallel.world_size
+        if self.config.parallel.per_rank_engine:
+            worker_world_size = (
+                self.config.parallel.tp_size
+                * self.config.parallel.pp_size
+                * self.config.parallel.pcp_size
+            )
+        from vllm.distributed.parallel_state import get_world_group
+
+        try:
+            local_rank = get_world_group().local_rank
+        except AssertionError:
+            # Config-only construction can happen before distributed state is
+            # initialized; use the configured rank until the process group is
+            # available.
+            local_rank = self.config.parallel.rank
+        return local_rank % worker_world_size
+
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None
         prefault_shard: tuple[int, int] | None = None
         # num_chunks == 0 would size the region to zero bytes, which cannot be
         # mmap'd; fall back to the tensor path (empty tensors) as before.
         if self._uses_shared_region() and self.num_chunks > 0:
-            # Replicated layout shares one region. Otherwise workers use
-            # independent regions keyed by their logical rank.
+            worker_rank = self.worker_rank
             engine_id = self.config.engine_id
             row_bytes = self.kv_bytes_per_chunk
             world_size = self.config.parallel.world_size
-            worker_index = self.config.parallel.rank
             if self.replicated_layout:
-                prefault_shard = (worker_index, world_size)
+                prefault_shard = (worker_rank, world_size)
             else:
-                engine_id += f"_{worker_index}"
+                engine_id += f"_{worker_rank}"
                 row_bytes = round_up(
                     self.cpu_page_size_per_worker, self.BLOCK_SIZE_ALIGNMENT
                 )
@@ -243,7 +259,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                         allocation_name="CPU KV offload regions in /dev/shm",
                     )
                 finally:
-                    _all_workers_barrier()
+                    _shared_region_barrier()
 
             mmap_region = SharedOffloadRegion(
                 engine_id=engine_id,
@@ -251,9 +267,10 @@ class CPUOffloadingSpec(OffloadingSpec):
                 rank=0,
                 kv_bytes_per_chunk=row_bytes,
                 cpu_page_size=self.cpu_page_size_per_worker,
-                barrier=_all_workers_barrier if self.replicated_layout else None,
+                barrier=_shared_region_barrier if self.replicated_layout else None,
                 num_segments=REGION_SEGMENTS,
                 private=not self.replicated_layout,
+                unlink_owner=(worker_rank == 0) if self.replicated_layout else True,
                 populate_shard=None if self.async_init else prefault_shard,
                 populate=not self.async_init,
             )
@@ -269,7 +286,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
         except Exception:
             if mmap_region is not None:
-                mmap_region.cleanup()
+                mmap_region.abort_startup_cleanup()
             raise
 
     @override
