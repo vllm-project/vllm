@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import importlib.metadata
 import math
 from collections.abc import Hashable, Iterable, Mapping, Sequence
@@ -22,11 +23,12 @@ from transformers.models.pixtral.image_processing_pixtral import (
 )
 from transformers.models.pixtral.modeling_pixtral import apply_rotary_pos_emb
 
+from vllm import ir
 from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.multimodal import MultiModalConfig, MultiModalDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
@@ -42,6 +44,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
@@ -105,6 +108,22 @@ from .vision import (
 )
 
 PATCH_MERGE = "patch_merge"
+
+
+def _use_vit_kernels() -> bool:
+    """Whether the encoder runs eagerly, so it uses vLLM's kernels in place of
+    the native ops that only Inductor would fuse."""
+    return not should_torch_compile_mm_encoder(get_current_vllm_config())
+
+
+@contextlib.contextmanager
+def _vit_ir_priority():
+    with (
+        ir.ops.rms_norm.set_priority(["vllm_c", "native"]),
+        ir.ops.fused_add_rms_norm.set_priority(["vllm_c", "native"]),
+    ):
+        yield
+
 
 # Transformers 5.17 renamed Pixtral's rotary embedding and switched it to axial
 # RoPE, which takes 2D (height, width) positions instead of flattened grid ids.
@@ -1638,7 +1657,10 @@ class PixtralHFMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
             disable_tp=use_data_parallel,
         )
-        self.act_and_mul = get_act_and_mul_fn(config.hidden_act)
+        if _use_vit_kernels() and config.hidden_act.lower() in ("silu", "swish"):
+            self.act_and_mul = SiluAndMul(enforce_enable=True)
+        else:
+            self.act_and_mul = get_act_and_mul_fn(config.hidden_act)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(x)
@@ -1691,6 +1713,11 @@ class PixtralHFAttention(nn.Module):
             head_size=self.head_dim,
             prefix=f"{prefix}.attn",
         )
+        # HF's cos/sin repeat one half-dim table twice (Neox layout), so the
+        # fused rotary kernel can rotate q and k in place of `rotate_half`.
+        self.apply_rotary_emb = (
+            ApplyRotaryEmb(enforce_enable=True) if _use_vit_kernels() else None
+        )
 
     def forward(
         self,
@@ -1704,16 +1731,25 @@ class PixtralHFAttention(nn.Module):
 
         qkv_states, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv_states.chunk(3, dim=-1)
-
-        # Transpose q and k to apply HF's Rotary Position Embedding.
-        q = q.view(batch, patches, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch, patches, self.n_heads, self.head_dim).transpose(1, 2)
         v = v.view(batch, patches, self.n_heads, self.head_dim)
         cos, sin = position_embeddings
-        q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=0)
+        if self.apply_rotary_emb is not None:
+            half = self.head_dim // 2
+            qk = qkv_states[..., : 2 * q.shape[-1]]
+            q, k = self.apply_rotary_emb(
+                qk.view(batch, patches, 2 * self.n_heads, self.head_dim),
+                cos[..., :half].contiguous(),
+                sin[..., :half].contiguous(),
+            ).chunk(2, dim=2)
+        else:
+            # Transpose q and k to apply HF's Rotary Position Embedding.
+            q = q.view(batch, patches, self.n_heads, self.head_dim).transpose(1, 2)
+            k = k.view(batch, patches, self.n_heads, self.head_dim).transpose(1, 2)
+            q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=0)
+            q, k = q.transpose(1, 2).contiguous(), k.transpose(1, 2).contiguous()
         out = self.attn(
-            q.transpose(1, 2).contiguous(),
-            k.transpose(1, 2).contiguous(),
+            q,
+            k,
             v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
@@ -1776,6 +1812,10 @@ class PixtralHFTransformerBlock(nn.Module):
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
         )
+        if self.attention.apply_rotary_emb is not None:
+            # Fused residual add + norm; it may update hidden_states in place.
+            x, h = self.ffn_norm(r, hidden_states)
+            return h + self.feed_forward.forward(x)
         h = hidden_states + r
         r = self.feed_forward.forward(self.ffn_norm(h))
         out = h + r
@@ -1808,6 +1848,7 @@ class PixtralHFTransformer(nn.Module):
                 for layer_idx in range(num_hidden_layers)
             ]
         )
+        self.use_vit_kernels = _use_vit_kernels()
 
     def forward(
         self,
@@ -1821,17 +1862,22 @@ class PixtralHFTransformer(nn.Module):
         hidden_states_pool = [x]
         rotary_pos_emb_cos, rotary_pos_emb_sin = position_embeddings
 
-        for layer in self.layers:
-            x = layer(
-                x,
-                rotary_pos_emb_cos,
-                rotary_pos_emb_sin,
-                cu_seqlens,
-                max_seqlen,
-                sequence_lengths,
-            )
-            if return_all_hidden_states:
-                hidden_states_pool.append(x)
+        use_kernels = self.use_vit_kernels
+        with _vit_ir_priority() if use_kernels else contextlib.nullcontext():
+            for layer in self.layers:
+                if return_all_hidden_states and use_kernels:
+                    # The fused residual norm updates the layer input in place.
+                    x = x.clone()
+                x = layer(
+                    x,
+                    rotary_pos_emb_cos,
+                    rotary_pos_emb_sin,
+                    cu_seqlens,
+                    max_seqlen,
+                    sequence_lengths,
+                )
+                if return_all_hidden_states:
+                    hidden_states_pool.append(x)
         # If we have multiple feature sample layers, we return all hidden
         # states in order and grab the ones we need by index.
         if return_all_hidden_states:

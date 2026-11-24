@@ -14,6 +14,9 @@ from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from typing import Any, cast
 
+import cv2
+import numpy as np
+import PIL.Image
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -50,6 +53,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+from vllm.multimodal.media.connector import global_thread_pool
 from vllm.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
@@ -69,6 +73,7 @@ from vllm.multimodal.video_decoders import (
     VideoTargetMetadata,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import round_up
 
 from .model import NemotronShortcutForCausalLM, check_sdsa_indexer_loaded
 from .sdsa import SdsaKVCacheGrouping
@@ -97,6 +102,63 @@ NEMOTRON_SHORTCUT_VIDEO_LOADER_BACKEND = "nemotron_shortcut_t2"
 _TRAINING_VIDEO_MAX_FRAMES = 64
 _TRAINING_VIDEO_MIN_FRAMES = 8
 _TRAINING_VIDEO_FPS = 2
+
+_IMAGE_PROCESSOR_NAMES = ("Nemotron4ImageProcessor", "Nemotron4ImageProcessorPil")
+
+
+class NemotronShortcutImageTransform:
+    """The checkpoint image processor's transform on HWC uint8 images.
+
+    Same float32 ops in the same order as `Nemotron4ImageProcessor` (divide
+    by 255, `cv2.INTER_AREA` resize to a multiple of the merged patch size,
+    CLIP normalization), so the pixels are bit-identical.
+    """
+
+    def __init__(self, processor: ProcessorMixin, dtype: torch.dtype) -> None:
+        image_processor = processor.image_processor
+        self.convert_to_rgb = image_processor.convert_to_rgb
+        self.rescale = np.float32(1.0 / image_processor.rescale_factor)
+        self.longest_edge = int(image_processor.size["longest_edge"])
+        self.multiple = processor.patch_size * processor.spatial_merge_size
+        self.mean = np.asarray(image_processor.image_mean, dtype=np.float32)
+        self.std = np.asarray(image_processor.image_std, dtype=np.float32)
+        self.dtype = dtype
+
+    def output_size(self, height: int, width: int) -> tuple[int, int]:
+        # Same rule as the checkpoint's `get_resize_output_image_size`.
+        ratio = max(height / self.longest_edge, width / self.longest_edge, 1.0)
+        height, width = round(height / ratio), round(width / ratio)
+        return round_up(height, self.multiple), round_up(width, self.multiple)
+
+    def supports(self, image: object) -> bool:
+        if isinstance(image, PIL.Image.Image):
+            return True
+        return (
+            isinstance(image, np.ndarray)
+            and image.dtype == np.uint8
+            and image.ndim == 3
+            and image.shape[-1] == 3
+            # HF reads these as channels-first.
+            and image.shape[0] not in (1, 3)
+        )
+
+    def _transform_image(self, image: PIL.Image.Image | np.ndarray) -> torch.Tensor:
+        if isinstance(image, PIL.Image.Image):
+            image = np.asarray(self.convert_to_rgb(image))
+        pixels = image.astype(np.float32)
+        pixels /= self.rescale
+        height, width = self.output_size(*pixels.shape[:2])
+        pixels = cv2.resize(pixels, (width, height), interpolation=cv2.INTER_AREA)
+        pixels -= self.mean
+        pixels /= self.std
+        out = torch.empty((3, height, width), dtype=self.dtype)
+        out.copy_(torch.from_numpy(pixels).permute(2, 0, 1))
+        return out
+
+    def __call__(
+        self, images: Sequence[PIL.Image.Image | np.ndarray]
+    ) -> list[torch.Tensor]:
+        return list(global_thread_pool.map(self._transform_image, images))
 
 
 def get_video_temporal_patch_size(config: object) -> int:
@@ -576,6 +638,21 @@ class _NemotronShortcutTimedVideoDataParser(MultiModalDataParser):
         return items
 
 
+def image_grid_token_ids(
+    processor: ProcessorMixin, height: int, width: int
+) -> list[int]:
+    """Token IDs of `processor.replace_image_token` for one image, without
+    building and tokenizing its text: one image token per merged patch, an
+    image break after each row, and an image end in place of the last break."""
+    multiple = processor.patch_size * processor.spatial_merge_size
+    cols = width // multiple
+    tokens = ([processor.image_token_id] * cols + [processor.image_break_token_id]) * (
+        height // multiple
+    )
+    tokens[-1] = processor.image_end_token_id
+    return tokens
+
+
 class NemotronShortcutProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self) -> MultiModalDataParser:
         if self.get_video_temporal_patch_size() == 1:
@@ -596,6 +673,22 @@ class NemotronShortcutProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
         return self.ctx.get_hf_processor(**kwargs)
+
+    @cached_property
+    def image_transform(self) -> NemotronShortcutImageTransform | None:
+        processor = self.get_hf_processor()
+        image_processor = processor.image_processor
+        # Other image processors and configurations keep the HF path.
+        if type(image_processor).__name__ not in _IMAGE_PROCESSOR_NAMES or not all(
+            (
+                image_processor.do_convert_rgb,
+                image_processor.do_rescale,
+                image_processor.do_resize,
+                image_processor.do_normalize,
+            )
+        ):
+            return None
+        return NemotronShortcutImageTransform(processor, self.ctx.model_config.dtype)
 
     def get_video_temporal_patch_size(self) -> int:
         return get_video_temporal_patch_size(self.get_hf_config())
@@ -716,6 +809,49 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
             missing.metadata = [videos.metadata[i] for i in idxs]
         return mm_is_cached, mm_missing_items
 
+    def _call_hf_processor(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        images = hf_data.get("images")
+        transform = cast(NemotronShortcutProcessingInfo, self.info).image_transform
+        # Processor kwargs (size overrides, ...) keep the HF path.
+        if (
+            transform is None
+            or self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
+            or set(hf_data) != {"images"}
+            or not isinstance(images, Sequence)
+            or not all(transform.supports(image) for image in images)
+        ):
+            return super()._call_hf_processor(hf_data, hf_kwargs)
+        pixel_values = transform(images)
+        return BatchFeature(
+            {
+                "pixel_values": pixel_values,
+                "image_sizes": [tuple(p.shape[-2:]) for p in pixel_values],
+            }
+        )
+
+    def _process_video_frames(
+        self, frames: Sequence[object], hf_kwargs: Mapping[str, object]
+    ) -> list[torch.Tensor]:
+        transform = cast(NemotronShortcutProcessingInfo, self.info).image_transform
+        if (
+            transform is not None
+            and not self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
+            and all(transform.supports(frame) for frame in frames)
+        ):
+            return transform(frames)
+        image_processor = self.info.get_hf_processor(**hf_kwargs).image_processor
+        processed = image_processor(images=frames, return_tensors="pt")
+        return [
+            pixels[:, :height, :width].to(dtype=self.info.ctx.model_config.dtype)
+            for pixels, (height, width) in zip(
+                processed["pixel_values"], processed["image_sizes"]
+            )
+        ]
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
@@ -727,7 +863,6 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
             return output
 
         videos = mm_items.get_items("video", VideoProcessorItems)
-        image_processor = self.info.get_hf_processor(**hf_kwargs).image_processor
         temporal_patch_size = cast(
             NemotronShortcutProcessingInfo, self.info
         ).get_video_temporal_patch_size()
@@ -796,16 +931,8 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
                         "video max_frames."
                     )
                 video_timestamps.append(torch.tensor(timestamps, dtype=torch.float64))
-            processed = image_processor(images=selected_frames, return_tensors="pt")
             pixel_values_videos.append(
-                [
-                    pixels[:, :height, :width].to(
-                        dtype=self.info.ctx.model_config.dtype
-                    )
-                    for pixels, (height, width) in zip(
-                        processed["pixel_values"], processed["image_sizes"]
-                    )
-                ]
+                self._process_video_frames(selected_frames, hf_kwargs)
             )
         output["pixel_values_videos"] = pixel_values_videos
         if temporal_patch_size > 1:
@@ -839,11 +966,7 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
             pixels = out_mm_kwargs["image"][item_idx]["pixel_values"].data
             assert isinstance(pixels, torch.Tensor)
             height, width = pixels.shape[-2:]
-            image_tokens = processor.replace_image_token(
-                {"image_sizes": [(height, width)]},
-                0,
-            )
-            tokens = processor.tokenizer.encode(image_tokens, add_special_tokens=False)
+            tokens = image_grid_token_ids(processor, height, width)
             return PromptUpdateDetails.select_token_id(tokens, processor.image_token_id)
 
         temporal_patch_size = cast(
@@ -871,10 +994,7 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
                 assert isinstance(pixels, torch.Tensor)
                 height, width = pixels.shape[-2:]
                 # A tubelet embeds as one frame's patch grid.
-                image_tokens = processor.replace_image_token(
-                    {"image_sizes": [(height, width)]}, 0
-                )
-                tubelet_tokens.append(encode(image_tokens))
+                tubelet_tokens.append(image_grid_token_ids(processor, height, width))
             tokens = video_prompt_token_ids(
                 encode, timestamps.tolist(), temporal_patch_size, tubelet_tokens
             )
@@ -892,12 +1012,7 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
                     tokens.extend(frame_separator)
                 assert isinstance(pixels, torch.Tensor)
                 height, width = pixels.shape[-2:]
-                image_tokens = processor.replace_image_token(
-                    {"image_sizes": [(height, width)]}, 0
-                )
-                tokens.extend(
-                    processor.tokenizer.encode(image_tokens, add_special_tokens=False)
-                )
+                tokens.extend(image_grid_token_ids(processor, height, width))
             return PromptUpdateDetails.select_token_id(tokens, processor.image_token_id)
 
         return [

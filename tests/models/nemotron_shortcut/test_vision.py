@@ -1,12 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The vision tower's video tubelets: `video_patch_conv` embeds a tubelet of T
-frames, and the rest of the encoder runs as for one frame of the same size."""
+"""The vision tower: its eager vLLM kernels, and its video tubelets
+(`video_patch_conv` embeds a tubelet of T frames, and the rest of the encoder
+runs as for one frame of the same size)."""
 
 import pytest
 import torch
 from transformers.models.pixtral import PixtralVisionConfig
 
+from vllm.config import (
+    CompilationConfig,
+    CompilationMode,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.models.nemotron_shortcut.nvidia.vision import NemotronShortcutVisionModel
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -22,20 +29,42 @@ def _inference(dist_init):
         yield
 
 
+CONFIG = PixtralVisionConfig(
+    hidden_size=64,
+    intermediate_size=128,
+    num_hidden_layers=2,
+    num_attention_heads=2,
+    image_size=256,
+    patch_size=16,
+)
+
+
+def test_eager_kernels_match_native_ops() -> None:
+    """The eager encoder's vLLM kernels (RMSNorm, RoPE, SiLU-and-mul) give the
+    features of the native ops that `compile_mm_encoder` uses."""
+    native_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.NONE, compile_mm_encoder=True
+        )
+    )
+    with set_default_torch_dtype(torch.bfloat16):
+        tower = build(lambda: NemotronShortcutVisionModel(CONFIG, 1))
+        with set_current_vllm_config(native_config):
+            native = build(lambda: NemotronShortcutVisionModel(CONFIG, 1))
+    assert tower.transformer.use_vit_kernels
+    assert not native.transformer.use_vit_kernels
+
+    frames = torch.randn(2, 3, 64, 96, device="cuda", dtype=torch.bfloat16)
+    for out, ref in zip(tower(list(frames)), native(list(frames))):
+        torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
+
+
 def test_tubelet_of_a_repeated_frame_encodes_as_the_frame() -> None:
     """With `video_patch_conv` set to half the image patch conv for each of
     T = 2 frames, a tubelet of one frame twice embeds as that frame does, so
     the encoder gives the frame's features, at the frame's RoPE positions."""
-    config = PixtralVisionConfig(
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=2,
-        num_attention_heads=2,
-        image_size=256,
-        patch_size=16,
-    )
     with set_default_torch_dtype(torch.bfloat16):
-        tower = build(lambda: NemotronShortcutVisionModel(config, 2))
+        tower = build(lambda: NemotronShortcutVisionModel(CONFIG, 2))
     assert tower.video_patch_conv is not None
     half = tower.patch_conv.weight / 2
     tower.video_patch_conv.weight.copy_(torch.cat([half, half], dim=1))
