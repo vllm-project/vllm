@@ -154,11 +154,7 @@ struct W4A8GroupedGemmKernel {
 
   using StrideC = typename GemmKernelShuffled::InternalStrideC;
   using StrideD = typename GemmKernelShuffled::InternalStrideD;
-
-  using StrideC_ref = cutlass::detail::TagToStrideC_t<LayoutC>;
-  using StrideD_ref = cutlass::detail::TagToStrideC_t<LayoutD>;
   using StrideS = typename CollectiveMainloopShuffled::StrideScale;
-  using StrideS_ref = cutlass::detail::TagToStrideB_t<LayoutScale>;
 
   // static asserts for passing in strides/layouts
   // pack to 2x int64
