@@ -11,6 +11,7 @@ as the AgentX server's max_model_len (1M).
 """
 
 import math
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -52,7 +53,7 @@ def gfx942_decode(monkeypatch):
 
 
 def _lengths(length: int, reqs: int) -> list[int]:
-    """The requests' lengths: the first is ``length`` and the others are
+    """The requests' lengths: the first is `length` and the others are
     shorter by a few hundred tokens each, so the rows end at different
     places."""
     return [max(0, length - 397 * i) for i in range(reqs)]
@@ -109,7 +110,7 @@ def _assert_same_top512(x, ref, got, ends, name):
 
 
 def _logits(ends: list[int], masked: bool, gen) -> torch.Tensor:
-    """Random logits. ``masked`` keeps 2047 random blocks of 8 and the newest
+    """Random logits. `masked` keeps 2047 random blocks of 8 and the newest
     block of each row and sets the rest of the row to -inf, as layers 24 to
     36 see their logits after the DSpark candidate mask."""
     x = torch.randn(len(ends), WIDTH, device="cuda", generator=gen) * 4.0
@@ -329,6 +330,15 @@ def test_select_candidates_matches_vllm(
             assert all((a != a and b != b) or a == b for a, b in zip(vw, vg)), (
                 f"row {r}: different chosen block scores"
             )
+
+
+def test_build_writes_nothing_beside_the_installed_source():
+    """The build writes nothing next to the installed topk512_gfx942.cu, which
+    a non-root server cannot write to."""
+    from vllm.models.deepseek_v41.amd.ops import topk
+
+    assert topk.build()
+    assert not os.path.exists(os.path.splitext(topk._SOURCE)[0] + ".hip")
 
 
 def test_failed_build_leaves_the_top_k_to_vllm(monkeypatch):
