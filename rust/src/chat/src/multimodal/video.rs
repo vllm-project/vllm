@@ -8,15 +8,17 @@ use std::sync::Arc;
 
 use itertools::izip;
 use llm_multimodal::{
-    FieldLayout, MediaItemInfo, Modality, PreprocessedEncoderInputs, VideoClip, VideoClipOptions,
+    FieldLayout, MediaItemInfo, Modality, ModelSpecificValue, PreprocessedEncoderInputs, VideoClip,
+    VideoClipOptions, VideoSamplingInfo,
 };
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{
-    MmBatchedField, MmField, MmFieldElem, MmFlatField, MmKwargsItem, MmSharedField, MmSlice,
-    SliceSpec,
+    MmBatchedField, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmKwargsItem, MmSharedField,
+    MmSlice, SliceSpec,
 };
+use vllm_engine_core_client::protocol::tensor::WireTensor;
 
 use super::timing::MM_STAGE_TARGET;
 use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, tensor};
@@ -76,13 +78,15 @@ impl MultimodalModelInfo {
                 );
             }
             replacements.push(clip_replacements.pop().unwrap());
-            items.push(build_video_item(
-                support,
-                preprocessed,
-                clip.hash.clone(),
-                uuid,
-                model_dtype,
-            )?);
+            let grid_t = first_video_grid_t(&preprocessed);
+            let mut item =
+                build_video_item(support, preprocessed, clip.hash.clone(), uuid, model_dtype)?;
+            if let Some(grid_t) = grid_t
+                && support.spec.raw.name() == QWEN3_VL_SPEC
+            {
+                self.attach_qwen3_vl_timestamps(support, clip, grid_t, &mut item)?;
+            }
+            items.push(item);
         }
 
         Ok(PreparedMedia {
@@ -91,6 +95,52 @@ impl MultimodalModelInfo {
             replacements,
             items,
         })
+    }
+
+    /// Add the per-group `timestamps` the Qwen3-VL family declares as
+    /// placeholder metadata, so an EC consumer that receives this item as
+    /// metadata only can rebuild the same `<t seconds>` prompt.
+    fn attach_qwen3_vl_timestamps(
+        &self,
+        support: &VisionModalitySupport,
+        clip: &VideoClip,
+        grid_t: usize,
+        item: &mut PreparedItem,
+    ) -> Result<()> {
+        let temporal_patch_size = support
+            .config
+            .temporal_patch_size
+            .or_else(|| {
+                self.context.config["vision_config"]["temporal_patch_size"]
+                    .as_u64()
+                    .and_then(|value| usize::try_from(value).ok())
+            })
+            .unwrap_or(2)
+            .max(1);
+        let sample_fps = support
+            .config
+            .get_extra::<f64>("fps")
+            .filter(|fps| fps.is_finite() && *fps > 0.0)
+            .unwrap_or(2.0);
+        let stamps = qwen3_vl_group_timestamps(
+            clip.sampling.as_ref(),
+            grid_t,
+            temporal_patch_size,
+            sample_fps,
+        );
+        let tensor = WireTensor::from_f32(
+            vec![stamps.len()],
+            stamps.into_iter().map(|seconds| seconds as f32).collect(),
+        )
+        .map_err(|error| multimodal!("video timestamps: {error}"))?;
+        item.data.insert(
+            "timestamps".to_string(),
+            MmFieldElem {
+                data: Some(MmKwargValue::Tensor(tensor)),
+                field: MmField::Batched(MmBatchedField { keep_on_cpu: true }),
+            },
+        );
+        Ok(())
     }
 
     /// Preprocess one decoded video clip with the model's resolved vision
@@ -134,6 +184,62 @@ impl MultimodalModelInfo {
         })
         .await
         .map_err(|error| multimodal!("video preprocessing task failed: {error}"))?
+    }
+}
+
+/// Spec name of the Qwen3-VL family (also Qwen3.5 / 3.6) in llm-multimodal.
+const QWEN3_VL_SPEC: &str = "qwen3_vl";
+
+/// `t` of a one-clip batch's `video_grid_thw`.
+fn first_video_grid_t(preprocessed: &PreprocessedEncoderInputs) -> Option<usize> {
+    match preprocessed.model_specific.get("video_grid_thw") {
+        Some(ModelSpecificValue::IntTensor { data, shape })
+            if shape.last() == Some(&3) && data.len() >= 3 =>
+        {
+            usize::try_from(data[0]).ok().filter(|t| *t > 0)
+        }
+        _ => None,
+    }
+}
+
+/// Seconds of each of `grid_t` temporal groups, the rule llm-multimodal stamps
+/// into the Qwen3-VL prompt and vLLM's Python processor uses: a sampled frame's
+/// time is its source index over the source rate, a group takes the mean of its
+/// first and last frame, and a trailing partial group repeats the last frame.
+/// Without decoder sampling the frames are evenly spaced at `sample_fps`.
+fn qwen3_vl_group_timestamps(
+    sampling: Option<&VideoSamplingInfo>,
+    grid_t: usize,
+    temporal_patch_size: usize,
+    sample_fps: f64,
+) -> Vec<f64> {
+    let sampling = sampling.filter(|sampling| {
+        sampling.source_fps.is_finite()
+            && sampling.source_fps > 0.0
+            && !sampling.frame_indices.is_empty()
+    });
+    match sampling {
+        Some(sampling) => {
+            let indices = &sampling.frame_indices;
+            let last = indices[indices.len() - 1];
+            let seconds = |index: usize| index as f64 / sampling.source_fps;
+            (0..grid_t)
+                .map(|group| {
+                    let first = group * temporal_patch_size;
+                    let end = first + temporal_patch_size - 1;
+                    let first = indices.get(first).copied().unwrap_or(last);
+                    let end = indices.get(end).copied().unwrap_or(last);
+                    (seconds(first) + seconds(end)) / 2.0
+                })
+                .collect()
+        }
+        None => (0..grid_t)
+            .map(|group| {
+                (group as f64 * temporal_patch_size as f64
+                    + (temporal_patch_size as f64 - 1.0) / 2.0)
+                    / sample_fps
+            })
+            .collect(),
     }
 }
 
@@ -213,6 +319,30 @@ mod tests {
     };
     use super::super::{MultimodalConfigFiles, MultimodalModelInfo};
     use super::*;
+
+    #[test]
+    fn qwen3_vl_timestamps_average_each_temporal_group() {
+        // Frames 0, 15, 30, 45, 60 of a 30 fps source; the trailing partial
+        // group repeats frame 60, as the Python processor pads indices.
+        let sampling = VideoSamplingInfo {
+            source_fps: 30.0,
+            frame_indices: vec![0, 15, 30, 45, 60],
+        };
+        assert_eq!(
+            qwen3_vl_group_timestamps(Some(&sampling), 3, 2, 2.0),
+            [0.25, 1.25, 2.0]
+        );
+        // No decoder sampling: frames evenly spaced at the sampling rate.
+        assert_eq!(
+            qwen3_vl_group_timestamps(None, 3, 2, 2.0),
+            [0.25, 1.25, 2.25]
+        );
+        let broken = VideoSamplingInfo {
+            source_fps: 0.0,
+            frame_indices: vec![0, 1],
+        };
+        assert_eq!(qwen3_vl_group_timestamps(Some(&broken), 1, 2, 4.0), [0.125]);
+    }
 
     #[test]
     fn from_paths_resolves_video_config_from_dedicated_file_or_processor_config() {

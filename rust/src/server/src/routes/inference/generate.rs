@@ -65,12 +65,17 @@ pub async fn generate(
     let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
 
-    let mut media = MultimodalInput::default();
-    if let Some(features) = body.features.take() {
-        media.preprocessed = features.into_prepared()?;
-    }
-    media.raw = body.content_parts.take().unwrap_or_default();
-    let has_content_parts = !media.raw.is_empty();
+    let features = match body.features.take() {
+        Some(features) => features.into_prepared()?,
+        None => Vec::new(),
+    };
+    let raw = body.content_parts.take().unwrap_or_default();
+    let has_content_parts = !raw.is_empty();
+    let media = match (features.is_empty(), raw.is_empty()) {
+        (true, _) => MultimodalInput::Raw(raw),
+        (false, true) => MultimodalInput::Preprocessed(features),
+        (false, false) => MultimodalInput::Appended { features, raw },
+    };
     let mm_features = state
         .chat
         .prepare_media(media, &mut body.token_ids)
