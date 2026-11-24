@@ -5,7 +5,7 @@ meta:
   provider: "Moonshot AI"
   description: "2.8T-parameter native multimodal MoE with Kimi Delta Attention, sparse MLA, and a 1M-token context window"
   date_added: 2026-11-02
-  date_updated: 2026-11-21
+  date_updated: 2026-11-24
   tasks:
     - multimodal
     - text
@@ -42,6 +42,11 @@ model:
   context_length: 1048576
   base_args:
     - "--trust-remote-code"
+    # The checkpoint's generation_config.json sets no sampling defaults, so a
+    # request that omits them would sample at top_p 1.0. These are the model
+    # card's values; see the guide's Client usage.
+    - "--override-generation-config"
+    - '{"temperature":1.0,"top_p":0.95}'
 
 features:
   tool_calling:
@@ -2426,11 +2431,17 @@ guide: |
     -H "Content-Type: application/json" \
     -d '{
       "model": "moonshotai/Kimi-K3.1-Pro",
-      "messages": [{"role": "user", "content": "Explain sparse attention in two sentences."}],
-      "temperature": 0.7,
-      "top_p": 0.95
+      "messages": [{"role": "user", "content": "Explain sparse attention in two sentences."}]
     }'
   ```
+
+  The model card reports its results at `temperature = 1.0` and `top-p = 0.95`, but the
+  checkpoint's `generation_config.json` sets no sampling defaults, so the command passes them
+  as server defaults with `--override-generation-config`. They apply only to the parameters a
+  request omits; a value sent by the client still wins. Without the flag vLLM serves such a
+  request at `top_p = 1.0`: on DeepSWE (113 tasks, 8x MI355X, one run each) a coding agent that
+  sends neither parameter resolved 75 tasks at that fallback and 88 with `temperature = 1.0`
+  and `top_p = 0.95` set in the agent.
 
   ## References
 
