@@ -239,6 +239,10 @@ class LMCacheMPRequestTracker:
     num_vllm_hit_blocks: int = 0
     num_lmcache_hit_blocks: int = 0
 
+    # Set when a STORE is handed to the workers. request_finished delays the
+    # block free only while this is set. A lookup hit is not a scheduled store.
+    store_scheduled: bool = False
+
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
 
@@ -252,6 +256,7 @@ class LMCacheMPRequestTracker:
         self.num_stored_blocks = 0
         self.num_vllm_hit_blocks = 0
         self.num_lmcache_hit_blocks = 0
+        self.store_scheduled = False
         self.state = LMCacheMPRequestState.PREFETCHING
 
     ####
@@ -460,6 +465,9 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
+        # Requests whose request_finished returned True since the last step.
+        # The worker reports finished_sending only for these ids.
+        self.delay_free_req_ids: set[str] = set()
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)
@@ -512,6 +520,11 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
+
+        # Scheduler fills this in request_finished. The next step's metadata
+        # carries it to the worker, which reports finished_sending only for
+        # these ids.
+        self._delay_free_req_ids: set[str] = set()
 
         assert vllm_config.kv_transfer_config is not None
         server_host = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -604,6 +617,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
+        self._delay_free_req_ids.update(metadata.delay_free_req_ids)
 
         request_ids = []
         ops = []
@@ -716,9 +730,16 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             call to this method (this call or a prior one).
 
         """
-        val = self.worker_adapter.get_finished(finished_req_ids)
-        # logger.error("Finished req ids: %s, %s", val[0], val[1])
-        return val
+        finished_sending, finished_recving = self.worker_adapter.get_finished(
+            finished_req_ids
+        )
+        # The adapter reports every engine-finished id that has no store
+        # future. vLLM asserts if finished_sending names a request whose
+        # blocks were already freed, so only report ids whose
+        # request_finished returned True.
+        finished_sending = set(finished_sending or ()) & self._delay_free_req_ids
+        self._delay_free_req_ids -= finished_sending
+        return finished_sending, finished_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get the set of block IDs that failed to load.
@@ -920,6 +941,8 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
 
         """
         metadata = LMCacheMPConnectorMetadata()
+        metadata.delay_free_req_ids = self._delay_free_req_ids
+        self._delay_free_req_ids = set()
 
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
@@ -980,12 +1003,20 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
                 num_extra_cached_blocks * self.vllm_block_size
             )
 
+        # Keep the blocks only while a scheduled store may still read them.
+        # A load-only request, including one aborted mid-retrieve, has no
+        # store, so the scheduler may free it as soon as the load finishes.
+        tracker = self.request_trackers.get(request.request_id)
+        delay_free = tracker is not None and tracker.store_scheduled
+
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
 
-        return True, return_params
+        if delay_free:
+            self._delay_free_req_ids.add(request.request_id)
+        return delay_free, return_params
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
         """Take the KV cache events from the connector.
@@ -1089,6 +1120,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             )
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
+                request_tracker.store_scheduled = True
 
     def _process_cached_requests(
         self,
@@ -1116,6 +1148,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
 
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
+                request_tracker.store_scheduled = True
 
     def _report_block_allocation_deltas(
         self,
