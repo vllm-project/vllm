@@ -281,7 +281,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Ernie4_5ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT"),
     "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT"),
     "ExaoneForCausalLM": _HfExamplesInfo(
-        "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct", trust_remote_code=True
+        "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct",
+        extras={"3.0": "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct"},
+        min_transformers_version="5.24.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/50966"
+        },
     ),
     "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B"),
     "ExaoneMoeForCausalLM": _HfExamplesInfo("LGAI-EXAONE/K-EXAONE-236B-A23B"),
@@ -319,7 +324,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         },
     ),
     "GPTJForCausalLM": _HfExamplesInfo(
-        "vllm-project/slovak-gpt-j-405M", {"6b": "EleutherAI/gpt-j-6b"}
+        "vllm-project/slovak-gpt-j-405M",
+        {"6b": "EleutherAI/gpt-j-6b"},
+        min_transformers_version="5.24.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/50965"
+        },
     ),
     "GPTNeoXForCausalLM": _HfExamplesInfo(
         "EleutherAI/pythia-70m", {"1b": "EleutherAI/pythia-1.4b"}
@@ -354,10 +364,18 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "internlm/internlm2-chat-7b", trust_remote_code=True
     ),
     "InternLM3ForCausalLM": _HfExamplesInfo(
-        "internlm/internlm3-8b-instruct", trust_remote_code=True
+        "internlm/internlm3-8b-instruct",
+        min_transformers_version="5.23.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/50578"
+        },
     ),
     "IQuestCoderForCausalLM": _HfExamplesInfo(
-        "IQuestLab/IQuest-Coder-V1-40B-Instruct", trust_remote_code=True
+        "IQuestLab/IQuest-Coder-V1-40B-Instruct",
+        min_transformers_version="5.23.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/50579"
+        },
     ),
     "IQuestLoopCoderForCausalLM": _HfExamplesInfo(
         "IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct", trust_remote_code=True
@@ -1286,6 +1304,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Nemotron3_5TranscribeForConditionalGeneration": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B", is_available_online=False
+    ),
+    "OmniASRForConditionalGeneration": _HfExamplesInfo(
+        "hf-audio/omniasr-llm-300m-v2", min_transformers_version="5.24.1"
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",
