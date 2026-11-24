@@ -13,7 +13,10 @@ from transformers.models.qwen3_vl import Qwen3VLVideoProcessor
 
 from vllm.config import ModelConfig
 from vllm.config.multimodal import MultiModalDummyOptions
-from vllm.model_executor.models.qwen3_vl import Qwen3VLProcessingInfo
+from vllm.model_executor.models.qwen3_vl import (
+    Qwen3VLMultiModalProcessor,
+    Qwen3VLProcessingInfo,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.processing.context import BaseProcessingInfo
@@ -72,6 +75,81 @@ def _build_video_mm_data(
         "do_sample_frames": True,
     }
     return {"video": [(video, metadata)]}
+
+
+def test_strip_video_placeholder_markers() -> None:
+    vs, vp, ve, ip = 1, 2, 3, 4
+    strip = Qwen3VLMultiModalProcessor._strip_video_placeholder_markers
+
+    def run(token_ids: list[int]) -> list[int]:
+        return strip(
+            token_ids,
+            video_token_id=vp,
+            vision_start_token_id=vs,
+            vision_end_token_id=ve,
+        )
+
+    # Wrapped and bare video placeholders both end up bare.
+    assert run([9, vs, vp, ve, 9, vp, 9]) == [9, vp, 9, vp, 9]
+    # Image placeholders keep their markers.
+    assert run([vs, ip, ve, vs, vp, ve]) == [vs, ip, ve, vp]
+    # Already expanded frames and partial matches are left alone.
+    assert run([vs, vp, vp, ve, vs, ve, vs, vp]) == [vs, vp, vp, ve, vs, ve, vs, vp]
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+@pytest.mark.parametrize(
+    "placeholder",
+    ["<|vision_start|><|video_pad|><|vision_end|>", "<|video_pad|>"],
+)
+def test_processor_video_prompt_does_not_nest_vision_markers(
+    model_id: str,
+    placeholder: str,
+) -> None:
+    """Regression test for #69473: each frame group gets its own
+    `<|vision_start|>`/`<|vision_end|>` pair, and the pair the chat template
+    puts around the video is replaced along with it, as in the reference
+    processor (transformers<5.10). transformers>=5.10 keeps the outer pair,
+    which nests the per-frame markers inside it."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    tokenizer = processor.info.get_tokenizer()
+
+    video = np.zeros((4, 64, 64, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 2.0,
+        "duration": 2.0,
+        "total_num_frames": 4,
+        "frames_indices": list(range(4)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    image = np.zeros((64, 64, 3), dtype=np.uint8)
+    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+
+    processed = processor(
+        f"{image_placeholder}{placeholder}Hi",
+        mm_items=processor.info.parse_mm_data(
+            {"image": [image], "video": [(video, metadata)]}
+        ),
+        hf_processor_mm_kwargs={},
+    )
+
+    pad_ids = {
+        tokenizer.convert_tokens_to_ids(token)
+        for token in ("<|image_pad|>", "<|video_pad|>")
+    }
+    text = tokenizer.decode(
+        [t for t in processed["prompt_token_ids"] if t not in pad_ids]
+    )
+    assert text == (
+        "<|vision_start|><|vision_end|>"
+        "<0.2 seconds><|vision_start|><|vision_end|>"
+        "<1.2 seconds><|vision_start|><|vision_end|>Hi"
+    )
 
 
 @pytest.mark.parametrize("model_id", [MODEL_ID])
