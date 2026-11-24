@@ -1130,6 +1130,46 @@ def test_output_head_calling_base_model_submodule():
     assert probe_output_head(output_head, model.config.hidden_size) == (1.0, None)
 
 
+@pytest.mark.parametrize(
+    ("model_type", "arch", "overrides"),
+    [
+        # A kept head whose checkpoint names its output embeddings `decoder`
+        ("modernbert-decoder", "ModernBertDecoderForCausalLM", {}),
+        # The checkpoint only holds `lm_head.bias`, the source of a tie to `decoder`
+        ("roberta", "RobertaForCausalLM", {"is_decoder": True}),
+    ],
+)
+def test_output_head_loads_checkpoint(model_type, arch, overrides, tmp_path, tp_init):
+    """A model loaded from its checkpoint gives the HF logits from the same hidden
+    states, so every weight of its head loaded where the head reads it."""
+    torch.manual_seed(0)
+    model = build_causal_lm(model_type, arch, "cpu", **overrides).eval()
+    with torch.no_grad():
+        for param in model.parameters():
+            # Not zeros or ones, so that a bias or norm which isn't loaded shows
+            if param.ndim == 1:
+                param.normal_()
+    model.save_pretrained(tmp_path)
+    hidden_states = torch.randn(3, model.config.hidden_size)
+
+    def replace_hidden_states(module, args, output):
+        output.last_hidden_state = hidden_states[None]
+        return output
+
+    model.base_model.register_forward_hook(replace_hidden_states)
+    with torch.no_grad():
+        expected = model(input_ids=torch.zeros(1, 3, dtype=torch.long)).logits[0]
+
+    checkpoint = str(tmp_path)
+    model_config = ModelConfig(checkpoint, model_impl="transformers", dtype="float32")
+    vllm_config = VllmConfig(model_config=model_config)
+    with set_current_vllm_config(vllm_config):
+        vllm_model = model_loader.get_model(vllm_config=vllm_config)
+    with torch.no_grad():
+        logits = vllm_model.compute_logits(hidden_states)
+    torch.testing.assert_close(logits, expected)
+
+
 # The smallest sizes the fused MoE kernels accept
 MTP_HIDDEN_SIZE = 128
 MTP_MOE_KWARGS = dict(
