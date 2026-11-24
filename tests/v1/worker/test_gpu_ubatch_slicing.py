@@ -439,6 +439,7 @@ def test_mla_without_metadata_reserves_only_before_the_workspace_locks(
         v_head_dim=4,
         qk_nope_head_dim=4,
         chunked_prefill_workspace_size=8,
+        use_shardq=False,
         impl=impl,
     )
 
