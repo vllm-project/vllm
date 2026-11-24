@@ -728,11 +728,13 @@ class BlockPool:
             for block in ret:
                 if block.block_hash is None:
                     continue
-                aliases = self.cached_block_hashes_by_block.get(block.block_id, ())
+                secondary_hashes = self.cached_block_hashes_by_block.get(
+                    block.block_id, ()
+                )
                 self._reused_cached_blocks.append(
                     (
                         block.block_id,
-                        (block.block_hash, *aliases),
+                        (block.block_hash, *secondary_hashes),
                         block.block_hash_num_tokens,
                     )
                 )

@@ -597,21 +597,22 @@ class SimpleCPUOffloadScheduler:
     def _prepare_lazy_store_specs(
         self,
     ) -> tuple[list[int], list[int], list[ReusedBlock]]:
-        """Offload the reused GPU blocks whose content has no CPU copy.
+        """Offload the reused GPU blocks of offloaded groups with no CPU copy.
 
         The worker copies them out before this step writes any KV cache block.
         Blocks beyond free CPU capacity are not offloaded.
         """
-        gpu_pool = self._gpu_block_pool
-        if gpu_pool is None:
-            return [], [], []
+        assert self._gpu_block_pool is not None
         cpu_cache = self.cpu_block_pool.cached_block_hash_to_block
         num_cpu_free = self.cpu_block_pool.get_num_free_blocks()
         reused_blocks: list[ReusedBlock] = []
-        for reused in gpu_pool.take_reused_cached_blocks():
+        for reused in self._gpu_block_pool.take_reused_cached_blocks():
             _, block_hashes, _ = reused
-            if cpu_cache.get_one_block(block_hashes[0]) is not None:
-                continue  # The CPU already holds this content.
+            if (
+                get_group_id(block_hashes[0]) not in self.prefix_cacheable_group_ids
+                or cpu_cache.get_one_block(block_hashes[0]) is not None
+            ):
+                continue
             if len(reused_blocks) == num_cpu_free:
                 break
             reused_blocks.append(reused)
@@ -1088,17 +1089,18 @@ class SimpleCPUOffloadScheduler:
         assert self._gpu_block_pool is not None
         for i, (gpu_block_id, cpu_block) in enumerate(zip(gpu_block_ids, cpu_blocks)):
             if reused_blocks is not None:
-                _, (primary_hash, *secondary_hashes), num_tokens = reused_blocks[i]
+                _, block_hashes, num_tokens = reused_blocks[i]
             else:
                 gpu_block = self._gpu_block_pool.blocks[gpu_block_id]
                 assert gpu_block.block_hash is not None
-                primary_hash = gpu_block.block_hash
-                num_tokens = gpu_block.block_hash_num_tokens
-                secondary_hashes = list(
-                    self._gpu_block_pool.cached_block_hashes_by_block.get(
+                block_hashes = (
+                    gpu_block.block_hash,
+                    *self._gpu_block_pool.cached_block_hashes_by_block.get(
                         gpu_block_id, ()
-                    )
+                    ),
                 )
+                num_tokens = gpu_block.block_hash_num_tokens
+            primary_hash, *secondary_hashes = block_hashes
             self.cpu_block_pool._insert_block_hash(
                 primary_hash, cpu_block, num_tokens=num_tokens
             )
@@ -1435,8 +1437,9 @@ class SimpleCPUOffloadScheduler:
 
         self._store_event_to_blocks.clear()
         self._in_flight_store_gpu_blocks.clear()
-        if self._lazy_mode and self._gpu_block_pool is not None:
+        if self._lazy_mode:
             # Content reused before the reset is not offloaded.
+            assert self._gpu_block_pool is not None
             self._gpu_block_pool.take_reused_cached_blocks()
 
         # Loads that have not been sent to the worker cannot have running DMA.

@@ -299,6 +299,27 @@ def test_store_orders_after_compute_write():
     assert fixed == 0, f"store raced compute even with the barrier: {fixed} corrupt"
 
 
+def test_lazy_store_saves_blocks_before_the_step_writes_them():
+    """Lazy stores run in handle_preemptions, before the runner zeroes or
+    overwrites the reused blocks on the compute stream."""
+    backend, gpu, cpu = _make_backend()
+    worker = SimpleCPUOffloadWorker(None, None, 0, lazy_offload=True)
+    worker._backend = backend
+    try:
+        gpu[1].fill_(7)
+        metadata = SimpleCPUOffloadMetadata(
+            store_event=0, store_gpu_blocks=[1], store_cpu_blocks=[2]
+        )
+        worker.handle_preemptions(metadata)
+        worker.bind_connector_metadata(metadata)
+        gpu[1].zero_()
+        worker.wait_for_save()
+        torch.accelerator.synchronize()
+    finally:
+        backend.shutdown()
+    assert bool((cpu[2] == 7).all())
+
+
 class _RecordingBackend:
     """Captures launch_copy calls without touching the GPU."""
 
