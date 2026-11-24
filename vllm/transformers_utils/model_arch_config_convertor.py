@@ -38,6 +38,7 @@ class ModelArchConfigConvertorBase:
         self.hf_config = hf_config
         self.hf_text_config = hf_text_config
         self.revision = revision
+        self.transformers_backend = False
 
     def get_per_layer_hf_configs(
         self,
@@ -298,6 +299,22 @@ class ModelArchConfigConvertorBase:
         return quant_cfg
 
     def is_deepseek_mla(self) -> bool:
+        if self.transformers_backend:
+            config = self.hf_text_config
+            if (kv_lora_rank := getattr(config, "kv_lora_rank", None)) is None:
+                return False
+            from vllm.model_executor.layers.attention.mla_attention import (
+                MLACommonBackend,
+            )
+
+            head_size = kv_lora_rank + self._get_qk_rope_head_dim()
+            if not MLACommonBackend.supports_head_size(head_size):
+                logger.info_once(
+                    "MLA does not support latent size %d, using full attention.",
+                    head_size,
+                )
+                return False
+            return True
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in (
@@ -675,7 +692,7 @@ class Qwen3OmniMoeModelArchConfigConvertor(ModelArchConfigConvertorBase):
         # Mutate hf_config (like the deepseek_v4/mimo_v2 rewrites above)
         # because model-class resolution reads hf_config.architectures.
         if getattr(hf_config, "architectures", None) == [
-            "Qwen3OmniMoeForConditionalGeneration"
+            "Qwen3OmniMoeThinkerForConditionalGeneration"
         ]:
             model_path = hf_config.name_or_path
             if model_path and file_or_path_exists(
@@ -877,7 +894,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "qwen3_5": Qwen3_5ModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
-    "qwen3_omni_moe": Qwen3OmniMoeModelArchConfigConvertor,
+    "qwen3_omni_moe_thinker": Qwen3OmniMoeModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "qwen4_exp_mtp": Qwen4ExpMTPModelArchConfigConvertor,
     "step3p5_mtp": Step3p5MTPModelArchConfigConvertor,

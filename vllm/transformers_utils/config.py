@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
+import regex as re
 import torch
 import transformers
 import transformers.configuration_utils as hf_configuration_utils
@@ -52,6 +53,64 @@ else:
 MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
+
+
+class InvalidSentenceTransformersModulePath(ValueError):
+    pass
+
+
+def get_sentence_transformers_module_file(
+    model: str | Path, folder: str, filename: str
+) -> str:
+    if not isinstance(folder, str):
+        raise InvalidSentenceTransformersModulePath("Invalid module path")
+
+    relative_path = Path(folder) / filename
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise InvalidSentenceTransformersModulePath(
+            "Module path leaves model directory"
+        )
+
+    model_path = Path(model)
+    if model_path.is_dir():
+        model_path = model_path.resolve()
+        module_file = model_path / relative_path
+        resolved_file = module_file.resolve()
+        if not resolved_file.is_relative_to(model_path) and not _is_hub_cache_blob(
+            model_path, module_file, resolved_file
+        ):
+            raise InvalidSentenceTransformersModulePath(
+                "Module path leaves model directory"
+            )
+
+    return relative_path.as_posix()
+
+
+def _is_hub_cache_blob(snapshot: Path, module_file: Path, resolved_file: Path) -> bool:
+    cache_root = Path(constants.HF_HUB_CACHE).resolve()
+    repo = snapshot.parent.parent
+    if not (
+        repo.parent == cache_root
+        and repo.name.startswith("models--")
+        and snapshot.parent.name == "snapshots"
+        and re.fullmatch(r"[0-9a-f]{40}", snapshot.name)
+        and module_file.is_symlink()
+    ):
+        return False
+
+    # Hub snapshots link individual files through their repository's blob directory.
+    parent = module_file.parent.resolve()
+    repo_blobs = repo / "blobs"
+    link_target = Path(os.path.abspath(parent / module_file.readlink()))
+    return (
+        parent.is_relative_to(snapshot)
+        and link_target.parent == repo_blobs
+        and (
+            resolved_file.parent == repo_blobs
+            or resolved_file.parent.parent == cache_root / "blobs"
+        )
+    )
+
 
 CONFIG_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "total_num_kv_heads": (
@@ -178,6 +237,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     **{"deepseek_v41": "DeepseekV41Config"},
     flint="FlintConfig",
     inkling2="Inkling2MMConfig",
+    inkling2_loop="Inkling2LoopMMConfig",
     inkling2_model="Inkling2ModelConfig",
 )
 
@@ -188,6 +248,9 @@ _ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
     "LongcatFlashForCausalLM": "longcat_flash",
     "LongcatFlashNgramForCausalLM": "longcat_flash",
 }
+
+# Checkpoints whose served model is nested in `thinker_config`
+_THINKER_MODEL_TYPES: set[str] = {"qwen3_asr", "qwen2_5_omni", "qwen3_omni_moe"}
 
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 
@@ -414,21 +477,34 @@ class HFConfigParser(ConfigParserBase):
             }
             kwargs.setdefault("name_or_path", str(model))
             config = Gemma4TextConfig.from_dict(config_dict, **kwargs)
-        elif model_type == "qwen3_asr" and "thinker_config" in config_dict:
-            from transformers import Qwen3ASRConfig
-
-            # Original checkpoints nest their fields in `thinker_config`
+        elif model_type in _THINKER_MODEL_TYPES and "thinker_config" in config_dict:
             thinker_config = config_dict.pop("thinker_config")
-            audio_config = thinker_config["audio_config"]
-            audio_config["model_type"] = "qwen3_asr_encoder"
-            config_dict = {**thinker_config, **config_dict}
-            if thinker_config["model_type"] == "qwen3_forced_aligner":
-                config_dict["architectures"] = [
-                    "Qwen3ASRForcedAlignerForTokenClassification"
-                ]
-                config_dict["num_labels"] = config_dict.pop("classify_num")
             kwargs.setdefault("name_or_path", str(model))
-            config = Qwen3ASRConfig.from_dict(config_dict, **kwargs)
+            if model_type == "qwen3_asr":
+                from transformers import Qwen3ASRConfig
+
+                # Original checkpoints nest their fields in `thinker_config`
+                thinker_config["audio_config"]["model_type"] = "qwen3_asr_encoder"
+                thinker_config["text_config"]["model_type"] = "qwen3"
+                config_dict = {**thinker_config, **config_dict}
+                if thinker_config["model_type"] == "qwen3_forced_aligner":
+                    config_dict["architectures"] = [
+                        "Qwen3ASRForcedAlignerForTokenClassification"
+                    ]
+                    config_dict["num_labels"] = config_dict.pop("classify_num")
+                config = Qwen3ASRConfig.from_dict(config_dict, **kwargs)
+            else:
+                from transformers import CONFIG_MAPPING
+
+                # Only the thinker of an omni model runs a forward pass
+                top_level = ("quantization_config", "torch_dtype", "dtype")
+                thinker_config |= {
+                    k: v for k in top_level if (v := config_dict.get(k)) is not None
+                }
+                thinker_cls = CONFIG_MAPPING[thinker_config["model_type"]]
+                name = thinker_cls.__name__.removesuffix("Config")
+                thinker_config["architectures"] = [f"{name}ForConditionalGeneration"]
+                config = thinker_cls.from_dict(thinker_config, **kwargs)
         elif model_type == "inkling_mm_model" and (
             "dense_intermediate_size"
             in (text_config := config_dict.get("text_config", {}))
@@ -1117,7 +1193,9 @@ def get_pooling_config(
     if pooling:
         from vllm.config.pooler import SEQ_POOLING_TYPES, TOK_POOLING_TYPES
 
-        pooling_file_name = "{}/config.json".format(pooling["path"])
+        pooling_file_name = get_sentence_transformers_module_file(
+            model, pooling["path"], "config.json"
+        )
         pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision) or {}
 
         logger.info("Found pooling configuration.")
@@ -1418,13 +1496,17 @@ def try_get_dense_modules(
         for module in dense_modules:
             folder = module.get("path", "")
 
-            config_path = f"{folder}/config.json" if folder else "config.json"
+            config_path = get_sentence_transformers_module_file(
+                model, folder, "config.json"
+            )
             layer_config = get_hf_file_to_dict(config_path, model, revision)
             if not layer_config:
                 continue
             layer_config["folder"] = folder
             layer_configs.append(layer_config)
         return layer_configs
+    except InvalidSentenceTransformersModulePath:
+        raise
     except Exception:
         return None
 

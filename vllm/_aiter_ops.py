@@ -2292,8 +2292,7 @@ def _flat_sigmoid_bias_topk_is_profitable(
     where it is a Triton launch from Python against a single C++ dispatch --
     measured at -1.8% to -3.5% end-to-end throughput with --enforce-eager.
     Stream capture is the test because it holds for every graph vLLM records,
-    FULL and PIECEWISE, under either model runner, while the forward context's
-    cudagraph_runtime_mode reads NONE during the V2 model runner's FULL capture.
+    FULL and PIECEWISE, under either model runner.
     """
     from vllm.model_executor.layers.fused_moe.router.rocm_sigmoid_bias_flat_topk import (  # noqa: E501
         can_use_sigmoid_bias_flat_topk,
@@ -4519,30 +4518,6 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_gemm_a8wfp4(
             x, w, x_scales, w_scales, out_dtype
         )
-
-    @staticmethod
-    def triton_fp4_gemm_dynamic_quant(
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        out_dtype: torch.dtype | None = torch.bfloat16,
-        x_scales: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
-        from aiter.ops.triton.quant import dynamic_mxfp4_quant
-
-        if x_scales is None:
-            x_q, x_s = dynamic_mxfp4_quant(x)
-        else:
-            x_q = x
-            x_s = x_scales
-
-        y = torch.empty(
-            x_q.shape[0], weight.shape[0], device=x_q.device, dtype=out_dtype
-        )
-
-        gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y)
-        return y
 
     @staticmethod
     def fused_qk_norm_rope_and_cache(
