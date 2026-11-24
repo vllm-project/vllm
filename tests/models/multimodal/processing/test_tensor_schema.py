@@ -30,6 +30,7 @@ from vllm.distributed import (
 from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
+from vllm.multimodal.processing.context import profiling_media
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.platforms import current_platform
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -110,11 +111,13 @@ def create_batched_mm_kwargs(
     # video metadata will be added back to the resized video data here.
     token_prompt = get_token_prompt(processor, resized_mm_data)
 
-    mm_kwargs = processor(
-        prompt=token_prompt,
-        mm_items=processor.info.parse_mm_data(resized_mm_data),
-        hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
-    )["mm_kwargs"].require_data()
+    # Exercise the full range of dummy tensor shapes as in startup profiling.
+    with profiling_media():
+        mm_kwargs = processor(
+            prompt=token_prompt,
+            mm_items=processor.info.parse_mm_data(resized_mm_data),
+            hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
+        )["mm_kwargs"].require_data()
 
     return group_and_batch_mm_kwargs(
         [
