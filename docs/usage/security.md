@@ -96,11 +96,14 @@ denial of service:
 | `VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB` | `256` | Maximum size in MB for a single remote media response. Oversized responses are rejected while streaming before the full body is materialized in memory. |
 | `VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB` | `256` | Maximum total HTTP media bytes downloaded for one request, including concurrent downloads and retried attempts. Enforced while streaming. |
 | `VLLM_MAX_IMAGE_PIXELS` | `178956970` (~179M pixels) | Maximum decoded image size in pixels. Images exceeding this are rejected before raster memory is allocated. Default matches PIL's built-in 2x decompression-bomb threshold (~680 MB for RGB). |
-| `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` | `715827880` (~683 MiB) | Maximum aggregate decoded image, video-frame, and audio bytes in one request. Images are charged at four bytes per pixel before decoding; audio is limited before decoding; video files are charged after frame extraction. |
+| `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` | `715827880` (~683 MiB) | Maximum aggregate decoded image, video-frame, and audio bytes in one request. Images are charged at four bytes per pixel before decoding; audio is limited before decoding; video frames are charged at three bytes per pixel after frame sampling and before decoding. |
 | `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` | `25` | Maximum compressed filesize in MB for a single audio file. Enforced on all audio inputs (multimodal chat URLs, speech-to-text uploads, data: URLs, and local file paths) before decoding begins. |
 | `VLLM_MAX_AUDIO_DECODE_DURATION_S` | `600` | Maximum decoded audio duration in seconds. Prevents compressed audio from expanding into gigabytes of float32 PCM. |
 | `VLLM_MAX_AUDIO_DECODE_BYTES` | `268435456` (256 MiB) | Maximum float32 PCM bytes that audio decoding may allocate. Guards against sample-rate forgery where an inflated header sample rate bypasses the duration guard while the actual frame count causes a multi-GiB allocation. |
-| `VLLM_MAX_EMBED_DECODE_BYTES` | `2147483648` (2 GiB) | Maximum bytes a client-supplied embedding payload (`prompt_embeds`, `image_embeds`, `audio_embeds`, `video_embeds`) may allocate once densified. A sparse tensor carries its own declared shape, so a payload of a few hundred bytes can expand into hundreds of GiB. Checked before `to_dense()`, so the memory is never allocated. Set to `0` to disable. |
+| `VLLM_MAX_EMBED_DECODE_BYTES` | `2147483648` (2 GiB) | Maximum bytes a client-supplied embedding payload (`prompt_embeds`, `image_embeds`, `audio_embeds`, `video_embeds`) may allocate once densified. A sparse tensor carries its own declared shape, so a payload of a few hundred bytes can expand into hundreds of GiB, and a `torch.save` archive can deflate-compress its storages. The uncompressed archive size is checked before `torch.load` and the dense size before `to_dense()`, so the memory is never allocated. Set to `0` to disable. |
+
+The request-wide media download and decode limits cover the entire batch in
+online pooling, scoring, reranking, embedding, and batched chat requests.
 
 Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
@@ -293,6 +296,15 @@ The most effective approach is to deploy vLLM behind a reverse proxy (such as ng
 Certain API request parameters can have a large impact on resource consumption and may be abused to exhaust server resources. The `n` parameter in the `/v1/completions` and `/v1/chat/completions` endpoints controls how many independent output sequences are generated per request. A very large value causes the engine to allocate memory, CPU, and GPU time proportional to `n`, which can lead to out-of-memory conditions on the host and block the server from processing other requests.
 
 To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter via the `VLLM_MAX_N_SEQUENCES` environment variable (default: **16384**). Requests exceeding this limit are rejected before reaching the engine.
+
+On the Python frontend, `/v1/responses` and `/v1/responses/render` stop validating
+the `input` list at the first invalid item and return HTTP 400. The error may
+include several details for that item.
+
+Generation requests also enforce `VLLM_MAX_STOP_STRINGS` (4),
+`VLLM_MAX_STOP_TOKEN_IDS` (128), and `VLLM_MAX_NUM_BAD_WORDS` (128).
+`VLLM_MAX_BAD_WORDS_TOTAL_TOKENS` (1024) bounds the combined length of the
+tokenized bad-word sequences.
 
 ### Recommendations
 
