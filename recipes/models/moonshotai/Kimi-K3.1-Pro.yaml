@@ -121,12 +121,29 @@ features:
     args:
       - "--kv-cache-dtype"
       - "nvfp4_ds_mla"
+  strict_tool_calls:
+    label: "Strict tool calls"
+    description: "Constrain tool calls to each tool's declared arguments; use with Tool calling."
+    # Not offered under pd_cluster: its Dynamo router passes feature args to a
+    # worker that rejects this flag.
+    strategies:
+      - single_node_tp
+      - single_node_tep
+      - multi_node_tp
+      - multi_node_tep
+    # The tool-call parser has not been exercised on TPU.
+    hardware:
+      ironwood: unsupported
+    args:
+      - "--tool-strict-level"
+      - "parameter"
 
 opt_in_features:
   - spec_decoding
   - text_only
   - low_latency_decode
   - nvfp4_kv_cache
+  - strict_tool_calls
 
 variants:
   default:
@@ -2423,6 +2440,22 @@ guide: |
   `cpu_bytes_to_use_per_rank` of host memory for every GPU, so size it from the host DRAM that
   is free after the engines are up. The tested GB300 prefill workers used 128 GiB per GPU
   (512 GiB per tray).
+
+  ## Strict tool calls
+
+  Without a grammar, K3.1 sometimes calls a tool with empty or placeholder arguments. The opt-in
+  **Strict tool calls** feature adds `--tool-strict-level parameter`, which constrains every
+  tool call to a declared tool and to that tool's declared argument names and types, as if each
+  tool had set `strict: true`. On the
+  [Kimi Vendor Verifier](https://github.com/MoonshotAI/Kimi-Vendor-Verifier) Tool Call benchmark
+  (70 samples x 5 epochs, 8x MI355X, single-node TP8, Python frontend) K3.1 Pro scored 0.786
+  without the flag and 0.980 with it. The Rust frontend builds its own grammar and was not
+  measured. The limits are those in the
+  [Kimi-K3 recipe](https://recipes.vllm.ai/moonshotai/Kimi-K3)'s Tool calling note: a tool
+  schema the grammar cannot compile fails the whole request, and arguments still need
+  validating on the client. The feature is not offered for prefill/decode disaggregation:
+  Dynamo workers do not accept the flag and constrain tool calls through their own
+  `--dyn-enable-structural-tag`, which the AgentX PD presets set.
 
   ## Client usage
 
