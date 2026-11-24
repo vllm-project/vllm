@@ -21,7 +21,7 @@ import psutil
 from vllm import envs
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ParallelConfig, VllmConfig
 
 logger = logging.getLogger(__name__)
 _NUMACTL_ARGS_ENV = "_VLLM_INTERNAL_NUMACTL_ARGS"
@@ -691,7 +691,7 @@ def enginecore_memory_nodes() -> list[int] | None:
     return None
 
 
-def export_enginecore_memory_nodes(parallel_config) -> None:
+def export_enginecore_memory_nodes(parallel_config: "ParallelConfig") -> None:
     """Record the EngineCore NUMA nodes for this process and the frontend
     processes it starts later (API servers rebuild their config from CLI args,
     where `numa_bind` is unresolved)."""
