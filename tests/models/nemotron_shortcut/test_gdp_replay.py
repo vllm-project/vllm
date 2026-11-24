@@ -212,6 +212,46 @@ def _replay_group(num_spec: int):
     return first, second
 
 
+def test_a_groups_first_layer_plans_the_step_for_the_rest():
+    trackers = _bound_trackers(NUM_BLOCKS, 8)
+    metadata = SimpleNamespace()
+    loc = torch.tensor([0, 4, 5], dtype=torch.int32)
+    step = trackers.commit_step(
+        metadata,
+        torch.tensor([5, 7], dtype=torch.int32),
+        loc,
+        torch.ones(2, dtype=torch.int32),
+        tokens=4,
+        padded=3,
+        num_rows=5,
+    )
+    assert GdpReplayTrackers.step_of(metadata) is step
+    assert step.slots.tolist() == [5, 7, 0] and step.valid_len.tolist() == [4, 1, 0]
+    # Request 1's single token lands at row 4 of the 2 x 4 rectangle.
+    assert step.dst is not None and step.dst.tolist() == [0, 1, 2, 3, 4]
+    with pytest.raises(AssertionError, match="plans each step"):
+        GdpReplayTrackers.step_of(SimpleNamespace())
+
+
+@pytest.mark.parametrize("padded", [1, 2, 3, 5])
+def test_every_planned_input_starts_16_byte_aligned(padded):
+    """gdp_conv_replay rejects index and cursor tensors that don't start on a
+    16-B boundary, at every padded batch size."""
+    trackers = _bound_trackers(NUM_BLOCKS, 8)
+    step = trackers.commit_step(
+        SimpleNamespace(),
+        torch.tensor([5], dtype=torch.int32),
+        torch.tensor([0, 4], dtype=torch.int32),
+        torch.ones(1, dtype=torch.int32),
+        tokens=4,
+        padded=padded,
+        num_rows=4,
+    )
+    planned = (step.slots, step.valid_len, step.base, step.hist_len, step.ring_bank)
+    for tensor in planned:
+        assert tensor.numel() == padded and tensor.data_ptr() % 16 == 0
+
+
 def test_a_standalone_layer_keeps_its_own_trackers(forward_context):
     first, second = _replay_group(num_spec=3)
     alone = _mixer(3, "model.layers.5.gdp_replay_alone")

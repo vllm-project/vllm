@@ -47,7 +47,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
-from .gdp_replay import FLUSH_MIN, GdpReplayTrackers
+from .gdp_replay import FLUSH_MIN, GdpReplayStep, GdpReplayTrackers
 
 
 def gdp_state_dtype(
@@ -638,13 +638,21 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
 
         num_decode_tokens = md.num_decode_tokens
         if md.num_decodes > 0:
+            # One token per row: only warmup batches decode without spec rows.
             assert md.non_spec_state_indices_tensor is not None
-            slots = md.non_spec_state_indices_tensor[: md.num_decodes]
-            ones = torch.ones_like(slots, dtype=torch.int32)
-            out = self._replay(
-                projected[:num_decode_tokens], slots, ones, ones, commits
+            batch = md.num_decodes
+            step = self._replay_step(
+                md,
+                commits,
+                md.non_spec_state_indices_tensor[:batch],
+                torch.arange(batch + 1, dtype=torch.int32, device=projected.device),
+                torch.ones(batch, dtype=torch.int32, device=projected.device),
+                tokens=1,
+                num_rows=num_decode_tokens,
             )
-            core_out[:num_decode_tokens] = out
+            core_out[:num_decode_tokens] = self._replay(
+                projected[:num_decode_tokens], step
+            )
         if md.num_prefills > 0:
             if md.num_decodes > 0:
                 # The conv's launch metadata covers the decode rows too, so let
@@ -681,45 +689,39 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         assert md.spec_query_start_loc is not None
         assert md.num_accepted_tokens is not None
         batch = md.num_spec_decodes
-        width = self.num_spec + 1
-        loc = md.spec_query_start_loc[: batch + 1]
-        query_lens = (loc[1:] - loc[:-1]).to(torch.int32)
-        slots = md.spec_state_indices_tensor[:batch, 0]
-        dst = None
-        if rows.size(0) != batch * width:
-            # `output_size` spares each layer a device-to-host sync.
-            starts = loc[:batch].long()
-            repeats = query_lens.long()
-            num_rows = rows.size(0)
-            requests = torch.repeat_interleave(
-                torch.arange(batch, device=rows.device), repeats, output_size=num_rows
-            )
-            offsets = torch.arange(num_rows, device=rows.device) - (
-                torch.repeat_interleave(starts, repeats, output_size=num_rows)
-            )
-            dst = requests * width + offsets
-            rows = _pad_spec_window(rows, dst, batch * width)
-        out = self._replay(
-            rows, slots, query_lens, md.num_accepted_tokens[:batch], commits
+        step = self._replay_step(
+            md,
+            commits,
+            md.spec_state_indices_tensor[:batch, 0],
+            md.spec_query_start_loc,
+            md.num_accepted_tokens[:batch],
+            tokens=self.num_spec + 1,
+            num_rows=rows.size(0),
         )
-        return out if dst is None else out.index_select(0, dst)
+        if step.dst is not None:
+            rows = _pad_spec_window(rows, step.dst, batch * step.tokens)
+        out = self._replay(rows, step)
+        return out if step.dst is None else out.index_select(0, step.dst)
 
-    def _replay(
+    def _replay_step(
         self,
-        rows: torch.Tensor,
-        slots: torch.Tensor,
-        query_lens: torch.Tensor,
-        num_accepted: torch.Tensor,
+        md: GDNAttentionMetadata,
         commits: bool,
-    ) -> torch.Tensor:
-        """Run `gdp_conv_replay` on whole in_proj rows, `rows.size(0) // B` tokens
-        per request. With `commits`, apply the previous step first."""
-        from flashinfer.gdp_conv_replay_decode import gdp_conv_replay
-
+        slots: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_accepted: torch.Tensor,
+        tokens: int,
+        num_rows: int,
+    ) -> GdpReplayStep:
+        """This step's op inputs: the group's first GDP layer commits the
+        previous step and plans them; the other layers reuse the plan."""
         trackers = self.gdp_replay_trackers
-        assert trackers is not None and self.gate_params is not None
+        assert trackers is not None
+        if not commits:
+            return trackers.step_of(md)
         batch = slots.size(0)
-        tokens = rows.size(0) // batch
+        # The op compiles once per batch size; eager steps pad up to a
+        # captured size, which warmup already compiled.
         padded = min(
             (
                 size // tokens
@@ -728,19 +730,20 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
             ),
             default=batch,
         )
-        slots = slots.to(torch.int32)
-        if padded > batch:
-            pad = padded - batch
-            rows = torch.cat([rows, rows.new_zeros(pad * tokens, rows.size(1))])
-            slots = torch.cat([slots, slots.new_full((pad,), NULL_BLOCK_ID)])
-            query_lens = torch.cat([query_lens, query_lens.new_zeros(pad)])
-            num_accepted = torch.cat([num_accepted, num_accepted.new_ones(pad)])
-        slots = slots.contiguous()
-        if commits:
-            base, hist_len, ring_bank = trackers.commit(slots, num_accepted, query_lens)
-        else:
-            base, hist_len, ring_bank = trackers.read(slots)
+        return trackers.commit_step(
+            md, slots, query_start_loc, num_accepted, tokens, padded, num_rows
+        )
 
+    def _replay(self, rows: torch.Tensor, step: GdpReplayStep) -> torch.Tensor:
+        """Run `gdp_conv_replay` on whole in_proj rows, `step.tokens` per
+        request, with the step's planned inputs."""
+        from flashinfer.gdp_conv_replay_decode import gdp_conv_replay
+
+        trackers = self.gdp_replay_trackers
+        assert trackers is not None and self.gate_params is not None
+        if step.padded > step.batch:
+            pad = (step.padded - step.batch) * step.tokens
+            rows = torch.cat([rows, rows.new_zeros(pad, rows.size(1))])
         conv_start = self.value_dim
         gates_start = conv_start + self.conv_dim
         conv_state, state, k_ring, u_ring, g_ring = self.kv_cache
@@ -749,28 +752,28 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
             rows[:, gates_start:],
             self.conv1d.weight.view(self.conv_dim, self.conv_kernel_size),
             conv_state,
-            slots,
+            step.slots,
             self.gate_params,
             state,
             k_ring,
             u_ring,
             g_ring,
-            slots,
-            base,
-            hist_len,
-            query_lens.to(torch.int32).contiguous(),
+            step.slots,
+            step.base,
+            step.hist_len,
+            step.valid_len,
             trackers.seed,
             scale=self.key_head_dim**-0.5,
             # The commit rule in GdpReplayTrackers assumes this threshold.
             flush_min=FLUSH_MIN,
             # The op's tuned default, within about 1 FP16 ulp of exact SiLU.
             silu="tanh",
-            ring_bank=ring_bank,
+            ring_bank=step.ring_bank,
             null_block_id=NULL_BLOCK_ID,
             # The norm and out_proj read every row, padding included.
             zero_inactive_out=True,
         )
-        return out.view(-1, self.num_heads, self.head_dim)[: batch * tokens]
+        return out.view(-1, self.num_heads, self.head_dim)[: step.batch * step.tokens]
 
     def _replay_prefill(
         self,

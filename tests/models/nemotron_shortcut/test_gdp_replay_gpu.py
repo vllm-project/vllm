@@ -25,6 +25,7 @@ from vllm.models.nemotron_shortcut.nvidia.gdp import (
     gdp_state_dtype,
     gdp_state_shape,
 )
+from vllm.models.nemotron_shortcut.nvidia.gdp_replay import GdpReplayTrackers
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -420,3 +421,48 @@ def test_replay_decodes_a_prefill_from_a_different_tp(forward_context, naive_cut
                 _assert_windows_match(outs, windows, slice(lo, hi))
         else:
             _assert_windows_match(outs, windows, slice(lo, hi))
+
+
+@pytest.mark.parametrize("tokens,padded", [(4, 5), (8, 3), (1, 7)])
+def test_commit_step_kernel_matches_the_reference(tokens, padded):
+    """The fused commit-and-plan kernel against `GdpReplayTrackers.commit`
+    over many steps with flushes, ragged windows and padding rows."""
+    generator = torch.Generator().manual_seed(tokens)
+    num_blocks, conv_rows, batch = 40, 12, min(padded, 3)
+    kernel, reference = GdpReplayTrackers(), GdpReplayTrackers()
+    kernel.bind(torch.zeros(num_blocks, conv_rows, 1, device="cuda"))
+    reference.bind(torch.zeros(num_blocks, conv_rows, 1))
+    slots = torch.tensor([3, 17, 39][:batch], dtype=torch.int32)
+    prev = torch.zeros(batch, dtype=torch.int64)
+    for _ in range(64):
+        valid = torch.randint(1, tokens + 1, (batch,), generator=generator)
+        accepted = torch.minimum(
+            torch.randint(1, tokens + 1, (batch,), generator=generator),
+            prev.clamp(min=1),
+        ).to(torch.int32)
+        loc = torch.zeros(batch + 1, dtype=torch.int32)
+        loc[1:] = valid.cumsum(0)
+        num_rows = int(loc[-1])
+        step = kernel.commit_step(
+            SimpleNamespace(),
+            slots.cuda(),
+            loc.cuda(),
+            accepted.cuda(),
+            tokens,
+            padded,
+            num_rows,
+        )
+        base, hist_len, bank = reference.commit(slots, accepted, valid.to(torch.int32))
+        live = slice(0, batch)
+        assert step.slots[live].cpu().tolist() == slots.tolist()
+        assert step.valid_len[live].cpu().tolist() == valid.tolist()
+        for got, want in ((step.base, base), (step.hist_len, hist_len)):
+            assert got[live].cpu().tolist() == want.tolist()
+        assert step.ring_bank[live].cpu().tolist() == bank.tolist()
+        # Padding rows: the null block, nothing to run.
+        assert not step.slots[batch:].any() and not step.valid_len[batch:].any()
+        for name in ("base", "hist_len", "ring_bank", "prev_query_len"):
+            torch.testing.assert_close(
+                getattr(kernel, name).cpu(), getattr(reference, name)
+            )
+        prev = valid.to(torch.int64)

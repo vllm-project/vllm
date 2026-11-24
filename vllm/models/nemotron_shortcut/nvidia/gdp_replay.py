@@ -14,24 +14,98 @@ never advances its own cursors. The model keeps them in one
   reset (new request or prefill), which marks "nothing to commit".
 
 All KV-cache groups draw their blocks from one pool, so block ids never
-collide across groups and one tracker set serves them all. Each group's
-first GDP layer to run in a step commits the group's previous step before the
-op runs. The commit sits in the forward, where the attention metadata carries
-the previous step's accepted counts, so the bookkeeping stays inside a
-captured CUDA graph.
+collide across groups and one tracker set serves them all. Each step, a
+group's first GDP layer to run commits the group's previous step and plans
+this step's op inputs in one kernel (`GdpReplayStep`); the group's other GDP
+layers reuse the plan. The commit sits in the forward, where the attention
+metadata carries the previous step's accepted counts, so the bookkeeping
+stays inside a captured CUDA graph.
 """
+
+from dataclasses import dataclass
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 # The op's default flush threshold: a step with hist_len >= FLUSH_MIN folds
 # the history into the checkpoint.
 FLUSH_MIN = 9
 
-# Set on a step's attention metadata once a layer has committed its group.
+# Set on a step's attention metadata once a layer has committed its group,
+# and the step plan that layer computed for the group's other layers.
 _COMMITTED = "_gdp_replay_committed"
+_STEP = "_gdp_replay_step"
+
+
+@dataclass
+class GdpReplayStep:
+    """One KV-cache group's `gdp_conv_replay` inputs for one step, `padded`
+    rows each (live rows first, then padding rows the op skips)."""
+
+    slots: torch.Tensor  # int32 block ids; NULL_BLOCK_ID on padding rows
+    valid_len: torch.Tensor  # int32 tokens per row; 0 on padding rows
+    base: torch.Tensor  # int32 cursors after the commit
+    hist_len: torch.Tensor
+    ring_bank: torch.Tensor
+    batch: int  # live rows
+    tokens: int  # window width per row
+    padded: int
+    dst: torch.Tensor | None = None
+    """Where each ragged-window token goes in the `batch * tokens`
+    rectangle; None when every window is full."""
+
+
+@triton.jit
+def _commit_step_kernel(
+    slots_ptr,
+    loc_ptr,
+    accepted_ptr,
+    base_ptr,
+    hist_ptr,
+    bank_ptr,
+    prev_ptr,
+    out_slots_ptr,
+    out_valid_ptr,
+    out_base_ptr,
+    out_hist_ptr,
+    out_bank_ptr,
+    batch,
+    padded,
+    modulus,
+    FLUSH_MIN: tl.constexpr,
+    NULL_BLOCK_ID: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """`GdpReplayTrackers.commit` for live rows, and the op inputs for every
+    row, in one launch."""
+    rows = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    live = rows < batch
+    inside = rows < padded
+    slot = tl.load(slots_ptr + rows, mask=live, other=NULL_BLOCK_ID).to(tl.int64)
+    start = tl.load(loc_ptr + rows, mask=live, other=0)
+    valid = tl.load(loc_ptr + rows + 1, mask=live, other=0) - start
+    accepted = tl.load(accepted_ptr + rows, mask=live, other=0)
+    base = tl.load(base_ptr + slot, mask=live, other=0)
+    hist = tl.load(hist_ptr + slot, mask=live, other=0)
+    bank = tl.load(bank_ptr + slot, mask=live, other=0)
+    committed = tl.load(prev_ptr + slot, mask=live, other=0) > 0
+    flush = committed & (hist >= FLUSH_MIN)
+    base = tl.where(flush, (base + hist) % modulus, base)
+    bank = tl.where(flush, bank ^ 1, bank)
+    hist = tl.where(committed, tl.where(flush, 0, hist) + accepted, hist)
+    tl.store(base_ptr + slot, base, mask=live)
+    tl.store(hist_ptr + slot, hist, mask=live)
+    tl.store(bank_ptr + slot, bank, mask=live)
+    tl.store(prev_ptr + slot, valid, mask=live)
+    tl.store(out_slots_ptr + rows, slot.to(tl.int32), mask=inside)
+    tl.store(out_valid_ptr + rows, valid, mask=inside)
+    tl.store(out_base_ptr + rows, base, mask=inside)
+    tl.store(out_hist_ptr + rows, hist, mask=inside)
+    tl.store(out_bank_ptr + rows, bank, mask=inside)
 
 
 class GdpReplayTrackers:
@@ -102,14 +176,17 @@ class GdpReplayTrackers:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Apply the previous step's accepted counts, record this step's query
         lengths and draw a new seed. Returns this step's `base`, `hist_len`
-        and `ring_bank` per row, the op's inputs.
+        and `ring_bank` per row, the op's inputs. The PyTorch reference of
+        `_commit_step_kernel`, and its CPU path.
 
         `num_accepted[r]` is the number of tokens row r kept from its previous
         step (accepted drafts plus the target token); it is ignored for blocks
         with nothing to commit.
         """
-        base, hist_len, ring_bank = self.read(slots)
         index = slots.long()
+        base = self.base[index]
+        hist_len = self.hist_len[index]
+        ring_bank = self.ring_bank[index]
         committed = self.prev_query_len[index] > 0
 
         flush = committed & (hist_len >= FLUSH_MIN)
@@ -128,12 +205,86 @@ class GdpReplayTrackers:
         torch.randint(0, 2**62, (1,), out=self.seed)
         return base, hist_len, ring_bank
 
-    def read(
-        self, slots: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """This step's `base`, `hist_len` and `ring_bank` per row."""
-        index = slots.long()
-        return self.base[index], self.hist_len[index], self.ring_bank[index]
+    def commit_step(
+        self,
+        metadata: object,
+        slots: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_accepted: torch.Tensor,
+        tokens: int,
+        padded: int,
+        num_rows: int,
+    ) -> GdpReplayStep:
+        """Commit the previous step for a group's `slots` and plan this step's
+        op inputs, `padded` rows of `tokens`-wide windows over `num_rows`
+        scheduled tokens. Called by the group's first GDP layer
+        (`claim`); the plan is kept on `metadata` for the other layers."""
+        batch = slots.size(0)
+        # The kernel reads them by row index; a block-table column is strided.
+        slots = slots.contiguous()
+        loc = query_start_loc[: batch + 1].contiguous()
+        num_accepted = num_accepted.contiguous()
+        device = slots.device
+        # slots, valid_len, base, hist_len, ring_bank: separate allocations,
+        # since gdp_conv_replay needs each to start 16-B aligned.
+        out = [torch.empty(padded, dtype=torch.int32, device=device) for _ in range(5)]
+        if device.type == "cuda":
+            block = 128
+            _commit_step_kernel[(triton.cdiv(padded, block),)](
+                slots,
+                loc,
+                num_accepted,
+                self.base,
+                self.hist_len,
+                self.ring_bank,
+                self.prev_query_len,
+                *out,
+                batch,
+                padded,
+                self.base_modulus,
+                FLUSH_MIN=FLUSH_MIN,
+                NULL_BLOCK_ID=NULL_BLOCK_ID,
+                BLOCK=block,
+            )
+            torch.randint(0, 2**62, (1,), out=self.seed)
+        else:
+            valid = (loc[1:] - loc[:-1]).to(torch.int32)
+            committed = self.commit(slots, num_accepted, valid)
+            for tensor, live in zip(out, (slots, valid, *committed), strict=True):
+                tensor.zero_()
+                tensor[:batch] = live
+            out[0][batch:] = NULL_BLOCK_ID
+        dst = None
+        if num_rows != batch * tokens:
+            # `output_size` spares the step a device-to-host sync.
+            repeats = (loc[1:] - loc[:-1]).long()
+            requests = torch.repeat_interleave(
+                torch.arange(batch, device=device), repeats, output_size=num_rows
+            )
+            offsets = torch.arange(num_rows, device=device) - torch.repeat_interleave(
+                loc[:batch].long(), repeats, output_size=num_rows
+            )
+            dst = requests * tokens + offsets
+        step = GdpReplayStep(
+            slots=out[0],
+            valid_len=out[1],
+            base=out[2],
+            hist_len=out[3],
+            ring_bank=out[4],
+            batch=batch,
+            tokens=tokens,
+            padded=padded,
+            dst=dst,
+        )
+        setattr(metadata, _STEP, step)
+        return step
+
+    @staticmethod
+    def step_of(metadata: object) -> GdpReplayStep:
+        """The plan the group's first GDP layer computed this step."""
+        step = getattr(metadata, _STEP, None)
+        assert step is not None, "the group's first GDP layer plans each step"
+        return step
 
 
 def validate_gdp_replay(vllm_config: VllmConfig) -> None:
