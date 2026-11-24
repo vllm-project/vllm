@@ -9,7 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use asynk_strim_attr::{TryYielder, try_stream};
 use axum::BoxError;
-use axum::http::HeaderMap;
+use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderMap, HeaderValue};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
@@ -54,12 +55,20 @@ where
     E: Into<BoxError>,
 {
     let sse = Sse::new(stream);
-    match keep_alive_interval {
+    let mut response = match keep_alive_interval {
         Some(interval) => sse
             .keep_alive(KeepAlive::new().interval(interval).text("keep-alive"))
             .into_response(),
         None => sse.into_response(),
-    }
+    };
+    // axum sends a bare `text/event-stream`. Name the charset like Python
+    // (Starlette appends it to every `text/*` type), since clients such as
+    // `requests` otherwise decode a `text/*` body as ISO-8859-1.
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream; charset=utf-8"),
+    );
+    response
 }
 
 #[easy_ext::ext(EventExt)]

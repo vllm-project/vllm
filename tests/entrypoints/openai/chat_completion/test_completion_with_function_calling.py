@@ -338,6 +338,36 @@ async def test_no_args_tool_call(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_strict_tool_without_parameters(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    # `parameters` is optional; a strict tool without it takes no arguments.
+    response = await client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": "What time is it now?"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_time",
+                    "description": "Get the current date and time.",
+                    "strict": True,
+                },
+            }
+        ],
+        tool_choice="required",
+        temperature=0.0,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+
+    tool_calls = response.choices[0].message.tool_calls
+    assert tool_calls
+    assert tool_calls[0].function.name == "get_current_time"
+    json.loads(tool_calls[0].function.arguments)
+
+
+@pytest.mark.asyncio
 async def test_named_tool_use(
     client: openai.AsyncOpenAI,
     sample_json_schema,

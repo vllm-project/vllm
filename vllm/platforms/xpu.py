@@ -3,6 +3,7 @@
 
 import contextlib
 import os
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import torch
@@ -22,6 +23,8 @@ from vllm.v1.attention.backends.registry import (
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from torch.distributed import PrefixStore, ProcessGroup
+
     from vllm.config import VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -137,6 +140,7 @@ class XPUPlatform(Platform):
         "online",
         "gpt_oss_mxfp4",
         "modelopt",
+        "modelopt_mxfp8",
         "compressed-tensors",
     ]
 
@@ -408,16 +412,6 @@ class XPUPlatform(Platform):
         if compilation_config.compile_sizes is None:
             compilation_config.compile_sizes = []
 
-        # lazy import to avoid circular import
-        from vllm.utils.torch_utils import supports_xpu_graph
-
-        if not supports_xpu_graph():
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            logger.warning_once(
-                "XPU Graph is not supported in the current PyTorch version, "
-                "disabling cudagraph_mode."
-            )
-
         if (
             vllm_config.model_config is not None
             and vllm_config.model_config.enable_sleep_mode
@@ -552,7 +546,7 @@ class XPUPlatform(Platform):
             return
 
         pre_block_size = cache_config.block_size
-        if cache_config.mamba_cache_mode == "align":
+        if cache_config.enable_prefix_caching:
             cache_config.mamba_block_size = new_block_size
         original_mamba_page_size_padded = cache_config.mamba_page_size_padded
         if cache_config.mamba_page_size_padded is not None:
@@ -693,6 +687,34 @@ class XPUPlatform(Platform):
         """Copy blocks from XPU to host (CPU)."""
         _src_cache = src_cache[src_block_indices]
         dst_cache[dst_block_indices] = _src_cache.cpu()
+
+    @classmethod
+    def stateless_init_device_torch_dist_pg(
+        cls,
+        backend: str,
+        prefix_store: "PrefixStore",
+        group_rank: int,
+        group_size: int,
+        timeout: timedelta,
+    ) -> "ProcessGroup":
+        assert torch.distributed.is_xccl_available()
+        from torch.distributed import ProcessGroup
+        from torch.distributed.distributed_c10d import ProcessGroupXCCL
+
+        pg: ProcessGroup = ProcessGroup(prefix_store, group_rank, group_size)
+
+        backend_options = ProcessGroupXCCL.Options()
+        backend_options._timeout = timeout
+
+        backend_class = ProcessGroupXCCL(
+            prefix_store, group_rank, group_size, backend_options
+        )
+        backend_type = ProcessGroup.BackendType.XCCL
+        pg._set_default_backend(backend_type)
+        backend_class._set_sequence_number_for_group()
+
+        pg._register_backend(torch.device("xpu"), backend_type, backend_class)
+        return pg
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:

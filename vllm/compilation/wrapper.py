@@ -68,9 +68,6 @@ def _compilation_context() -> Generator[None, None, None]:
 def compile_model_with_stock_torch(
     model: torch.nn.Module, vllm_config: VllmConfig
 ) -> None:
-    from vllm.env_override import _apply_constrain_to_fx_strides_patch
-
-    _apply_constrain_to_fx_strides_patch()
     backend = vllm_config.compilation_config.init_backend(vllm_config)
     compilation_counter.stock_torch_compile_count += 1
     model.compile(fullgraph=True, backend=backend)
@@ -153,32 +150,14 @@ class TorchCompileWithNoGuardsWrapper:
                     entry.guard_type == "SHAPE_ENV" for entry in x
                 ]
             else:
-                if hasattr(torch.compiler, "skip_all_guards_unsafe"):
-                    # Torch 2.10+ provides skip_all_guards_unsafe
-                    options["guard_filter_fn"] = torch.compiler.skip_all_guards_unsafe
-                else:
-                    # Equivalent fallback for older PyTorch: skip all guards
-                    options["guard_filter_fn"] = lambda x: [False for _ in x]
+                options["guard_filter_fn"] = torch.compiler.skip_all_guards_unsafe
 
         compiled_ptr: Any = self.forward
         # Validate that unbacked dynamic shapes require VLLM_USE_BYTECODE_HOOK=False
 
-        # Apply the constrain_to_fx_strides patch before first compilation.
-        # This covers STOCK_TORCH_COMPILE and DYNAMO_ONCE paths. The VLLM
-        # compile paths call this from their own compile() methods too.
-        from vllm.env_override import _apply_constrain_to_fx_strides_patch
-
-        _apply_constrain_to_fx_strides_patch()
-
         aot_context = nullcontext()
         if self._allow_aot_compile and envs.VLLM_USE_AOT_COMPILE:
-            if hasattr(torch._dynamo.config, "enable_aot_compile"):
-                aot_context = torch._dynamo.config.patch(enable_aot_compile=True)
-            else:
-                msg = "torch._dynamo.config.enable_aot_compile is not "
-                msg += "available. AOT compile is disabled and please "
-                msg += "upgrade PyTorch version to use AOT compile."
-                logger.warning(msg)
+            aot_context = torch._dynamo.config.patch(enable_aot_compile=True)
 
         with aot_context:
             self._compiled_callable = torch.compile(
@@ -316,7 +295,7 @@ class TorchCompileWithNoGuardsWrapper:
     @contextmanager
     def _dispatch_to_compiled_code(self) -> Generator[None, None, None]:
         # noqa: E501
-        """Context manager to dispatch to internally compiled code for torch<2.8.
+        """Context manager to dispatch to internally compiled code.
         Why does this work? Because Dynamo guarantees that the compiled
         bytecode has exactly the same arguments, cell variables, and free
         variables as the original code. Therefore we can directly switch
