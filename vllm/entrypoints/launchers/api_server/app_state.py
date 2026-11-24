@@ -65,7 +65,9 @@ async def init_app_state(
     state.vllm_config = vllm_config
     state.args = args
     resolved_chat_template = load_chat_template(args.chat_template)
-    default_chat_template_kwargs = resolve_default_chat_template_kwargs(args)
+    default_chat_template_kwargs = resolve_default_chat_template_kwargs(
+        args, tokenizer_mode=vllm_config.model_config.tokenizer_mode
+    )
     state.tool_server = (
         await init_tool_server(args) if "generate" in supported_tasks else None
     )
