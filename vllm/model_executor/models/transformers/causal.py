@@ -82,24 +82,32 @@ class _OpaqueBaseModel(nn.Module):
         return super().__getattr__(name)
 
 
+_stubbed_base_models: dict[type, nn.Module] = {}
+
+
+def _new(cls, *args, **kwargs):
+    if (base_model := _stubbed_base_models.get(cls)) is not None:
+        return _OpaqueBaseModel(base_model)
+    return object.__new__(cls)
+
+
 @contextmanager
 def stub_base_model(base_model: nn.Module) -> Iterator[None]:
     """Make the class of `base_model` build `_OpaqueBaseModel(base_model)` instead,
-    so that a `ForCausalLM` can be built without building its base model again."""
+    so that a `ForCausalLM` can be built without building its base model again.
+
+    `_new` stays on the class afterwards and builds it as usual, because deleting
+    an assigned `__new__` leaves CPython passing the class's arguments on to
+    `object.__new__`, which rejects them."""
     cls = type(base_model)
-    original = cls.__dict__.get("__new__")
-
-    def new(c, *args, **kwargs):
-        return _OpaqueBaseModel(base_model) if c is cls else object.__new__(c)
-
-    cls.__new__ = new  # type: ignore[assignment]
+    if cls.__new__ is object.__new__:
+        cls.__new__ = _new  # type: ignore[assignment]
+    if cls.__new__ is _new:
+        _stubbed_base_models[cls] = base_model
     try:
         yield
     finally:
-        if original is None:
-            del cls.__new__
-        else:
-            cls.__new__ = original
+        _stubbed_base_models.pop(cls, None)
 
 
 class _OutputEmbeddings:
