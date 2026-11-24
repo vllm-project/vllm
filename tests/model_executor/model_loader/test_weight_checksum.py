@@ -81,7 +81,7 @@ def test_tensor_subclass_inner_tensors_are_hashed_and_reset():
 
 
 @pytest.mark.parametrize("model", ["target", "draft", "both"])
-def test_reset_follows_weight_ownership(model):
+def test_reset_covers_selected_model_weights(model):
     target = nn.Module()
     target.embed_tokens = nn.Embedding(4, 2)
     target.lm_head = nn.Linear(2, 4, bias=False)
@@ -103,7 +103,7 @@ def test_reset_follows_weight_ownership(model):
 
     plan = select_reset_weights(target, draft, model)
     assert not isinstance(plan, str)
-    assert len(plan) == {"target": 3, "draft": 2, "both": 5}[model]
+    assert len(plan) == {"target": 3, "draft": 4, "both": 5}[model]
     zero_selected_weights(plan)
 
     assert draft.embed_tokens is target.embed_tokens
@@ -111,11 +111,10 @@ def test_reset_follows_weight_ownership(model):
     after_target = compute_tensor_digests(target)
     after_draft = compute_tensor_digests(draft)
     assert {key for key in after_target if after_target[key] != before_target[key]} == (
-        set(before_target) if model != "draft" else set()
+        set(before_target) if model != "draft" else shared
     )
     assert {key for key in after_draft if after_draft[key] != before_draft[key]} == (
-        (shared if model != "draft" else set())
-        | ({"private"} if model != "target" else set())
+        shared | ({"private"} if model != "target" else set())
     )
     for weight in plan:
         torch.testing.assert_close(weight, torch.zeros_like(weight))
@@ -130,12 +129,35 @@ def test_target_reset_without_draft():
     assert target.k_scale.item() == 2.0
 
 
-def test_draft_only_reset_requires_private_weights():
+@pytest.mark.parametrize("model", ["draft", "both"])
+def test_reset_accepts_a_draft_with_only_shared_weights(model):
     target = nn.Linear(2, 2, bias=False)
+    nn.init.ones_(target.weight)
     draft = nn.Sequential(target)
+    plan = select_reset_weights(target, draft, model)
+    assert not isinstance(plan, str)
+    assert len(plan) == 1 and plan[0] is target.weight
+    zero_selected_weights(plan)
+    torch.testing.assert_close(target.weight, torch.zeros_like(target.weight))
+
+
+def test_draft_only_reset_requires_nonempty_weights():
+    target = nn.Linear(2, 2, bias=False)
+    draft = nn.Module()
+    draft.weight = nn.Parameter(torch.empty(0))
     assert select_reset_weights(target, draft, "draft") == (
-        "Weight Checker found no independently resettable draft weights."
+        "Weight Checker found no resettable draft weights."
     )
+
+
+def test_draft_reset_checks_new_shared_writes_against_target_buffers():
+    target = nn.Linear(2, 2, bias=False)
+    target.register_buffer("alias", target.weight.detach())
+    draft = nn.Module()
+    draft.weight = target.weight
+
+    error = select_reset_weights(target, draft, "draft")
+    assert isinstance(error, str) and "overlaps buffer 'alias'" in error
     plan = select_reset_weights(target, draft, "both")
     assert not isinstance(plan, str)
     assert len(plan) == 1 and plan[0] is target.weight

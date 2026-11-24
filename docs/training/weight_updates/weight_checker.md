@@ -37,14 +37,18 @@ both models' keys.
 | Reset selection | Weights cleared | Recovery |
 | --- | --- | --- |
 | `target` | Target-private and target-owned shared weights | Transfer target weights. The draft's aliases see the restored values. |
-| `draft` | Draft-private weights | Transfer draft weights. Omit parameters borrowed from the target. |
+| `draft` | Draft-private and shared weights visible to the draft | Include shared parameters in the draft transfer to verify that the draft update restores them. |
 | `both` | Target-owned and draft-private weights, with shared weights cleared once | Complete the target transfer, then transfer the draft-private weights. |
 
-Draft-only reset returns HTTP 409 if there are no independently resettable draft
-weights. Reset also returns HTTP 409 if the worker cannot establish ownership
-for overlapping tensor views or if the operation would write through an alias
-to a buffer in the other model. Views with provably disjoint bytes can be reset
-independently.
+Draft reset also clears the target's view of shared parameters. If the draft
+transfer omits them, compare reports any omitted weight whose baseline differs
+from zero. Restore omitted shared parameters through a target weight update
+before resuming inference.
+
+Draft-only reset returns HTTP 409 if there are no resettable draft weights.
+Reset also returns HTTP 409 for ambiguous overlapping views or a write through
+an alias to a buffer in the other model. Views with provably disjoint bytes can
+be reset independently.
 
 Private quantized copies created with `draft_lm_head_quantization` are refreshed
 in place after a target reload or weight update, and after a draft weight update.
@@ -75,7 +79,7 @@ jq --arg model "$MODEL" '{action:"compare", model:$model, baseline:.checksums}' 
 # 4. Transfer the original target weights with /start_weight_update,
 #    /update_weights, /finish_weight_update. For the draft, use
 #    /start_draft_weight_update, then the same update and finish routes.
-#    Omit borrowed target weights from the draft transfer.
+#    For draft-only verification, include the shared weights in the draft transfer.
 #    For both, complete the target transfer before starting the draft transfer.
 
 # 5. Compare against the baseline. Resume only after match is true.

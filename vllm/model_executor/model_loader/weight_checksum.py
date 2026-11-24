@@ -134,10 +134,16 @@ def _tensor_mapping(weight: torch.Tensor):
 def select_reset_weights(
     target: nn.Module, draft: nn.Module | None, model: "WeightCheckerModel"
 ) -> tuple[torch.Tensor, ...] | str:
-    """Select in-place writes after checking cross-model ownership on this rank."""
+    """Select unique in-place writes after checking cross-model aliases."""
     target_weights = list(_weights(target))
-    draft_weights = list(_weights(draft)) if draft is not None else []
-    borrowed = set()
+    draft_weights = (
+        [(name, weight) for name, weight in _weights(draft) if weight.numel()]
+        if draft is not None
+        else []
+    )
+    if model == "draft" and not draft_weights:
+        return "Weight Checker found no resettable draft weights."
+
     for target_span, draft_span in _possible_aliases(target_weights, draft_weights):
         if _tensor_mapping(target_span.tensor) != _tensor_mapping(draft_span.tensor):
             return (
@@ -145,34 +151,29 @@ def select_reset_weights(
                 f"and draft parameter {draft_span.name!r} have ambiguous "
                 "overlapping storage."
             )
-        # A target parameter with the same mapping restores every borrowed byte.
-        borrowed.add(id(draft_span.tensor))
-
-    draft_private = [
-        (name, weight)
-        for name, weight in draft_weights
-        if weight.numel() and id(weight) not in borrowed
-    ]
-    if model == "draft" and not draft_private:
-        return "Weight Checker found no independently resettable draft weights."
 
     selected = {}
     for owner, weights, other in (
         ("target", target_weights if model != "draft" else [], draft),
-        ("draft", draft_private if model != "target" else [], target),
+        ("draft", draft_weights if model != "target" else [], target),
     ):
-        if weights and other is not None:
+        # For both, exact aliases already belong to the target's write plan.
+        writes = []
+        for name, weight in weights:
+            mapping = _tensor_mapping(weight)
+            if mapping not in selected:
+                selected[mapping] = weight
+                writes.append((name, weight))
+        if writes and other is not None:
             buffers = (
                 item
                 for name, buffer in other.named_buffers()
                 for item in _tensors(name, buffer)
             )
-            if alias := next(_possible_aliases(weights, buffers), None):
+            if alias := next(_possible_aliases(writes, buffers), None):
                 param, buffer = alias
                 return (
                     f"Cannot reset {model} weights: {owner} parameter {param.name!r} "
                     f"overlaps buffer {buffer.name!r} in the other model."
                 )
-        for _, weight in weights:
-            selected.setdefault(_tensor_mapping(weight), weight)
     return tuple(selected.values())

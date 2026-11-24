@@ -225,6 +225,13 @@ class DraftWeightSyncClient(HTTPVLLMWeightSyncClient):
         self._post("start_draft_weight_update")
 
 
+def send_ipc_weights(url: str, module: nn.Module, *, is_draft: bool) -> None:
+    client = DraftWeightSyncClient(url) if is_draft else HTTPVLLMWeightSyncClient(url)
+    WeightTransferTrainerFactory.trainer_init(
+        IPCTrainerInitInfo(rank=0), client=client, source=ModuleSource(module.cuda())
+    ).send_weights()
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="IPC weight transfer uses CUDA IPC."
 )
@@ -262,17 +269,8 @@ def test_ipc_transfer_restores_target_and_draft_weights():
                 is_draft = restored_model == "draft"
                 trainer_model = AutoModelForCausalLM.from_pretrained(
                     DRAFT_MODEL if is_draft else MODEL_NAME, torch_dtype=torch.bfloat16
-                ).cuda()
-                client = (
-                    DraftWeightSyncClient(url)
-                    if is_draft
-                    else HTTPVLLMWeightSyncClient(url)
                 )
-                WeightTransferTrainerFactory.trainer_init(
-                    IPCTrainerInitInfo(rank=0),
-                    client=client,
-                    source=ModuleSource(trainer_model),
-                ).send_weights()
+                send_ipc_weights(url, trainer_model, is_draft=is_draft)
                 del trainer_model
 
             comparison = weight_checker(url, "compare", baseline, model=model)
@@ -370,6 +368,7 @@ def test_eagle_shared_weights_reset_and_recover(eagle_checkpoints, pp_size):
             f"draft:dp0:pp{pp_size - 1}:pcp0:tp0:{name}"
             for name in ("model.embed_tokens.weight", "lm_head.weight")
         }
+        target_shared = {key.replace("draft:", "target:", 1) for key in shared}
         assert shared < draft_keys
         assert all(
             baseline[key] == baseline[key.replace("draft:", "target:", 1)]
@@ -381,7 +380,7 @@ def test_eagle_shared_weights_reset_and_recover(eagle_checkpoints, pp_size):
 
         expected = {
             "target": target_keys | shared,
-            "draft": draft_keys - shared,
+            "draft": draft_keys | target_shared,
             "both": target_keys | draft_keys,
         }
         for model, mismatches in expected.items():
@@ -401,18 +400,24 @@ def test_eagle_shared_weights_reset_and_recover(eagle_checkpoints, pp_size):
                         json={"method": "reload_weights"},
                         timeout=300,
                     ).raise_for_status()
+                elif model == "draft":
+                    send_ipc_weights(url, draft, is_draft=True)
+                    compare = weight_checker(url, "compare", baseline, model="both")
+                    compare.raise_for_status()
+                    assert set(compare.json()["mismatches"]) == shared | target_shared
+
+                    draft_with_shared = nn.ModuleDict(
+                        {
+                            **dict(draft.named_children()),
+                            "embed_tokens": target.model.embed_tokens,
+                            "lm_head": target.lm_head,
+                        }
+                    )
+                    send_ipc_weights(url, draft_with_shared, is_draft=True)
                 else:
-                    transfer = []
-                    if model != "draft":
-                        transfer.append((target, HTTPVLLMWeightSyncClient(url)))
-                    if model != "target":
-                        transfer.append((draft, DraftWeightSyncClient(url)))
-                    for module, client in transfer:
-                        WeightTransferTrainerFactory.trainer_init(
-                            IPCTrainerInitInfo(rank=0),
-                            client=client,
-                            source=ModuleSource(module.cuda()),
-                        ).send_weights()
+                    send_ipc_weights(url, target, is_draft=False)
+                    if model == "both":
+                        send_ipc_weights(url, draft, is_draft=True)
 
             compare = weight_checker(url, "compare", baseline, model="both")
             compare.raise_for_status()
