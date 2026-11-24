@@ -117,7 +117,7 @@ class LargeStepHook:
     """`DeepseekV4MoE.largestep`: decides per call and runs the block.
 
     It takes decode-only steps of MIN_ROWS to MAX_ROWS rows, the same check
-    as the mono decode layer (`MonoDecodeLayer._decode_step`). Prefill chunks
+    as the mono decode layer (`MonoDecodeLayer.decode_step`). Prefill chunks
     and mixed batches of that size take the original path.
 
     The router is the layer's own (`experts.router.select_experts`), so the
@@ -141,7 +141,7 @@ class LargeStepHook:
         layer = self._layer()
         if layer is None:
             return False
-        why, _, _ = MonoDecodeLayer._decode_step(layer, x.shape[0], MAX_ROWS)
+        why = MonoDecodeLayer.decode_step(layer, x.shape[0], MAX_ROWS)
         return why is None
 
     def forward(self, moe_layer, x: torch.Tensor, input_ids) -> torch.Tensor:

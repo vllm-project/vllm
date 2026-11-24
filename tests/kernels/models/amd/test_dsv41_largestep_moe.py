@@ -434,7 +434,7 @@ def test_quant_h_matches_reference_bytes(tp: int, picks: int):
 def test_takes_decode_only_steps(rows, prefills, decodes, decode_tokens, takes):
     """`LargeStepHook.takes` takes decode-only steps of 43 to 256 rows and
     nothing else, by the same attention-metadata check as the mono decode layer
-    (`MonoDecodeLayer._decode_step`). Needs no GPU: the hook's block is not
+    (`MonoDecodeLayer.decode_step`). Needs no GPU: the hook's block is not
     built and the forward context carries only the layer's SWA metadata."""
     import types
 

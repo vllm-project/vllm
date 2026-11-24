@@ -557,9 +557,9 @@ class MonoDecodeLayer:
         made here."""
         _mono_runner(device, self if self.draft else None)
         if layer is not None:
-            from vllm.models.deepseek_v41.amd import largestep_gate
+            from vllm.models.deepseek_v41.amd.largestep import gate
 
-            hook = largestep_gate.build(layer)
+            hook = gate.build(layer)
             if hook is not None:
                 layer.ffn.largestep = hook
 
@@ -687,6 +687,16 @@ class MonoDecodeLayer:
     def _skip(why: str) -> None:
         logger.debug_once("DSv4.1 mono decode skipped a step: %s", why)
         return None
+
+    @staticmethod
+    def decode_step(
+        layer: "DeepseekV4DecoderLayer", rows: int, max_rows: int
+    ) -> str | None:
+        """Why a step of `rows` rows takes the original path, or None for a
+        decode-only step of at most `max_rows` rows: the same check the mono
+        decode layer makes, for other blocks that take decode-only steps (the
+        gfx942 large-step MoE)."""
+        return MonoDecodeLayer._decode_step(layer, rows, max_rows)[0]
 
     @staticmethod
     def _decode_step(

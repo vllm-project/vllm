@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shapes the gfx942 large-step MoE kernels are built for: DeepSeek-V4.1's
-routing and hidden width. `largestep_gate.build` checks a layer against them
+routing and hidden width. `gate.build` checks a layer against them
 before it gets the block."""
 
 GROUP = 16  # picks a group: one MFMA's N
