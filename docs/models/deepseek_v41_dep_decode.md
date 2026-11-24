@@ -42,7 +42,9 @@ dispatch.
 - DSpark5 with adaptive verification disabled. Sampling is unchanged; the
   TP-sharded Markov sampler is not used across independent DP requests.
 - FULL decode graphs, FP8 KV, and the sparse MXFP4 indexer shown above.
-- No LoRA, KV transfer, sleep, weight updates or batch-invariant mode.
+- KV transfer through the built-in NIXL pull connector with CUDA buffers.
+  Other connectors, NIXL push and host-buffered transfer are not supported.
+- No LoRA, sleep, weight updates or batch-invariant mode.
 
 Unsupported configurations fail at initialization. Pure decode graphs up to
 128 token rows per rank use the executor; prefill, eager execution and larger
@@ -72,6 +74,29 @@ does not change the default backend. Two-rank timings do not predict a four-
 or eight-rank speedup: compare against `auto` with the same DP/EP width.
 In benchmark tables, C2/C4/C8 denote requests **per DP rank**, not total
 concurrency. Total concurrency is the per-rank count multiplied by the DP size.
+
+## Disaggregated prefill and decode
+
+Keep the prefill instance on `decode_backend=auto`. On the decode instance,
+use `latency_specialized_dep` and add:
+
+```bash
+--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda"}'
+```
+
+On prefill, use the same connector with `kv_role=kv_producer`. The default
+transfer mode is pull; `NixlPullConnector` is also accepted. Both instances
+must use compatible model and KV-cache settings. TP remains 1, but their DP/EP
+widths need not match: a DEP2 prefill can feed a DEP2 or DEP4 decode instance.
+Each instance's EP group stays local to its own NVLink-connected GPUs.
+
+Forward the prefill response's `kv_transfer_params` to decode using the
+[NIXL disaggregated-serving flow](../features/nixl_connector_usage.md).
+The scheduler waits for remote KV completion before admitting the request.
+KV registration, transfer completion and block lifetime remain with the
+connector; the executor reads and writes the original registered caches.
+Initial prompt replay and mixed prefill/decode batches keep the stock path.
+Eligible subsequent FULL decode graphs use the DEP executor.
 
 ## Experimental C8 attention
 

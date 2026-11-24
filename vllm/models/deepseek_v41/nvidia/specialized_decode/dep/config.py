@@ -9,6 +9,7 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config import CompilationMode, CUDAGraphMode, ParallelConfig, VllmConfig
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed import get_dp_group
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.models.deepseek_v41.nvidia.specialized_decode import DecodeConfig
@@ -33,6 +34,17 @@ def supports_layout(p: ParallelConfig, dp_size: int) -> bool:
         and p.enable_expert_parallel
         and not p.use_ubatching
         and not p.enable_eplb
+    )
+
+
+def supports_kv_transfer(config: KVTransferConfig | None) -> bool:
+    # NIXL pull completes receives before scheduling the request and uses the
+    # original registered caches; it needs no layer-wise save/load hooks.
+    return config is None or (
+        config.kv_connector in ("NixlConnector", "NixlPullConnector")
+        and config.kv_connector_module_path is None
+        and config.kv_buffer_device == "cuda"
+        and config.get_from_extra_config("transfer_mode", "pull") == "pull"
     )
 
 
@@ -64,11 +76,13 @@ def requirements(config: VllmConfig, dp_size: int):
             and graph.mixed_mode() != CUDAGraphMode.FULL
             and c.mode != CompilationMode.STOCK_TORCH_COMPILE
         ),
-        "no weight updates, sleep, LoRA, KV transfer or batch invariance": (
+        "no KV transfer or CUDA-buffered NIXL pull": supports_kv_transfer(
+            config.kv_transfer_config
+        ),
+        "no weight updates, sleep, LoRA or batch invariance": (
             config.weight_transfer_config is None
             and not config.model_config.enable_sleep_mode
             and config.lora_config is None
-            and config.kv_transfer_config is None
             and not envs.VLLM_BATCH_INVARIANT
         ),
     }

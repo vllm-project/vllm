@@ -14,6 +14,37 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
 
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer", "kv_both"])
+@pytest.mark.parametrize(
+    "connector,extra,device,module,expected",
+    [
+        ("NixlConnector", {}, "cuda", None, True),
+        ("NixlPullConnector", {"transfer_mode": "pull"}, "cuda", None, True),
+        ("NixlConnector", {"transfer_mode": "push"}, "cuda", None, False),
+        ("NixlPushConnector", {}, "cuda", None, False),
+        ("NixlConnector", {}, "cpu", None, False),
+        ("NixlConnector", {}, "cuda", "custom_connector", False),
+        ("OffloadingConnector", {}, "cuda", None, False),
+        ("MultiConnector", {}, "cuda", None, False),
+    ],
+)
+def test_dep_kv_transfer_scope(role, connector, extra, device, module, expected):
+    from vllm.config.kv_transfer import KVTransferConfig
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.dep.config import (
+        supports_kv_transfer,
+    )
+
+    config = KVTransferConfig(
+        kv_connector=connector,
+        kv_role=role,
+        kv_connector_extra_config=extra,
+        kv_buffer_device=device,
+        kv_connector_module_path=module,
+    )
+    assert supports_kv_transfer(config) is expected
+    assert supports_kv_transfer(None)
+
+
 @pytest.mark.skipif(
     not current_platform.is_device_capability(103), reason="needs SM103"
 )
