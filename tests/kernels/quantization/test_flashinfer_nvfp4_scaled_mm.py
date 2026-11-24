@@ -176,9 +176,10 @@ def test_flashinfer_nvfp4_gemm(
     torch.testing.assert_close(out, expected_out.to(dtype=dtype), atol=1e-1, rtol=1e-1)
 
 
-# More rows than the GB10 CUTLASS path runs in one GEMM (4096): it splits them
-# into 2048-row GEMMs, the last one partial.
-@pytest.mark.parametrize("shape", [(4100, 128, 64), (8192, 512, 256)])
+# More than 12 MiB of A, which the GB10 CUTLASS path splits into row slices:
+# 2048 rows for 4096 bytes per row, the 1024-row minimum for 8192; both leave a
+# partial last slice.
+@pytest.mark.parametrize("shape", [(4100, 256, 4096), (2100, 256, 8192)])
 @pytest.mark.skipif(
     not current_platform.is_device_capability((12, 1)),
     reason="Row splitting only applies on GB10 (SM121).",

@@ -1052,13 +1052,14 @@ if has_flashinfer():
         mutates_args=["k"],  # k tensor is modified in-place
     )
 
-    # On GB10 (SM121), FlashInfer's CUTLASS NVFP4 GEMMs slow down past about
-    # 4096 rows (an 8192 x 34816 x 5120 GEMM runs at 214 TFLOP/s against 280 in
-    # 2048-row pieces, an 8192 x 5120 x 17408 one at 117 against 267). Rows are
-    # independent and the swizzled block scales are laid out in 128-row tiles,
-    # so larger problems run as 2048-row GEMMs into slices of one output.
-    _GB10_FP4_MAX_ROWS = 4096
-    _GB10_FP4_ROW_CHUNK = 2048
+    # On GB10 (SM121), FlashInfer's CUTLASS NVFP4 GEMMs slow down 2-3x once A
+    # outgrows the L2 (an 8192 x 5120 x 17408 GEMM runs at 113 TFLOP/s against
+    # 290 when split). Rows are independent and the swizzled block scales come
+    # in 128-row tiles, so a problem with more than 12 MiB of A runs as row
+    # slices of at most 8 MiB of A, but at least 1024 rows, into one output.
+    _GB10_SPLIT_A_BYTES = 12 << 20
+    _GB10_SLICE_A_BYTES = 8 << 20
+    _GB10_MIN_SLICE_ROWS = 1024
 
     @functools.cache
     def _is_gb10() -> bool:
@@ -1078,16 +1079,20 @@ if has_flashinfer():
     ) -> torch.Tensor:
         from flashinfer import mm_fp4 as flashinfer_mm_fp4_
 
-        m = A.shape[0]
+        m, row_bytes = A.shape  # packed FP4: two values per byte
+        rows_per_slice = max(
+            _GB10_MIN_SLICE_ROWS, _GB10_SLICE_A_BYTES // row_bytes // 128 * 128
+        )
         if (
             backend == "cutlass"
-            and m > _GB10_FP4_MAX_ROWS
+            and m * row_bytes > _GB10_SPLIT_A_BYTES
+            and m > rows_per_slice
             and not use_8x4_sf_layout
             and _is_gb10()
         ):
             out = torch.empty(m, B.shape[1], dtype=dtype, device=A.device)
-            for start in range(0, m, _GB10_FP4_ROW_CHUNK):
-                rows = min(_GB10_FP4_ROW_CHUNK, m - start)
+            for start in range(0, m, rows_per_slice):
+                rows = min(rows_per_slice, m - start)
                 flashinfer_mm_fp4_(
                     A[start : start + rows],
                     B,

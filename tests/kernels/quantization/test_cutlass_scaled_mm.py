@@ -40,11 +40,12 @@ MNK_FACTORS = [
     (512, 24576, 128),
 ]
 
-# More rows than the GB10 FP8 path runs in one GEMM (3072); it splits them into
-# 1024-row GEMMs, and 4100 leaves a partial last one.
+# More than 12 MiB of A, which the GB10 FP8 path splits into row slices: 2048
+# rows for K = 4096, the 1024-row minimum for K = 8192; both leave a partial
+# last slice.
 MANY_ROWS_MNK_FACTORS = [
-    (3073, 512, 256),
-    (4100, 1024, 512),
+    (4100, 1024, 4096),
+    (2100, 512, 8192),
 ]
 
 # Shapes with N or K not divisible by 16.  These exercise the padding path
