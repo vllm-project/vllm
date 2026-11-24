@@ -3,6 +3,8 @@
 """The MX linear kernels used under batch invariance must not depend on the
 number of rows."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from utils import requires_mx, skip_if_not_cuda
@@ -200,9 +202,12 @@ _MXFP8_QUANT_CONFIG = ModelOptMxFp8Config(
 )
 
 
-def _mxfp8_column_linear(n: int, k: int, prefix: str) -> ColumnParallelLinear:
+def _mxfp8_column_linear(
+    n: int, k: int, prefix: str, loaded: bool = True
+) -> ColumnParallelLinear:
     """An MXFP8 ColumnParallelLinear with the weights of `_mxfp8_weights`,
-    built under the current value of VLLM_BATCH_INVARIANT."""
+    built under the current value of VLLM_BATCH_INVARIANT; `loaded=False` leaves
+    the weights as loaded, before `process_weights_after_loading`."""
     layer = ColumnParallelLinear(
         input_size=k,
         output_size=n,
@@ -215,8 +220,14 @@ def _mxfp8_column_linear(n: int, k: int, prefix: str) -> ColumnParallelLinear:
     weight, weight_scale = _mxfp8_weights(n, k)
     layer.weight.data.copy_(weight)
     layer.weight_scale.data.copy_(weight_scale)
-    layer.quant_method.process_weights_after_loading(layer)
+    if loaded:
+        layer.quant_method.process_weights_after_loading(layer)
     return layer
+
+
+def _set_batch_invariant(monkeypatch, on: bool) -> None:
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1" if on else "0")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", on)
 
 
 @skip_if_not_cuda
@@ -319,9 +330,156 @@ def test_minimax_m3_fused_gemm1_off_under_batch_invariance(
 
     gate_up, down = layers()
     assert not can_fuse_gemm1(gate_up, down, act_fn)
-    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+    _set_batch_invariant(monkeypatch, False)
     gate_up, down = layers()
     assert can_fuse_gemm1(gate_up, down, act_fn)
+
+
+@skip_if_not_cuda
+@requires_flashinfer_batch_invariant
+def test_minimax_m3_qkv_fused_epilogue_off_under_batch_invariance(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """`_supports_qkv_fused_epilogue` reads the attention layer's qkv_proj kernel
+    and head geometry; the layer is model-level, so a namespace carries a real
+    MXFP8 qkv_proj and the geometry the fusion accepts."""
+    from vllm.models.minimax_m3.nvidia.model import _supports_qkv_fused_epilogue
+
+    def attention():
+        return SimpleNamespace(
+            qkv_proj=_mxfp8_column_linear(1024, 1024, "model.layers.0.self_attn.qkv"),
+            num_kv_heads=1,
+            use_nvfp4_kv=True,
+            indexer_kv_dtype="nvfp4",
+            num_heads=16,
+            num_idx_heads=1,
+            head_dim=128,
+            idx_head_dim=128,
+            rotary_emb=SimpleNamespace(rotary_dim=64),
+            hidden_size=1024,
+        )
+
+    assert not _supports_qkv_fused_epilogue(attention())
+    _set_batch_invariant(monkeypatch, False)
+    assert _supports_qkv_fused_epilogue(attention())
+
+
+@skip_if_not_cuda
+@requires_flashinfer_batch_invariant
+def test_minimax_m3_norm_mxfp8_producer_off_under_batch_invariance(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """`_consumes_mxfp8_128x4` lets the MXFP8 norm kernels feed a linear
+    pre-quantized rows; under the mode the linear keeps its own quantizer."""
+    from vllm.models.minimax_m3.nvidia.model import _consumes_mxfp8_128x4
+
+    prefix = "model.layers.0.self_attn.qkv"
+    assert not _consumes_mxfp8_128x4(_mxfp8_column_linear(1024, 1024, prefix))
+    _set_batch_invariant(monkeypatch, False)
+    assert _consumes_mxfp8_128x4(_mxfp8_column_linear(1024, 1024, prefix))
+
+
+@skip_if_not_cuda
+@requires_flashinfer_batch_invariant
+def test_minimax_m3_fused_moe_finalize_off_under_batch_invariance(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """`_fuses_moe_finalize` is False under the mode; with the mode off it
+    follows `supports_fused_moe_finalize`, which is False at TP = 1 here, so
+    the mode-off case pins the agreement rather than True."""
+    from vllm.models.minimax_m3.nvidia.model import _fuses_moe_finalize
+    from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
+        supports_fused_moe_finalize,
+    )
+
+    assert not _fuses_moe_finalize(default_vllm_config)
+    _set_batch_invariant(monkeypatch, False)
+    assert _fuses_moe_finalize(default_vllm_config) == supports_fused_moe_finalize(
+        default_vllm_config
+    )
+
+
+@skip_if_not_cuda
+@requires_flashinfer_batch_invariant
+def test_gemm_rs_ar_off_for_mxfp8_only_under_batch_invariance(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """`GemmRsAr.can_run` reads only N, device and dtypes of its instance (which
+    needs TP > 1 and symmetric memory), so a namespace stands in for it; it is
+    called before weight loading. The MXFP8 layer is declined under the mode,
+    the bf16 layer is not."""
+    from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
+
+    n, k = 1024, 1024
+    prefix = "model.layers.0.self_attn.o_proj"
+    device = torch.device("cuda", torch.accelerator.current_device_index())
+
+    def can_run(linear):
+        rs = SimpleNamespace(N=n, device=device, dtypes=set())
+        return GemmRsAr.can_run(rs, linear)
+
+    def bf16_linear():
+        return ColumnParallelLinear(
+            input_size=k,
+            output_size=n,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=None,
+            prefix=prefix,
+            disable_tp=True,
+        ).cuda()
+
+    assert not can_run(_mxfp8_column_linear(n, k, prefix, loaded=False))
+    assert can_run(bf16_linear())
+    _set_batch_invariant(monkeypatch, False)
+    assert can_run(_mxfp8_column_linear(n, k, prefix, loaded=False))
+    assert can_run(bf16_linear())
+
+
+@skip_if_not_cuda
+@requires_flashinfer_batch_invariant
+def test_deepseek_v41_fused_wo_a_off_under_batch_invariance(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """`_can_fuse_wo_a` reads the attention layer's wo_a, wo_b and head geometry;
+    the layer is model-level, so a namespace carries a real MXFP8 wo_b and the
+    geometry the fusion accepts."""
+    from vllm.models.deepseek_v41.nvidia.ops.o_proj import _can_fuse_wo_a
+
+    def attention():
+        return SimpleNamespace(
+            wo_a=torch.nn.Module(),
+            wo_b=_mxfp8_column_linear(1024, 1024, "model.layers.0.self_attn.wo_b"),
+            _einsum_recipe=(1, 1, 32),
+            n_local_heads=8,
+            n_local_groups=1,
+            nope_head_dim=448,
+            rope_head_dim=64,
+            o_lora_rank=512,
+        )
+
+    assert not _can_fuse_wo_a(attention())
+    _set_batch_invariant(monkeypatch, False)
+    assert _can_fuse_wo_a(attention())
+
+
+@skip_if_not_cuda
+@requires_flashinfer_batch_invariant
+def test_deepseek_v41_fused_query_quant_off_under_batch_invariance(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """`can_fuse_query_quant` takes the query projections it would feed."""
+    from vllm.models.deepseek_v41.common.ops.query_quant import can_fuse_query_quant
+
+    def linears():
+        return [
+            _mxfp8_column_linear(1024, 1024, f"model.layers.0.self_attn.{name}")
+            for name in ("wq_b", "wq_idx")
+        ]
+
+    assert not can_fuse_query_quant(linears())
+    _set_batch_invariant(monkeypatch, False)
+    assert can_fuse_query_quant(linears())
 
 
 @skip_if_not_cuda

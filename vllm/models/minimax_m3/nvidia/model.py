@@ -194,6 +194,17 @@ def _supports_qkv_fused_epilogue(attn: "MiniMaxM3SparseAttention") -> bool:
     )
 
 
+def _fuses_moe_finalize(vllm_config: VllmConfig) -> bool:
+    """Whether MoE layers may defer their top-k finalize to the next layer's
+    fused input norm. Batch-invariant runs keep the stock finalize: the fused
+    one switches by token count and quantizes the next layer's input itself."""
+    from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
+        supports_fused_moe_finalize,
+    )
+
+    return not envs.VLLM_BATCH_INVARIANT and supports_fused_moe_finalize(vllm_config)
+
+
 def _sparse_attention_layer_ids(config: PreTrainedConfig) -> set[int]:
     """Layer ids whose attention runs the extra sparse "index" branch."""
     return {i for i, t in enumerate(config.layer_types) if t == "minimax_m3_sparse"}
@@ -1512,12 +1523,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         """
         from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
             init_fused_moe_finalize,
-            supports_fused_moe_finalize,
         )
 
-        # Batch-invariant runs keep the stock finalize: the fused one switches
-        # by token count and quantizes the next layer's input itself.
-        if envs.VLLM_BATCH_INVARIANT or not supports_fused_moe_finalize(vllm_config):
+        if not _fuses_moe_finalize(vllm_config):
             return
         from .specialized_decode import fused_finalize_max_tokens
 
