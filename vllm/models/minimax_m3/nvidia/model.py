@@ -45,9 +45,9 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
-    MEGA_MOE_NVFP4,
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
+    mega_moe_weight_format,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
     TrtLlmNvFp4ExpertsModular,
@@ -619,7 +619,7 @@ class MiniMaxM3MoE(nn.Module):
                 alpha=config.swiglu_alpha,
                 beta=1.0,
             ),
-            weight_format=MEGA_MOE_NVFP4,
+            weight_format=mega_moe_weight_format("nvfp4"),
             l2_input_scale=MEGA_MOE_FC2_INPUT_SCALE,
             shared_experts=shared_experts,
             prefix=f"{prefix}.experts",

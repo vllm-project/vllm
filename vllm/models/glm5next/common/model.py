@@ -374,6 +374,7 @@ class Glm5NextMoE(nn.Module):
         shared experts and combines across the EP group."""
         from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
             MegaMoEActivation,
+            mega_moe_weight_format,
         )
         from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
 
@@ -393,10 +394,12 @@ class Glm5NextMoE(nn.Module):
                 "GLM-5.3 MegaMoE requires sigmoid routing with a correction bias."
             )
         weight_block_size = getattr(quant_config, "weight_block_size", None)
-        if quant_config is not None and weight_block_size is None:
+        if quant_config is not None and (
+            weight_block_size is None or tuple(weight_block_size) != (128, 128)
+        ):
             raise NotImplementedError(
-                "GLM-5.3 MegaMoE requires a BF16 or a block-FP8 checkpoint "
-                "(quantization_config.weight_block_size)."
+                "GLM-5.3 MegaMoE requires a BF16 or a 128x128 block-FP8 "
+                "checkpoint (quantization_config.weight_block_size)."
             )
         if self.n_physical_experts % self.ep_size != 0:
             raise ValueError(
@@ -413,17 +416,13 @@ class Glm5NextMoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            weight_block_size=None
-            if weight_block_size is None
-            else tuple(weight_block_size),
+            weight_format=mega_moe_weight_format(
+                "bf16" if quant_config is None else "fp8_block"
+            ),
             num_shared_experts=config.n_shared_experts or 0,
             activation=MegaMoEActivation("swiglu", clamp=config.swiglu_limit),
             prefix=f"{prefix}.experts",
         )
-
-    def finalize_mega_moe_weights(self) -> None:
-        if self.use_mega_moe and self.experts.weight_block_size is not None:
-            self.experts.finalize_block_fp8_weights()
 
     def forward(
         self,
@@ -1360,9 +1359,6 @@ class Glm5NextForCausalLM(
         return loader.load_weights(weights)
 
     def process_weights_after_loading(self) -> None:
-        for module in self.modules():
-            if isinstance(module, Glm5NextMoE):
-                module.finalize_mega_moe_weights()
         # Every load format ends here, including the ones that skip loaders.
         self.model.split_mhc_fns()
 
