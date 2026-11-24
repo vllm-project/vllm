@@ -268,6 +268,12 @@ impl ChatRequestProcessor {
         Ok((text_request, prompt_text))
     }
 
+    /// Render an OpenAI completions `prompt` and `suffix` into the model's
+    /// fill-in-the-middle prompt text, or `None` if the model has none.
+    pub fn render_completion_suffix(&self, prompt: &str, suffix: &str) -> Option<String> {
+        self.backend.chat_renderer().render_completion_suffix(prompt, suffix)
+    }
+
     /// Prepare one chat request for tokenization without constructing an output processor.
     pub async fn prepare_for_tokenization(&self, mut request: ChatRequest) -> Result<TextRequest> {
         request.validate()?;
