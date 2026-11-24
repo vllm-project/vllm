@@ -108,10 +108,10 @@ class InfEncoder(json.JSONEncoder):
                 else k: self.clear_inf(v)
                 for k, v in o.items()
             }
-        elif isinstance(o, list):
+        elif isinstance(o, (list, tuple)):
             return [self.clear_inf(v) for v in o]
-        elif isinstance(o, float) and math.isinf(o):
-            return "inf"
+        elif isinstance(o, float) and not math.isfinite(o):
+            return str(o)
         return o
 
     def iterencode(self, o: Any, *args, **kwargs) -> Any:

@@ -113,6 +113,8 @@ The continuous benchmarking is triggered via a [GitHub workflow CI](https://gith
 - **Throughput tests**: Evaluate token generation rates
 - **Latency tests**: Assess response time characteristics
 
+In `.pytorch.json` exports, non-finite floating-point values are stored as the JSON strings `"inf"`, `"-inf"`, and `"nan"`. Finite values remain numbers.
+
 ### Benchmark Configuration
 
 The benchmarking currently runs on a predefined set of models configured in the [vllm-benchmarks directory](https://github.com/pytorch/pytorch-integration-testing/tree/main/vllm-benchmarks/benchmarks). To add new models for benchmarking:
