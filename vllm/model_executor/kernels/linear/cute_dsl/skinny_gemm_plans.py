@@ -61,10 +61,14 @@ SM121_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
     },
 }
 
-# B200 and B300, measured on the BF16 projections that stay unquantized in the
-# Qwen3.5 / Qwen3.6 MoE FP8 checkpoints (GDN in_proj_ba, shared-expert gate, router,
-# LM head) at the local shapes of Qwen3.6-35B-A3B TP=1/2/4 and Qwen3.5-397B-A17B
-# TP=4/8. Entries beat cuBLAS by at least 10% under CUDA graph replay on both.
+# B200 and B300. Every entry beats cuBLAS under CUDA graph replay on both GPUs: by at
+# least 10% on B200, and on B300 by at least 10% except six dense Qwen3 entries
+# (5-10%). Measured on:
+# - the BF16 projections that stay unquantized in the Qwen3.5 / Qwen3.6 MoE FP8
+#   checkpoints (GDN in_proj_ba, shared-expert gate, router, LM head) at the local
+#   shapes of Qwen3.6-35B-A3B TP=1/2/4 and Qwen3.5-397B-A17B TP=4/8;
+# - the dense Qwen3 local shapes (Qwen3-8B TP=1/2, Qwen3-14B TP=1/2/4,
+#   Qwen3-32B TP=1/2/4/8).
 SM100_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
     # Qwen3.6-35B-A3B TP1 GDN in_proj_ba.
     (64, 2048): {
@@ -156,6 +160,221 @@ SM100_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
         1: SkinnyGemmConfig(1, 256, 2, k_unroll=4, vector_width=4),
         2: SkinnyGemmConfig(2, 128, 4, k_unroll=4),
         4: SkinnyGemmConfig(4, 32, 2, k_unroll=4, vector_width=4),
+    },
+    # Dense Qwen3 (Qwen3-8B TP=1/2, Qwen3-14B TP=1/2/4, Qwen3-32B TP=1/2/4/8).
+    # 32B TP8 o.
+    (5120, 1024): {
+        1: SkinnyGemmConfig(1, 64, 4, vector_width=4, static_k=1024),
+        2: SkinnyGemmConfig(2, 64, 4, k_unroll=2, vector_width=4, static_k=1024),
+    },
+    # 14B TP4 o.
+    (5120, 1280): {
+        1: SkinnyGemmConfig(1, 64, 4, vector_width=4, static_k=1280),
+        2: SkinnyGemmConfig(2, 64, 4, vector_width=4, static_k=1280),
+    },
+    # 8B TP2 o.
+    (4096, 2048): {
+        1: SkinnyGemmConfig(1, 128, 4, vector_width=4, static_k=2048),
+        2: SkinnyGemmConfig(2, 64, 4, static_k=2048),
+        4: SkinnyGemmConfig(4, 64, 4, vector_width=4, static_k=2048),
+    },
+    # 32B TP4 o.
+    (5120, 2048): {
+        1: SkinnyGemmConfig(1, 64, 4, vector_width=4, static_k=2048),
+        2: SkinnyGemmConfig(2, 32, 4, static_k=2048),
+    },
+    # 14B TP2 o.
+    (5120, 2560): {
+        1: SkinnyGemmConfig(1, 64, 4, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 64, 2, k_unroll=2, vector_width=4, static_k=2560),
+    },
+    # 32B TP8 down.
+    (5120, 3200): {
+        1: SkinnyGemmConfig(1, 160, 2, k_unroll=2, vector_width=4, static_k=3200),
+        2: SkinnyGemmConfig(2, 32, 4, k_unroll=2, vector_width=4, static_k=3200),
+    },
+    # 8B TP2 qkv.
+    (3072, 4096): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=2, vector_width=4, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=4096),
+        4: SkinnyGemmConfig(4, 32, 2, k_unroll=2, static_k=4096),
+    },
+    # 8B TP1 o.
+    (4096, 4096): {
+        1: SkinnyGemmConfig(1, 128, 4, vector_width=4, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=4096),
+        4: SkinnyGemmConfig(4, 64, 4, vector_width=4, static_k=4096),
+    },
+    # 32B TP2 o.
+    (5120, 4096): {
+        1: SkinnyGemmConfig(1, 64, 2, vector_width=4, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 2, k_unroll=4, vector_width=4, static_k=4096),
+    },
+    # 8B TP1 qkv.
+    (6144, 4096): {
+        1: SkinnyGemmConfig(1, 64, 2, k_unroll=2, vector_width=4, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 2, k_unroll=4, vector_width=4, static_k=4096),
+    },
+    # 8B TP2 gate_up.
+    (12288, 4096): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=2, vector_width=4, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 2, k_unroll=2, vector_width=4, static_k=4096),
+    },
+    # 8B TP1 gate_up.
+    (24576, 4096): {
+        1: SkinnyGemmConfig(1, 256, 2, k_unroll=4, vector_width=4, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 2, k_unroll=2, vector_width=4, static_k=4096),
+    },
+    # 8B TP2 lm_head.
+    (75968, 4096): {
+        1: SkinnyGemmConfig(1, 64, 2, vector_width=4, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=4096),
+    },
+    # 8B TP1 lm_head.
+    (151936, 4096): {
+        1: SkinnyGemmConfig(1, 32, 2, vector_width=4, static_k=4096),
+    },
+    # 14B TP4 down.
+    (5120, 4352): {
+        1: SkinnyGemmConfig(1, 64, 2, vector_width=4, static_k=4352),
+        2: SkinnyGemmConfig(2, 32, 4, static_k=4352),
+    },
+    # 32B TP8 qkv.
+    (1280, 5120): {
+        1: SkinnyGemmConfig(1, 160, 2, k_unroll=2, static_k=5120),
+        2: SkinnyGemmConfig(2, 160, 2, static_k=5120),
+        4: SkinnyGemmConfig(4, 64, 2, k_unroll=4, static_k=5120),
+        8: SkinnyGemmConfig(8, 64, 2, static_k=5120),
+    },
+    # 14B TP4 qkv.
+    (1792, 5120): {
+        1: SkinnyGemmConfig(1, 256, 2, vector_width=4, static_k=5120),
+        2: SkinnyGemmConfig(2, 128, 4, static_k=5120),
+        4: SkinnyGemmConfig(4, 128, 4, vector_width=4, static_k=5120),
+    },
+    # 32B TP4 qkv.
+    (2560, 5120): {
+        1: SkinnyGemmConfig(1, 160, 2, vector_width=4, static_k=5120),
+        2: SkinnyGemmConfig(2, 128, 2, k_unroll=2, vector_width=4, static_k=5120),
+        4: SkinnyGemmConfig(4, 32, 2, static_k=5120),
+    },
+    # 14B TP2 qkv.
+    (3584, 5120): {
+        1: SkinnyGemmConfig(1, 128, 1, vector_width=4, static_k=5120),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=5120),
+        4: SkinnyGemmConfig(4, 64, 4, k_unroll=4, vector_width=4, static_k=5120),
+    },
+    # 14B TP1 o, 32B TP2 qkv.
+    (5120, 5120): {
+        1: SkinnyGemmConfig(1, 32, 2, static_k=5120),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=5120),
+        4: SkinnyGemmConfig(4, 32, 4, static_k=5120),
+    },
+    # 32B TP8 gate_up.
+    (6400, 5120): {
+        1: SkinnyGemmConfig(1, 64, 2, vector_width=4, static_k=5120),
+        2: SkinnyGemmConfig(2, 32, 4, static_k=5120),
+    },
+    # 14B TP1 qkv.
+    (7168, 5120): {
+        1: SkinnyGemmConfig(1, 64, 1, vector_width=4, static_k=5120),
+        2: SkinnyGemmConfig(2, 64, 1, k_unroll=4, vector_width=4, static_k=5120),
+    },
+    # 14B TP4 gate_up.
+    (8704, 5120): {
+        1: SkinnyGemmConfig(1, 128, 2, static_k=5120),
+    },
+    # 32B TP1 qkv.
+    (10240, 5120): {
+        1: SkinnyGemmConfig(1, 160, 2, vector_width=4, static_k=5120),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=5120),
+    },
+    # 32B TP4 gate_up.
+    (12800, 5120): {
+        1: SkinnyGemmConfig(1, 64, 2, k_unroll=4, vector_width=4, static_k=5120),
+        2: SkinnyGemmConfig(2, 128, 2, k_unroll=2, vector_width=4, static_k=5120),
+    },
+    # 14B TP2 gate_up.
+    (17408, 5120): {
+        1: SkinnyGemmConfig(1, 32, 2, k_unroll=2, vector_width=4, static_k=5120),
+    },
+    # 32B TP8 lm_head.
+    (18992, 5120): {
+        1: SkinnyGemmConfig(1, 32, 2, vector_width=4, static_k=5120),
+        2: SkinnyGemmConfig(2, 32, 4, static_k=5120),
+    },
+    # 32B TP2 gate_up.
+    (25600, 5120): {
+        1: SkinnyGemmConfig(1, 32, 1, vector_width=4, static_k=5120),
+    },
+    # 14B TP1 gate_up.
+    (34816, 5120): {
+        1: SkinnyGemmConfig(1, 32, 2, k_unroll=4, vector_width=4, static_k=5120),
+        2: SkinnyGemmConfig(2, 128, 2, k_unroll=4, vector_width=4, static_k=5120),
+    },
+    # 14B TP4 lm_head, 32B TP4 lm_head.
+    (37984, 5120): {
+        1: SkinnyGemmConfig(1, 32, 2, vector_width=4, static_k=5120),
+        2: SkinnyGemmConfig(2, 160, 2, k_unroll=2, vector_width=4, static_k=5120),
+    },
+    # 32B TP1 gate_up.
+    (51200, 5120): {
+        1: SkinnyGemmConfig(1, 32, 1, k_unroll=2, vector_width=4, static_k=5120),
+        2: SkinnyGemmConfig(2, 64, 4, k_unroll=2, static_k=5120),
+    },
+    # 14B TP2 lm_head, 32B TP2 lm_head.
+    (75968, 5120): {
+        1: SkinnyGemmConfig(1, 32, 2, k_unroll=2, vector_width=4, static_k=5120),
+        2: SkinnyGemmConfig(2, 64, 2, k_unroll=2, vector_width=4, static_k=5120),
+    },
+    # 14B TP1 lm_head, 32B TP1 lm_head.
+    (151936, 5120): {
+        1: SkinnyGemmConfig(1, 32, 1, vector_width=4, static_k=5120),
+        2: SkinnyGemmConfig(2, 128, 4, k_unroll=4, static_k=5120),
+    },
+    # 8B TP2 down.
+    (4096, 6144): {
+        1: SkinnyGemmConfig(1, 128, 1, vector_width=4, static_k=6144),
+        2: SkinnyGemmConfig(2, 128, 2, k_unroll=2, vector_width=4, static_k=6144),
+        4: SkinnyGemmConfig(4, 64, 4, k_unroll=2, vector_width=4, static_k=6144),
+    },
+    # 32B TP4 down.
+    (5120, 6400): {
+        1: SkinnyGemmConfig(1, 160, 2, k_unroll=2, vector_width=4, static_k=6400),
+        2: SkinnyGemmConfig(2, 32, 4, static_k=6400),
+        4: SkinnyGemmConfig(4, 32, 4, k_unroll=4, static_k=6400),
+    },
+    # 32B TP1 o.
+    (5120, 8192): {
+        1: SkinnyGemmConfig(1, 128, 1, vector_width=4, static_k=8192),
+        2: SkinnyGemmConfig(2, 128, 4, k_unroll=4),
+        4: SkinnyGemmConfig(4, 128, 4),
+    },
+    # 14B TP2 down.
+    (5120, 8704): {
+        1: SkinnyGemmConfig(1, 128, 1, vector_width=4, static_k=8704),
+        2: SkinnyGemmConfig(2, 32, 4, static_k=8704),
+    },
+    # 8B TP1 down.
+    (4096, 12288): {
+        1: SkinnyGemmConfig(1, 256, 2, static_k=12288),
+        2: SkinnyGemmConfig(2, 64, 4, k_unroll=4),
+        4: SkinnyGemmConfig(4, 64, 4, k_unroll=2, vector_width=4, static_k=12288),
+    },
+    # 32B TP2 down.
+    (5120, 12800): {
+        1: SkinnyGemmConfig(1, 160, 2, vector_width=4, static_k=12800),
+        2: SkinnyGemmConfig(2, 64, 4, k_unroll=2, static_k=12800),
+    },
+    # 14B TP1 down.
+    (5120, 17408): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=4, vector_width=4, static_k=17408),
+        2: SkinnyGemmConfig(2, 128, 4, vector_width=4, static_k=17408),
+    },
+    # 32B TP1 down.
+    (5120, 25600): {
+        1: SkinnyGemmConfig(1, 160, 1, k_unroll=4, vector_width=4, static_k=25600),
+        2: SkinnyGemmConfig(2, 128, 4, k_unroll=4, static_k=25600),
     },
 }
 
