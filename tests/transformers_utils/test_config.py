@@ -102,6 +102,7 @@ def test_thinker_config_is_served(
     if checkpoint_config == "Qwen3ASRConfig":
         # Original Qwen3-ASR checkpoints nest every field in `thinker_config`
         config_dict["audio_config"]["model_type"] = "qwen3_asr_audio_encoder"
+        config_dict["text_config"]["model_type"] = "qwen3_asr_text"
         config_dict = {"model_type": "qwen3_asr", "thinker_config": config_dict}
     quantization_config = {"quant_method": "awq", "bits": 4, "group_size": 128}
     config_dict.update(

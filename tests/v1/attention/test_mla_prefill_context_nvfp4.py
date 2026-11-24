@@ -11,6 +11,10 @@ token.
 The reference runs the same method on a BF16 cache that holds the dequantized
 values, through the generic gather, which applies `seq_starts` itself. Every
 chunk must then see bit-identical Q, K and V.
+
+Under decode context parallelism,
+`MLACommonBaseImpl._context_parallel_compute_prefill_context` gathers each
+rank's padded local rows from the request's local start the same way.
 """
 
 from types import SimpleNamespace
@@ -88,6 +92,9 @@ class _Impl:
     """Only the attributes the context loop reads."""
 
     _compute_prefill_context = MLACommonBaseImpl._compute_prefill_context
+    _context_parallel_compute_prefill_context = (
+        MLACommonBaseImpl._context_parallel_compute_prefill_context
+    )
     _concat_k_nope_k_pe = MLACommonBaseImpl._concat_k_nope_k_pe
     _use_flashinfer_concat_mla_k = False
 
@@ -239,3 +246,217 @@ def test_nvfp4_prefill_context_matches_dequantized_cache() -> None:
             )
     torch.testing.assert_close(out, ref_out, atol=0, rtol=0)
     torch.testing.assert_close(lse, ref_lse, atol=0, rtol=0)
+
+
+def _packed_nvfp4_cache(
+    num_blocks: int, block_size: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """This layer's view of a packed cache with every row filled, and the
+    dequantized rows by slot.
+
+    Other layers' pages sit between this layer's blocks, so the block stride is
+    larger than `block_size` rows. Those bytes are 0xFF, an e4m3 NaN in the
+    RoPE and the scale factors, so a gather that strays into them fails.
+    """
+    block_stride_rows = 3 * block_size + 64
+    storage = torch.full(
+        ((num_blocks - 1) * block_stride_rows + block_size, _NVFP4_ENTRY),
+        0xFF,
+        dtype=torch.uint8,
+        device=device,
+    )
+    kv_cache = storage.as_strided(
+        (num_blocks, block_size, _NVFP4_ENTRY),
+        (block_stride_rows * _NVFP4_ENTRY, _NVFP4_ENTRY, 1),
+    )
+    num_slots = num_blocks * block_size
+    ops.concat_and_cache_mla(
+        torch.randn(num_slots, _KV_LORA_RANK, device=device, dtype=torch.bfloat16),
+        torch.randn(num_slots, _QK_ROPE, device=device, dtype=torch.bfloat16),
+        kv_cache,
+        torch.arange(num_slots, device=device),
+        kv_cache_dtype="nvfp4_ds_mla",
+        scale=torch.ones(1, dtype=torch.float32, device=device),
+    )
+    # Dequantize a contiguous copy from its first token, block by block.
+    ref_rows = torch.empty((num_slots, _ENTRY), dtype=torch.bfloat16, device=device)
+    ops.cp_gather_and_upconvert_nvfp4_kv_cache(
+        src_cache=kv_cache.contiguous(),
+        dst=ref_rows,
+        block_table=torch.arange(num_blocks, dtype=torch.int32, device=device)[None],
+        workspace_starts=torch.zeros(1, dtype=torch.int32, device=device),
+        batch_size=1,
+    )
+    return kv_cache, ref_rows
+
+
+def _context_rows(
+    ref_rows: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    request_slice: slice,
+    starts: list[int],
+    lengths: list[int],
+) -> torch.Tensor:
+    """Reference rows for `lengths[i]` tokens from `starts[i]` of each
+    request in `request_slice`."""
+    slots = []
+    for req, start, length in zip(
+        range(request_slice.start, request_slice.stop), starts, lengths, strict=True
+    ):
+        pos = torch.arange(start, start + length, device=ref_rows.device)
+        blocks = block_table[req, pos // block_size].long()
+        slots.append(blocks * block_size + pos % block_size)
+    return ref_rows[torch.cat(slots)]
+
+
+@pytest.mark.parametrize(
+    (
+        "dcp_world_size",
+        "interleave",
+        "block_size",
+        "context_lens",
+        "workspace_tokens",
+    ),
+    [
+        # Splits the first request over three chunks (the middle one starts and
+        # ends inside it), packs its tail with whole requests, and leaves the
+        # last request without any context.
+        (1, 1, 64, [600, 90, 40, 0], 200),
+        # The packed layout's 1024-token blocks.
+        (1, 1, 1024, [5000, 900, 40, 0], 1600),
+        # As above, each rank resuming at local starts inside a block.
+        (2, 1, 64, [1400, 90, 40, 0], 448),
+        (2, 16, 64, [1400, 90, 40, 0], 448),
+        (2, 1, 1024, [7000, 900, 40, 0], 3072),
+        (2, 16, 1024, [7000, 900, 40, 0], 3072),
+    ],
+    ids=[
+        "block64",
+        "block1024",
+        "dcp2_interleave1_block64",
+        "dcp2_interleave16_block64",
+        "dcp2_interleave1_block1024",
+        "dcp2_interleave16_block1024",
+    ],
+)
+@torch.inference_mode()
+def test_nvfp4_prefill_context_gathers_each_chunk_from_its_start(
+    monkeypatch: pytest.MonkeyPatch,
+    dcp_world_size: int,
+    interleave: int,
+    block_size: int,
+    context_lens: list[int],
+    workspace_tokens: int,
+) -> None:
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    query_lens = [3, 2, 4, 1]
+    num_reqs = len(context_lens)
+    use_dcp = dcp_world_size > 1
+
+    query_start_loc_cpu = torch.zeros(num_reqs + 1, dtype=torch.int32)
+    query_start_loc_cpu[1:] = torch.tensor(query_lens, dtype=torch.int32).cumsum(0)
+    # DCP lays the workspace out as N local rows + N * DCP allgather rows.
+    workspace_rows = workspace_tokens
+    if use_dcp:
+        workspace_rows += workspace_tokens // dcp_world_size
+    workspace = torch.empty(
+        (workspace_rows, _ENTRY), dtype=torch.bfloat16, device=device
+    )
+    chunked_context = build_mla_chunked_context_metadata(
+        context_lens_cpu=torch.tensor(context_lens, dtype=torch.int32),
+        prefill_query_start_loc_cpu=query_start_loc_cpu,
+        chunked_prefill_workspace=workspace,
+        chunked_prefill_workspace_size=workspace_tokens,
+        block_size=block_size,
+        align_chunk_to_block=use_dcp,
+        device=device,
+        dcp_world_size=dcp_world_size,
+        dcp_local_block_size=interleave,
+        dcp_virtual_block_size=interleave * dcp_world_size,
+    )
+    assert chunked_context is not None
+    chunks = chunked_context.chunks
+    if use_dcp:
+        starts = []
+        for c in chunks:
+            assert c.local_starts is not None
+            starts.append(c.local_starts)
+        lengths = [c.padded_local_seq_lens for c in chunks]
+    else:
+        starts = [c.starts.tolist() for c in chunks]
+        lengths = [c.seq_lens.tolist() for c in chunks]
+    assert any(s[0] % block_size for s in starts), (
+        "the batch must resume a request at a start inside a block"
+    )
+    assert sum(c.request_slice.start == 0 for c in chunks) > 2, (
+        "the batch must gather a middle chunk of a request"
+    )
+
+    # This rank's cache: under DCP it holds 1/dcp_world_size of each context.
+    max_blocks = -(-max(context_lens) // (dcp_world_size * block_size)) + 1
+    num_blocks = num_reqs * max_blocks + 3
+    kv_cache, ref_rows = _packed_nvfp4_cache(num_blocks, block_size, device)
+    block_table = (
+        torch.randperm(num_blocks, device=device)[: num_reqs * max_blocks]
+        .to(torch.int32)
+        .view(num_reqs, max_blocks)
+    )
+
+    gathered: list[torch.Tensor] = []
+    nvfp4_gather = ops.cp_gather_and_upconvert_nvfp4_kv_cache
+
+    def recording_gather(**kwargs) -> None:
+        nvfp4_gather(**kwargs)
+        gathered.append(kwargs["dst"].clone())
+
+    monkeypatch.setattr(ops, "cp_gather_and_upconvert_nvfp4_kv_cache", recording_gather)
+
+    def kv_gather(dst: torch.Tensor, src: torch.Tensor) -> None:
+        dst.view(dcp_world_size, *src.shape).copy_(src.expand(dcp_world_size, -1, -1))
+
+    chunked_context.dcp_manager = SimpleNamespace(kv_gather=kv_gather)
+    backend = _RecordingPrefillBackend()
+    prefill = MLACommonPrefillMetadata(
+        block_table=block_table,
+        query_start_loc=query_start_loc_cpu.to(device),
+        max_query_len=max(query_lens),
+        chunked_context=chunked_context,
+        q_data_type=torch.bfloat16,
+        output_dtype=torch.bfloat16,
+        prefill_backend=backend,
+    )
+    q = torch.randn(
+        (sum(query_lens), _NUM_HEADS, _QK_NOPE + _QK_ROPE),
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    impl = cast(MLACommonBaseImpl, _Impl(_KVBProj(device), "nvfp4_ds_mla"))
+    attn_metadata = SimpleNamespace(prefill=prefill)
+    scale = torch.ones(1, dtype=torch.float32, device=device)
+    if use_dcp:
+        impl._context_parallel_compute_prefill_context(
+            q, kv_cache, attn_metadata, scale, dcp_world_size
+        )
+    else:
+        impl._compute_prefill_context(q, kv_cache, attn_metadata, scale)
+
+    assert len(gathered) == len(backend.calls) == len(chunks)
+    for chunk, chunk_starts, chunk_lens, rows in zip(
+        chunks, starts, lengths, gathered, strict=True
+    ):
+        torch.testing.assert_close(
+            rows,
+            _context_rows(
+                ref_rows,
+                block_table,
+                block_size,
+                chunk.request_slice,
+                chunk_starts,
+                chunk_lens,
+            ),
+            atol=0,
+            rtol=0,
+            msg=lambda m, i=chunk.index: f"chunk {i} gathered rows differ: {m}",
+        )
