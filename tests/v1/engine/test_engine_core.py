@@ -464,9 +464,7 @@ def _mock_batch_queue_core() -> MagicMock:
     core.batch_queue_size = 2
     core.deferred_step = None
     core._pp_admission = False
-    core._idle_step = None
-    for name in ("_keep_scheduling", "_wait_for_new_request", "_on_batch_done"):
-        setattr(core, name, partial(getattr(EngineCore, name), core))
+    core._wait_for_new_request = partial(EngineCore._wait_for_new_request, core)
     return core
 
 
@@ -476,7 +474,7 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
     core = _mock_batch_queue_core()
     core.is_mm_encoder_only = encoder_only
     core.is_pooling_model = False
-    core.scheduler.has_requests.side_effect = [True, False, False]
+    core.scheduler.should_schedule.side_effect = [True, False, False]
     scheduled = core.scheduler.schedule.return_value
     scheduled.total_num_scheduled_tokens = 16
     scheduled.pending_structured_output_tokens = False
@@ -510,6 +508,7 @@ def test_prefill_interval_counts_only_executed_steps(step_fn):
     core.prefill_schedule_interval = 3
     core.num_executed_steps = 0
     core.scheduler.has_requests.return_value = True
+    core.scheduler.should_schedule.return_value = True
     core._should_throttle_prefills = lambda: EngineCore._should_throttle_prefills(core)
 
     scheduled_tokens = [16, 0, 0, 16, 16, 16]

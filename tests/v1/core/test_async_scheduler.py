@@ -512,7 +512,7 @@ def _create_async_pp_scheduler(
     # pipeline_parallel_size>1 requires that many visible GPUs. Drive with
     # queue_size=pp_size+1 (V2 async PP runs pp_size+1 concurrent batches).
     scheduler.decode_stagger = pp_size
-    scheduler.use_pp = pp_size > 1
+    scheduler.use_pp = scheduler.skip_idle_steps = pp_size > 1
     scheduler.pp_microbatch_cap = PPMicrobatchCap.create(scheduler, pp_size)
     return scheduler
 
@@ -852,23 +852,33 @@ def test_resumable_request_handoff():
 
 
 @pytest.mark.parametrize("max_tokens", [1, 4])
-def test_decode_awaiting_cadence(max_tokens: int):
-    """Only a request that will decode waits on the PP cadence."""
+def test_should_schedule_skips_idle_steps(max_tokens: int):
+    """PP: after an empty step that no request needs, no more are scheduled until
+    a request arrives or that step completes. A request that will decode needs
+    them, to advance the PP cadence."""
     scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4)
     (request,) = create_requests(
         num_requests=1, num_tokens=8, max_tokens=max_tokens, ignore_eos=True
     )
     scheduler.add_request(request)
-    assert not scheduler.has_decode_awaiting_cadence()
-
-    output = scheduler.schedule()
-    assert output.num_scheduled_tokens[request.request_id] == 8
-    # Prefill step in flight: only a request that will decode waits on the cadence.
-    assert scheduler.has_decode_awaiting_cadence() == (max_tokens > 1)
+    prefill = scheduler.schedule()
+    assert prefill.num_scheduled_tokens[request.request_id] == 8
+    assert scheduler.should_schedule()
 
     # Nothing is schedulable until the cadence elapses or the step returns.
-    assert scheduler.schedule().total_num_scheduled_tokens == 0
-    assert scheduler.has_decode_awaiting_cadence() == (max_tokens > 1)
+    idle = scheduler.schedule()
+    assert idle.total_num_scheduled_tokens == 0
+    assert scheduler.should_schedule() == (max_tokens > 1)
+
+    if max_tokens == 1:
+        (other,) = create_requests(1, 8, max_tokens=1, req_ids=["other"])
+        scheduler.add_request(other)
+        assert scheduler.should_schedule()
+        assert scheduler.schedule().num_scheduled_tokens == {"other": 8}
+        assert not scheduler.schedule().total_num_scheduled_tokens
+        assert not scheduler.should_schedule()
+        scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
+        assert scheduler.should_schedule()
 
 
 @pytest.mark.parametrize(

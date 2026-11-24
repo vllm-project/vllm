@@ -245,9 +245,6 @@ class EngineCore:
             and parallel_config.pipeline_parallel_size > 1
             and parallel_config.data_parallel_size == 1
         )
-        # PP: an in-flight empty step that no request needs. Until it completes
-        # or something changes, schedule no more, so they don't fill the queue.
-        self._idle_step: Future[Any] | None = None
 
         self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
@@ -566,7 +563,6 @@ class EngineCore:
         `request_wave`: indicate which wave of requests this is expected to
         belong to in DP case
         """
-        self._idle_step = None
         # Validate the request_id type.
         if not isinstance(request.request_id, str):
             raise TypeError(
@@ -741,19 +737,6 @@ class EngineCore:
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
-    def _keep_scheduling(
-        self, batch_queue: deque, future: Future[Any], model_executed: bool
-    ) -> bool:
-        """Whether to schedule another step rather than wait on the oldest batch."""
-        if not model_executed:
-            if not self.scheduler.has_requests():
-                return False
-            # PP: empty steps only help a decode awaiting the cadence.
-            if self._pp_admission and not self.scheduler.has_decode_awaiting_cadence():
-                self._idle_step = future
-                return False
-        return len(batch_queue) < self.batch_queue_size
-
     def _wait_for_new_request(self, batch_queue: deque) -> bool:
         """PP, with a free batch slot: wait on the oldest batch, but return True
         as soon as a request is added, to schedule it into the slot."""
@@ -762,13 +745,6 @@ class EngineCore:
             and len(batch_queue) < self.batch_queue_size
             and self._handle_inputs_while_waiting(batch_queue[-1][0], stop_on_add=True)
         )
-
-    def _on_batch_done(
-        self, future: Future[Any], scheduler_output: SchedulerOutput
-    ) -> None:
-        # A step with tokens can make schedule() produce work again.
-        if scheduler_output.total_num_scheduled_tokens or future is self._idle_step:
-            self._idle_step = None
 
     def _wait_for_output(self, future: Future[Any]) -> Any:
         """Wait for a step's model output, meanwhile handling inputs if possible."""
@@ -816,9 +792,8 @@ class EngineCore:
         assert len(batch_queue) < self.batch_queue_size
 
         model_executed = False
-        if (
-            self.deferred_step is None and self._idle_step is None
-        ) and self.scheduler.has_requests():
+        # Workers need a deferred step's sample_tokens() before the next step.
+        if self.deferred_step is None and self.scheduler.should_schedule():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
@@ -856,7 +831,9 @@ class EngineCore:
             if self.deferred_step is None:
                 # Add this step's future to the queue.
                 batch_queue.appendleft((future, scheduler_output, exec_future))
-                if self._keep_scheduling(batch_queue, future, model_executed):
+                if len(batch_queue) < self.batch_queue_size and (
+                    model_executed or self.scheduler.should_schedule()
+                ):
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
                     return None, model_executed
@@ -881,7 +858,6 @@ class EngineCore:
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
         iteration_details = self._untimed_iteration_details(scheduler_output)
-        self._on_batch_done(future, scheduler_output)
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.

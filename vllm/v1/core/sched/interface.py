@@ -207,10 +207,10 @@ class SchedulerInterface(ABC):
         not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
 
-    def has_decode_awaiting_cadence(self) -> bool:
-        """Whether an empty step would advance the PP decode cadence for a running
-        request."""
-        return True
+    def should_schedule(self) -> bool:
+        """Whether the engine should schedule another step now, rather than wait
+        for an in-flight one."""
+        return self.has_requests()
 
     @property
     @abstractmethod

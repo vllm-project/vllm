@@ -397,6 +397,12 @@ class Scheduler(SchedulerInterface):
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+        # PP, not with DP, whose busy loop runs a dummy batch on idle steps.
+        self.skip_idle_steps = (
+            self.use_pp and self.parallel_config.data_parallel_size == 1
+        )
+        # In-flight empty step that no request needs; blocks should_schedule().
+        self._idle_step: SchedulerOutput | None = None
         self._pending_encoder_input_ids: dict[str, set[int]] = {}
         # Scheduler iteration counter. Drives the PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
@@ -1808,6 +1814,12 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+        if (
+            self.skip_idle_steps
+            and not total_num_scheduled_tokens
+            and not self._has_decode_awaiting_cadence()
+        ):
+            self._idle_step = scheduler_output
         return scheduler_output
 
     def _build_kv_connector_meta(
@@ -2331,6 +2343,12 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        # A step with tokens can make schedule() produce work again.
+        if (
+            scheduler_output.total_num_scheduled_tokens
+            or scheduler_output is self._idle_step
+        ):
+            self._idle_step = None
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
@@ -3105,6 +3123,7 @@ class Scheduler(SchedulerInterface):
         return request_id in self.requests
 
     def add_request(self, request: Request) -> None:
+        self._idle_step = None
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)
@@ -3361,13 +3380,16 @@ class Scheduler(SchedulerInterface):
             >= request.num_prompt_tokens + request.max_tokens
         )
 
-    def has_decode_awaiting_cadence(self) -> bool:
+    def _has_decode_awaiting_cadence(self) -> bool:
         """Whether a running request still needs a decode but awaits the cadence."""
         return any(
             self.current_step < r.next_decode_eligible_step
             and not self._needs_no_more_steps(r)
             for r in self.running
         )
+
+    def should_schedule(self) -> bool:
+        return self._idle_step is None and self.has_requests()
 
     def has_requests(self) -> bool:
         # Override the interface default to also keep the engine alive while a
