@@ -93,6 +93,18 @@ def _validate_checkpoint_quantization(config: object) -> None:
             raise ValueError(error)
 
 
+def _validate_dfly_quantization(config: object) -> None:
+    if isinstance(config, dict) and config.get("quant_method") == "compressed-tensors":
+        # Any layer scheme works for the target; draft layers check their own.
+        # An empty transform_config means no transforms.
+        if config.get("kv_cache_scheme") is not None or config.get("transform_config"):
+            raise ValueError(
+                "DFly does not support compressed-tensors kv_cache_scheme or transforms"
+            )
+        return
+    _validate_checkpoint_quantization(config)
+
+
 def _derive_dfly_config(
     hf_config: PreTrainedConfig,
     *,
@@ -231,9 +243,7 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
             raise ValueError("DFly requires a BF16 target dtype")
         checkpoint_quantized = target.quantization in ("fp8", "compressed-tensors")
         if checkpoint_quantized:
-            _validate_checkpoint_quantization(
-                target.model_arch_config.quantization_config
-            )
+            _validate_dfly_quantization(target.model_arch_config.quantization_config)
         elif target.quantization is not None:
             from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
             from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -247,8 +257,9 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
                 QuantizationConfigArgs(moe=QuantSpec(weight=kFp8Static128BlockSym))
             ):
                 raise ValueError(
-                    "DFly supports only unquantized targets, checkpoint blockwise "
-                    "FP8/MXFP4 or online MoE-only fp8_per_block quantization"
+                    "DFly supports only unquantized targets, compressed-tensors or "
+                    "blockwise FP8 checkpoints, or online MoE-only fp8_per_block "
+                    "quantization"
                 )
         if checkpoint_quantized:
             if draft.quantization != target.quantization or spec.quantization not in (
@@ -256,9 +267,7 @@ class HYV4DFlySpeculatorConfig(DFlySpeculatorConfig):
                 target.quantization,
             ):
                 raise ValueError("DFly must use the checkpoint's quantization")
-            _validate_checkpoint_quantization(
-                draft.model_arch_config.quantization_config
-            )
+            _validate_dfly_quantization(draft.model_arch_config.quantization_config)
         elif draft.quantization is not None or spec.quantization is not None:
             raise ValueError("DFly does not support quantized draft weights")
         parallel = spec.target_parallel_config

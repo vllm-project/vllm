@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Flash text/vision composition using HYV4 processing and checkpoint layouts."""
 
+from contextlib import nullcontext
 from functools import cached_property
 
 from vllm.model_executor.models.utils import WeightsMapper
@@ -91,7 +92,11 @@ class HYV4FlashVLForConditionalGeneration(HYV4VLForConditionalGeneration):
         return HYV4FlashForCausalLM.get_model_state_cls()
 
     def load_weights(self, weights):
-        with self.language_model.weight_loading_session():
+        with (
+            nullcontext()
+            if self.model_config.get_multimodal_config().mm_encoder_only
+            else self.language_model.weight_loading_session()
+        ):
             loaded = super().load_weights(weights)
         required_visual = (
             {f"visual.{name}" for name, _ in self.visual.named_parameters()}
