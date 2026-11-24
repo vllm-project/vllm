@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.lora.ops.triton_ops.kernel_utils import mm_k
+from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -42,8 +42,9 @@ def _grouped_lora_matmul(
 
     group = tl.program_id(1).to(tl.int64)
     feature_tiles = tl.cdiv(N, BLOCK_N)
-    row_start = tl.program_id(0) // feature_tiles * BLOCK_M
-    col_start = tl.program_id(0) % feature_tiles * BLOCK_N
+    tile = tl.program_id(0)
+    row_start = tile // feature_tiles * BLOCK_M
+    pid_n = tile % feature_tiles
     group_size = tl.load(group_sizes_ptr + lora_group)
     if row_start >= group_size:
         return
@@ -58,55 +59,39 @@ def _grouped_lora_matmul(
     tokens = tl.load(
         sorted_tile_ptr + rows, mask=row_start + rows < group_size, other=T
     ).to(tl.int64)
-    cols = col_start + tl.arange(0, BLOCK_N)
     valid_tokens = tokens < T
 
-    # mm_k expects valid row and column addresses. Mask padding on writeback.
-    load_tokens = tl.where(valid_tokens, tokens, first_token)
-    ks = tl.arange(0, BLOCK_K)
-    x_tile = (
-        x_ptr
-        + group * x_group_stride
-        + load_tokens[:, None] * x_token_stride
-        + ks[None, :] * x_feature_stride
-    )
-    weight_tile = (
-        weight_ptr
-        + slot.to(tl.int64) * weight_slot_stride
-        + group * weight_group_stride
-        + ks[:, None] * weight_k_stride
-        + (cols[None, :] % N) * weight_n_stride
-    )
-    acc = mm_k(
-        x_tile,
-        weight_tile,
-        x_feature_stride,
-        weight_k_stride,
-        ks,
-        K,
-        BLOCK_M,
-        BLOCK_N,
-        BLOCK_K,
+    # The helper loads a full tile and writes only its leading valid rows.
+    do_expand_kernel(
+        pid_n=pid_n,
+        lora_index=slot.to(tl.int64),
+        slice_id=0,
+        input_ptr=x_ptr + group * x_group_stride,
+        lora_ptr=weight_ptr + group * weight_group_stride,
+        out_ptr=out_ptr + group * out_group_stride,
+        N=N,
+        K=K,
+        M_LEN=tl.sum(valid_tokens.to(tl.int32), axis=0),
+        ram=tl.where(valid_tokens, tokens, first_token),
+        slice_start_loc=0,
+        input_d0_stride=0,
+        input_d1_stride=x_token_stride,
+        input_d2_stride=x_feature_stride,
+        ls_d0_ptr=weight_slot_stride,
+        ls_d1_ptr=weight_n_stride,
+        ls_d2_ptr=weight_k_stride,
+        output_d0_stride=out_token_stride,
+        output_d1_stride=out_feature_stride,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+        SAME_STRIDE=True,
+        SLICE_NUM=1,
         EVEN_K=K % BLOCK_K == 0,
-        SPLIT_K=1,
         CAST_TYPE=False,
-        b_dtype=weight_ptr.dtype.element_ty,
+        ADD_INPUTS=ADD_INPUTS,
         USE_GDC=False,
-        base_k=0,
     )
-
-    dest = (
-        out_ptr
-        + group * out_group_stride
-        + tokens[:, None] * out_token_stride
-        + cols[None, :] * out_feature_stride
-    )
-    mask = valid_tokens[:, None] & (cols[None, :] < N)
-    result = acc.to(out_ptr.dtype.element_ty)
-    if ADD_INPUTS:
-        base = tl.load(dest, mask=mask, other=0)
-        result = result.to(tl.float32) + base.to(tl.float32)
-    tl.store(dest, result, mask=mask)
 
 
 def _launch_grouped_lora_matmul(
