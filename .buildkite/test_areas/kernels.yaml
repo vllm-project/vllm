@@ -219,6 +219,7 @@ steps:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - vllm/models/deepseek_v4/nvidia/
+  - vllm/model_executor/layers/fused_moe/block_fp8_mega_moe.py
   - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
   - vllm/model_executor/layers/fused_moe/prepare_megamoe.py
   - vllm/utils/deep_gemm.py
@@ -767,7 +768,7 @@ steps:
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
     - pytest -v -s quantization/test_cutlass_w4a16.py
     - pytest -v -s model_executor/test_deep_gemm_warmup.py
-    - pytest -v -s kernels/moe/test_deep_gemm_mega_moe.py -k fp8_block_sm90_matches_reference
+    - pytest -v -s kernels/moe/test_deep_gemm_mega_moe.py -k 'fp8_block_sm90_matches_reference or block_fp8_mega_moe_rejects'
   mirror:
     amd:
       automatic_shard: true

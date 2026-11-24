@@ -29,16 +29,17 @@ Shard = tuple[int | None, str]
 class BlockFp8MegaMoEExperts(DeepGemmMegaMoEExperts):
     """MegaMoE experts loaded from BF16 or block-FP8 checkpoints.
 
-    A BF16 checkpoint (`weight_block_size` None) runs the BF16 kernel and loads
-    as is. A block-FP8 checkpoint stores E4M3 weights with one
+    A BF16 checkpoint (`weight_block_size` None) loads as is and runs the BF16
+    kernel on SM100 only. A block-FP8 checkpoint stores E4M3 weights with one
     scale per `weight_block_size` block. Loading writes each weight
     shard straight into the kernel layout and stages its block scale in
     `*_weight_scale_inv`. Once a load is complete, the model's
     `process_weights_after_loading` calls `finalize_block_fp8_weights`. On SM90
     the kernel takes the block scales, which DeepGEMM lays out in place. On
-    SM100 the kernel takes power-of-two UE8M0 scales per 1x32, so
+    SM100 the kernel takes MXFP8 with power-of-two UE8M0 scales per 1x32, so
     `requantize_block_fp8` rounds every newly loaded shard to them in place.
-    The shared expert is fused the same way.
+    Shared experts are fused via `num_shared_experts` and loaded the same way;
+    passing a `shared_experts` module is not supported.
     """
 
     def __init__(
@@ -70,6 +71,11 @@ class BlockFp8MegaMoEExperts(DeepGemmMegaMoEExperts):
     def _fusable_shared_experts(
         self, shared_experts: nn.Module | None
     ) -> tuple[int, MegaMoEWeightSpec | None]:
+        if shared_experts is not None:
+            raise ValueError(
+                "BlockFp8MegaMoEExperts does not accept a shared_experts module. "
+                "Use num_shared_experts and load the shared-expert weights."
+            )
         n = self._num_fused_shared_experts
         return n, self.weight_format.routed if n else None
 
@@ -107,7 +113,13 @@ class BlockFp8MegaMoEExperts(DeepGemmMegaMoEExperts):
 
     @staticmethod
     def _shared_shard_id(name: str) -> str:
-        return "w1" if ".gate_proj." in name else "w3" if ".up_proj." in name else "w2"
+        if ".gate_proj." in name or ".w1." in name:
+            return "w1"
+        if ".up_proj." in name or ".w3." in name:
+            return "w3"
+        if ".down_proj." in name or ".w2." in name:
+            return "w2"
+        raise ValueError(f"Unexpected shared-expert tensor: {name}")
 
     def weight_loader(
         self,

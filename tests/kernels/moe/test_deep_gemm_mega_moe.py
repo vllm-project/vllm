@@ -10,6 +10,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.config import VllmConfig
+from vllm.model_executor.layers.fused_moe.block_fp8_mega_moe import (
+    BlockFp8MegaMoEExperts,
+)
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_BF16,
     MEGA_MOE_FP8_BLOCK_SM90,
@@ -71,8 +75,10 @@ FP8_HIDDEN_QUANTS = pytest.mark.parametrize(
 
 
 @pytest.fixture(autouse=True)
-def skip_mega_moe_support_check(monkeypatch):
-    """Skip the MegaMoE support check; kernels are gated per test."""
+def skip_mega_moe_support_check(monkeypatch, request):
+    """Only layout tests bypass the device check; distributed tests use CUDA."""
+    if "dist_init" in request.fixturenames:
+        return
     monkeypatch.setattr(
         "vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe."
         "check_deep_gemm_mega_moe_supported",
@@ -1578,6 +1584,54 @@ def _block_fp8_checkpoint(n: int, k: int, device: torch.device):
     return weight, scale, weight.float() * full
 
 
+def _make_block_fp8_experts(**kwargs):
+    config = dict(
+        weight_block_size=(128, 128),
+        num_experts=NUM_EXPERTS,
+        num_local_experts=NUM_EXPERTS,
+        experts_start_idx=0,
+        top_k=TOP_K,
+        hidden_size=HIDDEN,
+        intermediate_size=INTER,
+        activation=MegaMoEActivation(),
+        max_num_tokens=NUM_TOKENS,
+    )
+    config.update(kwargs)
+    with torch.device("cuda"):
+        return BlockFp8MegaMoEExperts(VllmConfig(), **config)
+
+
+@requires_sm90_or_sm100
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"shared_experts": torch.nn.Identity()}, "num_shared_experts"),
+        ({"top_k": 32, "num_shared_experts": 1}, "top_k"),
+        ({"top_k": 33}, "top_k"),
+        pytest.param(
+            {"intermediate_size": 4224},
+            "intermediate size.*4096",
+            marks=pytest.mark.skipif(not is_sm90, reason="SM90 tile limit"),
+        ),
+    ],
+)
+def test_block_fp8_mega_moe_rejects_unsupported_construction(dist_init, kwargs, match):
+    """Reject ignored shared modules and unrunnable shapes before loading weights."""
+    with pytest.raises(ValueError, match=match):
+        _make_block_fp8_experts(**kwargs)
+
+
+@requires_sm90_or_sm100
+def test_block_fp8_mega_moe_rejects_unknown_shared_tensor(dist_init):
+    experts = _make_block_fp8_experts(num_shared_experts=1)
+    with pytest.raises(ValueError, match="Unexpected shared-expert tensor"):
+        list(
+            experts.load_weights(
+                [("shared_experts.unknown.weight", torch.ones(HIDDEN, INTER))]
+            )
+        )
+
+
 @pytest.mark.skipif(
     not (
         has_sm90_mega_moe
@@ -1585,7 +1639,9 @@ def _block_fp8_checkpoint(n: int, k: int, device: torch.device):
     ),
     reason="The SM90 block-FP8 MegaMoE kernel requires SM90 and DeepGEMM",
 )
-@pytest.mark.parametrize("fuse_shared", [False, True])
+@pytest.mark.parametrize(
+    "shared_layout", ["unfused", "separate", "fused", "shards", "fused_square"]
+)
 @pytest.mark.parametrize(
     "act_name",
     [
@@ -1595,35 +1651,20 @@ def _block_fp8_checkpoint(n: int, k: int, device: torch.device):
     ],
 )
 def test_deep_gemm_mega_moe_fp8_block_sm90_matches_reference(
-    dist_init, act_name, fuse_shared
+    dist_init, act_name, shared_layout
 ):
     """A 128x128 block-FP8 checkpoint loaded through the block-FP8 experts matches
     the dequantized reference."""
-    from vllm.model_executor.layers.fused_moe.block_fp8_mega_moe import (
-        BlockFp8MegaMoEExperts,
-    )
-
     fmt, act = MEGA_MOE_FP8_BLOCK_SM90, ACTIVATIONS[act_name]
+    fuse_shared = shared_layout != "unfused"
+    shared_size = HIDDEN if shared_layout == "fused_square" else INTER
     torch.manual_seed(0)
     device = torch.device("cuda")
-    vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=NUM_TOKENS),
-        compilation_config=SimpleNamespace(static_forward_context={}),
+    experts = _make_block_fp8_experts(
+        num_shared_experts=shared_size // INTER if fuse_shared else 0,
+        activation=act,
+        prefix=f"model.layers.0.{fmt.name}.{act_name}.{shared_layout}",
     )
-    with torch.device(device):
-        experts = BlockFp8MegaMoEExperts(
-            vllm_config,  # type: ignore[arg-type]
-            weight_block_size=(128, 128),
-            num_shared_experts=int(fuse_shared),
-            num_experts=NUM_EXPERTS,
-            num_local_experts=NUM_EXPERTS,
-            experts_start_idx=0,
-            top_k=TOP_K,
-            hidden_size=HIDDEN,
-            intermediate_size=INTER,
-            activation=act,
-            prefix=f"model.layers.0.{fmt.name}.{act_name}.{fuse_shared}",
-        )
     assert experts.weight_format == fmt
     assert experts.has_fused_shared_experts == fuse_shared
 
@@ -1656,14 +1697,26 @@ def test_deep_gemm_mega_moe_fp8_block_sm90_matches_reference(
                 )
 
     shared_ckpt = (
-        _block_fp8_checkpoint(2 * INTER, HIDDEN, device),
-        _block_fp8_checkpoint(HIDDEN, INTER, device),
+        _block_fp8_checkpoint(2 * shared_size, HIDDEN, device),
+        _block_fp8_checkpoint(HIDDEN, shared_size, device),
     )
     reference_shared = _ReferenceSharedExpert(
         shared_ckpt[0][2], shared_ckpt[1][2], fmt.hidden_quant, act
     )
-    if fuse_shared:
-        projs = {"w1": "gate_proj", "w3": "up_proj", "w2": "down_proj"}
+    if shared_layout in ("fused", "fused_square"):
+        list(
+            experts.load_weights(
+                (f"shared_experts.{proj}.{suffix}", tensor)
+                for proj, ckpt in zip(("gate_up_proj", "down_proj"), shared_ckpt)
+                for suffix, tensor in zip(("weight", "weight_scale_inv"), ckpt[:2])
+            )
+        )
+    elif fuse_shared:
+        projs = (
+            {"w1": "w1", "w3": "w3", "w2": "w2"}
+            if shared_layout == "shards"
+            else {"w1": "gate_proj", "w3": "up_proj", "w2": "down_proj"}
+        )
         for shard_id, _, weight, scale in shards(*shared_ckpt):
             prefix = f"mlp.shared_experts.{projs[shard_id]}"
             experts.load_shared_expert_weight(f"{prefix}.weight", weight)

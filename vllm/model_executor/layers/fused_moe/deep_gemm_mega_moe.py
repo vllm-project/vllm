@@ -230,6 +230,12 @@ def check_deep_gemm_mega_moe_supported(
                 "DeepGEMM MegaMoE on SM90 supports MXFP4 and block-FP8 experts "
                 f"only, not {weight_format.name}."
             )
+        # The SM90 scheduler tracks 128-column L1 tiles with a 64-bit mask.
+        if intermediate_size > 4096:
+            raise ValueError(
+                "DeepGEMM MegaMoE on SM90 requires routed-expert intermediate "
+                f"size <= 4096, got {intermediate_size}."
+            )
     elif not current_platform.is_device_capability_family(100, device_id=device_id):
         raise NotImplementedError("DeepGEMM MegaMoE requires SM90 or SM100 GPUs.")
     elif weight_format.sm90:
@@ -377,6 +383,13 @@ class DeepGemmMegaMoEExperts(nn.Module):
         self.num_shared_experts, self.shared_spec = self._fusable_shared_experts(
             shared_experts
         )
+        # All fused shared experts contribute to a single combine slot.
+        if top_k + int(self.has_fused_shared_experts) > 32:
+            raise ValueError(
+                "DeepGEMM MegaMoE requires top_k plus one fused shared-expert "
+                f"output slot <= 32, got top_k={top_k} and "
+                f"num_shared_experts={self.num_shared_experts}."
+            )
         self._create_weights()
         for name, param in self.named_parameters(recurse=False):
             shared = name.startswith("shared_")
