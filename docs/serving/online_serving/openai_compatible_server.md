@@ -100,6 +100,10 @@ completion = client.chat.completions.create(
 )
 ```
 
+For the Rust frontend, `stream_interval` sets a token target for each streamed
+chunk after the first. The frontend flushes earlier if a batch reaches 128
+engine outputs, leaving room for the next batch while the client reads.
+
 ## Extra HTTP Headers
 
 The `X-Request-Id` HTTP request header can be enabled with

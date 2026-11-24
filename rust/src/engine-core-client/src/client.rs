@@ -744,8 +744,8 @@ impl EngineCoreClient {
     /// stream.
     ///
     /// With `sampling_params.stream_interval` above one, outputs after the
-    /// first are delivered to the stream in batches of at least that many new
-    /// tokens, and the terminal output is delivered immediately together with
+    /// first are batched until they reach the token interval or 128 engine
+    /// outputs, and the terminal output is delivered immediately together with
     /// any held-back outputs. The stream still yields every raw output in
     /// order; batching only reduces how often the consuming task is woken.
     pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {

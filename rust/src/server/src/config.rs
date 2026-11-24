@@ -407,9 +407,9 @@ pub struct Config {
     /// Optional maximum number of top log probabilities accepted by the
     /// frontend. `None` delegates to the text layer default.
     pub max_logprobs: Option<i32>,
-    /// Minimum number of newly generated tokens batched into each streamed
-    /// output after the first one. Requests can raise it with their own
-    /// `stream_interval`.
+    /// Target number of newly generated tokens per streamed output after the
+    /// first one. Requests can raise it with their own `stream_interval`.
+    /// The engine client may flush earlier to bound the unread output queue.
     pub stream_interval: NonZeroU32,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,

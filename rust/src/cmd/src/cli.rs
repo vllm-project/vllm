@@ -429,6 +429,7 @@ pub struct SharedRuntimeArgs {
     /// A smaller value (1) makes streaming smoother by sending each token
     /// immediately, while a larger value (e.g., 10) reduces host overhead and
     /// may increase throughput by batching multiple tokens before sending.
+    /// Batches flush early at 128 engine outputs.
     #[arg(long, default_value_t = NonZeroU32::MIN)]
     #[serde(default = "default_stream_interval")]
     pub stream_interval: NonZeroU32,
