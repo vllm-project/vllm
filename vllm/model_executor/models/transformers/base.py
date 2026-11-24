@@ -451,9 +451,10 @@ class Base(
             if isinstance(mapping, WeightRenaming):
                 orig_to_new_renaming.append(mapping)
             # Handle weights which Transformers splits into several
-            elif isinstance(mapping, WeightConverter):
-                if all(isinstance(op, _SPLIT_OPS) for op in mapping.operations):
-                    splits.append(mapping)
+            elif isinstance(mapping, WeightConverter) and all(
+                isinstance(op, _SPLIT_OPS) for op in mapping.operations
+            ):
+                splits.append(mapping)
             # TODO: Handle other WeightConverters to enable layer merging
 
         # Standardise base model prefix
