@@ -270,6 +270,8 @@ class SchedulerConfig:
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
+    It is disabled by default for a model with persistent state, with which it
+    is not yet validated.
     """
 
     async_scheduling_depth: int = Field(default=2, ge=2)

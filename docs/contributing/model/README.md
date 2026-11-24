@@ -17,6 +17,10 @@ Read through these pages for a step-by-step guide:
 - [Multi-Modal Support](multimodal.md)
 - [Speech-to-Text Support](transcription.md)
 
+A model that keeps fixed-size state per request on the GPU across steps, instead
+of a token-indexed KV cache, declares it as described in
+[Persistent State](../../design/persistent_state.md).
+
 !!! tip
     If you are encountering issues while integrating your model into vLLM, feel free to open a [GitHub issue](https://github.com/vllm-project/vllm/issues)
     or ask on our [developer slack](https://slack.vllm.ai).
