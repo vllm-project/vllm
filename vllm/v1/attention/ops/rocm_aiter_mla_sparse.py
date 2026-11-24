@@ -865,13 +865,19 @@ def rocm_fp8_paged_mqa_logits(
     block_size = kv_cache_fp8.shape[1]
 
     # Block-flat (NORMAL) caches take the Triton path: C4A by ratio, others
-    # by explicit cache_layout. Flash/DSv3.2 also skip insert but write SHUFFLE.
+    # by explicit cache_layout. gfx1151 stays on the Triton implementation for
+    # C4A because the AITER DeepGEMM decode path is not stable there.
+    # Flash/DSv3.2 also skip insert but write SHUFFLE.
     if (
-        (_ON_GFX950 or _ON_GFX942)
+        (_ON_GFX950 or _ON_GFX942 or _ON_GFX1151)
         and block_size > 1
         and (cache_layout == "NORMAL" or _indexer_k_is_c4a_block_flat(compress_ratio))
     ):
         if block_size % 64 == 0:
+            if _ON_GFX1151:
+                logger.info_once(
+                    "Using Triton paged-MQA logits on gfx1151 for C4A decode."
+                )
             return rocm_fp8_paged_mqa_logits_triton(
                 q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
             )
