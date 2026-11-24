@@ -19,6 +19,7 @@ import argparse
 import gzip
 import json
 import statistics
+import time
 from collections import defaultdict
 from typing import Any
 
@@ -78,6 +79,43 @@ def short_name(name: str) -> str:
     return base
 
 
+def _split_replays(
+    acts: list[dict], events: list[dict], replays: int
+) -> list[list[dict]]:
+    """Split time-ordered GPU activities into one list per replay.
+
+    With one `cudaGraphLaunch` per replay in the trace, a replay is the
+    activities carrying its launch's correlation id. That leaves out eager
+    work issued between replays (e.g. RNG state updates for the graph), and
+    a trace that lost records from one replay fails instead of being split
+    at the wrong places. Otherwise the activities are split evenly.
+    """
+    launches = [
+        e["args"]["correlation"]
+        for e in sorted(events, key=lambda e: e.get("ts", 0))
+        if e.get("cat") == "cuda_runtime"
+        and e.get("name") == "cudaGraphLaunch"
+        and "correlation" in e.get("args", {})
+    ]
+    if len(launches) == replays:
+        by_launch: dict[Any, list[dict]] = {c: [] for c in launches}
+        for a in acts:
+            corr = a.get("args", {}).get("correlation")
+            if corr in by_launch:
+                by_launch[corr].append(a)
+        chunks = [by_launch[c] for c in launches]
+        counts = [len(c) for c in chunks]
+        if len(set(counts)) != 1:
+            raise ValueError(f"Per-replay GPU activity counts differ: {counts}")
+        return chunks
+    if len(acts) % replays:
+        raise ValueError(
+            f"{len(acts)} GPU activities don't split into {replays} replays"
+        )
+    per_replay = len(acts) // replays
+    return [acts[r * per_replay : (r + 1) * per_replay] for r in range(replays)]
+
+
 def summarize(events: list[dict], replays: int, skip: int) -> dict[str, Any]:
     """Per-forward kernel times from the GPU activities of `replays` replays.
 
@@ -94,19 +132,15 @@ def summarize(events: list[dict], replays: int, skip: int) -> dict[str, Any]:
             "No GPU activity recorded. Another profiler (e.g. nsys) may hold "
             "CUPTI; don't combine --profile-dir with it."
         )
-    if len(acts) % replays:
-        raise ValueError(
-            f"{len(acts)} GPU activities don't split into {replays} replays"
-        )
-    per_replay = len(acts) // replays
+    chunks = _split_replays(acts, events, replays)
+    per_replay = len(chunks[0])
     if per_replay <= skip:
         raise ValueError(f"{per_replay} activities per replay, {skip} to skip")
     kernels: dict[str, dict[str, Any]] = defaultdict(
         lambda: {"total_us": 0.0, "calls": 0, "example": ""}
     )
     spans, busy, pre = [], [], []
-    for r in range(replays):
-        chunk = acts[r * per_replay : (r + 1) * per_replay]
+    for chunk in chunks:
         pre.append(sum(e["dur"] for e in chunk[:skip]))
         forward = chunk[skip:]
         spans.append(
@@ -178,6 +212,9 @@ def profile_graph(
     activities = get_default_torch_profiler_activities()
     with torch.profiler.profile(activities=activities) as prof:
         run()
+        # GPU records can be stamped up to ~0.5 ms after the last synchronize
+        # returns; keep the trace window open so the last replay isn't cut.
+        time.sleep(0.05)
     trace = f"{prefix}.trace.json.gz"
     prof.export_chrome_trace(trace)
     with gzip.open(trace, "rt") as f:

@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import socket
+import sys
 from dataclasses import asdict
 from typing import Any
 
@@ -290,7 +291,18 @@ def main(args: argparse.Namespace) -> None:
     results = []
     with torch.inference_mode(), set_current_vllm_config(runner.vllm_config):
         for case in cases:
-            result = run_case(runner, case, args, sampling_params)
+            try:
+                result = run_case(runner, case, args, sampling_params)
+            except Exception:
+                if world.world_size == 1:
+                    raise
+                # A normal exit blocks in NCCL teardown: the other ranks wait in
+                # this case's collectives, and the traceback keeps the captured
+                # graph alive. Exit now so the launcher stops the other ranks.
+                logger.exception("Case %s failed on rank %d", case.name, world.rank)
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os._exit(1)
             gathered: list[Any] = [None] * world.world_size
             torch.distributed.all_gather_object(gathered, result, group=world.cpu_group)
             if world.rank != 0:

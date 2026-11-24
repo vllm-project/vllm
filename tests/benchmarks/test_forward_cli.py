@@ -708,6 +708,51 @@ def test_profile_summary():
         summarize(events[:-1], replays=2, skip=1)
 
 
+def test_profile_summary_splits_by_graph_launch():
+    """Replays are the activities of each `cudaGraphLaunch`: eager kernels
+    between launches are dropped, and a replay that lost records fails even
+    when the total still divides by the replay count."""
+
+    def launch(corr, ts):
+        return {
+            "cat": "cuda_runtime",
+            "name": "cudaGraphLaunch",
+            "ts": ts,
+            "dur": 1,
+            "args": {"correlation": corr},
+        }
+
+    def act(name, corr, ts, dur):
+        return {
+            "cat": "kernel",
+            "name": name,
+            "ts": ts,
+            "dur": dur,
+            "args": {"correlation": corr},
+        }
+
+    events = []
+    for r, corr in enumerate((11, 22, 33)):
+        base = 1000 * r
+        events.append(act("void at::fill<long>(long*)", 900 + r, base, 1))
+        events.append(launch(corr, base + 1))
+        events.append(act("void restore()", corr, base + 10, 2))
+        events.append(
+            act("ncclDevKernel_AllReduce_Sum_f32_RING_LL", corr, base + 20, 50)
+        )
+        events.append(act("void ns::gemm<128>(Params)", corr, base + 100, 10))
+    summary = summarize(events, replays=3, skip=2)
+    assert summary["pre_forward_us"] == 52
+    kernels = [(k["name"], k["calls"]) for k in summary["kernels"]]
+    assert kernels == [("ns::gemm", 1)]
+
+    # Replay 3 lost its last record. With two eager kernels gone too, the
+    # 9 remaining activities still split evenly; the per-launch counts don't.
+    truncated = [e for e in events if e["ts"] not in (2100, 0, 1000)]
+    with pytest.raises(ValueError, match="counts differ"):
+        summarize(truncated, replays=3, skip=2)
+
+
 @pytest.mark.benchmark
 # TODO(woosuk): Support ROCm and re-enable this test there.
 @pytest.mark.skipif(
