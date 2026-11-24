@@ -839,7 +839,7 @@ class CompilationConfig:
     token-keyed graphs. None (default): 8192 on SM100 GPUs, otherwise no budget.
     Wider decode graphs take memory from the KV cache."""
     cudagraph_copy_inputs: bool = False
-    """Deprecated: has no effect and will be removed in v0.36. The model runner
+    """Deprecated: has no effect and will be removed in v0.37.0. The model runner
     already passes persistent input buffers to CUDA graphs."""
     cudagraph_specialize_lora: bool = True
     """Whether to create separate cuda graphs for cases with and without active
@@ -1099,7 +1099,7 @@ class CompilationConfig:
         if self.cudagraph_copy_inputs:
             logger.warning_once(
                 "`cudagraph_copy_inputs` is deprecated, has no effect and will be "
-                "removed in v0.36."
+                "removed in v0.37.0."
             )
 
         # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
