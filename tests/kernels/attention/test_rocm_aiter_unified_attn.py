@@ -15,15 +15,19 @@ from tests.kernels.attention.test_triton_unified_attention import ref_paged_attn
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
-_SKIP_NON_CDNA_2_PLUS = True
+_SKIP_UNSUPPORTED_ARCH = True
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import get_cdna_version
+    from vllm.platforms.rocm import get_cdna_version, on_gfx1151, on_gfx1201
 
-    _SKIP_NON_CDNA_2_PLUS = get_cdna_version() < 2
+    _SKIP_UNSUPPORTED_ARCH = get_cdna_version() < 2 and not (
+        on_gfx1151() or on_gfx1201()
+    )
 
 pytestmark = [
     pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific tests"),
-    pytest.mark.skipif(_SKIP_NON_CDNA_2_PLUS, reason="CDNA 2+ ROCm only"),
+    pytest.mark.skipif(
+        _SKIP_UNSUPPORTED_ARCH, reason="CDNA 2+, gfx1151 or gfx1201 ROCm only"
+    ),
 ]
 
 NUM_Q_HEADS = 8
@@ -79,9 +83,12 @@ FP8_SEQ_LENS = [
 
 
 def _require_aiter() -> None:
-    from vllm._aiter_ops import is_aiter_found_and_supported
+    from vllm._aiter_ops import (
+        is_aiter_found_and_supported,
+        is_aiter_found_and_supported_on_rdna,
+    )
 
-    if not is_aiter_found_and_supported():
+    if not (is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna()):
         pytest.skip("aiter is required on supported ROCm hardware for this test")
 
 
