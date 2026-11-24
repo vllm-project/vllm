@@ -176,15 +176,15 @@ def _draft_update_worker(vllm_config, drafter: torch.nn.Module, **engine) -> Wor
 
 
 @requires_cuda
-@requires_fp8_gemm
+@pytest.mark.parametrize("quantization", [FP8, NVFP4])
 def test_draft_weight_update_refreshes_copy(
-    default_vllm_config, dist_init, monkeypatch
+    default_vllm_config, dist_init, monkeypatch, quantization
 ):
     """A draft weight update can write a target weight the drafter shares, such
     as an embedding tied to the lm_head; the copy must follow it."""
     head = _target_head(monkeypatch)
     drafter = torch.nn.Module()
-    drafter.lm_head = quantized_lm_head_copy(head, "fp8")
+    drafter.lm_head = quantized_lm_head_copy(head, quantization)
     worker = _draft_update_worker(
         default_vllm_config,
         drafter,
@@ -196,7 +196,7 @@ def test_draft_weight_update_refreshes_copy(
     head.weight.data.copy_(_target_head(monkeypatch, seed=1).weight)
     worker.finish_weight_update()
 
-    expected = _tensors(quantized_lm_head_copy(head, "fp8"))
+    expected = _tensors(quantized_lm_head_copy(head, quantization))
     for name, tensor in _tensors(drafter.lm_head).items():
         assert torch.equal(tensor, expected[name]), name
 
