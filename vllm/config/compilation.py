@@ -522,8 +522,6 @@ class CompilationConfig:
         [vllm.config.CompilationConfig.max_decode_cudagraph_capture_requests]
         - [`cudagraph_num_of_warmups`]
         [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
-        - [`cudagraph_copy_inputs`]
-        [vllm.config.CompilationConfig.cudagraph_copy_inputs]
     - Inductor compilation:
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
         - [`compile_ranges_endpoints`]
@@ -840,14 +838,6 @@ class CompilationConfig:
     batches take the prefill graphs. It also bounds adaptive verification's
     token-keyed graphs. None (default): 8192 on SM100 GPUs, otherwise no budget.
     Wider decode graphs take memory from the KV cache."""
-    cudagraph_copy_inputs: bool = False
-    """Whether to copy input tensors for
-    cudagraph. If the caller can guarantee that the same input buffers
-    are always used, it can set this to False. Otherwise, it should
-    set this to True, and the compiler will copy the input to an
-    internally managed buffer. Default is False.
-    Note that this flag is only effective when cudagraph_mode is PIECEWISE.
-    """
     cudagraph_specialize_lora: bool = True
     """Whether to create separate cuda graphs for cases with and without active
     LoRA adapters. When set to False, the LoRA-enabled cuda graph will be used
