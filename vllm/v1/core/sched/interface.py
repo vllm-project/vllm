@@ -46,7 +46,7 @@ class SchedulerInterface(ABC):
         hash_block_size: int,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
-        log_stats: bool = False,
+        collect_stats: bool = False,
     ) -> None:
         raise NotImplementedError
 
