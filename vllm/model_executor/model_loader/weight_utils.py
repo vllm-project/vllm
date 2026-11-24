@@ -187,6 +187,7 @@ def get_quant_config(
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
     # resolve_quantization_config does not resolve `quantization_config` from
     # ambiguous shorthands as `"mxfp4"`, `"mxfp8"`.
@@ -294,6 +295,12 @@ def get_quant_config(
                 "but quant_cls.from_config_dict_json is not implemented in "
                 f"{quant_cls}"
             )
+
+    if quant_cls is QuarkConfig:
+        raise ValueError(
+            "Quark requires a checkpoint exported with quantization_config "
+            "in config.json. For an unquantized checkpoint, omit quantization='quark'."
+        )
 
     # Raw unambiguous online quantization doesn't read from checkpoint configs
     # We must continue to load/read the config below in two cases:

@@ -204,7 +204,10 @@ for more exporting format details.
 
 ### 5. Evaluation in vLLM
 
-Now, you can load and run the Quark quantized model directly through the LLM entrypoint:
+Load the exported checkpoint through the `LLM` entry point. When you set
+`quantization="quark"`, vLLM reads the Quark `quantization_config` from the
+checkpoint's `config.json`. For full-precision inference, omit the `quantization`
+argument when loading the original checkpoint.
 
 ??? code
 
