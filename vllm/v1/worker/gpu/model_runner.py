@@ -1768,6 +1768,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.masked_token_ids is not None:
             logits.index_fill_(-1, self.masked_token_ids, float("-inf"))
 
+        import os as alignment_os
+        if alignment_os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
+            from alignment_audit import capture_vllm_v2_step
+            capture_vllm_v2_step(self, logits, sample_hidden_states, input_batch)
+
         # A diffusion prefill has no logit rows even when a bitmask row
         # arrived for it.
         if grammar_output is not None and logits.shape[0] > 0:

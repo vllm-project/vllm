@@ -1376,6 +1376,9 @@ class KimiLinearForCausalLM(
         # The model's final norm is applied here, not at the end of forward.
         self.after_specialized_decode_step()
         hidden_states = self.model.norm(hidden_states, None)
+        import os as alignment_os
+        if alignment_os.environ.get("KIMI_ALIGNMENT_AUDIT_DIR"):
+            self._alignment_post_norm_hidden = hidden_states.detach()
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

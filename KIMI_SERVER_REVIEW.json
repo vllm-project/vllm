@@ -1,0 +1,36 @@
+{
+  "captured_at": "2026-11-24T11:44:59.445241+08:00",
+  "source": "423 task workspace, read only",
+  "upstream_base": "9cd5cde84bc372462a9034e49462634a168304fb",
+  "previous_pr_head": "698523f4896211d8d5fff31c1763d5e744029928",
+  "scope": "删除服务器不存在的通用sampling trace processor、demo、CPU测试和CI接线。恢复服务器原来的模型输出采集、GPU runner采集入口，以及暂停时调整scheduler budget的分段prefill诊断接口。",
+  "main_context_notes": "只保留主仓现有的grammar/diffusion判断，在其之前放回原采集入口。探针仍是实验专用，会读取设备张量到CPU并写本地文件；不是异步GPU友好的通用采集机制。",
+  "model_or_device_runs_started": false,
+  "unit_tests_run": false,
+  "files": [
+    {
+      "repo": "vllm",
+      "server_path": "source/vllm/vllm/models/kimi_k3/amd/linear.py",
+      "target": "vllm/models/kimi_k3/amd/linear.py",
+      "server_sha256": "bccfd39bd10bd366f0b4b4cee5da80a3b568b2ff3cb3279dfb91c7f0b7bc0bae",
+      "pr_sha256": "702c2a2e59f52d62414ee0bb3023ed87068e5922c8d3a53491643476ef540d50",
+      "byte_identical": false
+    },
+    {
+      "repo": "vllm",
+      "server_path": "source/vllm/vllm/v1/engine/core.py",
+      "target": "vllm/v1/engine/core.py",
+      "server_sha256": "00a3adb56ab520786ed25db7f3cb7b89f4bb64241016bed9c2d5aa1eb7978687",
+      "pr_sha256": "55dafd3ee5759dd9cbfb10c4373f17f8dfaa7811909289fe070fd0e0c4baf4f2",
+      "byte_identical": false
+    },
+    {
+      "repo": "vllm",
+      "server_path": "source/vllm/vllm/v1/worker/gpu/model_runner.py",
+      "target": "vllm/v1/worker/gpu/model_runner.py",
+      "server_sha256": "2c32fe308bc2aac3de66f27bd2cc239911124e8e51922a3c898e918c05584c7b",
+      "pr_sha256": "359fe5b1f26a5e1749ba1ca02f659224b19edb98050638924c27d64927ab43a4",
+      "byte_identical": false
+    }
+  ]
+}
