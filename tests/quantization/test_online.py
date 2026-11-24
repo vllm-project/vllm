@@ -2909,6 +2909,119 @@ def test_online_ptpc_activation_override(default_vllm_config) -> None:
         OnlineQuantizationConfig(args).resolve_quant_method_cls(_TestLinear, "linear")
 
 
+def _draft_copy_config(targets, alias=None, target_quant_method=None):
+    """A VllmConfig stand-in for `resolve_draft_lm_head_copy`, and a target head
+    that is quantized when `target_quant_method` is given."""
+    config = SimpleNamespace(
+        quant_config=OnlineQuantizationConfig(QuantizationConfigArgs(targets=targets)),
+        speculative_config=SimpleNamespace(draft_lm_head_quantization=alias),
+    )
+    head = SimpleNamespace(
+        quant_method=target_quant_method or UnquantizedEmbeddingMethod(),
+        prefix="language_model.lm_head",
+    )
+    return config, head
+
+
+def test_draft_lm_head_key_selects_only_the_copy(default_vllm_config) -> None:
+    """The draft key names the drafter's copy; the target head keeps its method."""
+    from vllm.model_executor.layers.quantization.online.lm_head import (
+        DRAFT_LM_HEAD_PREFIX,
+        resolve_draft_lm_head_copy,
+    )
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    config, head = _draft_copy_config({DRAFT_LM_HEAD_PREFIX: "fp8_per_channel"})
+    spec = resolve_draft_lm_head_copy(config, head)
+    assert spec is not None and spec.method_cls is Fp8PtpcOnlineLinearMethod
+    assert spec.activation_quant_key == kFp8DynamicTokenSym
+    online = config.quant_config
+    assert online.resolve_quant_method_cls(ParallelLMHead, head.prefix) is None
+    # Each copy gets its own method: one method holds one layer's kernel.
+    assert spec.build() is not spec.build()
+    # No key, no alias: the drafter shares the target head.
+    config, head = _draft_copy_config({"re:.*self_attn.*": "fp8_per_channel"})
+    assert resolve_draft_lm_head_copy(config, head) is None
+
+
+def test_draft_lm_head_copy_takes_formats_verify_rejects(default_vllm_config) -> None:
+    """NVFP4 weight-only is a drafter copy format; the target head refuses it,
+    and so does a copy of a method that is not validated for the head."""
+    from vllm.model_executor.layers.quantization.online.lm_head import (
+        DRAFT_LM_HEAD_PREFIX,
+        resolve_draft_lm_head_copy,
+    )
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    config, head = _draft_copy_config({DRAFT_LM_HEAD_PREFIX: "nvfp4_weight_only"})
+    spec = resolve_draft_lm_head_copy(config, head)
+    assert spec is not None
+    assert spec.method_cls is Nvfp4WeightOnlyOnlineLinearMethod
+    verify = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={"lm_head": "nvfp4_weight_only"})
+    )
+    with pytest.raises(NotImplementedError, match="does not support the lm_head"):
+        verify.resolve_quant_method_cls(ParallelLMHead, "lm_head")
+    config, head = _draft_copy_config({DRAFT_LM_HEAD_PREFIX: "fp8_per_tensor"})
+    with pytest.raises(NotImplementedError, match="cannot quantize a drafter lm_head"):
+        resolve_draft_lm_head_copy(config, head)
+
+
+def test_draft_lm_head_copy_with_a_quantized_target(default_vllm_config) -> None:
+    """A pattern naming both heads quantizes the target and the drafter shares
+    it, as before. A separate draft key needs an unquantized source head."""
+    from vllm.model_executor.layers.quantization.online.lm_head import (
+        DRAFT_LM_HEAD_PREFIX,
+        resolve_draft_lm_head_copy,
+    )
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    quantized = Fp8PtpcOnlineLinearMethod()
+    config, head = _draft_copy_config(
+        {"re:.*lm_head$": "fp8_per_channel"}, target_quant_method=quantized
+    )
+    assert resolve_draft_lm_head_copy(config, head) is None
+    config, head = _draft_copy_config(
+        {
+            "language_model.lm_head": "fp8_per_channel",
+            DRAFT_LM_HEAD_PREFIX: "fp8_per_channel",
+        },
+        target_quant_method=quantized,
+    )
+    with pytest.raises(ValueError, match="needs an unquantized target lm_head"):
+        resolve_draft_lm_head_copy(config, head)
+
+
+def test_draft_lm_head_quantization_alias(default_vllm_config, monkeypatch) -> None:
+    """`draft_lm_head_quantization` stands for the matching `targets` key."""
+    from vllm.model_executor.layers.quantization.online.lm_head import (
+        DRAFT_LM_HEAD_PREFIX,
+        resolve_draft_lm_head_copy,
+    )
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    for alias, key, method_cls in (
+        ("fp8", "fp8_per_channel", Fp8PtpcOnlineLinearMethod),
+        ("nvfp4", "nvfp4_weight_only", Nvfp4WeightOnlyOnlineLinearMethod),
+    ):
+        config, head = _draft_copy_config({}, alias=alias)
+        from_alias = resolve_draft_lm_head_copy(config, head)
+        config, head = _draft_copy_config({DRAFT_LM_HEAD_PREFIX: key}, alias=alias)
+        both = resolve_draft_lm_head_copy(config, head)
+        assert from_alias is not None and both is not None
+        assert from_alias.method_cls is both.method_cls is method_cls
+        assert from_alias.activation_quant_key == both.activation_quant_key
+    config, head = _draft_copy_config(
+        {DRAFT_LM_HEAD_PREFIX: "nvfp4_weight_only"}, alias="fp8"
+    )
+    with pytest.raises(ValueError, match="disagrees with quantization_config.targets"):
+        resolve_draft_lm_head_copy(config, head)
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    config, head = _draft_copy_config({DRAFT_LM_HEAD_PREFIX: "fp8_per_channel"})
+    with pytest.raises(ValueError, match="VLLM_RELOAD_MODE=direct"):
+        resolve_draft_lm_head_copy(config, head)
+
+
 def test_online_quantization_targets_reject_unsupported_layer() -> None:
     """A targets match on a non-linear, non-MoE layer is rejected."""
     config = OnlineQuantizationConfig(

@@ -279,13 +279,26 @@ vllm serve amd/Qwen3.6-35B-A3B-Quark-UINT4-G128 \
   a checkpoint-quantized lm_head raises `NotImplementedError`.
 - `targets` is mutually exclusive with `linear` and `moe`. To also quantize
   the linear layers online, add patterns for them to `targets`.
-- This quantizes the model's own lm_head. It is unrelated to
-  `draft_lm_head_quantization` in `--speculative-config`, which gives a
-  speculative-decoding drafter a private quantized copy of the target's lm_head
-  and leaves the target unchanged. Both live in
-  `vllm/model_executor/layers/quantization/online/lm_head.py`, where
-  `OnlineLMHeadMethodBase` implements the weight-only methods above that are
-  specific to the lm_head.
+- A pattern naming the target's own lm_head quantizes that head. A
+  speculative-decoding drafter that shares the target's lm_head shares the
+  quantized head too. To give the drafter its own quantized copy and leave the
+  target's head unchanged, add a pattern for `draft_model.lm_head`:
+
+  ```bash
+  --quantization-config '{"targets":{"draft_model.lm_head":"fp8_per_channel"}}'
+  ```
+
+  The key is this exact name for every drafter; a shell-style pattern such as
+  `*draft_model.*.lm_head` does not match it. The copy takes `fp8_per_channel`
+  (add `"activation": null` for weight-only FP8 on GPUs without FP8 GEMMs),
+  `nvfp4_weight_only`, or the lm_head-only weight above. It needs an
+  unquantized target lm_head, so a pattern that also names the target head
+  (such as `re:.*lm_head$`) quantizes the target head and the drafter shares it.
+  `draft_lm_head_quantization` in `--speculative-config` (`"fp8"`,
+  `"nvfp4"`) still works as an alias for the matching key and must agree with
+  it if both are set. `OnlineLMHeadMethodBase`, in
+  `vllm/model_executor/layers/quantization/online/lm_head.py`, implements the
+  weight-only methods above that are specific to the lm_head.
 
 !!! warning
     A lm_head tied to the input embeddings (e.g. small Qwen3 and Gemma models)

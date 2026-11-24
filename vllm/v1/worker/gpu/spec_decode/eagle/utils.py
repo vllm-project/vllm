@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Literal
-
 import torch
 import torch.nn as nn
 
@@ -9,7 +7,10 @@ from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import in_single_pp_stage
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.quantization.online.lm_head import (
+    DRAFT_LM_HEAD_PREFIX,
+    LMHeadCopySpec,
     quantized_lm_head_copy,
+    resolve_draft_lm_head_copy,
 )
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.utils import get_draft_load_config
@@ -44,7 +45,7 @@ def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
 def share_target_lm_head(
     draft_model: nn.Module,
     target_lm_head: nn.Module | None,
-    quantization: Literal["fp8", "nvfp4"] | None,
+    quantization: LMHeadCopySpec | str | None,
     can_share: bool = True,
 ) -> nn.Module | None:
     """Install the target lm_head, or its quantized copy, on a drafter that
@@ -58,8 +59,9 @@ def share_target_lm_head(
     ):
         if quantization is not None:
             raise ValueError(
-                "draft_lm_head_quantization needs a drafter that shares the "
-                "target lm_head."
+                "A quantized drafter lm_head (draft_lm_head_quantization, or a "
+                f"quantization_config.targets pattern for {DRAFT_LM_HEAD_PREFIX!r})"
+                " needs a drafter that shares the target lm_head."
             )
         return None
     head = target_lm_head
@@ -137,10 +139,11 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
 
     maybe_share_target_embed(eagle_model, draft_inner, target_inner)
 
+    target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_head = share_target_lm_head(
         eagle_model,
-        get_target_lm_head(target_model, target_language_model),
-        speculative_config.draft_lm_head_quantization,
+        target_lm_head,
+        resolve_draft_lm_head_copy(vllm_config, target_lm_head),
     )
     if draft_head is not None:
         # MTP layers route logits through layer.shared_head.head, not

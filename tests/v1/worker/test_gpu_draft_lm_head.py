@@ -7,10 +7,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.online.lm_head import (
+    DRAFT_LM_HEAD_PREFIX,
     quantized_lm_head_copy,
     refresh_quantized_lm_heads,
+    resolve_draft_lm_head_copy,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.reload import (
@@ -77,6 +81,40 @@ def test_tracks_bf16_head_through_logits_processor(
     top1 = (out.argmax(-1) == ref.argmax(-1)).float().mean().item()
     assert rel_err < max_rel_err
     assert top1 > min_top1
+
+
+@requires_cuda
+def test_targets_key_weight_only_fp8_tracks_bf16_head(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """A `draft_model.lm_head` key with `activation: null` builds a W8A16 copy
+    on any CUDA GPU (the W8A8 `"fp8"` alias needs FP8 GEMM hardware). The
+    Humming kernel repacks the weight, so a layout slip shows as wrong logits."""
+    head = _target_head(monkeypatch)
+    spec = resolve_draft_lm_head_copy(
+        SimpleNamespace(
+            quant_config=OnlineQuantizationConfig(
+                QuantizationConfigArgs(
+                    targets={
+                        DRAFT_LM_HEAD_PREFIX: QuantSpec(
+                            weight="fp8_per_channel_static", activation=None
+                        )
+                    }
+                )
+            ),
+            speculative_config=SimpleNamespace(draft_lm_head_quantization=None),
+        ),
+        head,
+    )
+    assert spec is not None
+    draft_head = quantized_lm_head_copy(head, spec)
+
+    logits_processor = LogitsProcessor(VOCAB)
+    hidden = torch.randn(2048, HIDDEN, device="cuda", dtype=torch.bfloat16)
+    ref = logits_processor(head, hidden).float()
+    out = logits_processor(draft_head, hidden).float()
+    assert ((out - ref).norm() / ref.norm()).item() < 0.05
+    assert (out.argmax(-1) == ref.argmax(-1)).float().mean().item() > 0.9
 
 
 @requires_cuda
