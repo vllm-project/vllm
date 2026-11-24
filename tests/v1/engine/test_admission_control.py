@@ -141,7 +141,7 @@ def _make_request_test_llm(
     add_request_async: Callable[[EngineCoreRequest], Awaitable[None]],
 ) -> AsyncLLM:
     llm = _make_async_llm(max_num_queued_reqs=max_num_queued_reqs)
-    llm.output_processor = OutputProcessor(None, log_stats=False)
+    llm.output_processor = OutputProcessor(None, collect_stats=False)
     llm.engine_core = SimpleNamespace(
         resources=SimpleNamespace(engine_dead=False),
         add_request_async=AsyncMock(side_effect=add_request_async),
