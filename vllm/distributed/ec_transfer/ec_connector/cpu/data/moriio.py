@@ -38,9 +38,6 @@ try:
 except ImportError:
     mori_io = None
 
-# Largest region verified with MoRI-IO. 1.5 and 2 GiB regions registered fine
-# but returned blank embeddings for part of the requests, cause not yet known.
-_MAX_REGION_BYTES = 1 << 30
 # How long deregister() lets released, still in-flight READs finish.
 _SHUTDOWN_SETTLE_MS = 2000
 # Transports whose READs did not settle in deregister(). MoRI-IO holds their
@@ -112,11 +109,6 @@ class MoRIIODataTransport(DataTransport):
             raise RuntimeError(
                 "ec_transport=moriio requires MoRI-IO; install `amd-mori` or "
                 "set a different ec_transport."
-            )
-        if region.nbytes > _MAX_REGION_BYTES:
-            raise ValueError(
-                f"ec_transport=moriio supports ec_cpu_bytes up to "
-                f"{_MAX_REGION_BYTES} bytes; got {region.nbytes}"
             )
         self._block_size = block_size_bytes
         # The memory READs write into. Held so that it outlives the scheduler

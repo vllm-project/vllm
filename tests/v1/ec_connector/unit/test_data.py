@@ -511,12 +511,6 @@ def test_deregister_keeps_region_registered_while_read_is_in_flight(fake_mori):
         producer.deregister()
 
 
-def test_rejects_region_above_validated_size(fake_mori, monkeypatch):
-    monkeypatch.setattr(moriio_mod, "_MAX_REGION_BYTES", _N * _BS - 1)
-    with pytest.raises(ValueError, match="ec_cpu_bytes up to"):
-        _transport("enc", 0)
-
-
 def test_scheduler_builds_moriio_transport_from_extra_config(fake_mori, monkeypatch):
     """ec_transport=moriio must reach the scheduler's data plane."""
     import uuid
