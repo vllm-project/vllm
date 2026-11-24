@@ -150,8 +150,8 @@ async def _encode(session, encoder):
     )
     assert rewritten["messages"][0]["content"][0]["type"] == "image_embeds"
     for request in (body, rewritten):
-        request["ec_transfer_params"] = {item_uuid: copy.deepcopy(handle)}
-    return body, rewritten, item_uuid
+        request["ec_transfer_params"] = {mm_hash: copy.deepcopy(handle)}
+    return body, rewritten, mm_hash
 
 
 @pytest.mark.asyncio
