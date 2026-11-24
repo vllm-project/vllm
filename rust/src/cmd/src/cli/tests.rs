@@ -2976,7 +2976,7 @@ fn frontend_args_json_parses_cors_fields() {
 }
 
 #[test]
-fn frontend_args_json_rejects_unsupported_fields() {
+fn frontend_args_json_marks_prompt_token_ids_unsupported() {
     let error = Cli::try_parse_from([
         "vllm-rs",
         "frontend",
@@ -2991,6 +2991,7 @@ fn frontend_args_json_rejects_unsupported_fields() {
     ])
     .unwrap_err();
 
+    let actual = error.to_string().replace(": \n", ":\n");
     expect![[r#"
         error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","tool_server":"demo"}' for '--args-json <JSON>': 
         The following arguments are not implemented in Rust frontend yet:
@@ -2999,7 +3000,7 @@ fn frontend_args_json_rejects_unsupported_fields() {
         Remove these arguments to continue.
 
         For more information, try '--help'.
-    "#]].assert_eq(&error.to_string());
+    "#]].assert_eq(&actual);
 }
 
 #[test]
