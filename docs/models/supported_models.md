@@ -19,7 +19,7 @@ vLLM also supports model implementations that are available in Transformers. We 
 
 Currently, the Transformers modeling backend works for the following:
 
-- Modalities: embedding models, language models, vision-language models and audio-language models
+- Modalities: embedding models, language models, vision-language models, audio-language models and omni models
 - Architectures: encoder-only, decoder-only, mixture-of-experts
 - Attention types: full attention and/or sliding attention
 - [Speculative decoding](../features/speculative_decoding/README.md) methods: EAGLE-3, DFlash, DFlash2, DSpark, XPress and MTP (for models following the Transformers MTP standard)
@@ -47,6 +47,9 @@ If a model has a vLLM implementation but you would prefer to use the Transformer
 
 !!! note
     For vision-language models, if you are loading with `dtype="auto"`, vLLM loads the whole model with config's `dtype` if it exists. In contrast the native Transformers will respect the `dtype` attribute of each backbone in the model. That might cause a slight difference in performance.
+
+!!! note
+    For omni models, `load_audio_from_video` (or the deprecated `use_audio_in_video`) can only be set for the whole model with `mm_processor_kwargs` for [offline inference](../serving/offline_inference.md) or `--mm-processor-kwargs` for the [online serving](../serving/online_serving/README.md). In contrast the vLLM implementations of Qwen2.5-Omni and Qwen3-Omni also accept it per request.
 
 #### Custom models
 
@@ -402,7 +405,6 @@ th {
 | `DomynEdgeForCausalLM` | Domyn Edge | `domyn/Domyn-Edge-Base`, `domyn/Domyn-Edge-SFT`, etc. | | |
 | `DoryForCausalLM` | Dory | `nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16` | | |
 | `DotsOCRForCausalLM` | [dots_ocr](../usage/troubleshooting.md#gpu-cpu-synchronization-errors) | `rednote-hilab/dots.ocr` | ✅︎ | ✅︎ |
-| `Ernie4_5ForCausalLM` | Ernie4.5 | `baidu/ERNIE-4.5-0.3B-PT`, etc. | ✅︎ | ✅︎ |
 | `Ernie4_5_MoeForCausalLM` | Ernie4.5MoE | `baidu/ERNIE-4.5-21B-A3B-PT`, `baidu/ERNIE-4.5-300B-A47B-PT`, etc. | ✅︎ | ✅︎ |
 | `ExaoneForCausalLM` | EXAONE-3 | `LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `ExaoneMoeForCausalLM` | K-EXAONE, K-EXAONE-2 | `LGAI-EXAONE/K-EXAONE-236B-A23B`, `LGAI-EXAONE/K-EXAONE-2.0-750B-A37B`, etc. | | |
@@ -430,7 +432,7 @@ th {
 | `GraniteSWAForCausalLM` | Granite SWA | `ibm-granite/granite-swash-2b` | ✅︎ | ✅︎ |
 | `HrmTextForCausalLM` | HRM-Text | `sapientinc/HRM-Text-1B`, etc. | | |
 | `HYV3ForCausalLM` | HY3 | `tencent/Hy3-preview-Base`, `tencent/Hy3-preview`, `tencent/Hy3`, `tencent/Hy3-FP8` | ✅︎ | ✅︎ |
-| `HYV4ForCausalLM` | HY4 | `tencent/Hy4-preview`, `tencent/Hy4-preview-FP8` | ✅︎ | ✅︎ |
+| `HYV4ForCausalLM` | HY4 Preview | `tencent/Hy4-preview`, `tencent/Hy4-preview-FP8` | ✅︎ | ✅︎ |
 | `HyperCLOVAXForCausalLM` | HyperCLOVAX-SEED-Think-14B | `naver-hyperclovax/HyperCLOVAX-SEED-Think-14B` | ✅︎ | ✅︎ |
 | `InternLM2ForCausalLM` | InternLM2 | `internlm/internlm2-7b`, `internlm/internlm2-chat-7b`, etc. | ✅︎ | ✅︎ |
 | `InternLM3ForCausalLM` | InternLM3 | `internlm/internlm3-8b-instruct`, etc. | ✅︎ | ✅︎ |
@@ -487,6 +489,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
 | `ArceeForCausalLM` | Arcee (AFM) | `arcee-ai/AFM-4.5B-Base`, etc. | ✅︎ | ✅︎ |
 | `CwmForCausalLM` | CWM | `facebook/cwm`, etc. | ✅︎ | ✅︎ |
+| `Ernie4_5ForCausalLM` | Ernie4.5 | `baidu/ERNIE-4.5-0.3B-PT`, etc. | ✅︎ | ✅︎ |
 | `FlexOlmoForCausalLM` | FlexOlmo | `allenai/FlexOlmo-7x7B-1T`, `allenai/FlexOlmo-7x7B-1T-RT`, etc. | ✅︎ | ✅︎ |
 | `GemmaForCausalLM` | Gemma | `google/gemma-2b`, `google/gemma-1.1-2b-it`, etc. | ✅︎ | ✅︎ |
 | `GlmForCausalLM` | GLM-4 | `zai-org/glm-4-9b-chat-hf`, etc. | ✅︎ | ✅︎ |
@@ -586,9 +589,11 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `HCXVisionV2ForCausalLM` | HyperCLOVAX-SEED-Think-32B | T + I<sup>+</sup> + V<sup>+</sup> | `naver-hyperclovax/HyperCLOVAX-SEED-Think-32B` | | |
 | `H2OVLChatModel` | H2OVL | T + I<sup>E+</sup> | `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc. | ✅︎ | ✅︎ |
 | `HYV4FlashVLForConditionalGeneration` | HY4 Flash | T + I<sup>E+</sup> + V<sup>E+</sup> | `tencent/Hy4-flash`, `tencent/Hy4-flash-FP8` | | |
+| `HYV4VLForConditionalGeneration` | HY4 | T + I<sup>+</sup> + V<sup>+</sup> | `tencent/Hy4`, `tencent/Hy4-FP8` | | ✅︎ |
 | `Idefics3ForConditionalGeneration` | Idefics3 | T + I | `HuggingFaceM4/Idefics3-8B-Llama3`, etc. | ✅︎ | |
 | `IsaacForConditionalGeneration` | Isaac | T + I<sup>+</sup> | `PerceptronAI/Isaac-0.1` | ✅︎ | ✅︎ |
 | `Inkling2ForConditionalGeneration` | Inkling 2 Small | T + I<sup>+</sup> | `thinkingmachines/Inkling-2-Small`, `thinkingmachines/Inkling-2-Small-MXFP8` | ✅︎ | |
+| `Inkling2LoopForConditionalGeneration` | Inkling 2 Mini | T + I<sup>+</sup> | `thinkingmachines/Inkling-2-Mini` | | |
 | `InternS1ForConditionalGeneration` | Intern-S1 | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S1`, `internlm/Intern-S1-mini`, etc. | ✅︎ | ✅︎ |
 | `InternS1ProForConditionalGeneration` | Intern-S1-Pro | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S1-Pro`, etc. | ✅︎ | ✅︎ |
 | `InternS2MobiusForConditionalGeneration` | Intern-S2-Mobius | T + I<sup>E+</sup> + V<sup>E+</sup> | `internlm/Intern-S2-Mobius` | ✅︎ | ✅︎ |
@@ -688,6 +693,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | ------------ | ------ | ------ | ----------------- | --------------------------- | --------------------------------------- |
 | `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | ✅︎ | ✅︎ |
 | `Emu3ForConditionalGeneration` | Emu3 | T + I<sup>+</sup> | `BAAI/Emu3-Chat-hf` | ✅︎ | ✅︎ |
+| `GraniteDoclingForConditionalGeneration` | Granite Docling | T + I<sup>+</sup> | `ibm-granite/granite-for-docling-2b`, etc. | ✅︎ | ✅︎ |
 | `HunYuanVLForConditionalGeneration` | HunyuanOCR | T + I<sup>E+</sup> | `tencent/HunyuanOCR`, etc. | ✅︎ | ✅︎ |
 | `VibeVoiceAsrForConditionalGeneration` | VibeVoice-ASR | T + A<sup>+</sup> | `microsoft/VibeVoice-ASR-HF` | ✅︎ | ✅︎ |
 
@@ -738,6 +744,12 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     - Gemma 4 Unified assistant checkpoints (`model_type: gemma4_unified_assistant`) use the same MTP path as the tower-based variant. See the [Gemma 4 assistant model MTP example](../features/speculative_decoding/mtp.md#gemma-4-assistant-models).
 
 !!! note
+    `GraniteDoclingForConditionalGeneration` checkpoints with a fine connector path (`vision_config.use_fine_route`)
+    accept `fine_route=True` in `--mm-processor-kwargs` or per request, for four times as many image tokens per tile.
+    To choose the route of each page with the checkpoint's density router, see
+    [examples/generate/multimodal/granite_docling_density_router_online.py](../../examples/generate/multimodal/granite_docling_density_router_online.py).
+
+!!! note
     For `InternVLChatModel`, only InternVL2.5 with Qwen2.5 text backbone (`OpenGVLab/InternVL2.5-1B` etc.), InternVL3 and InternVL3.5 have video inputs support currently.
 
 !!! note
@@ -766,6 +778,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     image and video only, as do the Nemotron 3.5 Super VL checkpoints.
     `NemotronH_Omni_Reasoning_V3` checkpoints load without `--trust-remote-code`
     on `transformers>=5.18.0`; older versions still require the flag.
+    The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) serves image and video inputs
+    for these checkpoints. Audio inputs need the Python frontend.
 
 !!! note
     On ROCm, `Step5ForConditionalGeneration` requires CDNA3 or newer (MI300 series

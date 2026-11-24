@@ -134,29 +134,29 @@ def test_dspark_adaptive_verification_separates_graph_cache():
 
 
 @pytest.mark.parametrize(
-    ("mode", "input_dtype", "use_ubatching", "pp_size", "error"),
+    ("enable_prefix_caching", "input_dtype", "use_ubatching", "pp_size", "error"),
     [
-        ("align", torch.bfloat16, False, 1, None),
-        ("align", torch.float16, False, 1, "bfloat16 model inputs"),
-        ("none", torch.float16, False, 1, None),
-        ("align", torch.bfloat16, True, 1, "ReplaySSM does not support microbatching"),
-        ("align", torch.bfloat16, False, 2, "pipeline_parallel_size=1"),
+        (True, torch.bfloat16, False, 1, None),
+        (True, torch.float16, False, 1, "bfloat16 model inputs"),
+        (False, torch.float16, False, 1, None),
+        (True, torch.bfloat16, True, 1, "ReplaySSM does not support microbatching"),
+        (True, torch.bfloat16, False, 2, "pipeline_parallel_size=1"),
     ],
     ids=[
-        "align-bf16",
-        "align-fp16-rejected",
-        "none-fp16",
+        "prefix-caching-bf16",
+        "prefix-caching-fp16-rejected",
+        "no-prefix-caching-fp16",
         "microbatch-rejected",
         "pp-rejected",
     ],
 )
 def test_flashinfer_replayssm_validates_config(
-    mode, input_dtype, use_ubatching, pp_size, error
+    enable_prefix_caching, input_dtype, use_ubatching, pp_size, error
 ):
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             use_replayssm=True,
-            mamba_cache_mode=mode,
+            enable_prefix_caching=enable_prefix_caching,
             mamba_ssm_cache_dtype="float16",
             replayssm_buffer_len=16,
         ),
@@ -195,7 +195,7 @@ def test_triton_replayssm_spec_decode_validates_config(
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             use_replayssm=True,
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
             replayssm_buffer_len=buffer_len,
         ),
         num_speculative_tokens=3,
@@ -386,7 +386,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
         cache_config=SimpleNamespace(
             use_replayssm=True,
             use_kda_recoverssm=False,
-            mamba_cache_mode="none",
+            enable_prefix_caching=False,
             replayssm_buffer_len=16,
         ),
         num_speculative_tokens=3,
@@ -409,9 +409,9 @@ def test_kda_recoverssm_derivation_is_revalidated():
     assert config.cache_config.use_replayssm
     assert config.cache_config.use_kda_recoverssm
 
-    config.cache_config.mamba_cache_mode = "align"
+    config.cache_config.enable_prefix_caching = True
     VllmConfig.validate_mamba_cached_kernel(config)
-    config.cache_config.mamba_cache_mode = "none"
+    config.cache_config.enable_prefix_caching = False
 
     config.model_config.architecture = "NemotronHForCausalLM"
     config.mamba_config.backend = MambaBackendEnum.FLASHINFER
@@ -469,12 +469,6 @@ def test_lora_allowed_for_drafter_without_lora_support():
     assert lora_config.lora_dtype == torch.bfloat16
 
 
-def test_mamba_cache_mode_all_is_rejected():
-    """The removed 'all' mode must fail validation instead of being ignored."""
-    with pytest.raises(ValidationError, match="mamba_cache_mode"):
-        CacheConfig(mamba_cache_mode="all")
-
-
 @pytest.mark.parametrize(
     ("cache_dtype", "model_dtype", "should_raise"),
     [
@@ -498,11 +492,10 @@ def test_mismatched_float_kv_cache_is_rejected(cache_dtype, model_dtype, should_
 
 
 @pytest.mark.parametrize("dcp_size", [1, 2])
-def test_nvfp4_ds_mla_rejects_decode_context_parallelism(dcp_size):
-    # The nvfp4_ds_mla chunked-context gather is not validated under DCP, so
-    # the combination fails at startup instead of on the first request that
-    # carries cached context.
-    kwargs = dict(
+def test_nvfp4_ds_mla_accepts_decode_context_parallelism(dcp_size):
+    # The nvfp4_ds_mla chunked-context gather reads each rank's local context
+    # from its chunk start, as fp8_ds_mla does, so DCP is supported.
+    VllmConfig(
         cache_config=CacheConfig(cache_dtype="nvfp4_ds_mla"),
         device_config=DeviceConfig(device="cpu"),
         parallel_config=ParallelConfig(
@@ -511,11 +504,6 @@ def test_nvfp4_ds_mla_rejects_decode_context_parallelism(dcp_size):
             distributed_executor_backend="mp",
         ),
     )
-    if dcp_size > 1:
-        with pytest.raises(ValueError, match="decode context parallelism"):
-            VllmConfig(**kwargs)
-    else:
-        VllmConfig(**kwargs)
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():
@@ -667,7 +655,7 @@ def test_kv_offloading_does_not_skip_dcp_interleave_validation():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=16,
-            mamba_cache_mode="none",
+            enable_prefix_caching=False,
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=2,
@@ -2281,12 +2269,18 @@ _PEER_GROUP = {
 
 
 @pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(current_platform.is_xpu(), reason="CUDA Only Test")
 @pytest.mark.parametrize(
     "options,parallel,error",
     [
         ({"cpu_offload": False, "peer_group_size": 4}, {}, "set together"),
         ({"cpu_offload": False, "peer_group_store": "/p"}, {}, "set together"),
-        (_PEER_GROUP | {"cpu_offload": True}, {}, "peer_group_transport='rdma'"),
+        (_PEER_GROUP | {"cpu_offload": True}, {}, None),
+        (
+            _PEER_GROUP | {"cpu_offload": True, "dp_shared_memory": True},
+            {},
+            "does not support dp_shared_memory",
+        ),
         (_PEER_GROUP | {"cpu_offload": True, "peer_group_transport": "rdma"}, {}, None),
         (_PEER_GROUP, {"tensor_parallel_size": 2}, "TP=1"),
         (_PEER_GROUP, {"pipeline_parallel_size": 2}, "PP=1"),
@@ -2296,6 +2290,11 @@ _PEER_GROUP = {
 )
 def test_engram_peer_group_validation(options, parallel, error, monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        type(current_platform),
+        "get_device_capability",
+        staticmethod(lambda device_id=0: DeviceCapability(8, 9)),
+    )
     config = ParallelConfig(
         **({"data_parallel_size": 2} | parallel), distributed_executor_backend="mp"
     )
@@ -2305,14 +2304,46 @@ def test_engram_peer_group_validation(options, parallel, error, monkeypatch):
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "architecture,layer_field,supported",
+    "architecture,layer_field,options,error",
     [
-        ("DeepseekV41ForCausalLM", "engram_layer_ids", True),
-        ("Qwen4ExpForCausalLM", "ple_layer_ids", False),
+        ("DeepseekV41ForCausalLM", "engram_layer_ids", {}, None),
+        ("Qwen4ExpForConditionalGeneration", "ple_layer_ids", {}, None),
+        (
+            "Qwen4ExpForConditionalGeneration",
+            "ple_layer_ids",
+            {"peer_group_transport": "rdma"},
+            None,
+        ),
+        (
+            "Qwen4ExpForConditionalGeneration",
+            "ple_layer_ids",
+            {"peer_group_transport": "rdma", "cpu_offload": True},
+            None,
+        ),
+        (
+            "Qwen4ExpForCausalLM",
+            "ple_layer_ids",
+            {"peer_group_fetch": "async"},
+            "peer_group_fetch",
+        ),
+        (
+            "Qwen4ExpForCausalLM",
+            "ple_layer_ids",
+            {"embedding_across_dp": True},
+            "embedding_across_dp",
+        ),
+        (
+            "Qwen4ExpForCausalLM",
+            "ple_layer_ids",
+            {"disk_offload": True},
+            "incompatible with disk_offload",
+        ),
     ],
 )
-def test_engram_peer_group_requires_pool_support(architecture, layer_field, supported):
-    """Qwen4Exp's tables ignore peer groups, so they would not be split."""
+def test_engram_peer_group_model_options(
+    architecture, layer_field, options, error, monkeypatch
+):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     model = cast(
         ModelConfig,
         SimpleNamespace(
@@ -2320,10 +2351,41 @@ def test_engram_peer_group_requires_pool_support(architecture, layer_field, supp
             hf_text_config=SimpleNamespace(**{layer_field: [1]}),
         ),
     )
-    config = EngramConfig(**_PEER_GROUP)
-    rejects = pytest.raises(ValueError, match="pool support")
-    with nullcontext() if supported else rejects:
+    config = EngramConfig(**(_PEER_GROUP | options))
+    with pytest.raises(ValueError, match=error) if error else nullcontext():
         config.verify_model_config(model)
+
+
+@pytest.mark.parametrize(
+    "parallel,load_format,transfer,error",
+    [
+        ({"enable_dbo": True}, "auto", None, "DBO"),
+        ({}, "ipc_cache", None, "ipc_cache"),
+        ({}, "sharded_state", None, "sharded_state"),
+        ({}, "auto", True, "weight transfer"),
+    ],
+)
+def test_qwen_ple_pool_rejects_unsupported_engine_options(
+    monkeypatch, parallel, load_format, transfer, error
+):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "has_device_capability", lambda _: True)
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            model_config=SimpleNamespace(
+                architecture="Qwen4ExpForConditionalGeneration",
+                hf_text_config=SimpleNamespace(ple_layer_ids=[1]),
+            ),
+            speculative_config=None,
+            engram_config=EngramConfig(**_PEER_GROUP),
+            parallel_config=ParallelConfig(**parallel),
+            load_config=SimpleNamespace(load_format=load_format),
+            weight_transfer_config=transfer,
+        ),
+    )
+    with pytest.raises(ValueError, match=error):
+        VllmConfig._resolve_and_verify_engram_config(config)
 
 
 @pytest.mark.skip_global_cleanup
@@ -3329,7 +3391,7 @@ def test_parallel_drafting_is_deprecated(caplog_vllm):
         )
     assert "parallel_drafting is deprecated" in caplog_vllm.text
 
-    with pytest.raises(ValueError, match="only supported by the dflash and dspark"):
+    with pytest.raises(ValueError, match="not supported by method"):
         SpeculativeConfig(
             model="ngram", num_speculative_tokens=2, parallel_drafting=True
         )
@@ -4427,12 +4489,13 @@ def test_vllm_config_defaults_are_none():
 
 
 def test_validate_mamba_align_subblock_prefill():
-    """Align mode permits configured prefill chunks smaller than a block."""
+    """Mamba prefix caching permits prefill chunks smaller than a block."""
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=11392,
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
         ),
+        model_config=SimpleNamespace(is_hybrid=True),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
         ),
@@ -5012,8 +5075,7 @@ def test_gemma4_assistant_needs_no_hash_lookahead(model_type):
         ),
     )
 
-    assert speculative_config.use_gemma4_mtp()
-    assert speculative_config.use_eagle()
+    assert isinstance(speculative_config.speculator_config, Gemma4MTPSpeculatorConfig)
     assert speculative_config.speculator_config.num_hash_lookahead_tokens == 0
 
 
@@ -5378,12 +5440,11 @@ def _make_qwen3_omni_dspark_configs():
     )
     target_model_config = SimpleNamespace(
         hf_config=SimpleNamespace(
-            model_type="qwen3_omni_moe",
-            architectures=["Qwen3OmniMoeForConditionalGeneration"],
-            thinker_config=SimpleNamespace(text_config=text_config),
+            model_type="qwen3_omni_moe_thinker",
+            architectures=["Qwen3OmniMoeThinkerForConditionalGeneration"],
         ),
         hf_text_config=text_config,
-        architectures=["Qwen3OmniMoeForConditionalGeneration"],
+        architectures=["Qwen3OmniMoeThinkerForConditionalGeneration"],
         get_hidden_size=lambda: 2048,
         get_total_num_hidden_layers=lambda: 48,
         get_vocab_size=lambda: 152064,
