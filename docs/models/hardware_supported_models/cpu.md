@@ -22,7 +22,7 @@ The image includes the Recipes tool, which can retrieve the latest published
 recipe, apply Xeon hardware detection, and start `vllm serve`.
 
 For converter usage and interactive model/hardware discovery, see the
-[Recipes tool documentation](../../../tools/recipes/README.md).
+[Recipes tool documentation](https://github.com/vllm-project/vllm/blob/main/tools/recipes/README.md).
 
 ## Recommended Models
 

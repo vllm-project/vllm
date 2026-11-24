@@ -19,7 +19,7 @@ For one-step serving with an XPU container that includes the Recipes tool, see
 The tool selects the published configuration, checks visible XPU devices,
 and starts `vllm serve`. It can also generate optional GPU-aware sweeps for
 parallel layout, concurrency, and scheduler settings. See the
-[Recipes tool documentation](../../../tools/recipes/README.md) for details.
+[Recipes tool documentation](https://github.com/vllm-project/vllm/blob/main/tools/recipes/README.md) for details.
 
 ## Recommended Models
 

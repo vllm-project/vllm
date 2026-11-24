@@ -149,7 +149,7 @@ layout, but model and KV-cache memory fit must still be verified at startup.
 
 For supported recipe variants, converter options, and optional GPU-aware
 TP/DP, concurrency, and scheduler sweeps, see the
-[Recipes tool documentation](../../../tools/recipes/README.md).
+[Recipes tool documentation](https://github.com/vllm-project/vllm/blob/main/tools/recipes/README.md).
 
 --8<-- [end:pre-built-images]
 --8<-- [start:build-image-from-source]

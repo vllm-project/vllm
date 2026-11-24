@@ -214,7 +214,7 @@ For Xeon 6, the script enables hardware detection automatically, generates
 `/vllm-workspace` as its working directory so relative recipe assets under
 `examples/` continue to resolve.
 
-See the [Recipes tool documentation](../../../tools/recipes/README.md) for
+See the [Recipes tool documentation](https://github.com/vllm-project/vllm/blob/main/tools/recipes/README.md) for
 interactive discovery and additional options.
 
 --8<-- [end:pre-built-images]
