@@ -776,6 +776,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             session.serve_external_requests(parent)
 
     @override
+    def report_demand(self, parent: ParentManager) -> None:
+        for session in self._sessions.values():
+            session.report_demand(parent)
+
+    @override
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
         # Flush any p2p lookups aggregated during this step.
         # One LookupMsg per (peer, kv_request_id) with unsent entries;

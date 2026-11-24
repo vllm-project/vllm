@@ -2864,8 +2864,8 @@ class TestFinishRequestServerSide:
 
         # Every round's keys are reported as demand, once.
         parent = FakeParent()
-        session.serve_external_requests(parent)
-        session.serve_external_requests(parent)
+        session.report_demand(parent)
+        session.report_demand(parent)
         assert parent.demands == [
             [OffloadKey(b"k1")],
             [OffloadKey(b"k2"), OffloadKey(b"k3")],
@@ -2891,7 +2891,7 @@ class TestFinishRequestServerSide:
         assert len(session._server._inflight) == 1
 
         parent = FakeParent()
-        session.serve_external_requests(parent)
+        session.report_demand(parent)
         assert parent.demands == [[k1]]
 
     def test_write_blocks_failure_finalizes_after_last_inflight_completes(

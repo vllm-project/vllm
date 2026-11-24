@@ -326,6 +326,9 @@ class P2PSession:
         """
         self._server.serve_external_requests(parent)
 
+    def report_demand(self, parent: ParentManager) -> None:
+        self._server.report_demand(parent)
+
     def poll(self) -> SessionPollResult:
         """Process incoming messages, drive transfers, apply timeouts."""
         if self._conn is None:

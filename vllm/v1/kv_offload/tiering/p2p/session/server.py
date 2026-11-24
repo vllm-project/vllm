@@ -295,8 +295,7 @@ class ServerRole:
         # finish popped their parked lookup). Drained via
         # ``parent.on_request_finished`` in ``serve_external_requests``.
         self._finished_lookup_ctxs: list[ReqContext] = []
-        # Keys a peer demanded and when, reported to the parent on the next
-        # serve_external_requests.
+        # Keys a peer demanded and when, until report_demand().
         self._demands: list[tuple[list[OffloadKey], float]] = []
         self._lookup_id_counter: int = 0
         # Parked aborts awaiting drain, keyed by (kv_request_id, round)
@@ -526,6 +525,7 @@ class ServerRole:
                 parent.on_request_finished(ctx)
             self._finished_lookup_ctxs = []
 
+    def report_demand(self, parent: ParentManager) -> None:
         for keys, at in self._demands:
             parent.on_demand(keys, at)
         self._demands.clear()

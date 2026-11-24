@@ -145,7 +145,8 @@ class ParentManager(ABC):
     def on_demand(self, keys: Collection[OffloadKey], at: float) -> None:
         """A consumer demanded these keys at local monotonic time `at`.
 
-        Only a tier that is polled every step may report demand.
+        Call it while the keys are pinned: when the demand arrives, or from
+        report_demand().
         """
 
 
@@ -345,6 +346,14 @@ class SecondaryTierManager(ABC):
         Args:
             req_context: per-request context.
 
+        """
+        return
+
+    def report_demand(self, parent: ParentManager) -> None:
+        """Report demand seen outside serve_external_requests() to the parent.
+
+        Called after get_finished_jobs() and before the primary pins of the
+        finished jobs are released, so a demanded chunk is still cached.
         """
         return
 

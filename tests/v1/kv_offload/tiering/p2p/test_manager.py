@@ -1040,6 +1040,9 @@ class _FakeSession:
     def has_pending_work(self) -> bool:
         return self._client.has_active_loads or self._server.has_inflight_transfers
 
+    def report_demand(self, parent) -> None:
+        pass
+
     def poll(self):
         result = SessionPollResult(
             loads=self._loads,
@@ -3450,6 +3453,49 @@ def test_peer_lookup_counts_as_demand_only_after_fetch(fetch):
             CPUOffloadingMetrics.CPU_CHUNK_TIME_TO_FIRST_DEMAND, {}
         )
         assert len(first_demands.get((), [])) == int(fetch)
+    finally:
+        tiering.shutdown()
+        consumer.shutdown()
+
+
+@pytest.mark.cpu_test
+def test_pd_store_counts_only_fetched_keys_as_demand():
+    """A prefiller job stores two keys and the decoder fetches one of them."""
+    fetched, unfetched = OffloadKey(b"fetched"), OffloadKey(b"unfetched")
+    consumer, tiering = _producer_with_cpu_hit(fetched, tier_poll_interval_s=0)
+    (producer,) = tiering.secondary_tiers
+    primary = tiering.primary_tier
+    step_end = ScheduleEndContext([], ())
+    try:
+        seed_ctx = ReqContext(req_id="seed")
+        trigger = StoreTrigger.ON_COMPUTE
+        assert primary.prepare_store([unfetched], seed_ctx, trigger=trigger)
+        primary.complete_store([unfetched], seed_ctx, trigger=trigger)
+
+        ctx = _req_context(_remote_prefiller_kv_params("B", 2))
+        consumer.on_new_request(ctx)
+        for _ in range(3):
+            list(consumer.get_finished_jobs())
+            tiering.on_schedule_end(step_end)
+        consumer.submit_load(_job_metadata(10, [fetched], [0], ctx.kv_transfer_params))
+        tiering.on_schedule_end(step_end)
+        job = tiering.create_store_job(
+            [fetched, unfetched], _req_context(_remote_decoder_kv_params())
+        )
+        producer.submit_store(job)
+        tiering.on_schedule_end(step_end)
+        assert list(consumer.get_finished_jobs()) == [JobResult(10, True)]
+        assert not tiering._jobs
+
+        replacement = primary.prepare_write(
+            [OffloadKey(bytes([i])) for i in range(4)], ReqContext(req_id="new")
+        )
+        assert replacement is not None
+        assert set(replacement.evicted_keys) == {fetched, unfetched}
+        stats = primary.get_stats()
+        assert stats is not None
+        evictions = stats.data["data"][CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS]
+        assert evictions == {("true",): 1, ("false",): 1}
     finally:
         tiering.shutdown()
         consumer.shutdown()
