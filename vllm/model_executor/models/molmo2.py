@@ -23,6 +23,7 @@ from transformers.image_utils import ImageInput
 from transformers.video_utils import VideoMetadata
 from typing_extensions import TypedDict
 
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
@@ -33,6 +34,7 @@ from vllm.distributed import (
     split_tensor_along_last_dim,
     tensor_model_parallel_all_gather,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import MulAndSilu, SiluAndMul, get_act_fn
@@ -60,6 +62,7 @@ from vllm.multimodal.inputs import (
     VideoItem,
 )
 from vllm.multimodal.parse import (
+    ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
     MultiModalDataParser,
@@ -71,6 +74,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.context import is_profiling_media
 from vllm.multimodal.processing.dummy_inputs import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_down
@@ -1974,6 +1978,55 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
 
         hf_config = self.info.get_hf_config()
         hf_processor = self.info.get_hf_processor(**hf_kwargs)
+
+        limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
+        if (images := hf_data.get("images")) and limit > 0 and not is_profiling_media():
+            assert isinstance(images, Sequence)
+            image_processor = hf_processor.image_processor
+            resolved_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
+            image_kwargs = resolved_kwargs.get("images_kwargs", {})
+            if not isinstance(image_kwargs, Mapping):
+                raise ValueError("images_kwargs must be a mapping.")
+
+            def image_option(name: str) -> Any:
+                return (
+                    image_kwargs.get(name)
+                    or resolved_kwargs.get(name)
+                    or getattr(image_processor, name)
+                )
+
+            size = image_kwargs.get("size", resolved_kwargs.get("size"))
+            if size is None:
+                size = image_processor.size
+            if not isinstance(size, Mapping) or not {"height", "width"} <= size.keys():
+                raise ValueError("Image size must contain 'height' and 'width' keys.")
+            crop_height, crop_width = size["height"], size["width"]
+            crop_pixels = crop_height * crop_width
+            max_crops = image_option("max_crops")
+            overlap_margins = image_option("overlap_margins")
+            patch_size = image_option("patch_size")
+            margin = patch_size * sum(overlap_margins)
+            crop_window = crop_height - margin
+            output_pixels = 0
+            image_items = ImageProcessorItems(images)
+            for image_idx in range(len(images)):
+                image_width, image_height = image_items.get_image_size(image_idx)
+                tiling_h, tiling_w = select_tiling(
+                    height=image_height - margin,
+                    width=image_width - margin,
+                    patch_size=crop_window,
+                    max_num_patches=max_crops,
+                )
+                output_pixels += (1 + int(tiling_h * tiling_w)) * crop_pixels
+
+            bytes_per_channel = max(4, torch.get_default_dtype().itemsize)
+            # The image processor retains individual crops while concatenating them.
+            if 2 * output_pixels * 3 * bytes_per_channel > limit:
+                raise VLLMValidationError(
+                    "Image preprocessing exceeds "
+                    f"VLLM_MAX_MEDIA_PREPROCESSING_BYTES={limit}.",
+                    parameter="image",
+                )
 
         def patched_call(text=None, images=None, videos=None, **kwargs) -> BatchFeature:
             res = hf_processor(text=text, images=images, videos=videos, **kwargs)
