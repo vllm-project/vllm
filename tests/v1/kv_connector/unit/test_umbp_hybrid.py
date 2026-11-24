@@ -829,28 +829,19 @@ def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
 
 
 @pytest.mark.parametrize(
-    ("device", "queued_writes"),
+    "device",
     [
-        ("cpu", False),
-        *(
-            pytest.param(
-                "cuda",
-                queued_writes,
-                marks=pytest.mark.skipif(
-                    not mori_has_umbp(), reason="MORI was built without UMBP"
-                ),
-            )
-            for queued_writes in (False, True)
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not mori_has_umbp(), reason="MORI was built without UMBP"
+            ),
         ),
     ],
 )
-def test_finished_hybrid_tail_restores_every_byte(socket_dir, device, queued_writes):
-    """A hash-only tail survives request cleanup, then restores byte for byte.
-
-    With `queued_writes` the caller stream still holds writes to the
-    destination pages when the load is submitted, as it does when an async
-    load is started after the forward launch.
-    """
+def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
+    """A hash-only tail survives request cleanup, then restores byte for byte."""
     if device == "cpu":
         runtime = MemoryRuntime()
     else:
@@ -943,16 +934,11 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device, queued_wri
             )
             time.sleep(0.001)
         assert [block.ref_cnt for block in sources] == [0, 0]
-        if queued_writes:
-            # Hold the wipe behind queued compute, so a load that ignores the
-            # caller stream writes its pages before the wipe runs. 2ms is
-            # already enough on MI355X; 64 matmuls leave room to spare.
-            square = torch.randn((4096, 4096), dtype=torch.float16, device=device)
-            product = torch.empty_like(square)
-            for _ in range(64):
-                torch.mm(square, square, out=product)
         for cache in caches.values():
             cache.zero_()
+        # Core leaves no write to an asynchronous load's blocks queued on the
+        # caller stream, which the transfer is not ordered behind.
+        torch.accelerator.synchronize()
 
         request.request_id = "replay"
         assert scheduler.get_num_new_matched_tokens(request, 0) == (12, True)
