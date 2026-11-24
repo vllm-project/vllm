@@ -10,6 +10,7 @@ from vllm.config.diffusion import DiffusionConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.v1.engine.input_processor import InputProcessor
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 
 @dataclass(slots=True)
@@ -301,3 +302,20 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+def test_extra_args_decode_skips_walk(monkeypatch):
+    """The engine re-verifies params on each decoded request; long KV block-id
+    lists must not take the per-element walk there."""
+    block_ids = [list(range(2**64 - 4096, 2**64))]
+    params = SamplingParams(
+        extra_args={"kv_transfer_params": {"remote_block_ids": block_ids}}
+    )
+    frames = MsgpackEncoder().encode(params)
+
+    def fail(self):
+        raise AssertionError("extra_args walk ran on decode")
+
+    monkeypatch.setattr(SamplingParams, "_verify_extra_args_int_range", fail)
+    decoded = MsgpackDecoder(SamplingParams).decode(frames)
+    assert decoded.extra_args == params.extra_args
