@@ -15,10 +15,14 @@ import torch
 
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import AttentionConfig, SpeculativeConfig, VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.config.utils import hash_config
 from vllm.model_executor.models.registry import ModelRegistry
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu import model_runner
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode import speculator_config as speculator_config_module
@@ -59,23 +63,42 @@ def test_prepare_propose_defaults_to_no_op():
     assert sampler.mock_calls == []
 
 
-def test_runner_prepares_custom_speculator_before_propose(monkeypatch):
+@pytest.mark.parametrize(
+    "scheduled,skip_drafts,dp,expected_k",
+    [
+        pytest.param(1, False, False, 1, id="drafting"),
+        pytest.param(0, True, False, 0, id="budget-one"),
+        pytest.param(1, True, False, 0, id="non-final-prefill"),
+        pytest.param(0, False, False, 0, id="context-kv-only"),
+        pytest.param(0, True, True, 0, id="data-parallel"),
+    ],
+)
+def test_runner_prepares_custom_speculator_before_propose(
+    monkeypatch, scheduled, skip_drafts, dp, expected_k
+):
     device = torch.device("cpu")
     batch = InputBatch.make_dummy(1, 3, InputBuffers(1, 3, device))
     sampled, rejected = torch.tensor([2]), torch.tensor([1])
     observations = []
+    proposed = []
 
     class ObservingSpeculator(DummySpeculator):
         def prepare_propose(self, input_batch, num_sampled, num_rejected, sampler):
             observations.append((input_batch, num_sampled, num_rejected, sampler))
 
         def propose(self, *args, **kwargs):
+            proposed.append(kwargs["num_speculative_tokens"])
             assert observations == [(batch, sampled, rejected, runner.sampler)]
             return torch.tensor([[42]])
 
     runner = MagicMock(
         speculator=ObservingSpeculator(VllmConfig(), device, None),
         is_last_pp_rank=True,
+        is_first_pp_rank=True,
+        uses_inputs_embeds=False,
+        use_aux_hidden_state_outputs=False,
+        lora_config=None,
+        dcp_size=1,
         pcp_manager=None,
         pp_handler=None,
         spec_round=None,
@@ -87,20 +110,31 @@ def test_runner_prepares_custom_speculator_before_propose(monkeypatch):
     runner.sample.return_value = (Mock(), sampled, rejected)
     runner._get_num_drafted_and_verified.return_value = (None, None)
     monkeypatch.setattr(model_runner, "AsyncOutput", Mock())
-    runner.execute_model_state = model_runner.ExecuteModelState(
-        input_batch=batch,
-        attn_metadata={},
-        slot_mappings_by_layer={},
-        hidden_states=torch.ones(3, 2),
-        aux_hidden_states=None,
-        dp_sync_state=None,
-        finished_req_ids=set(),
-        ec_connector_output=None,
-        cudagraph_stats=None,
-        num_spec_tokens_to_schedule=1,
+    out = SchedulerOutput.make_empty()
+    out.num_scheduled_tokens = {batch.req_ids[0]: batch.num_tokens}
+    out.total_num_scheduled_tokens = batch.num_tokens
+    out.num_spec_tokens_to_schedule = scheduled
+    out.skip_drafts = skip_drafts
+    desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL, num_tokens=batch.num_tokens, num_reqs=1
     )
+    dp_state = (
+        DPSyncState(torch.tensor([3, 3]), None, None, False, 1, True) if dp else None
+    )
+    monkeypatch.setattr(
+        model_runner, "dispatch_cg_and_sync_dp", Mock(return_value=(desc, dp_state))
+    )
+    runner.observability_config.cudagraph_metrics = False
+    runner.gather_batch_req_state.return_value = (batch, None)
+    runner.prepare_inputs.return_value = batch
+    runner.prepare_attn.return_value = ({}, {})
+    runner.cudagraph_manager.run_fullgraph.return_value = torch.ones(3, 2)
+
+    model_runner.GPUModelRunner.execute_model(runner, out)
     model_runner.GPUModelRunner.sample_tokens(runner, None)
-    assert runner.req_states.draft_tokens.tolist() == [[42]]
+    assert proposed == [expected_k]
+    assert runner.req_states.draft_tokens.tolist() == [[42 if expected_k else -1]]
+    runner.kv_connector.finalize_step.assert_called_once_with()
 
 
 class DummySpeculatorConfig(SpeculatorConfig):

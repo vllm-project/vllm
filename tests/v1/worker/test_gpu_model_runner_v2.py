@@ -42,14 +42,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.model_runner import (
-    ExecuteModelState,
-    GPUModelRunner,
-    skips_drafter,
-)
+from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.spec_decode.standalone_ar import speculator as ar_module
 from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
@@ -717,22 +712,3 @@ def test_dummy_inputs_embeds_holds_random_input_id_embeddings(multimodal):
     assert inputs_embeds.shape == (6, model_config.get_inputs_embeds_size())
     torch.testing.assert_close(inputs_embeds[:5], expected)
     torch.testing.assert_close(state.dummy_inputs_embeds(5), expected)
-
-
-@pytest.mark.parametrize(
-    "num_spec_tokens_to_schedule, dp, skips",
-    [(0, False, True), (3, False, False), (0, True, False)],
-    ids=["budget-1", "requests-skip-drafts", "data-parallel"],
-)
-def test_only_a_budget_of_one_skips_the_drafter(num_spec_tokens_to_schedule, dp, skips):
-    """A step whose requests cannot use drafts (non-final prefill chunks) still
-    runs the drafter with K=0 so it writes its KV, as on main."""
-    scheduler_output = SchedulerOutput.make_empty()
-    scheduler_output.skip_drafts = True
-    scheduler_output.num_spec_tokens_to_schedule = num_spec_tokens_to_schedule
-    dp_sync_state = (
-        DPSyncState(torch.zeros(2), None, None, False, 1, skip_drafts=True)
-        if dp
-        else None
-    )
-    assert skips_drafter(scheduler_output, dp_sync_state) is skips

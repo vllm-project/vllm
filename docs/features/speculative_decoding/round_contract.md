@@ -107,9 +107,9 @@ per `schedule()` that schedules requests; the budget binds one step later, as th
 Dynamic SD schedule does, and is capped at the effective `max_rows`. The default is
 K + 1, or the Dynamic SD schedule's.
 
-A budget of 1 proposes no drafts (`skip_drafts`): the runner skips the drafter
-(under data parallelism, only when every rank skips it) and the next step is a
-plain decode. A budget that stops drafting under load:
+A budget of 1 makes the next step a plain decode. The runner still calls
+`propose` with `num_speculative_tokens=0` so the drafter can write KV for this
+step's tokens. A budget that stops drafting under load:
 
 ```python
 from vllm.v1.worker.gpu.spec_decode.eagle.config import Eagle3SpeculatorConfig
@@ -202,7 +202,7 @@ After sampling, the runner calls `prepare_propose` on every speculator, even whe
 no drafts are requested. The default does nothing.
 
 The runner calls `propose(..., num_speculative_tokens=)` with the number of drafts
-this step's budget allows. It does not call it when the drafter is skipped (step 1).
+this step's budget allows, including zero.
 `propose` returns the draft tokens. The scheduler schedules them, and step 2 of the
 next step plans over them.
 

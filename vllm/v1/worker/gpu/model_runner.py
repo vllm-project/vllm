@@ -2307,7 +2307,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_spec_tokens_to_schedule=(
                 0 if skip_drafts else scheduler_output.num_spec_tokens_to_schedule
             ),
-            skip_drafter=skips_drafter(scheduler_output, dp_sync_state),
         )
 
         if not self.is_last_pp_rank:
@@ -2339,7 +2338,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
-        skip_drafter = self.execute_model_state.skip_drafter
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2447,7 +2445,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # have no cached embeddings to gather.
         if (
             self.speculator is not None
-            and not skip_drafter
             and self.speculator.supports_mm_inputs
             and self.model_state.supports_mm_inputs
         ):
@@ -2485,15 +2482,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.prepare_propose(
                 input_batch, num_sampled, num_rejected, self.sampler
             )
-        if self.speculator is not None and skip_drafter:
-            # index_fill_, not `draft_tokens[idx] = -1`: index_put_ copies the
-            # scalar to the device from pageable memory, a stream sync that
-            # ends the overlap with the next step's scheduling.
-            self.req_states.draft_tokens.index_fill_(
-                0, input_batch.idx_mapping.long(), -1
-            )
-        elif self.speculator is not None:
-            assert self.sampler is not None
+            # The drafter runs even when it proposes no drafts (K=0): its forward
+            # writes the draft KV of this step's tokens, which later steps and
+            # prefix-cache hits read.
             spec_hidden_states = get_drafter_hidden_states(
                 self.model, draft_hidden_states
             )
@@ -2701,14 +2692,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return pcp.PCPManager
 
 
-def skips_drafter(
-    scheduler_output: SchedulerOutput, dp_sync_state: DPSyncState | None
-) -> bool:
-    """Whether the step skips the drafter: the candidate budget chose no drafts
-    and there is one DP rank (under DP the drafter runs in lockstep)."""
-    return dp_sync_state is None and scheduler_output.num_spec_tokens_to_schedule == 0
-
-
 class ExecuteModelState(NamedTuple):
     input_batch: InputBatch
     attn_metadata: dict[str, Any] | None
@@ -2720,7 +2703,6 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
-    skip_drafter: bool = False
 
 
 class BatchReqState(NamedTuple):

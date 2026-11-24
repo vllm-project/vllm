@@ -82,9 +82,10 @@ class BaseSpeculator(ABC):
     drafting consumes target model state), which the model runner loads and
     allocates draft KV cache for.
 
-    `propose` is skipped on a step whose next round verifies no drafts unless
-    another data parallel rank drafts; a drafter keeping its own KV may catch
-    up from `input_batch` in its next `propose`.
+    `propose` is called on every step, also when the next round verifies no
+    drafts (candidate budget 1, `num_speculative_tokens == 0`). A drafter that
+    keeps its own KV writes it for the step's tokens then, and need not sample:
+    no later step re-runs it over those positions.
     """
 
     num_query_per_req: int = 1
