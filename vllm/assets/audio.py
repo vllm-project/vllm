@@ -14,7 +14,7 @@ from .base import VLLM_S3_BUCKET_URL, get_vllm_public_assets
 
 ASSET_DIR = "multimodal_asset"
 
-AudioAssetName = Literal["winning_call", "mary_had_lamb"]
+AudioAssetName = Literal["winning_call", "mary_had_lamb", "azacinto_foscolo"]
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
+
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
 use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 
@@ -91,7 +93,7 @@ impl Internlm2ToolParser {
 
 impl ToolParser for Internlm2ToolParser {
     /// Create a boxed InternLM2 tool parser.
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
@@ -106,7 +108,7 @@ impl ToolParser for Internlm2ToolParser {
     }
 
     /// Feed one decoded text chunk through the InternLM2 parser.
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
         self.inner.parse_into(chunk, output)
     }
 

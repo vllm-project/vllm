@@ -9,10 +9,14 @@ import torch
 from utils import (
     _extract_step_logprobs,
     _random_prompt,
-    skip_if_not_cuda,
+    skip_if_not_cuda_alike,
 )
 
 from vllm import LLM, SamplingParams
+from vllm.platforms import current_platform
+
+# FLASH_ATTN is CUDA-only.
+E2E_BACKENDS = ["TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
 
 pytestmark = pytest.mark.skipif(
     not hasattr(torch, "float8_e4m3fn"),
@@ -40,8 +44,8 @@ def _make_llm(max_num_seqs: int, backend: str) -> LLM:
     )
 
 
-@skip_if_not_cuda
-@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
+@skip_if_not_cuda_alike
+@pytest.mark.parametrize("backend", E2E_BACKENDS)
 def test_dense_nvfp4_generation_is_deterministic_across_batch_sizes_e2e(backend):
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)

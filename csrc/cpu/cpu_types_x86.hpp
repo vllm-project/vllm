@@ -18,9 +18,7 @@ namespace vec_op {
 // VEC path (FP8 → pseudo-FP16 layout, scale correction applied later):
 struct fp8_e4m3_tag {};  // E4M3 → pseudo-FP16; BF16 value = true_E4M3 * 2^-8
 struct fp8_e5m2_tag {};  // E5M2 → FP16 bits directly (same exponent bias=15)
-// AMX path (FP8 → unscaled BF16, no FP32 round-trip):
-// BF16 value = true_E4M3 * 2^-120 (E4M3) or true_E5M2 * 2^-112 (E5M2).
-// Exponent rebiasing is folded into k/v scales by the caller.
+// AMX path: FP8 → BF16.
 struct fp8_bf16_e4m3_tag {};
 struct fp8_bf16_e5m2_tag {};
 
@@ -225,28 +223,24 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
     reg = _mm512_slli_epi16(_mm512_cvtepu8_epi16(b8), 8);
   }
 
-  // Direct FP8-E4M3 → unscaled BF16 for AMX (no FP32 round-trip).
-  // BF16 value = true_E4M3 * 2^-120; exponent rebiasing folded into k/v scales.
+  // The cache writer saturates NaN/Inf inputs to finite FP8 encodings.
+  // Flush encoded subnormals to zero before delayed scaling.
   explicit BF16Vec32(const uint8_t* ptr, fp8_bf16_e4m3_tag) {
     __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
-    __m512i b16 = _mm512_cvtepu8_epi16(b8);
-    __m512i sign =
-        _mm512_slli_epi16(_mm512_and_si512(b16, _mm512_set1_epi16(0x80)), 8);
-    __m512i payload =
-        _mm512_slli_epi16(_mm512_and_si512(b16, _mm512_set1_epi16(0x7F)), 4);
-    reg = _mm512_or_si512(sign, payload);
+    __m512i b16 = _mm512_cvtepi8_epi16(b8);
+    __mmask32 normal = _mm512_test_epi16_mask(b16, _mm512_set1_epi16(0x78));
+    b16 = _mm512_ternarylogic_epi32(b16, _mm512_set1_epi16(0x087f),
+                                    _mm512_set1_epi16(0x0400), 0xea);
+    reg = _mm512_maskz_slli_epi16(normal, b16, 4);
   }
 
-  // Direct FP8-E5M2 → unscaled BF16 for AMX (no FP32 round-trip).
-  // BF16 value = true_E5M2 * 2^-112; exponent rebiasing folded into k/v scales.
   explicit BF16Vec32(const uint8_t* ptr, fp8_bf16_e5m2_tag) {
     __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
-    __m512i b16 = _mm512_cvtepu8_epi16(b8);
-    __m512i sign =
-        _mm512_slli_epi16(_mm512_and_si512(b16, _mm512_set1_epi16(0x80)), 8);
-    __m512i payload =
-        _mm512_slli_epi16(_mm512_and_si512(b16, _mm512_set1_epi16(0x7F)), 5);
-    reg = _mm512_or_si512(sign, payload);
+    __m512i b16 = _mm512_cvtepi8_epi16(b8);
+    __mmask32 normal = _mm512_test_epi16_mask(b16, _mm512_set1_epi16(0x7c));
+    b16 = _mm512_ternarylogic_epi32(b16, _mm512_set1_epi16(0x047f),
+                                    _mm512_set1_epi16(0x0200), 0xea);
+    reg = _mm512_maskz_slli_epi16(normal, b16, 5);
   }
 
   void save(void* ptr) const { *reinterpret_cast<__m512i*>(ptr) = reg; }
@@ -383,29 +377,6 @@ FORCE_INLINE __m128i quant_fp32x16_to_fp8e4m3_avx512(const float* src,
   return _mm512_cvtepi32_epi8(fp8);
 }
 
-// Quantize 32 BF16 values to 32 FP8-E4M3 bytes using AVX-512.
-// Writes 32 bytes to dst.  inv_scale = 1.0f / q_scale.
-FORCE_INLINE void quant_bf16x32_to_fp8e4m3_avx512(const c10::BFloat16* src,
-                                                  uint8_t* dst,
-                                                  float inv_scale) {
-  // Convert 32 BF16 → 2x16 FP32 then quantize each half.
-  const uint16_t* u16 = reinterpret_cast<const uint16_t*>(src);
-  __m256i b16_lo = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(u16));
-  __m256i b16_hi =
-      _mm256_loadu_si256(reinterpret_cast<const __m256i*>(u16 + 16));
-  // Zero-extend uint16 -> uint32, then shift left by 16 to form FP32 bits.
-  __m512 lo_fp32 =
-      _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(b16_lo), 16));
-  __m512 hi_fp32 =
-      _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(b16_hi), 16));
-  alignas(64) float fp32_buf[32];
-  _mm512_store_ps(fp32_buf, lo_fp32);
-  _mm512_store_ps(fp32_buf + 16, hi_fp32);
-  __m128i lo8 = quant_fp32x16_to_fp8e4m3_avx512(fp32_buf, inv_scale);
-  __m128i hi8 = quant_fp32x16_to_fp8e4m3_avx512(fp32_buf + 16, inv_scale);
-  _mm_storeu_si128(reinterpret_cast<__m128i*>(dst), lo8);
-  _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + 16), hi8);
-}
 #endif  // __AVX512F__
 
 struct FP32Vec4 : public Vec<FP32Vec4> {

@@ -6,13 +6,15 @@
 use std::{fmt, str::FromStr};
 
 use serde::Serialize;
+use serde_json::{Map, json};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
 use xgrammar_structural_tag::builders::{StructuralTagBuilder, StructuralTagOptions};
 use xgrammar_structural_tag::format::Format;
 use xgrammar_structural_tag::tool::ToolChoiceValue;
 use xgrammar_structural_tag::{
-    FunctionDefinition, FunctionToolParam, ToolChoice, ToolParam, build_structural_tag,
+    FunctionDefinition, FunctionToolParam, NormalizedToolChoice, ToolChoice, ToolParam,
+    build_structural_tag,
 };
 
 use crate::tool::Tool;
@@ -131,6 +133,10 @@ pub struct OutputGrammarContext<'a> {
     pub tool_strict_level: ToolStrictLevel,
     /// Whether the request permits more than one tool call.
     pub parallel_tool_calls: bool,
+    /// The user's constraint on the answer text, such as a `response_format`
+    /// JSON schema, normalized to a format. A builder that composes it inserts
+    /// it where the model writes its answer; `None` leaves the answer free.
+    pub answer: Option<&'a Format>,
 }
 
 /// Errors produced while building an output grammar.
@@ -146,6 +152,9 @@ pub enum OutputGrammarError {
         /// Builder whose output did not match the parser's known shape.
         builder: &'static str,
     },
+    /// The request asks for a grammar the model's protocol cannot express.
+    #[error("{0}")]
+    UnsupportedRequest(&'static str),
 }
 
 /// Build the visible (post-reasoning) language from a crate structural-tag
@@ -202,14 +211,23 @@ pub(crate) fn full_format_from_builder_for_test(
     )
 }
 
-fn tool_params(tools: &[Tool], strict_level: ToolStrictLevel) -> Vec<ToolParam> {
+/// Tools as builder inputs, strict when the tool or the server floor asks for it.
+pub(crate) fn tool_params(tools: &[Tool], strict_level: ToolStrictLevel) -> Vec<ToolParam> {
     tools
         .iter()
         .map(|tool| {
             ToolParam::Function(FunctionToolParam::new(FunctionDefinition {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: Some(tool.parameters.clone()),
+                // A missing (`Null`) or empty schema still constrains the arguments
+                // to a JSON object, like Python's forced-tool path
+                // (`_params_or_empty_object`): such a function takes `{}`.
+                parameters: Some(match &tool.parameters {
+                    schema if schema.is_null() || schema.as_object().is_some_and(Map::is_empty) => {
+                        json!({"type": "object", "properties": {}})
+                    }
+                    schema => schema.clone(),
+                }),
                 strict: Some(
                     strict_level >= ToolStrictLevel::Parameter || tool.strict == Some(true),
                 ),
@@ -218,17 +236,39 @@ fn tool_params(tools: &[Tool], strict_level: ToolStrictLevel) -> Vec<ToolParam> 
         .collect()
 }
 
+/// Normalize the request tools the way `build_structural_tag` does before
+/// calling a crate builder, for model-owned grammar builders. Returns `None`
+/// when the request asks for no tool grammar.
+pub(crate) fn normalize_tool_choice(
+    ctx: &OutputGrammarContext<'_>,
+) -> Result<Option<NormalizedToolChoice>> {
+    if !tool_grammar_applies(ctx) {
+        return Ok(None);
+    }
+
+    let tools = tool_params(ctx.tools, ctx.tool_strict_level);
+    let normalized =
+        xgrammar_structural_tag::normalize_tool_choice(&tools, ctx.tool_choice.clone())?;
+    Ok(Some(normalized))
+}
+
 /// Whether the request asks for a tool grammar at all.
-fn tool_grammar_applies(ctx: &OutputGrammarContext<'_>) -> bool {
+pub(crate) fn tool_grammar_applies(ctx: &OutputGrammarContext<'_>) -> bool {
     if ctx.tools.is_empty() {
         return false;
     }
 
     match ctx.tool_choice {
         ToolChoice::Value(ToolChoiceValue::None) => false,
+        // With an answer constraint, the grammar must hold the calls `auto`
+        // allows, or the answer would exclude them.
         ToolChoice::Value(ToolChoiceValue::Auto) => {
             ctx.tool_strict_level >= ToolStrictLevel::Function
                 || ctx.tools.iter().any(|tool| tool.strict == Some(true))
+                || ctx.answer.is_some()
+                // `parallel_tool_calls = false` caps the model at one call,
+                // which needs the call envelope in the grammar, like Python.
+                || !ctx.parallel_tool_calls
         }
         ToolChoice::Value(ToolChoiceValue::Required)
         | ToolChoice::NamedFunction(_)
@@ -240,7 +280,7 @@ fn tool_grammar_applies(ctx: &OutputGrammarContext<'_>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
     use xgrammar_structural_tag::builders::Qwen3Builder;
 
     use super::*;
@@ -267,6 +307,7 @@ mod tests {
                 tool_choice,
                 tool_strict_level: ToolStrictLevel::Auto,
                 parallel_tool_calls: true,
+                answer: None,
             },
         )
         .unwrap()
@@ -293,6 +334,7 @@ mod tests {
                 tool_choice: &tool_choice,
                 tool_strict_level: level,
                 parallel_tool_calls: true,
+                answer: None,
             },
         )
         .unwrap()
@@ -301,6 +343,35 @@ mod tests {
 
     fn tag_string(format: &Format) -> String {
         serde_json::to_string(format).unwrap()
+    }
+
+    #[test]
+    fn parallel_tool_calls_false_constrains_auto_to_one_call() {
+        // Limiting the call count needs the call envelope in the grammar, so a
+        // single-call request constrains `auto` even without strict tools.
+        let tools = [tool("search", None)];
+        let build = |parallel_tool_calls| {
+            visible_format_from_builder(
+                Some(&Qwen3Builder),
+                &OutputGrammarContext {
+                    tools: &tools,
+                    tool_choice: &ToolChoice::auto(),
+                    tool_strict_level: ToolStrictLevel::Auto,
+                    parallel_tool_calls,
+                    answer: None,
+                },
+            )
+            .unwrap()
+        };
+
+        assert!(build(true).is_none());
+        let single = build(false).expect("auto grammar limited to one call");
+        let unlimited = build_at_level(
+            ToolChoice::auto(),
+            tools.to_vec(),
+            ToolStrictLevel::Function,
+        );
+        assert_ne!(tag_string(&single), tag_string(&unlimited));
     }
 
     #[test]
@@ -372,6 +443,41 @@ mod tests {
 
         assert_eq!(tag_string(&pinned), tag_string(&strict));
         assert_ne!(tag_string(&pinned), tag_string(&envelope_only));
+    }
+
+    #[test]
+    fn strict_tool_without_parameters_takes_an_empty_object() {
+        let with_parameters = |parameters, strict| Tool {
+            parameters,
+            ..tool("get_time", strict)
+        };
+        let empty_object = build_at_level(
+            ToolChoice::required(),
+            vec![with_parameters(
+                json!({"type": "object", "properties": {}}),
+                Some(true),
+            )],
+            ToolStrictLevel::Auto,
+        );
+
+        // An omitted `parameters` deserializes to `Null`, which is not a schema.
+        for parameters in [Value::Null, json!({})] {
+            for (strict, level) in [
+                (Some(true), ToolStrictLevel::Auto),
+                (None, ToolStrictLevel::Parameter),
+            ] {
+                let pinned = build_at_level(
+                    ToolChoice::required(),
+                    vec![with_parameters(parameters.clone(), strict)],
+                    level,
+                );
+                assert_eq!(
+                    tag_string(&pinned),
+                    tag_string(&empty_object),
+                    "parameters: {parameters}, strict: {strict:?}, level: {level:?}"
+                );
+            }
+        }
     }
 
     #[test]

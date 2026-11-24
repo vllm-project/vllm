@@ -18,6 +18,7 @@ from transformers import (
     ImageProcessingMixin,
     TensorType,
 )
+from transformers.image_transforms import to_pil_image
 from transformers.processing_utils import ProcessorMixin
 
 from vllm.multimodal.image import convert_image_mode
@@ -202,6 +203,8 @@ def video_to_pixel_values_internvl(
     max_num: int,
     use_thumbnail: bool,
 ) -> torch.Tensor:
+    if isinstance(video, torch.Tensor):
+        video = video.cpu().numpy()
     target_ratios = get_internvl_target_ratios(min_num, max_num)
 
     transform = build_transform(input_size=input_size)
@@ -220,7 +223,7 @@ def video_to_pixel_values_internvl(
     return pixel_values
 
 
-class InternVLImageProcessor(ImageProcessingMixin):
+class InternVLChatImageProcessor(ImageProcessingMixin):
     def __init__(
         self,
         image_size: int,
@@ -302,6 +305,7 @@ class InternVLImageProcessor(ImageProcessingMixin):
         **kwargs,
     ) -> BatchFeature:
         images_lst = [images] if not isinstance(images, list) else images
+        images_lst = [to_pil_image(image) for image in images_lst]
 
         pixel_values_lst = self._images_to_pixel_values_lst(
             images_lst,
@@ -317,7 +321,7 @@ class InternVLImageProcessor(ImageProcessingMixin):
         return BatchFeature(image_inputs, tensor_type=return_tensors)
 
 
-class InternVLVideoProcessor(BaseVideoProcessor):
+class InternVLChatVideoProcessor(BaseVideoProcessor):
     def __init__(
         self,
         image_size: int,
@@ -357,7 +361,7 @@ class InternVLVideoProcessor(BaseVideoProcessor):
         return BatchFeature(image_inputs, tensor_type=return_tensors)
 
 
-class InternVLProcessor(ProcessorMixin):
+class InternVLChatProcessor(ProcessorMixin):
     """This model doesn't define its own HF processor,
     so we implement our own one here.
 
@@ -372,9 +376,9 @@ class InternVLProcessor(ProcessorMixin):
 
     def __init__(
         self,
-        image_processor: InternVLImageProcessor,
+        image_processor: InternVLChatImageProcessor,
         tokenizer: HfTokenizer,
-        video_processor: InternVLVideoProcessor | None = None,
+        video_processor: InternVLChatVideoProcessor | None = None,
         *,
         image_seq_length: int,
         start_image_token: str = "<img>",

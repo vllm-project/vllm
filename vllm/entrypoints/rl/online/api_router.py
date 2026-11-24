@@ -32,19 +32,20 @@ router = APIRouter()
 async def pause_generation(
     raw_request: Request,
     mode: Annotated[PauseMode, Query()] = "abort",
-    wait_for_inflight_requests: bool = Query(False),
     clear_cache: Annotated[bool, Query()] = True,
 ) -> JSONResponse:
     """Pause generation requests to allow weight updates.
+
+    In `abort` and `wait` modes new requests are rejected with HTTP 503
+    until /resume; `keep` continues to accept and queue them.
 
     Args:
         raw_request: The incoming FastAPI request, used to reach the engine
             client on the app state.
         mode: How to handle in-flight requests:
-            - ``"abort"``: Abort all in-flight requests immediately (default).
-            - ``"wait"``: Wait for in-flight requests to complete.
-            - ``"keep"``: Freeze requests in queue; they resume on /resume.
-        wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
+            - `"abort"`: Abort all in-flight requests immediately (default).
+            - `"wait"`: Wait for in-flight requests to complete.
+            - `"keep"`: Freeze requests in queue; they resume on /resume.
         clear_cache: DEPRECATED. Whether to clear KV/prefix caches after
             draining. Ignored when mode="keep".
 
@@ -55,7 +56,6 @@ async def pause_generation(
         await engine.pause_generation(
             mode=mode,
             clear_cache=clear_cache,
-            wait_for_inflight_requests=wait_for_inflight_requests,
         )
         return JSONResponse(
             content={"status": "paused"},
@@ -98,7 +98,7 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
 async def abort_requests(raw_request: Request) -> JSONResponse:
     """Abort in-flight requests without pausing the scheduler.
 
-    Empty/missing ``request_ids`` aborts all in-flight requests.
+    Empty/missing `request_ids` aborts all in-flight requests.
     """
     engine = engine_client(raw_request)
 
@@ -171,6 +171,13 @@ async def init_weight_transfer_engine(
     return JSONResponse(content={"message": "Weight transfer initialized"})
 
 
+@router.post("/shutdown_weight_transfer_engine")
+async def shutdown_weight_transfer_engine(raw_request: Request):
+    with weight_operation_metrics().record("shutdown"):
+        await engine_client(raw_request).shutdown_weight_transfer_engine()
+    return JSONResponse(content={"message": "Weight transfer shut down"})
+
+
 @router.post("/start_weight_update")
 async def start_weight_update(raw_request: Request):
     with weight_operation_metrics().record("start"):
@@ -201,10 +208,16 @@ async def update_weights(
 async def finish_weight_update(
     raw_request: Request,
     weight_version: Annotated[str | None, Body(embed=True)] = None,
+    baseline: Annotated[dict[str, str] | None, Body(embed=True)] = None,
 ):
+    """Finish the weight update; with a baseline, also compare the weights."""
+    client = engine_client(raw_request)
     with weight_operation_metrics().record("finish"):
-        await engine_client(raw_request).finish_weight_update(weight_version)
-    return JSONResponse(content={"message": "Weight update finished"})
+        await client.finish_weight_update(weight_version)
+    content: dict[str, Any] = {"message": "Weight update finished"}
+    if baseline is not None:
+        content |= _compare(await _weight_checksums(client), baseline)
+    return JSONResponse(content=content)
 
 
 @router.post("/update_weight_version")
@@ -239,6 +252,14 @@ async def weight_checker(
             detail="action='compare' requires a 'baseline' object",
         )
 
+    checksums = await _weight_checksums(client)
+    if action == "checksum":
+        return JSONResponse(content={"checksums": checksums})
+    assert baseline is not None
+    return JSONResponse(content=_compare(checksums, baseline))
+
+
+async def _weight_checksums(client: EngineClient) -> dict[str, str]:
     checksums: dict[str, str] = {}
     for worker_checksums in await client.compute_weight_checksums():
         if duplicates := checksums.keys() & worker_checksums.keys():
@@ -247,16 +268,16 @@ async def weight_checker(
                 detail=f"Duplicate weight checksum keys: {sorted(duplicates)}",
             )
         checksums.update(worker_checksums)
-    if action == "checksum":
-        return JSONResponse(content={"checksums": checksums})
+    return checksums
 
-    assert baseline is not None
+
+def _compare(checksums: dict[str, str], baseline: dict[str, str]) -> dict[str, Any]:
     mismatches = sorted(
         key
         for key in checksums.keys() | baseline.keys()
         if checksums.get(key) != baseline.get(key)
     )
-    return JSONResponse(content={"match": not mismatches, "mismatches": mismatches})
+    return {"match": not mismatches, "mismatches": mismatches}
 
 
 @router.get("/get_world_size")

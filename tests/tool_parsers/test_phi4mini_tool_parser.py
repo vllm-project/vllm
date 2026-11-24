@@ -14,17 +14,20 @@ from vllm.tokenizers import TokenizerLike
 
 class TestPhi4MiniToolParser(ToolParserTests):
     @pytest.fixture
-    def tokenizer(self, default_tokenizer: TokenizerLike) -> TokenizerLike:
+    def tokenizer(
+        self, default_tokenizer: TokenizerLike, monkeypatch: pytest.MonkeyPatch
+    ) -> TokenizerLike:
         """Add some phi4mini specific tokens to the default vocab."""
         tokenizer = default_tokenizer
         tokenizer_vocab = tokenizer.get_vocab()
-        tokenizer.get_vocab = MagicMock()
         tokenizer_vocab.update(
             {
                 "functools": 32000,
             }
         )
-        tokenizer.get_vocab.return_value = tokenizer_vocab
+        monkeypatch.setattr(
+            tokenizer, "get_vocab", MagicMock(return_value=tokenizer_vocab)
+        )
         return tokenizer
 
     @pytest.fixture

@@ -5,6 +5,7 @@ from collections.abc import Iterable
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import (
     FusedStagedWriter,
@@ -12,6 +13,22 @@ from vllm.v1.worker.gpu.buffer_utils import (
     UvaBackedTensor,
     _load_ptr,
 )
+
+
+def make_slot_mappings(
+    num_groups: int, num_tokens: int, device: torch.device
+) -> torch.Tensor:
+    """Allocate a [num_groups, num_tokens] int64 slot-mapping buffer.
+
+    Each group's row is handed to attention as its own tensor, and some
+    kernels assume an aligned base address (DeepSeek-V4's CuTe DSL compressor
+    requires 64 bytes). Pad the row stride so every row starts 128-byte
+    aligned whatever num_tokens is.
+    """
+    buffer = torch.zeros(
+        num_groups, round_up(num_tokens, 16), dtype=torch.int64, device=device
+    )
+    return buffer[:, :num_tokens]
 
 
 class BlockTables:
@@ -30,6 +47,7 @@ class BlockTables:
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
         dcp_sharded: list[bool] | None = None,
+        sliding_window_reach: list[int] | None = None,
     ):
         self.block_sizes = block_sizes
         self.max_num_reqs = max_num_reqs
@@ -50,6 +68,15 @@ class BlockTables:
             dcp_sharded = [True] * self.num_kv_cache_groups
         assert len(dcp_sharded) == self.num_kv_cache_groups
         self.dcp_sharded = torch.tensor(dcp_sharded, dtype=torch.bool, device=device)
+        # Per group, how many tokens below a request's first scheduled position
+        # attention can still read; 0 disables it for the group. Under context
+        # parallelism a block-table column does not map to a contiguous token
+        # range, so the masking in gather_block_tables is disabled.
+        if sliding_window_reach is None or cp_size > 1:
+            sliding_window_reach = [0] * self.num_kv_cache_groups
+        assert len(sliding_window_reach) == self.num_kv_cache_groups
+        self._sliding_window_reach = sliding_window_reach
+        self.has_sliding_window_groups = any(r > 0 for r in sliding_window_reach)
 
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
@@ -74,12 +101,10 @@ class BlockTables:
         self.input_block_tables: list[torch.Tensor] = [
             torch.zeros_like(b.gpu) for b in self.block_tables
         ]
+        self._num_dirty_rows = 0
 
-        self.slot_mappings = torch.zeros(
-            self.num_kv_cache_groups,
-            self.max_num_batched_tokens,
-            dtype=torch.int64,
-            device=self.device,
+        self.slot_mappings = make_slot_mappings(
+            self.num_kv_cache_groups, self.max_num_batched_tokens, self.device
         )
 
         self.init_block_table_layout_tensors()
@@ -104,6 +129,9 @@ class BlockTables:
         )
         self.slot_mapping_enabled = torch.tensor(
             self._slot_mapping_enabled, dtype=torch.bool, device=self.device
+        )
+        self.sliding_window_reach = torch.tensor(
+            self._sliding_window_reach, dtype=torch.int32, device=self.device
         )
         self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
@@ -148,18 +176,38 @@ class BlockTables:
         num_reqs_padded: int,
         out: tuple[torch.Tensor, ...] | None = None,
         out_ptrs: torch.Tensor | None = None,
+        num_computed_tokens: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
+        """Gather the batch's block-table rows into the forward-pass tables.
+
+        When num_computed_tokens ([max_num_reqs], indexed like the block tables)
+        is given, sliding-window groups get every entry wholly below the window
+        of the request's first scheduled token replaced by the null block. Those
+        blocks may already have been freed by the sliding-window manager and
+        reused, while attention kernels can still load them as part of a KV
+        tile that straddles the window start: masked-out NaN in such a tile
+        propagates into the output.
+        """
         if self.num_kv_cache_groups == 0:
             return ()
+        mask_sliding_window = (
+            self.has_sliding_window_groups and num_computed_tokens is not None
+        )
+        if not mask_sliding_window:
+            # Unused by the kernel; any int32 tensor satisfies the signature.
+            num_computed_tokens = self.sliding_window_reach
+        num_reqs = idx_mapping.shape[0]
+        num_rows = num_reqs_padded
         if out is None:
             out = tuple(self.input_block_tables)
             out_ptrs = self.input_block_table_ptrs
+            num_rows = max(num_rows, self._num_dirty_rows)
+            self._num_dirty_rows = num_reqs
         else:
             assert out_ptrs is not None
             assert len(out) == self.num_kv_cache_groups
-        num_reqs = idx_mapping.shape[0]
-        # Launch kernel with num_reqs_padded to fuse zeroing of padded rows.
-        _gather_block_tables_kernel[(self.num_kv_cache_groups, num_reqs_padded)](
+        # Also clear rows left by a larger batch in the shared buffer.
+        _gather_block_tables_kernel[(self.num_kv_cache_groups, num_rows)](
             idx_mapping,
             self.block_table_ptrs,
             out_ptrs,
@@ -167,6 +215,10 @@ class BlockTables:
             self.num_blocks.gpu,
             self.num_blocks.gpu.stride(0),
             num_reqs,
+            num_computed_tokens,
+            self.sliding_window_reach,
+            self.block_sizes_tensor,
+            MASK_SLIDING_WINDOW=mask_sliding_window,
             BLOCK_SIZE=1024,  # type: ignore
         )
         return tuple(bt[:num_reqs_padded] for bt in out)
@@ -180,9 +232,17 @@ class BlockTables:
         # Zero the rows so dummy runs write mamba state to the reserved null
         # block rather than through the previous real step's (stale) block
         # ids, which may point at blocks since freed and reallocated.
-        return tuple(
-            block_table[:num_reqs].zero_() for block_table in self.input_block_tables
-        )
+        num_rows = max(num_reqs, self._num_dirty_rows)
+        for block_table in self.input_block_tables:
+            block_table[:num_rows].zero_()
+        # Profiling may populate the returned rows with valid block IDs.
+        self._num_dirty_rows = num_reqs
+        return tuple(block_table[:num_reqs] for block_table in self.input_block_tables)
+
+    def clear_input_block_tables(self) -> None:
+        for block_table in self.input_block_tables:
+            block_table.zero_()
+        self._num_dirty_rows = 0
 
     def compute_slot_mappings(
         self,
@@ -238,6 +298,10 @@ def _gather_block_tables_kernel(
     num_blocks_ptr,  # [num_kv_cache_groups, max_num_reqs]
     num_blocks_stride,
     num_reqs,  # actual number of requests (for padding)
+    num_computed_tokens_ptr,  # [max_num_reqs]
+    sliding_window_reach_ptr,  # [num_kv_cache_groups]
+    block_sizes_ptr,  # [num_kv_cache_groups]
+    MASK_SLIDING_WINDOW: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     # kv cache group id
@@ -263,9 +327,24 @@ def _gather_block_tables_kernel(
     src_block_table_ptr = _load_ptr(src_block_table_ptrs + group_id, tl.int32)
     src_row_ptr = src_block_table_ptr + req_idx * stride
 
+    # Leading entries no query of this step can attend: null them (see
+    # BlockTables.gather_block_tables).
+    num_null = 0
+    if MASK_SLIDING_WINDOW:
+        reach = tl.load(sliding_window_reach_ptr + group_id)
+        first_pos = tl.load(num_computed_tokens_ptr + req_idx)
+        block_size = tl.load(block_sizes_ptr + group_id)
+        num_null = tl.where(
+            reach > 0, tl.maximum(first_pos - reach, 0) // block_size, 0
+        )
+
     for i in tl.range(0, num_blocks, BLOCK_SIZE):
         offset = i + tl.arange(0, BLOCK_SIZE)
-        block_ids = tl.load(src_row_ptr + offset, mask=offset < num_blocks)
+        block_ids = tl.load(
+            src_row_ptr + offset,
+            mask=(offset >= num_null) & (offset < num_blocks),
+            other=0,
+        )
         tl.store(dst_row_ptr + offset, block_ids, mask=offset < num_blocks)
 
 

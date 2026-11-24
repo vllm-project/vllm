@@ -7,9 +7,10 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Callable, Iterable, Sequence
+from math import inf
 from typing import TYPE_CHECKING, Any, cast
 
-from openai.types.responses import ToolChoiceFunction
+from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
 
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -28,6 +29,7 @@ from vllm.parser.chat_parsing.response_templates import (
     ResponseTemplate,
     load_response_template,
 )
+from vllm.parser.response_template_grammar import message_start_anchors
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
@@ -43,10 +45,13 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-THINKING_FIELD = "thinking"
+REASONING_FIELD = "reasoning_content"
 CONTENT_FIELD = "content"
 TOOL_FIELD = "tool_calls"
-_SUPPORTED_FIELDS = frozenset({THINKING_FIELD, CONTENT_FIELD, TOOL_FIELD})
+# Legacy name of the reasoning field, renamed to `REASONING_FIELD` for parsing.
+_THINKING_FIELD = "thinking"
+_REASONING_FIELDS = (REASONING_FIELD, _THINKING_FIELD)
+_SUPPORTED_FIELDS = frozenset({*_REASONING_FIELDS, CONTENT_FIELD, TOOL_FIELD})
 
 
 def _tool_dict(tool: Any) -> dict[str, Any]:
@@ -116,15 +121,16 @@ def validate_response_template_for_serving(
             f"{sorted(unsupported)}. Supported fields are: "
             f"{sorted(_SUPPORTED_FIELDS)}"
         )
-    for name in (THINKING_FIELD, CONTENT_FIELD):
+    if set(_REASONING_FIELDS) <= loaded.fields.keys():
+        raise ValueError(
+            f"response_template declares both {REASONING_FIELD!r} and its "
+            f"legacy alias {_THINKING_FIELD!r}"
+        )
+    for name in (*_REASONING_FIELDS, CONTENT_FIELD):
         field = loaded.fields.get(name)
         if field is None:
             continue
-        if (
-            field.content != "text"
-            or field.transform is not None
-            or field.join is not None
-        ):
+        if field.content != "text" or field.transform is not None:
             raise ValueError(
                 f"response_template field {name!r} uses semantics that cannot "
                 "be streamed by the OpenAI serving adapter"
@@ -135,33 +141,47 @@ def validate_response_template_for_serving(
 def validate_tokenizer_response_template(
     tokenizer: Any,
     *,
-    reasoning: bool,
-    tools: bool,
+    reasoning_parser: str | None,
+    tool_parser: str | None,
 ) -> None:
-    """Fail at startup if the tokenizer cannot serve the requested parsing."""
+    """Fail at startup if the tokenizer cannot serve the selected parsers,
+    named as given on the command line."""
     template = resolve_response_template(tokenizer)
     if template is None:
+        selected = " ".join(
+            f"{flag} {name}"
+            for flag, name in (
+                ("--reasoning-parser", reasoning_parser),
+                ("--tool-call-parser", tool_parser),
+            )
+            if name
+        )
         raise TypeError(
-            "The hf parser requires `response_template` metadata "
+            f"{selected} requires `response_template` metadata "
             "in the tokenizer configuration"
         )
     try:
         fields = validate_response_template_for_serving(template).fields
     except (TypeError, ValueError) as exc:
         raise TypeError(f"Invalid response_template metadata: {exc}") from exc
-    if reasoning and THINKING_FIELD not in fields:
+    if reasoning_parser and fields.keys().isdisjoint(_REASONING_FIELDS):
         raise TypeError(
-            "--reasoning-parser hf requires a response_template with a thinking field"
+            f"--reasoning-parser {reasoning_parser} requires a response_template "
+            f"with a {REASONING_FIELD} (or {_THINKING_FIELD}) field"
         )
-    if tools and TOOL_FIELD not in fields:
+    if tool_parser and TOOL_FIELD not in fields:
         raise TypeError(
-            "--tool-call-parser hf requires a response_template with a tool_calls field"
+            f"--tool-call-parser {tool_parser} requires a response_template "
+            "with a tool_calls field"
         )
 
 
 def _streaming_template(template: dict[str, Any]) -> ResponseTemplate:
     result = copy.deepcopy(template)
-    fields = result["fields"]
+    fields = result["fields"] = {
+        REASONING_FIELD if name == _THINKING_FIELD else name: field
+        for name, field in result["fields"].items()
+    }
     if CONTENT_FIELD not in fields and all(
         "open" in field or "open_pattern" in field for field in fields.values()
     ):
@@ -173,7 +193,8 @@ def _streaming_template(template: dict[str, Any]) -> ResponseTemplate:
 
 def _is_named_tool_choice(request: ChatCompletionRequest | ResponsesRequest) -> bool:
     return isinstance(
-        request.tool_choice, (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam)
+        request.tool_choice,
+        (ToolChoiceFunction, ToolChoiceCustom, ChatCompletionNamedToolChoiceParam),
     )
 
 
@@ -211,7 +232,7 @@ def _reasoning_has_ended(
     *,
     thinking_disabled: bool = False,
 ) -> bool:
-    thinking = template.fields.get(THINKING_FIELD)
+    thinking = template.fields.get(REASONING_FIELD)
     if thinking is None:
         return True
     if thinking.repeats:
@@ -223,7 +244,7 @@ def _reasoning_has_ended(
         if event["type"] == "region_open":
             active_field = event["field"]
         elif event["type"] in {"region_close", "region_malformed"}:
-            thinking_closed |= event["field"] == THINKING_FIELD
+            thinking_closed |= event["field"] == REASONING_FIELD
             active_field = None
     if thinking_closed:
         return True
@@ -240,12 +261,12 @@ def _reasoning_has_ended(
             and event["end"] > event["start"]
         ):
             return True
-        if event["field"] == THINKING_FIELD:
+        if event["field"] == REASONING_FIELD:
             if event["type"] == "region_open":
                 return False
             if event["type"] in {"region_close", "region_malformed"}:
                 return True
-    if active_field == THINKING_FIELD:
+    if active_field == REASONING_FIELD:
         return False
     return thinking_disabled
 
@@ -268,7 +289,7 @@ def _reasoning_end_ids(
 ) -> list[list[int]] | None:
     """Token ids of each thinking closer, or `None` when they are not all
     literal."""
-    thinking = template.fields.get(THINKING_FIELD)
+    thinking = template.fields.get(REASONING_FIELD)
     if thinking is None or thinking.repeats or not thinking.close_literals:
         return None
     return _literal_ids(tokenizer, vocab, thinking.close_literals)
@@ -291,7 +312,7 @@ def _serving_template(
     template = resolve_response_template(tokenizer, template)
     if template is None:
         raise ValueError(
-            "The hf parser requires `response_template` "
+            "Parsing with a response template requires `response_template` "
             "metadata in the tokenizer configuration"
         )
     validate_response_template_for_serving(template)
@@ -318,11 +339,16 @@ def _to_tool_calls(value: Any) -> list[tuple[str, str]]:
 
 
 class ResponseTemplateReasoningParser(ReasoningParser):
-    """Reasoning end detection for `--reasoning-parser hf`.
+    """Reasoning end detection for a response-template parser.
 
     `ResponseTemplateParser` parses the output; this parser tells it and the
     structured-output engine where reasoning ends.
     """
+
+    @classmethod
+    def unified_parser_cls(cls) -> type[ResponseTemplateParser]:
+        """The unified parser that selecting this reasoning parser stands for."""
+        return ResponseTemplateParser
 
     def __init__(
         self,
@@ -341,13 +367,13 @@ class ResponseTemplateReasoningParser(ReasoningParser):
 
     @property
     def reasoning_start_str(self) -> str | None:
-        thinking = self.response_template.fields.get(THINKING_FIELD)
+        thinking = self.response_template.fields.get(REASONING_FIELD)
         literals = thinking.open_literals if thinking else None
         return literals[0] if literals else None
 
     @property
     def reasoning_end_str(self) -> str | None:
-        thinking = self.response_template.fields.get(THINKING_FIELD)
+        thinking = self.response_template.fields.get(REASONING_FIELD)
         literals = thinking.close_literals if thinking else None
         return literals[0] if literals else None
 
@@ -399,8 +425,26 @@ class ResponseTemplateReasoningParser(ReasoningParser):
 
 
 class ResponseTemplateToolParser(ToolParser):
-    """Registers `--tool-call-parser hf`; `ResponseTemplateParser` extracts the
-    tool calls."""
+    """Selects a response-template parser as the tool parser;
+    `ResponseTemplateParser` extracts the tool calls."""
+
+    @classmethod
+    def unified_parser_cls(cls) -> type[ResponseTemplateParser]:
+        """The unified parser that selecting this tool parser stands for."""
+        return ResponseTemplateParser
+
+
+def response_template_parser_cls(
+    split_parser_cls: type[ReasoningParser] | type[ToolParser],
+) -> type[ResponseTemplateParser] | None:
+    """The response-template parser that a registered reasoning or tool parser
+    stands for, or `None` for any other parser."""
+    if issubclass(
+        split_parser_cls,
+        (ResponseTemplateReasoningParser, ResponseTemplateToolParser),
+    ):
+        return split_parser_cls.unified_parser_cls()
+    return None
 
 
 class _DeltaBuilder:
@@ -440,22 +484,69 @@ class _ResponseStream:
         self.include_reasoning = include_reasoning
         self.parse_tools = parse_tools
         self.new_tool_call_id = new_tool_call_id
+        self.template = template
         self.parser = ResponseParser(template, prefix=prefix, tools=tools)
         self._prefix_end = len(self.parser.input_text)
         self._next_tool_index = 0
         self._finalized = False
+        self._open_region: dict[str, Any] | None = None
+        # Text fields with a closed occurrence, and whether the open occurrence
+        # still owes its `join` separator.
+        self._joined: set[str] = set()
+        self._owes_join = False
+        self._track(self.parser.initial_events)
 
     def feed(self, text: str, *, finished: bool) -> DeltaMessage | None:
         if self._finalized:
             return None
         delta = _DeltaBuilder()
-        self._route(self.parser.feed(text), delta)
+        self._route(self._track(self.parser.feed(text)), delta)
         if finished:
             self._finalized = True
             if len(self.parser.input_text) > self._prefix_end:
-                _, events = self.parser.finalize()
-                self._route(events, delta)
+                events = self.parser.feed(self._closer_rest())
+                self._route(self._track(events + self.parser.finalize()[1]), delta)
         return delta.build()
+
+    def _track(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Follow the open region, and add a text field's `join` separator as a
+        chunk before each occurrence that follows a closed one."""
+        tracked: list[dict[str, Any]] = []
+        for event in events:
+            name = event["field"]
+            if event["type"] == "region_open":
+                self._open_region = event
+            elif event["type"] in ("region_close", "region_malformed"):
+                self._open_region = None
+            join = None if name == TOOL_FIELD else self.template.fields[name].join
+            if join:
+                if event["type"] == "region_open":
+                    self._owes_join = name in self._joined
+                elif self._owes_join:
+                    tracked.append(
+                        {"type": "region_chunk", "field": name, "text": join}
+                    )
+                    self._owes_join = False
+                if event["type"] == "region_close":
+                    self._joined.add(name)
+            tracked.append(event)
+        return tracked
+
+    def _closer_rest(self) -> str:
+        """The rest of a closer the output stopped in after ending its region,
+        when only the next message's start anchor is missing."""
+        if self._open_region is None:
+            return ""
+        field = self.template.fields[self._open_region["field"]]
+        text = self.parser.input_text[self._open_region["end"] :]
+        for closer in field.close_literals or ():
+            for anchor in message_start_anchors(self.template):
+                if not anchor or not closer.endswith(anchor) or closer == anchor:
+                    continue
+                for cut in range(len(closer) - 1, len(closer) - len(anchor) - 1, -1):
+                    if text.endswith(closer[:cut]):
+                        return closer[cut:]
+        return ""
 
     def _route(self, events: Sequence[dict[str, Any]], delta: _DeltaBuilder) -> None:
         for event in events:
@@ -463,10 +554,10 @@ class _ResponseStream:
             if field == TOOL_FIELD:
                 self._route_tool_event(event, delta)
             elif event["type"] == "region_chunk":
-                if field == THINKING_FIELD and self.parse_reasoning:
+                if field == REASONING_FIELD and self.parse_reasoning:
                     if self.include_reasoning:
                         delta.reasoning.append(event["text"])
-                elif field in (THINKING_FIELD, CONTENT_FIELD):
+                elif field in (REASONING_FIELD, CONTENT_FIELD):
                     delta.content.append(event["text"])
 
     def _route_tool_event(self, event: dict[str, Any], delta: _DeltaBuilder) -> None:
@@ -498,6 +589,54 @@ class _ResponseStream:
                 self._next_tool_index += 1
 
 
+class _ReasoningTokenCounter:
+    """Counts the reasoning tokens of one growing generation, parsing each
+    token once."""
+
+    def __init__(
+        self, template: ResponseTemplate, prefix: str, tokenizer: TokenizerLike
+    ) -> None:
+        self.tokenizer = tokenizer
+        self.parser = ResponseParser(template, prefix=prefix)
+        self.start = len(self.parser.input_text)
+        self.token_ids: list[int] = []
+        self.token_ends: list[int] = []
+        # Input spans between the delimiters of thinking regions.
+        self.spans: list[tuple[int, float]] = []
+        self.open: int | None = None
+        self._track(self.parser.initial_events)
+
+    def continues(self, token_ids: Sequence[int]) -> bool:
+        return list(token_ids[: len(self.token_ids)]) == self.token_ids
+
+    def count(self, token_ids: Sequence[int]) -> int:
+        new_ids = list(token_ids[len(self.token_ids) :])
+        texts = [_decode(self.tokenizer, [token_id]) for token_id in new_ids]
+        end = self.token_ends[-1] if self.token_ends else self.start
+        for text in texts:
+            end += len(text)
+            self.token_ends.append(end)
+        self.token_ids.extend(new_ids)
+        self._track(self.parser.feed("".join(texts)))
+        # Text held back as a possible closer counts until a closer arrives.
+        spans = self.spans if self.open is None else [*self.spans, (self.open, inf)]
+        count, start = 0, self.start
+        for end in self.token_ends:
+            count += any(begin < end and start < close for begin, close in spans)
+            start = end
+        return count
+
+    def _track(self, events: Iterable[dict[str, Any]]) -> None:
+        for event in events:
+            if event["field"] != REASONING_FIELD or event["type"] == "region_chunk":
+                continue
+            if event["type"] == "region_open":
+                self.open = event["end"]
+            elif self.open is not None:
+                self.spans.append((self.open, event["start"]))
+                self.open = None
+
+
 class ResponseTemplateParser(Parser):
     """Parse reasoning, content, and tool calls with one response template."""
 
@@ -525,6 +664,7 @@ class ResponseTemplateParser(Parser):
         self._prompt_token_ids: list[int] | None = None
         self._prefix = ""
         self._stream: _ResponseStream | None = None
+        self._reasoning_counter: _ReasoningTokenCounter | None = None
 
     def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
         prompt_token_ids = list(prompt_token_ids)
@@ -533,6 +673,7 @@ class ResponseTemplateParser(Parser):
         self._prompt_token_ids = prompt_token_ids
         self._prefix = _decode(self.model_tokenizer, prompt_token_ids)
         self._stream = None
+        self._reasoning_counter = None
 
     def adjust_request(
         self,
@@ -546,6 +687,14 @@ class ResponseTemplateParser(Parser):
         request.skip_special_tokens = False
         if hasattr(request, "spaces_between_special_tokens"):
             request.spaces_between_special_tokens = False
+        return self._constrain_request(request)
+
+    def _constrain_request(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        """Constrain `request` to the tool guarantees it asks for, or reject
+        those this parser cannot enforce."""
         if (
             self._tool_parser is not None
             and request.tools
@@ -565,6 +714,21 @@ class ResponseTemplateParser(Parser):
             self._reasoning_parser is None
             or self._reasoning_parser.is_reasoning_end(input_ids)
         )
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count the generated tokens whose text the template parses as
+        reasoning, continuing reasoning left open by the prompt."""
+        if (
+            self._reasoning_parser is None
+            or REASONING_FIELD not in self.response_template.fields
+        ):
+            return 0
+        counter = self._reasoning_counter
+        if counter is None or not counter.continues(token_ids):
+            counter = self._reasoning_counter = _ReasoningTokenCounter(
+                self.response_template, self._prefix, self.model_tokenizer
+            )
+        return counter.count(token_ids)
 
     def parse(
         self,

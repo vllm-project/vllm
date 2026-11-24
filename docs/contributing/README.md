@@ -54,7 +54,7 @@ To rebuild only the Rust frontend binary:
 If you are developing vLLM's Python and CUDA/C++ code, install PyTorch first:
 
 ```bash
-uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129
+uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu132
 ```
 
 Then install the necessary build dependencies from `requirements/build/cuda.txt`, skipping `torch` as it was installed in the previous step:
@@ -90,6 +90,9 @@ pre-commit install
 
 vLLM's `pre-commit` hooks will now run automatically every time you commit.
 
+For package archive hashes, compiled requirements, and GitHub Actions commit
+pins, see [Dependency Hash Pinning](ci/dependency_hashes.md).
+
 When running ShellCheck or markdownlint directly, or configuring an editor
 integration, use the configuration files in `tools/pre_commit/`:
 `--rcfile=tools/pre_commit/.shellcheckrc` for ShellCheck and
@@ -101,6 +104,13 @@ integration, use the configuration files in `tools/pre_commit/`:
     ```bash
     pre-commit run     # runs on staged files
     pre-commit run -a  # runs on all files (short for --all-files)
+    ```
+
+    Hook revisions in `.pre-commit-config.yaml` are pinned to commit SHAs. To bump them, use:
+
+    ```bash
+    pre-commit autoupdate --freeze               # bumps all hooks
+    pre-commit autoupdate --freeze --repo <url>  # bumps one hook
     ```
 
 ### Documentation
@@ -260,8 +270,31 @@ The PR needs to meet the following code quality standards:
   understand the code.
 - Include sufficient tests to ensure the project stays correct and robust. This
   includes both unit tests and integration tests.
-- Please add documentation to `docs/` if the PR modifies the user-facing behaviors of vLLM.
-  It helps vLLM users understand and utilize the new features or changes.
+- Document user-visible changes in the same PR; see
+  [Documenting User-Visible Changes](#documenting-user-visible-changes).
+
+### Documenting User-Visible Changes
+
+If a PR changes what users can run, configure, or observe, update the rendered
+docs in the same PR; code comments, tests, and PR descriptions alone are not
+found by users or their agents. CLI arguments, config fields, and environment
+variables are documented in their docstring, `help=` text, or
+`environment_variables` comment, which generate the reference pages. Everything
+else goes on its page under `docs/` (feature, model, hardware, deprecation),
+linked from its index. Lead with what it is, how to enable it, and the default,
+using the names users search for.
+
+To check, ask a fresh agent a user question (e.g. "What does `VLLM_FOO` do?")
+three times, limited in turn to web search, GitHub, and a local checkout (before
+merge: the docs preview and the PR branch). If it cannot find and quote the
+docs, fix the docs.
+
+Some reference tables are generated from source at docs build time, e.g.
+attention backends (`docs/mkdocs/gen_files/generate_attention_backends.py`) and
+quantization methods, schemes, and linear kernels
+(`docs/mkdocs/gen_files/generate_quantization_tables.py`). Do not copy their
+contents into prose; write around the `--8<-- "gen:..."` marker in the tracked
+page instead.
 
 ### Adding or Changing Kernels
 
@@ -329,19 +362,33 @@ review process:
   in the upstream repository. Your branch must contain every commit currently
   on that branch: **zero commits behind**. This also applies to PRs targeting
   release branches or another PR's branch.
-- If the PR is behind, the bot reports the count without creating a new build.
-  Merge or rebase onto the latest target branch, then rerun the command. If the
-  target branch advances in the meantime, update your branch and try again.
+- If the PR is behind, the bot merges the target branch into your PR branch
+  (like the **Update branch** button) and runs CI on the resulting merge commit.
+  Pull the branch before pushing more changes. This needs **Allow edits by
+  maintainers** enabled on fork PRs. If the merge conflicts or is not allowed,
+  the bot reports the count without creating a new build; merge or rebase onto
+  the latest target branch yourself, then rerun the command.
+- PR authors without write access cannot start another full run (including
+  `--allow-stale`) on a commit that already has a CI build. Push new changes,
+  use `/ci retry` to rerun failed jobs, or ask a reviewer with write access.
 - To run CI on an outdated branch at your own risk, append `--allow-stale` to
   any run command, for example `/ci run --allow-stale` or
   `/amd-ci run all --allow-stale`. The same authorization requirements apply.
   The bot reports the lag and warns that outdated CI configuration may cause
   failures. Before merging, merge or rebase onto the latest target branch and
   rerun CI without `--allow-stale` on the latest PR commit.
+- A PR targeting `main` that changes `docker/Dockerfile.rocm_base` or
+  `tools/vllm-rocm/therock_wheels.py` can merge only once its new ROCm base
+  image is cached for `main`, which its `ROCm image cache` CI step checks. A
+  maintainer comments `/ci run`, or a trusted reviewer approves the commit and
+  comments `/ci run`, and when that commit's CI build finishes, the bot caches
+  the image and retries the step. If `main` changes those files after the PR's
+  merge base, the step fails until the PR merges `main`. A PR that changes how
+  `.buildkite/scripts/rocm/build.sh` keys the image is not cached: `main`
+  rebuilds it after the merge.
 - Retrying or cancelling builds does not check branch freshness.
-- These commands do not modify your branch or enforce merge requirements.
-  Direct Buildkite launches are outside this workflow. No additional token is
-  needed.
+- Apart from that merge, these commands do not modify your branch or enforce
+  merge requirements. Direct Buildkite launches are outside this workflow.
 
 Maintainers must configure required Buildkite status checks on the latest PR
 commit and enable GitHub's

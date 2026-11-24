@@ -20,10 +20,12 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizerInfoResponse,
 )
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import TokensPrompt, tokens_input
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.renderers.params import apply_max_tokenize_tokens, resolve_max_tokenize_tokens
 from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
@@ -40,6 +42,7 @@ class ServingTokenization(BaseServing):
         default_chat_template_kwargs: dict[str, Any] | None = None,
         trust_request_chat_template: bool = False,
         request_logger: RequestLogger | None = None,
+        max_tokenize_tokens: int | None = None,
     ) -> None:
         super().__init__(
             models=models,
@@ -53,6 +56,10 @@ class ServingTokenization(BaseServing):
         self.chat_template_content_format: Final = chat_template_content_format
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.trust_request_chat_template = trust_request_chat_template
+        self.max_tokenize_tokens = resolve_max_tokenize_tokens(
+            max_tokenize_tokens,
+            online_renderer.model_config.max_model_len,
+        )
 
     async def create_tokenize(
         self,
@@ -63,11 +70,32 @@ class ServingTokenization(BaseServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        try:
+            tok_params = apply_max_tokenize_tokens(
+                request.build_tok_params(self.model_config),
+                self.max_tokenize_tokens,
+            )
+        except VLLMValidationError as e:
+            return self.create_error_response(str(e))
+
         request_id = f"tokenize-{self._base_request_id(raw_request)}"
 
         lora_request = self._maybe_get_adapters(request)
 
-        if isinstance(request, TokenizeChatRequest):
+        if (
+            isinstance(request, TokenizeChatRequest)
+            and self.online_renderer.use_harmony
+        ):
+            # The chat route renders GPT-OSS chats with Harmony, not the template.
+            rendered = await self.online_renderer.render_chat(
+                request.to_chat_completion_request(),
+                skip_mm_cache=True,
+                tok_params=tok_params,
+            )
+            if isinstance(rendered, ErrorResponse):
+                return rendered
+            _, engine_inputs = rendered
+        elif isinstance(request, TokenizeChatRequest):
             tool_dicts = (
                 None
                 if request.tools is None
@@ -89,6 +117,7 @@ class ServingTokenization(BaseServing):
                 default_template_kwargs=self.default_chat_template_kwargs,
                 tool_dicts=tool_dicts,
                 skip_mm_cache=True,
+                tok_params=tok_params,
             )
         else:
             engine_inputs = await self.online_renderer.preprocess_completion(
@@ -96,6 +125,7 @@ class ServingTokenization(BaseServing):
                 prompt_input=request.prompt,
                 prompt_embeds=None,
                 skip_mm_cache=True,
+                tok_params=tok_params,
             )
 
         input_ids: list[int] = []
@@ -132,6 +162,14 @@ class ServingTokenization(BaseServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        try:
+            tok_params = apply_max_tokenize_tokens(
+                request.build_tok_params(self.model_config),
+                self.max_tokenize_tokens,
+            )
+        except VLLMValidationError as e:
+            return self.create_error_response(str(e))
+
         request_id = f"tokenize-{self._base_request_id(raw_request)}"
 
         lora_request = self._maybe_get_adapters(request)
@@ -145,7 +183,7 @@ class ServingTokenization(BaseServing):
 
         tok_prompt = await self.renderer.tokenize_prompt_async(
             TokensPrompt(prompt_token_ids=request.tokens),
-            request.build_tok_params(self.model_config),
+            tok_params,
         )
         prompt_text = tok_prompt["prompt"]  # type: ignore[typeddict-item]
 
@@ -160,7 +198,7 @@ class ServingTokenization(BaseServing):
         return TokenizerInfoResponse(**info)
 
 
-@dataclass
+@dataclass(slots=True)
 class TokenizerInfo:
     tokenizer: TokenizerLike
     chat_template: str | None

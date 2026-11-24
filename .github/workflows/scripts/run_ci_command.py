@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import binascii
 import http.client
 import json
 import os
@@ -10,7 +11,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from fnmatch import fnmatchcase
 from typing import Any
 
 COMMAND_RUN_CI = "/ci run"
@@ -62,6 +64,8 @@ CI_COMMAND_PREFIXES = frozenset({"/ci", "/amd-ci"})
 CI_AUTHORIZED_COMMENT_MARKER = "<!-- vllm-ci-authorized -->"
 READY_LABELS = {"ready", "ready-run-all-tests"}
 TRUSTED_PERMISSIONS = {"admin", "maintain", "write"}
+BRANCH_UPDATE_POLL_SECONDS = 3
+BRANCH_UPDATE_POLL_ATTEMPTS = 40
 ACTIVE_BUILD_STATES = {
     "blocked",
     "creating",
@@ -74,11 +78,43 @@ ACTIVE_BUILD_STATES = {
 }
 RETRY_STATES = "failed,timed_out,expired"
 CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
-SETUP_STEP_KEYS = {
-    "ensure-ci-base-amd",
-    "pre-commit",
-    "refresh-rocm-base-amd",
-}
+# ensure-ci-base-amd: the old ROCm build chain, which ci-infra still renders
+# for branches that predate .buildkite/scripts/rocm/build.sh.
+ROCM_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
+SETUP_STEP_KEYS = {"ensure-ci-base-amd", ROCM_REFRESH_STEP_KEY, "pre-commit"}
+# A PR to main that changes these builds a new ROCm base image. Its
+# rocm-image-cache-check step fails until reconcile_rocm_cache caches the image
+# a trusted user's CI build pushed, so main reuses it after the merge.
+ROCM_STACK_INPUTS = ("docker/Dockerfile.rocm_base", "tools/vllm-rocm/therock_wheels.py")
+ROCM_CACHE_YAML = ".buildkite/image_build/amd_rocm_cache.yaml"
+ROCM_CACHE_CHECK_KEY = "rocm-image-cache-check"
+ROCM_PROMOTE_KEY = "rocm-promote"
+CODEOWNERS_PATH = ".github/CODEOWNERS"
+# build.sh check: main changed the stack since the PR's merge base.
+ROCM_CHECK_MAIN_MOVED = 4
+ROCM_BUILD_SH = ".buildkite/scripts/rocm/build.sh"
+# build.sh check: the PR's stack was in main's cache when the check passed.
+ROCM_CACHED_KEY = "rocm-stack-cached"
+# The build.sh line ranges that make the stack key (build.sh check's keyfmt). A PR
+# that changes them is not cached: promote keys the stack with main's build.sh.
+ROCM_KEY_RANGES = (("case $STACK in", "esac"), ("_trw=", "  Kr="))
+# build.sh base mode records the images it pushed itself under these keys, not
+# ones it reused from a tag another PR's CI could have pushed, and a runtime or
+# test-deps only with the parent it was built on ("none" otherwise). Only a build
+# that pushed the stack is a source; build.sh promote copies the rest over it.
+ROCM_STACK_BUILT_KEY = "rocm-rocm-stack-built"
+ROCM_BUILT_KEYS = (
+    ROCM_STACK_BUILT_KEY,
+    "rocm-rocm-runtime-built",
+    "rocm-rocm-test-deps-built",
+)
+# The one step a cache build runs (.buildkite/image_build/amd_rocm_cache.yaml).
+ROCM_CACHE_STEP_KEY = "rocm-base-image-cache"
+# Promote builds per source build before the bot asks a maintainer to look.
+ROCM_PROMOTE_ATTEMPTS = 3
+REVIEW_VERDICTS = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
+BUILDS_PER_PAGE = 100
+MAX_BUILD_PAGES = 100
 
 
 class ApiError(RuntimeError):
@@ -259,6 +295,13 @@ class GitHubClient:
             raise ApiError(None, "GitHub returned an invalid commits-behind count.")
         return behind
 
+    def update_branch(self, number: int, expected_head_sha: str) -> None:
+        self._request(
+            self._repo_path(f"/pulls/{number}/update-branch"),
+            body={"expected_head_sha": expected_head_sha},
+            method="PUT",
+        )
+
     def list_pulls_for_commit(self, commit: str) -> list[dict[str, Any]]:
         commit = urllib.parse.quote(commit, safe="")
         response = self._request(self._repo_path(f"/commits/{commit}/pulls"))
@@ -327,6 +370,42 @@ class GitHubClient:
             method="POST",
         )
 
+    def list_pr_files(self, number: int) -> list[str]:
+        files = self._paginate(self._repo_path(f"/pulls/{number}/files"))
+        return [
+            str(path)
+            for file in files
+            for path in (file["filename"], file.get("previous_filename"))
+            if path
+        ]
+
+    def get_file_sha(self, path: str, ref: str) -> str:
+        path, ref = urllib.parse.quote(path), urllib.parse.quote(ref, safe="")
+        try:
+            return self._request(self._repo_path(f"/contents/{path}?ref={ref}"))["sha"]
+        except ApiError as error:
+            if error.status == 404:
+                return "none"
+            raise
+
+    def get_file_text(self, path: str, ref: str) -> str:
+        path, ref = urllib.parse.quote(path), urllib.parse.quote(ref, safe="")
+        try:
+            response = self._request(self._repo_path(f"/contents/{path}?ref={ref}"))
+        except ApiError as error:
+            if error.status == 404:
+                return ""
+            raise
+        return binascii.a2b_base64(response["content"]).decode()
+
+    def get_merge_base(self, base_ref: str, head_sha: str) -> str:
+        base_ref = urllib.parse.quote(f"refs/heads/{base_ref}", safe="")
+        head_sha = urllib.parse.quote(head_sha, safe="")
+        response = self._request(
+            self._repo_path(f"/compare/{base_ref}...{head_sha}?per_page=1")
+        )
+        return str(response["merge_base_commit"]["sha"])
+
 
 class BuildkiteClient:
     def __init__(
@@ -394,12 +473,18 @@ class BuildkiteClient:
         branch: str | None = None,
         metadata: tuple[str, str] | None = None,
         states: Sequence[str] = (),
+        page: int = 1,
+        created_from: str | None = None,
     ) -> list[dict[str, Any]]:
         query = [
             ("exclude_jobs", "true"),
             ("exclude_pipeline", "true"),
-            ("per_page", "100"),
+            ("per_page", str(BUILDS_PER_PAGE)),
         ]
+        if page > 1:
+            query.append(("page", str(page)))
+        if created_from:
+            query.append(("created_from", created_from))
         if commit:
             query.append(("commit", commit))
         if branch:
@@ -413,7 +498,14 @@ class BuildkiteClient:
             raise ApiError(None, "Buildkite API returned an invalid build list.")
         return response
 
+    def get_build(self, build_number: int) -> dict[str, Any]:
+        number = urllib.parse.quote(str(build_number), safe="")
+        return self._request(path=f"/{number}")
+
     def create_build(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        # Bot builds are explicit commands. Pipeline branch settings gate
+        # webhooks and would otherwise reject them, e.g. amd-ci on main.
+        body = {**body, "ignore_pipeline_branch_filters": True}
         return self._request(body=body, method="POST")
 
     def retry_failed_jobs(
@@ -432,15 +524,27 @@ class BuildkiteClient:
         number = urllib.parse.quote(str(build_number), safe="")
         return self._request(method="PUT", path=f"/{number}/cancel")
 
-    def list_failed_jobs(self, build_number: int) -> list[dict[str, Any]]:
+    def retry_job(self, build_number: int, job_id: str) -> dict[str, Any]:
         number = urllib.parse.quote(str(build_number), safe="")
-        query = [
-            ("state[]", "failed"),
-            ("state[]", "timed_out"),
-            ("state[]", "expired"),
-            ("include_retried_jobs", "false"),
-            ("per_page", "100"),
-        ]
+        job = urllib.parse.quote(job_id, safe="")
+        return self._request(method="PUT", path=f"/{number}/jobs/{job}/retry")
+
+    def list_failed_jobs(self, build_number: int) -> list[dict[str, Any]]:
+        return self.list_jobs(build_number, states=RETRY_STATES.split(","))
+
+    def list_jobs(
+        self,
+        build_number: int,
+        *,
+        states: Sequence[str] = (),
+        step_key: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List a build's jobs, without the ones that were retried."""
+        number = urllib.parse.quote(str(build_number), safe="")
+        query = [("state[]", state) for state in states]
+        if step_key:
+            query.append(("step_key", step_key))
+        query += [("include_retried_jobs", "false"), ("per_page", "100")]
         url = f"{self.base_url}/{number}/jobs?{urllib.parse.urlencode(query)}"
         jobs: list[dict[str, Any]] = []
         while url:
@@ -541,8 +645,10 @@ def authorize(
     if actor.casefold() != pr["user"]["login"].casefold():
         return (
             False,
-            "Only reviewers with write access can use CI commands before CI is "
-            "delegated to the PR author.",
+            (
+                "Only reviewers with write access can use CI commands before CI is "
+                "delegated to the PR author."
+            ),
         )
     if pr["draft"]:
         return False, "PR authors cannot run CI while the PR is a draft."
@@ -552,9 +658,34 @@ def authorize(
         return True, "approval from a trusted reviewer"
     return (
         False,
-        f"A reviewer with write access must run `{run_command}`, approve the PR, "
-        "or add the `ready` label first.",
+        (
+            f"A reviewer with write access must run `{run_command}`, approve the PR, "
+            "or add the `ready` label first."
+        ),
     )
+
+
+def is_trusted_user(github: GitHubClient, login: str, trusted_users: set[str]) -> bool:
+    return login.casefold() in trusted_users or is_trusted_permission(
+        github.get_permission(login)
+    )
+
+
+def trusted_approved_commits(
+    github: GitHubClient, number: int, trusted_users: set[str]
+) -> set[str]:
+    """Return the commits that trusted reviewers' latest reviews approved."""
+    latest_reviews: dict[str, Mapping[str, Any]] = {}
+    for review in github.list_reviews(number):
+        login = (review.get("user") or {}).get("login")
+        if login and review.get("state") in REVIEW_VERDICTS:
+            latest_reviews[login.casefold()] = review
+    return {
+        str(review.get("commit_id"))
+        for review in latest_reviews.values()
+        if review["state"] == "APPROVED"
+        and is_trusted_user(github, review["user"]["login"], trusted_users)
+    }
 
 
 def has_trusted_approval(
@@ -562,25 +693,31 @@ def has_trusted_approval(
     number: int,
     trusted_users: set[str],
 ) -> bool:
-    if github.get_review_decision(number) != "APPROVED":
-        return False
+    return github.get_review_decision(number) == "APPROVED" and bool(
+        trusted_approved_commits(github, number, trusted_users)
+    )
 
-    latest_review_states: dict[str, tuple[str, str]] = {}
-    for review in github.list_reviews(number):
-        user = review.get("user") or {}
-        login = user.get("login")
-        state = review.get("state")
-        if login and state in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}:
-            latest_review_states[login.casefold()] = (login, state)
 
-    for login, state in latest_review_states.values():
-        if state != "APPROVED":
-            continue
-        if login.casefold() in trusted_users:
-            return True
-        if is_trusted_permission(github.get_permission(login)):
-            return True
-    return False
+def iter_builds(
+    buildkite: Any,
+    *,
+    branch: str | None = None,
+    metadata: tuple[str, str] | None = None,
+    created_from: str | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Yield builds across every page, newest first."""
+    for page in range(1, MAX_BUILD_PAGES + 1):
+        builds = buildkite.list_builds(
+            None,
+            branch=branch,
+            metadata=metadata,
+            page=page,
+            created_from=created_from,
+        )
+        yield from builds
+        if len(builds) < BUILDS_PER_PAGE:
+            return
+    raise ApiError(None, "Buildkite API pagination exceeded 10,000 builds.")
 
 
 def is_build_for_pr(build: Mapping[str, Any], pr_number: int) -> bool:
@@ -594,7 +731,16 @@ def is_build_for_pr(build: Mapping[str, Any], pr_number: int) -> bool:
 
 
 def is_active_build(build: Mapping[str, Any]) -> bool:
-    return bool(build.get("blocked")) or build.get("state") in ACTIVE_BUILD_STATES
+    state = build.get("state")
+    if state == "blocked" or build.get("blocked"):
+        # A build stays blocked after every job has finished while an optional
+        # block or input step (the "Run more tests" picker) waits for a click,
+        # which may never come. Only a block that holds back unfinished work
+        # keeps the build active.
+        if build.get("finished_at"):
+            return state in ACTIVE_BUILD_STATES - {"blocked"}
+        return True
+    return state in ACTIVE_BUILD_STATES
 
 
 def is_comment_triggered_build(build: Mapping[str, Any]) -> bool:
@@ -610,6 +756,16 @@ def blocks_new_run(command: str, build: Mapping[str, Any]) -> bool:
             and build.get("state") != "blocked"
         )
     return is_active_build(build)
+
+
+def list_commit_builds(
+    buildkite: BuildkiteClient, command: str, commit: str
+) -> list[dict[str, Any]]:
+    builds = buildkite.list_builds(commit)
+    if command not in AMD_CI_COMMANDS:
+        return builds
+    # bootstrap-amd.sh exits before uploading any test steps for PR webhook builds.
+    return [build for build in builds if build.get("source") != "webhook"]
 
 
 def select_latest_build(
@@ -646,7 +802,6 @@ def create_build_payload(
         "pull_request_base_branch": pr["base"]["ref"],
         "pull_request_repository": pr["head"]["repo"]["clone_url"],
         "pull_request_labels": [label["name"] for label in pr["labels"]],
-        "ignore_pipeline_branch_filters": True,
         "env": env,
         "meta_data": {
             "github-comment-id": str(comment_id),
@@ -778,10 +933,11 @@ def notify_authorized(
         (
             f"✅ @{author}, CI is now available for this PR.\n\n"
             "- `/ci run` starts upstream CI; `/amd-ci run` starts AMD CI only.\n"
-            "- Your branch must contain every commit currently on its upstream "
-            "target branch. Merge or rebase onto the latest target branch, then "
-            "rerun the command. Append `--allow-stale` to a run command to test "
-            "an outdated branch at your own risk.\n"
+            "- Run commands test your branch with every commit currently on its "
+            "upstream target branch. If it is behind, the bot merges the target "
+            "branch into it first (pull before pushing again). Append "
+            "`--allow-stale` to a run command to test an outdated branch as is, "
+            "at your own risk.\n"
             "- `/ci retry` retries failed jobs in the CI build for the current "
             "PR head. If the current head has no CI build, it starts a new CI "
             "build for the current head containing only jobs that failed in "
@@ -829,10 +985,65 @@ def resolve_workflow_run_pr(
     return find_matching_pr(github.list_pulls_for_commit(head_sha))
 
 
+def merge_base_into_pr(
+    github: GitHubClient,
+    branch_updater: GitHubClient,
+    pr: Mapping[str, Any],
+    command: str,
+    lag: str,
+) -> tuple[dict[str, Any], str]:
+    base_ref = pr["base"]["ref"]
+
+    def merge_failed(reason: str) -> CiPreparationError:
+        return CiPreparationError(
+            f"{lag} The bot could not merge upstream `{base_ref}` into this "
+            f"branch ({reason}). No new CI build was started. Either merge or "
+            f"rebase onto the latest `{base_ref}` yourself and rerun `{command}`, "
+            f"or use `{command}{ALLOW_STALE_SUFFIX}` to test this branch as is."
+        )
+
+    try:
+        branch_updater.update_branch(pr["number"], pr["head"]["sha"])
+        for _ in range(BRANCH_UPDATE_POLL_ATTEMPTS):
+            time.sleep(BRANCH_UPDATE_POLL_SECONDS)
+            current_pr = github.get_pr(pr["number"])
+            if current_pr["head"]["sha"] == pr["head"]["sha"]:
+                continue
+            try:
+                behind = github.get_commits_behind_base(
+                    base_ref, current_pr["head"]["sha"]
+                )
+            except ApiError as error:
+                # A fork's new head is briefly unknown to the base repository.
+                if error.status == 404:
+                    continue
+                raise
+            break
+        else:
+            raise merge_failed("the merge commit did not appear in time")
+        if (
+            current_pr["state"] != "open"
+            or current_pr["base"]["ref"] != base_ref
+            or behind
+        ):
+            raise merge_failed("the PR changed during the merge")
+    except ApiError as error:
+        raise merge_failed(str(error)) from error
+
+    note = (
+        f"ℹ️ {lag} Merged upstream `{base_ref}` into this branch as "
+        f"`{current_pr['head']['sha'][:12]}` before starting CI. "
+        "Pull the branch before pushing more changes."
+    )
+    print(note)
+    return current_pr, note
+
+
 def prepare_pr_for_ci(
     github: GitHubClient,
     pr: Mapping[str, Any],
     command: str,
+    branch_updater: GitHubClient | None = None,
 ) -> tuple[dict[str, Any], str]:
     base_ref = pr["base"]["ref"]
     no_action = "No new CI build was started."
@@ -868,6 +1079,8 @@ def prepare_pr_for_ci(
             print(warning)
         return current_pr, warning
 
+    if behind and branch_updater is not None:
+        return merge_base_into_pr(github, branch_updater, current_pr, command, lag)
     if behind:
         raise CiPreparationError(
             f"{lag} Your branch must contain every commit currently on upstream "
@@ -887,6 +1100,8 @@ def handle_run_ci(
     command: str,
     github: GitHubClient,
     pr: Mapping[str, Any],
+    branch_updater: GitHubClient | None = None,
+    allow_repeat_run: bool = False,
 ) -> str:
     ci_name = ci_name_for_command(command)
     duplicate_builds = buildkite.list_builds(
@@ -899,7 +1114,7 @@ def handle_run_ci(
             f"{ci_name} was already requested by this comment: {duplicate['web_url']}"
         )
 
-    current_builds = buildkite.list_builds(pr["head"]["sha"])
+    current_builds = list_commit_builds(buildkite, command, pr["head"]["sha"])
     active_build = next(
         (
             build
@@ -913,7 +1128,19 @@ def handle_run_ci(
             f"{ci_name} is already running for this commit: {active_build['web_url']}"
         )
 
-    current_pr, warning = prepare_pr_for_ci(github, pr, command)
+    tested_build = select_latest_build(
+        [build for build in current_builds if build.get("state") != "canceled"],
+        pr["number"],
+    )
+    if tested_build and not allow_repeat_run:
+        raise CiPreparationError(
+            f"{ci_name} already ran on this commit: {tested_build['web_url']}. "
+            "No new CI build was started. Push new changes to run CI again, use "
+            f"`{retry_command_for_command(command)}` to rerun failed jobs, or ask "
+            "a reviewer with write access to rerun it."
+        )
+
+    current_pr, warning = prepare_pr_for_ci(github, pr, command, branch_updater)
 
     build = buildkite.create_build(
         create_build_payload(
@@ -942,7 +1169,7 @@ def handle_retry_failed(
     ci_name = ci_name_for_command(command)
     run_command = run_command_for_command(command)
     retry_command = retry_command_for_command(command)
-    builds = buildkite.list_builds(pr["head"]["sha"])
+    builds = list_commit_builds(buildkite, command, pr["head"]["sha"])
     build = select_latest_build(builds, pr["number"])
     if build:
         metadata = build.get("meta_data") or {}
@@ -1026,6 +1253,21 @@ def handle_retry_failed(
             f"Comment `{retry_command}` again."
         )
 
+    failed_count = len(step_keys)
+    # Branches from before the check existed fail on an unknown step key.
+    try:
+        if (
+            pr["base"]["ref"] == "main"
+            and set(ROCM_STACK_INPUTS) & set(github.list_pr_files(pr["number"]))
+            and defines_step_key(
+                github.get_file_text(ROCM_CACHE_YAML, pr["head"]["sha"]),
+                ROCM_CACHE_CHECK_KEY,
+            )
+        ):
+            step_keys = sorted({*step_keys, ROCM_CACHE_CHECK_KEY})
+    except ApiError as error:
+        print(f"Not adding {ROCM_CACHE_CHECK_KEY}: {error}")
+
     retry_build = buildkite.create_build(
         create_retry_build_payload(
             actor=actor,
@@ -1039,7 +1281,7 @@ def handle_retry_failed(
     return (
         f"Triggered [Buildkite {ci_name} #{retry_build['number']}]"
         f"({retry_build['web_url']}) for commit "
-        f"`{current_pr['head']['sha'][:12]}`, running {len(step_keys)} failed "
+        f"`{current_pr['head']['sha'][:12]}`, running {failed_count} failed "
         f"step(s) from [Buildkite {ci_name} #{source_build['number']}]"
         f"({source_build['web_url']})."
     )
@@ -1093,6 +1335,365 @@ def handle_cancel_ci(
     )
 
 
+def codeowners_for(codeowners: str, paths: Sequence[str]) -> list[str]:
+    """Return the owners of paths, where the last matching CODEOWNERS line wins."""
+    rules = [
+        line.split()
+        for line in codeowners.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    found: dict[str, str] = {}
+    for path in paths:
+        matches = [
+            owners
+            for pattern, *owners in rules
+            if fnmatchcase(path, pattern.lstrip("/"))
+            or path.startswith(pattern.strip("/") + "/")
+        ]
+        for owner in matches[-1] if matches else []:
+            found.setdefault(owner.casefold(), owner)
+    return list(found.values())
+
+
+def rocm_key_format(build_sh: str) -> list[str]:
+    lines = []
+    for start, end in ROCM_KEY_RANGES:
+        inside = False
+        for line in build_sh.splitlines():
+            if inside or line.startswith(start):
+                if not line.lstrip().startswith("#"):
+                    lines.append(line)
+                inside = not (inside and line.startswith(end))
+    return lines
+
+
+def rocm_changes_key_format(
+    github: GitHubClient, pr: Mapping[str, Any], files: set[str]
+) -> bool:
+    if ROCM_BUILD_SH not in files:
+        return False
+    head = pr["head"]["sha"]
+    base = github.get_merge_base(pr["base"]["ref"], head)
+    return rocm_key_format(github.get_file_text(ROCM_BUILD_SH, base)) != (
+        rocm_key_format(github.get_file_text(ROCM_BUILD_SH, head))
+    )
+
+
+def rocm_cache_run_note(
+    github: GitHubClient,
+    pr: Mapping[str, Any],
+    trusted: bool,
+    trusted_users: set[str],
+) -> str:
+    files = set(github.list_pr_files(pr["number"]))
+    stack_files = [path for path in ROCM_STACK_INPUTS if path in files]
+    if not stack_files:
+        return ""
+    if rocm_changes_key_format(github, pr, files):
+        return (
+            "This PR changes how `build.sh` keys the ROCm base image: `main` "
+            "rebuilds it after the merge, so there is nothing to cache."
+        )
+    if trusted or pr["head"]["sha"] in trusted_approved_commits(
+        github, pr["number"], trusted_users
+    ):
+        return (
+            "This PR changes the ROCm base image: it is cached into `main` "
+            "automatically when this build finishes. The `ROCm image cache` step "
+            "must be green before merge."
+        )
+    owners = codeowners_for(github.get_file_text(CODEOWNERS_PATH, "main"), stack_files)
+    mentions: dict[str, str] = {}
+    for user in (pr["user"]["login"], *owners):
+        user = user.removeprefix("@")
+        mentions.setdefault(user.casefold(), user)
+    return (
+        f"{' '.join(f'@{user}' for user in mentions.values())}: this PR changes "
+        f"the ROCm base image. A maintainer must comment `{COMMAND_RUN_CI}`, or a "
+        f"trusted reviewer must approve this commit and comment `{COMMAND_RUN_CI}`, "
+        "to cache it into `main`; until then the `ROCm image cache` step blocks "
+        "the merge."
+    )
+
+
+def defines_step_key(pipeline_yaml: str, key: str) -> bool:
+    for line in pipeline_yaml.splitlines():
+        line = line.split("#", 1)[0].strip().removeprefix("- ")
+        name, _, value = line.partition(":")
+        if name.strip() == "key" and value.strip().strip("\"'") == key:
+            return True
+    return False
+
+
+def find_rocm_cache_source(
+    github: GitHubClient,
+    pr: Mapping[str, Any],
+    buildkites: Sequence[BuildkiteClient],
+    trusted_users: set[str],
+) -> dict[str, Any] | None:
+    """Return the newest build of the PR that may be cached into main.
+
+    A trusted user had the bot build its commit, or a trusted reviewer's latest
+    review approved that commit: every build the bot made of the commit runs
+    the same code. It pushed the ROCm stack itself, finished its ROCm base image
+    step (a later failure leaves the stack whole), and built the PR head's stack
+    inputs. Its pull request is checked, not
+    is_build_for_pr's github-pr-number fallback, which is metadata that any job
+    can write.
+    """
+    # Builds are created under the head label (owner:branch); older ones under
+    # the bare ref, unless that is the base branch, whose builds are not this PR's.
+    branches = dict.fromkeys(
+        branch
+        for branch in (pr["head"].get("label"), pr["head"]["ref"])
+        if branch and branch != pr["base"]["ref"]
+    )
+    builds = sorted(
+        (
+            (build, client)
+            for client in buildkites
+            for branch in branches
+            for build in iter_builds(
+                client, branch=branch, created_from=pr.get("created_at")
+            )
+            if str((build.get("pull_request") or {}).get("id")) == str(pr["number"])
+            and build.get("source") == "api"
+        ),
+        key=lambda candidate: candidate[0].get("created_at", ""),
+        reverse=True,
+    )
+    actors = {
+        str((build.get("env") or {}).get("VLLM_CI_TRIGGERED_BY", ""))
+        for build, _ in builds
+    }
+    trusted_actors = {
+        actor
+        for actor in actors
+        if actor and is_trusted_user(github, actor, trusted_users)
+    }
+    vouched = trusted_approved_commits(github, pr["number"], trusted_users) | {
+        build["commit"]
+        for build, _ in builds
+        if (build.get("env") or {}).get("VLLM_CI_TRIGGERED_BY") in trusted_actors
+    }
+    head_stack = {
+        p: github.get_file_sha(p, pr["head"]["sha"]) for p in ROCM_STACK_INPUTS
+    }
+    for build, client in builds:
+        built = (build.get("meta_data") or {}).get(ROCM_STACK_BUILT_KEY)
+        if not built or build["commit"] not in vouched:
+            continue
+        jobs = client.list_jobs(build["number"], step_key=ROCM_REFRESH_STEP_KEY)
+        latest = max(jobs, key=lambda job: job.get("created_at") or "", default={})
+        if not latest.get("finished_at"):
+            continue
+        if all(
+            github.get_file_sha(path, build["commit"]) == sha
+            for path, sha in head_stack.items()
+        ):
+            return build
+    return None
+
+
+def start_rocm_promote(
+    github: GitHubClient,
+    ci_buildkite: BuildkiteClient,
+    pr: Mapping[str, Any],
+    source: Mapping[str, Any],
+    promote_id: str,
+) -> str:
+    sha = source["commit"]
+    # A main commit, so build.sh and the pipeline are trusted.
+    commit = github.get_merge_base("main", sha)
+    meta_data = source["meta_data"]
+    build = ci_buildkite.create_build(
+        {
+            "commit": commit,
+            "branch": "main",
+            "message": f"Cache the ROCm base image of PR #{pr['number']}",
+            "env": {
+                "ROCM_PROMOTE_PR": str(pr["number"]),
+                "ROCM_PROMOTE_SHA": sha,
+                "ROCM_PROMOTE_IMAGES": " ".join(
+                    meta_data[key]
+                    for key in ROCM_BUILT_KEYS
+                    if meta_data.get(key, "none") != "none"
+                ),
+                "VLLM_CI_ONLY_STEP_KEYS": json.dumps([ROCM_CACHE_STEP_KEY]),
+            },
+            "meta_data": {ROCM_PROMOTE_KEY: promote_id},
+        }
+    )
+    return f"Started {build['web_url']} to cache {source['web_url']}."
+
+
+def reconcile_rocm_cache(
+    pr: Mapping[str, Any],
+    github: GitHubClient,
+    ci_buildkite: BuildkiteClient,
+    amd_buildkite: BuildkiteClient,
+    trusted_users: set[str],
+) -> str:
+    """Take the next step to cache a PR's ROCm base image into main.
+
+    Stateless and idempotent: it promotes the source build's images with a CI
+    build on main, then retries the PR head's failed rocm-image-cache-check.
+    Returns what it did, for the workflow log.
+    """
+    if pr["state"] != "open" or pr["base"]["ref"] != "main":
+        return "Not an open PR to main."
+    files = set(github.list_pr_files(pr["number"]))
+    if not files & set(ROCM_STACK_INPUTS):
+        return "The PR does not change the ROCm base image."
+    if rocm_changes_key_format(github, pr, files):
+        return "The PR changes how build.sh keys the stack; main rebuilds after merge."
+
+    head_builds = [
+        build
+        for build in ci_buildkite.list_builds(pr["head"]["sha"])
+        if str((build.get("pull_request") or {}).get("id")) == str(pr["number"])
+    ]
+    head_build = max(
+        head_builds, key=lambda build: build.get("created_at", ""), default=None
+    )
+    checks = (
+        ci_buildkite.list_jobs(head_build["number"], step_key=ROCM_CACHE_CHECK_KEY)
+        if head_build
+        else []
+    )
+    latest_check = max(checks, key=lambda job: job.get("created_at") or "", default={})
+    if latest_check.get("state") == "passed":
+        return "The PR head's cache check passed."
+    # main would never use this stack: the merge gets another one.
+    if latest_check.get("exit_status") == ROCM_CHECK_MAIN_MOVED:
+        return "Main changed the ROCm stack; the PR must merge main."
+
+    source = find_rocm_cache_source(
+        github, pr, (ci_buildkite, amd_buildkite), trusted_users
+    )
+    if source is None:
+        return "No trusted CI build has built the PR's ROCm stack yet."
+
+    sha = source["commit"]
+    promote_id = f"{pr['number']}@{sha}"
+    # Only builds the bot created: a trigger step can set meta-data.
+    promotes = [
+        build
+        for build in ci_buildkite.list_builds(
+            None, branch="main", metadata=(ROCM_PROMOTE_KEY, promote_id)
+        )
+        if build.get("source") == "api"
+    ]
+    promote = max(promotes, key=lambda build: build.get("created_at", ""), default=None)
+    if promote is None:
+        return start_rocm_promote(github, ci_buildkite, pr, source, promote_id)
+    if not promote.get("finished_at"):
+        return f"Waiting for {promote['web_url']}."
+    if promote.get("state") != "passed":
+        if len(promotes) < ROCM_PROMOTE_ATTEMPTS:
+            return start_rocm_promote(github, ci_buildkite, pr, source, promote_id)
+        marker = f"<!-- vllm-ci-rocm-promote-failed:{promote_id} -->"
+        if not has_bot_comment_marker(github, pr["number"], marker):
+            github.add_comment(
+                pr["number"],
+                f"❌ Caching this PR's ROCm base image into `main` failed "
+                f"{len(promotes)} times, last in {promote['web_url']}. A "
+                f"maintainer must look into it.\n\n{marker}",
+            )
+        return f"Gave up after {len(promotes)} failed promote builds."
+
+    if head_build is None:
+        return "No CI build for the PR head to check the cache."
+    # A check that started after the promote build finished already saw its result.
+    failed = [
+        job
+        for job in checks
+        if job.get("state") in RETRY_STATES.split(",")
+        and (job.get("started_at") or "") < promote["finished_at"]
+    ]
+    check = max(failed, key=lambda job: job.get("created_at") or "", default=None)
+    if check is None:
+        return "No failed cache check needs a retry."
+    try:
+        ci_buildkite.retry_job(head_build["number"], check["id"])
+    except ApiError as error:
+        if error.status is None or not 400 <= error.status < 500:
+            raise
+        return f"Could not retry the cache check: {error}"
+    return f"Retried the cache check of {head_build['web_url']}."
+
+
+def handle_buildkite_status(
+    event: Mapping[str, Any],
+    github: GitHubClient,
+    ci_buildkite: BuildkiteClient,
+    amd_buildkite: BuildkiteClient,
+    trusted_users: set[str],
+) -> str:
+    """Reconcile the PR whose CI or ROCm promote build just finished.
+
+    The status's target URL only names the build; the build itself, fetched
+    from Buildkite, says which PR it belongs to.
+    """
+    number = str(event.get("target_url") or "").rpartition("/builds/")[2]
+    if not number.isdigit():
+        return "The status does not link a Buildkite build."
+    build = ci_buildkite.get_build(int(number))
+    if build.get("source") != "api" or build.get("commit") != event.get("sha"):
+        return "Not a build the bot created for this commit."
+    # Buildkite also posts failure while a failing build still runs.
+    if build.get("state") in CANCELABLE_BUILD_STATES:
+        return "The build has not finished."
+    pr_number = str((build.get("pull_request") or {}).get("id") or "")
+    if not pr_number and build.get("branch") == "main":
+        pr_number = str((build.get("env") or {}).get("ROCM_PROMOTE_PR", ""))
+    if not pr_number.isdigit():
+        return "Not a PR or ROCm promote build."
+    pr = github.get_pr(int(pr_number))
+    return reconcile_rocm_cache(pr, github, ci_buildkite, amd_buildkite, trusted_users)
+
+
+def recheck_rocm_stack_prs(
+    github: GitHubClient, ci_buildkite: BuildkiteClient
+) -> list[str]:
+    """Retry the passed cache check of each open PR, after main changed its stack.
+
+    Each check compares the PR with main's stack as it was when it ran. Run again,
+    it fails until the PR merges main if main changed the stack since its merge base.
+    Returns the builds whose check was retried.
+    """
+    seen, retried, failed = set(), [], []
+    for build in iter_builds(ci_buildkite, metadata=(ROCM_CACHED_KEY, "true")):
+        number = str((build.get("pull_request") or {}).get("id") or "")
+        if build.get("source") != "api" or not number.isdigit() or number in seen:
+            continue
+        seen.add(number)  # its newest build
+        try:
+            pr = github.get_pr(int(number))
+            if (
+                pr["state"] != "open"
+                or pr["base"]["ref"] != "main"
+                or pr["head"]["sha"] != build["commit"]
+            ):
+                continue
+            checks = ci_buildkite.list_jobs(
+                build["number"], step_key=ROCM_CACHE_CHECK_KEY
+            )
+            check = max(checks, key=lambda job: job.get("created_at") or "", default={})
+            if check.get("state") != "passed":
+                continue
+            ci_buildkite.retry_job(build["number"], check["id"])
+        except ApiError as error:
+            print(f"Could not recheck PR #{number}: {error}")
+            if error.status is None or not 400 <= error.status < 500:
+                failed.append(number)
+            continue
+        retried.append(build["web_url"])
+    if failed:
+        raise ApiError(None, f"Could not recheck PRs {failed}; retried {retried}.")
+    return retried
+
+
 def reply_unrecognized_command(
     event: Mapping[str, Any],
     github: GitHubClient,
@@ -1120,6 +1721,9 @@ def run(
     github: GitHubClient,
     buildkite: BuildkiteClient,
     trusted_users_value: str = "",
+    branch_updater: GitHubClient | None = None,
+    ci_buildkite: BuildkiteClient | None = None,
+    amd_buildkite: BuildkiteClient | None = None,
 ) -> None:
     command = parse_command(event["comment"]["body"])
     if not command or "pull_request" not in event["issue"]:
@@ -1134,6 +1738,7 @@ def run(
         return
     add_reaction_safely(github, comment_id, "eyes")
 
+    rocm = False
     try:
         pr = github.get_pr(issue_number)
         permission = github.get_permission(actor)
@@ -1146,9 +1751,9 @@ def run(
             return
 
         trusted_users = parse_trusted_users(trusted_users_value)
+        trusted = is_trusted_permission(permission) or actor.casefold() in trusted_users
         should_check_approval = (
-            not is_trusted_permission(permission)
-            and actor.casefold() not in trusted_users
+            not trusted
             and actor.casefold() == pr["user"]["login"].casefold()
             and not pr["draft"]
             and not has_ready_label(pr)
@@ -1174,6 +1779,7 @@ def run(
             return
 
         print(f"Authorized @{actor}: {reason}")
+        rocm = command.startswith(COMMAND_RUN_CI) and pr["base"]["ref"] == "main"
         if command in RUN_CI_COMMAND_ENV:
             message = handle_run_ci(
                 actor=actor,
@@ -1182,6 +1788,8 @@ def run(
                 command=command,
                 github=github,
                 pr=pr,
+                branch_updater=branch_updater,
+                allow_repeat_run=is_trusted_permission(permission),
             )
         elif command in RETRY_COMMANDS:
             message = handle_retry_failed(
@@ -1201,6 +1809,17 @@ def run(
         else:
             raise ValueError(f"Unsupported CI command: {command}")
         add_reaction_safely(github, comment_id, "rocket")
+        if rocm:
+            # The head the run built: handle_run_ci may have merged main into it.
+            try:
+                note = rocm_cache_run_note(
+                    github, github.get_pr(issue_number), trusted, trusted_users
+                )
+            except Exception as error:
+                note = ""
+                print(f"No ROCm image cache note: {error}")
+            if note:
+                message = f"{message}\n\n{note}"
         github.add_comment(issue_number, f"✅ {message}")
     except CiPreparationError as error:
         add_reaction_safely(github, comment_id, "-1")
@@ -1211,6 +1830,19 @@ def run(
     except Exception:
         add_reaction_safely(github, comment_id, "confused")
         raise
+    # Also when preparing the run failed: an approval can vouch for an earlier build.
+    if rocm:
+        try:
+            result = reconcile_rocm_cache(
+                github.get_pr(issue_number),
+                github,
+                ci_buildkite or buildkite,
+                amd_buildkite or buildkite,
+                parse_trusted_users(trusted_users_value),
+            )
+        except Exception as error:
+            result = f"Error (comment /ci run again to retry): {error}"
+        print(f"ROCm image cache: {result}")
 
 
 def main() -> None:
@@ -1223,6 +1855,26 @@ def main() -> None:
         os.environ["GITHUB_REPOSITORY"],
     )
     event_name = os.environ.get("GITHUB_EVENT_NAME", "issue_comment")
+    buildkite_token = os.environ.get("BUILDKITE_API_TOKEN", "")
+    organization = os.environ.get("BUILDKITE_ORGANIZATION", "vllm")
+    ci_pipeline = os.environ.get("BUILDKITE_PIPELINE", "ci")
+    amd_pipeline = os.environ.get("BUILDKITE_AMD_PIPELINE", "amd-ci")
+    ci_buildkite = BuildkiteClient(buildkite_token, organization, ci_pipeline)
+    amd_buildkite = BuildkiteClient(buildkite_token, organization, amd_pipeline)
+    if event_name == "status":
+        print(
+            handle_buildkite_status(
+                event,
+                github,
+                ci_buildkite,
+                amd_buildkite,
+                parse_trusted_users(os.environ.get("CI_TRUSTED_USERS", "")),
+            )
+        )
+        return
+    if event_name == "push":
+        print(recheck_rocm_stack_prs(github, ci_buildkite))
+        return
     if event_name == "pull_request_target":
         notify_authorized(
             event,
@@ -1254,20 +1906,19 @@ def main() -> None:
         return
 
     pipeline = pipeline_for_command(
-        command,
-        amd_ci_pipeline=os.environ.get("BUILDKITE_AMD_PIPELINE", "amd-ci"),
-        upstream_ci_pipeline=os.environ.get("BUILDKITE_PIPELINE", "ci"),
+        command, amd_ci_pipeline=amd_pipeline, upstream_ci_pipeline=ci_pipeline
     )
-    buildkite = BuildkiteClient(
-        os.environ.get("BUILDKITE_API_TOKEN", ""),
-        os.environ.get("BUILDKITE_ORGANIZATION", "vllm"),
-        pipeline,
-    )
+    branch_update_token = os.environ.get("GH_BRANCH_UPDATE_TOKEN", "")
     run(
         event,
         github,
-        buildkite,
+        amd_buildkite if pipeline == amd_pipeline else ci_buildkite,
         os.environ.get("CI_TRUSTED_USERS", ""),
+        GitHubClient(branch_update_token, os.environ["GITHUB_REPOSITORY"])
+        if branch_update_token
+        else None,
+        ci_buildkite,
+        amd_buildkite,
     )
 
 

@@ -11,8 +11,12 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops import (
     fused_sigmoid_gating_delta_rule_update,
+)
+from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp import (
+    fused_gdn_decode_post_conv_mtp_triton,
 )
 from vllm.third_party.flash_linear_attention.ops.fused_gdn_prefill_post_conv import (
     fused_post_conv_prep,
@@ -33,6 +37,7 @@ def reference_post_conv(
     V: int,
     apply_l2norm: bool = True,
     output_g_exp: bool = False,
+    beta_scale: float = 1.0,
 ):
     """Reference implementation using individual ops."""
     L = conv_output.shape[0]
@@ -59,7 +64,7 @@ def reference_post_conv(
     if output_g_exp:
         g = torch.exp(g)
 
-    beta_out = torch.sigmoid(b.float())
+    beta_out = torch.sigmoid(b.float()) * beta_scale
 
     return q, k, v, g, beta_out
 
@@ -67,18 +72,21 @@ def reference_post_conv(
 # Qwen3.5-35B config: H=16, HV=32, K=128, V=128
 # Qwen3.5-397B config: H=16, HV=64, K=128, V=128
 @pytest.mark.parametrize(
-    "H, HV, K, V",
+    "H, HV, K, V, beta_scale",
     [
-        (16, 32, 128, 128),  # 35B
-        (16, 64, 128, 128),  # 397B
-        (4, 8, 64, 64),  # small
+        (16, 32, 128, 128, 1.0),  # 35B
+        (16, 64, 128, 128, 1.0),  # 397B
+        (4, 8, 64, 64, 1.0),  # small
+        (30, 30, 96, 192, 2.0),  # OLMo Hybrid
     ],
 )
 @pytest.mark.parametrize("L", [1, 16, 128, 512, 2048])
 @pytest.mark.parametrize("apply_l2norm", [True, False])
 @pytest.mark.parametrize("output_g_exp", [True, False])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-def test_fused_post_conv_correctness(H, HV, K, V, L, apply_l2norm, output_g_exp, dtype):
+def test_fused_post_conv_correctness(
+    H, HV, K, V, beta_scale, L, apply_l2norm, output_g_exp, dtype
+):
     """Test fused kernel matches reference for all configs."""
     torch.manual_seed(42)
     device = "cuda"
@@ -102,6 +110,7 @@ def test_fused_post_conv_correctness(H, HV, K, V, L, apply_l2norm, output_g_exp,
         V,
         apply_l2norm,
         output_g_exp,
+        beta_scale,
     )
 
     # Fused kernel
@@ -116,6 +125,7 @@ def test_fused_post_conv_correctness(H, HV, K, V, L, apply_l2norm, output_g_exp,
         head_v_dim=V,
         apply_l2norm=apply_l2norm,
         output_g_exp=output_g_exp,
+        beta_scale=beta_scale,
     )
 
     # Check shapes
@@ -216,15 +226,58 @@ def test_fused_post_conv_l0():
     assert g.shape == (0, HV)
 
 
+def test_fused_post_conv_int64_token_offset():
+    """Rows past 2^31 // qkv_dim need int64 offsets."""
+    device = "cuda"
+    H, HV, K, V = 16, 32, 128, 128
+    qkv_dim = 2 * H * K + HV * V
+    L = 2**31 // qkv_dim + 16
+    # conv_output plus the q, k and v outputs, all bf16.
+    need = L * (qkv_dim + 2 * H * K + HV * V) * 2
+    free, _ = current_platform.mem_get_info()
+    if free < need + (1 << 30):
+        pytest.skip("not enough free device memory")
+
+    torch.manual_seed(0)
+    conv_output = torch.randn(L, qkv_dim, dtype=torch.bfloat16, device=device)
+    a = torch.randn(L, HV, dtype=torch.bfloat16, device=device)
+    b = torch.randn(L, HV, dtype=torch.bfloat16, device=device)
+    A_log = torch.randn(HV, dtype=torch.float32, device=device) - 2.0
+    dt_bias = torch.randn(HV, dtype=torch.float32, device=device) * 0.1
+
+    fused = fused_post_conv_prep(
+        conv_output,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        num_k_heads=H,
+        head_k_dim=K,
+        head_v_dim=V,
+    )
+
+    # Reference on the first row and the last rows, past the int32 boundary.
+    rows = torch.tensor([0, *range(L - 16, L)], device=device)
+    ref = reference_post_conv(
+        conv_output[rows], a[rows], b[rows], A_log, dt_bias, H, K, V
+    )
+    for out, expected in zip(fused, ref):
+        torch.testing.assert_close(out[rows], expected, atol=1e-3, rtol=1e-3)
+
+
 @pytest.mark.parametrize(
     "head_ratio,tp_size,query_lengths,state_dtype,norm_dtype",
     [
+        pytest.param(
+            3, 1, (4, 2, 0), torch.float16, torch.bfloat16, id="ratio3-fp16-ragged"
+        ),
+        pytest.param(4, 4, (9,), torch.float16, torch.float32, id="ratio4-fp16-max"),
         pytest.param(8, 16, (4, 4), torch.bfloat16, torch.bfloat16, id="tp16-bf16"),
         pytest.param(8, 4, (4, 4), torch.float32, torch.float32, id="tp4-fp32"),
         pytest.param(8, 16, (4, 2, 0), torch.bfloat16, torch.float32, id="tp16-ragged"),
         pytest.param(8, 4, (4, 2, 0), torch.float32, torch.bfloat16, id="tp4-ragged"),
-        pytest.param(8, 16, (8,), torch.float32, torch.bfloat16, id="tp16-max"),
-        pytest.param(8, 4, (8,), torch.bfloat16, torch.float32, id="tp4-max"),
+        pytest.param(8, 16, (9,), torch.float32, torch.bfloat16, id="tp16-max"),
+        pytest.param(8, 4, (9,), torch.bfloat16, torch.float32, id="tp4-max"),
         pytest.param(
             1,
             1,
@@ -244,7 +297,7 @@ def test_fused_post_conv_l0():
         pytest.param(
             2,
             4,
-            (8,),
+            (9,),
             torch.float32,
             torch.float32,
             id="ratio2-tp4-max-fp32",
@@ -260,14 +313,36 @@ def test_fused_post_conv_l0():
         pytest.param(
             4,
             4,
-            (8,),
+            (9,),
             torch.float32,
             torch.bfloat16,
             id="ratio4-tp4-max-fp32",
         ),
+        # More requests leave fewer idle SMs, so the CUDA kernel splits V less.
+        pytest.param(
+            2, 1, (9, 9, 4, 2), torch.float32, torch.bfloat16, id="ratio2-4reqs"
+        ),
+        pytest.param(
+            2,
+            1,
+            (9,) * 14 + (3, 0),
+            torch.bfloat16,
+            torch.float32,
+            id="ratio2-16reqs-ragged",
+        ),
+        # Enough requests for no V split: 16-bit state runs the separate kernel.
+        pytest.param(
+            3,
+            1,
+            (9,) + (4,) * 6 + (2, 0),
+            torch.float16,
+            torch.bfloat16,
+            id="ratio3-9reqs-fp16",
+        ),
     ],
 )
 @pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])
+@pytest.mark.parametrize("impl", ["cuda", "triton"])
 @torch.inference_mode()
 def test_fused_gdn_decode_post_conv_mtp_head_ratios(
     head_ratio: int,
@@ -276,11 +351,17 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
     state_dtype: torch.dtype,
     norm_dtype: torch.dtype,
     output_gate_activation: str,
+    impl: str,
 ) -> None:
-    if torch.cuda.get_device_capability() < (8, 0):
+    if current_platform.is_cuda() and not current_platform.has_device_capability(80):
         pytest.skip("fused GDN decode MTP requires compute capability 8.0+")
-    if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
+    if impl == "cuda" and not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
         pytest.skip("fused GDN decode MTP op is not built")
+    fused_mtp_decode = (
+        ops.fused_gdn_decode_post_conv_mtp
+        if impl == "cuda"
+        else fused_gdn_decode_post_conv_mtp_triton
+    )
 
     torch.manual_seed(0)
     device = "cuda"
@@ -332,6 +413,10 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
     if query_lengths[-1] == 0:
         state_indices[-1].zero_()
 
+    output_rtol = 5e-4
+    if impl == "cuda" and state_dtype == torch.float32 and norm_dtype == torch.bfloat16:
+        output_rtol = 1e-3
+
     for step, accepted_tokens in enumerate((1, min(2, state_width), state_width)):
         num_accepted_tokens.fill_(accepted_tokens)
         if query_lengths[-1] == 0:
@@ -361,7 +446,7 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
             norm_before_gate=True,
             activation=output_gate_activation,
         )
-        actual = ops.fused_gdn_decode_post_conv_mtp(
+        actual = fused_mtp_decode(
             mixed_qkv=mixed_qkv,
             a=a,
             b=b,
@@ -381,9 +466,54 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
 
         output_error = (actual.float() - expected.float()).norm()
         output_relative_l2 = output_error / expected.float().norm().clamp_min(1e-20)
-        assert output_relative_l2 < 5e-4, (
+        assert output_relative_l2 < output_rtol, (
             f"MTP output relative L2 mismatch at step {step}: "
             f"{output_relative_l2.item():.6g}"
         )
 
     torch.testing.assert_close(state_actual, state_ref, atol=3e-2, rtol=3e-2)
+
+
+@torch.inference_mode()
+def test_fused_post_conv_prep_strided_ba_bitwise() -> None:
+    """Packed b/a chunk views (row stride 2*HV) must match contiguous inputs
+    bitwise."""
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    device = "cuda"
+    num_tokens = 33
+    H, HV, K, V = 2, 4, 128, 128
+    qkv_dim = 2 * H * K + HV * V
+
+    conv_output = torch.randn(num_tokens, qkv_dim, dtype=dtype, device=device)
+    ba = torch.randn(num_tokens, 2 * HV, dtype=dtype, device=device)
+    b_view, a_view = ba.chunk(2, dim=-1)
+    A_log = torch.randn(HV, dtype=torch.float32, device=device)
+    dt_bias = torch.randn(HV, dtype=torch.float32, device=device)
+
+    ref = fused_post_conv_prep(
+        conv_output=conv_output,
+        a=a_view.contiguous(),
+        b=b_view.contiguous(),
+        A_log=A_log,
+        dt_bias=dt_bias,
+        num_k_heads=H,
+        head_k_dim=K,
+        head_v_dim=V,
+        apply_l2norm=True,
+        output_g_exp=False,
+    )
+    got = fused_post_conv_prep(
+        conv_output=conv_output,
+        a=a_view,
+        b=b_view,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        num_k_heads=H,
+        head_k_dim=K,
+        head_v_dim=V,
+        apply_l2norm=True,
+        output_g_exp=False,
+    )
+    for r, g in zip(ref, got, strict=True):
+        torch.testing.assert_close(g, r, rtol=0, atol=0)
