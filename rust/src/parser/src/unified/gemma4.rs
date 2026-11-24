@@ -9,10 +9,16 @@ use winnow::error::{ContextError, ErrMode, ModalResult};
 use winnow::prelude::*;
 use winnow::stream::{Partial, Stream};
 use winnow::token::{literal, take_till, take_until};
+use xgrammar_structural_tag::Model;
+use xgrammar_structural_tag::format::Format;
 
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, token_id};
+use crate::output_grammar::{
+    self, BuiltOutputGrammar, OutputGrammarContext, tool_grammar_applies,
+    visible_format_from_builder,
+};
 use crate::reasoning::last_reasoning_boundary;
-use crate::tool::{JsonStyle, Tool, ToolCallDelta};
+use crate::tool::{JsonStyle, Tool, ToolCallDelta, call_required, warn_answer_ignored_once};
 use crate::unified::parsing_failed;
 use crate::utils::recursion::ParserRecursionGuard;
 use crate::utils::{incomplete, parse_buffered_event, partial_prefix_len, safe_text_len_mul};
@@ -242,6 +248,40 @@ impl UnifiedParser for Gemma4UnifiedParser {
 
     fn preserve_special_tokens(&self) -> bool {
         true
+    }
+
+    fn build_output_grammar(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<BuiltOutputGrammar>> {
+        let required_choice = ctx.answer.and_then(|_| call_required(ctx.tool_choice));
+        // In auto mode the answer format must not enable calls on its own.
+        if required_choice.is_some()
+            && !tool_grammar_applies(&OutputGrammarContext {
+                answer: None,
+                parallel_tool_calls: true,
+                ..*ctx
+            })
+        {
+            return Ok(None);
+        }
+        let tool_ctx = OutputGrammarContext {
+            tool_choice: required_choice.as_ref().unwrap_or(ctx.tool_choice),
+            ..*ctx
+        };
+        let Some(calls) = visible_format_from_builder(Some(Model::Gemma4.builder()), &tool_ctx)?
+        else {
+            return Ok(None);
+        };
+        let format = match ctx.answer {
+            Some(answer) if required_choice.is_some() => Format::or(vec![calls, answer.clone()]),
+            Some(_) => {
+                warn_answer_ignored_once();
+                calls
+            }
+            None => calls,
+        };
+        Ok(Some(BuiltOutputGrammar::final_output_only(format)))
     }
 
     fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
@@ -579,6 +619,7 @@ fn parse_gemma4_scalar(value: &str) -> Value {
 mod tests {
     use std::sync::Arc;
 
+    use expect_test::expect;
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
     use vllm_tokenizer::test_utils::TestTokenizer;
@@ -586,11 +627,15 @@ mod tests {
     use winnow::combinator::{eof, terminated};
     use winnow::error::ErrMode;
     use winnow::prelude::*;
+    use xgrammar_structural_tag::ToolChoice;
+    use xgrammar_structural_tag::format::Format;
 
     use super::{
         CHANNEL_END, CHANNEL_START, Gemma4UnifiedParser, ToolCallDelta, UnifiedParser,
         UnifiedParserOutput, gemma4_array_content, parse_gemma4_args,
     };
+    use crate::output_grammar::test_utils::outline;
+    use crate::output_grammar::{GrammarCoverage, OutputGrammarContext, ToolStrictLevel};
     use crate::tool::Tool;
     use crate::unified::{UnifiedParserError, UnifiedParserEvent, parsing_failed};
     use crate::utils::recursion::MAX_PARSER_RECURSION_DEPTH;
@@ -604,6 +649,61 @@ mod tests {
             .with_special_token(CHANNEL_START, CHANNEL_START_ID)
             .with_special_token(CHANNEL_END, CHANNEL_END_ID)
             .with_special_token("<turn-boundary>", TURN_BOUNDARY_ID)
+    }
+
+    #[test]
+    fn strict_tool_choice_builds_gemma_argument_grammar() {
+        let tools = [Tool {
+            name: "record_color".to_string(),
+            description: None,
+            parameters: json!({
+                "type": "object",
+                "properties": {"color": {"type": "string", "enum": ["blue"]}},
+                "required": ["color"],
+                "additionalProperties": false,
+            }),
+            strict: Some(true),
+            defer_loading: None,
+        }];
+        let parser = Gemma4UnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
+        let ctx = OutputGrammarContext {
+            tools: &tools,
+            tool_choice: &ToolChoice::required(),
+            tool_strict_level: ToolStrictLevel::Auto,
+            parallel_tool_calls: false,
+            answer: None,
+        };
+
+        let required = parser.build_output_grammar(&ctx).unwrap().unwrap();
+        assert_eq!(required.coverage, GrammarCoverage::FinalOutputOnly);
+        expect![[r#"
+            triggered_tags [`<|tool_call>`] excluding [`<|channel>`, `<channel|>`] at_least_one stop_after_first
+              tag `<|tool_call>call:record_color` gemma({ color: "blue" }) excluding [`<|channel>`, `<channel|>`, `<|tool_call>`, `<tool_call|>`] `<tool_call|>`
+        "#]].assert_eq(&outline(&required.format));
+
+        let answer = Format::json_schema(json!({"type": "string"}));
+        let auto_ctx = OutputGrammarContext {
+            tool_choice: &ToolChoice::auto(),
+            answer: Some(&answer),
+            ..ctx
+        };
+        let auto = parser.build_output_grammar(&auto_ctx).unwrap().unwrap();
+        assert_eq!(
+            auto.format,
+            Format::or(vec![required.format, answer.clone()])
+        );
+
+        let non_strict = [Tool {
+            strict: Some(false),
+            ..tools[0].clone()
+        }];
+        let no_tool_grammar = parser
+            .build_output_grammar(&OutputGrammarContext {
+                tools: &non_strict,
+                ..auto_ctx
+            })
+            .unwrap();
+        assert!(no_tool_grammar.is_none());
     }
 
     trait UnifiedParserTestExt {
