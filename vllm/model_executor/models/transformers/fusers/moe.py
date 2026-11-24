@@ -397,20 +397,22 @@ class MoEBlockFuser:
         )
 
     def gate(
-        self, moe_block: nn.Module, prefix: str, out_dtype: torch.dtype | None = None
+        self,
+        moe_block: nn.Module,
+        prefix: str,
+        router_dtype: torch.dtype | None = None,
     ) -> GateLinear:
-        """Rebuild the HF gate as a `GateLinear` for vLLM's fused MoE."""
+        """Rebuild the HF gate as a `GateLinear` for vLLM's fused MoE, with logits in
+        `router_dtype` (default: detected) and the weight in the dtype Transformers
+        built it in, which follows `_keep_in_fp32_modules_strict`."""
         hf_gate = getattr(moe_block, self.gate_name)
         num_experts, hidden_size = hf_gate.weight.shape
-        router_dtype = out_dtype or self.router_dtype
-        # Store the weight in the dtype the router computes in, so a checkpoint
-        # that keeps it in fp32 is not rounded to the activation dtype
         gate = GateLinear(
             hidden_size,
             num_experts,
             bias=False,
-            out_dtype=router_dtype,
-            params_dtype=router_dtype,
+            out_dtype=router_dtype or self.router_dtype,
+            params_dtype=hf_gate.weight.dtype,
             prefix=maybe_prefix(prefix, self.gate_name),
         )
         if (bias := getattr(hf_gate, "e_score_correction_bias", None)) is not None:

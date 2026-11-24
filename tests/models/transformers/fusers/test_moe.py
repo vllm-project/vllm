@@ -617,15 +617,18 @@ def test_moe_fuser_looks_through_casts_and_identity(block_cls):
     assert fuser.shared_name == "shared_expert"
 
 
-def test_moe_fuser_gate_keeps_fp32_router_weight(dist_init):
-    """A router that computes in fp32 keeps its weight in fp32 when rebuilt, so a
-    checkpoint storing it in fp32 (Sarvam-30B) is not rounded to the activation
-    dtype, as native vLLM models do with `params_dtype`."""
+@pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float32])
+def test_moe_fuser_gate_keeps_hf_weight_dtype(dist_init, weight_dtype):
+    """An fp32 router computes fp32 logits whatever its weight is stored in. The
+    weight keeps the dtype Transformers built it in, so a gate in
+    `_keep_in_fp32_modules_strict` (Sarvam-30B's fp32 checkpoint) stays in fp32
+    and other gates keep the model dtype and its bf16 router GEMMs."""
     with torch.device("meta"):
         block = MoEBlock(Fp32Router)
+    block.gate.to(weight_dtype)
     fuser = MoEBlockFuser.match(block, "experts")
     assert fuser is not None
     with set_default_torch_dtype(torch.bfloat16):
         gate = fuser.gate(block, "model.layers.0.mlp")
-    assert gate.weight.dtype == torch.float32
     assert gate.out_dtype == torch.float32
+    assert gate.weight.dtype == weight_dtype
