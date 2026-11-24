@@ -448,7 +448,7 @@ async def test_external_elastic_ep_local_range_routes_after_old_size_stats():
         client = DPLBAsyncMPClient(
             config,
             UniProcExecutor,
-            log_stats=False,
+            collect_stats=False,
             client_addresses={
                 "input_address": input_address,
                 "output_address": output_address,
