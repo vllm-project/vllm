@@ -3053,9 +3053,15 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         assert isinstance(self.manager_config.params, HiSparseHotManager.Params)
         self.blocks_per_request = self.manager_config.params.blocks_per_request
         self.hot_required: set[str] = set()
+        self.preallocated: dict[str, list[KVCacheBlock]] = {}
 
     def require_hot(self, request_id: str) -> None:
         self.hot_required.add(request_id)
+
+    def preallocate(self, request_id: str) -> None:
+        """Allocate Hot ahead of the step's allocation, which then reports it."""
+        self.require_hot(request_id)
+        self.preallocated[request_id] = self.allocate_new_blocks(request_id, 0, 0)
 
     def has_hot(self, request_id: str) -> bool:
         return len(self.req_to_blocks.get(request_id, ())) == self.blocks_per_request
@@ -3117,6 +3123,8 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
     ) -> list[KVCacheBlock]:
         # Cold admissions can bypass add_local_computed_blocks.
         self.num_cached_block[request_id] = 0
+        if (preallocated := self.preallocated.pop(request_id, None)) is not None:
+            return preallocated
         if request_id not in self.hot_required:
             return []
         req_blocks = self.req_to_blocks[request_id]
@@ -3129,6 +3137,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         self.hot_required.discard(request_id)
+        assert request_id not in self.preallocated
         return super().pop_blocks_for_free(request_id)
 
 
