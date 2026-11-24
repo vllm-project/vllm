@@ -379,12 +379,15 @@ class RouterModel:
     span is not one block per hash, as from a group that skips null or masked
     blocks, only names blocks, like a token-less store. A strict consumer
     fails on any engine hash it cannot resolve; otherwise the event, or the
-    hash of a token-less store, is skipped, as the router does.
+    hash of a token-less store, is skipped, as the router does. Events of
+    `ignored_groups` are dropped, as the router drops groups whose cache kind
+    it cannot index (sliding window, Mamba).
     """
 
-    def __init__(self, strict: bool = True, forget: bool = True):
+    def __init__(self, strict: bool = True, forget: bool = True, ignored_groups=()):
         self.strict = strict
         self.forget = forget
+        self.ignored_groups = set(ignored_groups)
         self.keys: dict = {}
         self.entries: set = set()
         self.refs: Counter = Counter()
@@ -400,6 +403,8 @@ class RouterModel:
 
     def apply(self, events):
         for e in events:
+            if getattr(e, "group_idx", None) in self.ignored_groups:
+                continue
             if isinstance(e, BlockStored):
                 scope = self.scope(e)
                 size = e.block_size
@@ -475,6 +480,31 @@ def test_dead_alias_does_not_remove_live_block():
     consumer = RouterModel()
     consumer.apply(wire(snap.export()))
     assert consumer.state() == reference.state() and reference.entries
+
+
+def test_offloaded_block_is_taught_in_its_own_group():
+    """A block left only in the CPU tier is taught in the group that stated
+    its tokens, not another live group a consumer may ignore, so a child
+    stored after the snapshot still resolves its parent."""
+    history = [
+        [stored([1, 2], group=0), stored([1, 2], group=1)],
+        # The window group's placeholder completes first.
+        [stored([1, 2], medium="CPU", group=1), stored([1, 2], medium="CPU", group=0)],
+        [
+            BlockRemoved(block_hashes=[1, 2], medium="GPU", group_idx=0),
+            BlockRemoved(block_hashes=[1, 2], medium="GPU", group_idx=1),
+        ],
+    ]
+    tail = [stored([3], parent=2, group=0)]
+    reference, snap = RouterModel(ignored_groups={1}), KVCacheSnapshot()
+    for events in history:
+        reference.apply(events)
+        snap.apply(events)
+    reference.apply(tail)
+    consumer = RouterModel(ignored_groups={1})
+    consumer.apply(wire(snap.export()))
+    consumer.apply(tail)
+    assert consumer.state() == reference.state()
 
 
 def cache_history(

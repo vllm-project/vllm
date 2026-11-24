@@ -338,9 +338,9 @@ class KVCacheSnapshot:
     ) -> Iterator[BlockStored | BlockRemoved]:
         """Teach every retained block, clear the dead, then set live residency.
 
-        Each rebuildable block is stored once with its tokens, parents first:
-        a live block in one of its live scopes, a dead block in its group's
-        GPU scope. Dead blocks are removed again. Token-less stores then bring
+        Each rebuildable block is stored once with its tokens, parents first,
+        in its group: a live scope of that group if there is one, else the
+        group's GPU scope. Dead blocks are removed again. Token-less stores then bring
         every live scope to its exact count, and a last removal drops the
         teaching store of each live block. The consumer counts references per
         scope and hash, so that removal never evicts, a live block keeps its
@@ -359,9 +359,15 @@ class KVCacheSnapshot:
                 first_child[record.parent] = h
             else:
                 more_children.setdefault(record.parent, []).append(h)
+        # A block is taught in its own group, where its tokens were stated: a
+        # consumer can ignore stores of other groups (sliding window, Mamba).
+        # A live scope of that group is preferred, else the group's GPU scope.
         live_scope: dict[ExternalBlockHash, _Scope] = {}
         for live_key in self._live:
-            live_scope.setdefault(live_key[1], live_key[0])
+            h = live_key[1]
+            if live_key[0][1] == self._records[h].group:
+                live_scope.setdefault(h, live_key[0])
+        live = {h for _, h in self._live}
 
         def buildable(h: ExternalBlockHash) -> bool:
             record = self._records[h]
@@ -449,7 +455,7 @@ class KVCacheSnapshot:
                 h = child
             yield segment(blocks)
 
-        yield from removals(h for h in included if h not in live_scope)
+        yield from removals(h for h in included if h not in live)
 
         # Every live scope reaches its exact count, one reference per round.
         refs: dict[_Scope, list[tuple[ExternalBlockHash, int]]] = {}
@@ -478,7 +484,7 @@ class KVCacheSnapshot:
                 round_ += 1
                 owed = [(h, count) for h, count in owed if count > round_]
 
-        yield from removals(h for h in live_scope if h in included)
+        yield from removals(h for h in live if h in included)
 
 
 class KVEventSnapshotRecorder:
