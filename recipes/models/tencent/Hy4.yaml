@@ -5,7 +5,7 @@ meta:
   provider: "Hunyuan (Tencent)"
   description: "Tencent HY4 flagship multimodal MoE — 774B total / 49B active, 1M context, hy_v4 tool and reasoning parsers, DFly2 speculative decoding"
   date_added: 2026-11-20
-  date_updated: 2026-11-20
+  date_updated: 2026-11-23
   tasks:
     - text
     - multimodal
@@ -14,22 +14,23 @@ meta:
     - "tencent/Hy4-preview"
   # The hardware the recipe was evaluated on (8x B300, TP8).
   default_hardware: b300
-  # vLLM's ROCm port of HY4 covers the text backbone only (no vision encoder,
-  # no DFly drafter), and no ROCm image ships HY4.
+  # The ROCm sparse MLA path requires gfx950, so MI300X and MI325X (gfx942) cannot run it.
   hardware:
     mi300x: unsupported
     mi325x: unsupported
-    mi350x: unsupported
-    mi355x: unsupported
+    mi350x: supported
+    mi355x: supported
 
 model:
   model_id: "tencent/Hy4"
   min_vllm_version: "0.35.0"
   nightly_required: true
-  docker_image: "vllm/vllm-openai:hy4"
+  docker_image:
+    nvidia: "vllm/vllm-openai:hy4"
+    amd: "vllm/vllm-openai-rocm:nightly"
   install:
     docker:
-      note: "Official HY4 image from the model card (amd64 and arm64)"
+      note: "Official HY4 image from the model card (amd64 and arm64) on NVIDIA, nightly ROCm image on AMD"
     pip:
       note: "v0.34.0 does not register HY4; nightly wheels built from 2026-11-20 on do"
   architecture: moe
@@ -89,6 +90,18 @@ strategy_overrides:
   single_node_tp:
     tp: 8
 
+hardware_overrides:
+  amd:
+    extra_args:
+      # Shadows base_args' CUDA-only FLASHMLA_SPARSE (arg dedupe is last-wins).
+      - "--attention-backend"
+      - "ROCM_AITER_MLA_SPARSE"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      # Temporary: AITER's default sparse MLA decode kernel reads the wrong KV
+      # past 4 GiB of cache. Remove once vLLM's AITER includes ROCm/aiter#6277.
+      VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: "1"
+
 notes:
   - title: "Host memory for the BF16 checkpoint"
     when: { variants: [bf16] }
@@ -120,12 +133,12 @@ guide: |
 
   ## Prerequisites
 
-  - **Hardware**: one 8-GPU NVIDIA node. FP8 needs about 944 GB of aggregate GPU
-    memory and BF16 about 1,859 GB (8x B300). AMD Instinct is not supported:
-    vLLM's ROCm port has neither the vision encoder nor the DFly2 drafter.
-  - **vLLM**: the `vllm/vllm-openai:hy4` image, or a nightly wheel. v0.34.0
-    does not register the architecture; 0.35.0 will be the first release
-    with it.
+  - **Hardware**: one 8-GPU node. FP8 needs about 944 GB of aggregate GPU
+    memory and BF16 about 1,859 GB (8x B300). On AMD, 8x MI355X or MI350X runs
+    the FP8 checkpoint (see the AMD section below).
+  - **vLLM**: the `vllm/vllm-openai:hy4` image on NVIDIA,
+    `vllm/vllm-openai-rocm:nightly` on AMD, or a nightly wheel. v0.34.0 does
+    not register the architecture; 0.35.0 will be the first release with it.
   - **Host memory**: enough RAM to load the checkpoint — 786 GB (FP8) or
     1,549 GB (BF16) on disk, 245 safetensors shards each.
 
@@ -149,6 +162,38 @@ guide: |
     flag is needed. It is not the MXFP8 format of Hy4-preview-FP8.
   - **Multimodal**: one image per prompt, video off, as on the model card.
     Raise `--limit-mm-per-prompt` to allow more.
+
+  ## AMD (8x MI355X)
+
+  The FP8 checkpoint has been run on 8x MI355X with TP8 and DFly2, but not
+  yet with the command the builder renders for AMD (Rust frontend), so MI355X
+  is not marked verified. MI350X is the same gfx950 architecture. The ROCm
+  path needs gfx950, so MI300X and MI325X are not supported.
+
+  ```bash
+  docker run --device=/dev/kfd --device=/dev/dri --group-add video \
+    --ipc=host --shm-size 16g \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -e VLLM_ROCM_USE_AITER=1 \
+    -e VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1 \
+    -p 8000:8000 \
+    vllm/vllm-openai-rocm:nightly \
+    tencent/Hy4-FP8 \
+    --tensor-parallel-size 8 \
+    --dtype bfloat16 \
+    --attention-backend ROCM_AITER_MLA_SPARSE \
+    --reasoning-parser hy_v4 \
+    --tool-call-parser hy_v4 \
+    --speculative-config '{"num_speculative_tokens":5,"method":"dfly"}'
+  ```
+
+  `FLASHMLA_SPARSE` is CUDA-only; on ROCm the sparse MLA layers use
+  `ROCM_AITER_MLA_SPARSE`. `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1` is
+  required for now: AITER's default sparse MLA decode kernel reads the wrong
+  KV rows once a layer's KV cache passes 4 GiB. It can be dropped once vLLM's
+  AITER includes [ROCm/aiter#6277](https://github.com/ROCm/aiter/pull/6277).
+  On ROCm the KV cache must stay BF16 (the default); `fp8_ds_mla` is not
+  supported.
 
   ## Context and capacity
 

@@ -953,10 +953,7 @@ fn serve_args_select_structured_outputs_backend_and_forward_config() {
 fn frontend_args_json_reads_python_structured_outputs_config() {
     for (backend, expected) in [
         ("auto", StructuredOutputBackend::Xgrammar),
-        (
-            "lm-format-enforcer",
-            StructuredOutputBackend::LmFormatEnforcer,
-        ),
+        ("outlines", StructuredOutputBackend::Outlines),
     ] {
         // The Python supervisor sends the whole config once any field is set.
         let args_json = serde_json::json!({

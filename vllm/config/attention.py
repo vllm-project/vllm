@@ -203,15 +203,14 @@ class AttentionConfig:
     flex_attn_q_block_size: int | None = None
     """Logical Q block size for the flex attention block mask.
     Must be a power of 2 and divisible by flex_attn_block_m.
-    If None, uses 16 for paged KV attention on PyTorch >= 2.9, and 128
-    for encoder-only attention or older PyTorch versions."""
+    If None, uses 16 for paged KV attention and 128 for encoder-only
+    attention."""
 
     flex_attn_kv_block_size: int | None = None
     """Logical KV block size for the flex attention block mask.
     Must be a power of 2 and divisible by flex_attn_block_n.
-    If None, uses the KV cache block size for paged KV attention on
-    PyTorch >= 2.9, and 128 for encoder-only attention or older PyTorch
-    versions."""
+    If None, uses the KV cache block size for paged KV attention and 128
+    for encoder-only attention."""
 
     def __post_init__(self) -> None:
         msa_aliases: dict[AttentionBackendEnum, MiniMaxM3MSADecodeBackend] = {

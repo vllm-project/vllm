@@ -20,7 +20,6 @@ updates:
       - dependency-name: "torch"
       - dependency-name: "torchvision"
       - dependency-name: "xformers"
-      - dependency-name: "lm-format-enforcer"
       - dependency-name: "compressed-tensors"
       - dependency-name: "ray[cgraph]" # Ray Compiled Graph
       - dependency-name: "lm-eval"
