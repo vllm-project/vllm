@@ -400,7 +400,8 @@ class OnlineQuantizationConfig(QuantizationConfig):
             raise NotImplementedError(
                 f"{prefix}: {quant_method_cls.__name__} does not support the "
                 "lm_head, use `fp8_per_channel` (or `fp8_per_channel_static` "
-                "with `activation: null`) or `int4_per_group_32_asym`."
+                "with `activation: null`), `nvfp4_weight_only` or "
+                "`int4_per_group_32_asym`."
             )
         explicit = "activation" in quant_spec.fields_set
         quant_spec = QuantSpec(

@@ -102,6 +102,10 @@ class Nvfp4WeightOnlyOnlineLinearMethod(OnlineLinearBase):
     """
 
     activation_quant_key: QuantKey | None = None
+    # The global scale comes from the amax over all TP ranks, and the padded
+    # vocab rows are zeros, so a sharded, padded lm_head quantizes like any
+    # other weight. The drafter lm_head copies use the same method.
+    supports_lm_head = True
 
     def create_weights(
         self,

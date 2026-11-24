@@ -267,6 +267,7 @@ example:
 | Target value | Recipe | Notes |
 | ------------ | ------ | ----- |
 | `{"weight": "fp8_per_channel_static", "activation": null}` | fp8_e4m3 data, per-output-channel scale, BF16 activations | `"fp8_per_channel"` (W8A8) is also accepted; other FP8 schemes are not. CUDA and XPU only, use `"fp8_per_channel"` on ROCm. |
+| `"nvfp4_weight_only"` | NVFP4 (FP4 e2m1 data, FP8 scale per 16 input channels, one global scale), BF16 activations | Weight-only (W4A16). The same method as `draft_lm_head_quantization: "nvfp4"`. Needs a Blackwell GPU. |
 | `{"weight": "int4_per_group_32_asym"}` | uint4 data, one scale and zero point per 32 input channels, BF16 activations | lm_head only. Weight-only: `"activation"` may be omitted or `null`. Runs on the platform's mixed-precision (W4A16) linear kernel, e.g. `RDNAHybridW4A16LinearKernel` on gfx11/gfx12. |
 
 ```bash
