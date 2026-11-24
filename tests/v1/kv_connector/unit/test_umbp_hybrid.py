@@ -829,18 +829,21 @@ def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
 
 
 @pytest.mark.parametrize(
-    "device",
+    ("device", "queued_writes"),
     [
-        "cpu",
-        pytest.param(
-            "cuda",
-            marks=pytest.mark.skipif(
-                not mori_has_umbp(), reason="MORI was built without UMBP"
-            ),
+        ("cpu", False),
+        *(
+            pytest.param(
+                "cuda",
+                queued_writes,
+                marks=pytest.mark.skipif(
+                    not mori_has_umbp(), reason="MORI was built without UMBP"
+                ),
+            )
+            for queued_writes in (False, True)
         ),
     ],
 )
-@pytest.mark.parametrize("queued_writes", [False, True])
 def test_finished_hybrid_tail_restores_every_byte(socket_dir, device, queued_writes):
     """A hash-only tail survives request cleanup, then restores byte for byte.
 
@@ -848,8 +851,6 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device, queued_wri
     destination pages when the load is submitted, as it does when an async
     load is started after the forward launch.
     """
-    if queued_writes and device == "cpu":
-        pytest.skip("caller stream ordering only applies to GPU caches")
     if device == "cpu":
         runtime = MemoryRuntime()
     else:
