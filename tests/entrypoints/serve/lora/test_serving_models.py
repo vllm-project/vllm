@@ -204,12 +204,76 @@ async def test_load_lora_adapter_pinned_failure_rolls_back():
     mock_engine_client.remove_lora.assert_awaited_once()
 
 
+def _attach_fake_worker_lora_cache(
+    mock_engine_client: MagicMock,
+    *,
+    failing_paths: set[str] | None = None,
+) -> tuple[dict[int, str], set[int]]:
+    """Simulate LRUCacheWorkerLoRAManager cache semantics on the mock client."""
+    worker_cache: dict[int, str] = {}
+    worker_pinned: set[int] = set()
+    bad_paths = failing_paths if failing_paths is not None else set()
+
+    async def _add_lora(lora_request: LoRARequest) -> bool:
+        if lora_request.lora_int_id not in worker_cache or lora_request.load_inplace:
+            if lora_request.lora_path in bad_paths:
+                raise RuntimeError(f"Failed to load {lora_request.lora_path}")
+            # Mirrors LRUCacheWorkerLoRAManager.add_adapter: remove_adapter
+            # unpins the old entry before inserting the replacement.
+            worker_pinned.discard(lora_request.lora_int_id)
+            worker_cache[lora_request.lora_int_id] = lora_request.lora_path
+            return True
+        return False
+
+    async def _remove_lora(lora_id: int) -> bool:
+        worker_pinned.discard(lora_id)
+        return worker_cache.pop(lora_id, None) is not None
+
+    async def _pin_lora(lora_id: int) -> bool:
+        if lora_id not in worker_cache:
+            raise ValueError(f"Pinning failed. LoRA {lora_id} is not registered.")
+        worker_pinned.add(lora_id)
+        return True
+
+    async def _unpin_lora(lora_id: int) -> bool:
+        if lora_id not in worker_cache:
+            raise ValueError(f"Unpinning failed. LoRA {lora_id} is not registered.")
+        worker_pinned.discard(lora_id)
+        return True
+
+    mock_engine_client.add_lora.side_effect = _add_lora
+    mock_engine_client.remove_lora.side_effect = _remove_lora
+    mock_engine_client.pin_lora.side_effect = _pin_lora
+    mock_engine_client.unpin_lora.side_effect = _unpin_lora
+    return worker_cache, worker_pinned
+
+
+async def _next_request_served_version(
+    serving_models: OpenAIServingModels,
+    worker_cache: dict[int, str],
+    lora_name: str,
+) -> tuple[str, str]:
+    """Return (frontend_path, worker_path) seen by the next inference request."""
+    resolved = await serving_models.resolve_lora(lora_name)
+    assert isinstance(resolved, LoRARequest)
+    assert resolved.load_inplace is False
+    # On inference, LRUCacheWorkerLoRAManager reuses the cached adapter for
+    # lora_int_id when load_inplace is False.
+    worker_path = worker_cache.get(resolved.lora_int_id, resolved.lora_path)
+    return resolved.lora_path, worker_path
+
+
 @pytest.mark.asyncio
-async def test_load_lora_adapter_inplace_pinned_failure_keeps_existing():
+async def test_load_lora_adapter_inplace_pinned_failure_rolls_back_to_previous():
     serving_models, mock_engine_client = await _async_serving_models_init_with_mock()
+    worker_cache, worker_pinned = _attach_fake_worker_lora_cache(mock_engine_client)
+
     await serving_models.load_lora_adapter(
         LoadLoRAAdapterRequest(lora_name="adapter1", lora_path="/path/to/v1")
     )
+    lora_int_id = serving_models.lora_requests["adapter1"].lora_int_id
+    assert worker_cache[lora_int_id] == "/path/to/v1"
+
     mock_engine_client.pin_lora.side_effect = NotImplementedError(
         "Pinning is not supported in LoRAModelManager."
     )
@@ -224,8 +288,109 @@ async def test_load_lora_adapter_inplace_pinned_failure_keeps_existing():
     assert isinstance(response, ErrorResponse)
     assert response.error.type == "InvalidUserInput"
     assert response.error.code == HTTPStatus.BAD_REQUEST
-    assert "adapter1" in serving_models.lora_requests
     mock_engine_client.remove_lora.assert_not_called()
+
+    frontend_path, worker_path = await _next_request_served_version(
+        serving_models, worker_cache, "adapter1"
+    )
+    assert frontend_path == "/path/to/v1"
+    assert worker_path == "/path/to/v1"
+    assert lora_int_id not in worker_pinned
+
+
+@pytest.mark.asyncio
+async def test_load_lora_adapter_inplace_pinned_failure_restores_previous_pin():
+    serving_models, mock_engine_client = await _async_serving_models_init_with_mock()
+    worker_cache, worker_pinned = _attach_fake_worker_lora_cache(mock_engine_client)
+
+    await serving_models.load_lora_adapter(
+        LoadLoRAAdapterRequest(
+            lora_name="adapter1", lora_path="/path/to/v1", pinned=True
+        )
+    )
+    lora_int_id = serving_models.lora_requests["adapter1"].lora_int_id
+    assert lora_int_id in worker_pinned
+    assert lora_int_id in serving_models._pinned_lora_ids
+
+    # Simulate a transient pin failure on v2, followed by a successful re-pin
+    # when rolling back to v1.
+    real_pin = mock_engine_client.pin_lora.side_effect
+    attempts = 0
+
+    async def _fail_once_then_pin(lora_id: int) -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise Exception(
+                "Call to pin_lora method failed: "
+                "All items are pinned, cannot remove oldest from the cache."
+            )
+        return await real_pin(lora_id)
+
+    mock_engine_client.pin_lora.side_effect = _fail_once_then_pin
+    response = await serving_models.load_lora_adapter(
+        LoadLoRAAdapterRequest(
+            lora_name="adapter1",
+            lora_path="/path/to/v2",
+            load_inplace=True,
+            pinned=True,
+        )
+    )
+    assert isinstance(response, ErrorResponse)
+    assert response.error.type == "InvalidUserInput"
+    assert response.error.code == HTTPStatus.BAD_REQUEST
+
+    frontend_path, worker_path = await _next_request_served_version(
+        serving_models, worker_cache, "adapter1"
+    )
+    assert frontend_path == "/path/to/v1"
+    assert worker_path == "/path/to/v1"
+    assert lora_int_id in worker_pinned
+    assert lora_int_id in serving_models._pinned_lora_ids
+
+
+@pytest.mark.asyncio
+async def test_load_lora_adapter_inplace_pinned_failure_rollback_error_stays_in_sync():
+    serving_models, mock_engine_client = await _async_serving_models_init_with_mock()
+    failing_paths: set[str] = set()
+    worker_cache, worker_pinned = _attach_fake_worker_lora_cache(
+        mock_engine_client, failing_paths=failing_paths
+    )
+
+    await serving_models.load_lora_adapter(
+        LoadLoRAAdapterRequest(
+            lora_name="adapter1", lora_path="/path/to/v1", pinned=True
+        )
+    )
+    lora_int_id = serving_models.lora_requests["adapter1"].lora_int_id
+
+    # v1 can no longer be reloaded during rollback, while pinning v2 fails.
+    failing_paths.add("/path/to/v1")
+    mock_engine_client.pin_lora.side_effect = Exception(
+        "Call to pin_lora method failed: "
+        "All items are pinned, cannot remove oldest from the cache."
+    )
+    response = await serving_models.load_lora_adapter(
+        LoadLoRAAdapterRequest(
+            lora_name="adapter1",
+            lora_path="/path/to/v2",
+            load_inplace=True,
+            pinned=True,
+        )
+    )
+    assert isinstance(response, ErrorResponse)
+    assert response.error.type == "InvalidUserInput"
+    assert response.error.code == HTTPStatus.BAD_REQUEST
+
+    # Since worker failed to reload v1 and kept v2, frontend must also point
+    # to v2 (unpinned) so frontend and worker do not diverge.
+    frontend_path, worker_path = await _next_request_served_version(
+        serving_models, worker_cache, "adapter1"
+    )
+    assert frontend_path == "/path/to/v2"
+    assert worker_path == "/path/to/v2"
+    assert lora_int_id not in worker_pinned
+    assert lora_int_id not in serving_models._pinned_lora_ids
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,8 @@ from asyncio import Lock
 from collections import defaultdict
 from http import HTTPStatus
 
+import msgspec
+
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
@@ -181,11 +183,13 @@ class OpenAIServingModels:
                 return error_check_ret
 
             lora_path = request.lora_path
+            previous = self.lora_requests.get(lora_name)
             lora_int_id = (
-                self.lora_requests[lora_name].lora_int_id
-                if lora_name in self.lora_requests
+                previous.lora_int_id
+                if previous is not None
                 else self.lora_id_counter.inc(1)
             )
+            was_pinned = previous is not None and lora_int_id in self._pinned_lora_ids
             lora_request = LoRARequest(
                 lora_name=lora_name,
                 lora_int_id=lora_int_id,
@@ -217,7 +221,11 @@ class OpenAIServingModels:
                     status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                 )
 
-            previous = self.lora_requests.get(lora_name)
+            if previous is not None:
+                # An in-place reload removes and re-adds the adapter in the
+                # worker cache, clearing any existing pin on lora_int_id.
+                self._pinned_lora_ids.discard(lora_int_id)
+
             if request.pinned:
                 try:
                     await self.engine_client.pin_lora(lora_int_id)
@@ -233,6 +241,42 @@ class OpenAIServingModels:
                                 lora_name,
                                 exc_info=True,
                             )
+                    else:
+                        # An in-place reload already replaced the worker's
+                        # cached adapter under lora_int_id. Restore the previous
+                        # version so frontend and worker stay on the same
+                        # version; if rollback fails, advance lora_requests to
+                        # the newly loaded version instead of diverging.
+                        rollback_request = msgspec.structs.replace(
+                            previous, load_inplace=True
+                        )
+                        try:
+                            await self.engine_client.add_lora(rollback_request)
+                        except Exception:
+                            logger.warning(
+                                "Failed to roll back LoRA adapter '%s' to '%s' "
+                                "after pin error; keeping newly loaded path '%s' "
+                                "in sync with the engine.",
+                                lora_name,
+                                previous.lora_path,
+                                lora_path,
+                                exc_info=True,
+                            )
+                            lora_request.load_inplace = False
+                            self.lora_requests[lora_name] = lora_request
+                        else:
+                            if was_pinned:
+                                try:
+                                    await self.engine_client.pin_lora(lora_int_id)
+                                except Exception:
+                                    logger.warning(
+                                        "Failed to re-pin rolled-back LoRA "
+                                        "adapter '%s'",
+                                        lora_name,
+                                        exc_info=True,
+                                    )
+                                else:
+                                    self._pinned_lora_ids.add(lora_int_id)
                     return self._lora_pin_error_response(e)
                 self._pinned_lora_ids.add(lora_int_id)
 
