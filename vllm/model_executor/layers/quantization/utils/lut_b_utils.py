@@ -355,7 +355,6 @@ def dequantize_lut_b(
 # (expert, 128 N, 128 K) tile. See csrc/moe/lut_b_moe_sm107.cu.
 LUT_B_SM107_TILE_N = 128
 LUT_B_SM107_TILE_K = 128
-LUT_B_SM107_TILE_BYTES = 6144 + 512 + 512
 
 
 def lut_b_to_sm107_tiles(

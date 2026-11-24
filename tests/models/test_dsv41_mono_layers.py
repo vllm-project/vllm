@@ -469,6 +469,9 @@ def _merged_matches_two_launches(vllm_runner, monkeypatch) -> None:
         "VLLM_USE_BREAKABLE_CUDAGRAPH",
     ):
         monkeypatch.setenv(name, "1")
+    # The workers must import this module with MERGE_AB set: forked ones keep
+    # the pytest process's import, made without it, and skip the patches.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     g = torch.Generator().manual_seed(0)
     prompt = torch.randint(1000, 60000, (1000,), generator=g).tolist()
     with vllm_runner(
