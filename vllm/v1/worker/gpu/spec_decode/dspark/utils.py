@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING
+
 import torch.nn as nn
 
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig, replace
@@ -8,6 +10,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.spec_decode.dspark.config import dspark_draft_supports_eplb
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 logger = init_logger(__name__)
 
@@ -75,6 +80,42 @@ def _get_dspark_parallel_config(
     )
 
 
+def _resolve_dspark_quant_config(
+    vllm_config: VllmConfig,
+) -> "QuantizationConfig | None":
+    from vllm.model_executor.models.utils import get_draft_quant_config
+
+    speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
+    draft_model_config = speculative_config.draft_model_config
+    target_model_config = vllm_config.model_config
+
+    target_model_path = getattr(target_model_config, "model", None)
+    draft_model_path = getattr(draft_model_config, "model", None)
+    draft_architectures = getattr(draft_model_config, "architectures", None) or ()
+    # Same-checkpoint DSpark drafts (except Mistral Large 4, whose draft weights
+    # ship in BF16) share the target's quantization even when resolved after
+    # SpeculativeConfig initialization (e.g. via Platform.check_and_update_config).
+    inherits_target_quant = (
+        getattr(speculative_config, "quantization", None) is None
+        and target_model_path is not None
+        and draft_model_path == target_model_path
+        and "MistralLarge4DSparkModel" not in draft_architectures
+    )
+    target_quantization = getattr(target_model_config, "quantization", None)
+    if (
+        inherits_target_quant
+        and getattr(draft_model_config, "quantization", None) is None
+        and target_quantization is not None
+    ):
+        draft_model_config.quantization = target_quantization
+
+    draft_quant_config = get_draft_quant_config(vllm_config)
+    if draft_quant_config is None and inherits_target_quant:
+        return getattr(vllm_config, "quant_config", None)
+    return draft_quant_config
+
+
 def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
@@ -83,7 +124,6 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     from vllm.compilation.backends import set_model_tag
     from vllm.model_executor.model_loader import get_model
     from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
-    from vllm.model_executor.models.utils import get_draft_quant_config
     from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
         get_target_lm_head,
         maybe_share_target_embed,
@@ -123,7 +163,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     )
     # VllmConfig post-init restores the target's quant config because the target
     # config is retained for DSpark's target-layer metadata, so we must override it.
-    draft_vllm_config.quant_config = get_draft_quant_config(vllm_config)
+    draft_vllm_config.quant_config = _resolve_dspark_quant_config(vllm_config)
 
     with set_model_tag("dspark_head"):
         draft_model = get_model(
