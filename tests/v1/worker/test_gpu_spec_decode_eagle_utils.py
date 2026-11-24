@@ -3,9 +3,14 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
-from vllm.v1.worker.gpu.spec_decode.eagle.utils import _should_share
+from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
+    _should_share,
+    share_target_lm_head,
+)
 
 
 class _UnquantizedHead(torch.nn.Module):
@@ -79,3 +84,44 @@ def test_draft_without_own_head_is_shared():
         _UnquantizedHead(torch.ones(4, 8)),
     )
     assert shared is True
+
+
+def _drafter():
+    drafter = torch.nn.Module()
+    drafter.has_own_lm_head = False
+    return drafter
+
+
+def test_share_target_lm_head_installs_the_copy_the_caller_resolved(monkeypatch):
+    """EAGLE/MTP and DSpark both hand the resolved copy spec to this function;
+    the drafter ends up with the copy, and the target keeps its own head."""
+    target_head, spec, copy = _UnquantizedHead(torch.ones(4, 8)), object(), object()
+    seen = []
+    monkeypatch.setattr(
+        eagle_utils,
+        "quantized_lm_head_copy",
+        lambda head, got: seen.append((head, got)) or copy,
+    )
+    drafter = _drafter()
+    assert share_target_lm_head(drafter, target_head, spec) is copy
+    assert seen == [(target_head, spec)]
+    assert drafter.lm_head is copy
+
+    shared = _drafter()
+    assert share_target_lm_head(shared, target_head, None) is target_head
+    assert shared.lm_head is target_head
+
+
+def test_share_target_lm_head_rejects_a_copy_without_sharing():
+    """A quantized copy only exists for a drafter that shares the target head,
+    e.g. not one with its own vocabulary (can_share False in DSpark)."""
+    with pytest.raises(ValueError, match="needs a drafter that shares"):
+        share_target_lm_head(
+            _drafter(), _UnquantizedHead(torch.ones(4, 8)), object(), can_share=False
+        )
+    assert (
+        share_target_lm_head(
+            _drafter(), _UnquantizedHead(torch.ones(4, 8)), None, can_share=False
+        )
+        is None
+    )
