@@ -350,3 +350,65 @@ def test_mxfp8_weight_only_rejects_forced_w8a8_backend(backend, kernel_cls):
         pytest.raises(ValueError, match="quantization scheme"),
     ):
         init_mxfp8_linear_kernel(weight_shape=(128, 128), activation_quant_key=None)
+
+
+# K is not a multiple of 256, as in DeepSeek-V4.1-Flash's shared-expert down
+# projection at TP2.
+_TRTLLM_UNALIGNED_K_SHAPE = (4096, 1152)
+
+
+@pytest.mark.parametrize(
+    ("weight_shape", "expected"),
+    [(_TRTLLM_UNALIGNED_K_SHAPE, False), ((4096, 2048), True)],
+)
+def test_trtllm_mxfp8_can_implement_requires_k_multiple_of_256(weight_shape, expected):
+    config = Mxfp8LinearLayerConfig(weight_shape=weight_shape)
+    can_implement, reason = FlashInferTrtllmMxfp8LinearKernel.can_implement(config)
+    assert can_implement == expected
+    if not expected:
+        assert reason is not None and "divisible by 256" in reason
+
+
+@pytest.mark.parametrize(
+    ("weight_shape", "expected_kernel_cls"),
+    [
+        (_TRTLLM_UNALIGNED_K_SHAPE, FlashInferCutedslMxfp8LinearKernel),
+        ((4096, 2048), FlashInferTrtllmMxfp8LinearKernel),
+    ],
+)
+def test_forced_trtllm_mxfp8_falls_back_per_layer(weight_shape, expected_kernel_cls):
+    """--linear-backend=flashinfer_trtllm keeps layers whose K the TRT-LLM
+    GEMM cannot run on automatic selection instead of failing at load."""
+    config = VllmConfig(
+        kernel_config=KernelConfig(
+            linear_backend_per_quant={"mxfp8": "flashinfer_trtllm"}
+        )
+    )
+    with (
+        set_current_vllm_config(config),
+        _patch_cuda_platform(100),
+        patch.object(
+            FlashInferTrtllmMxfp8LinearKernel, "is_supported", return_value=(True, None)
+        ),
+    ):
+        kernel = init_mxfp8_linear_kernel(weight_shape=weight_shape)
+    assert type(kernel) is expected_kernel_cls
+
+
+def test_forced_trtllm_mxfp8_reports_shape_when_nothing_fits(monkeypatch):
+    monkeypatch.setenv(
+        "VLLM_DISABLED_KERNELS",
+        "FlashInferCutedslMxfp8LinearKernel,FlashInferCutlassMxfp8LinearKernel,"
+        "MarlinMxfp8LinearKernel,B12xMxfp8LinearKernel,EmulationMxfp8LinearKernel,"
+        "HummingMxfp8LinearKernel,TorchMxFp8LinearKernel",
+    )
+    config = VllmConfig(kernel_config=KernelConfig(linear_backend="flashinfer_trtllm"))
+    with (
+        set_current_vllm_config(config),
+        _patch_cuda_platform(100),
+        patch.object(
+            FlashInferTrtllmMxfp8LinearKernel, "is_supported", return_value=(True, None)
+        ),
+        pytest.raises(ValueError, match="divisible by 256, got K=1152"),
+    ):
+        init_mxfp8_linear_kernel(weight_shape=_TRTLLM_UNALIGNED_K_SHAPE)

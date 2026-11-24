@@ -261,8 +261,16 @@ class FlashInferTrtllmMxfp8LinearKernel(Mxfp8LinearKernel):
             return False, "requires FlashInfer"
         return True, None
 
+    _K_ALIGNMENT = 256
+
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
+        _, K = c.weight_shape
+        if K % cls._K_ALIGNMENT != 0:
+            return (
+                False,
+                f"requires K to be divisible by {cls._K_ALIGNMENT}, got K={K}",
+            )
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -273,10 +281,10 @@ class FlashInferTrtllmMxfp8LinearKernel(Mxfp8LinearKernel):
 
         weight = layer.weight.data  # [N, K]
         N, K = weight.shape
-        if K % 256 != 0:
-            raise ValueError(
-                f"FlashInfer TRTLLM MXFP8 requires K to be divisible by 256, got K={K}."
-            )
+        assert K % self._K_ALIGNMENT == 0, (
+            f"FlashInfer TRTLLM MXFP8 requires K to be divisible by "
+            f"{self._K_ALIGNMENT}, got K={K}."
+        )
 
         scale_k = K // MXFP8_BLOCK_SIZE
         weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
