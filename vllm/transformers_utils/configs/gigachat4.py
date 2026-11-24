@@ -45,7 +45,7 @@ class GigaChat4Config(PreTrainedConfig):
         hidden_act: str = "silu",
         full_attention_layers: list[int] | None = None,
         layer_types: list[str] | None = None,
-        linear_attention_type: str = "Qwen3NextGatedDeltaNet",
+        linear_attention_type: str = "GigaChat4GatedDeltaNet",
         linear_key_head_dim: int = 128,
         linear_value_head_dim: int = 128,
         linear_conv_kernel_dim: int = 4,
@@ -92,7 +92,7 @@ class GigaChat4Config(PreTrainedConfig):
         if attention_bias:
             raise ValueError("GigaChat4 attention bias is unsupported")
         if (
-            linear_attention_type != "Qwen3NextGatedDeltaNet"
+            linear_attention_type != "GigaChat4GatedDeltaNet"
             or linear_gating_type != "gated_rmsnorm_sigmoid"
             or kwargs.get("linear_use_legacy_qkvz_layout", False)
             or not linear_use_short_conv
