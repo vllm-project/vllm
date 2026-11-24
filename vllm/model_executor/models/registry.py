@@ -100,7 +100,6 @@ _TEXT_GENERATION_MODELS = {
     "DeepseekV4ForCausalLM": ("vllm.models.deepseek_v4", "DeepseekV4ForCausalLM"),
     "DomynEdgeForCausalLM": ("domyn_edge", "DomynEdgeForCausalLM"),
     "DoryForCausalLM": ("dory", "DoryForCausalLM"),
-    "Ernie4_5ForCausalLM": ("ernie45", "Ernie4_5ForCausalLM"),
     "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "Exaone4ForCausalLM": ("exaone4", "Exaone4ForCausalLM"),
@@ -493,6 +492,10 @@ _MULTIMODAL_MODELS = {
         "vllm.models.kimi_k3",
         "KimiK3ForConditionalGeneration",
     ),
+    "Inkling2LoopForConditionalGeneration": (
+        "vllm.models.inkling2",
+        "Inkling2LoopForConditionalGeneration",
+    ),
     "Inkling2ForConditionalGeneration": (
         "vllm.models.inkling2",
         "Inkling2ForConditionalGeneration",
@@ -579,6 +582,10 @@ _MULTIMODAL_MODELS = {
     "Nemotron3_5TranscribeForConditionalGeneration": (
         "nemotron3_5_transcribe",
         "Nemotron3_5TranscribeForConditionalGeneration",
+    ),
+    "Nemotron4ForConditionalGeneration": (
+        "vllm.models.nemotron_shortcut",
+        "NemotronShortcutForConditionalGeneration",
     ),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "MuseGlimmerForConditionalGeneration": ("muse_glimmer", "MuseGlimmerForCausalLM"),
@@ -766,6 +773,10 @@ _SPECULATIVE_DECODING_MODELS = {
         "nemotron3_5_transcribe",
         "Nemotron3_5TranscribeMTP",
     ),
+    "NemotronShortcutMTPModel": (
+        "vllm.models.nemotron_shortcut",
+        "NemotronShortcutMTP",
+    ),
     "LongCatFlashMTPModel": ("longcat_flash_mtp", "LongCatFlashMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "Glm4MoeLiteMTPModel": ("glm4_moe_lite_mtp", "Glm4MoeLiteMTP"),
@@ -790,6 +801,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     # Text generation models
     "ArceeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "CwmForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "Ernie4_5ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "FlexOlmoForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "GemmaForCausalLM": ("transformers", "TransformersForCausalLM"),
     "GlmForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -825,6 +837,10 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
         "TransformersMultiModalMoEForCausalLM",
     ),
     "Emu3ForConditionalGeneration": (
+        "transformers",
+        "TransformersMultiModalForCausalLM",
+    ),
+    "GraniteDoclingForConditionalGeneration": (
         "transformers",
         "TransformersMultiModalForCausalLM",
     ),
