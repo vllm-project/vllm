@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops import triton_decode_attention as tda
@@ -475,7 +476,7 @@ def _make_q(layout, B, H_Q, D_QK, dtype):
 )
 @pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
 def test_decode_attention_mla_tensor_descriptor(
-    monkeypatch, H_Q, H_KV, D_QK, D_V, is_mla, layout, td_on_xpu, kv_dtype
+    request, monkeypatch, H_Q, H_KV, D_QK, D_V, is_mla, layout, td_on_xpu, kv_dtype
 ):
     """The Q tensor-descriptor load of the grouped kernel is used only for the
     576-wide MLA tile with a Q a descriptor can cover, on XPU, unless
@@ -483,6 +484,26 @@ def test_decode_attention_mla_tensor_descriptor(
     the pointer load: only the Q load differs, the math is unchanged."""
     if kv_dtype != torch.bfloat16 and not is_mla:
         pytest.skip("fp8 KV is only wired for MLA here")
+    if (
+        kv_dtype != torch.bfloat16
+        and D_QK == 576
+        and current_platform.is_cuda()
+        and torch.cuda.get_device_properties().shared_memory_per_block_optin < 102400
+    ):
+        # FIXME: bug on main, not in the tensor-descriptor path: with an fp8 KV
+        # cache the 576-wide MLA tile of the grouped stage-1 kernel needs
+        # 102400 B of shared memory at num_stages=2, more than the 101376 B of
+        # L4, L40S, sm_120 and GB10.  Drop this marker once a fix lands; strict
+        # turns the expected failure into an error as soon as it passes.
+        # https://github.com/vllm-project/vllm/issues/53748
+        # https://github.com/vllm-project/vllm/issues/60172
+        request.applymarker(
+            pytest.mark.xfail(
+                reason="https://github.com/vllm-project/vllm/issues/53748",
+                raises=triton.runtime.errors.OutOfResources,
+                strict=True,
+            )
+        )
     torch.manual_seed(0)
     B, PAGE_SIZE, num_pages, seq_len, num_kv_splits = 3, 16, 1024, 1027, 8
     sm_scale = 1.0 / (D_QK**0.5)
