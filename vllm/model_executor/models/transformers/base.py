@@ -459,7 +459,6 @@ class Base(
                 type(op).__name__ in ("Chunk", "Split") for op in mapping.operations
             ):
                 weight_converters.append(mapping)
-            # TODO: Handle other WeightConverters to enable layer merging
 
         # Standardise base model prefix
         bmp = self.model.base_model_prefix
