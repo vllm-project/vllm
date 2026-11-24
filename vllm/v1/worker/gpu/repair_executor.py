@@ -1674,6 +1674,21 @@ def _derive_repair_geometry(
                 f"'{resolved_layout_name}' has no known per-K/V 4D view "
                 "token-axis contract; refusing to guess"
             )
+        # Shape-ambiguity guard (F2): when the head dim and the token
+        # dim carry the same size (num_kv_heads == block_size), the
+        # shape alone cannot confirm the token axis: a layout-label or
+        # binding disagreement would write the wrong cells with no
+        # refusal. Refuse (fail-closed) rather than rely on the label.
+        if int(cache.shape[1]) == int(cache.shape[2]):
+            raise ValueError(
+                f"hole repair: per-K/V 4D view shape "
+                f"{tuple(cache.shape)} is ambiguous: dim 1 and dim 2 "
+                f"carry the same size ({cache.shape[1]}), so the shape "
+                "cannot confirm the token axis for layout "
+                f"'{resolved_layout_name}' (num_kv_heads == block_size "
+                "edge case); refusing to write through an ambiguous "
+                "geometry"
+            )
         if int(cache.shape[token_axis]) != spec_block_size:
             raise ValueError(
                 f"hole repair: the bound per-K/V 4D view shape "
