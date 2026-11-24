@@ -583,6 +583,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
     ),
     "VaultGemmaForCausalLM": _HfExamplesInfo("google/vaultgemma-1b"),
+    "YoutuForCausalLM": _HfExamplesInfo("tencent/Youtu-LLM-2B"),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
     "ZayaForCausalLM": _HfExamplesInfo("Zyphra/ZAYA1-8B"),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL", trust_remote_code=True),
