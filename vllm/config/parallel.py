@@ -6,7 +6,7 @@ import socket
 from collections.abc import Callable, Sequence
 from datetime import timedelta
 from functools import cache
-from typing import TYPE_CHECKING, Any, Literal, Self, overload
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Self, overload
 
 import regex as re
 import torch
@@ -39,6 +39,22 @@ _NUMACTL_CPUSET_PATTERN = re.compile(r"^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
 def get_min_num_redundant_experts(num_logical_experts: int, ep_size: int) -> int:
     """Return the minimum R that makes the expert count divisible by EP size."""
     return (-num_logical_experts) % ep_size
+
+
+class LocalDPState(NamedTuple):
+    """Per-rank DP state sent into `ParallelConfig.sync_dp_state`."""
+
+    has_unfinished: bool
+    pending_pause: bool
+    scheduler_state: Sequence[float] | None = None
+
+
+class SyncedDPState(NamedTuple):
+    """Aggregated DP state returned by `ParallelConfig.sync_dp_state`."""
+
+    has_unfinished: bool
+    pause_consensus: bool
+    scheduler_states: list[list[float]] | None = None
 
 
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
@@ -1084,10 +1100,8 @@ class ParallelConfig:
     def sync_dp_state(
         self,
         dp_group: ProcessGroup,
-        has_unfinished: bool,
-        pending_pause: bool,
-        row: Sequence[float] | None = None,
-    ) -> tuple[bool, bool, list[list[float]] | None]:
+        local_state: LocalDPState,
+    ) -> SyncedDPState:
         """Combined all-reduce for DP state synchronization.
 
         Uses a single SUM all-reduce on a 2-element tensor:
@@ -1096,38 +1110,48 @@ class ParallelConfig:
           `[1]` = 1 if this rank has a pending pause request, else 0.
                 SUM == dp_size ≡ all ranks reached pause consensus.
 
-        `has_unfinished_global` is true if any rank has unfinished work,
-        or if some ranks are waiting for a pause consensus.
+        `has_unfinished` in the returned `SyncedDPState` is true if any rank
+        has unfinished work, or if some ranks are waiting for a pause
+        consensus.
 
-        `row`, if given, is all-gathered in the same all-reduce: each rank
-        writes it into its own slot of a zeroed `[dp_size, len(row)]` block
-        appended to the tensor. Every rank must pass a row of the same length.
+        `local_state.scheduler_state`, if given, is all-gathered in the same
+        all-reduce: each rank writes it into its own slot of a zeroed
+        `[dp_size, len(scheduler_state)]` block appended to the tensor. Every
+        rank must pass a sequence of the same length.
 
         Returns:
-            `(has_unfinished_global, pause_consensus, rows)`, where `rows` holds
-            every rank's `row` in rank order, or is None without `row`.
+            `SyncedDPState` holding `(has_unfinished, pause_consensus,
+            scheduler_states)`, where `scheduler_states` contains every rank's
+            `scheduler_state` in rank order, or is None when not provided.
 
         """
         dp_size = dp_group.size()
-        if row is None:
+        sched = local_state.scheduler_state
+        if sched is None:
             tensor = torch.tensor(
-                [int(has_unfinished), int(pending_pause)],
+                [int(local_state.has_unfinished), int(local_state.pending_pause)],
                 dtype=torch.int32,
                 device="cpu",
             )
         else:
-            n = len(row)
+            n = len(sched)
             buf = [0.0] * (2 + dp_size * n)
-            buf[0] = float(has_unfinished)
-            buf[1] = float(pending_pause)
+            buf[0] = float(local_state.has_unfinished)
+            buf[1] = float(local_state.pending_pause)
             start = 2 + dp_group.rank() * n
-            buf[start : start + n] = row
+            buf[start : start + n] = sched
             tensor = torch.tensor(buf, dtype=torch.float64, device="cpu")
         cpu_all_reduce_(tensor, dp_group, timeout=self.cpu_distributed_timeout)
-        rows = None if row is None else tensor[2:].view(dp_size, n).tolist()
+        scheduler_states = (
+            None if sched is None else tensor[2:].view(dp_size, n).tolist()
+        )
         pause_count = int(tensor[1].item())
         has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
-        return has_unfinished_global, pause_count == dp_size, rows
+        return SyncedDPState(
+            has_unfinished=has_unfinished_global,
+            pause_consensus=pause_count == dp_size,
+            scheduler_states=scheduler_states,
+        )
 
     @staticmethod
     def sync_kv_cache_memory_size(dp_group: ProcessGroup, kv_cache_memory: int) -> int:

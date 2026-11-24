@@ -23,6 +23,7 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.config.parallel import LocalDPState
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
 from vllm.config.utils import hash_config
 from vllm.config.watermarking import warn_watermarking_override
@@ -2868,25 +2869,21 @@ class DPEngineCoreProc(EngineCoreProc):
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Sync step 1 too: an idle pause needs one dummy batch, not a full interval.
         self.step_counter += 1
-        row = self.scheduler.dp_row()
+        scheduler_state = self.scheduler.get_dp_state()
         if (
-            row is None
+            scheduler_state is None
             and self.step_counter != 1
             and self.step_counter % self.dp_sync_interval != 0
         ):
             return True
 
-        parallel_config = self.vllm_config.parallel_config
-        has_unfinished, pause_consensus, rows = parallel_config.sync_dp_state(
+        dp_state = self.vllm_config.parallel_config.sync_dp_state(
             self.dp_group,
-            has_unfinished=local_unfinished,
-            pending_pause=self.pending_pause,
-            row=row,
+            LocalDPState(local_unfinished, self.pending_pause, scheduler_state),
         )
-        if rows is not None:
-            self.scheduler.update_from_dp_rows(rows, idle=not has_unfinished)
+        self.scheduler.update_dp_state(dp_state)
 
-        if pause_consensus:
+        if dp_state.pause_consensus:
             self.ignore_start_dp_wave = True
             self.pending_pause = False
             logger.debug("DP pause consensus reached, ignoring START_DP_WAVE.")
@@ -2894,7 +2891,7 @@ class DPEngineCoreProc(EngineCoreProc):
             # Coordinator disabled: never idle-pause; engines keep stepping.
             return True
 
-        return has_unfinished
+        return dp_state.has_unfinished
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest

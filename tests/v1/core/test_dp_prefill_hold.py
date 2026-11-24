@@ -10,6 +10,7 @@ import pytest
 from tests.v1.core.utils import create_requests, create_scheduler
 from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import ModelConfig
+from vllm.config.parallel import SyncedDPState
 from vllm.v1.core.sched import dp_prefill_hold as dph
 from vllm.v1.core.sched.dp_prefill_hold import PrefillHold, _RankRow
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
@@ -596,11 +597,23 @@ def test_scans_waiting_queues_in_admission_order(policy):
 
 def test_sync_that_finds_every_rank_idle_releases():
     """A sync that finds every rank idle resets the hold; without the hold no
-    row is shared."""
-    assert create_scheduler().dp_row() is None
+    DP state is shared."""
+    assert create_scheduler().get_dp_state() is None
     scheduler, hold = _hold_scheduler()
     _warm(hold, random.Random(0))
-    scheduler.update_from_dp_rows(_one_rank_queued(), idle=False)
+    scheduler.update_dp_state(
+        SyncedDPState(
+            has_unfinished=True,
+            pause_consensus=False,
+            scheduler_states=_one_rank_queued(),
+        )
+    )
     assert hold.hold
-    scheduler.update_from_dp_rows(_one_rank_queued(), idle=True)
+    scheduler.update_dp_state(
+        SyncedDPState(
+            has_unfinished=False,
+            pause_consensus=False,
+            scheduler_states=_one_rank_queued(),
+        )
+    )
     assert not hold.hold

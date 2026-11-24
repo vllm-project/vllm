@@ -10,6 +10,7 @@ from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
+from vllm.config.parallel import SyncedDPState
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
     retained_objects,
@@ -3217,14 +3218,14 @@ class Scheduler(SchedulerInterface):
             self._can_start_waiting, itertools.chain(self.kv_holding_waiting, merged)
         )
 
-    def dp_row(self) -> Sequence[float] | None:
+    def get_dp_state(self) -> Sequence[float] | None:
         return None if self.prefill_hold is None else self.prefill_hold.local_row()
 
-    def update_from_dp_rows(self, rows: Sequence[Sequence[float]], idle: bool) -> None:
-        assert self.prefill_hold is not None
-        self.prefill_hold.update(rows)
-        if idle:
-            self.prefill_hold.reset()
+    def update_dp_state(self, dp_state: SyncedDPState) -> None:
+        if self.prefill_hold is not None and dp_state.scheduler_states is not None:
+            self.prefill_hold.on_dp_sync(
+                dp_state.scheduler_states, idle=not dp_state.has_unfinished
+            )
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus

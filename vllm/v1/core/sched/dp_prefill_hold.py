@@ -514,6 +514,12 @@ class PrefillHold:
             self._log(reason)
         return reason
 
+    def on_dp_sync(self, rows: Sequence[Sequence[float]], idle: bool) -> None:
+        """Apply all ranks' rows from a DP state sync, resetting if all idle."""
+        self.update(rows)
+        if idle:
+            self.reset()
+
     def _learn(self, rows: list[_RankRow], period: float) -> None:
         if self._skip_sample:
             self._skip_sample = False
