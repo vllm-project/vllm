@@ -1916,8 +1916,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1, SupportsHMA):
 
         Returns:
             - `LEGACY_IPC` when `use_vmm_api` is explicitly false.
-            - `EXPORTS_FABRIC` in automatic or explicit VMM mode with
-              `isolated_ipc`.
+            - `EXPORTS_FABRIC` in automatic or explicit VMM mode with `isolated_ipc`.
             - `EXPORTS_FD` in automatic or explicit VMM mode otherwise.
             - None when vLLM has no `KVCacheAccess`.
 
