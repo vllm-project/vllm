@@ -140,6 +140,11 @@ class Fp8BlockExpertsAsMxfp4FusedMoE(Mxfp4OnlineMoEMethod):
             layer.register_parameter(name, meta)
         initialize_online_processing(layer)
 
+    def create_weight_stream(self, device: torch.device) -> None:
+        # The block-FP8 layer is loaded whole by the layerwise loader, and
+        # requantized by `process_weights_after_loading`.
+        return None
+
     def _requant(self, weight: torch.Tensor, scale_inv: torch.Tensor):
         num_experts, n, k = weight.shape
         out = torch.empty(

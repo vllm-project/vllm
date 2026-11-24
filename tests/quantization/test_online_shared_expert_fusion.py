@@ -1203,65 +1203,86 @@ def test_online_gate_up_proj_target_disables_fse(
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("num_shared", [0, 1, 2])
-@pytest.mark.parametrize("experts_per_chunk", [1, 3, 4])
-def test_online_moe_quantize_weights_places_routed_then_shared_experts(
-    num_shared: int, experts_per_chunk: int
-):
-    """Chunked routed experts come first and the staged shared experts last."""
+def test_online_moe_stream_places_routed_then_shared_experts(num_shared: int):
+    """Experts loaded in any order land in their slots: routed experts first and
+    the staged fused shared experts last."""
     import types
 
-    from vllm.model_executor.layers.quantization.online.moe_base import (
-        OnlineMoEMethodBase,
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.layers.quantization.online.moe_streaming import (
+        ExpertWeightStream,
     )
 
-    num_routed, w13_shape, w2_shape = 4, (6, 8), (8, 3)
+    num_routed, intermediate, hidden = 4, 3, 8
     num_experts = num_routed + num_shared
 
-    def expert_values(shape: tuple[int, ...]) -> torch.Tensor:
-        # Every element of expert `e` is `e`, so the slot is recoverable.
-        values = torch.arange(num_experts, dtype=torch.float32)
-        return values.view(-1, 1, 1).expand(num_experts, *shape).contiguous()
+    def meta(*shape: int) -> torch.nn.Parameter:
+        return torch.nn.Parameter(torch.empty(*shape, device="meta"), False)
 
-    w13_all, w2_all = expert_values(w13_shape), expert_values(w2_shape)
-
-    def dequantize_weight(layer):
-        for start in range(0, num_routed, experts_per_chunk):
-            experts = slice(start, min(start + experts_per_chunk, num_routed))
-            yield experts, w13_all[experts], w2_all[experts]
-
-    method = SimpleNamespace(
-        requantization_source=SimpleNamespace(
-            dequantize_weight=dequantize_weight,
-        ),
-        _pad_requantized_weights=lambda layer, w13, w2, n: (w13, w2),
-    )
-    method.iter_weights_for_quantization = types.MethodType(
-        OnlineMoEMethodBase.iter_weights_for_quantization, method
-    )
+    staging = {
+        "online_w13_weight": meta(num_shared, 2 * intermediate, hidden),
+        "online_w2_weight": meta(num_shared, hidden, intermediate),
+    }
     layer = SimpleNamespace(
         local_num_experts=num_experts,
         expert_map_manager=SimpleNamespace(num_fused_shared_experts=num_shared),
         orig_dtype=torch.float32,
+        moe_config=SimpleNamespace(
+            is_act_and_mul=True,
+            hidden_dim=hidden,
+            intermediate_size_per_partition=intermediate,
+            tp_rank=0,
+            tp_shard_with_padding=False,
+            moe_parallel_config=SimpleNamespace(tp_size=1),
+        ),
+        w13_weight=meta(num_experts, 2 * intermediate, hidden),
+        w2_weight=meta(num_experts, hidden, intermediate),
         shared_expert_online_loader=SimpleNamespace(
-            dequantize_staging=lambda layer: (
-                w13_all[num_routed:],
-                w2_all[num_routed:],
-            ),
-            release_staging=lambda layer: None,
+            staging_parameters=staging, dequantize=lambda weight, scale: weight
+        ),
+        _map_global_expert_id_to_local_expert_id=lambda expert: expert,
+        _get_hidden_dim=RoutedExperts._get_hidden_dim,
+        _narrow_expert_data_for_padding=RoutedExperts._narrow_expert_data_for_padding,
+        _parameters={},
+        _buffers={},
+        **staging,
+    )
+    for name in ("_load_model_weight_or_group_weight_scale", "_load_w13", "_load_w2"):
+        setattr(layer, name, types.MethodType(getattr(RoutedExperts, name), layer))
+    method = SimpleNamespace(
+        expert_weight_names=("w13_weight", "w2_weight"),
+        expert_activation_scale_names=(),
+        requantization_source=None,
+        expert_statistics=lambda w13, w2: {},
+        quantize_expert=lambda layer, w13, w2, statistics: (
+            w13 * 2,
+            w13.mean(-1),
+            w2 * 2,
+            w2.mean(-1),
         ),
     )
+    stream = ExpertWeightStream(method, torch.device("cpu"))
 
-    def quantize(w13, w2):
-        return w13 * 2, w13.mean(-1), w2 * 2, w2.mean(-1)
+    # Every element of expert `e` is `e`, so its slot is recoverable.
+    shared_experts = range(num_routed, num_experts)
+    for expert in [*shared_experts, *reversed(range(num_routed))]:
+        prefix = "online_" if expert >= num_routed else ""
+        for name, shard_id, shape in (
+            ("w13_weight", "w1", (intermediate, hidden)),
+            ("w2_weight", "w2", (hidden, intermediate)),
+            ("w13_weight", "w3", (intermediate, hidden)),
+        ):
+            stream._load_expert(
+                layer, prefix + name, expert, shard_id, torch.full(shape, expert * 1.0)
+            )
+    assert stream.is_complete(layer)
+    w13_q, w13_scale, w2_q, w2_scale = stream.quantized_weights(layer)
 
-    w13_q, w13_scale, w2_q, w2_scale = OnlineMoEMethodBase.quantize_weights(
-        method, layer, quantize
-    )
-
-    assert torch.equal(w13_q, w13_all * 2)
-    assert torch.equal(w13_scale, w13_all.mean(-1))
-    assert torch.equal(w2_q, w2_all * 2)
-    assert torch.equal(w2_scale, w2_all.mean(-1))
+    expected = torch.arange(num_experts, dtype=torch.float32).view(-1, 1, 1)
+    assert torch.equal(w13_q, (expected * 2).expand(-1, 2 * intermediate, hidden))
+    assert torch.equal(w13_scale, expected[..., 0].expand(-1, 2 * intermediate))
+    assert torch.equal(w2_q, (expected * 2).expand(-1, hidden, intermediate))
+    assert torch.equal(w2_scale, expected[..., 0].expand(-1, hidden))
 
 
 if current_platform.is_rocm():

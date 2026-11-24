@@ -182,28 +182,24 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
 
         layer.weight_block_size = [1, MXFP8_BLOCK_SIZE]
 
-    def _quantize_mxfp8_moe_weight(
-        self, weight: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Batch quantization: bf16/fp16 weights -> MXFP8 (fp8 + uint8 scales)."""
-        E = weight.size(0)
-        first_q, first_s = mxfp8_e4m3_quantize(weight[0], is_sf_swizzled_layout=False)
-        # Pre-allocate the output tensors rather than stacking.
-        # This is important for consistent memory layout.
-        w_quant = torch.empty(
-            (E, *first_q.shape), dtype=first_q.dtype, device=weight.device
+    def quantize_expert(
+        self,
+        layer: Module,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        statistics: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, ...]:
+        """bf16/fp16 weights -> MXFP8 (fp8 + uint8 scales)."""
+        return (
+            *mxfp8_e4m3_quantize(w13, is_sf_swizzled_layout=False),
+            *mxfp8_e4m3_quantize(w2, is_sf_swizzled_layout=False),
         )
-        w_scales = torch.empty(
-            (E, *first_s.shape), dtype=first_s.dtype, device=weight.device
-        )
-        w_quant[0] = first_q
-        w_scales[0] = first_s
-        for i in range(1, E):
-            w_quant[i], w_scales[i] = mxfp8_e4m3_quantize(
-                weight[i], is_sf_swizzled_layout=False
-            )
 
-        return w_quant, w_scales
+    def setup_quantized_weights(self, layer: Module, *weights: torch.Tensor) -> None:
+        w13, w13_scale, w2, w2_scale = weights
+        layer.w13_input_scale = None
+        layer.w2_input_scale = None
+        self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, None, None)
 
     def _setup_kernel(
         self,
@@ -275,31 +271,3 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
             gemm1_beta=getattr(layer, "swiglu_beta", None),
             layer=layer,
         )
-
-    def process_weights_after_loading(self, layer: Module) -> None:
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-
-        layer.w13_input_scale = None
-        layer.w2_input_scale = None
-
-        def quantize(w13_weight: torch.Tensor, w2_weight: torch.Tensor):
-            return (
-                *self._quantize_mxfp8_moe_weight(w13_weight),
-                *self._quantize_mxfp8_moe_weight(w2_weight),
-            )
-
-        w13, w13_scale, w2, w2_scale = self.quantize_weights(layer, quantize)
-
-        self._setup_kernel(
-            layer,
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-            layer.w13_input_scale,
-            layer.w2_input_scale,
-        )
-        self.release_requantization_source_weights(layer)
-
-        layer._already_called_process_weights_after_loading = True

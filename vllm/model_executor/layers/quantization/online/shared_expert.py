@@ -187,17 +187,28 @@ class OnlineSharedExpertLoader:
         self, layer: torch.nn.Module
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the staged `(w13, w2)` shared experts, dequantized if needed."""
-        w13 = layer.online_w13_weight.data
-        w2 = layer.online_w2_weight.data
-        if self.stored_key is not None:
-            from vllm.model_executor.layers.quantization.online.base import (
-                ONLINE_SHARED_EXPERT_DEQUANTIZERS,
+        return tuple(  # type: ignore[return-value]
+            self.dequantize(
+                getattr(layer, f"online_{stem}_weight").data,
+                getattr(layer, f"online_{stem}_weight_scale", None),
             )
+            for stem in ("w13", "w2")
+        )
 
-            dequantize = ONLINE_SHARED_EXPERT_DEQUANTIZERS[self.stored_key]
-            w13 = dequantize(w13, layer.online_w13_weight_scale.data)
-            w2 = dequantize(w2, layer.online_w2_weight_scale.data)
-        return w13, w2
+    def dequantize(
+        self, weight: torch.Tensor, weight_scale: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Dequantize shared expert weights as stored, if they are quantized."""
+        if self.stored_key is None:
+            return weight
+        from vllm.model_executor.layers.quantization.online.base import (
+            ONLINE_SHARED_EXPERT_DEQUANTIZERS,
+        )
+
+        assert weight_scale is not None
+        return ONLINE_SHARED_EXPERT_DEQUANTIZERS[self.stored_key](
+            weight, weight_scale.data
+        )
 
     def release_staging(self, layer: torch.nn.Module) -> None:
         for name, param in self.staging_parameters.items():
