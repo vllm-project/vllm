@@ -472,6 +472,10 @@ ADD ./requirements/build/hybrid-test-deps.txt ./requirements/build/hybrid-test-d
 # prompt block hash vectors that the Rust frontend's unit tests also use.
 ADD ./rust/src/engine-core-client/src/tests/prompt_block_hash_vectors.json \
     ./rust/src/engine-core-client/src/tests/prompt_block_hash_vectors.json
+# tests/v1/core/test_kv_event_vectors.py does the same for the KV cache events
+# that the Rust frontend decodes.
+ADD ./rust/src/engine-core-client/src/tests/kv_event_vectors.json \
+    ./rust/src/engine-core-client/src/tests/kv_event_vectors.json
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \

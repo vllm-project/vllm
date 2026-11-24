@@ -448,3 +448,59 @@ def test_ephemeral_bind_needs_a_node_ip(monkeypatch, node_ip):
     )
     with pytest.raises(ValueError, match="VLLM_HOST_IP"):
         EventPublisherFactory.create(config, DP_RANK)
+
+
+def test_frontend_endpoints_carry_the_same_stream(random_port, tmp_path):
+    """The private addresses a Rust frontend asks for carry the same batches,
+    sequence numbers and replay answers as the configured endpoints."""
+    from vllm.config.kv_events import KVEventsConfig
+
+    from .conftest import MockSubscriber
+
+    frontend_endpoint = f"ipc://{tmp_path}/kv"
+    frontend_replay_endpoint = f"ipc://{tmp_path}/kvr"
+    config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint=f"tcp://*:{random_port}",
+        topic="kv",
+    )
+    config._frontend_endpoint = frontend_endpoint
+    config._frontend_replay_endpoint = frontend_replay_endpoint
+    publisher = EventPublisherFactory.create(config, DP_RANK)
+    resolved = publisher.get_publisher_config()
+    assert resolved._frontend_endpoint == frontend_endpoint
+    assert resolved._frontend_replay_endpoint == frontend_replay_endpoint
+    assert resolved.replay_endpoint is None
+
+    user = MockSubscriber(f"tcp://127.0.0.1:{random_port}", topic="kv")
+    frontend = MockSubscriber(frontend_endpoint, frontend_replay_endpoint, topic="kv")
+    try:
+        # PUB/SUB drops messages sent before the subscription lands.
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            publisher.publish(create_test_events(1))
+            if user.receive_one(timeout=100) and frontend.receive_one(timeout=100):
+                break
+        for _ in range(3):
+            publisher.publish(create_test_events(1))
+        for sub in (user, frontend):
+            while sub.receive_one(timeout=500) is not None:
+                pass
+        user_seqs = [seq for seq, _ in user.received_msgs]
+        frontend_seqs = [seq for seq, _ in frontend.received_msgs]
+        assert user_seqs[-4:] == frontend_seqs[-4:]
+
+        frontend.request_replay(0)
+        replayed = frontend.receive_replay()
+        assert [seq for seq, _ in replayed] == list(range(frontend_seqs[-1] + 1))
+    finally:
+        user.close()
+        frontend.close()
+        publisher.shutdown()
+
+    # With KV events off, the frontend's addresses are not bound.
+    config.enable_kv_cache_events = False
+    config._frontend_endpoint = f"ipc://{tmp_path}/kv-off"
+    assert isinstance(EventPublisherFactory.create(config, DP_RANK), NullEventPublisher)
+    assert not (tmp_path / "kv-off").exists()

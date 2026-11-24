@@ -325,6 +325,10 @@ class ZmqEventPublisher(EventPublisher):
         hwm: ZeroMQ high-water-mark for PUB socket.
         max_queue_size: Maximum number of events to buffer in memory.
         topic: Topic to publish events to.
+        frontend_endpoint: Private address bound in addition to `endpoint`,
+            for the Rust frontend.
+        frontend_replay_endpoint: Private address bound in addition to
+            `replay_endpoint`, for the Rust frontend.
 
     """
 
@@ -340,6 +344,8 @@ class ZmqEventPublisher(EventPublisher):
         hwm: int = 100_000,
         max_queue_size: int = 100_000,
         topic: str = "",
+        frontend_endpoint: str | None = None,
+        frontend_replay_endpoint: str | None = None,
     ) -> None:
         # Storage
         super().__init__(data_parallel_rank)
@@ -357,6 +363,8 @@ class ZmqEventPublisher(EventPublisher):
             replay_endpoint, self._dp_rank
         )
         assert self._endpoint is not None
+        self._frontend_endpoint = frontend_endpoint
+        self._frontend_replay_endpoint = frontend_replay_endpoint
         self._hwm = hwm
         # ZMQ acks reads only every HWM/2 messages, so the sender can see up to
         # HWM/2 stale messages; 2x lets a full replay plus marker always fit.
@@ -371,6 +379,8 @@ class ZmqEventPublisher(EventPublisher):
             hwm=hwm,
             max_queue_size=max_queue_size,
             topic=topic,
+            _frontend_endpoint=self._frontend_endpoint,
+            _frontend_replay_endpoint=self._frontend_replay_endpoint,
         )
 
         # Payload
@@ -449,6 +459,16 @@ class ZmqEventPublisher(EventPublisher):
             # Queue a full replay plus its end marker for slow subscribers.
             self._replay.setsockopt(zmq.SNDHWM, self._replay_hwm)
             self._replay_endpoint = self._bind(self._replay, self._replay_endpoint)
+
+        if self._frontend_endpoint is not None:
+            self._frontend_endpoint = self._bind(self._pub, self._frontend_endpoint)
+        if self._frontend_replay_endpoint is not None:
+            if self._replay is None:
+                self._replay = self._ctx.socket(zmq.ROUTER)
+                self._replay.setsockopt(zmq.SNDHWM, self._replay_hwm)
+            self._frontend_replay_endpoint = self._bind(
+                self._replay, self._frontend_replay_endpoint
+            )
 
     @staticmethod
     def _is_bind_endpoint(endpoint: str) -> bool:
@@ -596,6 +616,12 @@ class EventPublisherFactory:
 
         kind = config_dict.pop("publisher")
         config_dict.pop("enable_kv_cache_events")
+        frontend_endpoints = {
+            "frontend_endpoint": config_dict.pop("_frontend_endpoint"),
+            "frontend_replay_endpoint": config_dict.pop("_frontend_replay_endpoint"),
+        }
+        if kind == "zmq":
+            config_dict.update(frontend_endpoints)
         try:
             constructor = cls._registry[kind]
         except KeyError as exc:

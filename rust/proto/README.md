@@ -20,7 +20,8 @@ vllm-proto = "0.7"
 ```
 
 For example, import `vllm_proto::inference_client::InferenceClient`,
-`vllm_proto::control_client::ControlClient`, or
+`vllm_proto::control_client::ControlClient`,
+`vllm_proto::kv_events_client::KvEventsClient`, or
 `vllm_proto::render_client::RenderClient`. The vLLM frontend uses this same crate.
 The package includes the canonical `.proto` files and generates bindings during
 compilation using `protox` and `tonic-prost-build`. Consumers do not need Buf
@@ -58,3 +59,25 @@ for repository `vllm-project/vllm`, workflow `proto-crate.yml`, and environment
 `crates-io`. Configure that GitHub environment to allow `proto-v*` release tags.
 Only tag pushes in the upstream repository can publish; forks do not obtain
 publishing credentials.
+
+## KV cache events
+
+`KvEvents.SubscribeKvEvents` streams the KV cache events of an engine started
+with `--kv-events-config '{"enable_kv_cache_events": true}'`, one stream per
+data-parallel rank, with the same batches and sequence numbers as the engine's
+ZMQ publisher. Nothing else needs configuring: at startup the frontend gives
+each engine a private events address and replay address (IPC for engines on its
+node, TCP on the engine's own node otherwise), which the publisher binds in
+addition to its configured endpoints. `Control.GetKvEventSources` lists the
+stream as a source with transport `grpc`.
+
+A subscriber without `resume` receives live batches. With `resume`, the
+frontend first replays the batches the engine still buffers (`buffer_steps`)
+from the cursor, then continues live; it keeps no history of its own, and fills
+batches its own subscription misses from the same buffer. A cursor older than
+the buffer fails with `OUT_OF_RANGE`; batches that can no longer be recovered
+end the stream with `DATA_LOSS` and start a new `stream_id`.
+
+Each batch is one gRPC message. Requests that set `kv_cache_report_mode=full`
+can produce batches above the 4 MiB that gRPC clients accept by default, so
+subscribers should raise their receive limit.

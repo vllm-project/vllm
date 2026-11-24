@@ -1,0 +1,171 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+syntax = "proto3";
+package vllm;
+
+// KV cache events of the engine, as its ZMQ publisher emits them
+// (`vllm/distributed/kv_events.py`), with the same sequence numbers.
+//
+// The messages are shared with SGLang's `sglang.kv.v1` package so that one
+// client handles both engines; fields marked "SGLang" are never set by vLLM.
+service KvEvents {
+  // Streams the KV cache events of one data-parallel rank.
+  //
+  // The first response is `start`; every later response is a `batch`, in
+  // sequence-number order, each number once. Without `resume`, the stream
+  // starts with the next batch the engine publishes. With `resume`, it first
+  // replays the engine's buffered batches from the cursor (the engine keeps
+  // `buffer_steps` batches), then continues live.
+  //
+  // Each batch is one message, however large; raise the client's receive
+  // limit above gRPC's default 4 MiB for long prompts.
+  //
+  // INVALID_ARGUMENT: the rank is not connected to this server.
+  // FAILED_PRECONDITION: the engine does not publish KV cache events.
+  // OUT_OF_RANGE: the cursor's batches are no longer buffered, or its
+  //   `stream_id` is not the current one.
+  // DATA_LOSS: batches after the last one sent can no longer be recovered,
+  //   because the subscriber fell too far behind or the server lost them.
+  rpc SubscribeKvEvents (SubscribeKvEventsRequest) returns (stream SubscribeKvEventsResponse) {}
+}
+
+message SubscribeKvEventsRequest {
+  uint32 data_parallel_rank = 1;
+  // Absent: live batches only.
+  optional KvEventCursor resume = 2;
+}
+
+message KvEventCursor {
+  // Empty: the current stream.
+  string stream_id = 1;
+  uint64 next_sequence_number = 2;
+}
+
+message SubscribeKvEventsResponse {
+  oneof item {
+    KvEventStreamStart start = 1;
+    KvEventBatch batch = 2;
+  }
+}
+
+message KvEventStreamStart {
+  // Changes when the server loses batches for good or restarts.
+  string stream_id = 1;
+  uint32 data_parallel_rank = 2;
+}
+
+// `EventBatch` (`[ts, events, data_parallel_rank]`) and its sequence number.
+message KvEventBatch {
+  uint64 sequence_number = 1;
+  double ts = 2;
+  // SGLang: `attn_dp_rank`.
+  optional uint32 data_parallel_rank = 3;
+  repeated KvCacheEvent events = 4;
+}
+
+message KvCacheEvent {
+  oneof event {
+    BlockStored block_stored = 1;
+    BlockRemoved block_removed = 2;
+    AllBlocksCleared all_blocks_cleared = 3;
+  }
+}
+
+// `ExternalBlockHash`.
+message BlockHash {
+  oneof value {
+    // vLLM with VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES (the default).
+    uint64 unsigned_value = 1;
+    // SGLang.
+    int64 signed_value = 2;
+    // vLLM without VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES.
+    bytes digest = 3;
+  }
+}
+
+message BlockTokenIds {
+  oneof ids {
+    TokenIdList single = 1;
+    // SGLang EAGLE pages.
+    TokenIdPairList pairs = 2;
+  }
+}
+
+message TokenIdList {
+  repeated uint64 token_ids = 1;
+}
+
+message TokenIdPairList {
+  repeated TokenIdPair pairs = 1;
+}
+
+message TokenIdPair {
+  uint64 first = 1;
+  uint64 second = 2;
+}
+
+message BlockStored {
+  repeated BlockHash block_hashes = 1;
+  // Unset for a block without a parent.
+  BlockHash parent_block_hash = 2;
+  // Across all blocks of the event.
+  BlockTokenIds token_ids = 3;
+  uint32 block_size = 4;
+  optional int64 lora_id = 5;
+  optional string medium = 6;
+  optional string lora_name = 7;
+  optional string session_id = 8;
+  // SGLang.
+  optional string cache_salt = 9;
+  // SGLang, one entry per block.
+  repeated BlockMmRoutingSpans mm_routing_spans = 10;
+  // One entry per block, empty for a block without keys.
+  repeated BlockExtraKeys extra_keys = 11;
+  optional uint32 group_idx = 12;
+  optional string kv_cache_spec_kind = 13;
+  optional uint32 kv_cache_spec_sliding_window = 14;
+  optional string locality = 15;
+  optional string ownership = 16;
+  // One entry per block.
+  repeated TokenIdList lookahead_token_ids = 17;
+}
+
+message BlockRemoved {
+  repeated BlockHash block_hashes = 1;
+  optional string medium = 2;
+  optional uint32 group_idx = 3;
+  optional string locality = 4;
+  optional string ownership = 5;
+}
+
+message AllBlocksCleared {}
+
+// The untagged keys of one block, as published: the LoRA name,
+// `(mm_identifier, offset)` pairs, the cache salt and prompt embedding digests.
+message BlockExtraKeys {
+  repeated ExtraKeyValue keys = 1;
+}
+
+message ExtraKeyValue {
+  oneof value {
+    string text = 1;
+    bytes data = 2;
+    int64 integer = 3;
+    ExtraKeyTuple tuple = 4;
+  }
+}
+
+message ExtraKeyTuple {
+  repeated ExtraKeyValue items = 1;
+}
+
+message BlockMmRoutingSpans {
+  repeated MmRoutingSpan spans = 1;
+}
+
+message MmRoutingSpan {
+  uint64 start = 1;
+  uint64 length = 2;
+  string label = 3;
+}

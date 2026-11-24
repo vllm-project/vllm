@@ -113,6 +113,10 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
+    # Private KV event and replay addresses of the Rust frontend, which the
+    # KV event publisher binds in addition to its configured endpoints.
+    kv_events: str | None = None
+    kv_events_replay: str | None = None
 
 
 @dataclass(slots=True)

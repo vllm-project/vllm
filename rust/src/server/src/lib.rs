@@ -266,6 +266,12 @@ where
         .context("failed to bind listener for OpenAI server")?;
     let bind_address = listener.local_addr_display()?;
 
+    // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
+    // token. Caller cancellation propagates into both protocols; if either
+    // protocol exits first, we cancel this child token so its sibling also
+    // begins a graceful drain.
+    let server_shutdown = shutdown.child_token();
+
     // Optionally bind the gRPC Inference server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
     // surface before serving rather than being deferred until shutdown.
@@ -295,6 +301,10 @@ where
         let render_service =
             grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state.clone()))
                 .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+        let kv_events_service = grpc::KvEventsGrpcService::new(grpc::KvEventsServiceImpl::new(
+            state.clone(),
+            server_shutdown.clone(),
+        ));
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
@@ -302,6 +312,7 @@ where
             .add_service(health_service)
             .add_service(control_service)
             .add_service(inference_service)
+            .add_service(kv_events_service)
             .add_service(render_service);
         Some((addr, grpc_listener, svc, grpc_tls, health_monitor))
     } else {
@@ -315,11 +326,6 @@ where
     };
     let model = model.as_str();
 
-    // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
-    // token. Caller cancellation propagates into both protocols; if either
-    // protocol exits first, we cancel this child token so its sibling also
-    // begins a graceful drain.
-    let server_shutdown = shutdown.child_token();
     let force_shutdown = CancellationToken::new();
     let shutdown_deadline = Arc::new(OnceLock::new());
     let health_fut = monitor_llm_health(

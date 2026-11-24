@@ -49,6 +49,14 @@ class KVEventsConfig:
     this topic to receive events.
     """
 
+    _frontend_endpoint: str | None = None
+    """Private address the Rust frontend reads events from, bound in addition
+    to `endpoint`. Set from the engine's startup handshake, not by users."""
+
+    _frontend_replay_endpoint: str | None = None
+    """Private replay address for the Rust frontend, bound in addition to
+    `replay_endpoint`. Set from the engine's startup handshake, not by users."""
+
     def __post_init__(self):
         if self.publisher is None:
             self.publisher = "zmq" if self.enable_kv_cache_events else "null"
