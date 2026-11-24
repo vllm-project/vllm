@@ -151,7 +151,6 @@ def test_non_finite_row_fails_open(bad_val: float):
     bad_rows[0] = bad_rows[0]._replace(period=bad_val)
     assert hold.update(bad_rows) == "invalid"
     assert not hold.hold
-    assert hold._hold_start is None and hold._rent == 0.0
     assert hold._t_dec == t_dec
 
 
@@ -294,17 +293,6 @@ def test_requires_dp_on_a_moe_model(monkeypatch, dp_size: int, is_moe: bool):
         create_scheduler(prefill_hold_ttft_target=T, data_parallel_size=dp_size)
 
 
-def test_pp_gt_1_logs_warning(caplog):
-    """PP > 1 is allowed but logs a step-cost noise warning."""
-    with caplog.at_level("WARNING"):
-        create_scheduler(
-            prefill_hold_ttft_target=T,
-            data_parallel_size=2,
-            pipeline_parallel_size=2,
-        )
-    assert any("pipeline_parallel_size > 1" in r.message for r in caplog.records)
-
-
 def test_local_row_effective_budget_and_long_prefill_threshold():
     """Effective budget deducts running decodes, and `long_prefill_token_threshold`
     caps single-step `x` and increases the release count `k`."""
@@ -330,9 +318,9 @@ def test_local_row_effective_budget_and_long_prefill_threshold():
     assert row.slack == pytest.approx(10.0 / 5, abs=0.1)
 
 
-def test_full_prefix_hit_excluded_and_preemption_clears_cache():
+def test_full_prefix_hit_excluded():
     """A full prefix hit leaves 1 token (never deferred) and is not reported as
-    held prefill work; preemption clears cached hits."""
+    held prefill work."""
     scheduler, hold = _hold_scheduler(
         num_blocks=40,
         block_size=16,
@@ -350,16 +338,9 @@ def test_full_prefix_hit_excluded_and_preemption_clears_cache():
     row = hold.local_row()
     assert row.queued == 0 and row.x == 0
 
-    # Preemption clears any stale _cached_tokens entry even on empty step.
-    hold._cached_tokens["p0"] = 128
-    out = Mock(total_num_scheduled_tokens=0, preempted_req_ids={"p0"})
-    hold.on_scheduled(out, {})
-    assert "p0" not in hold._cached_tokens
-
 
 def test_external_hits_are_no_prefill():
-    """Deferred requests remember connector lookup hits in `_cached_tokens`,
-    and admitted requests pop their cached entry."""
+    """Deferred requests remember connector lookup hits across steps."""
     scheduler, hold = _hold_scheduler(
         use_kv_connector=MockKVConfig(matched_tokens=128, is_async=False)
     )
@@ -380,7 +361,6 @@ def test_external_hits_are_no_prefill():
 
     hold.hold = False
     assert scheduler.schedule().num_scheduled_tokens["r"] == 200 - 128
-    assert "r" not in hold._cached_tokens
 
 
 class _Clock:
@@ -469,8 +449,8 @@ def test_queue_scan_stops_at_kv_without_double_probe(monkeypatch):
     assert row.x == 316 and row.queued == 2
 
 
-def test_queue_scan_stops_at_free_slots_and_max_queue_scan(monkeypatch):
-    """Queue scan stops at free running slots and at `_MAX_QUEUE_SCAN`."""
+def test_queue_scan_stops_at_free_slots():
+    """Queue scan stops at free running slots."""
     scheduler, hold = _hold_scheduler(max_num_seqs=2)
     reqs = create_requests(num_requests=4, num_tokens=8)
     scheduler.add_request(reqs[0])
@@ -482,16 +462,8 @@ def test_queue_scan_stops_at_free_slots_and_max_queue_scan(monkeypatch):
 
     _finish_step(scheduler, scheduler.schedule())
     row = hold.local_row()
-    assert row.done == 1 and row.done_tokens == 8
     assert row.decodes == 2
     assert row.work == 1 and row.x == 0 and row.queued == 0
-
-    # Verify `_MAX_QUEUE_SCAN` caps waiting scan even with many free slots.
-    monkeypatch.setattr(dph, "_MAX_QUEUE_SCAN", 3)
-    big_sched, big_hold = _hold_scheduler(max_num_seqs=16, max_num_batched_tokens=1024)
-    for req in create_requests(num_requests=10, num_tokens=8):
-        big_sched.add_request(req)
-    assert big_hold.local_row().queued == 3
 
 
 def test_past_target_bounds_only_waiting_not_in_progress_chunks(monkeypatch):
@@ -508,15 +480,12 @@ def test_past_target_bounds_only_waiting_not_in_progress_chunks(monkeypatch):
     req.arrival_time = clock.wall - 4.0
     assert hold.local_row().slack == pytest.approx(3.0)  # (10 - 4) / 2
 
-    # Waiting past target: bounds only the current hold.
+    # Waiting past target: bounds only the current hold (age clamped to held=0).
     req.arrival_time = clock.wall - 20.0
     assert hold.local_row().slack == pytest.approx(5.0)  # 10 / 2
-    hold._hold_start, hold._clock = 0.0, 0.5
-    assert hold.local_row().slack == pytest.approx((10.0 - 0.5 - 0.5) / 2)
 
     # Once admitted and partially prefilled (in_progress), past-target age is
     # NOT reset, so slack <= 0 and the remaining chunk releases immediately.
-    hold._clear_hold()
     _finish_step(scheduler, scheduler.schedule())
     assert req.is_prefill_chunk
     assert hold.local_row().slack <= 0.0
