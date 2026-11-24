@@ -140,6 +140,31 @@ def test_fp32_head_uses_mm_fast_path_on_device(default_vllm_config):
     torch.testing.assert_close(logits, expected)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Measures device memory.")
+def test_soft_cap_holds_one_logits_sized_tensor(default_vllm_config):
+    """The soft cap runs in place: a second logits-sized tensor in every step
+    can exceed the torch memory cap of an extensible KV cache."""
+    vocab_size, hidden_size, num_tokens = 262144, 16, 64
+    lp = _build_processor(vocab_size)
+    lp.soft_cap = 30.0
+
+    hidden_states = torch.randn(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+    )
+    weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device="cuda")
+    expected = torch.nn.functional.linear(hidden_states, weight)
+    expected = torch.tanh(expected / lp.soft_cap) * lp.soft_cap
+
+    torch.accelerator.reset_peak_memory_stats()
+    allocated = torch.accelerator.memory_allocated()
+    logits = lp(_fake_lm_head(weight), hidden_states)
+    peak = torch.accelerator.max_memory_allocated() - allocated
+
+    assert logits is not None
+    assert torch.equal(logits, expected)
+    assert peak < 1.5 * logits.nbytes
+
+
 def test_fp32_head_rejects_quantized_lm_head(default_vllm_config):
     lp = _build_processor(64)
     lp.head_dtype = torch.float32

@@ -111,9 +111,12 @@ class LogitsProcessor(PluggableLayer):
             )
         if logits is not None:
             if self.soft_cap is not None:
-                logits = logits / self.soft_cap
-                logits = torch.tanh(logits)
-                logits = logits * self.soft_cap
+                # In place, so that no second logits-sized tensor is live.
+                if self.logits_as_input:
+                    logits = logits / self.soft_cap
+                else:
+                    logits.div_(self.soft_cap)
+                logits.tanh_().mul_(self.soft_cap)
 
             if self.scale != 1.0:
                 logits *= self.scale
