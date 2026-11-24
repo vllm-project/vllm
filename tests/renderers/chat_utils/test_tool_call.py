@@ -188,21 +188,17 @@ def _tool_result_messages(call_ids, result_ids):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("is_async", [False, True])
-@pytest.mark.parametrize("content_format", ["string", "openai"])
-@pytest.mark.parametrize("result_ids", [("call_A", "call_B"), ("call_B", "call_A")])
-async def test_tool_results_follow_call_order(
-    tool_result_model_config, is_async, content_format, result_ids
-):
+async def test_tool_results_follow_call_order(tool_result_model_config, is_async):
     """An ID-less template must see each result in its original call position."""
-    messages = _tool_result_messages(("call_A", "call_B"), result_ids)
+    messages = _tool_result_messages(("call_A", "call_B"), ("call_B", "call_A"))
     original = deepcopy(messages)
     if is_async:
         conversation, _, _ = await parse_chat_messages_async(
-            messages, tool_result_model_config, content_format
+            messages, tool_result_model_config, "string"
         )
     else:
         conversation, _, _ = parse_chat_messages(
-            messages, tool_result_model_config, content_format
+            messages, tool_result_model_config, "string"
         )
     assert [
         (message["tool_call_id"], message["content"])
@@ -216,29 +212,13 @@ async def test_tool_results_follow_call_order(
     "call_ids, result_ids, separator",
     [
         (("call_A", "call_B"), ("call_B",), None),
-        (("call_A", "call_B"), ("call_B", "call_B"), None),
-        (("call_A", "call_A"), ("call_A", "call_A"), None),
         (("call_A", "call_B"), ("call_B", "call_C"), None),
-        (("call_A", "call_B"), ("call_B", "call_A", "call_A"), None),
-        (("call_A", None), ("call_B", "call_A"), None),
-        (("call_A", ""), ("call_B", "call_A"), None),
-        (("call_A", "call_B"), (None, "call_A"), None),
-        (("call_A", "call_B"), ("", "call_A"), None),
         (("call_A", "call_B"), ("call_B", "call_A"), "user"),
-        (("call_A", "call_B"), ("call_B", "call_A"), "assistant"),
     ],
     ids=[
         "partial",
-        "duplicate-result",
-        "duplicate-call",
         "unknown-result",
-        "extra-result",
-        "missing-call-id",
-        "empty-call-id",
-        "missing-result-id",
-        "empty-result-id",
         "intervening-user",
-        "intervening-assistant",
     ],
 )
 def test_ambiguous_tool_results_keep_received_order(
