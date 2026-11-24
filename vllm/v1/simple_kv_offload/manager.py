@@ -268,8 +268,6 @@ class SimpleCPUOffloadScheduler:
         self._reqs_to_store: dict[str, StoreRequestState] = {}
         self._store_event_to_reqs: dict[int, list[str]] = {}
         self._in_flight_store_gpu_blocks: set[int] = set()
-        # Finish-time flushes by request id. The request stays registered until
-        # its flush lands, so its CPU prefix is requeued after the last store.
         self._pending_finished_stores: dict[str, TransferMeta] = {}
         self._abandoned_reqs_to_load: dict[str, LoadRequestState] = {}
 
