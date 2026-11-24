@@ -4,7 +4,7 @@ meta:
   provider: "Moonshot AI"
   description: "Pre-release 2.8T-parameter native multimodal MoE with Kimi Delta Attention, Gated MLA, Attention Residuals, and a 1M-token context window"
   date_added: 2026-07-27
-  date_updated: 2026-11-17
+  date_updated: 2026-11-24
   tasks:
     - multimodal
     - text
@@ -1920,7 +1920,7 @@ guide: |
   - **Rust Frontend**: Selected by default in the command builder. Switch to Python if you encounter unsupported features or compatibility issues.
   - **Model Runner v2**: `VLLM_USE_V2_MODEL_RUNNER=1`: Model Runner v2 fully supports this model and can be enabled if needed.
   - **Tool calling**: K3 occasionally emit a tool-call format its own parser doesn't expect. Suggest to run do schema validation and retry.
-  - **AMD (MI355X / MI350X, CDNA4 gfx950)**: `VLLM_ROCM_USE_AITER_MOE_SITUV2=1` (set above) enables AITER's SiTUv2 a4w4 FlyDSL MoE path on builds that carry vllm-project/vllm#53940 (ROCm nightlies since 2026-09-16). v0.30.0 predates it: there the variable is ignored and the MoE runs the default a16w4 path. Unset it or set `0` for the default a16w4 path. On builds with #53940, `VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4` is a deprecated alias for the same a4w4 path and vLLM removes `AITER_SITUV2_A8W4` at startup while the toggle is on; on v0.30.0 and older, `VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1` selects the a8w4 path instead. Do not set `AITER_SITUV2_A8W4=1` by itself: vLLM does not derive its MoE weight layout from that AITER flag (vllm-project/vllm#53954 is open), so the two can disagree and corrupt output without an error.
+  - **AMD (MI355X / MI350X, CDNA4 gfx950)**: the routed experts run on AITER's SiTUv2 FlyDSL MoE kernels, and `VLLM_ROCM_USE_AITER_MOE_SITUV2` selects their activation precision: `a4w4` (MXFP4 activations; the default, also selected by leaving it unset, by `auto` and by the legacy `1` set above), `a8w4` (FP8 activations) or `a16w4` (BF16 activations, also the legacy `0`). The default is 4-bit activations, below the MXFP8 activations the checkpoint was trained with. An A/B of `a4w4` against `a8w4` on 8x MI355X (TP8, FP8 KV cache) found no detectable accuracy difference: OCRBench 0.887 vs 0.893 (n=1000) and Kimi Vendor Verifier Tool Call 0.851 vs 0.866 (n=350), both within sampling noise; `a16w4` was not part of that comparison. The startup log line `Using AITER_MXFP4_BF16 for Kimi-K3 SiTU MXFP4 MoE` names the selected mode; on builds where that line carries no mode, it shows only in the AITER kernel names (for example `afp4_wfp4`). The three modes need v0.31.0 or newer (vllm-project/vllm#58201). v0.30.0 ignores the variable and runs a16w4 unless `VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1` selects a8w4; newer builds no longer read that variable. Do not set `AITER_SITUV2_A8W4` or `AITER_SITUV2_A4W4` directly: vLLM overwrites both at startup to match its own setting.
   - **max-model-len**: Adjust max-model-len for different benchmark scenarios for best performance.
   - **RDMA**: If RDMA is enabled, set `UCX_TLS="rc,cuda_copy"` to make sure KV Cache transfer goes through RDMA.
   - **MNNVL environments** (GB200/GB300 NVL): recommend adding `NCCL_MNNVL_ENABLE=1`, `NCCL_CUMEM_ENABLE=1`, and `NCCL_NVLS_ENABLE=1`.
