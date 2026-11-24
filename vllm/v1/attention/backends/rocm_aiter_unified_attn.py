@@ -422,7 +422,12 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         return rocm_aiter_ops.is_enabled()
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        return rocm_aiter_ops.is_enabled()
+        return rocm_aiter_ops.is_enabled() and (
+            not self._use_shuffle_kv
+            or rocm_aiter_ops.qk_norm_rope_shuffle_layout_supported(
+                self.head_size, self.kv_cache_dtype
+            )
+        )
 
     def fused_qk_norm_mrope_kvcache_supported(self) -> bool:
         return IS_AITER_FOUND
@@ -448,6 +453,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         layer_slot_mapping: torch.Tensor,
         q_out_fp8: torch.Tensor | None = None,
         q_scale: torch.Tensor | None = None,
+        v_norm: bool = False,
     ):
         key_cache, value_cache = self._split_kv_cache(kv_cache)
         rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
@@ -473,6 +479,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             return_kv=False,
             q_out_fp8=q_out_fp8,
             q_scale=q_scale,
+            v_norm=v_norm,
         )
 
     def do_qk_norm_mrope_kvcache_update(

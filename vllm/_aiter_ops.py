@@ -2671,6 +2671,19 @@ class rocm_aiter_ops:
     def is_shuffle_kv_cache_enabled(cls) -> bool:
         return cls._SHUFFLE_KV_CACHE_ENABLED
 
+    @staticmethod
+    def qk_norm_rope_shuffle_layout_supported(
+        head_size: int, kv_cache_dtype: str
+    ) -> bool:
+        """Whether the fused QK-norm+RoPE+KV-cache shuffle write fits head_size.
+
+        The AITER shuffle-layout cache writer requires x >= head_size // 32,
+        where x is the number of cache elements per 16 bytes, so head_size 512
+        needs an fp8 cache. Other layouts have no such restriction.
+        """
+        x = 16 if kv_cache_dtype.startswith("fp8") else 8
+        return x >= head_size // 32
+
     @classmethod
     @if_aiter_supported
     def fused_qknorm_idxrqknorm_enabled(
@@ -4610,6 +4623,7 @@ class rocm_aiter_ops:
         return_kv: bool,
         q_out_fp8: torch.Tensor | None = None,
         q_scale: torch.Tensor | None = None,
+        v_norm: bool = False,
     ) -> None:
         """Run the fused QK-norm+RoPE+KV-cache op on already-split k/v caches.
 
@@ -4622,7 +4636,8 @@ class rocm_aiter_ops:
         passes False, so the kernel skips that store). For fp8 caches the
         kernel writes the pre-quant K into k_out via k_out_unquantized. When
         q_out_fp8 is set, the kernel also writes Q statically quantized by the
-        fp32 device scalar q_scale (fp8 caches only).
+        fp32 device scalar q_scale (fp8 caches only). v_norm applies a
+        weightless RMS norm to V before the cache write (e.g. Gemma4).
         """
         is_fp8_cache = kv_cache_dtype.startswith("fp8")
         write_unquantized = return_kv and is_fp8_cache
@@ -4662,6 +4677,7 @@ class rocm_aiter_ops:
             k_out_unquantized=k_out if write_unquantized else None,
             q_out_fp8=q_out_fp8,
             per_tensor_q_scale=q_scale,
+            v_norm=v_norm,
         )
 
     @staticmethod
