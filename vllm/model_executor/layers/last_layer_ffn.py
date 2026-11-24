@@ -75,11 +75,7 @@ class _TransformerFFNHooks:
         return output.new_zeros(self.shape).index_copy_(-2, indices, output)
 
 
-def install_transformer_ffn_hooks(model) -> bool:
-    layers = getattr(model, "_decoder_layers", None)
-    if not layers or not hasattr(layers[-1], "mlp"):
-        return False
+def install_transformer_ffn_hooks(ffn: torch.nn.Module) -> None:
     hooks = _TransformerFFNHooks()
-    layers[-1].mlp.register_forward_pre_hook(hooks.pre)
-    layers[-1].mlp.register_forward_hook(hooks.post, always_call=True)
-    return True
+    ffn.register_forward_pre_hook(hooks.pre)
+    ffn.register_forward_hook(hooks.post, always_call=True)

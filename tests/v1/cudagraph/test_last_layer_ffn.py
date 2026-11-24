@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Last-layer FFN pruning: row selection, LoRA metadata, and graph replay."""
 
+from typing import TYPE_CHECKING
+
+import pytest
 import torch
 from torch import nn
 
@@ -19,6 +22,9 @@ from vllm.v1.worker.gpu.last_layer_ffn import (
     LastLayerFFNGraphWrapper,
     last_layer_ffn_graph_key,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
 class _Adapter:
@@ -121,7 +127,7 @@ def test_lora_mapping_is_restored_after_pruned_ffn():
 
 
 def test_transformer_hook_restores_shape_and_lora_mapping():
-    """Qwen2 hooks select only while indices are set, and always restore metadata."""
+    """Shared hooks select only while indices are set and restore metadata."""
 
     class Block(nn.Module):
         def __init__(self):
@@ -135,7 +141,7 @@ def test_transformer_hook_restores_shape_and_lora_mapping():
             self._decoder_layers = [self.block]
 
     model = Model()
-    assert install_transformer_ffn_hooks(model)
+    install_transformer_ffn_hooks(model.block.mlp)
     hidden = torch.arange(8, dtype=torch.float32).reshape(4, 2)
     with using_last_layer_ffn_indices(None):
         unchanged = model.block.mlp(hidden)
@@ -183,3 +189,117 @@ def test_first_capture_executes_and_replay_uses_current_rows(dist_init, monkeypa
                 torch.testing.assert_close(actual, select(x), rtol=0, atol=0)
     assert current_last_layer_ffn_indices() is None
     assert len(graph.entries) == 2
+
+
+@pytest.mark.parametrize("architecture", ["llama", "qwen2", "qwen3"])
+def test_causal_ffn_selection_preserves_real_decoder_outputs(architecture):
+    """Different HF blocks use the same selection logic, preserving sampled rows."""
+    from transformers import AutoConfig, AutoModel
+
+    from vllm.model_executor.models.transformers.causal import _terminal_ffn
+
+    config = AutoConfig.for_model(
+        architecture,
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+    )
+    torch.manual_seed(42)
+    model = AutoModel.from_config(config).eval()
+    block = model.layers[-1]
+    target = _terminal_ffn(block)
+    assert target is not None
+    ffn = block.get_submodule(target)
+    ids = torch.tensor([[1, 5, 9, 2, 6, 3]])
+    with torch.inference_mode():
+        expected = model(ids, use_cache=False).last_hidden_state
+        install_transformer_ffn_hooks(ffn)
+        for rows in ([0, 5], [4, 1], [0, 5]):
+            indices = torch.tensor(rows)
+            with using_last_layer_ffn_indices(indices):
+                actual = model(ids, use_cache=False).last_hidden_state
+            torch.testing.assert_close(actual[:, rows], expected[:, rows])
+        torch.testing.assert_close(
+            model(ids, use_cache=False).last_hidden_state, expected
+        )
+
+
+def test_causal_ffn_rejects_later_token_mixing():
+    """Finding a GLU is insufficient when its outputs feed a sequence reduction."""
+    from transformers import LlamaConfig
+    from transformers.models.llama.modeling_llama import LlamaMLP
+
+    from vllm.model_executor.models.transformers.causal import _terminal_ffn
+
+    class Block(nn.Module):
+        def __init__(self, mix):
+            super().__init__()
+            self.projection = LlamaMLP(
+                LlamaConfig(
+                    hidden_size=16,
+                    intermediate_size=32,
+                    num_attention_heads=2,
+                    num_key_value_heads=2,
+                )
+            )
+            self.mix = mix
+
+        def forward(self, hidden_states):
+            output = self.projection(hidden_states)
+            if self.mix:
+                output = output.mean(dim=-2, keepdim=True)
+            return hidden_states + output
+
+    assert _terminal_ffn(Block(False)) == "projection"
+    assert _terminal_ffn(Block(True)) is None
+
+
+class CausalFFNTestWorker:
+    model_runner: "GPUModelRunner"
+
+    def causal_ffn_batches(self):
+        return self.model_runner.last_layer_ffn_pruner.batches
+
+
+@pytest.mark.parametrize(
+    "model_name", ["Qwen/Qwen2.5-0.5B-Instruct", "meta-llama/Llama-3.2-1B-Instruct"]
+)
+def test_transformers_causal_mixin_prunes_in_generation(
+    vllm_runner, monkeypatch, model_name
+):
+    """An inherited capability must reach the runner, not silently disable pruning."""
+    from tests.models.utils import check_logprobs_close
+    from vllm.transformers_utils.utils import maybe_model_redirect
+
+    model_name = maybe_model_redirect(model_name)
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    prompts = [
+        "The capital of France is",
+        "Explain why the sky appears blue in a few words:",
+    ]
+    outputs = []
+    for enabled in (False, True):
+        monkeypatch.setenv("VLLM_ENABLE_LAST_LAYER_FFN_PRUNING", str(int(enabled)))
+        with vllm_runner(
+            model_name,
+            model_impl="transformers",
+            dtype="bfloat16",
+            enforce_eager=True,
+            max_model_len=512,
+            max_num_seqs=2,
+            enable_prefix_caching=False,
+            compilation_config={"mode": 0},
+            worker_extension_cls=f"{__name__}.CausalFFNTestWorker",
+        ) as runner:
+            outputs.append(runner.generate_greedy_logprobs(prompts, 8, 5))
+            batches = runner.llm.collective_rpc("causal_ffn_batches")
+            assert all((count > 0) == enabled for count in batches)
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="original",
+        name_1="pruned",
+    )

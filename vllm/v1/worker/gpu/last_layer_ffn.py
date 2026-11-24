@@ -56,10 +56,7 @@ class LastLayerFFNPruner:
         config = runner.vllm_config
         parallel = config.parallel_config
         if (
-            not (
-                "supports_last_layer_ffn_pruning" in type(runner.model).__dict__
-                and runner.model.supports_last_layer_ffn_pruning
-            )
+            not getattr(runner.model, "supports_last_layer_ffn_pruning", False)
             or runner.is_pooling_model
             or runner.use_aux_hidden_state_outputs
             or config.model_config.is_multimodal_model

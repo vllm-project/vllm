@@ -16,11 +16,15 @@
 # limitations under the License.
 """Transformers modeling backend mixin for causal language models."""
 
+import operator
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 import torch
 
+import vllm.envs as envs
+from vllm.model_executor.layers.last_layer_ffn import install_transformer_ffn_hooks
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -30,9 +34,54 @@ from vllm.model_executor.models.interfaces_base import VllmModelForTextGeneratio
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 
 from .base import Base
+from .fuser import get_fuser
+from .fusers.glu import GLUFuser
+from .fusers.rms_norm import RMSNormFuser
+from .fx_utils import trace
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+
+def _terminal_ffn(block: torch.nn.Module) -> str | None:
+    """Identify a token-wise GLU before fusion, with no later token mixing."""
+    graph = trace(block)
+    if graph is None or not any(n.op == "output" for n in graph.nodes):
+        return None
+    selected = None
+    for node in graph.nodes:
+        if node.op == "call_module":
+            child = block.get_submodule(node.target)
+            if selected is not None:
+                if not (
+                    isinstance(child, (RMSNorm, torch.nn.LayerNorm))
+                    or get_fuser(child, RMSNormFuser) is not None
+                ):
+                    return None
+                continue
+            fuser = get_fuser(child, GLUFuser)
+            if fuser is None or fuser.down_name is None:
+                continue
+            # A GLU match may be only a subgraph; reject extra computation.
+            inner = trace(child)
+            names = {*fuser.linear_names, fuser.act_name, fuser.down_name}
+            if (
+                inner is not None
+                and all(
+                    n.op in ("placeholder", "output")
+                    or (n.op == "call_module" and n.target in names)
+                    or (n.op == "call_function" and n.target == operator.mul)
+                    for n in inner.nodes
+                )
+                and any(n.op == "output" for n in inner.nodes)
+            ):
+                selected = node.target
+        elif selected is not None and not (
+            node.op == "output"
+            or (node.op == "call_function" and node.target == operator.add)
+        ):
+            return None
+    return selected
 
 
 class CausalMixin(VllmModelForTextGeneration, Base):
@@ -66,6 +115,30 @@ class CausalMixin(VllmModelForTextGeneration, Base):
             )
         else:
             self.lm_head = PPMissingLayer()
+
+    def recursive_replace(self):
+        self._ffn_pruning_supported = False
+        target = None
+        if (
+            envs.VLLM_ENABLE_LAST_LAYER_FFN_PRUNING
+            and self.pp_group.is_last_rank
+            and not self.model_config.is_moe
+            and not self.model_config.is_multimodal_model
+            and self.quant_config is None
+            and (layers := self._decoder_layers) is not None
+            and len(layers)
+        ):
+            target = _terminal_ffn(layers[-1])
+        super().recursive_replace()
+        if target is not None:
+            layers = self._decoder_layers
+            assert layers is not None
+            install_transformer_ffn_hooks(layers[-1].get_submodule(target))
+            self._ffn_pruning_supported = True
+
+    @property
+    def supports_last_layer_ffn_pruning(self) -> bool:
+        return self._ffn_pruning_supported
 
     def load_weights(self, weights: Iterable[tuple[str, "torch.Tensor"]]) -> set[str]:
         """A thin wrapper around `Base.load_weights` to handle the lm_head bias."""
