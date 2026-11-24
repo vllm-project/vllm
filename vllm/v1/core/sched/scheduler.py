@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.aux_output_connector.connector import (
@@ -45,6 +46,7 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.sched.forecast import Forecaster
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -94,6 +96,10 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
+    # Time-to-first-token forecast from the engine's own state; None unless
+    # VLLM_TTFT_FORECAST is set.
+    forecaster: Forecaster | None = None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -153,6 +159,18 @@ class Scheduler(SchedulerInterface):
             self.scheduler_config.long_prefill_token_threshold_adaptive
         )
         self.max_model_len = vllm_config.model_config.max_model_len
+        if envs.VLLM_TTFT_FORECAST:
+            self.forecaster = Forecaster(
+                token_budget=self.max_num_scheduled_tokens,
+                max_seats=self.max_num_active_reqs,
+                long_prefill_threshold=(
+                    self.scheduler_config.long_prefill_token_threshold
+                    if self.scheduler_config.enable_chunked_prefill
+                    else 0
+                ),
+                adaptive_threshold=self.adaptive_long_prefill_threshold,
+                max_model_len=self.max_model_len,
+            )
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
@@ -1811,7 +1829,38 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+        self.notify_forecaster("on_schedule", self, scheduler_output)
         return scheduler_output
+
+    def notify_forecaster(self, hook: str, *args: Any) -> None:
+        """Run a forecaster hook. A failing forecaster is switched off; the
+        engine keeps serving."""
+        forecaster = self.forecaster
+        if forecaster is None:
+            return
+        if hook == "note_arrival":
+            args = (*args, self._cached_prefix_at_arrival(args[0]))
+        try:
+            getattr(forecaster, hook)(*args)
+        except Exception:
+            logger.exception("TTFT forecaster failed in %s, forecasting is off", hook)
+            self.forecaster = None
+
+    def _cached_prefix_at_arrival(self, request: Request) -> int:
+        """Cached prefix of a request the engine's input thread has received."""
+        try:
+            manager = self.kv_cache_manager
+            if manager.prefix_cache_lookup_enabled(request):
+                return manager.coordinator.find_longest_cache_hit(
+                    request.block_hashes,
+                    request.get_max_cache_hit_length(None),
+                    request.num_tokens,
+                )[1]
+        except Exception:
+            # The loop thread may be changing the block table; the
+            # scheduler's own lookup decides what is reused.
+            pass
+        return 0
 
     def _build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
@@ -2788,6 +2837,7 @@ class Scheduler(SchedulerInterface):
             stats.iteration_records = model_runner_output.iteration_records
             eco.scheduler_stats = stats
 
+        self.notify_forecaster("on_output", self, scheduler_output)
         return engine_core_outputs
 
     def _ec_transfer_pending(self, request: Request, num_computed_tokens: int) -> bool:
@@ -3129,6 +3179,7 @@ class Scheduler(SchedulerInterface):
                 self.connector.on_new_request(request)
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            self.notify_forecaster("note_added", request)
             if self.spec_decode_metrics_level != "none":
                 request.spec_decode_metrics = RequestSpecDecodeMetrics.new(
                     self.num_spec_tokens

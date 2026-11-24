@@ -1442,6 +1442,13 @@ class AsyncMPClient(MPClient):
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_consensus_async("is_sleeping")
 
+    async def forecast_ttft_async(
+        self,
+        cached_tokens: list[int] | None = None,
+        queries: list[list[int]] | None = None,
+    ) -> dict[str, Any]:
+        return await self.call_utility_async("forecast_ttft", cached_tokens, queries)
+
     async def checkpoint_prepare_async(self, mode: PauseMode) -> str | None:
         return await self.call_utility_async("checkpoint_prepare", mode)
 

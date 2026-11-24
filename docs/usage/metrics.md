@@ -87,6 +87,14 @@ These metrics are available via `--enable-mfu-metrics`:
 
 --8<-- "gen:metrics-mfu"
 
+## TTFT Forecast Metrics
+
+These metrics are exposed when `VLLM_TTFT_FORECAST=1`. They are refreshed at
+each scrape; see [TTFT Forecast](../features/ttft_forecast.md) for how to read
+them.
+
+--8<-- "gen:metrics-ttft-forecast"
+
 ## Custom Histogram Buckets
 
 The core engine histograms ship with default bucket boundaries tuned for
