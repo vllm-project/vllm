@@ -233,9 +233,18 @@ def probe_output_head(
     # Heads with parameters apply more than a scale or a soft cap
     if next(model.parameters(), None) is not None:
         return None
-    hidden_states = torch.linspace(-50, 50, 3 * hidden_size).view(1, 3, hidden_size)
-    hidden_states[0, 0, :2] = torch.tensor([1.0, 1e6])
-    logits = model(inputs_embeds=hidden_states).logits
+    # On the CPU in float64 whatever vLLM's defaults are, so that bf16 rounding can't
+    # hide a scale and meta tensors can't be read
+    kwargs = dict(dtype=torch.float64, device="cpu")
+    hidden_states = torch.linspace(-50, 50, 3 * hidden_size, **kwargs)
+    hidden_states = hidden_states.view(1, 3, hidden_size)
+    hidden_states[0, 0, :2] = torch.tensor([1.0, 1e6], **kwargs)
+    try:
+        logits = model(inputs_embeds=hidden_states).logits.double()
+    except Exception:
+        return None
+    if logits.shape != hidden_states.shape:
+        return None
     # A scale maps 1 to itself and a soft cap maps large logits to itself
     scale, soft_cap = logits[0, 0, :2].tolist()
     if torch.allclose(logits, scale * hidden_states):

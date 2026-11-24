@@ -48,6 +48,7 @@ from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_I
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.transformers.utils import infer_dynamic_arg_dims
 from vllm.model_executor.models.utils import StageMissingLayer
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from ...conftest import HfRunner, VllmRunner
 from ...utils import create_new_process_for_each_test, multi_gpu_test, prep_prompts
@@ -1094,6 +1095,27 @@ def test_logit_transform_is_detected(model_type, arch, overrides, renames):
     assert (output_head := to_output_head(stub(model)))
     logit_transform = probe_output_head(output_head, model.config.hidden_size)
     assert logit_transform == LOGIT_TRANSFORMS.get(arch)
+
+
+@pytest.mark.parametrize(
+    ("model_type", "arch", "overrides", "logit_transform"),
+    [
+        # Not a power of two, so bfloat16 rounds the scale differently
+        ("granite", "GraniteForCausalLM", {"logits_scaling": 12.0}, (1 / 12, None)),
+        # Upcasts its logits to float32
+        ("nemotron_h", "NemotronHForCausalLM", {}, (1.0, None)),
+    ],
+)
+def test_logit_transform_is_detected_with_vllm_defaults(
+    model_type, arch, overrides, logit_transform
+):
+    """Models are built with vLLM's dtype and device as the defaults (e.g. bfloat16
+    on meta), which must not change what the probe finds."""
+    model = build_causal_lm(model_type, arch, "meta", **overrides)
+    output_head = to_output_head(stub(model))
+    with set_default_torch_dtype(torch.bfloat16), torch.device("meta"):
+        result = probe_output_head(output_head, model.config.hidden_size)
+    assert result == pytest.approx(logit_transform)
 
 
 def test_output_head_calling_base_model_submodule():
