@@ -169,6 +169,58 @@ def test_shard_q_round_trip(use_sm, q_dtype, num_decode_tokens):
     )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_indexer_build_survives_next_build(monkeypatch):
+    """Building the next step must not change a step's still-queued uploads."""
+    from vllm.v1.attention.backends.mla.indexer import (
+        DeepseekV32IndexerMetadataBuilder,
+    )
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    device = torch.device("cuda")
+    config = create_vllm_config(max_model_len=8192)
+    config.model_config.hf_text_config.index_topk = 2048
+    config.compilation_config.static_forward_context = {
+        "indexer": SimpleNamespace(use_shardq=True)
+    }
+    monkeypatch.setattr(
+        shardq, "get_tp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=0)
+    )
+    builder = DeepseekV32IndexerMetadataBuilder(
+        kv_cache_spec=MLAAttentionSpec(
+            block_size=64, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+        ),
+        layer_names=["indexer"],
+        vllm_config=config,
+        device=device,
+        block_table_width=128,
+    )
+    # On the device up front: a blocking copy would drain the queue below.
+    steps = [
+        create_common_attn_metadata(
+            BatchSpec(seq_lens=[8192, 4096], query_lens=query_lens), 64, device
+        )
+        for query_lens in ([3000, 1200], [700, 900])
+    ]
+
+    def build_and_read(step):
+        """What the step's forward reads, queued right behind its build."""
+        prefill = builder.build(0, step).prefill
+        assert prefill is not None
+        indices = prefill.shardq_gather_indices
+        assert indices is not None
+        chunk = prefill.chunks[0]
+        return [t.clone() for t in (indices, chunk.cu_seqlen_ks, chunk.cu_seqlen_ke)]
+
+    expected = [t.cpu() for t in build_and_read(steps[0])]
+    torch.cuda._sleep(1 << 30)  # keep the uploads queued
+    queued = build_and_read(steps[0])
+    builder.build(0, steps[1])
+    torch.accelerator.synchronize()
+    for got, want in zip(queued, expected):
+        torch.testing.assert_close(got.cpu(), want)
+
+
 def _check_builder_shardq_route(rank, world, port):
     from vllm.model_executor.layers.attention.mla_attention import MLAAttention
     from vllm.model_executor.layers.linear import ColumnParallelLinear

@@ -8,7 +8,6 @@ import functools
 import json
 import os
 import sys
-import warnings
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
 from types import UnionType
@@ -458,12 +457,6 @@ _IR_OP_PRIORITY_DEPRECATION_MESSAGE = (
 )
 
 
-_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE = (
-    "--disable-cascade-attn is deprecated and has no effect since cascade "
-    "attention has been removed. It will be removed in v0.33.0."
-)
-
-
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -583,7 +576,6 @@ class EngineArgs:
         CacheConfig, "prefix_cache_retention_interval"
     )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
-    disable_cascade_attn: bool | None = None
     offload_backend: str = OffloadConfig.offload_backend
     cpu_offload_gb: float = UVAOffloadConfig.cpu_offload_gb
     cpu_offload_params: set[str] = get_field(UVAOffloadConfig, "cpu_offload_params")
@@ -652,6 +644,9 @@ class EngineArgs:
     )
     mm_shm_cache_max_object_size_mb: int = (
         MultiModalConfig.mm_shm_cache_max_object_size_mb
+    )
+    mm_shm_cache_buffer_name: str = get_field(
+        MultiModalConfig, "mm_shm_cache_buffer_name"
     )
     mm_encoder_only: bool = MultiModalConfig.mm_encoder_only
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
@@ -791,6 +786,7 @@ class EngineArgs:
     sleep_preserve_parameter_names: list[str] = get_field(
         ModelConfig, "sleep_preserve_parameter_names"
     )
+    masked_token_ids: list[int] | None = ModelConfig.masked_token_ids
     enable_cumem_allocator: bool = ModelConfig.enable_cumem_allocator
     enable_nccl_comm_suspend: bool = ModelConfig.enable_nccl_comm_suspend
     checkpoint_prepare_on_startup: bool = ModelConfig.checkpoint_prepare_on_startup
@@ -1008,12 +1004,6 @@ class EngineArgs:
             "--disable-sliding-window", **model_kwargs["disable_sliding_window"]
         )
         model_group.add_argument(
-            "--disable-cascade-attn",
-            action=argparse.BooleanOptionalAction,
-            default=None,
-            help=_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE,
-        )
-        model_group.add_argument(
             "--skip-tokenizer-init", **model_kwargs["skip_tokenizer_init"]
         )
         model_group.add_argument(
@@ -1048,6 +1038,9 @@ class EngineArgs:
         model_group.add_argument(
             "--sleep-preserve-parameter-names",
             **model_kwargs["sleep_preserve_parameter_names"],
+        )
+        model_group.add_argument(
+            "--masked-token-ids", **model_kwargs["masked_token_ids"]
         )
         model_group.add_argument(
             "--enable-cumem-allocator", **model_kwargs["enable_cumem_allocator"]
@@ -1520,6 +1513,10 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--mm-shm-cache-max-object-size-mb",
             **multimodal_kwargs["mm_shm_cache_max_object_size_mb"],
+        )
+        multimodal_group.add_argument(
+            "--mm-shm-cache-buffer-name",
+            **multimodal_kwargs["mm_shm_cache_buffer_name"],
         )
         multimodal_group.add_argument(
             "--mm-encoder-only", **multimodal_kwargs["mm_encoder_only"]
@@ -2000,8 +1997,6 @@ class EngineArgs:
                 "launched vLLM.",
                 self.seed,
             )
-        if self.disable_cascade_attn is not None:
-            warnings.warn(_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE, stacklevel=1)
 
         return ModelConfig(
             model=self.model,
@@ -2047,6 +2042,7 @@ class EngineArgs:
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
+            mm_shm_cache_buffer_name=self.mm_shm_cache_buffer_name,
             mm_hasher_algorithm=self.mm_hasher_algorithm,
             mm_encoder_only=self.mm_encoder_only,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
@@ -2062,6 +2058,7 @@ class EngineArgs:
             sleep_mode_backend=self.sleep_mode_backend,
             sleep_mode_offload_cudagraph=self.sleep_mode_offload_cudagraph,
             sleep_preserve_parameter_names=self.sleep_preserve_parameter_names,
+            masked_token_ids=self.masked_token_ids,
             enable_cumem_allocator=self.enable_cumem_allocator,
             enable_nccl_comm_suspend=self.enable_nccl_comm_suspend,
             checkpoint_prepare_on_startup=self.checkpoint_prepare_on_startup,
