@@ -33,7 +33,9 @@ class ParentRequest:
     # To efficiently obtain child sampling params
     cached_child_sampling_params: SamplingParams | None
 
-    # Prefill stats of the child with the fewest cached tokens
+    # RequestOutput covers all samples, so keep the prefill stats of the child
+    # with the fewest cached tokens. FinishedRequestStats records each child's
+    # own count.
     num_cached_tokens: int | None
     num_cache_creation_tokens: int
 
