@@ -381,12 +381,17 @@ class ExpertWeightStream:
                 weight[index], None if scale is None else scale[index]
             )
 
+        if source is None:
+            # Full-precision weights are created padded: zero the padding, which
+            # e.g. dummy weights fill.
+            method._zero_padding(layer)
         for expert in range(layer.local_num_experts):
             if staged and expert >= num_routed:
-                w13 = staged_shared_expert("w13", expert - num_routed)
-                w2 = staged_shared_expert("w2", expert - num_routed)
+                w13 = staged_shared_expert("w13", expert - num_routed)[None]
+                w2 = staged_shared_expert("w2", expert - num_routed)[None]
             elif source is None:
-                w13, w2 = layer.w13_weight[expert], layer.w2_weight[expert]
+                w13 = layer.w13_weight[expert : expert + 1]
+                w2 = layer.w2_weight[expert : expert + 1]
             else:
                 # The source holds the routed experts only.
                 checkpoint = _ExpertCheckpoint(
@@ -398,24 +403,10 @@ class ExpertWeightStream:
                     },
                 )
                 ((_, w13, w2),) = source.dequantize_weight(checkpoint)
-                w13, w2 = w13[0], w2[0]
             w13, w2 = w13.to(layer.orig_dtype), w2.to(layer.orig_dtype)
-            statistics = method.expert_statistics(w13[None], w2[None])
-            self._quantize(layer, expert, *self._pad(layer, w13, w2), statistics)
-
-    @staticmethod
-    def _pad(
-        layer: "RoutedExperts", w13: torch.Tensor, w2: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Pad a TP-local expert to the layer's (padded) sizes."""
-        config = layer.moe_config
-        num_shards = 2 if config.is_act_and_mul else 1
-        intermediate_size = config.intermediate_size_per_partition
-        padded_w13 = w13.new_zeros(num_shards * intermediate_size, config.hidden_dim)
-        for shard, weight in enumerate(w13.chunk(num_shards)):
-            start = shard * intermediate_size
-            rows, cols = weight.shape
-            padded_w13[start : start + rows, :cols] = weight
-        padded_w2 = w2.new_zeros(config.hidden_dim, intermediate_size)
-        padded_w2[: w2.shape[0], : w2.shape[1]] = w2
-        return padded_w13, padded_w2
+            statistics = method.expert_statistics(w13, w2)
+            if source is not None:
+                # Dequantized experts (and staged shared experts, only with a
+                # source) have the unpadded checkpoint sizes.
+                w13, w2 = method._pad_requantized_weights(layer, w13, w2, 1)
+            self._quantize(layer, expert, w13[0], w2[0], statistics)

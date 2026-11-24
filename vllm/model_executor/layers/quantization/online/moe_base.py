@@ -184,6 +184,103 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
             loader.release_staging(layer)
         return outputs
 
+    def _pad_requantized_weights(
+        self,
+        layer: torch.nn.Module,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        num_experts: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        config = layer.moe_config
+        hidden_size = config.hidden_dim_unpadded
+        intermediate_size = config.intermediate_size_per_partition_unpadded
+        target_hidden_size = config.hidden_dim
+        target_intermediate_size = config.intermediate_size_per_partition
+
+        num_shards = self.moe.w13_num_shards
+
+        if w13.shape != (num_experts, num_shards * intermediate_size, hidden_size):
+            raise ValueError("Requantization requires unpadded source w13 weights.")
+        if w2.shape != (num_experts, hidden_size, intermediate_size):
+            raise ValueError("Requantization requires unpadded source w2 weights.")
+
+        if (
+            target_hidden_size < hidden_size
+            or target_intermediate_size < intermediate_size
+        ):
+            raise ValueError("Requantization target dimensions cannot shrink weights.")
+
+        # No padding required.
+        if (hidden_size, intermediate_size) == (
+            target_hidden_size,
+            target_intermediate_size,
+        ):
+            return w13, w2
+
+        if any(
+            getattr(layer, name, None) is not None for name in ("w13_bias", "w2_bias")
+        ):
+            raise NotImplementedError(
+                "Padded requantization with biases is unsupported."
+            )
+
+        def pad_moe_weights(
+            w13: torch.Tensor, w2: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            padded_w13 = w13.new_zeros(
+                (num_experts, num_shards * target_intermediate_size, target_hidden_size)
+            )
+            padded_w2 = w2.new_zeros(
+                (num_experts, target_hidden_size, target_intermediate_size)
+            )
+            for shard in range(num_shards):
+                source_start = shard * intermediate_size
+                target_start = shard * target_intermediate_size
+                padded_w13[
+                    :, target_start : target_start + intermediate_size, :hidden_size
+                ] = w13[:, source_start : source_start + intermediate_size, :]
+            padded_w2[:, :hidden_size, :intermediate_size] = w2
+            return padded_w13, padded_w2
+
+        return pad_moe_weights(w13, w2)
+
+    def _zero_padding(
+        self,
+        layer: torch.nn.Module,
+        w13_weight: torch.Tensor | None = None,
+        w2_weight: torch.Tensor | None = None,
+    ) -> None:
+        w13_weight = layer.w13_weight if w13_weight is None else w13_weight
+        w2_weight = layer.w2_weight if w2_weight is None else w2_weight
+        hidden_size = layer.moe_config.hidden_dim_unpadded
+        intermediate_size = layer.moe_config.intermediate_size_per_partition_unpadded
+
+        w13_shard = w13_weight.shape[1] // self.moe.w13_num_shards
+        if w13_shard > intermediate_size:
+            for shard in range(self.moe.w13_num_shards):
+                start = shard * w13_shard + intermediate_size
+                w13_weight[:, start : (shard + 1) * w13_shard, :] = 0
+        if w13_weight.shape[2] > hidden_size:
+            w13_weight[:, :, hidden_size:] = 0
+
+        if w2_weight.shape[1] > hidden_size:
+            w2_weight[:, hidden_size:, :] = 0
+        if w2_weight.shape[2] > intermediate_size:
+            w2_weight[:, :, intermediate_size:] = 0
+
+        if getattr(layer, "w13_bias", None) is not None:
+            w13_bias_shard = layer.w13_bias.shape[1] // self.moe.w13_num_shards
+            if w13_bias_shard > intermediate_size:
+                for shard in range(self.moe.w13_num_shards):
+                    start = shard * w13_bias_shard + intermediate_size
+                    layer.w13_bias[:, start : (shard + 1) * w13_bias_shard] = 0
+
+        if (
+            getattr(layer, "w2_bias", None) is not None
+            and layer.w2_bias.shape[1] > hidden_size
+        ):
+            layer.w2_bias[:, hidden_size:] = 0
+
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
