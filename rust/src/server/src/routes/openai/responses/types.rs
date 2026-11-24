@@ -21,6 +21,7 @@ use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
+use vllm_chat::AllowedToolsMode;
 
 /// Responses API `input` field: either a plain string (single user message)
 /// or a list of input/output items.
@@ -271,9 +272,8 @@ pub enum ResponseToolChoice {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseToolChoiceObject {
     Function(FunctionChoice),
-    /// TODO: support `allowed_tools` tool choices.
     AllowedTools {
-        mode: String,
+        mode: AllowedToolsMode,
         tools: Vec<ToolReference>,
     },
 }

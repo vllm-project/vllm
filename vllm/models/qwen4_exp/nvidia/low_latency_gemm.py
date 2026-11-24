@@ -197,6 +197,44 @@ QWEN4_EXP_SM100_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
     (62080, 2560): {
         1: SkinnyGemmConfig(1, 128, 2, k_unroll=4, vector_width=4),
     },
+    # GDN fused B/A projection, TP=8.
+    (12, 2560): {
+        1: SkinnyGemmConfig(1, 128, 1, k_unroll=2, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 1, k_unroll=2, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 128, 1, k_unroll=2, vector_width=4, static_k=2560),
+        8: SkinnyGemmConfig(8, 128, 1, vector_width=4, static_k=2560),
+    },
+    # Shared-expert fused gate/up projection, TP=8.
+    (160, 2560): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=2, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 160, 2, k_unroll=2, static_k=2560),
+        4: SkinnyGemmConfig(4, 160, 1, static_k=2560),
+        8: SkinnyGemmConfig(8, 128, 1, vector_width=4, static_k=2560),
+    },
+    # GDN fused QKVZ projection, TP=8.
+    (2048, 2560): {
+        1: SkinnyGemmConfig(1, 160, 2, static_k=2560),
+        2: SkinnyGemmConfig(2, 160, 2, static_k=2560),
+        4: SkinnyGemmConfig(4, 160, 2, static_k=2560),
+    },
+    # GDN and QSA output projections, TP=8.
+    (2560, 768): {
+        1: SkinnyGemmConfig(1, 32, 4, vector_width=4, static_k=768),
+        2: SkinnyGemmConfig(2, 64, 4, k_unroll=2, vector_width=4, static_k=768),
+        4: SkinnyGemmConfig(4, 32, 2, k_unroll=4, vector_width=4, static_k=768),
+    },
+    # QSA fused QKV/gate + replicated KV and indexer Q/K, TP=8.
+    (2688, 2560): {
+        1: SkinnyGemmConfig(1, 160, 2, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 160, 2, static_k=2560),
+        4: SkinnyGemmConfig(4, 32, 2, static_k=2560),
+    },
+    # LM head, TP=8.
+    (31040, 2560): {
+        1: SkinnyGemmConfig(1, 160, 2, k_unroll=4, vector_width=4),
+        2: SkinnyGemmConfig(2, 160, 4, k_unroll=2),
+        4: SkinnyGemmConfig(4, 32, 2, k_unroll=4, vector_width=4),
+    },
     # GDN fused B/A projection, TP=1.
     (96, 2560): {
         1: SkinnyGemmConfig(1, 128, 4, k_unroll=2, vector_width=2, static_k=2560),
@@ -218,6 +256,41 @@ QWEN4_EXP_SM100_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
     (2560, 6144): {
         1: SkinnyGemmConfig(1, 256, 2, k_unroll=2, static_k=6144),
         2: SkinnyGemmConfig(2, 128, 2, static_k=6144),
+    },
+    # GDN fused B/A projection, TP=2.
+    (48, 2560): {
+        1: SkinnyGemmConfig(1, 128, 1, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 1, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 160, 1, k_unroll=2, static_k=2560),
+        8: SkinnyGemmConfig(8, 128, 1, vector_width=4, static_k=2560),
+    },
+    # Shared-expert fused gate/up projection, TP=2.
+    (640, 2560): {
+        1: SkinnyGemmConfig(1, 128, 1, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 160, 2, k_unroll=2, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 160, 1, k_unroll=4, static_k=2560),
+        8: SkinnyGemmConfig(8, 128, 1, vector_width=4, static_k=2560),
+    },
+    # GDN fused QKVZ projection, TP=2.
+    (8192, 2560): {
+        1: SkinnyGemmConfig(1, 32, 4, k_unroll=4, vector_width=4),
+        2: SkinnyGemmConfig(2, 64, 2, k_unroll=4, vector_width=4, static_k=2560),
+    },
+    # GDN and QSA output projections, TP=2.
+    (2560, 3072): {
+        1: SkinnyGemmConfig(1, 64, 1, k_unroll=4, static_k=3072),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=3072),
+        4: SkinnyGemmConfig(4, 64, 2, k_unroll=2),
+    },
+    # QSA fused QKV/gate + KV and replicated indexer Q/K, TP=2.
+    (7296, 2560): {
+        1: SkinnyGemmConfig(1, 160, 2, k_unroll=2),
+        2: SkinnyGemmConfig(2, 64, 2, k_unroll=2, vector_width=4, static_k=2560),
+    },
+    # LM head, TP=2.
+    (124160, 2560): {
+        1: SkinnyGemmConfig(1, 160, 2, k_unroll=2),
+        2: SkinnyGemmConfig(2, 160, 4, k_unroll=2),
     },
 }
 
