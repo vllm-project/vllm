@@ -176,7 +176,7 @@ CONFIGS: dict[str, ServerConfig] = {
     },
     # FIXME: This test currently fails, need to debug why.
     # "granite20b": {
-    #     "model": "mbayser/granite-20b-functioncalling-FP8-KV",
+    #     "model": "vllm-project/granite-20b-functioncalling-FP8-KV",
     #     "arguments": [
     #         "--tool-call-parser",
     #         "granite-20b-fc",

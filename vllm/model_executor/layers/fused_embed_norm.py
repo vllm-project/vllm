@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Replicated input embedding + its fused gather/norm kernels.
 
-Groups the ``VLLM_REPLICATE_EMBED`` path in one place: the embedding factory,
+Groups the `VLLM_REPLICATE_EMBED` path in one place: the embedding factory,
 the predicate that says whether the fusions apply, and the two Triton fusions
 the full on-rank table unlocks --
 
-  * ``fused_embed_norm``: gather + a chained RMSNorm (e.g. the first decoder
-    layer's ``input_layernorm``), and
-  * ``fused_embed_eh_norm``: gather + pos-0 zeroing + enorm/hnorm + cat, the
+  * `fused_embed_norm`: gather + a chained RMSNorm (e.g. the first decoder
+    layer's `input_layernorm`), and
+  * `fused_embed_eh_norm`: gather + pos-0 zeroing + enorm/hnorm + cat, the
     embed/previous-hidden input norm for a speculative (MTP/eagle) depth layer
-    (the replicated-table analogue of the model-local ``fused_eh_norm``, which
+    (the replicated-table analogue of the model-local `fused_eh_norm`, which
     takes precomputed embeds).
 
-Self-contained (no model-local imports) so it can live under ``layers/``.
+Self-contained (no model-local imports) so it can live under `layers/`.
 """
 
 import torch
@@ -47,13 +47,13 @@ def make_input_embedding(
 ) -> VocabParallelEmbedding:
     """Input token embedding with an optional replicated escape hatch.
 
-    ``VLLM_REPLICATE_EMBED=1`` builds the embedding with ``disable_tp``: the full
+    `VLLM_REPLICATE_EMBED=1` builds the embedding with `disable_tp`: the full
     table lives on every rank and the lookup is a local gather with no mask and
     no all-reduce, which unlocks the fused gather+norm path. The cost is a full
     table per rank at TP>1 (no extra memory at TP=1, where vocab-parallel is
     already unsharded). A replicated, unsharded table cannot be tied to a
-    vocab-parallel ``ParallelLMHead``, so tied word embeddings are rejected at
-    TP>1 (at TP=1 ``disable_tp`` is a no-op and tying still works).
+    vocab-parallel `ParallelLMHead`, so tied word embeddings are rejected at
+    TP>1 (at TP=1 `disable_tp` is a no-op and tying still works).
     """
     disable_tp = envs.VLLM_REPLICATE_EMBED
     if disable_tp and tie_word_embeddings:
@@ -72,10 +72,10 @@ def make_input_embedding(
 
 
 def has_full_vocab_on_rank(embedding: torch.nn.Module) -> bool:
-    """Whether ``embedding.weight`` is the whole vocab as a plain [V, H] table.
+    """Whether `embedding.weight` is the whole vocab as a plain [V, H] table.
 
     The fused gather kernels index the table directly, so they need every row
-    on-rank (``disable_tp``, or any TP=1 run) and an unquantized weight.
+    on-rank (`disable_tp`, or any TP=1 run) and an unquantized weight.
     """
     return getattr(embedding, "tp_size", 0) == 1 and isinstance(
         getattr(embedding, "quant_method", None), UnquantizedEmbeddingMethod
@@ -114,13 +114,13 @@ def fused_embed_norm(
     chain_weight: torch.Tensor | None = None,
     eps: float = 0.0,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """Fused embedding row gather (``embed_table[input_ids]``).
+    """Fused embedding row gather (`embed_table[input_ids]`).
 
     Requires the full vocab on-rank (replicated embedding). When
-    ``chain_weight`` is given, also emits ``rmsnorm(gathered, chain_weight)``
-    (the first decoder layer's ``input_layernorm``) as a second output in the
-    same launch, so the returned pair is ``(residual, normed_input)``. Bit-exact
-    vs a plain gather followed by an ``RMSNorm``.
+    `chain_weight` is given, also emits `rmsnorm(gathered, chain_weight)`
+    (the first decoder layer's `input_layernorm`) as a second output in the
+    same launch, so the returned pair is `(residual, normed_input)`. Bit-exact
+    vs a plain gather followed by an `RMSNorm`.
     """
     assert embed_table.ndim == 2, embed_table.shape
     ids = input_ids.view(-1)
@@ -167,8 +167,8 @@ def _fused_embed_eh_norm_kernel(
     BLOCK: tl.constexpr,
 ):
     """MTP input fusion with a folded embedding gather: gather
-    ``table[ids]``, zero it at position 0, RMSNorm(embed) with enorm and
-    RMSNorm(prev_hidden) with hnorm, written side-by-side into ``out`` ([N, 2H])
+    `table[ids]`, zero it at position 0, RMSNorm(embed) with enorm and
+    RMSNorm(prev_hidden) with hnorm, written side-by-side into `out` ([N, 2H])
     ready for the eh_proj GEMM. Replaces embedding lookup + where + 2x RMSNorm +
     cat. Requires the full table on-rank (replicated embedding)."""
     tok = tl.program_id(0)
@@ -199,11 +199,11 @@ def fused_embed_eh_norm(
     hnorm_w: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
-    """Fused ``cat([enorm(masked embed_table[ids]), hnorm(prev_hidden)])`` -> [N, 2H].
+    """Fused `cat([enorm(masked embed_table[ids]), hnorm(prev_hidden)])` -> [N, 2H].
 
     Folds the embedding row gather into the MTP eh-norm launch; requires the full
-    table on-rank (replicated embedding). Bit-exact vs gathering ``embed_table[
-    input_ids]`` and passing it to the model-local ``fused_eh_norm``.
+    table on-rank (replicated embedding). Bit-exact vs gathering `embed_table[
+    input_ids]` and passing it to the model-local `fused_eh_norm`.
     """
     assert previous_hidden.ndim == 2 and embed_table.ndim == 2
     n, h = previous_hidden.shape

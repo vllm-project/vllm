@@ -163,7 +163,6 @@ guide: |
     --enable-expert-parallel \
     --max-num-batched-tokens 8192 \
     --max-num-seqs 256 \
-    --gpu-memory-utilization 0.85 \
     --enable-auto-tool-choice \
     --tool-call-parser kimi_k2
 
@@ -180,7 +179,6 @@ guide: |
     --enable-expert-parallel \
     --max-num-batched-tokens 8192 \
     --max-num-seqs 256 \
-    --gpu-memory-utilization 0.85 \
     --enable-auto-tool-choice \
     --tool-call-parser kimi_k2
   ```
@@ -200,8 +198,9 @@ guide: |
   - `--max-model-len` preserves memory; `--max-model-len=65536` is usually good for most scenarios.
   - `--max-num-batched-tokens` balances throughput vs latency. `32768` is good for prompt-heavy
     workloads; reduce to 16k or 8k to cut activation memory and decrease latency.
-  - vLLM conservatively uses 90% of GPU memory. Set `--gpu-memory-utilization=0.95` to
-    maximize KV cache.
+  - On CUDA and ROCm, vLLM sizes the KV cache from the memory free after warmup, so
+    `--gpu-memory-utilization` defaults to 1.0; set it only when the GPU is shared
+    ([details](https://docs.vllm.ai/en/latest/configuration/optimization/#gpu-memory-utilization)).
 
   ## Benchmarking
 

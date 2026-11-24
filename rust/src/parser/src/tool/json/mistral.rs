@@ -17,7 +17,7 @@ const MISTRAL_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     arguments_key: &["arguments"],
 };
 
-/// Tool parser for Mistral JSON-array tool calls.
+/// Tool parser for the pre-v11 Mistral JSON-array tool calls.
 ///
 /// Example tool call content:
 ///
@@ -27,11 +27,11 @@ const MISTRAL_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
 ///
 /// Arguments are already OpenAI-style JSON text, so they are streamed as raw
 /// argument deltas without schema conversion or JSON normalization.
-pub struct MistralToolParser {
+pub(crate) struct MistralJsonArrayToolParser {
     inner: JsonToolCallParser,
 }
 
-impl MistralToolParser {
+impl MistralJsonArrayToolParser {
     /// Create a Mistral tool parser.
     fn new(_tools: &[Tool]) -> Self {
         Self {
@@ -40,7 +40,7 @@ impl MistralToolParser {
     }
 }
 
-impl ToolParser for MistralToolParser {
+impl ToolParser for MistralJsonArrayToolParser {
     fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
@@ -66,7 +66,7 @@ mod tests {
     use expect_test::expect;
     use thiserror_ext::AsReport;
 
-    use super::MistralToolParser;
+    use super::MistralJsonArrayToolParser;
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
     use crate::tool::{ToolParser, ToolParserOutput, ToolParserTestExt as _};
 
@@ -80,7 +80,7 @@ mod tests {
 
     #[test]
     fn mistral_parse_complete_without_tool_call_keeps_text() {
-        let mut parser = MistralToolParser::new(&test_tools());
+        let mut parser = MistralJsonArrayToolParser::new(&test_tools());
         let output = parser.parse_complete("Hello, world!").unwrap();
 
         assert_eq!(output.normal_text(), "Hello, world!");
@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn mistral_parse_complete_extracts_raw_json_arguments() {
-        let mut parser = MistralToolParser::new(&test_tools());
+        let mut parser = MistralJsonArrayToolParser::new(&test_tools());
         let arguments = r#"{ "location": "Tokyo", "days": "3" }"#;
         let output = parser
             .parse_complete(&format!(
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn mistral_parse_complete_extracts_pretty_multiple_tool_calls() {
-        let mut parser = MistralToolParser::new(&test_tools());
+        let mut parser = MistralJsonArrayToolParser::new(&test_tools());
         let output = parser
             .parse_complete(
                 r#"I'll help.
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn mistral_does_not_validate_or_normalize_arguments() {
-        let mut parser = MistralToolParser::new(&test_tools());
+        let mut parser = MistralJsonArrayToolParser::new(&test_tools());
         let arguments = r#"{"location":"Tokyo",}"#;
         let output = parser
             .parse_complete(&build_tool_calls(&[build_tool_call(
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn mistral_streaming_emits_argument_deltas() {
-        let mut parser = MistralToolParser::new(&test_tools());
+        let mut parser = MistralJsonArrayToolParser::new(&test_tools());
         let chunks = [
             "preface [TOOL",
             "_CALLS] [{\"name\":\"get_weather\",\"arguments\":",
@@ -204,7 +204,7 @@ mod tests {
             build_tool_calls(&[build_tool_call("get_weather", r#"{"location":"Tokyo"}"#)])
         );
         let chunks = split_by_chars(&input, 5);
-        let mut parser = MistralToolParser::new(&test_tools());
+        let mut parser = MistralJsonArrayToolParser::new(&test_tools());
 
         let output = collect_stream(&mut parser, &chunks);
 
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn mistral_keeps_array_bracket_literal_inside_json_string() {
-        let mut parser = MistralToolParser::new(&test_tools());
+        let mut parser = MistralJsonArrayToolParser::new(&test_tools());
         let arguments = r#"{"text":"Array notation: arr[0] = value[1]"}"#;
         let output = parser
             .parse_complete(&build_tool_calls(&[build_tool_call("echo", arguments)]))
@@ -227,20 +227,19 @@ mod tests {
 
     #[test]
     fn mistral_finish_fails_incomplete_tool_call() {
-        let mut parser = MistralToolParser::new(&test_tools());
+        let mut parser = MistralJsonArrayToolParser::new(&test_tools());
         parser
             .parse_chunk(r#"[TOOL_CALLS] [{"name":"get_weather","arguments":{"location""#)
             .unwrap();
 
         let error = parser.finish().unwrap_err();
 
-        expect!["tool parser parsing failed: incomplete Mistral tool call"]
-            .assert_eq(&error.to_report_string());
+        expect!["incomplete Mistral tool call"].assert_eq(&error.to_report_string());
     }
 
     #[test]
     fn mistral_malformed_field_order_fails_fast() {
-        let mut parser = MistralToolParser::new(&test_tools());
+        let mut parser = MistralJsonArrayToolParser::new(&test_tools());
         let error = parser
             .parse_chunk(r#"[TOOL_CALLS] [{"arguments":{},"name":"get_weather"}]"#)
             .unwrap_err();
