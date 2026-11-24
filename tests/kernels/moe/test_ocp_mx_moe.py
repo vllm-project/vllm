@@ -2659,6 +2659,8 @@ def test_moe_activation_override_wins_over_checkpoint(monkeypatch, override):
         ("marlin", True, {"MARLIN"}, "MARLIN"),
         # A BF16 checkpoint never gets its activations quantized.
         ("auto", False, {"CUTLASS_MXFP4_MXFP4", "MARLIN"}, "MARLIN"),
+        ("auto", False, {"EMULATION", "MARLIN"}, "MARLIN"),
+        ("auto", True, {"EMULATION", "MARLIN"}, "EMULATION"),
     ],
 )
 def test_select_mxfp4_moe_backend_respects_checkpoint_activation(
@@ -3073,7 +3075,7 @@ def test_convert_weight_to_mxfp4_cutlass_swizzles_scales_per_expert():
     assert not torch.equal(out_w2_scale, w2_scale)
 
 
-@pytest.fixture(params=["compressed_tensors", "inc"])
+@pytest.fixture(params=["compressed_tensors", "compressed_tensors_w4a16", "inc"])
 def packed_mxfp4_quant_config(request):
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
         CompressedTensorsConfig,
@@ -3108,6 +3110,8 @@ def packed_mxfp4_quant_config(request):
         activations = weights | {"dynamic": True}
         if request.param == "compressed_tensors_w4a8":
             activations |= {"num_bits": 8, "group_size": 128}
+        elif request.param == "compressed_tensors_w4a16":
+            activations = None
         quant_config = CompressedTensorsConfig.from_config(
             {
                 "format": "mxfp4-pack-quantized",
@@ -3149,6 +3153,23 @@ def test_packed_mxfp4_rejects_incompatible_activation(
         _make_packed_mxfp4_layer(
             packed_mxfp4_quant_config, moe_backend, QuantSpec(activation=activation)
         )
+
+
+@pytest.mark.skipif(not TRTLLM_GEN_MXFP4_AVAILABLE, reason="Requires SM100")
+@pytest.mark.parametrize(
+    "packed_mxfp4_quant_config,expected",
+    [
+        ("compressed_tensors", "CUTLASS_MXFP4_MXFP4"),
+        ("compressed_tensors_w4a16", "FLASHINFER_TRTLLM_MXFP4_BF16"),
+    ],
+    indirect=["packed_mxfp4_quant_config"],
+)
+def test_packed_mxfp4_auto_honors_checkpoint_activation(
+    packed_mxfp4_quant_config, default_vllm_config, expected
+):
+    """Weight-only checkpoints must retain BF16 activations without an override."""
+    layer = _make_packed_mxfp4_layer(packed_mxfp4_quant_config, "auto")
+    assert layer.quant_method.mxfp4_backend.name == expected
 
 
 @pytest.mark.skipif(not TRTLLM_GEN_MXFP4_AVAILABLE, reason="Requires SM100")

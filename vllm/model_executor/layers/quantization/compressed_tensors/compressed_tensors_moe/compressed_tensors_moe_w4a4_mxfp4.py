@@ -9,14 +9,14 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.mxfp4 import PackedMxfp4MoEMethod
-from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
 class CompressedTensorsW4A4Mxfp4MoEMethod(PackedMxfp4MoEMethod):
-    """Packed MXFP4 checkpoints with dynamic MXFP4 activations."""
+    """Packed MXFP4 checkpoints with optional MXFP4 activations."""
 
-    def __init__(self, moe: FusedMoEConfig):
-        super().__init__(moe, activation_key=kMxfp4Dynamic)
+    def __init__(self, moe: FusedMoEConfig, activation_key: QuantKey | None = None):
+        super().__init__(moe, activation_key=activation_key)
         self.group_size = 32
 
     def _select_backend(

@@ -1077,6 +1077,34 @@ def test_compressed_tensors_mxfp4(vllm_runner):
         assert output
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA MXFP4")
+def test_compressed_tensors_mxfp4_weight_only_moe_keeps_bf16(vllm_runner):
+    """Loading a weight-only checkpoint must not introduce activation quantization."""
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+
+    def activation_dtypes(model):
+        actual = {}
+        for layer in model.modules():
+            if isinstance(layer, RoutedExperts):
+                config = layer.quant_method.moe_quant_config
+                assert config is not None
+                actual[layer.layer_name] = config.quant_dtype
+        return actual
+
+    with vllm_runner(
+        "nm-testing/Qwen3-30B-A3B-MXFP4A16",
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.85,
+        kernel_config={"linear_backend": "marlin"},
+    ) as llm:
+        for actual in llm.apply_model(activation_dtypes):
+            assert actual and set(actual.values()) == {None}
+        output = llm.generate_greedy("The capital of France is", max_tokens=4)
+        assert output[0][0]
+
+
 def _mxfp4_moe_layer(monkeypatch, input_activations):
     from types import SimpleNamespace
 
