@@ -33,10 +33,6 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if request.suffix.is_some() {
-        bail_invalid_request!(param = "suffix", "suffix is not supported.");
-    }
-
     // Python's prompt-presence validator treats an empty `prompt_embeds` list
     // like an absent one; lowering ignores it.
     if (request.prompt_embeds.as_ref())

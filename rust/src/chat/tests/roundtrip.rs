@@ -590,6 +590,28 @@ impl RoundtripCase {
             with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
+
+    /// Mistral v11+ `[TOOL_CALLS]name[ARGS]{...}` tool calls with
+    /// `[THINK]`/`[/THINK]` reasoning (tekken v15).
+    fn mistral_large4() -> Self {
+        Self {
+            model_id: "mistralai/Mistral-Large-4-1T-A52B",
+            assistant_stop_suffix: "</s>",
+            tool_call_parser: ParserSelection::Explicit("mistral".to_owned()),
+            reasoning_parser: ParserSelection::Explicit("mistral".to_owned()),
+            // `reasoning_effort` only takes low/medium/high; the model always
+            // thinks.
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_style: JsonStyle::Spaced,
+            sort_json_keys: false,
+            // The v11+ Mistral tool parser builds no tool grammar, so the
+            // schema excludes the calls.
+            with_schema: &[
+                ToolCallMixVariant::NoneSchema,
+                ToolCallMixVariant::AutoSchemaContent,
+            ],
+        }
+    }
 }
 
 macro_rules! roundtrip_tests {
@@ -640,6 +662,7 @@ roundtrip_tests! {
     muse_glimmer => [reasoning_and_content], // Glimmer drops content on tool-call turns in history
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
     inkling => [reasoning_and_content, tool_call_mix],
+    mistral_large4 => [reasoning_and_content, tool_call_mix],
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
@@ -864,6 +887,9 @@ async fn load_roundtrip_backends(case: &RoundtripCase) -> Result<vllm_chat::Load
         case.model_id,
         LoadModelBackendsOptions {
             renderer: RendererSelection::Auto,
+            // Roundtrips render and parse text only; some cases are multimodal
+            // checkpoints the Rust frontend serves only as text.
+            language_model_only: true,
             ..Default::default()
         },
     )
