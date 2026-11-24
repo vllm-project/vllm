@@ -23,7 +23,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
-    compute_causal_conv1d_metadata,
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
@@ -110,7 +109,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
     # Will be disabled if speculative decoding is used
     supports_update_block_table: bool = True
-    needs_causal_conv1d_metadata: bool = True
 
     def __init__(
         self,
@@ -490,29 +488,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             num_reqs=num_reqs,
             seq_lens=common_attn_metadata.seq_lens,
         )
-        if num_prefills > 0:
+        if num_prefills > 0 and self.conv_prefill_kernel is not None:
             query_start_loc_p_cpu = (
                 common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
                 - num_decode_tokens
             )
-            if self.conv_prefill_kernel is not None:
-                metadata = self.conv_prefill_kernel.prepare_metadata(
-                    metadata, query_start_loc_p_cpu
-                )
-            elif self.needs_causal_conv1d_metadata:
-                # ShortConv calls the conv op directly.
-                nums_dict, batch_ptr, token_chunk_offset_ptr = (
-                    compute_causal_conv1d_metadata(
-                        query_start_loc_p_cpu,
-                        device=common_attn_metadata.query_start_loc.device,
-                    )
-                )
-                metadata = replace(
-                    metadata,
-                    nums_dict=nums_dict,
-                    batch_ptr=batch_ptr,
-                    token_chunk_offset_ptr=token_chunk_offset_ptr,
-                )
+            metadata = self.conv_prefill_kernel.prepare_metadata(
+                metadata, query_start_loc_p_cpu
+            )
 
         return self._update_metadata_for_cudagraph_capture(metadata)
 

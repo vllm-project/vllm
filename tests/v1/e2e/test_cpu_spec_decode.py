@@ -106,14 +106,21 @@ def test_ngram_spec_decode_matches_baseline(baseline_refs):
     )
 
 
-def test_mamba2_spec_decode_fails_at_startup(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize(
+    "model",
+    [
+        "vllm-project/mamba2-codestral-v0.1-tiny-random",
+        "trl-internal-testing/tiny-Lfm2ForCausalLM",  # ShortConv
+    ],
+)
+def test_conv_spec_decode_fails_at_startup(model: str, monkeypatch: pytest.MonkeyPatch):
     """The CPU conv update ignores the accepted-token counts, so it would keep
-    rejected drafts in Mamba layers' conv state. Startup fails instead."""
+    rejected drafts in a conv layer's state. Startup fails instead."""
     # Raise the engine's error here rather than in its process.
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     with pytest.raises(ValueError, match="speculative decoding not supported"):
         _make_llm(
-            model="vllm-project/mamba2-codestral-v0.1-tiny-random",
+            model=model,
             speculative_config={
                 "method": "ngram",
                 "prompt_lookup_max": 5,
