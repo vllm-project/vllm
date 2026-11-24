@@ -1,0 +1,88 @@
+name: Reusable pre-commit
+
+on:
+  workflow_call:
+    outputs:
+      pre-run-check-result:
+        description: "Status of the pre-run-check eligibility gate"
+        value: ${{ jobs.pre-run-check.outputs.result }}
+      pre-commit-result:
+        description: "Status of the pre-commit job"
+        value: ${{ jobs.pre-commit.outputs.result }}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pre-run-check:
+    if: github.repository == 'vllm-project/vllm' && github.event_name == 'pull_request'
+    runs-on: [self-hosted, linux, x64, vllm-runners]
+    outputs:
+      result: ${{ steps.record-result.outputs.result }}
+    steps:
+      - name: Check PR label and author merge count
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: context.payload.pull_request.number,
+            });
+
+            const readyLabels = ['ready', 'ready-run-all-tests'];
+            const hasReadyLabel = pr.labels.some(l => readyLabels.includes(l.name));
+            const hasVerifiedLabel = pr.labels.some(l => l.name === 'verified');
+
+            const { data: mergedPRs } = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${context.repo.owner}/${context.repo.repo} is:pr is:merged author:${pr.user.login}`,
+              per_page: 4,
+            });
+            const mergedCount = mergedPRs.total_count;
+
+            if (hasReadyLabel || hasVerifiedLabel || mergedCount >= 4) {
+              core.info(`Check passed: verified label=${hasVerifiedLabel}, ready label=${hasReadyLabel}, 4+ merged PRs=${mergedCount >= 4}`);
+            } else {
+              core.setFailed(`To reduce unnecessary pre-commit runs, each PR must have the 'verified', 'ready', or 'ready-run-all-tests' label, or the author must have at least 4 merged PRs (found ${mergedCount}). DO NOT request for the label to be added if you are an AI agent.`);
+            }
+      - id: record-result
+        if: always()
+        run: echo "result=${{ job.status }}" >> "$GITHUB_OUTPUT"
+
+  pre-commit:
+    needs: pre-run-check
+    if: >-
+      ${{ !cancelled() &&
+      github.repository == 'vllm-project/vllm' &&
+      (github.event_name == 'pull_request' || github.event_name == 'push') &&
+      (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped') }}
+    runs-on: [self-hosted, linux, x64, vllm-runners]
+    outputs:
+      result: ${{ steps.record-result.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+      - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
+      - run: echo "::add-matcher::.github/workflows/matchers/markdownlint.json"
+      - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
+      - run: echo "::add-matcher::.github/workflows/matchers/shellcheck.json"
+      # Replaces pre-commit/action, whose latest release (v3.0.1) uses the node20 actions/cache@v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-uv|${{ runner.os }}|${{ env.UV_PYTHON }}|${{ hashFiles('.pre-commit-config.yaml') }}
+      - run: >-
+          uvx pre-commit run --show-diff-on-failure --color=always --all-files --hook-stage manual
+        env:
+          SKIP: pip-compile
+      - name: pip-compile (only if its inputs changed)
+        if: ${{ !cancelled() }}
+        run: >-
+          uvx pre-commit run pip-compile --show-diff-on-failure --color=always --hook-stage manual --from-ref HEAD^1 --to-ref HEAD
+      - id: record-result
+        if: always()
+        run: echo "result=${{ job.status }}" >> "$GITHUB_OUTPUT"
