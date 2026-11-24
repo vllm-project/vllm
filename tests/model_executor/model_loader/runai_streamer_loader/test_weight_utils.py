@@ -2,14 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import glob
+import os
 import tempfile
 
 import huggingface_hub.constants
 import pytest
 import torch
 from safetensors.torch import save_file
+from transformers import GPT2Config
 
-from vllm.model_executor.model_loader import weight_utils
+from vllm.config import ModelConfig
+from vllm.config.load import LoadConfig
+from vllm.model_executor.model_loader import get_model_loader, weight_utils
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     runai_safetensors_weights_iterator,
@@ -124,6 +128,111 @@ def test_runai_model_loader():
             assert runai_tensor.dtype == hf_safetensors_tensors[name].dtype
             assert runai_tensor.shape == hf_safetensors_tensors[name].shape
             assert torch.all(runai_tensor.eq(hf_safetensors_tensors[name]))
+
+
+def _cpu_checkpoint(tmp_path):
+    GPT2Config(
+        n_layer=1,
+        n_head=1,
+        n_embd=8,
+        n_positions=32,
+        vocab_size=16,
+        bos_token_id=0,
+        eos_token_id=1,
+        architectures=["GPT2LMHeadModel"],
+    ).save_pretrained(tmp_path)
+    return ModelConfig(model=str(tmp_path), skip_tokenizer_init=True, max_model_len=32)
+
+
+def _cpu_loader(shard, **extra):
+    return get_model_loader(
+        LoadConfig(
+            load_format="runai_streamer",
+            use_tqdm_on_load=False,
+            model_loader_extra_config={
+                "distributed": True,
+                "cpu_weight_files": [shard],
+                "cpu_memory_limit": 4096,
+                **extra,
+            },
+        )
+    )
+
+
+def test_runai_cpu_shards_reuse_ring_without_corrupting_retained_weights(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("RUNAI_STREAMER_MEMORY_LIMIT", "64")
+    path = tmp_path / "cpu.safetensors"
+    expected = {
+        f"model.layers.{layer}.engram.{name}": torch.arange(1024, dtype=torch.float32)
+        + (2 * layer + index) * 1024
+        for layer in range(4)
+        for index, name in enumerate(("embed.weight", "wkv.weight"))
+    }
+    save_file(expected, path)
+    model_config = _cpu_checkpoint(tmp_path)
+    loader = _cpu_loader(path.name)
+    retained = {}
+    for name, tensor in loader.get_all_weights(model_config, torch.nn.Module()):
+        assert torch.equal(tensor, expected[name])
+        if ".engram.embed." not in name:
+            retained[name] = tensor
+    assert retained
+    for name, tensor in retained.items():
+        assert torch.equal(tensor, expected[name])
+    assert os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] == "64"
+
+
+def test_runai_cpu_shards_restore_limit_when_consumer_closes(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUNAI_STREAMER_MEMORY_LIMIT", "64")
+    path = tmp_path / "cpu.safetensors"
+    save_file({"first": torch.ones(1024), "second": torch.zeros(1024)}, path)
+    loader = _cpu_loader(path.name)
+    stream = loader.get_all_weights(_cpu_checkpoint(tmp_path), torch.nn.Module())
+    next(stream)
+    assert os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] == "4096"
+    stream.close()
+    assert os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] == "64"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"cpu_weight_files": ["cpu.safetensors"]},
+        {"cpu_memory_limit": 4096},
+        {"cpu_weight_files": "cpu.safetensors", "cpu_memory_limit": 4096},
+        {"cpu_weight_files": ["../cpu.safetensors"], "cpu_memory_limit": 4096},
+        {"cpu_weight_files": ["cpu.safetensors"], "cpu_memory_limit": True},
+        {"cpu_weight_files": ["cpu.safetensors"], "cpu_memory_limit": 0},
+        {
+            "distributed": False,
+            "cpu_weight_files": ["cpu.safetensors"],
+            "cpu_memory_limit": 4096,
+        },
+    ],
+)
+def test_runai_cpu_shards_validate_before_changing_environment(monkeypatch, extra):
+    monkeypatch.setenv("RUNAI_STREAMER_MEMORY_LIMIT", "64")
+    with pytest.raises(ValueError, match="cpu_"):
+        get_model_loader(
+            LoadConfig(
+                model_loader_extra_config={
+                    "distributed": True,
+                    "memory_limit": 128,
+                    **extra,
+                },
+                load_format="runai_streamer",
+            )
+        )
+    assert os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] == "64"
+
+
+def test_runai_cpu_shards_missing_file_fails_before_streaming(tmp_path):
+    save_file({"weight": torch.ones(8)}, tmp_path / "present.safetensors")
+    loader = _cpu_loader("missing.safetensors")
+    with pytest.raises(ValueError, match=r"missing\.safetensors"):
+        list(loader.get_all_weights(_cpu_checkpoint(tmp_path), torch.nn.Module()))
 
 
 if __name__ == "__main__":

@@ -51,6 +51,16 @@ requires_accelerator = pytest.mark.skipif(
 )
 
 
+def test_v41_indexer_prefill_workspace_uses_full_latent_width():
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V4.1-Flash-1017",
+        max_model_len=1024,
+    )
+    vllm_config.attention_config.sparse_mla_prefill_workspace_factor = 5
+    assert vllm_config.model_config.hf_text_config.head_dim == 512
+    assert get_max_prefill_buffer_size(vllm_config) == 1024 * 35
+
+
 @requires_accelerator
 def test_adaptive_indexer_uses_configured_max_decode_len():
     """GLM adaptive verification may replay wider rows than capture dummy rows."""

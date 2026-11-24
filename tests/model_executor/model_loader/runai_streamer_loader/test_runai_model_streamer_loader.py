@@ -86,6 +86,71 @@ def test_runai_model_loader_download_files(vllm_runner):
         assert deserialized_outputs
 
 
+@create_new_process_for_each_test("spawn")
+def test_runai_cpu_shards_real_checkpoint(vllm_runner, tmp_path, monkeypatch):
+    """Mixed GPU/CPU loading preserves generation from real checkpoint weights."""
+    from vllm.transformers_utils.repo_utils import hf_api
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    checkpoint = tmp_path / "checkpoint"
+    hf_api().snapshot_download(
+        repo_id=test_model,
+        local_dir=str(checkpoint),
+        allow_patterns=["*.json", "*.txt", "*.safetensors"],
+    )
+    original_files = list(checkpoint.glob("*.safetensors"))
+    tensors = {}
+    for path in original_files:
+        tensors.update(load_file(path))
+    cpu = {
+        name: tensor
+        for name, tensor in tensors.items()
+        if name.startswith("h.0.") or ".h.0." in name
+    }
+    ordinary = {name: tensor for name, tensor in tensors.items() if name not in cpu}
+    assert cpu and ordinary
+    files = [checkpoint / "ordinary.safetensors", checkpoint / "cpu.safetensors"]
+    for path, contents in zip(files, (ordinary, cpu)):
+        save_file(contents, path, metadata={"format": "pt"})
+    for path in original_files:
+        path.unlink()
+    (checkpoint / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    name: path.name
+                    for path, contents in zip(files, (ordinary, cpu))
+                    for name in contents
+                },
+            }
+        )
+    )
+    del tensors, cpu, ordinary
+    results = []
+    for load_format in ("safetensors", "runai_streamer"):
+        extra = (
+            {}
+            if load_format == "safetensors"
+            else {
+                "distributed": True,
+                "memory_limit": 64 << 20,
+                "cpu_weight_files": [files[1].name],
+                "cpu_memory_limit": 16 << 20,
+            }
+        )
+        with vllm_runner(
+            str(checkpoint),
+            load_format=load_format,
+            model_loader_extra_config=extra,
+            enforce_eager=True,
+            max_model_len=128,
+            gpu_memory_utilization=0.2,
+        ) as runner:
+            results.append(runner.generate_greedy(prompts, max_tokens=16))
+    assert all(text for _, text in results[1])
+    assert results[0] == results[1]
+
+
 # In-process MTP compilation must not retain GPU resources in the pytest worker.
 @create_new_process_for_each_test("spawn")
 def test_runai_mtp_real_checkpoint(vllm_runner, tmp_path, monkeypatch):

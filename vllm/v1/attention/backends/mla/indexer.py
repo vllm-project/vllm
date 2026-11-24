@@ -906,7 +906,11 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     # size while still fitting within the flashmla_sparse workspace.
     # For DeepSeek-V3.2, the max_model_len is 163840.
     #   40 * 163840 * 132 = 865075200 bytes = 825 MB
-    return max_model_len * (576 * 2 // 132) * factor
+    hf_text_config = vllm_config.model_config.hf_text_config
+    latent_bytes = 576 * 2
+    if hf_text_config.model_type in ("deepseek_v4", "deepseek_v41"):
+        latent_bytes = hf_text_config.head_dim * 2
+    return max_model_len * (latent_bytes // 132) * factor
 
 
 def dense_logits_rows(max_seqlen_k: int, max_logits_bytes: int | None = None) -> int:

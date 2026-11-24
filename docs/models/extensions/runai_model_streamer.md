@@ -99,6 +99,30 @@ vllm serve /home/meta-llama/Llama-3.2-3B-Instruct \
 !!! note
     For further instructions about tunable parameters and additional parameters configurable through environment variables, read the [Environment Variables Documentation](https://github.com/run-ai/runai-model-streamer/blob/master/docs/src/env-vars.md).
 
+## CPU staging for oversized checkpoint shards
+
+`runai_streamer` can keep ordinary checkpoint files on distributed GPU streaming
+and read named oversized files through a separate CPU ring. This is opt-in and
+requires `runai-model-streamer>=0.17.0`. For DeepSeek V4.1 Flash 1017:
+
+```bash
+uv pip install runai-model-streamer==0.17.1
+vllm serve deepseek-ai/DeepSeek-V4.1-Flash-1017 \
+    --load-format runai_streamer \
+    --model-loader-extra-config '{"distributed":true,"memory_limit":34359738368,"cpu_weight_files":["model-00047-of-00048.safetensors","model-00048-of-00048.safetensors"],"cpu_memory_limit":107374182400}'
+```
+
+Set `cpu_weight_files` and `cpu_memory_limit` together; file names are relative
+basenames and must exist in the checkpoint. Each loading rank independently
+reads the CPU files after the ordinary phase. The CPU ring must fit the largest
+tensor. This changes staging, not the configured Engram storage location.
+DeepSeek's Engram tables are consumed synchronously from the reused ring;
+other weights in those files receive owned copies. The ordinary memory limit
+is restored when the CPU iterator finishes, fails or closes early.
+
+The DSpark model's unused-weight predicate prevents rereading target-only shards
+when the checkpoint's draft tensors are selected by the existing loader.
+
 ## Sharded Model Loading
 
 vLLM also supports loading sharded models using Run:ai Model Streamer. This is particularly useful for large models that are split across multiple files. To use this feature, use the `--load-format runai_streamer_sharded` flag:
