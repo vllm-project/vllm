@@ -445,11 +445,80 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   }
   __syncthreads();
 
+  // With valid_counts, each row's valid attention indices are packed to its
+  // front in column order (the triton_convert contract), so the counts can
+  // bound the kernel as topk_length even when the input rows have holes.
+  // Compaction is in place: an iteration reads its own chunks before any
+  // write, and every write lands at or before its source column.
+  const bool pack_attention =
+      valid_counts != nullptr && attention_indices != nullptr;
+  bool any_row_needs_compaction = false;
+  const auto pack_valid_to_front = [&]() {
+    if (!any_row_needs_compaction) return;
+    const int num_chunks = (top_k + kWarpSize - 1) / kWarpSize;
+    const int iters = (num_chunks + NUM_WARPS - 1) / NUM_WARPS;
+    for (int row = first_row; row < end_row; ++row) {
+      int32_t* row_attention =
+          attention_indices + static_cast<int64_t>(row) * attention_row_stride;
+      __syncthreads();
+      // Phase 1 already wrote the count of rows that need no compaction.
+      if (valid_counts[static_cast<int64_t>(row) * valid_count_stride] >= 0) {
+        continue;
+      }
+      for (int i = tid; i < num_chunks + 1; i += blockDim.x) {
+        s_chunk_off[i] = 0;
+      }
+      __syncthreads();
+      int running = 0;
+      for (int iter = 0; iter < iters; ++iter) {
+        const int chunk_idx = warp_id + iter * NUM_WARPS;
+        const bool has_chunk = chunk_idx < num_chunks;
+        const int i = chunk_idx * kWarpSize + lane_id;
+        const int32_t value = has_chunk && i < top_k ? row_attention[i] : -1;
+        const bool valid = value >= 0;
+        int local_off = 0;
+        if (has_chunk) {
+          const unsigned int mask = __ballot_sync(0xFFFFFFFF, valid);
+          local_off = __popc(mask & lanes_before);
+          if (lane_id == 0) s_chunk_off[chunk_idx + 1] = __popc(mask);
+        }
+        __syncthreads();
+        if (warp_id == 0) {
+          running =
+              warp_inclusive_scan(s_chunk_off, lane_id, iter * NUM_WARPS + 1,
+                                  num_chunks + 1, running);
+        }
+        __syncthreads();
+        if (valid) row_attention[s_chunk_off[chunk_idx] + local_off] = value;
+      }
+      __syncthreads();
+      const int count = s_chunk_off[num_chunks];
+      for (int i = count + tid; i < top_k; i += blockDim.x) {
+        row_attention[i] = -1;
+      }
+      if (tid == 0) {
+        valid_counts[static_cast<int64_t>(row) * valid_count_stride] = count;
+      }
+    }
+  };
+
   // Phase 1: translate every row's request-relative positions in one pass,
   // resolve resident rows directly, and count the host-backed positions.
-  // s_chunk_off holds per-row valid counts until phase 2.
+  // Until phase 2, s_chunk_off holds per-row valid counts and, when packing,
+  // s_evict_off holds top_k - (first invalid column). A row needs compaction
+  // iff it has more valid columns than precede its first invalid one.
   int32_t* s_row_valid = s_chunk_off;
+  int32_t* s_first_invalid = s_evict_off;
   const int num_positions = (end_row - first_row) * top_k;
+  // With top_k a multiple of the warp size, a warp's positions share a row,
+  // so only the lowest lane among those arriving together records its
+  // column. A partial mask is still correct: max combines.
+  const bool warp_in_one_row = top_k % kWarpSize == 0;
+  const auto record_invalid = [&](const int r, const int col) {
+    if (!warp_in_one_row || lane_id == __ffs(__activemask()) - 1) {
+      atomicMax(&s_first_invalid[r], top_k - col);
+    }
+  };
   const auto resolve_position = [&](const int position,
                                     const int32_t token_index) {
     const int row = first_row + position / top_k;
@@ -467,8 +536,11 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
         source_num_blocks, source_block_size, resident_bt_stride,
         resident_num_reqs, resident_num_blocks, resident_block_size,
         resident_row);
-    if (resident_row >= 0 || g >= 0)
+    if (resident_row >= 0 || g >= 0) {
       atomicAdd(&s_row_valid[row - first_row], 1);
+    } else if (pack_attention) {
+      record_invalid(row - first_row, i);
+    }
     if (resident_row >= 0) {
       store_hot_index(row_out, row_attention, i, resident_row, hot_block_size,
                       attention_block_stride);
@@ -503,13 +575,24 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
                        position % top_k]);
   }
   __syncthreads();
+  int needs_compaction = 0;
   for (int row = first_row + tid; row < end_row; row += blockDim.x) {
-    if (valid_counts != nullptr) {
+    const int r = row - first_row;
+    if (pack_attention) {
+      const bool compact = s_row_valid[r] > top_k - s_first_invalid[r];
+      needs_compaction |= compact;
+      // -1 marks rows that pack_valid_to_front must compact.
       valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
-          s_row_valid[row - first_row];
+          compact ? -1 : s_row_valid[r];
+      s_first_invalid[r] = 0;
+    } else if (valid_counts != nullptr) {
+      valid_counts[static_cast<int64_t>(row) * valid_count_stride] =
+          s_row_valid[r];
     }
-    s_row_valid[row - first_row] = 0;
+    s_row_valid[r] = 0;
   }
+  any_row_needs_compaction =
+      pack_attention && __syncthreads_or(needs_compaction) != 0;
   // Fully resident rows need only request-relative page translation. Avoid
   // building the table or touching the hot LRU when no row can consult it.
   const int host_positions = s_counters[3];
@@ -517,6 +600,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     for (int row = first_row + tid; row < end_row; row += blockDim.x) {
       if (swap_counts != nullptr) swap_counts[row] = 0;
     }
+    pack_valid_to_front();
     return;
   }
 
@@ -833,6 +917,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       row_lru[i] = s_lru_out[i - remaining_evictable - total_misses];
     }
   }
+  pack_valid_to_front();
 }
 
 // Prefill staging: copy the planned host rows (miss_mask != 0) into the
