@@ -148,6 +148,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "MiniMaxM3SparseTritonBackend"
     )
     STEP5_DSA = "vllm.models.step5.nvidia.sparse_attention.Step5DSAAttentionBackend"
+    NEMOTRON_SHORTCUT_SDSA = (
+        "vllm.models.nemotron_shortcut.nvidia.sdsa.backend.SdsaAttentionBackend"
+    )
     BEAM_DFLASH2_SPLIT_KV = (
         "vllm.models.beam.amd.dflash2_attention.BeamDFlash2AttentionBackend"
     )
