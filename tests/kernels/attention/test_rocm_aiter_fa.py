@@ -1337,6 +1337,7 @@ def test_aiter_fa_metadata_build_does_not_sync(sliding_window):
         batch_spec, BLOCK_SIZE, torch.device("cuda"), max_block_idx=32
     )
     # Async speculative decoding overstates the CPU bound on decode rows.
+    assert common.seq_lens_cpu_upper_bound is not None
     common.seq_lens_cpu_upper_bound[0] += 100
 
     torch.cuda.set_sync_debug_mode("error")
@@ -1351,5 +1352,7 @@ def test_aiter_fa_metadata_build_does_not_sync(sliding_window):
         1,
     )
     # The overstated decode row did not leak into the other rows' lengths.
+    assert metadata.extend_metadata is not None
+    assert metadata.prefill_metadata is not None
     assert metadata.extend_metadata.max_seq_len == 80
     assert metadata.prefill_metadata.max_seq_len == 24
