@@ -13,7 +13,8 @@ from typing_extensions import override
 
 from vllm import envs
 from vllm.config import ModelConfig
-from vllm.exceptions import VLLMValidationError
+from vllm.connections import MediaFetchDeadlineExceededError
+from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.multimodal.utils import get_load_audio_from_video
 from vllm.renderers.embed_utils import (
@@ -312,7 +313,12 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("video", placeholder)
 
         if audio_url is not None:
-            audio = self._connector.fetch_audio(audio_url)
+            try:
+                audio = self._connector.fetch_audio(audio_url)
+            except VLLMUnprocessableEntityError as exc:
+                if isinstance(exc.__cause__, MediaFetchDeadlineExceededError):
+                    exc.parameter = "video_url"
+                raise
             audio_placeholder = self._tracker.add("audio", (audio, uuid))
             self._add_placeholder("audio", audio_placeholder)
 

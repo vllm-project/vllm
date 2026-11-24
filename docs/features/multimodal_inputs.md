@@ -812,6 +812,8 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
     that continuously sends a few response-body bytes from occupying a
     renderer worker indefinitely. The same limit applies to audio and video
     URLs using `VLLM_AUDIO_FETCH_TIMEOUT` and `VLLM_VIDEO_FETCH_TIMEOUT`.
+    When a fetch exceeds this limit, the API returns HTTP 422 with `error.param`
+    set to the request field that supplied the URL.
 
 ### Video Inputs
 
