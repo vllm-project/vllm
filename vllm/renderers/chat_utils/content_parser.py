@@ -287,6 +287,17 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
         self._tracker._validate_add("video")
+        audio_url = (
+            video_url
+            if video_url
+            and _loads_audio_from_video(
+                self._tracker.model_config, self._mm_processor_kwargs
+            )
+            else None
+        )
+        if audio_url is not None:
+            self._tracker._validate_add("audio")
+
         video = (
             self._connector.fetch_video(
                 video_url=video_url,
@@ -300,11 +311,8 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         placeholder = self._tracker.add("video", (video, uuid))
         self._add_placeholder("video", placeholder)
 
-        # `load_audio_from_video` is replacing `use_audio_in_video` in Transformers
-        if video_url and _loads_audio_from_video(
-            self._tracker.model_config, self._mm_processor_kwargs
-        ):
-            audio = self._connector.fetch_audio(video_url) if video_url else None
+        if audio_url is not None:
+            audio = self._connector.fetch_audio(audio_url)
             audio_placeholder = self._tracker.add("audio", (audio, uuid))
             self._add_placeholder("audio", audio_placeholder)
 

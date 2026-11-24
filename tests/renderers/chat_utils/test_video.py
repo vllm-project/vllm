@@ -16,6 +16,34 @@ from .utils import (
 QWEN25OMNI_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
 
 
+def test_parse_chat_messages_checks_video_audio_limit_before_url_loading():
+    model_config = ModelConfig(
+        QWEN25OMNI_MODEL_ID,
+        runner="generate",
+        limit_mm_per_prompt={"video": 1, "audio": 0},
+        allowed_media_domains=["allowed.example"],
+    )
+
+    # This URL cannot reach the network even if the connector is called.
+    with pytest.raises(VLLMValidationError, match="At most 0 audio"):
+        parse_chat_messages(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "video_url",
+                            "video_url": {"url": "https://other.example/video.mp4"},
+                        }
+                    ],
+                }
+            ],
+            model_config,
+            content_format="string",
+            mm_processor_kwargs={"load_audio_from_video": True},
+        )
+
+
 @pytest.fixture(scope="function")
 def qwen25omni_model_config_image_embeds():
     return ModelConfig(
