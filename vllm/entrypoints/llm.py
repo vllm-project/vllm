@@ -33,6 +33,7 @@ from vllm.entrypoints.common.startup import log_non_default_args
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.rl.offline import RLOfflineMixin
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import PromptType
 from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
@@ -257,9 +258,10 @@ class LLM(
                     raw_config_dict,
                     e,
                 )
-                # Consider re-raising a more specific vLLM error or ValueError
-                # to provide better context to the user.
-                raise ValueError(f"Invalid 'kv_transfer_config' provided: {e}") from e
+                raise VLLMValidationError(
+                    f"Invalid 'kv_transfer_config' provided: {e}",
+                    parameter="kv_transfer_config",
+                ) from e
 
         if hf_overrides is None:
             hf_overrides = {}
@@ -295,11 +297,13 @@ class LLM(
             and not _distributed_executor_backend == "external_launcher"
             and not current_platform.is_tpu()
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 f"LLM(data_parallel_size={_dp_size}) is not supported for single-"
                 "process usage and may hang. Please use "
                 "the explicit multi-process data-parallel example at "
-                "'examples/features/data_parallel/data_parallel_offline.py'."
+                "'examples/features/data_parallel/data_parallel_offline.py'.",
+                parameter="data_parallel_size",
+                value=_dp_size,
             )
 
         engine_args = EngineArgs(
@@ -470,7 +474,7 @@ class LLM(
         """
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
-            raise ValueError(
+            raise RuntimeError(
                 "LLM.generate() is only supported for generative models. "
                 "Try passing `--runner generate` to use the model as a "
                 "generative model."
@@ -525,7 +529,7 @@ class LLM(
         """
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
-            raise ValueError("LLM.enqueue() is only supported for generative models.")
+            raise RuntimeError("LLM.enqueue() is only supported for generative models.")
 
         if sampling_params is None:
             sampling_params = self.get_default_sampling_params()
@@ -699,7 +703,7 @@ class LLM(
         model_config = self.model_config
         runner_type = model_config.runner_type
         if runner_type != "generate":
-            raise ValueError(
+            raise RuntimeError(
                 "LLM.chat() is only supported for generative models. "
                 "Try passing `--runner generate` to use the model as a "
                 "generative model."
@@ -782,7 +786,7 @@ class LLM(
         model_config = self.model_config
         runner_type = model_config.runner_type
         if runner_type != "generate":
-            raise ValueError(
+            raise RuntimeError(
                 "LLM.enqueue_chat() is only supported for generative models. "
                 "Try passing `--runner generate` to use the model as a "
                 "generative model."
