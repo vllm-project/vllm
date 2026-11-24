@@ -289,6 +289,12 @@ class Step5FlashAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
         return metadata
 
 
+class Step5SplitKVMetadataBuilder(FlashAttentionMetadataBuilder):
+    """FlashAttention's builder for the split-KV backend. Its fused SWA decode
+    assumes uniform query lengths, so this subclass declares no varlen decode
+    cudagraph bound."""
+
+
 class Step5DSAMetadataBuilder(Step5FlashAttentionMetadataBuilder):
     _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     supports_update_block_table = False
@@ -974,7 +980,7 @@ class Step5SplitKVFlashAttentionBackend(FlashAttentionBackend):
             and config.kernel_config.step5_attention_backend == "prims_ts"
         ):
             return Step5FlashAttentionMetadataBuilder
-        return FlashAttentionMetadataBuilder
+        return Step5SplitKVMetadataBuilder
 
 
 class Step5PrimsTSSWABackend(Step5SplitKVFlashAttentionBackend):

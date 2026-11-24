@@ -33,7 +33,12 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.config.attention import HiSparseConfig
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.models.kimi_k3.common.dsa_cache import SelfAddressedMLASpec
-from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
+    MultipleOf,
+    max_decode_query_len,
+)
 from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -591,6 +596,137 @@ def test_dsv41_sparse_builders_keep_varlen_decode_graphs_only(
         backend_name,
         decode_width,
     )
+
+
+def _fa2_varlen_bound(
+    monkeypatch, builder_cls, spec, dcp_size=1, support=None, fa_version=2
+):
+    from vllm.v1.attention.backends import flash_attn
+
+    monkeypatch.setattr(flash_attn, "get_flash_attn_version", lambda **_: fa_version)
+    monkeypatch.setattr(
+        flash_attn.FlashAttentionMetadataBuilder,
+        "_cudagraph_support",
+        support or AttentionCGSupport.UNIFORM_BATCH,
+    )
+    config: Any = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=7,
+            enable_adaptive_verification=True,
+            max_num_new_slots_for_drafting=1,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
+    )
+    return config, builder_cls.get_varlen_cudagraph_max_query_len(config, spec)
+
+
+_FA2_SPEC = AttentionSpec(
+    block_size=16, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
+)
+
+
+def test_fa2_builder_keeps_varlen_decode_graphs_with_spec_decode(monkeypatch):
+    """FA2 FULL graphs replay varlen decode batches up to the decode width, so
+    adaptive verification passes the startup check."""
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    builder_cls = FlashAttentionBackend.get_builder_cls()
+    config, bound = _fa2_varlen_bound(monkeypatch, builder_cls, _FA2_SPEC)
+    assert bound == max_decode_query_len(config) == 9
+
+    group = AttentionGroup(FlashAttentionBackend, ["target"], _FA2_SPEC, 0)
+    group.metadata_builders = [object.__new__(builder_cls)]
+    unsupported = attn_utils.get_varlen_cudagraph_unsupported_backend
+    assert unsupported([[group]], config, 8) is None
+    assert unsupported([[group]], config, 10) == ("FlashAttentionBackend", 9)
+
+
+@pytest.mark.parametrize(
+    "builder_qualname,spec,dcp_size,support,fa_version",
+    [
+        pytest.param(
+            "vllm.models.inkling2.nvidia.attention.Inkling2AttentionMetadataBuilder",
+            _FA2_SPEC,
+            1,
+            None,
+            2,
+            id="inkling2",
+        ),
+        pytest.param(
+            "vllm.models.step5.nvidia.sparse_attention."
+            "Step5FlashAttentionMetadataBuilder",
+            _FA2_SPEC,
+            1,
+            None,
+            2,
+            id="step5",
+        ),
+        pytest.param(
+            "vllm.models.step5.nvidia.sparse_attention.Step5DSAMetadataBuilder",
+            _FA2_SPEC,
+            1,
+            None,
+            2,
+            id="step5_dsa",
+        ),
+        pytest.param(
+            "vllm.v1.attention.backends.flash_attn.FlashAttentionMetadataBuilder",
+            _FA2_SPEC,
+            2,
+            None,
+            2,
+            id="dcp",
+        ),
+        pytest.param(
+            "vllm.v1.attention.backends.flash_attn.FlashAttentionMetadataBuilder",
+            _FA2_SPEC,
+            1,
+            AttentionCGSupport.ALWAYS,
+            2,
+            id="always",
+        ),
+        pytest.param(
+            "vllm.v1.attention.backends.flash_attn.FlashAttentionMetadataBuilder",
+            MambaSpec(shapes=((3, 64),), dtypes=(torch.bfloat16,), block_size=16),
+            1,
+            None,
+            2,
+            id="not_attention_spec",
+        ),
+        pytest.param(
+            "vllm.v1.attention.backends.flash_attn.FlashAttentionMetadataBuilder",
+            _FA2_SPEC,
+            1,
+            None,
+            3,
+            id="not_fa2",
+        ),
+    ],
+)
+def test_fa2_varlen_bound_only_for_the_base_builder(
+    monkeypatch, builder_qualname, spec, dcp_size, support, fa_version
+):
+    """Subclasses plan or decode on their own, build() splits DCP rows on host
+    lengths, and ALWAYS builders replay any batch: none declares a bound."""
+    from vllm.utils.import_utils import resolve_obj_by_qualname
+
+    builder_cls = resolve_obj_by_qualname(builder_qualname)
+    _, bound = _fa2_varlen_bound(
+        monkeypatch, builder_cls, spec, dcp_size, support, fa_version
+    )
+    assert bound is None
+
+
+def test_step5_split_kv_backend_declares_no_varlen_bound(monkeypatch):
+    """Step5's split-KV backend reuses FlashAttention's builder logic, but its
+    fused SWA decode assumes uniform query lengths."""
+    from vllm.models.step5.nvidia.sparse_attention import (
+        Step5SplitKVFlashAttentionBackend,
+    )
+
+    builder_cls = Step5SplitKVFlashAttentionBackend.get_builder_cls()
+    _, bound = _fa2_varlen_bound(monkeypatch, builder_cls, _FA2_SPEC, 1, None)
+    assert bound is None
 
 
 def test_get_kv_sharing_fast_prefill_eligible_layers(monkeypatch: pytest.MonkeyPatch):

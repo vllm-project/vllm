@@ -72,6 +72,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    max_decode_query_len,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -701,8 +702,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     # For FA2, a graph is captured with max_query_len=1, (which is what we
     # capture by default for num_tokens <= max_num_seqs when there is no
     # spec-decode) then these graphs will not work for mixed prefill-decode
-    # (unlike FA3). This is due to special max_query_len=1 packed-GQA handling
-    # in FA2.
+    # (unlike FA3). This is due to FA2's special max_query_len=1 handling, see
+    # get_varlen_cudagraph_max_query_len.
     # In summary if we are running with spec decodes the graphs would
     # work for mixed prefill-decode and uniform-decode. But for non-spec decodes
     # the graphs would not work for mixed prefill-decode; sorta the inverse
@@ -726,6 +727,39 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         kv_cache_spec: "KVCacheSpec",
     ) -> AttentionCGSupport:
         return cls._cudagraph_support
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: "VllmConfig",
+        kv_cache_spec: "KVCacheSpec",
+    ) -> int | None:
+        # Subclasses plan or decode differently and must declare their own bound.
+        if cls is not FlashAttentionMetadataBuilder:
+            return super().get_varlen_cudagraph_max_query_len(
+                vllm_config, kv_cache_spec
+            )
+        # build() splits DCP decode and prefill rows on host query lengths.
+        if vllm_config.parallel_config.decode_context_parallel_size > 1:
+            return None
+        if (
+            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
+            != AttentionCGSupport.UNIFORM_BATCH
+            or not isinstance(kv_cache_spec, AttentionSpec)
+            or get_flash_attn_version(
+                head_size=kv_cache_spec.head_size,
+                head_size_v=kv_cache_spec.head_size_v,
+            )
+            != 2
+        ):
+            return None
+        # FA2 special-cases max_seqlen_q == 1: it drops the causal mask (unless
+        # ALiBi) and, for GQA without a window or ALiBi, packs the query heads
+        # and ignores cu_seqlens_q. Otherwise it reads per-request offsets from
+        # the device cu_seqlens_q, and decode graphs are captured at the decode
+        # width, at least 2 with spec decoding, so they replay any decode batch
+        # up to that width.
+        return max_decode_query_len(vllm_config)
 
     def _get_scheduler_metadata(
         self,
