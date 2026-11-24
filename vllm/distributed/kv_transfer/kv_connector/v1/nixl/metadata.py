@@ -26,6 +26,9 @@ LOOKUP_PIN_MSG = b"lookup_pin"
 # Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
 # PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).
 PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
+
+# Lease renewal notification, D worker -> P worker: HB_NOTIF_PREFIX + "req1,req2".
+HB_NOTIF_PREFIX = "HB:"
 #
 # NIXL Connector Version
 #
@@ -280,10 +283,8 @@ class HeartbeatInfo:
     tp_size: int
     dcp_size: int = 1
     pp_size: int = 1
-    # Per remote request id, the lease deadline the remote exported (its
-    # perf_counter) and the seconds each heartbeat renews it by, when the
-    # remote provided both. The worker keeps an exact model of the lease it
-    # renews from these (NixlBaseConnectorWorker._record_heartbeat_sent).
+    # remote req id -> (exported lease deadline, seconds per renewal), when the
+    # remote exports both; used to model the lease (`_record_heartbeat_sent`).
     leases: dict[ReqId, tuple[float, int]] = field(default_factory=dict)
 
 

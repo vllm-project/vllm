@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -249,6 +249,8 @@ class NixlBaseConnectorScheduler:
         # Reverse lookup: local req_id -> (engine_id, remote_req_id) for O(1) removal
         self._heartbeat_req_engine: dict[ReqId, tuple[EngineId, ReqId]] = {}
         self._last_heartbeat_time: float = 0.0
+        # Requests tracked since the last heartbeat round, sent right away.
+        self._new_heartbeat_reqs: set[tuple[EngineId, ReqId]] = set()
 
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
@@ -487,10 +489,12 @@ class NixlBaseConnectorScheduler:
             remote_engine_id,
             remote_request_id,
         )
+        self._new_heartbeat_reqs.add((remote_engine_id, remote_request_id))
 
     def _stop_heartbeat(self, req_id: ReqId) -> None:
         """Remove *req_id* from heartbeat tracking (if tracked)."""
         if key := self._heartbeat_req_engine.pop(req_id, None):
+            self._new_heartbeat_reqs.discard(key)
             engine_id, remote_id = key
             if info := self._heartbeat_by_engine.get(engine_id):
                 info.req_ids.discard(remote_id)
@@ -739,7 +743,7 @@ class NixlBaseConnectorScheduler:
         """
         return max(
             1 if self._has_mamba or self._bounded_replay else 0,
-            self.vllm_config.num_prefill_lookahead_tokens - 1,
+            self.vllm_config.num_reprefillable_tokens,
         )
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
@@ -882,6 +886,18 @@ class NixlBaseConnectorScheduler:
             if now - self._last_heartbeat_time >= self._heartbeat_interval:
                 self._last_heartbeat_time = now
                 meta.heartbeat_by_engine = self._heartbeat_by_engine
+            elif self._new_heartbeat_reqs:
+                # Renew new requests' leases now rather than at the next round:
+                # a router may have held the request for most of its lease.
+                for engine_id, remote_id in self._new_heartbeat_reqs:
+                    info = self._heartbeat_by_engine[engine_id]
+                    if (new := meta.heartbeat_by_engine.get(engine_id)) is None:
+                        new = replace(info, req_ids=set(), leases={})
+                        meta.heartbeat_by_engine[engine_id] = new
+                    new.req_ids.add(remote_id)
+                    if lease := info.leases.get(remote_id):
+                        new.leases[remote_id] = lease
+            self._new_heartbeat_reqs.clear()
 
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()

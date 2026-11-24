@@ -23,7 +23,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     _KV_BLOCKS_EXPIRY_SAFETY_MARGIN,
-    RemoteLeaseModel,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     HeartbeatInfo,
@@ -61,11 +60,14 @@ _FAKE_WRAPPER = patch(
 )
 
 
-def _make_connector():
+def _make_connector(kv_lease_duration: int = _LEASE):
     """Worker-side NixlConnector (pull mode, no bidirectional transfer) with a
     handshaken fake remote and a zero clock offset."""
     block_size = maybe_update_block_size(32)
-    vllm_config = create_vllm_config(block_size=block_size)
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        kv_connector_extra_config={"kv_lease_duration": kv_lease_duration},
+    )
     kv_cache_config = make_kv_cache_config(block_size=block_size, num_blocks=2)
     connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
     connector.connector_worker = FakeNixlConnectorWorker(
@@ -216,21 +218,15 @@ def test_lease_model_decides_the_read(
     dist_init, expiry_delta, model_deadline_delta, expect_declined
 ):
     connector, worker = _make_connector()
-    worker._remote_leases[_KEY] = RemoteLeaseModel(
-        deadline=time.perf_counter() + model_deadline_delta
-    )
+    worker._remote_leases[_KEY] = time.perf_counter() + model_deadline_delta
     result = _load(connector, _recv_meta(expiry_delta))
     _assert_declined(worker, result, expect_declined)
-    # Bookkeeping is dropped once the read is decided either way.
-    assert _KEY not in worker._remote_leases
 
 
 @_FAKE_WRAPPER
 def test_model_for_another_engine_does_not_count(dist_init):
     connector, worker = _make_connector()
-    worker._remote_leases[("other-engine", _REMOTE_REQ)] = RemoteLeaseModel(
-        deadline=time.perf_counter() + 100.0
-    )
+    worker._remote_leases[("other-engine", _REMOTE_REQ)] = time.perf_counter() + 100
     result = _load(connector, _recv_meta(-10.0))
     _assert_declined(worker, result, True)
 
@@ -277,6 +273,26 @@ def test_heartbeat_chain_end_to_end(
 
 
 @_FAKE_WRAPPER
+@pytest.mark.parametrize("heartbeats", [True, False])
+def test_short_lease_keeps_reads_alive(dist_init, monkeypatch, heartbeats):
+    """With a lease shorter than the default margin allows (6s: 4s renewals,
+    1s heartbeat interval), the margin shrinks to the heartbeat interval, so
+    both the initial lease and heartbeat renewals still allow the read."""
+    lease = 6
+    connector, worker = _make_connector(kv_lease_duration=lease)
+    now = {"t": 0.0}
+    monkeypatch.setattr(time, "perf_counter", lambda: now["t"])
+    meta = _recv_meta(lease)
+    leases = {_REMOTE_REQ: (float(lease), kv_lease_extension(lease))}
+    for t in range(20) if heartbeats else ():
+        now["t"] = float(t)
+        worker._send_heartbeats(_hb_meta(_REMOTE_REQ, leases=leases))
+    now["t"] = 20.0 if heartbeats else 4.0
+    result = _load(connector, meta)
+    _assert_declined(worker, result, False)
+
+
+@_FAKE_WRAPPER
 def test_lease_model_mirrors_the_remote_renewal(dist_init, monkeypatch):
     """Deadline after each heartbeat equals what the remote's _handle_heartbeat
     would hold, with the send time standing in for the arrival time."""
@@ -288,15 +304,17 @@ def test_lease_model_mirrors_the_remote_renewal(dist_init, monkeypatch):
     for t, deadline in expected:
         now["t"] = t
         worker._send_heartbeats(_hb_meta(_REMOTE_REQ, leases=leases))
-        model = worker._remote_leases[_KEY]
-        assert (model.deadline, model.alive) == (deadline, True)
-    # 54 + margin > 58: this heartbeat finds the lease gone; it and all later
-    # ones renew nothing, and the deadline stays where the lease ran out.
-    for t in (54.0, 59.0):
+        assert worker._remote_leases[_KEY] == deadline
+    # 54 + margin > 58: this heartbeat finds the lease gone and renews nothing.
+    now["t"] = 54.0
+    worker._send_heartbeats(_hb_meta(_REMOTE_REQ, leases=leases))
+    assert worker._remote_leases[_KEY] == 58.0
+    # Past 58 the lease is pruned; later heartbeats start again from the
+    # initial deadline (30), which is long gone, so they renew nothing either.
+    for t in (59.0, 64.0):
         now["t"] = t
         worker._send_heartbeats(_hb_meta(_REMOTE_REQ, leases=leases))
-    model = worker._remote_leases[_KEY]
-    assert (model.deadline, model.alive) == (58.0, False)
+        assert _KEY not in worker._remote_leases
 
 
 @_FAKE_WRAPPER
@@ -331,20 +349,25 @@ def test_unknown_clock_offset_builds_no_model(dist_init):
 
 
 @_FAKE_WRAPPER
-def test_send_heartbeats_prunes_finished_requests(dist_init, monkeypatch):
+def test_send_heartbeats_prunes_expired_models(dist_init, monkeypatch):
+    """Rounds may carry only some requests (new ones are sent right away), so
+    models are pruned by deadline rather than by absence from a round."""
     _, worker = _make_connector()
     now = {"t": 100.0}
     monkeypatch.setattr(time, "perf_counter", lambda: now["t"])
     leases = {"a": (130.0, 20), "b": (130.0, 20)}
     worker._send_heartbeats(_hb_meta("a", "b", leases=leases))
-    now["t"] = 112.0
-    worker._send_heartbeats(_hb_meta("a", "b", leases=leases))
-    assert worker._remote_leases[(_REMOTE, "a")].deadline == 132.0
-    # "b" left the scheduler's heartbeat set: its model goes away.
+    # "b" is no longer heartbeated; a round carrying only "a" keeps both.
+    now["t"] = 125.0
     worker._send_heartbeats(_hb_meta("a", leases={"a": leases["a"]}))
-    assert set(worker._remote_leases) == {(_REMOTE, "a")}
-    # An empty heartbeat round (throttled) must not prune anything.
+    assert worker._remote_leases[(_REMOTE, "a")] == 145.0
+    assert set(worker._remote_leases) == {(_REMOTE, "a"), (_REMOTE, "b")}
+    # Past b's deadline the next round drops it; an empty (throttled) round
+    # prunes nothing.
+    now["t"] = 131.0
     worker._send_heartbeats(NixlConnectorMetadata())
+    assert len(worker._remote_leases) == 2
+    worker._send_heartbeats(_hb_meta("a", leases={"a": leases["a"]}))
     assert set(worker._remote_leases) == {(_REMOTE, "a")}
 
 
@@ -396,7 +419,7 @@ def test_replicated_pcp_rank_keeps_a_lease_model(dist_init, monkeypatch):
         connector.bind_connector_metadata(_hb_meta(_REMOTE_REQ, leases=leases))
         connector.start_load_kv(ctx)
         connector.clear_connector_metadata()
-    assert worker._remote_leases[_KEY].deadline == 70.0
+    assert worker._remote_leases[_KEY] == 70.0
 
 
 @_FAKE_WRAPPER
@@ -416,23 +439,6 @@ def test_heartbeat_round_in_the_read_step_is_credited_first(dist_init, monkeypat
     meta.heartbeat_by_engine = _hb_meta(_REMOTE_REQ, leases=leases).heartbeat_by_engine
     result = _load(connector, meta)
     _assert_declined(worker, result, False)
-
-
-@_FAKE_WRAPPER
-def test_model_is_dropped_when_the_transfer_completes(dist_init):
-    """Heartbeats may still go out between the read and its completion; the
-    model they recreate must not outlive the transfer."""
-    connector, worker = _make_connector()
-    leases = {_REMOTE_REQ: (time.perf_counter() + 30.0, 20)}
-    connector.bind_connector_metadata(_recv_meta(20.0))
-    ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
-    connector.start_load_kv(ctx)
-    assert _KEY not in worker._remote_leases  # popped when the read was decided
-    worker._send_heartbeats(_hb_meta(_REMOTE_REQ, leases=leases))
-    assert _KEY in worker._remote_leases
-    result = worker.get_transfer_results()
-    assert "req" in result.finished_recving
-    assert _KEY not in worker._remote_leases
 
 
 # ---------------------------------------------------------------------------

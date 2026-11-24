@@ -47,7 +47,9 @@ from vllm.v1.kv_offload.tiering.p2p.manager import (
     _RECONNECT_MAX_BACKOFF_S,
     _RETAINED_HOLD_CAP_S,
     _UNBOUND_STORE_TIMEOUT_S,
+    P2PDestInfo,
     P2PSecondaryTierManager,
+    P2PSourceInfo,
     _annotate_req_context,
 )
 from vllm.v1.kv_offload.tiering.p2p.session import (
@@ -368,6 +370,50 @@ def test_on_new_request_policy(monkeypatch, kv_params, expected):
     assert mgr.on_new_request(_req_context(kv_params=kv_params)).policy is expected
 
 
+@pytest.mark.parametrize(
+    "kv_params,expect_p2p_store",
+    [
+        (None, False),
+        (_remote_prefiller_kv_params(), False),
+        (_remote_decoder_kv_params(), True),
+    ],
+    ids=["local", "consumer", "producer"],
+)
+def test_primary_store_only_cascades_to_p2p_for_producers(
+    monkeypatch, kv_params, expect_p2p_store
+):
+    p2p = _make_manager()
+    p2p.locality = None
+    _attach_fake_transports(p2p)
+    monkeypatch.setattr(p2p, "_get_or_create_session", lambda peer_id: None)
+    region = _mock_mmap_region(4)
+    example = ExampleSecondaryTierManager(
+        offloading_spec=SimpleNamespace(),
+        primary_kv_view=region.create_kv_memoryview(),
+        tier_type="example",
+    )
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=region)
+    tiering = TieringOffloadingManager(primary, [p2p, example], tier_poll_interval_s=0)
+    ctx = ReqContext(req_id="req", kv_transfer_params=kv_params)
+    keys = [OffloadKey(b"new-chunk")]
+    try:
+        tiering.on_new_request(ctx)
+        assert (
+            tiering.prepare_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        tiering.complete_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
+
+        # No P2P submission also means no primary read/pin or job accounting.
+        assert {job.tier_idx for job in tiering._jobs.values()} == (
+            {0, 1} if expect_p2p_store else {1}
+        )
+        assert example.lookup(keys[0], ctx) is LookupResult.HIT
+        assert bool(p2p._unbound_stores) is expect_p2p_store
+    finally:
+        tiering.shutdown()
+
+
 # ---------------------------------------------------------------------------
 # Tests for serve_external_requests
 # ---------------------------------------------------------------------------
@@ -444,10 +490,11 @@ class TestServeExternalRequests:
 
 
 class TestSubmitStore:
-    def test_no_decode_succeeds_immediately(self):
-        """Without a `remote_decoder` block, job succeeds immediately."""
+    @pytest.mark.parametrize("params", [{}, {"remote_decoder": None}])
+    def test_no_decode_succeeds_immediately(self, params):
+        """An absent or null `remote_decoder` permits a local store."""
         mgr = _make_manager()
-        job = _job_metadata(job_id=1, kv_params={})
+        job = _job_metadata(job_id=1, kv_params=params)
         mgr.submit_store(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
 
@@ -1305,6 +1352,7 @@ class TestHasPendingWork:
             scheduler.kv_holding_waiting = []
             scheduler.async_kv_waiting = []
             scheduler.num_waiting_for_streaming_input = 0
+            scheduler.dropped_streaming_updates = []
             scheduler.finished_req_ids = set()
             scheduler.requests = {}
             scheduler.connector = connector
@@ -1363,6 +1411,7 @@ class TestHasPendingWork:
             scheduler.kv_holding_waiting = []
             scheduler.async_kv_waiting = []
             scheduler.num_waiting_for_streaming_input = 0
+            scheduler.dropped_streaming_updates = []
             scheduler.finished_req_ids = set()
             scheduler.requests = {}
             scheduler.connector = connector
@@ -3700,3 +3749,120 @@ def test_reset_symmetric_lookup_rounds(drain_peers, fetch_before_reset):
     finally:
         tiering.shutdown()
         region.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Tests for non-dict role params rejection
+# ---------------------------------------------------------------------------
+
+
+class TestNonDictRoleParamsRejected:
+    """Non-dict role values must not crash EngineCore.
+
+    Consumer roles (remote_prefiller / remote_kv_source) are treated as
+    absent. A present but malformed remote_decoder is a remote-decode
+    signal and must fail closed.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_remote_prefiller_treated_as_absent(self, bad_value):
+        ctx = _req_context(kv_params={"remote_prefiller": bad_value})
+        assert ctx.get_state(P2PSourceInfo) is None
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_remote_decoder_fails_closed(self, bad_value):
+        ctx = _req_context(kv_params={"remote_decoder": bad_value})
+        dest = ctx.get_state(P2PDestInfo)
+        assert dest is not None
+        assert dest.kv_request_id is None
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_remote_kv_source_treated_as_absent(self, bad_value):
+        ctx = _req_context(kv_params={"remote_kv_source": bad_value})
+        assert ctx.get_state(P2PSourceInfo) is None
+
+    @pytest.mark.parametrize(
+        "bad_params",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_kv_params_treated_as_absent(self, bad_params):
+        ctx = _req_context(kv_params=bad_params)
+        assert ctx.get_state(P2PSourceInfo) is None
+        assert ctx.get_state(P2PDestInfo) is None
+
+    @pytest.mark.parametrize("request_id", [17, ["id"], {"id": "req"}])
+    def test_non_string_transfer_ids_do_not_become_routing_keys(self, request_id):
+        source = _req_context(
+            kv_params={
+                "remote_prefiller": {
+                    "remote_host": "host",
+                    "remote_port": 8000,
+                    "kv_request_id": request_id,
+                }
+            }
+        )
+        assert source.get_state(P2PSourceInfo) is None
+
+        dest = _req_context(
+            kv_params={"remote_decoder": {"kv_request_id": request_id}}
+        ).get_state(P2PDestInfo)
+        assert dest is not None
+        assert dest.kv_request_id is None
+
+    def test_manager_survives_malformed_prefiller_role(self):
+        """Full manager flow: malformed remote_prefiller does not crash
+        on_new_request or lookup — the request is handled locally."""
+        mgr = _make_manager()
+        ctx = _req_context(kv_params={"remote_prefiller": "not-a-dict"})
+        result = mgr.on_new_request(ctx)
+        assert result.policy is OffloadPolicy.CHUNK_LEVEL
+        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+
+    def test_malformed_decoder_role_fails_store(self):
+        """Malformed remote_decoder does not crash; submit_store fails
+        closed instead of succeeding as a local store."""
+        mgr = _make_manager()
+        ctx = _req_context(kv_params={"remote_decoder": "not-a-dict"})
+        result = mgr.on_new_request(ctx)
+        assert result.policy is OffloadPolicy.CHUNK_LEVEL
+        job = _job_metadata(job_id=1, kv_params={"remote_decoder": "not-a-dict"})
+        mgr.submit_store(job)
+        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+
+    def test_manager_survives_malformed_kv_source_role(self):
+        """Malformed remote_kv_source does not crash — request handled
+        locally."""
+        mgr = _make_manager()
+        ctx = _req_context(kv_params={"remote_kv_source": "not-a-dict"})
+        result = mgr.on_new_request(ctx)
+        assert result.policy is OffloadPolicy.CHUNK_LEVEL
+        assert mgr.lookup(b"key", ctx) is LookupResult.MISS

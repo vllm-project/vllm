@@ -111,8 +111,7 @@ class NixlKVConnectorStats(KVConnectorStats):
         # as it is an actionable autoscaler signal rather than a transport
         # issue. Notifications arriving after expiry are surfaced too, as the
         # reader may have consumed KV blocks that were already reused. Declined
-        # reads are the consumer-side view of expiry: requests that reached the
-        # reader only after the remote lease had run out.
+        # expired reads are the consumer-side view of expiry.
         failure_counts = {
             "Num failed transfers": len(self.data["num_failed_transfers"])
             + len(self.data["num_failed_handshakes"])

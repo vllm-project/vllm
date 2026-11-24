@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pull-specific (READ) worker-side logic for the NIXL connector."""
 
+import math
 import time
 from typing import TYPE_CHECKING
 
@@ -9,12 +10,13 @@ import numpy as np
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
-    _KV_BLOCKS_EXPIRY_SAFETY_MARGIN,
     NixlBaseConnectorWorker,
     _RegionPairs,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    HB_NOTIF_PREFIX,
     NixlConnectorMetadata,
+    ReqId,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
@@ -48,11 +50,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         """Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        # Send heartbeats to P-side engines to keep KV blocks alive while
-        # requests sit in the D scheduler WAITING queue. This runs first so
-        # that every rank keeps its lease model (replicated-PCP ranks > 0
-        # return early below yet still gate their reads) and so that a round
-        # shipped in the same step as a read is credited before the gate.
+        # Heartbeats keep P's blocks alive while requests wait on D. Sent first so
+        # replicated-PCP ranks > 0 (which return early) and this step's reads see
+        # this round's renewals.
         self._send_heartbeats(metadata)
 
         for req_id, meta in metadata.reqs_to_recv.items():
@@ -125,47 +125,46 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     )
                 self._reqs_to_send[req_id] = expiration_time
 
-    def _remote_lease_deadline(self, meta: ReqMeta) -> float | None:
-        """Instant (our perf_counter) until which the remote keeps this request's
-        blocks, or None when it cannot be told.
-
-        Starts from the deadline the remote exported in ``kv_transfer_params``,
-        rebased with the handshake clock offset. Heartbeats we sent for the
-        request renew the lease on the remote, and ``_record_heartbeat_sent``
-        keeps an exact model of those renewals (a lease that lapsed between two
-        heartbeats keeps the deadline it ran out at). Without a model (no
-        heartbeat went out, or the remote exported no renewal amount) the
-        initial deadline stands: never guess.
-        """
-        assert meta.remote is not None
-        expiry = meta.remote.blocks_expiry_time
-        if expiry is None:
-            return None
-        clock_offset = self._engine_clock_offset.get(meta.remote.engine_id)
-        if clock_offset is None:
-            return None
-        deadline = expiry - clock_offset
-        model = self._remote_leases.get((meta.remote.engine_id, meta.remote.request_id))
-        if model is None:
-            return deadline
-        return max(deadline, model.deadline)
-
     def _is_remote_read_expired(self, meta: ReqMeta) -> bool:
-        """Whether the remote's lease on this request's blocks has (nearly) run out.
+        """Whether the remote's lease on the blocks has (nearly) run out, after
+        which they may hold other requests' KV. Uses the exported deadline, rebased
+        by the clock offset and extended by our heartbeats' renewals."""
+        remote = meta.remote
+        assert remote is not None
+        clock_offset = self._engine_clock_offset.get(remote.engine_id)
+        # No read for a full local hit; no deadline (older peer): read as before.
+        if (
+            not meta.local_physical_block_ids
+            or remote.blocks_expiry_time is None
+            or clock_offset is None
+        ):
+            return False
+        deadline = max(
+            remote.blocks_expiry_time - clock_offset,
+            self._remote_leases.get((remote.engine_id, remote.request_id), -math.inf),
+        )
+        return time.perf_counter() + self._lease_safety_margin >= deadline
 
-        P exports the deadline of the lease it grants when a prefill finishes (D
-        exports its turn-2 TTL). Past it the remote has released the blocks and
-        reused them, so the read would load other requests' KV and SSM state
-        without any transport error.
-        """
-        # A full local prefix hit issues no read at all. The deadline may be
-        # absent (older peer, or a router that drops it): read as before.
-        if not meta.local_physical_block_ids:
-            return False
-        deadline = self._remote_lease_deadline(meta)
-        if deadline is None:
-            return False
-        return time.perf_counter() + _KV_BLOCKS_EXPIRY_SAFETY_MARGIN >= deadline
+    def _get_lease_lapsed_recvs(self, done_recving: set[ReqId]) -> set[ReqId]:
+        """Completed reads that may have overlapped the remote's lease expiry,
+        so the blocks could have been recycled while being read."""
+        lapsed: set[ReqId] = set()
+        for req_id in done_recving:
+            meta = self._recving_metadata.get(req_id)
+            if meta is None or meta.remote is None:
+                continue
+            # Completion is observed no earlier than it happened: conservative.
+            if self._is_remote_read_expired(meta):
+                logger.debug(
+                    "Lease of %s (remote %s on engine %s) may have run out "
+                    "before its read completed",
+                    req_id,
+                    meta.remote.request_id,
+                    meta.remote.engine_id,
+                )
+                self.xfer_stats.record_declined_expired_read()
+                lapsed.add(req_id)
+        return lapsed
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
@@ -185,12 +184,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Also re-handshakes queued requests that outlived invalid-peer cleanup.
             self._background_nixl_handshake(req_id, engine_id, meta)
             return
-        lease_key = (engine_id, meta.remote.request_id)
         if self._is_remote_read_expired(meta):
-            self._remote_leases.pop(lease_key, None)
-            # One warning per remote engine explains the condition; every
-            # occurrence is counted (Num declined expired reads) and logged at
-            # debug level, as a stalled router can produce these continuously.
+            # Warn once per engine; each decline is counted and debug-logged.
             logger.warning_once(
                 "Declining remote KV reads from engine %s whose lease ran out "
                 "before the read (router held the request longer than "
@@ -211,9 +206,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 req_id, None, self._recv_failures, record_failed_transfer=False
             )
             return
-        # The read goes ahead; the scheduler stops heartbeating this request
-        # once it completes.
-        self._remote_leases.pop(lease_key, None)
 
         # Update last activity from this remote. Mind that cleanup is done on main
         # thread (this one), so we don't race on this structure.
@@ -785,7 +777,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         are reading from the same producer (heterogeneous TP or DCP
         scenario), wait for all consumers to be done pulling.
 
-        Also handles heartbeat notifications ("HB:req1,req2,...") by
+        Also handles heartbeat notifications (HB_NOTIF_PREFIX + "req1,req2") by
         extending the lease on the referenced requests.
         """
         assert self.transfer_topo is not None
@@ -795,8 +787,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 msg = notif.decode("utf-8")
 
                 # Handle heartbeat messages from D-side.
-                if msg.startswith("HB:"):
-                    self._handle_heartbeat(msg[3:])
+                if msg.startswith(HB_NOTIF_PREFIX):
+                    self._handle_heartbeat(msg[len(HB_NOTIF_PREFIX) :])
                     continue
 
                 req_id, expected_consumers = msg.rsplit(":", 1)
