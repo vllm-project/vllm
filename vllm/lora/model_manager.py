@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig
-from vllm.config.lora import LoRAConfig, LoRAVocabModule
+from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseClassificationHeadWithLoRA,
@@ -485,18 +485,17 @@ class LoRAModelManager:
         # Layers that share a suffix with a LoRA layer but are not wrapped,
         # such as BERT's pooler.dense. Adapters with LoRA on them are refused.
         self.unsupported_lora_modules: set[str] = set()
-        self.disabled_vocab_modules: dict[str, LoRAVocabModule] = {}
-        if self.lora_config.target_modules is None:
-            enabled = self.lora_config.enable_vocab_modules or ()
+        self.disabled_vocab_modules: set[str] = set()
+        if (
+            self.lora_config.target_modules is None
+            and not self.lora_config.enable_embedding_modules
+        ):
             # Use model declarations so every pipeline rank can check adapter
             # weights, even when the corresponding layer is on another rank.
             for module in self.model.modules():
-                for name in getattr(module, "embedding_modules", None) or ():
-                    kind: LoRAVocabModule = (
-                        "lm_head" if "lm_head" in name else "embedding"
-                    )
-                    if kind not in enabled:
-                        self.disabled_vocab_modules[name] = kind
+                self.disabled_vocab_modules.update(
+                    getattr(module, "embedding_modules", None) or ()
+                )
 
         named_modules = list(self.model.named_modules(remove_duplicate=False))
         runners = [f"{n}." for n, m in named_modules if isinstance(m, MoERunner)]
@@ -1286,23 +1285,15 @@ class LoRAModelManager:
     def warn_disabled_vocab_modules(self, lora_model: LoRAModel) -> None:
         if not self.disabled_vocab_modules:
             return
-        disabled = {
-            kind
-            for name in lora_model.loras
-            if (kind := self.disabled_vocab_modules.get(name.rsplit(".", 1)[-1]))
-            is not None
-        }
+        disabled = self.disabled_vocab_modules.intersection(
+            name.rsplit(".", 1)[-1] for name in lora_model.loras
+        )
         if disabled:
-            modules = ", ".join(sorted(disabled))
-            enable = " ".join(
-                sorted(disabled.union(self.lora_config.enable_vocab_modules or ()))
-            )
             logger.warning_once(
                 "Ignoring weights for disabled vocabulary modules in LoRA adapter "
-                "ID %d: %s. Enable them with --lora-enable-vocab-modules %s.",
+                "ID %d: %s. Enable them with --enable-lora-embedding-modules.",
                 lora_model.id,
-                modules,
-                enable,
+                ", ".join(sorted(disabled)),
             )
 
     def _pop_lora_weights(self, lora_model: LoRAModel, module_names: list[str]) -> None:

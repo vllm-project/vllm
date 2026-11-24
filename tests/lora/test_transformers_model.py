@@ -133,7 +133,7 @@ def test_lora_on_input_embeddings_not_named_embed_tokens(tmp_path):
     llm = vllm.LLM(
         model_path,
         enable_lora=True,
-        lora_enable_vocab_modules=["embedding"],
+        enable_lora_embedding_modules=True,
         max_lora_rank=8,
         max_model_len=256,
     )

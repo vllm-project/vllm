@@ -480,18 +480,17 @@ vllm serve model --enable-lora --lora-target-modules o_proj
 vllm serve model --enable-lora --lora-target-modules o_proj qkv_proj down_proj
 ```
 
-`--lora-target-modules` is an explicit allowlist for module names or suffixes such as `o_proj`, `qkv_proj`, and `gate_proj`. When set, this list takes precedence over `--lora-enable-vocab-modules`.
+`--lora-target-modules` is an explicit allowlist for module names or suffixes such as `o_proj`, `qkv_proj`, and `gate_proj`. When set, this list takes precedence over `--enable-lora-embedding-modules`.
 
 ### Input Embeddings and `lm_head`
 
 By default, LoRA wraps supported modules except input embeddings and `lm_head`, so it allocates no LoRA buffers for those two module types.
-Use `--lora-enable-vocab-modules` to enable either or both alongside the default modules. The Python `LLM` argument is `lora_enable_vocab_modules`.
+Use `--enable-lora-embedding-modules` to enable both alongside the default modules. The Python `LLM` argument is `enable_lora_embedding_modules=True`.
 
 ```bash
-vllm serve model --enable-lora --lora-enable-vocab-modules embedding
-vllm serve model --enable-lora --lora-enable-vocab-modules embedding lm_head
+vllm serve model --enable-lora --enable-lora-embedding-modules
 ```
 
-If an adapter contains weights for a vocabulary module excluded by default, vLLM logs a warning with the applicable opt-in values, skips those weights, and applies the remaining enabled weights. An explicit `--lora-target-modules` list selects which adapter weights are applied.
+If an adapter contains weights for a vocabulary module excluded by default, vLLM logs a warning, skips those weights, and applies the remaining enabled weights. Use an explicit `--lora-target-modules` list for finer control, such as enabling input embedding LoRA without `lm_head`.
 
 Enabling `lm_head` LoRA through either option disables prompt scoring for the deployment. Requests using `prompt_logprobs` (including `0`) or `prompt_logprob_token_ids` receive a validation error. This restriction also applies to base-model requests because they can be batched with LoRA requests. Input embedding LoRA supports prompt scoring when `lm_head` LoRA is disabled.

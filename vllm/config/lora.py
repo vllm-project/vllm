@@ -25,7 +25,6 @@ else:
 logger = init_logger(__name__)
 
 LoRADType = Literal["auto", "float16", "bfloat16"]
-LoRAVocabModule = Literal["embedding", "lm_head"]
 MaxLoRARanks = Literal[1, 8, 16, 32, 64, 128, 256, 320, 512]
 
 
@@ -49,12 +48,11 @@ class LoRAConfig:
     """Data type for LoRA. If auto, will default to base model dtype."""
     target_modules: list[str] | None = None
     """Restrict LoRA to specific module suffixes (e.g., ["o_proj", "qkv_proj"]).
-    If None, supported modules follow the default policy for vocabulary layers.
-    An explicit list takes precedence over `lora_enable_vocab_modules`."""
-    enable_vocab_modules: list[LoRAVocabModule] | None = None
-    """Enable LoRA on `embedding`, `lm_head`, or both alongside the default
-    LoRA modules. Neither vocabulary module is enabled by default. Ignored
-    when `lora_target_modules` is specified."""
+    An explicit list takes precedence over `enable_lora_embedding_modules`."""
+    enable_embedding_modules: bool = False
+    """Enable LoRA on input embeddings and `lm_head` alongside the default
+    LoRA modules. Both are skipped by default. Ignored when
+    `lora_target_modules` is specified."""
     default_mm_loras: dict[str, str] | None = None
     """Dictionary mapping specific modalities to LoRA model paths; this field
     is only applicable to multimodal models and should be leveraged when a
@@ -100,7 +98,7 @@ class LoRAConfig:
         lm_head_enabled = (
             any("lm_head" in name for name in self.target_modules)
             if self.target_modules is not None
-            else "lm_head" in (self.enable_vocab_modules or ())
+            else self.enable_embedding_modules
         )
         if lm_head_enabled:
             raise VLLMValidationError(
@@ -128,8 +126,6 @@ class LoRAConfig:
         if self.target_modules is not None:
             # Order is not semantic
             factors["target_modules"] = sorted(self.target_modules)
-        if self.enable_vocab_modules is not None:
-            factors["enable_vocab_modules"] = sorted(set(self.enable_vocab_modules))
         return factors
 
     @model_validator(mode="after")
