@@ -209,7 +209,7 @@ steps:
         - vllm/platforms/rocm.py
         - vllm/envs.py
       commands:
-        # Common qnorm/RoPE/cache kernels already run in the H100 AMD mirror.
+        # Common qnorm/RoPE/cache kernels already run in the H100 step's AMD job.
         # Pin the tested BF16 Triton routing and shared-expert path before imports.
         - VLLM_ROCM_USE_AITER_MOE=0 pytest -v -s models/test_deepseek_v4_vl_rocm.py
         - pytest -v -s models/test_deepseek_v4_aiter_mega_moe.py
@@ -865,7 +865,7 @@ steps:
 #       parallelism: 5
 #       timeout_in_minutes: 115
 #     mi250_1:
-#       # Explicit so the base step's count does not multiply the mirror's replicas.
+#       # Its own count, so the H100 job's does not multiply its replicas.
 #       parallelism: 2
 #       timeout_in_minutes: 45
 #       source_file_dependencies:

@@ -173,14 +173,14 @@ steps:
 # configs keep one dedicated GPU per side.
 - label: NixlConnector PD accuracy core
   key: nixlconnector-pd-accuracy-core-2-gpus
+  # No AMD device: the MI300/MI355 jobs above are not optional and already
+  # cover these paths on PRs.
   devices:
     l4:
       num_devices: 2
       timeout_in_minutes: 90
   automatic_shard: true
   working_dir: "/vllm-workspace/tests"
-  # No AMD mirror: the MI300/MI355 mirrors above are optional: false and
-  # already cover these paths on PRs.
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
@@ -336,9 +336,10 @@ steps:
         - vllm/_aiter_ops.py
         - vllm/platforms/rocm.py
       commands:
-        # A mirror does not inherit the parent env, so it is repeated here in
-        # the parent's order. The layouts must stay empty: unset, the script
-        # defaults to HND, which the V4 indexer rejects.
+        # The step env reaches this job too; the inline copy below, in the
+        # step's order, is kept so the command stays as it was. The layouts
+        # must stay empty: unset, the script defaults to HND, which the V4
+        # indexer rejects.
         - >-
           VLLM_ROCM_USE_AITER=1
           ENABLE_HMA_FLAG=1
