@@ -276,7 +276,9 @@ class HYV4VisionPatchMerger(nn.Module):
                 dim=1,
             )
         x = x.reshape(-1, x.shape[-1])
-        return self.after_rms(x) if self.after_rms is not None else x
+        if self.after_rms is not None:
+            x = self.after_rms(x)
+        return x.contiguous()
 
 
 class HYV4VisionTransformer(nn.Module):
