@@ -7061,3 +7061,196 @@ def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
     full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
     manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
     assert manager.estimate_cached_tokens(request) == 3 * block_size
+
+
+def _run_mamba_finished_request(
+    manager: KVCacheManager, request: Request, chunk_ends: list[int]
+) -> int:
+    blocks, hit, junction = manager.get_computed_blocks(request)
+    request.shared_prefix_boundary = junction
+    num_computed = hit
+    prefix_hit: tuple = (hit, blocks)
+    for end in chunk_ends:
+        manager.new_step_starts()
+        assert manager.allocate_slots(request, end - num_computed, *prefix_hit)
+        prefix_hit = ()
+        request.num_computed_tokens = num_computed = end
+    request.status = RequestStatus.FINISHED_STOPPED
+    manager.free(request)
+    return hit
+
+
+@pytest.mark.parametrize("deprioritize", [False, True])
+def test_mamba_deprioritize_superseded_state(deprioritize):
+    """States two or more turns behind the latest tip are deprioritized
+    (evicted after uncached blocks but before normal LRU-cached blocks), while
+    the immediate predecessor stays in normal LRU as a rollback fallback."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 50, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        retention_interval=0,
+        deprioritize_superseded_mamba_states=deprioritize,
+    )
+    older = make_request("o", [9] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, older, [32, 40]) == 0
+    turn1 = make_request("t1", [1] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn1, [32, 40]) == 0
+    turn2 = make_request("t2", [1] * 40 + [2] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn2, [64, 80]) == 32
+
+    pool = manager.block_pool
+    # After turn2, turn1 is the immediate predecessor fallback and must stay
+    # behind older's blocks in normal LRU order (not deprioritized yet).
+    if deprioritize:
+        free_blocks = pool.free_block_queue.get_all_free_blocks()
+        t1_block = pool.get_cached_block(turn1.block_hashes[1], [1])
+        older_block = pool.get_cached_block(older.block_hashes[1], [1])
+        assert t1_block is not None and older_block is not None
+        assert free_blocks.index(t1_block[0]) > free_blocks.index(older_block[0])
+
+    # A third turn makes turn1 two turns behind (superseded) and promotes turn2
+    # to the one-turn fallback.
+    turn3 = make_request("t3", [1] * 40 + [2] * 40 + [3] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn3, [112, 120]) == 80
+
+    free_blocks = pool.free_block_queue.get_all_free_blocks()
+    num_uncached = sum(b.block_hash is None for b in free_blocks)
+    assert num_uncached > 0
+
+    # Consuming all uncached blocks keeps the deprioritized state alive.
+    pool.get_new_blocks(num_uncached)
+    assert pool.get_cached_block(turn1.block_hashes[1], [1]) is not None
+
+    # The first cached eviction takes turn1's state when enabled (while keeping
+    # turn2's fallback intact), or older's blocks when disabled.
+    pool.get_new_blocks(1)
+    turn1_state = pool.get_cached_block(turn1.block_hashes[1], [1])
+    turn2_state = pool.get_cached_block(turn2.block_hashes[4], [1])
+    older_prefix = pool.get_cached_block(older.block_hashes[1], [0, 1])
+    assert (turn1_state is None) == deprioritize
+    assert turn2_state is not None
+    assert (older_prefix is None) == (not deprioritize)
+
+
+def test_mamba_deprioritize_keeps_shared_prefix_junction():
+    """Shared-prefix junction states keep normal LRU order even when multiple
+    later turns advance past them."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 50, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        retention_interval=0,
+        deprioritize_superseded_mamba_states=True,
+    )
+    shared = [7] * (2 * block_size)
+    primer = make_request("p", shared + [50] * 32, block_size, sha256)
+    assert _run_mamba_finished_request(manager, primer, [48, 64]) == 0
+    writer = make_request("w1", shared + [60] * 8, block_size, sha256)
+    assert _run_mamba_finished_request(manager, writer, [32, 40]) == 0
+    turn2 = make_request("w2", shared + [60] * 8 + [61] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn2, [64, 80]) == 32
+    turn3 = make_request(
+        "w3", shared + [60] * 8 + [61] * 40 + [62] * 40, block_size, sha256
+    )
+    assert _run_mamba_finished_request(manager, turn3, [112, 120]) == 80
+
+    pool = manager.block_pool
+    num_uncached = sum(
+        b.block_hash is None for b in pool.free_block_queue.get_all_free_blocks()
+    )
+    pool.get_new_blocks(num_uncached + 1)
+    assert pool.get_cached_block(writer.block_hashes[1], [1]) is not None
+
+
+def test_mamba_deprioritize_deferred_and_cancelled_by_touch():
+    """A superseded state still referenced at finish is deprioritized once its
+    last reference is freed, unless touched by a prefix hit first."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 50, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        retention_interval=0,
+        deprioritize_superseded_mamba_states=True,
+    )
+    older = make_request("o", [9] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, older, [32, 40]) == 0
+    turn1 = make_request("t1", [1] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn1, [32, 40]) == 0
+    turn2 = make_request("t2", [1] * 40 + [2] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn2, [64, 80]) == 32
+
+    pool = manager.block_pool
+    t1_blocks = pool.get_cached_block(turn1.block_hashes[1], [1])
+    assert t1_blocks is not None
+    # Hold an external reference (e.g. KV connector) while turn3 supersedes turn1.
+    pool.touch(t1_blocks)
+    turn3 = make_request("t3", [1] * 40 + [2] * 40 + [3] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn3, [112, 120]) == 80
+    assert t1_blocks[0].block_id in pool._deprioritize_on_free_ids
+
+    # Releasing the last reference places it in the deprioritized tier.
+    pool.free_blocks(t1_blocks)
+    assert t1_blocks[0].block_id not in pool._deprioritize_on_free_ids
+    num_uncached = sum(
+        b.block_hash is None for b in pool.free_block_queue.get_all_free_blocks()
+    )
+    pool.get_new_blocks(num_uncached + 1)
+    assert pool.get_cached_block(turn1.block_hashes[1], [1]) is None
+
+    # A touch on a deferred block cancels its pending deprioritization.
+    older_blocks = pool.get_cached_block(older.block_hashes[1], [1])
+    assert older_blocks is not None
+    pool.touch(older_blocks)
+    pool.deprioritize_blocks(older_blocks, defer=True)
+    assert older_blocks[0].block_id in pool._deprioritize_on_free_ids
+    pool.touch(older_blocks)
+    assert older_blocks[0].block_id not in pool._deprioritize_on_free_ids
+    pool.free_blocks(older_blocks)
+    pool.free_blocks(older_blocks)
+    assert pool.free_block_queue.get_all_free_blocks()[-1] is older_blocks[0]
+
+
+def test_mamba_deprioritize_preempted_request_keeps_old_state():
+    """A preempted request does not deprioritize earlier states and cleans up
+    its tracked hit metadata."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 50, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        retention_interval=0,
+        deprioritize_superseded_mamba_states=True,
+    )
+    older = make_request("o", [9] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, older, [32, 40]) == 0
+    turn1 = make_request("t1", [1] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn1, [32, 40]) == 0
+    turn2 = make_request("t2", [1] * 40 + [2] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, turn2, [64, 80]) == 32
+
+    turn3 = make_request("t3", [1] * 40 + [2] * 40 + [3] * 40, block_size, sha256)
+    blocks, hit, junction = manager.get_computed_blocks(turn3)
+    assert hit == 80
+    turn3.shared_prefix_boundary = junction
+    manager.new_step_starts()
+    assert manager.allocate_slots(turn3, 32, hit, blocks)
+    turn3.num_computed_tokens = 112
+    # Preempted (not finished): free without deprioritizing turn1's state.
+    turn3.status = RequestStatus.PREEMPTED
+    manager.free(turn3)
+    assert turn3.request_id not in manager._prefix_hit_tokens
+
+    pool = manager.block_pool
+    num_uncached = sum(
+        b.block_hash is None for b in pool.free_block_queue.get_all_free_blocks()
+    )
+    pool.get_new_blocks(num_uncached + 1)
+    assert pool.get_cached_block(turn1.block_hashes[1], [1]) is not None

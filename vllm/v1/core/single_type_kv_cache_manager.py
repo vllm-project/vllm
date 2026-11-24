@@ -17,6 +17,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     KVCacheBlock,
+    make_block_hash_with_group_id,
     resolve_block_hashes,
     trim_null_head,
 )
@@ -1937,6 +1938,12 @@ class MambaManager(SingleTypeKVCacheManager):
             self.enable_caching and self.retention_interval is not None
         )
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
+        # Deepest cached state hash left by finished requests and its immediate
+        # predecessor on the same prefix chain. Keeping one predecessor in
+        # normal LRU shields against small tail rollbacks (e.g. tool retries)
+        # while deprioritizing states two or more turns behind.
+        self._tip_hashes: set[BlockHashWithGroupId] = set()
+        self._prev_tip: dict[BlockHashWithGroupId, BlockHashWithGroupId] = {}
         if self.prefix_caching:
             # Mapping from request ID to the index of the block
             # allocated in the previous step
@@ -2464,6 +2471,83 @@ class MambaManager(SingleTypeKVCacheManager):
                 if entry[0] != request_id
             ]
         return super().pop_blocks_for_free(request_id)
+
+    def deprioritize_superseded_states(self, request: Request, hit_tokens: int) -> None:
+        """Deprioritize earlier Mamba tip states superseded by a finished
+        request.
+
+        A tip is the deepest cached Mamba state a finished request left on its
+        prompt. When a request extends past a previous tip, the immediate
+        predecessor is retained in normal LRU as a one-turn rollback fallback,
+        and any older tips along the chain are deprioritized (evicted after
+        uncached blocks but before normal LRU-cached blocks, keeping their
+        hashes until reused). Shared-prefix junction states keep normal LRU
+        order.
+        """
+        block_pool = self.block_pool
+        get_cached_block = block_pool.cached_block_hash_to_block.get_one_block
+        block_hashes = request.block_hashes
+        hash_block_size = block_pool.hash_block_size
+        hit_idx = hit_tokens // hash_block_size - 1
+        alignment = self.cache_hit_alignment_tokens
+        junction_idx = (
+            request.shared_prefix_boundary // alignment * alignment // hash_block_size
+            - 1
+        )
+        tip: BlockHashWithGroupId | None = None
+        tip_idx = -1
+        old_tips: list[BlockHashWithGroupId] = []
+        for idx in range(len(block_hashes) - 1, max(hit_idx, 0) - 1, -1):
+            key = make_block_hash_with_group_id(
+                block_hashes[idx], self.kv_cache_group_id
+            )
+            if get_cached_block(key) is None:
+                continue
+            if tip is None:
+                if idx == hit_idx:
+                    return  # Nothing cached past the hit.
+                tip, tip_idx = key, idx
+                if hit_idx < 0:
+                    break
+            elif idx != junction_idx and key in self._tip_hashes:
+                old_tips.append(key)
+        if tip is None:
+            return
+        if old_tips:
+            immediate = old_tips[0]
+            self._prev_tip[tip] = immediate
+            stale_keys = list(old_tips[1:])
+            cur = self._prev_tip.pop(immediate, None)
+            while cur is not None:
+                if cur in self._tip_hashes:
+                    stale_keys.append(cur)
+                cur = self._prev_tip.pop(cur, None)
+            to_deprioritize: list[KVCacheBlock] = []
+            for key in stale_keys:
+                self._tip_hashes.discard(key)
+                self._prev_tip.pop(key, None)
+                block = get_cached_block(key)
+                if block is not None:
+                    to_deprioritize.append(block)
+            if to_deprioritize:
+                block_pool.deprioritize_blocks(to_deprioritize, defer=True)
+        if 0 <= junction_idx < len(block_hashes):
+            junction_key = make_block_hash_with_group_id(
+                block_hashes[junction_idx], self.kv_cache_group_id
+            )
+            self._tip_hashes.discard(junction_key)
+            self._prev_tip.pop(junction_key, None)
+        if tip_idx != junction_idx:
+            self._tip_hashes.add(tip)
+        if len(self._tip_hashes) > block_pool.num_gpu_blocks:
+            self._tip_hashes = {
+                key for key in self._tip_hashes if get_cached_block(key) is not None
+            }
+            self._prev_tip = {
+                key: prev
+                for key, prev in self._prev_tip.items()
+                if key in self._tip_hashes and prev in self._tip_hashes
+            }
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """Get the number of tokens whose mamba state are not needed anymore. Mamba only

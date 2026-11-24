@@ -144,6 +144,7 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
         enable_mamba_shared_prefix_checkpoint: bool = False,
+        deprioritize_superseded_mamba_states: bool = True,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -185,6 +186,15 @@ class KVCacheManager:
             for manager in self.coordinator.single_type_managers:
                 if isinstance(manager, MambaManager):
                     manager.shared_prefix_checkpoint = True
+        self._mamba_deprioritize_managers: list[MambaManager] = []
+        if enable_caching and deprioritize_superseded_mamba_states:
+            self._mamba_deprioritize_managers = [
+                manager
+                for manager in self.coordinator.single_type_managers
+                if isinstance(manager, MambaManager) and manager.prefix_caching
+            ]
+        # Request ID -> first-admission local prefix-cache hit in tokens.
+        self._prefix_hit_tokens: dict[str, int] = {}
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         # Called when an allocation is short; returns True only if it can now proceed.
@@ -615,6 +625,11 @@ class KVCacheManager:
         ):
             return None
 
+        if self._mamba_deprioritize_managers:
+            self._prefix_hit_tokens.setdefault(
+                request.request_id, num_local_computed_tokens
+            )
+
         if (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
             or num_external_computed_tokens > 0
@@ -665,6 +680,7 @@ class KVCacheManager:
 
         """
         self.coordinator.free(request)
+        self._deprioritize_superseded_mamba_states(request)
 
     def remove_skipped_blocks(
         self,
@@ -698,7 +714,18 @@ class KVCacheManager:
             The request's blocks in allocation order.
 
         """
-        return self.coordinator.pop_blocks_for_free(request)
+        blocks = self.coordinator.pop_blocks_for_free(request)
+        self._deprioritize_superseded_mamba_states(request)
+        return blocks
+
+    def _deprioritize_superseded_mamba_states(self, request: Request) -> None:
+        if not self._mamba_deprioritize_managers:
+            return
+        hit_tokens = self._prefix_hit_tokens.pop(request.request_id, None)
+        if not request.is_finished() or hit_tokens is None:
+            return
+        for manager in self._mamba_deprioritize_managers:
+            manager.deprioritize_superseded_states(request, hit_tokens)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """Evict blocks from the prefix cache by their block IDs.
@@ -721,6 +748,10 @@ class KVCacheManager:
         """
         if not self.coordinator.reset_prefix_cache():
             return False
+        for manager in self._mamba_deprioritize_managers:
+            manager._tip_hashes.clear()
+            manager._prev_tip.clear()
+        self._prefix_hit_tokens.clear()
         if self.collect_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.reset = True
