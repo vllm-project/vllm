@@ -9,20 +9,20 @@ use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ApiError, invalid_request};
+use crate::error::ApiError;
 use crate::state::AppState;
 use crate::utils::utility_call_error;
 use vllm_engine_core_client::EngineCoreClient;
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum WeightCheckerAction {
+enum WeightCheckerAction {
     Checksum,
     Reset,
     Compare,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WeightCheckerModel {
     #[default]
@@ -36,7 +36,6 @@ pub(crate) struct WeightCheckerRequest {
     action: WeightCheckerAction,
     #[serde(default)]
     model: WeightCheckerModel,
-    #[serde(default)]
     baseline: Option<BTreeMap<String, String>>,
 }
 
@@ -70,33 +69,32 @@ pub async fn weight_checker(
 ) -> Result<Json<WeightCheckerResponse>, ApiError> {
     let Json(body) = body?;
     let client = state.engine_core_client();
-    if body.action == WeightCheckerAction::Reset {
-        let errors: Vec<Option<String>> = client
-            .call_utility("reset_weights", (body.model,))
-            .await
-            .map_err(|error| utility_call_error("reset_weights", error))?;
-        if let Some(message) = errors.into_iter().flatten().next() {
-            return Err(ApiError::Conflict { message });
+    let response = match body.action {
+        WeightCheckerAction::Checksum => WeightCheckerResponse::Checksums {
+            checksums: weight_checksums(client, body.model).await?,
+        },
+        WeightCheckerAction::Compare => {
+            let baseline = body.baseline.ok_or_else(|| {
+                ApiError::invalid_body("action='compare' requires a 'baseline' object")
+            })?;
+            let mismatches = mismatches(&weight_checksums(client, body.model).await?, &baseline);
+            WeightCheckerResponse::Compare {
+                matched: mismatches.is_empty(),
+                mismatches,
+            }
         }
-        return Ok(Json(WeightCheckerResponse::Reset { status: "reset" }));
-    }
-    if body.action == WeightCheckerAction::Compare && body.baseline.is_none() {
-        return Err(invalid_request!(
-            param = Some("baseline"),
-            "action='compare' requires a 'baseline' object"
-        ));
-    }
-
-    let checksums = weight_checksums(client, body.model).await?;
-    let Some(baseline) = body.baseline.filter(|_| body.action == WeightCheckerAction::Compare)
-    else {
-        return Ok(Json(WeightCheckerResponse::Checksums { checksums }));
+        WeightCheckerAction::Reset => {
+            let errors: Vec<Option<String>> = client
+                .call_utility("reset_weights", (body.model,))
+                .await
+                .map_err(|error| utility_call_error("reset_weights", error))?;
+            if let Some(message) = errors.into_iter().flatten().next() {
+                return Err(ApiError::Conflict { message });
+            }
+            WeightCheckerResponse::Reset { status: "reset" }
+        }
     };
-    let mismatches = mismatches(&checksums, &baseline);
-    Ok(Json(WeightCheckerResponse::Compare {
-        matched: mismatches.is_empty(),
-        mismatches,
-    }))
+    Ok(Json(response))
 }
 
 /// Merge every worker's weight checksums, rejecting duplicate keys.
