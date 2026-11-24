@@ -260,3 +260,32 @@ def test_abort_during_kv_transfer():
     )
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)
+
+
+def test_pending_kv_transfers_until_send_finishes():
+    """Workers are told to poll while finished requests' blocks await a send."""
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    request = create_request(
+        block_size=block_size,
+        max_tokens=1,
+        num_tokens=block_size * 2,
+        do_remote_decode=True,
+    )
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    assert not scheduler_output.has_pending_kv_transfers
+
+    scheduler.update_from_output(
+        scheduler_output, create_model_runner_output(reqs=[request])
+    )
+    assert request.is_finished()
+    scheduler_output = scheduler.schedule()
+    assert scheduler_output.has_pending_kv_transfers
+
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(reqs=[], finished_sending={request.request_id}),
+    )
+    assert not scheduler.schedule().has_pending_kv_transfers

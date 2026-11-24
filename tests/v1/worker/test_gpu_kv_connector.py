@@ -59,13 +59,13 @@ def _make_connector(
 
 
 def _scheduler_output(
-    has_sync_kv_loads: bool, has_pending_kv_loads: bool = False
+    has_sync_kv_loads: bool, has_pending_kv_transfers: bool = False
 ) -> SimpleNamespace:
     return SimpleNamespace(
         kv_connector_metadata=object(),
         finished_req_ids=set(),
         has_sync_kv_loads=has_sync_kv_loads,
-        has_pending_kv_loads=has_pending_kv_loads,
+        has_pending_kv_transfers=has_pending_kv_transfers,
     )
 
 
@@ -155,13 +155,13 @@ def _empty_output():
 def test_polling_only_while_loads_pending(monkeypatch: pytest.MonkeyPatch):
     connector = _polling_connector(monkeypatch)
     assert connector.next_poll_time() is None
-    connector.pre_forward(_scheduler_output(False, has_pending_kv_loads=True))
+    connector.pre_forward(_scheduler_output(False, has_pending_kv_transfers=True))
     assert connector.next_poll_time() is not None
-    connector.pre_forward(_scheduler_output(False, has_pending_kv_loads=False))
+    connector.pre_forward(_scheduler_output(False, has_pending_kv_transfers=False))
     assert connector.next_poll_time() is None
 
     connector = _make_connector(monkeypatch, [], polls=False)
-    connector.pre_forward(_scheduler_output(False, has_pending_kv_loads=True))
+    connector.pre_forward(_scheduler_output(False, has_pending_kv_transfers=True))
     assert connector.next_poll_time() is None
 
 
@@ -173,7 +173,7 @@ def test_held_results_go_to_next_output(monkeypatch: pytest.MonkeyPatch):
         KVConnectorTransferResults(finished_recving={"a"}),
         KVConnectorTransferResults(finished_recving={"b"}, finished_sending={"c"}),
     )
-    connector.pre_forward(_scheduler_output(False, has_pending_kv_loads=True))
+    connector.pre_forward(_scheduler_output(False, has_pending_kv_transfers=True))
     take = connector.transfer_results_taker()
     assert take is not None
     step_kv_output = connector.post_forward(set())
@@ -201,7 +201,7 @@ def test_held_failures_stay_with_completions(monkeypatch: pytest.MonkeyPatch):
     backend = connector.kv_connector
     assert isinstance(backend, Mock)
     backend.get_block_ids_with_load_errors.return_value = {7}
-    connector.pre_forward(_scheduler_output(False, has_pending_kv_loads=True))
+    connector.pre_forward(_scheduler_output(False, has_pending_kv_transfers=True))
     connector.poll()
 
     output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
@@ -221,10 +221,12 @@ def test_no_forward_output_takes_held_results(monkeypatch: pytest.MonkeyPatch):
         KVConnectorTransferResults(finished_recving={"a"}),
         KVConnectorTransferResults(finished_recving={"b"}),
     )
-    connector.pre_forward(_scheduler_output(False, has_pending_kv_loads=True))
+    connector.pre_forward(_scheduler_output(False, has_pending_kv_transfers=True))
     connector.poll()
 
-    output = connector.no_forward(_scheduler_output(False, has_pending_kv_loads=True))
+    output = connector.no_forward(
+        _scheduler_output(False, has_pending_kv_transfers=True)
+    )
     assert output is not EMPTY_MODEL_RUNNER_OUTPUT
     assert output.kv_connector_output is not None
     assert output.kv_connector_output.finished_recving == {"a", "b"}
@@ -236,7 +238,7 @@ def test_no_forward_output_defers_to_pending_output(monkeypatch: pytest.MonkeyPa
     connector = _polling_connector(
         monkeypatch, KVConnectorTransferResults(finished_sending={"a"})
     )
-    connector.pre_forward(_scheduler_output(False, has_pending_kv_loads=True))
+    connector.pre_forward(_scheduler_output(False, has_pending_kv_transfers=True))
     take = connector.transfer_results_taker()
     assert take is not None
     connector.post_forward(set())
@@ -268,7 +270,7 @@ def test_sync_load_failures_stay_with_their_step(monkeypatch: pytest.MonkeyPatch
     assert isinstance(backend, Mock)
     earlier_take = connector.transfer_results_taker()
 
-    connector.pre_forward(_scheduler_output(True, has_pending_kv_loads=True))
+    connector.pre_forward(_scheduler_output(True, has_pending_kv_transfers=True))
     assert connector.next_poll_time() is None
     take = connector.transfer_results_taker()
     assert earlier_take is not None and take is not None
@@ -291,7 +293,7 @@ def test_poll_error_fails_next_step(monkeypatch: pytest.MonkeyPatch):
     connector = _polling_connector(monkeypatch)
     backend = connector.kv_connector
     assert isinstance(backend, Mock)
-    connector.pre_forward(_scheduler_output(False, has_pending_kv_loads=True))
+    connector.pre_forward(_scheduler_output(False, has_pending_kv_transfers=True))
     backend.get_transfer_results.side_effect = RuntimeError("lost transfer")
     connector.poll()
     assert connector.next_poll_time() is None

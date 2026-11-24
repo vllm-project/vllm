@@ -140,7 +140,7 @@ class ActiveKVConnector(KVConnector):
         self._polls_paused = False
         # Raised by the next post_forward(); polls have no RPC to fail.
         self._poll_error: Exception | None = None
-        self._has_pending_loads = False
+        self._has_pending_transfers = False
         self._last_step_time = 0.0
         self._next_poll_time = 0.0
 
@@ -153,7 +153,7 @@ class ActiveKVConnector(KVConnector):
         if self._disabled:
             return
 
-        self._has_pending_loads = scheduler_output.has_pending_kv_loads
+        self._has_pending_transfers = scheduler_output.has_pending_kv_transfers
         self._last_step_time = time.monotonic()
         kv_connector_metadata = scheduler_output.kv_connector_metadata
         assert kv_connector_metadata is not None
@@ -268,7 +268,7 @@ class ActiveKVConnector(KVConnector):
 
     def next_poll_time(self) -> float | None:
         if (
-            (not self._polls or self._disabled or not self._has_pending_loads)
+            (not self._polls or self._disabled or not self._has_pending_transfers)
             or (self._polls_paused or self._poll_error is not None)
             or time.monotonic() - self._last_step_time > _POLL_ACTIVE_WINDOW_S
         ):

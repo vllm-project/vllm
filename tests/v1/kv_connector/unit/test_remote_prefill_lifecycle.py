@@ -382,6 +382,50 @@ def test_basic_lifecycle():
     assert_scheduler_empty(scheduler)
 
 
+def test_pending_kv_transfers_until_load_finishes():
+    """Workers are told to poll only while an async load is in flight."""
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    request = create_request(
+        block_size=block_size, num_tokens=block_size * 2, do_remote_prefill=True
+    )
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert scheduler_output.has_pending_kv_transfers
+
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(reqs=[], finished_recving={request.request_id}),
+    )
+    # The loaded request runs, with no transfer left in flight.
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+    assert not scheduler_output.has_pending_kv_transfers
+
+
+def test_pending_kv_transfers_while_aborted_load_in_flight():
+    """An aborted request's load stays in flight until it reports done."""
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    request = create_request(
+        block_size=block_size, num_tokens=block_size * 2, do_remote_prefill=True
+    )
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert scheduler.schedule().has_pending_kv_transfers
+
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(reqs=[], finished_recving={request.request_id}),
+    )
+    assert request.request_id not in scheduler.requests
+    assert not scheduler.schedule().has_pending_kv_transfers
+
+
 def test_interleaved_lifecycle():
     """Test Remote Prefills Work Well With Other Requests."""
     vllm_config = create_vllm_config()
