@@ -136,7 +136,8 @@ class ActiveKVConnector(KVConnector):
         self._last_taker = 0
         self._first_taker = 0
         self._has_sync_loads = False
-        # Set until a step with synchronous loads has collected their failures.
+        # From an output's take until the next post_forward(), which finds the
+        # same results, polls would only contend with sending that output.
         self._polls_paused = False
         # Raised by the next post_forward(); polls have no RPC to fail.
         self._poll_error: Exception | None = None
@@ -322,6 +323,7 @@ class ActiveKVConnector(KVConnector):
         with self._results_lock:
             if taker is not None:
                 self._num_pending_takers -= 1
+                self._polls_paused = True
                 if taker < self._first_taker:
                     return
             elif self._num_pending_takers:

@@ -258,6 +258,24 @@ def test_no_polling_without_opt_in(monkeypatch: pytest.MonkeyPatch):
     assert connector.transfer_results_taker() is None
 
 
+def test_polling_paused_from_take_until_next_step(monkeypatch: pytest.MonkeyPatch):
+    """Once an output takes held results, polling waits for the next step."""
+    connector = _polling_connector(monkeypatch)
+    connector.pre_forward(_scheduler_output(False, has_pending_kv_transfers=True))
+    take = connector.transfer_results_taker()
+    assert take is not None
+    connector.post_forward(set())
+    assert connector.next_poll_time() is not None
+
+    take(_empty_output())
+    assert connector.next_poll_time() is None
+
+    connector.pre_forward(_scheduler_output(False, has_pending_kv_transfers=True))
+    assert connector.next_poll_time() is None
+    connector.post_forward(set())
+    assert connector.next_poll_time() is not None
+
+
 def test_sync_load_failures_stay_with_their_step(monkeypatch: pytest.MonkeyPatch):
     """An earlier pending output must not take a later step's sync load failures,
     nor anything collected after them."""
