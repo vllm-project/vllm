@@ -1240,8 +1240,26 @@ class UMBPStoreConnectorScheduler:
                     len(entries),
                 )
                 continue
+            boundaries = sorted({boundary for _, _, boundary in entries})
+            # Core hands off only state pages. A boundary inside an attention
+            # block also needs the matching target and independent draft page.
+            pages: list[tuple[int, int, int]] = []
+            for group_id, group_blocks in zip(
+                self.kv_cache_config.prefix_cacheable_group_ids, tracker.block_ids
+            ):
+                group = self.kv_cache_config.kv_cache_groups[group_id]
+                if not issubclass(
+                    group.manager_cls,
+                    (FullAttentionManager, SlidingWindowManager),
+                ):
+                    continue
+                block_size = self.group_block_sizes[group_id]
+                for boundary in boundaries:
+                    index = boundary // block_size
+                    if boundary % block_size and index < len(group_blocks):
+                        pages.append((group_id, group_blocks[index], boundary))
             plans: list[BlockTransferPlan] = []
-            for group_id, block_id, boundary_tokens in entries:
+            for group_id, block_id, boundary_tokens in [*entries, *pages]:
                 if group_id not in prefix_groups or block_id == NULL_BLOCK_ID:
                     continue
                 if boundary_tokens <= 0:
@@ -1270,7 +1288,7 @@ class UMBPStoreConnectorScheduler:
                 request_id,
                 len(entries),
                 len(plans),
-                sorted({entry[2] for entry in entries}),
+                boundaries,
             )
             if plans:
                 meta.store_plans.extend(plans)
@@ -1536,15 +1554,22 @@ class UMBPStoreConnectorScheduler:
                 num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             )
         )
+        # Fine-grained restore needs the full SWA pages before its partial tail.
+        alignment_tokens = self.block_size
+        if (
+            self._lookup_coordinator is not None
+            and self._lookup_coordinator.enable_partial_hash_hits
+        ):
+            alignment_tokens = self.hash_block_size
         mask = group.manager_cls.reachable_block_mask(
             start_block=indices.start,
             end_block=indices.stop,
-            alignment_tokens=self.block_size,
+            alignment_tokens=alignment_tokens,
             block_size=group.block_size,
             manager_config=group.manager_config,
             retention_interval=self._retention_interval,
             reachable_boundaries=reachable_boundaries,
-            dcp_world_size=self._dcp_size,
+            dcp_world_size=self._dcp_size if group.dcp_sharded else 1,
         )
         if mask is not None and len(mask) != len(indices):
             raise RuntimeError(
@@ -1698,13 +1723,13 @@ class UMBPStoreConnectorScheduler:
         }
         if not sources.keys() <= prefix_groups:
             return False
-        # Core hands off Mamba state pages. Include the matching FA tail page
-        # so every group can resolve the same fine-grained prefix boundary.
+        # Core hands off Mamba state pages. Include matching target and draft
+        # attention tail pages so every group resolves the same boundary.
         for group_id in prefix_groups:
             if (
                 issubclass(
                     self.kv_cache_config.kv_cache_groups[group_id].manager_cls,
-                    FullAttentionManager,
+                    (FullAttentionManager, SlidingWindowManager),
                 )
                 and boundary % self.group_block_sizes[group_id]
             ):

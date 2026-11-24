@@ -9,6 +9,13 @@ restores them when a later request shares a prefix that has left GPU memory.
 - MORI built with UMBP (`BUILD_UMBP=ON`), importable as `mori`.
 - Prefix caching enabled.
 
+For hybrid speculative models, UMBP retains each cache group's replay window
+using that group's DCP sharding. An unsharded draft keeps its original token
+block size even when the target uses DCP; its sliding-window pages are required
+alongside the target checkpoint for a reusable prefix. With fine-grained prefix
+hits enabled, store retention follows the lookup coordinator's hash alignment,
+including the full sliding-window pages preceding a partial tail.
+
 ## Embedded mode
 
 Embedded mode is the default. Each vLLM worker owns a private DRAM pool in its
@@ -110,6 +117,12 @@ excluded, so DP ranks and engines serving the same model with the same layout
 share objects. Different layouts use different keys. Use `key_namespace` to
 separate weight versions that share a model path. There is no per-engine quota; engines can evict each
 other's objects.
+
+Mamba speculative block reservations do not change the stored checkpoint layout.
+The derived namespace normalizes `num_speculative_blocks` to zero, so engines
+with different reservations can share committed states. Shapes, dtypes, cache
+policy and checkpoint alignment still distinguish incompatible checkpoints.
+Existing zero-reservation namespaces are unchanged.
 
 | Event | Behavior |
 | --- | --- |

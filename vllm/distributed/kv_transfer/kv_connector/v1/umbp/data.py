@@ -25,11 +25,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     KVCacheTensor,
+    ManagerConfig,
     compute_layer_kv_cache_shape_bytes,
     compute_layout_strides,
 )
@@ -102,6 +104,13 @@ def _spec_fingerprint(spec: KVCacheSpec) -> dict[str, str]:
         "kind": type(spec).__name__,
         **{item.name: str(getattr(spec, item.name)) for item in dataclass_fields(spec)},
     }
+
+
+def _manager_fingerprint(config: ManagerConfig) -> str:
+    if isinstance(config.params, MambaManager.Params):
+        # Extra speculative slots do not change a committed checkpoint's bytes.
+        config = config.replace_params(num_speculative_blocks=0)
+    return repr(config)
 
 
 def _model_fingerprint(model_config: Any) -> dict[str, Any]:
@@ -276,7 +285,7 @@ class UMBPNamespace:
                 {
                     "layers": group.layer_names,
                     "block_size": group.block_size,
-                    "kind": repr(group.manager_config),
+                    "kind": _manager_fingerprint(group.manager_config),
                     "layer_specs": {
                         name: _spec_fingerprint(spec)
                         for name, spec in group.kv_cache_specs.items()
