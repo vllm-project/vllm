@@ -68,7 +68,9 @@ SM121_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
 #   checkpoints (GDN in_proj_ba, shared-expert gate, router, LM head) at the local
 #   shapes of Qwen3.6-35B-A3B TP=1/2/4 and Qwen3.5-397B-A17B TP=4/8;
 # - the dense Qwen3 local shapes (Qwen3-8B TP=1/2, Qwen3-14B TP=1/2/4,
-#   Qwen3-32B TP=1/2/4/8).
+#   Qwen3-32B TP=1/2/4/8);
+# - the Qwen3 MoE attention, router and LM head local shapes (Qwen3-30B-A3B
+#   TP=1/2/4, Qwen3-235B-A22B TP=4/8).
 SM100_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
     # Qwen3.6-35B-A3B TP1 GDN in_proj_ba.
     (64, 2048): {
@@ -375,6 +377,102 @@ SM100_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
     (5120, 25600): {
         1: SkinnyGemmConfig(1, 160, 1, k_unroll=4, vector_width=4, static_k=25600),
         2: SkinnyGemmConfig(2, 128, 4, k_unroll=4, static_k=25600),
+    },
+    # Qwen3 MoE (Qwen3-30B-A3B TP=1/2/4, Qwen3-235B-A22B TP=4/8): attention, router and
+    # LM head. Routed experts run in FusedMoE and are not affected.
+    # 30B-A3B TP4 o.
+    (2048, 1024): {
+        1: SkinnyGemmConfig(1, 128, 4, k_unroll=2, vector_width=4, static_k=1024),
+        2: SkinnyGemmConfig(2, 128, 4, vector_width=4, static_k=1024),
+        4: SkinnyGemmConfig(4, 64, 4, static_k=1024),
+    },
+    # 235B-A22B TP8 o.
+    (4096, 1024): {
+        1: SkinnyGemmConfig(1, 64, 4, vector_width=4, static_k=1024),
+        2: SkinnyGemmConfig(2, 128, 4, vector_width=4, static_k=1024),
+    },
+    # 30B-A3B TP1 router, 30B-A3B TP2 router, 30B-A3B TP4 router.
+    (128, 2048): {
+        1: SkinnyGemmConfig(1, 128, 1, vector_width=4, static_k=2048),
+        2: SkinnyGemmConfig(2, 128, 1, static_k=2048),
+        4: SkinnyGemmConfig(4, 256, 1, vector_width=4, static_k=2048),
+        8: SkinnyGemmConfig(8, 128, 1, k_unroll=4, static_k=2048),
+    },
+    # 30B-A3B TP4 qkv.
+    (1280, 2048): {
+        1: SkinnyGemmConfig(1, 128, 4, k_unroll=2, static_k=2048),
+        2: SkinnyGemmConfig(2, 256, 2, vector_width=4, static_k=2048),
+        4: SkinnyGemmConfig(4, 128, 2, k_unroll=2),
+    },
+    # 30B-A3B TP2 o.
+    (2048, 2048): {
+        1: SkinnyGemmConfig(1, 64, 4, k_unroll=4, static_k=2048),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=2048),
+        4: SkinnyGemmConfig(4, 64, 2, vector_width=4, static_k=2048),
+        8: SkinnyGemmConfig(8, 128, 2),
+    },
+    # 30B-A3B TP2 qkv.
+    (2560, 2048): {
+        1: SkinnyGemmConfig(1, 64, 2, vector_width=4, static_k=2048),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=2048),
+        4: SkinnyGemmConfig(4, 128, 2, static_k=2048),
+    },
+    # 30B-A3B TP4 lm_head.
+    (37984, 2048): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=4, vector_width=4),
+        2: SkinnyGemmConfig(2, 64, 4, k_unroll=2),
+        4: SkinnyGemmConfig(4, 32, 2, k_unroll=4, vector_width=4),
+    },
+    # 30B-A3B TP2 lm_head.
+    (75968, 2048): {
+        1: SkinnyGemmConfig(1, 256, 4, k_unroll=2, vector_width=4),
+        2: SkinnyGemmConfig(2, 64, 4, k_unroll=2),
+        4: SkinnyGemmConfig(4, 32, 2, k_unroll=4, vector_width=4),
+    },
+    # 30B-A3B TP1 lm_head.
+    (151936, 2048): {
+        1: SkinnyGemmConfig(1, 256, 4),
+        2: SkinnyGemmConfig(2, 32, 2, k_unroll=4),
+        4: SkinnyGemmConfig(4, 32, 4),
+    },
+    # 235B-A22B TP4 router, 235B-A22B TP8 router.
+    (128, 4096): {
+        1: SkinnyGemmConfig(1, 256, 1, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 1, k_unroll=2, static_k=4096),
+        4: SkinnyGemmConfig(4, 256, 1, static_k=4096),
+        8: SkinnyGemmConfig(8, 256, 1, static_k=4096),
+    },
+    # 235B-A22B TP8 qkv.
+    (1280, 4096): {
+        1: SkinnyGemmConfig(1, 256, 2, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 1, static_k=4096),
+        4: SkinnyGemmConfig(4, 128, 2, k_unroll=2),
+        8: SkinnyGemmConfig(8, 128, 1),
+    },
+    # 30B-A3B TP1 o.
+    (2048, 4096): {
+        1: SkinnyGemmConfig(1, 128, 1, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=4096),
+        4: SkinnyGemmConfig(4, 64, 2, k_unroll=4),
+        8: SkinnyGemmConfig(8, 128, 2),
+    },
+    # 235B-A22B TP4 qkv.
+    (2304, 4096): {
+        1: SkinnyGemmConfig(1, 256, 1, vector_width=4, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 1, static_k=4096),
+        4: SkinnyGemmConfig(4, 64, 2, k_unroll=4),
+    },
+    # 235B-A22B TP8 lm_head.
+    (18992, 4096): {
+        1: SkinnyGemmConfig(1, 256, 2, k_unroll=4, vector_width=4),
+        2: SkinnyGemmConfig(2, 128, 4, k_unroll=4),
+        4: SkinnyGemmConfig(4, 32, 2, k_unroll=4),
+    },
+    # 235B-A22B TP4 lm_head.
+    (37984, 4096): {
+        1: SkinnyGemmConfig(1, 256, 2, k_unroll=2),
+        2: SkinnyGemmConfig(2, 128, 4, k_unroll=4),
+        4: SkinnyGemmConfig(4, 32, 2, k_unroll=4, vector_width=4),
     },
 }
 
