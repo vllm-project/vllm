@@ -333,6 +333,7 @@ class SchedulerOutput:
     # Publish these events once this step's worker output is processed, even
     # when the step schedules no tokens but frees encoder cache entries.
     encoder_cache_events: "list[ECCacheEvent] | None" = None
+    encoder_cache_epoch: int = 0
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

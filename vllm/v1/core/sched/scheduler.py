@@ -95,6 +95,8 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
+    _encoder_cache_epoch: int = 0
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1788,6 +1790,7 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             encoder_cache_events=self.encoder_cache_manager.take_events() or None,
+            encoder_cache_epoch=self._encoder_cache_epoch,
             encoder_input_updates=self._get_encoder_input_updates(
                 num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
             ),
@@ -2770,7 +2773,13 @@ class Scheduler(SchedulerInterface):
         # Updates dropped at turn end follow the turn's final output.
         self._emit_dropped_streaming_updates(outputs)
 
-        self._publish_ec_events(scheduler_output.encoder_cache_events or [])
+        # A batch may complete after its encoder cache entries were reset.
+        ec_events = (
+            scheduler_output.encoder_cache_events
+            if scheduler_output.encoder_cache_epoch == self._encoder_cache_epoch
+            else None
+        )
+        self._publish_ec_events(ec_events or [])
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -3468,6 +3477,7 @@ class Scheduler(SchedulerInterface):
         stale vision embeddings are not reused.
         """
         self.encoder_cache_manager.reset()
+        self._encoder_cache_epoch += 1
         if self.ec_connector is not None:
             self.ec_connector.reset()
         # An idle engine does not call `update_from_output`, so publish the
