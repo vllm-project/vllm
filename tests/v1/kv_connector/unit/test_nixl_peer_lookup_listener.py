@@ -213,7 +213,7 @@ def test_miss_is_answered_in_the_first_cycle(served):
     assert not connector.has_pending_push_work()
 
 
-def test_lookup_before_binding_is_refused_not_stuck():
+def test_lookup_before_binding_is_pin_refused_not_stuck():
     manager, hashes = cached_manager()
     sched = make_wired_scheduler(manager)
     sched._lookup.inbox.put((b"id", lookup(hashes, lookup_id="id-3")))
@@ -221,7 +221,9 @@ def test_lookup_before_binding_is_refused_not_stuck():
     make_wired_connector(sched).build_connector_meta(SchedulerOutput.make_empty())
     identity, reply = sched._lookup.outbox.get_nowait()
     assert identity == b"id"
-    assert reply.miss_reason == PeerMissReason.IDENTITY_MISMATCH
+    # Transient (lookups are enabled, just not bound yet), unlike a disabled
+    # engine, which refuses for good with IDENTITY_MISMATCH.
+    assert reply.miss_reason == PeerMissReason.PIN_REFUSED
     assert reply.lookup_id == "id-3"
     sched._lookup.close()
 

@@ -410,11 +410,14 @@ class NixlBaseConnectorScheduler:
             except queue.Empty:
                 return
             if self._peer_pins is None:
-                # Not bound to a cache manager (yet): nothing to look up in.
+                # Lookups are enabled but no cache manager is bound yet (startup,
+                # or a layout that cannot pin). This is transient, unlike the
+                # disabled engine, which answers IDENTITY_MISMATCH for good: the
+                # peer should compute locally now and may ask again later.
                 self._lookup.outbox.put(
                     (
                         identity,
-                        miss_reply(PeerMissReason.IDENTITY_MISMATCH, request.lookup_id),
+                        miss_reply(PeerMissReason.PIN_REFUSED, request.lookup_id),
                     )
                 )
                 self._lookup.wake()
