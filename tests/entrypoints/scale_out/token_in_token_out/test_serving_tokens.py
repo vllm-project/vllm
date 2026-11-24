@@ -146,6 +146,10 @@ async def test_generate_rejects_min_tokens_above_filled_max_tokens(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not register the k2_horizon reasoning parser",
+)
 @pytest.mark.parametrize("model_name", ["IFM/K2-Horizon-0.9B"], scope="module")
 @pytest.mark.parametrize(
     "server",
