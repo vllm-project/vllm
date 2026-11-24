@@ -294,7 +294,6 @@ def test_qwen4_prefill_preserves_gate_rounding_and_continuation(
             mamba_block_size=512,
             mamba_cache_dtype="bfloat16",
             mamba_ssm_cache_dtype="float32",
-            mamba_cache_mode="align",
             enable_prefix_caching=True,
         ),
         scheduler_config=SchedulerConfig(
