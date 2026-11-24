@@ -40,7 +40,7 @@ else()
           vllm-flash-attn
           # vllm-project/flash-attention#206 head until it merges.
           GIT_REPOSITORY https://github.com/jhaotingc/flash-attention.git
-          GIT_TAG 8ef2c611192870bb18f1a9fa908da41b9ed23f6d
+          GIT_TAG e95900d867eb62dd4600e2bdb6987fc05e543e28
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
