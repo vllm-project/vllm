@@ -18,6 +18,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
+from vllm.platforms import current_platform
 
 
 class _FakeLmHead:
@@ -109,7 +110,7 @@ def test_head_dtype_equal_to_model_dtype_uses_quant_method(default_vllm_config):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not current_platform.is_cuda_alike(),
     reason="Exercises the torch.mm(out_dtype=...) device fast path, "
     "available on CUDA and ROCm.",
 )
@@ -140,18 +141,20 @@ def test_fp32_head_uses_mm_fast_path_on_device(default_vllm_config):
     torch.testing.assert_close(logits, expected)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Measures device memory.")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Measures device memory."
+)
 def test_soft_cap_holds_one_logits_sized_tensor(default_vllm_config):
     """The soft cap runs in place: a second logits-sized tensor in every step
     can exceed the torch memory cap of an extensible KV cache."""
     vocab_size, hidden_size, num_tokens = 262144, 16, 64
-    lp = _build_processor(vocab_size)
-    lp.soft_cap = 30.0
+    lp = LogitsProcessor(vocab_size, soft_cap=30.0)
 
     hidden_states = torch.randn(
         num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
     )
     weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device="cuda")
+    # Also warms up the GEMM, whose one-time workspace would count in the peak.
     expected = torch.nn.functional.linear(hidden_states, weight)
     expected = torch.tanh(expected / lp.soft_cap) * lp.soft_cap
 
