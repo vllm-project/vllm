@@ -38,6 +38,7 @@ class ModelArchConfigConvertorBase:
         self.hf_config = hf_config
         self.hf_text_config = hf_text_config
         self.revision = revision
+        self.transformers_backend = False
 
     def get_per_layer_hf_configs(
         self,
@@ -298,6 +299,22 @@ class ModelArchConfigConvertorBase:
         return quant_cfg
 
     def is_deepseek_mla(self) -> bool:
+        if self.transformers_backend:
+            config = self.hf_text_config
+            if (kv_lora_rank := getattr(config, "kv_lora_rank", None)) is None:
+                return False
+            from vllm.model_executor.layers.attention.mla_attention import (
+                MLACommonBackend,
+            )
+
+            head_size = kv_lora_rank + self._get_qk_rope_head_dim()
+            if not MLACommonBackend.supports_head_size(head_size):
+                logger.info_once(
+                    "MLA does not support latent size %d, using full attention.",
+                    head_size,
+                )
+                return False
+            return True
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in (
