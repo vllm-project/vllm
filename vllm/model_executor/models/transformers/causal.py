@@ -325,6 +325,10 @@ class CausalMixin(VllmModelForTextGeneration, Base):
                 break
         else:
             return fallback
+        # Already built as `self.model` (e.g. Llama4, whose `AutoModel` is its
+        # `ForConditionalGeneration`), so there is no head after it to run
+        if model_cls is type(self.model):
+            return fallback
         # Tying would look for the input embeddings in the base model, a stub
         config = copy.deepcopy(self.config)
         config.tie_word_embeddings = False
