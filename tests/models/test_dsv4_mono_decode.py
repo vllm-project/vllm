@@ -15,6 +15,7 @@ import torch
 
 from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+from vllm.model_executor.utils import weights_already_processed
 from vllm.models.deepseek_v4.amd import mono_decode as md
 from vllm.models.deepseek_v4.amd.mono.dims import HIDDEN, MAX_TOKENS, WINDOW
 
@@ -373,27 +374,29 @@ def test_hca_key_table_is_vllms_c128a_width(monkeypatch):
     assert mono is not None and mono.hca_width == 7936
 
 
-def _loaded_layer():
+def _loaded_layer(processed: bool = False):
     """A decoder layer as `prepare` reads it, every E8M0 source scale one
-    128 x 128 block."""
+    128 x 128 block (`processed`: its weights loaded already processed, so
+    the linear kernel never shuffled them here)."""
     t = torch.zeros(1)
 
     def scale():
         return torch.ones(1, 1, dtype=torch.uint8)
 
-    def lin():
-        return SimpleNamespace(weight=t, weight_scale_inv=scale())
+    def lin(**kwargs):
+        return SimpleNamespace(weight=t, weight_scale_inv=scale(), **kwargs)
+
+    def shuffled():
+        return lin(use_aiter_bpreshuffle=True, aiter_bpreshuffled=not processed)
 
     attn = SimpleNamespace(
         prefix="model.layers.5.attn",
-        fused_wqa_wkv=SimpleNamespace(weight=t),
-        _wqa_wkv_scale=scale(),
+        fused_wqa_wkv=shuffled(),
         q_norm=SimpleNamespace(weight=t),
         kv_norm=SimpleNamespace(weight=t),
         wq_b=lin(),
         wo_a=lin(),
-        wo_b=SimpleNamespace(weight=t),
-        _wo_b_scale=scale(),
+        wo_b=shuffled(),
         attn_sink=t,
         rotary_emb=SimpleNamespace(cos_sin_cache=t),
         compress_ratio=md.CSA,
@@ -403,11 +406,7 @@ def _loaded_layer():
     )
     ffn = SimpleNamespace(
         experts=SimpleNamespace(routed_experts=experts),
-        shared_experts=SimpleNamespace(
-            gate_up_proj=SimpleNamespace(weight=t),
-            _gateup_scale=scale(),
-            down_proj=lin(),
-        ),
+        shared_experts=SimpleNamespace(gate_up_proj=shuffled(), down_proj=lin()),
         gate=SimpleNamespace(weight=t, e_score_correction_bias=t),
     )
     hc = {f"hc_{s}_{p}": t for s in ("attn", "ffn") for p in ("fn", "scale", "base")}
@@ -415,9 +414,9 @@ def _loaded_layer():
     return SimpleNamespace(attn=attn, ffn=ffn, **hc, **norms)
 
 
-def test_weight_update_refills_the_derived_scales_in_place(monkeypatch):
-    """Every post-load finalization (a runtime weight update's too) re-derives
-    the kernels' 32 x 32 scales into the tensors captured graphs read."""
+def _prepare_without_kernels(monkeypatch) -> None:
+    """A deployment `prepare` runs in without building the runner or checking
+    the weights against the kernels' dims."""
     _deployment(monkeypatch)
     runner = sys.modules["vllm.models.deepseek_v4.amd.mono.runner"]
 
@@ -427,6 +426,12 @@ def test_weight_update_refills_the_derived_scales_in_place(monkeypatch):
 
     runner.AttnWeights = runner.MonoLayerWeights = _Weights  # type: ignore[attr-defined]
     monkeypatch.setattr(md, "_mono_runner", lambda *args: None)
+
+
+def test_weight_update_refills_the_derived_scales_in_place(monkeypatch):
+    """Every post-load finalization (a runtime weight update's too) re-derives
+    the kernels' 32 x 32 scales into the tensors captured graphs read."""
+    _prepare_without_kernels(monkeypatch)
     layer, mono = _loaded_layer(), md.MonoDecodeLayer(HCA_WIDTH)
 
     def scales():
@@ -444,16 +449,24 @@ def test_weight_update_refills_the_derived_scales_in_place(monkeypatch):
     mono.prepare(layer)
     before = scales()
     a, sh = layer.attn, layer.ffn.shared_experts
-    for src in (
-        a._wqa_wkv_scale,
-        a.wq_b.weight_scale_inv,
-        a.wo_a.weight_scale_inv,
-        a._wo_b_scale,
-        sh._gateup_scale,
-        sh.down_proj.weight_scale_inv,
-    ):
-        src.fill_(7)
+    for lin in (a.fused_wqa_wkv, a.wq_b, a.wo_a, a.wo_b, sh.gate_up_proj, sh.down_proj):
+        lin.weight_scale_inv.fill_(7)
     mono.prepare(layer)
     after = scales()
     assert [s.data_ptr() for s in after] == [s.data_ptr() for s in before]
     assert all(s.shape == (4, 4) and bool((s == 7).all()) for s in after)
+
+
+def test_weights_loaded_already_processed_were_shuffled_at_their_source(
+    monkeypatch,
+):
+    """Weights loaded already processed (the weight cache's IPC loader) skip
+    the linear kernel's processing, which shuffled them where they were first
+    processed: their linears carry the B-preshuffle request, not the kernel's
+    record of the shuffle, which any other load must leave."""
+    _prepare_without_kernels(monkeypatch)
+    layer, mono = _loaded_layer(processed=True), md.MonoDecodeLayer(HCA_WIDTH)
+    with pytest.raises(AssertionError):
+        mono.prepare(layer)
+    with weights_already_processed():
+        mono.prepare(layer)
