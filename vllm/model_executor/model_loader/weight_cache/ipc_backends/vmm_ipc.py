@@ -15,8 +15,10 @@ from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
     IPCBackendBase,
     StorageEntry,
     StorageRecord,
-    materialize_tensor_storages,
     storage_bytes,
+)
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.memfd_storage import (
+    materialize_pinned_cpu_storages,
 )
 from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
     SharedFileDescriptor,
@@ -186,7 +188,7 @@ class VmmIPCBackend(IPCBackendBase):
         return packs
 
     def materialize(self, storages: list[torch.UntypedStorage]) -> list[StorageRecord]:
-        records = materialize_tensor_storages(storages)
+        records = materialize_pinned_cpu_storages(storages)
         groups: dict[int, list[int]] = {}
         for index, record in enumerate(records):
             storage = record.storage

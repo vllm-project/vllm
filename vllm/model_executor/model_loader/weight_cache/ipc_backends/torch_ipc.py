@@ -11,11 +11,11 @@ from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
     IPCBackendBase,
     StorageEntry,
     StorageRecord,
-    materialize_tensor_storages,
     storage_bytes,
 )
-from vllm.model_executor.model_loader.weight_cache.ipc_backends.memfd_ipc import (
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.memfd_storage import (
     MemfdStorageEntry,
+    materialize_pinned_cpu_storages,
 )
 
 
@@ -57,7 +57,7 @@ def export_tensor(record: StorageRecord) -> StorageEntry:
 
 class TorchIPCBackend(IPCBackendBase):
     def materialize(self, storages: list[torch.UntypedStorage]) -> list[StorageRecord]:
-        return materialize_tensor_storages(storages)
+        return materialize_pinned_cpu_storages(storages)
 
     def export_storage(self, record: StorageRecord) -> StorageEntry:
         return export_tensor(record)

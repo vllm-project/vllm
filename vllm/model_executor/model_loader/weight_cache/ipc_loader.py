@@ -66,10 +66,9 @@ _T = TypeVar("_T")
 class IpcModelLoader(BaseModelLoader):
     """Zero-copy loads a model using the weight cache daemon's sharing backend.
 
-    The model is initialized on the meta device and every parameter/buffer is
-    replaced by the daemon's post-quantized tensor, so
-    process_weights_after_loading is skipped entirely. The engine shares the
-    daemon's GPU memory.
+    The model is initialized on the meta device and receives the daemon's
+    post-processed tensors. Post-load hooks can recreate process-local state
+    such as accelerator views over shared pinned CPU weights.
 
     Extra config keys (via --model-loader-extra-config):
 
@@ -288,7 +287,10 @@ class IpcModelLoader(BaseModelLoader):
                 f"weight_cache_backend mismatch: unsupported backend {backend!r}"
             )
         device_index = torch.accelerator.current_device_index()
-        records = rebuild_entries(response["storages"], device_index)
+        try:
+            records = rebuild_entries(response["storages"], device_index)
+        except (OSError, ValueError) as e:
+            raise WeightCacheUnavailableError(str(e)) from e
         return WeightCacheState(
             manifest=response["manifest"],
             storages=records,
