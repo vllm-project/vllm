@@ -287,6 +287,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
+                        mm_processor_kwargs: {},
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
@@ -2192,13 +2193,13 @@ fn serve_args_reject_unsupported_flag_arg() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--uvicorn-log-level",
-        "debug",
+        "--tool-server",
+        "demo",
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'debug' for '--uvicorn-log-level <UVICORN_LOG_LEVEL>': argument is not implemented in Rust frontend yet
+        error: invalid value 'demo' for '--tool-server <TOOL_SERVER>': argument is not implemented in Rust frontend yet
 
         Remove this unsupported argument to continue.
 
@@ -2351,6 +2352,7 @@ fn frontend_args_accept_json() {
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
+                        mm_processor_kwargs: {},
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
@@ -2985,15 +2987,15 @@ fn frontend_args_json_marks_prompt_token_ids_unsupported() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_prompt_token_ids":true}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","tool_server":"demo"}"#,
     ])
     .unwrap_err();
 
     let actual = error.to_string().replace(": \n", ":\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","enable_prompt_token_ids":true}' for '--args-json <JSON>':
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","tool_server":"demo"}' for '--args-json <JSON>': 
         The following arguments are not implemented in Rust frontend yet:
-        - enable_prompt_token_ids
+        - tool_server
 
         Remove these arguments to continue.
 
@@ -3013,16 +3015,16 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","uvicorn_log_level":"debug"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","tool_server":"demo"}"#,
     ])
     .unwrap_err();
 
     let actual = error.to_string().replace(": \n", ":\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","uvicorn_log_level":"debug"}' for '--args-json <JSON>':
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","tool_server":"demo"}' for '--args-json <JSON>':
         The following arguments are not implemented in Rust frontend yet:
         - response_role
-        - uvicorn_log_level
+        - tool_server
 
         Remove these arguments to continue.
 
@@ -3039,8 +3041,12 @@ fn noop_args_are_accepted() {
         "serve",
         "Qwen/Qwen3-0.6B",
         "--disable-fastapi-docs",
+        "--enable-offline-docs",
+        "--aggregate-engine-logging",
+        "--uvicorn-log-level",
+        "debug",
     ])
-    .expect("--disable-fastapi-docs is accepted");
+    .expect("no-op flags are accepted");
 
     Cli::try_parse_from([
         "vllm-rs",
@@ -3052,9 +3058,9 @@ fn noop_args_are_accepted() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","disable_fastapi_docs":true}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","disable_fastapi_docs":true,"enable_offline_docs":true,"aggregate_engine_logging":true,"uvicorn_log_level":"debug"}"#,
     ])
-    .expect("disable_fastapi_docs is accepted");
+    .expect("no-op fields are accepted");
 }
 
 /// `--custom-histogram-buckets` reaches the frontend config on both the
@@ -3439,6 +3445,7 @@ fn serve_args_accept_handshake_aliases() {
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
+                        mm_processor_kwargs: {},
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
@@ -3640,6 +3647,8 @@ fn serve_hybrid_lb_frontend_connects_only_its_ranks() {
             "13345",
             "--data-parallel-size",
             "4",
+            "--mm-processor-cache-gb",
+            "0",
             "--headless-client-handshake-address",
             "ipc:///tmp/vllm-rs-h",
             "--reasoning-parser",
@@ -3748,6 +3757,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             trust_request_chat_template: false,
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
+            mm_processor_kwargs: {},
             lora_modules: [],
             default_mm_loras: {},
             chat_template_content_format: Auto,
@@ -3885,6 +3895,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             trust_request_chat_template: false,
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
+            mm_processor_kwargs: {},
             lora_modules: [],
             default_mm_loras: {},
             chat_template_content_format: Auto,
@@ -4135,6 +4146,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             trust_request_chat_template: false,
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
+            mm_processor_kwargs: {},
             lora_modules: [],
             default_mm_loras: {},
             chat_template_content_format: Auto,
@@ -4420,4 +4432,49 @@ fn tokens_only_implies_scale_out_and_skip_tokenizer_init() {
     let config = args.into_config();
     assert!(config.api_server_options.enable_scale_out);
     assert!(config.skip_tokenizer_init);
+}
+
+#[test]
+fn mm_processor_kwargs_reach_frontend_engine_and_render() {
+    let kwargs = r#"{"images_kwargs":{"min_pixels":3136,"max_pixels":12544}}"#;
+    let expected: HashMap<String, serde_json::Value> = serde_json::from_str(kwargs).unwrap();
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen2-VL-2B-Instruct",
+        "--mm-processor-kwargs",
+        kwargs,
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args")
+    };
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    let forwarded = engine
+        .python_args
+        .windows(2)
+        .find(|args| args[0] == "--mm-processor-kwargs")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<HashMap<String, serde_json::Value>>(&forwarded[1]).unwrap(),
+        expected
+    );
+    assert_eq!(
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+            .mm_processor_kwargs,
+        expected
+    );
+
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2-VL-2B-Instruct",
+        "--mm-processor-kwargs",
+        kwargs,
+    ])
+    .unwrap();
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args")
+    };
+    assert_eq!(args.into_config().mm_processor_kwargs, expected);
 }

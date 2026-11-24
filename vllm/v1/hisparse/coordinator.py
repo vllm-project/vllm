@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -188,7 +188,8 @@ class HiSparseCoordinator:
         self.copies: dict[BlockHashWithGroupId, tuple[KVCacheBlock, ...]] = {}
         self._copy_by_block: dict[int, BlockHashWithGroupId] = {}
         # Unpinned GPU block id -> (request, page) pairs still reading it.
-        self._owners: dict[int, set[tuple[str, int]]] = {}
+        self._owners: dict[int, tuple[tuple[str, int], ...]] = {}
+        self._reuse_watcher = self._on_block_reused
 
     @property
     def gpu_pool(self) -> BlockPool:
@@ -391,13 +392,13 @@ class HiSparseCoordinator:
             for manager in self.resident_managers
         )
 
-    def _unpin_pages(
+    def _iter_unpinnable_pages(
         self,
         request_id: str,
         state: _HiSparseRequestState,
         page_indices: Iterable[int],
-    ) -> None:
-        """Release the pages' resident blocks to the pool, in the given order."""
+    ) -> Iterator[tuple[int, tuple[KVCacheBlock, ...]]]:
+        """Select complete, durable pages outside the active tail."""
         num_unpinnable = self._num_resident_pages(request_id) - ACTIVE_TAIL_PAGES
         pages = [
             page_idx
@@ -412,19 +413,39 @@ class HiSparseCoordinator:
             manager.get_residency_pages(request_id, pages)
             for manager in self.resident_managers
         ]
+        null_slots = {
+            slot
+            for column in columns
+            for slot, block in enumerate(column)
+            if block.is_null
+        }
+        for slot, blocks in enumerate(zip(*columns)):
+            if slot not in null_slots:
+                yield pages[slot], blocks
+
+    def _unpin_pages(
+        self,
+        request_id: str,
+        state: _HiSparseRequestState,
+        page_indices: Iterable[int],
+    ) -> None:
+        """Release the pages' resident blocks to the pool, in the given order."""
+        owners = self._owners
+        unpinned: list[int] = []
         released: list[KVCacheBlock] = []
-        for page_idx, blocks in zip(pages, zip(*columns)):
-            if any(block.is_null for block in blocks):
-                continue
+        for page_idx, blocks in self._iter_unpinnable_pages(
+            request_id, state, page_indices
+        ):
+            single = ((request_id, page_idx),)
             for block in blocks:
-                self._owners.setdefault(block.block_id, set()).add(
-                    (request_id, page_idx)
-                )
+                current = owners.get(block.block_id)
+                owners[block.block_id] = single if current is None else current + single
+            unpinned.append(page_idx)
             released.extend(blocks)
-            state.pinned_clean.discard(page_idx)
-            state.unpinned_pages.add(page_idx)
         if released:
-            self.gpu_pool.unpin_blocks(released, self._on_block_reused)
+            state.pinned_clean.difference_update(unpinned)
+            state.unpinned_pages.update(unpinned)
+            self.gpu_pool.unpin_blocks(released, self._reuse_watcher)
 
     def _unpin_clean_pages(self, request_id: str, state: _HiSparseRequestState) -> None:
         # Tail first, so a prefix loses its tail pages before its head.
@@ -439,6 +460,16 @@ class HiSparseCoordinator:
         for request_id, page_idx in self._owners.pop(block.block_id, ()):
             self._lose_page(request_id, page_idx)
 
+    def _discard_owner(self, block_id: int, owner: tuple[str, int]) -> None:
+        owners = self._owners.get(block_id)
+        if owners is None or owner not in owners:
+            return
+        remaining = tuple(o for o in owners if o != owner)
+        if remaining:
+            self._owners[block_id] = remaining
+        else:
+            del self._owners[block_id]
+
     def _lose_page(self, request_id: str, page_idx: int) -> None:
         self._resident_requests.discard(request_id)
         state = self.request_states.get(request_id)
@@ -448,14 +479,48 @@ class HiSparseCoordinator:
             block = manager.drop_resident_page(request_id, page_idx)
             if block is None:
                 continue
-            owners = self._owners.get(block.block_id)
-            if owners is not None:
-                owners.discard((request_id, page_idx))
+            self._discard_owner(block.block_id, (request_id, page_idx))
         state.unpinned_pages.discard(page_idx)
         if page_idx < state.synced_pages:
             state.stale_pages.add(page_idx)
         for hot_manager in self.hot_managers:
             hot_manager.require_hot(request_id)
+
+    def get_num_reclaimable_blocks(self, request_id: str) -> int:
+        """Clean resident blocks a hot-first allocation can release immediately."""
+        state = self.request_states.get(request_id)
+        if state is None:
+            return 0
+        return sum(
+            block.ref_cnt == 1
+            for _, blocks in self._iter_unpinnable_pages(
+                request_id, state, state.pinned_clean
+            )
+            for block in blocks
+        )
+
+    def try_preallocate_hot(
+        self, request_id: str, shortfall: int, available: int
+    ) -> bool:
+        """Fund this allocation only if Hot fits and reclaim covers the shortfall."""
+        if not self.resident_managers:
+            return False
+        upfront = 0
+        for manager in self.hot_managers:
+            missing = manager.get_num_required_blocks(request_id)
+            upfront += missing
+            # A running request's ordinary estimate counts Hot only after it
+            # has been requested. Charge any additional Hot groups here.
+            if request_id not in manager.hot_required:
+                shortfall += missing
+        if not upfront or upfront > available:
+            return False
+        if self.get_num_reclaimable_blocks(request_id) < shortfall:
+            return False
+        for manager in self.hot_managers:
+            manager.preallocate(request_id)
+        self.update_residency(request_id)
+        return True
 
     def update_residency(self, request_id: str) -> None:
         """Per-step residency policy for a scheduled request.
@@ -489,9 +554,8 @@ class HiSparseCoordinator:
         """Run the per-step residency work for each scheduled request.
 
         `requests` pairs a request id with the number of tokens computed
-        once the step completes. As in `KVCacheCoordinator.cache_blocks`, the
-        last `num_reprefillable_tokens` are not final yet and are not written
-        back.
+        once the step completes. Multi-module MTP may still rewrite the last
+        `num_reprefillable_tokens`, so they are not written back yet.
         """
         if not self.resident_managers:
             return
@@ -620,12 +684,16 @@ class HiSparseCoordinator:
         if num_pages > 0:
             self._import_reservations[request_id] = num_pages
 
-    def finish_host_import(self, request_id: str, *, failed: bool) -> None:
+    def finish_host_import(
+        self, request_id: str, *, failed: bool, restore: bool = True
+    ) -> None:
         num_tokens = self._pending_imports.pop(request_id, None)
         if num_tokens is not None and not failed:
-            self.complete_host_import(request_id, num_tokens)
+            self.complete_host_import(request_id, num_tokens, restore=restore)
 
-    def complete_host_import(self, request_id: str, num_computed_tokens: int) -> None:
+    def complete_host_import(
+        self, request_id: str, num_computed_tokens: int, *, restore: bool = True
+    ) -> None:
         """Publish externally populated host pages after connector completion."""
         if not self.resident_managers:
             return
@@ -634,7 +702,11 @@ class HiSparseCoordinator:
         state = self._get_request_state(request_id)
         state.valid_pages = set(range(num_pages))
         state.ready_prefix_pages = num_pages
-        if num_computed_tokens:
+        if not restore:
+            # Publish the host prefix after cancellation, but skip these pages
+            # when indexing GPU copies: their landing blocks were never filled.
+            state.copies_recorded_blocks = max(state.copies_recorded_blocks, num_pages)
+        elif num_computed_tokens:
             # A local prefix hit's surviving GPU copies cost no copy, so adopt
             # them before promoting the rest.
             self._adopt_pending_copies(request_id, state)
@@ -1033,9 +1105,7 @@ class HiSparseCoordinator:
                 if block.is_null:
                     continue
                 if page_idx in state.unpinned_pages:
-                    owners = self._owners.get(block.block_id)
-                    if owners is not None:
-                        owners.discard((request_id, page_idx))
+                    self._discard_owner(block.block_id, (request_id, page_idx))
                 elif (
                     page_idx in state.valid_pages
                     and page_idx not in state.pending_pages
@@ -1045,7 +1115,7 @@ class HiSparseCoordinator:
                     continue
                 dropped.append(page_idx)
             if released:
-                self.gpu_pool.unpin_blocks(released, self._on_block_reused)
+                self.gpu_pool.unpin_blocks(released, self._reuse_watcher)
             manager.drop_resident_pages(request_id, dropped)
 
 
@@ -1053,6 +1123,7 @@ def get_hisparse_coordinator(
     kv_cache_manager: "KVCacheManager",
     *,
     import_step_tokens: int | None = None,
+    num_reprefillable_tokens: int | None = None,
 ) -> HiSparseCoordinator:
     """Return the coordinator shared by a KV cache manager's HiSparse groups.
 
@@ -1065,14 +1136,19 @@ def get_hisparse_coordinator(
         if coordinator is not None:
             assert isinstance(coordinator, HiSparseCoordinator)
             assert import_step_tokens in (None, coordinator.import_step_tokens)
+            assert num_reprefillable_tokens in (
+                None,
+                coordinator.num_reprefillable_tokens,
+            )
             return coordinator
     coordinator = HiSparseCoordinator(
         kv_cache_manager.kv_cache_config,
         managers,
         kv_cache_manager.max_model_len,
-        num_reprefillable_tokens=kv_cache_manager.coordinator.num_reprefillable_tokens,
+        num_reprefillable_tokens=num_reprefillable_tokens or 0,
         import_step_tokens=import_step_tokens or 0,
     )
     if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")
+    kv_cache_manager.reclaim_blocks = coordinator.try_preallocate_hot
     return coordinator

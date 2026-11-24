@@ -340,6 +340,7 @@ class OnlineRenderer:
         request: ChatCompletionRequest,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Core preprocessing logic for chat requests (no model/engine check).
 
@@ -420,13 +421,16 @@ class OnlineRenderer:
                 tool_dicts=tool_dicts,
                 parser=self.parser,
                 skip_mm_cache=skip_mm_cache,
+                tok_params=tok_params,
             )
         else:
             # For GPT-OSS.
             self.adjust_harmony_request(request)
             should_include_tools = tool_dicts is not None
             conversation, engine_inputs = self._make_request_with_harmony(
-                request, should_include_tools
+                request,
+                should_include_tools,
+                tok_params=tok_params,
             )
 
         observe_request_render_duration(
@@ -658,6 +662,7 @@ class OnlineRenderer:
         self,
         request: ChatCompletionRequest,
         should_include_tools: bool = True,
+        tok_params: TokenizeParams | None = None,
     ):
         """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
         # Harmony is not a vision path: forwarded multimodal features are
@@ -712,8 +717,16 @@ class OnlineRenderer:
         messages.extend(parse_chat_inputs_to_harmony_messages(chat_messages))
 
         # Render prompt token ids.
-        prompt_token_ids = render_for_completion(messages)
-        engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
+
+        prompt = TokensPrompt(prompt_token_ids=render_for_completion(messages))
+        if tok_params is not None:
+            tok_params.apply_post_tokenization(
+                self.renderer.tokenizer,
+                prompt,
+            )
+        engine_input = tokens_input(
+            prompt["prompt_token_ids"], cache_salt=request.cache_salt
+        )
 
         return messages, [engine_input]
 
@@ -841,6 +854,7 @@ class OnlineRenderer:
         prompt_embeds: bytes | list[bytes] | None,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> list[EngineInput]:
         """Copied from GenerateBaseServing._preprocess_completion."""
         prompts = list[SingletonPrompt | bytes]()
@@ -848,7 +862,9 @@ class OnlineRenderer:
             prompts.extend(prompt_to_seq(prompt_embeds))
         if prompt_input is not None:
             prompts.extend(prompt_to_seq(prompt_input))
-        return await self.preprocess_cmpl(request, prompts, skip_mm_cache=skip_mm_cache)
+        return await self.preprocess_cmpl(
+            request, prompts, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+        )
 
     async def preprocess_cmpl(
         self,
@@ -856,6 +872,7 @@ class OnlineRenderer:
         prompts: Sequence[PromptType | bytes],
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> list[EngineInput]:
         """Copied from GenerateBaseServing._preprocess_cmpl."""
         renderer = self.renderer
@@ -874,7 +891,8 @@ class OnlineRenderer:
             )
             for prompt in prompts
         ]
-        tok_params = request.build_tok_params(model_config)
+        if tok_params is None:
+            tok_params = request.build_tok_params(self.model_config)
 
         return await renderer.render_cmpl_async(
             parsed_prompts,
@@ -898,6 +916,7 @@ class OnlineRenderer:
         parser: type[Parser] | None = None,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from GenerateBaseServing._preprocess_chat."""
         renderer = self.renderer
@@ -919,7 +938,8 @@ class OnlineRenderer:
             ),
         )
 
-        tok_params = request.build_tok_params(self.model_config)
+        if tok_params is None:
+            tok_params = request.build_tok_params(self.model_config)
         build_kwargs: dict[str, Any] = {}
         if isinstance(request, (ChatCompletionRequest, ResponsesRequest)):
             build_kwargs["reasoning_effort_map"] = self.reasoning_effort_map
