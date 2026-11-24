@@ -19,7 +19,7 @@ MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
 
 @config
 class HiSparseConfig:
-    """Configuration for HiSparse sparse-MLA KV offloading."""
+    """Configuration for HiSparse DSA and QSA KV offloading."""
 
     device_buffer_size: int | None = Field(default=None, gt=0)
     """Total per-request GPU hot-buffer rows, including the newest-token slot.
@@ -147,8 +147,10 @@ class AttentionConfig:
     the query and the attention output between the layouts. Applies to steps
     with at least `sparse_mla_shard_q_min_tokens` prefill tokens on the
     FlashInfer sparse MLA backend, or on FlashMLA sparse with an FP8 DeepSeek
-    KV cache, without DCP, PCP or HiSparse. A mixed step's decode tokens stay
-    sharded by head."""
+    KV cache, without PCP or HiSparse. Under DCP (on FlashInfer and SM100, with
+    the DCP group equal to the TP group), each rank attends a gathered copy of
+    its tokens' context instead of the DCP-local cache. A mixed step's decode
+    tokens stay sharded by head (on the DCP path under DCP)."""
 
     sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
     """Minimum number of tokens after a step's decodes (requests of at most
@@ -167,7 +169,7 @@ class AttentionConfig:
 
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental
-    Model Runner V2-only HiSparse sparse-MLA decode hot-buffering. It is inferred
+    Model Runner V2-only HiSparse DSA and QSA decode hot-buffering. It is inferred
     with defaults when HiSparseConnector is configured (directly or via
     MultiConnector); set it explicitly only to tune its fields."""
 
@@ -201,15 +203,14 @@ class AttentionConfig:
     flex_attn_q_block_size: int | None = None
     """Logical Q block size for the flex attention block mask.
     Must be a power of 2 and divisible by flex_attn_block_m.
-    If None, uses 16 for paged KV attention on PyTorch >= 2.9, and 128
-    for encoder-only attention or older PyTorch versions."""
+    If None, uses 16 for paged KV attention and 128 for encoder-only
+    attention."""
 
     flex_attn_kv_block_size: int | None = None
     """Logical KV block size for the flex attention block mask.
     Must be a power of 2 and divisible by flex_attn_block_n.
-    If None, uses the KV cache block size for paged KV attention on
-    PyTorch >= 2.9, and 128 for encoder-only attention or older PyTorch
-    versions."""
+    If None, uses the KV cache block size for paged KV attention and 128
+    for encoder-only attention."""
 
     def __post_init__(self) -> None:
         msa_aliases: dict[AttentionBackendEnum, MiniMaxM3MSADecodeBackend] = {

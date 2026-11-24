@@ -146,7 +146,8 @@ def _make_builder(max_num_batched_tokens: int = 8):
 
     builder.device = torch.device("cpu")
     builder.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1)
+        attention_config=SimpleNamespace(hisparse_config=None),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
     builder.kv_cache_spec = SimpleNamespace(block_size=1)
     builder.model_dtype = torch.bfloat16
@@ -157,6 +158,7 @@ def _make_builder(max_num_batched_tokens: int = 8):
     builder.cp_kv_cache_interleave_size = 1
     builder.use_pcp = False
     builder.use_shardq = False
+    builder.dcp_shardq = None
     builder._prefill_backend = None
 
     builder._build_req_id_per_token = _cpu_token_to_req  # type: ignore[method-assign]

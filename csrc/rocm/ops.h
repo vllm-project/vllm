@@ -48,6 +48,13 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
 
+void moe_w4a8_decode_rdna3(
+    at::Tensor& out, const at::Tensor& x, const at::Tensor& topk_ids,
+    const at::Tensor& topk_weights, const std::optional<at::Tensor>& expert_map,
+    at::Tensor& workspace, const at::Tensor& w13, const at::Tensor& w13_scale,
+    const std::optional<at::Tensor>& w13_zp, const at::Tensor& w2,
+    const at::Tensor& w2_scale, const std::optional<at::Tensor>& w2_zp);
+
 // RDNA3.5 decode and prefill attention: the fields of every build (none off
 // gfx1151), and a launch of one build by its index.
 std::vector<int64_t> rdna_decode_configs();
