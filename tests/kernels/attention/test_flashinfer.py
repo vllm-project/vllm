@@ -711,22 +711,71 @@ def test_flashinfer_decode_with_paged_fp8_kv(
 )
 @pytest.mark.parametrize("layout", ["LBNHC", "LBHNC", "BLNHC", "BLHNC"])
 def test_flashinfer_nvfp4_kv_cache_update(default_vllm_config, layout):
+    from tests.v1.core.utils import new_kv_cache_group
+    from vllm.model_executor.layers.attention import Attention
     from vllm.v1.attention.backends import flashinfer as fi
+    from vllm.v1.kv_cache_interface import (
+        AttentionSpec,
+        KVCacheConfig,
+        KVCacheTensor,
+        KVQuantMode,
+    )
+    from vllm.v1.worker.gpu.attn_utils import init_kv_cache
+    from vllm.v1.worker.utils import AttentionGroup
 
     torch.set_default_device("cuda")
-    order = KVCacheLayout[layout].stride_order
-    # [L, B, 2H, N, 64 + 8] NVFP4 pages for two layers; layer 1 is written.
-    shape = (2, 6, 4, 16, 64 + 8)
-    layers = torch.zeros([shape[i] for i in order], dtype=torch.uint8)
-    layers = layers.permute(*(order.index(i) for i in range(5)))
+    config = default_vllm_config
+    config.cache_config.cache_dtype = "nvfp4"
+    config.cache_config.kv_cache_layout = layout
+    layer = Attention(
+        4,
+        128,
+        1.0,
+        2,
+        cache_config=config.cache_config,
+        prefix="layer.1",
+        attn_backend=fi.FlashInferBackend,
+    )
+    # Layer-compact pages can also be split into smaller kernel blocks.
+    compact = KVCacheLayout[layout].is_layer_compact
+    ratio = 2 if compact else 1
+    blocks = 6 // ratio
+    spec = fi.FlashInferBackend.customize_spec(
+        AttentionSpec(
+            block_size=16 * ratio,
+            num_kv_heads=2,
+            head_size=128,
+            dtype=torch.uint8,
+            kv_quant_mode=KVQuantMode.NVFP4,
+        )
+    )
+    page = spec.page_size_bytes
+    placement = KVCacheTensor(
+        size=2 * blocks * page,
+        layers=["layer.0", "layer.1"],
+        layer_stride=blocks * page if compact else page,
+        block_stride=page if compact else 2 * page,
+    )
+    caches = init_kv_cache(
+        {"layer.1": layer},
+        KVCacheConfig(
+            num_blocks=blocks,
+            kv_cache_tensors=[placement],
+            kv_cache_groups=[new_kv_cache_group(placement.layers, spec)],
+        ),
+        torch.device("cuda"),
+        [16],
+        config,
+        attn_groups=[AttentionGroup(fi.FlashInferBackend, ["layer.1"], spec, 0)],
+    )
+    assert layer.kv_cache is caches["layer.1"]
+    assert layer.impl.runtime_kv_cache_views is not None
     one = torch.ones(())
-    layer = torch.nn.Module()
     layer._k_scale = layer._v_scale = one
     kv = torch.randn(2, 96, 2, 128, dtype=torch.bfloat16)
-    impl = fi.FlashInferImpl(4, 128, 1.0, 2, None, None, "nvfp4")
-    impl.do_kv_cache_update(layer, kv[0], kv[1], layers[1], torch.arange(96))
+    layer.impl.do_kv_cache_update(layer, kv[0], kv[1], layer.kv_cache, torch.arange(96))
 
-    data, scales, kv_layout = fi._nvfp4_kv_views(layers[1], 2)
+    data, scales, kv_layout = fi._nvfp4_kv_views(layer.kv_cache, 2)
     pages = torch.arange(6, dtype=torch.int32)[None]
     seq_lens = torch.tensor([96], dtype=torch.int32)
     deq = torch.empty_like(kv)[:, None]
@@ -734,4 +783,4 @@ def test_flashinfer_nvfp4_kv_cache_update(default_vllm_config, layout):
         data, scales, pages, seq_lens, one, one, *deq, kv_layout
     )
     assert ((deq[:, 0] - kv).norm() / kv.norm()) < 0.2
-    assert not layers[0].any()
+    assert not caches["layer.0"].any()

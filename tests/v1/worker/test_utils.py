@@ -1603,6 +1603,43 @@ def test_gdn_runtime_states_alias_planned_pages(layout):
     assert torch.equal(raw, expected)
 
 
+@pytest.mark.parametrize("layout", ["LBHNC", "BLHNC", "LBNHC", "BLNHC"])
+@pytest.mark.parametrize("num_blocks,num_heads", [(1, 1), (3, 2)])
+def test_flashinfer_nvfp4_components_alias_planned_pages(layout, num_blocks, num_heads):
+    from vllm.utils.torch_utils import nvfp4_split_data_scale
+    from vllm.v1.attention.backends.utils import (
+        flashinfer_nvfp4_component_shapes,
+        get_flashinfer_layout_string,
+    )
+    from vllm.v1.kv_cache_interface import create_page_component_views
+
+    layout = KVCacheLayout[layout]
+    rows, width = 16, 72
+    logical = (2, num_blocks, 2 * num_heads, rows, width)
+    order = layout.stride_order
+    raw = torch.zeros(
+        16 + 2 * num_blocks * 2 * num_heads * rows * width, dtype=torch.uint8
+    )
+    layers = raw[16:].view(tuple(logical[i] for i in order))
+    cache = layers.permute(tuple(order.index(i) for i in range(5)))[1]
+    pages = cache.permute(layout.layer_view_order)
+    kv_layout = get_flashinfer_layout_string(layout)
+    shapes = flashinfer_nvfp4_component_shapes(
+        num_blocks, num_heads, rows, width, kv_layout
+    )
+    actual = create_page_component_views(pages, shapes, (torch.uint8,) * 4)
+
+    dims = (num_heads, rows) if kv_layout == "HND" else (rows, num_heads)
+    expected = []
+    for side in pages.view(num_blocks, 2, *dims, width).unbind(1):
+        side = side.as_strided(side.shape, (cache.stride(0), *side.stride()[1:]))
+        expected.extend(nvfp4_split_data_scale(side))
+    for view, reference in zip(actual, expected, strict=True):
+        assert view.shape == reference.shape
+        assert view.stride() == reference.stride()
+        assert view.data_ptr() == reference.data_ptr()
+
+
 class _TestReplaySSMMixer(MambaMixer2):
     def __init__(self, backend: MambaBackendEnum = MambaBackendEnum.FLASHINFER):
         torch.nn.Module.__init__(self)

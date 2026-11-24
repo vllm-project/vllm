@@ -978,6 +978,8 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
                 layer.impl._k_scale_cache = None
             if hasattr(layer.impl, "_v_scale_cache"):
                 layer.impl._v_scale_cache = None
+            if getattr(layer.impl, "runtime_kv_cache_views", None) is not None:
+                layer.impl.runtime_kv_cache_views = None
             if hasattr(layer.impl, "_kv_view_cache"):
                 layer.impl._kv_view_cache = None
         for name in ("_replayssm_ring_start", "_replayssm_prev_num_accepted"):

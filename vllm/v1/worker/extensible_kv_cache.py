@@ -575,6 +575,7 @@ def extend_kv_cache(
             runner.kv_cache_config,
             runner.vllm_config,
             attn_groups,
+            runner.kernel_block_sizes,
         )
         runner.kv_caches = [
             cache
