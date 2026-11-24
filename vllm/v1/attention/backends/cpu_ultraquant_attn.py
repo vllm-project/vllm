@@ -209,35 +209,22 @@ class CPUUltraQuantAttentionMetadataBuilder(CPUAttentionMetadataBuilder):
 class CPUUltraQuantAttentionImpl(CPUAttentionBackendImpl):
     """FP4 E2M1 codes with UE8M0 group-of-32 scales and Hadamard-rotated K."""
 
-    @property
-    def rotation(self) -> torch.Tensor:
-        return hadamard_matrix(self.head_size, torch.device("cpu"), torch.float32)
-
-    @property
-    def rotation_t(self) -> torch.Tensor:
-        """Transposed rotation in bf16, for the decode query."""
-        t = getattr(self, "_rot_t", None)
-        if t is None:
-            t = self.rotation.T.to(torch.bfloat16).contiguous()
-            self._rot_t = t
-        return t
-
-    @property
-    def fp8_widen(self) -> torch.Tensor:
-        """Every FP8 E4M3 bit pattern as bf16.
-
-        Torch's own fp8->bf16 conversion is scalar and costs more than the
-        rotation it follows; a 256-entry gather gives the identical bytes.
-        """
-        t = getattr(self, "_fp8_tbl", None)
-        if t is None:
-            t = (
-                torch.arange(256, dtype=torch.uint8)
-                .view(torch.float8_e4m3fn)
-                .to(torch.bfloat16)
-            )
-            self._fp8_tbl = t
-        return t
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        cpu = torch.device("cpu")
+        self.rotation = hadamard_matrix(self.head_size, cpu, torch.float32)
+        # The decode query wants the transpose, but the Sylvester Hadamard is
+        # symmetric and hadamard_matrix caches per dtype, so this is both the
+        # transpose and the same matrix the store's bf16 path rotates K with.
+        self.rotation_t = hadamard_matrix(self.head_size, cpu, torch.bfloat16)
+        # Every FP8 E4M3 bit pattern as bf16. Torch's own fp8->bf16 conversion
+        # is scalar and costs more than the rotation it follows; a 256-entry
+        # gather gives the identical bytes.
+        self.fp8_widen = (
+            torch.arange(256, dtype=torch.uint8)
+            .view(torch.float8_e4m3fn)
+            .to(torch.bfloat16)
+        )
 
     def do_kv_cache_update(
         self,

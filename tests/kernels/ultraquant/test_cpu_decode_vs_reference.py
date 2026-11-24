@@ -81,73 +81,87 @@ def _rel_err(actual, expected):
     return ((a - b).norm() / b.norm()).item()
 
 
-@pytest.mark.parametrize("num_kv_heads,query_group_size", [(1, 1), (8, 3), (2, 8)])
-@pytest.mark.parametrize("seq_len", [1, 31, 128, 999])
-@pytest.mark.parametrize("head_dim", [64, 128])
-def test_decode_matches_reference(num_kv_heads, query_group_size, seq_len, head_dim):
-    set_random_seed(0xDEC0DE)
-    batch, block_size = 2, 32
+def _check_against_reference(
+    *,
+    lens: list[int],
+    num_kv_heads: int,
+    query_group_size: int,
+    head_dim: int,
+    kv_dtype: torch.dtype = torch.float32,
+    rot_dtype: torch.dtype | None = None,
+    with_sinks: bool = False,
+    tol: float = _FAST_EXP_TOL,
+) -> None:
+    """Decode a batch of sequence lengths `lens` and hold every row to the
+    reference.
+
+    Comparing row by row rather than over the whole batch is what lets a
+    ragged batch share this path: each row is checked against a reference run
+    on its own length, so a sequence that stops mid-block cannot pass by
+    picking up the block's unwritten tail.
+    """
+    batch = len(lens)
     num_q_heads = num_kv_heads * query_group_size
     scale = head_dim**-0.5
 
     query = torch.randn(batch, num_q_heads, head_dim, dtype=torch.bfloat16)
-    key = torch.randn(batch, seq_len, num_kv_heads, head_dim)
+    key = torch.randn(batch, max(lens), num_kv_heads, head_dim, dtype=kv_dtype)
     value = torch.randn_like(key)
-    kv_cache, block_table = _build_paged_cache(key, value, block_size)
-    seq_lens = torch.full((batch,), seq_len, dtype=torch.int32)
+    sinks = torch.randn(num_q_heads, dtype=torch.float32) if with_sinks else None
 
-    actual = _decode(query, kv_cache, block_table, seq_lens, scale)
-    expected = reference_ultraquant_attention(
-        query=query, key=key, value=value, scale=scale
-    )
-    assert _rel_err(actual, expected) < _FAST_EXP_TOL
-
-
-def test_decode_handles_ragged_seq_lens():
-    """Sequences that stop mid-block must not read the block's unwritten tail."""
-    set_random_seed(0xAA)
-    batch, num_kv_heads, num_q_heads, head_dim, block_size = 3, 2, 6, 128, 32
-    lens = [1, 33, 100]
-    scale = head_dim**-0.5
-
-    key = torch.randn(batch, max(lens), num_kv_heads, head_dim)
-    value = torch.randn_like(key)
-    kv_cache, block_table = _build_paged_cache(key, value, block_size)
-    query = torch.randn(batch, num_q_heads, head_dim, dtype=torch.bfloat16)
-
+    kv_cache, block_table = _build_paged_cache(key, value, block_size=32)
     actual = _decode(
-        query, kv_cache, block_table, torch.tensor(lens, dtype=torch.int32), scale
+        query,
+        kv_cache,
+        block_table,
+        torch.tensor(lens, dtype=torch.int32),
+        scale,
+        sinks,
+        rot_dtype,
     )
+
     for b, n in enumerate(lens):
         expected = reference_ultraquant_attention(
             query=query[b : b + 1],
             key=key[b : b + 1, :n],
             value=value[b : b + 1, :n],
             scale=scale,
+            sinks=sinks,
         )
-        assert _rel_err(actual[b : b + 1], expected) < _FAST_EXP_TOL, (
-            f"seq {b} (len {n})"
-        )
+        assert _rel_err(actual[b : b + 1], expected) < tol, f"seq {b} (len {n})"
+
+
+@pytest.mark.parametrize("num_kv_heads,query_group_size", [(1, 1), (8, 3), (2, 8)])
+@pytest.mark.parametrize("seq_len", [1, 31, 128, 999])
+@pytest.mark.parametrize("head_dim", [64, 128])
+def test_decode_matches_reference(num_kv_heads, query_group_size, seq_len, head_dim):
+    set_random_seed(0xDEC0DE)
+    _check_against_reference(
+        lens=[seq_len] * 2,
+        num_kv_heads=num_kv_heads,
+        query_group_size=query_group_size,
+        head_dim=head_dim,
+    )
+
+
+@pytest.mark.parametrize("lens", [[1, 33, 100], [32, 64, 96], [1, 1, 999]])
+def test_decode_handles_ragged_seq_lens(lens):
+    """Sequences that stop mid-block must not read the block's unwritten tail."""
+    set_random_seed(0xAA)
+    _check_against_reference(
+        lens=lens, num_kv_heads=2, query_group_size=3, head_dim=128
+    )
 
 
 def test_decode_applies_sinks():
     set_random_seed(0x5151)
-    batch, num_kv_heads, num_q_heads, head_dim = 2, 2, 4, 128
-    seq_len, block_size = 64, 32
-    scale = head_dim**-0.5
-
-    query = torch.randn(batch, num_q_heads, head_dim, dtype=torch.bfloat16)
-    key = torch.randn(batch, seq_len, num_kv_heads, head_dim)
-    value = torch.randn_like(key)
-    kv_cache, block_table = _build_paged_cache(key, value, block_size)
-    seq_lens = torch.full((batch,), seq_len, dtype=torch.int32)
-    sinks = torch.randn(num_q_heads, dtype=torch.float32)
-
-    actual = _decode(query, kv_cache, block_table, seq_lens, scale, sinks)
-    expected = reference_ultraquant_attention(
-        query=query, key=key, value=value, scale=scale, sinks=sinks
+    _check_against_reference(
+        lens=[64, 64],
+        num_kv_heads=2,
+        query_group_size=2,
+        head_dim=128,
+        with_sinks=True,
     )
-    assert _rel_err(actual, expected) < _FAST_EXP_TOL
 
 
 @pytest.mark.parametrize("head_dim", [64, 128, 256])
@@ -155,19 +169,12 @@ def test_decode_in_backend_precision(head_dim):
     """End to end on the precision the backend ships: both the store's K
     rotation and the query's run in bf16, on top of the FP4 cache itself."""
     set_random_seed(0xB16)
-    batch, num_kv_heads, num_q_heads, seq_len, block_size = 2, 2, 6, 512, 32
-    scale = head_dim**-0.5
-
-    query = torch.randn(batch, num_q_heads, head_dim, dtype=torch.bfloat16)
-    key = torch.randn(batch, seq_len, num_kv_heads, head_dim, dtype=torch.bfloat16)
-    value = torch.randn_like(key)
-    kv_cache, block_table = _build_paged_cache(key, value, block_size)
-    seq_lens = torch.full((batch,), seq_len, dtype=torch.int32)
-
-    actual = _decode(
-        query, kv_cache, block_table, seq_lens, scale, rot_dtype=torch.bfloat16
+    _check_against_reference(
+        lens=[512, 512],
+        num_kv_heads=2,
+        query_group_size=3,
+        head_dim=head_dim,
+        kv_dtype=torch.bfloat16,
+        rot_dtype=torch.bfloat16,
+        tol=5e-2,
     )
-    expected = reference_ultraquant_attention(
-        query=query, key=key, value=value, scale=scale
-    )
-    assert _rel_err(actual, expected) < 5e-2
