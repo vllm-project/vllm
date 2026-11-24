@@ -9,6 +9,10 @@ import torch.nn as nn
 
 import vllm.ir
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+)
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -20,7 +24,7 @@ from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
     record_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheLayerConfig
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -103,9 +107,13 @@ class WorkerBase:
             vllm_config.compilation_config.ir_enable_torch_wrap
         )
 
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+    def get_kv_cache_layer_configs(self) -> dict[str, KVCacheLayerConfig]:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
+
+    def set_mamba_block_size(self, mamba_block_size: int) -> None:
+        """Assign the Mamba block size resolved by the core."""
+        self.vllm_config.cache_config.mamba_block_size = mamba_block_size
 
     def get_supported_kv_cache_layouts(self) -> list[str]:
         """Layout names every attention backend supports, most preferred first."""
@@ -148,9 +156,15 @@ class WorkerBase:
         """Basic health check (override for device-specific checks)."""
         return
 
+    def notify_kv_cache_ready(self) -> None:
+        """Finish startup device work before notifying the worker connector."""
+        if has_kv_transfer_group():
+            self.synchronize_device()
+            get_kv_transfer_group().on_kv_cache_ready()
+
     def synchronize_device(self) -> None:
         """Block until in-flight device work completes; backends outside
-        ``torch.accelerator`` must override with their own wait."""
+        `torch.accelerator` must override with their own wait."""
         if torch.accelerator.is_available():
             torch.accelerator.synchronize()
 
@@ -177,6 +191,11 @@ class WorkerBase:
 
     def supports_draft_weight_updates(self) -> bool:
         """Whether this worker can update its configured speculative model."""
+        return False
+
+    def has_incomplete_weight_update(self) -> bool:
+        """Whether a weight update started and has not finished successfully,
+        so the model weights may be incomplete."""
         return False
 
     def apply_model(self, fn: Callable[[nn.Module], _R]) -> _R:
@@ -208,12 +227,6 @@ class WorkerBase:
         self, grammar_output: GrammarOutput
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         """Should be called immediately after execute_model iff it returned None."""
-        raise NotImplementedError
-
-    def get_cache_block_size_bytes(self) -> int:
-        """Return the size of a single cache block, in bytes. Used in
-        speculative decoding.
-        """
         raise NotImplementedError
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -305,8 +318,8 @@ class WorkerWrapperBase:
 
         load_general_plugins()
 
-        # Let the platform replace core Triton kernels (e.g. CPU fallback
-        # implementations) before any worker or model code can launch them.
+        # Let the platform replace core Triton kernels before any worker or
+        # model code can launch them.
         from vllm.platforms import current_platform
 
         current_platform.register_triton_kernel_overrides()

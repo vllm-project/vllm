@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.ultraquant.format import DEFAULT_CONSTANT_C, slot_size
 from vllm.v1.attention.ops.ultraquant.reference import (

@@ -3,6 +3,7 @@
 
 import asyncio
 import itertools
+import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
@@ -42,7 +43,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
-from vllm.logprobs import Logprob
+from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.outputs import RequestOutput
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -52,6 +53,63 @@ from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
 logger = init_logger(__name__)
+
+
+def _padded_prompt_logprobs(
+    prompt_logprobs: PromptLogprobs | None, num_prompt_tokens: int
+) -> PromptLogprobs:
+    """One entry per prompt token; a request aborted mid-prefill has logprobs
+    only for the prompt tokens it processed, or none."""
+    if prompt_logprobs is not None and len(prompt_logprobs) == num_prompt_tokens:
+        return prompt_logprobs
+    logprobs = list(prompt_logprobs or [])
+    return logprobs + [None] * (num_prompt_tokens - len(logprobs))
+
+
+_PROBE_TEXT = "zZ_vllm_sse_probe_Zz"
+_PROBE_INDEX = 987654321
+_encode_delta_text = json.JSONEncoder(ensure_ascii=False).encode
+
+
+def _delta_frame_template(
+    request_id: str, created_time: int, model_name: str
+) -> tuple[str, str, str] | None:
+    """Split a probe chunk into the parts of a plain-delta SSE frame that are
+    constant for a stream, so only index and text are rendered per chunk.
+
+    Taking them from the serializer keeps frames byte-identical to
+    `model_dump_json(exclude_unset=True)` if the models gain fields.
+
+    Returns:
+        `(prefix, infix, suffix)`, or None if the sentinels are ambiguous.
+
+    """
+    probe = CompletionStreamResponse(
+        id=request_id,
+        object="text_completion",
+        created=created_time,
+        model=model_name,
+        choices=[
+            CompletionResponseStreamChoice(
+                index=_PROBE_INDEX,
+                text=_PROBE_TEXT,
+                logprobs=None,
+                finish_reason=None,
+                stop_reason=None,
+                prompt_token_ids=None,
+                token_ids=None,
+                weight_versions=None,
+            )
+        ],
+        kv_transfer_params=None,
+    )
+    frame = f"data: {probe.model_dump_json(exclude_unset=True)}\n\n"
+    index, text = str(_PROBE_INDEX), json.dumps(_PROBE_TEXT)
+    if frame.count(index) != 1 or frame.count(text) != 1:
+        return None
+    prefix, rest = frame.split(index, 1)
+    infix, suffix = rest.split(text, 1)
+    return prefix, infix, suffix
 
 
 class OpenAIServingCompletion(GenerateBaseServing):
@@ -205,6 +263,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     trace_headers=trace_headers,
                     session_id=session_id,
                     priority=self._get_priority(request, raw_request),
+                    data_parallel_rank=data_parallel_rank,
                 )
             else:
                 generator = self.engine_client.generate(
@@ -323,6 +382,20 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
         last_res: RequestOutput | None = None
         try:
+            # Requests that can only emit plain delta chunks render them from a
+            # per-stream template; everything else uses the model path below.
+            delta_template = None
+            if (
+                not request.echo
+                and request.logprobs is None
+                and not request.return_token_ids
+                and not request.return_weight_versions
+                and not include_continuous_usage
+            ):
+                delta_template = _delta_frame_template(
+                    request_id, created_time, model_name
+                )
+
             async for prompt_idx, res in result_generator:
                 last_res = res
                 prompt_token_ids = res.prompt_token_ids
@@ -331,11 +404,6 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 if first_iteration:
                     num_cached_tokens = res.num_cached_tokens
                     first_iteration = False
-
-                prompt_text = res.prompt
-                if prompt_text is None:
-                    engine_input = engine_inputs[prompt_idx]
-                    prompt_text = self._extract_prompt_text(engine_input)
 
                 # Prompt details are excluded from later streamed outputs
                 if prompt_token_ids is not None:
@@ -357,14 +425,22 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     assert request.max_tokens is not None
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
-                        if request.return_token_ids:
-                            prompt_text = ""
-                        assert prompt_text is not None
+                        prompt_text = "" if request.return_token_ids else res.prompt
+                        if prompt_text is None:
+                            prompt_text = self._extract_prompt_text(
+                                engine_inputs[prompt_idx]
+                            )
                         if request.max_tokens == 0:
                             # only return the prompt
                             delta_text = prompt_text
                             delta_token_ids = prompt_token_ids
-                            out_logprobs = prompt_logprobs
+                            out_logprobs = (
+                                _padded_prompt_logprobs(
+                                    prompt_logprobs, len(prompt_token_ids)
+                                )
+                                if request.logprobs is not None
+                                else None
+                            )
                         else:
                             # echo the prompt and first token
                             delta_text = prompt_text + output.text
@@ -372,10 +448,16 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 *prompt_token_ids,
                                 *output.token_ids,
                             ]
-                            out_logprobs = [
-                                *(prompt_logprobs or []),
-                                *(output.logprobs or []),
-                            ]
+                            out_logprobs = (
+                                [
+                                    *_padded_prompt_logprobs(
+                                        prompt_logprobs, len(prompt_token_ids)
+                                    ),
+                                    *(output.logprobs or []),
+                                ]
+                                if request.logprobs is not None
+                                else None
+                            )
                         prompt_token_ids_to_return = prompt_token_ids
                         has_echoed[i] = True
                     else:
@@ -434,6 +516,15 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 is_streaming=True,
                                 delta=True,
                             )
+
+                    if delta_template is not None and finish_reason is None:
+                        prefix, infix, suffix = delta_template
+                        yield (
+                            f"{prefix}{i}{infix}"
+                            f"{_encode_delta_text(delta_text)}"
+                            f"{suffix}"
+                        )
+                        continue
 
                     chunk = CompletionStreamResponse(
                         id=request_id,
@@ -593,7 +684,13 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     assert prompt_text is not None
                     if request.max_tokens == 0:
                         token_ids = prompt_token_ids
-                        out_logprobs = prompt_logprobs
+                        out_logprobs = (
+                            _padded_prompt_logprobs(
+                                prompt_logprobs, len(prompt_token_ids)
+                            )
+                            if request.logprobs is not None
+                            else None
+                        )
                         output_text = prompt_text
                     else:
                         token_ids = [*prompt_token_ids, *output.token_ids]
@@ -601,10 +698,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         if request.logprobs is None:
                             out_logprobs = None
                         else:
-                            assert prompt_logprobs is not None
                             assert output.logprobs is not None
                             out_logprobs = [
-                                *prompt_logprobs,
+                                *_padded_prompt_logprobs(
+                                    prompt_logprobs, len(prompt_token_ids)
+                                ),
                                 *output.logprobs,
                             ]
 

@@ -110,8 +110,9 @@ SCRATCH_BYTES = SCRATCH["_bytes"]
 
 
 def sym_layout(npes: int):
-    """Per-rank symmetric buffer: attn / ffn partial regions, [src rank][token][HIDDEN],
-    and the peers' index-selection candidates (``sel_cp``)."""
+    """Per-rank symmetric buffer: attn / ffn partial regions,
+    `[src rank][token][HIDDEN]`, and the peers' index-selection candidates
+    (`sel_cp`)."""
     rows = npes * MAX_TOKENS * HIDDEN // 2
     # a_ag / ffn_ag: the finished attention / FFN all-reduce rows, each written by
     # its owner rank (the reduce-scatter + all-gather form, S >= AG_RS_FROM)
@@ -155,7 +156,7 @@ def ug_ctas_per_token(tokens: int):
 
 
 def ug_tasks_of(cta: int, tokens: int) -> int:
-    """Routed up / gate tasks CTA ``cta`` runs."""
+    """Routed up / gate tasks CTA `cta` runs."""
     per_token = TOP_K * UG_PER_SLOT
     cpt = ug_ctas_per_token(tokens)
     if cpt is None:
@@ -219,7 +220,7 @@ O_ROW = O_K // 4 + 4
 
 
 def pool_words(tokens: int) -> int:
-    """LDS words of the activation pool ``x``. Narrow: every token's bf16 xn (the
+    """LDS words of the activation pool `x`. Narrow: every token's bf16 xn (the
     largest stage operand). Wide: the largest of the split's PV partials, the up /
     gate stage's MXFP8 xn + scales + up partials + router sigmoids, and the down
     stage's MXFP8 mids + scales + a zero row."""
