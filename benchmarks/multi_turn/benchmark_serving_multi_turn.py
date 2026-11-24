@@ -1203,9 +1203,8 @@ def process_statistics(
 
         df = raw_data.tail(tail_count)
 
-        # Runtime is the diff between the end of the last request
-        # and the start of the first request
-        runtime_sec = df["end_time_ms"].iloc[-1] - df["start_time_ms"].iloc[0]
+        # Overlapping requests can finish in a different order than they started.
+        runtime_sec = df["end_time_ms"].max() - df["start_time_ms"].iloc[0]
 
         # Convert milliseconds to seconds
         runtime_sec = runtime_sec / 1000.0
