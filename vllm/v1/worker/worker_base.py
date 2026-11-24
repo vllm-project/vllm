@@ -156,6 +156,15 @@ class WorkerBase:
         """Basic health check (override for device-specific checks)."""
         return
 
+    def next_kv_transfer_poll_time(self) -> float | None:
+        """When `poll_kv_transfers()` is next due between RPCs
+        (`time.monotonic()`), or None if it isn't needed."""
+        return None
+
+    def poll_kv_transfers(self) -> None:
+        """Collect finished KV transfers for the next model output."""
+        return
+
     def notify_kv_cache_ready(self) -> None:
         """Finish startup device work before notifying the worker connector."""
         if has_kv_transfer_group():

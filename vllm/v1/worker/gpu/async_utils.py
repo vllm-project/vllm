@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -126,7 +126,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
         pending_aux_output: "PendingAuxOutput | None",
         num_drafted_tokens_per_req: torch.Tensor | None = None,
         num_verified_tokens_per_req: torch.Tensor | None = None,
+        take_kv_transfer_results: Callable[[ModelRunnerOutput], None] | None = None,
     ):
+        self.take_kv_transfer_results = take_kv_transfer_results
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
         # the one where the tensors were created.
@@ -190,7 +192,13 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
-        self.copy_event.synchronize()
+        try:
+            self.copy_event.synchronize()
+        finally:
+            if self.take_kv_transfer_results is not None:
+                # Include transfers that finished while the GPU ran this step.
+                # On failure, they are reported with the step's KV output.
+                self.take_kv_transfer_results(self.model_runner_output)
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.

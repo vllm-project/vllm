@@ -1579,6 +1579,12 @@ class Worker(WorkerBase):
             return self.model_runner.pool()
         return None
 
+    def next_kv_transfer_poll_time(self) -> float | None:
+        return self.model_runner.kv_connector.next_poll_time()
+
+    def poll_kv_transfers(self) -> None:
+        self.model_runner.kv_connector.poll()
+
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 

@@ -126,23 +126,6 @@ def kv_connector_may_load_foreign_kv(vllm_config: VllmConfig) -> bool:
     return not connector_cls.only_restores_canonical_kv(kv_config)
 
 
-def kv_output_in_execute_model(vllm_config: VllmConfig) -> bool:
-    """Whether workers return KV connector output from execute_model() instead
-    of with the sampled output.
-
-    With a batch queue, the engine schedules the next step before the sampled
-    output, which waits for the GPU, arrives. The execute_model() reply comes
-    sooner, so the scheduler can act on finished loads one step earlier.
-    """
-    return (
-        vllm_config.kv_transfer_config is not None
-        and vllm_config.max_concurrent_batches > 1
-        and vllm_config.parallel_config.pipeline_parallel_size == 1
-        and vllm_config.model_config is not None
-        and vllm_config.model_config.runner_type != "pooling"
-    )
-
-
 class KVOutputAggregator:
     """Utility class to aggregate the output of all workers into a single
     output corresponding to Rank 0 for scheduler."""

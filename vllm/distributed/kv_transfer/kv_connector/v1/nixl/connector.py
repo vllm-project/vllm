@@ -411,6 +411,10 @@ class NixlPullConnector(NixlBaseConnector):
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
 
+    @property
+    def supports_transfer_polling(self) -> bool:
+        return True
+
 
 class NixlPushConnector(NixlBaseConnector):
     """Push-based (WRITE) NIXL KV transfer connector."""

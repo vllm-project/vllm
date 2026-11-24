@@ -30,10 +30,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
 from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
-from vllm.distributed.kv_transfer.kv_connector.utils import (
-    KVOutputAggregator,
-    kv_output_in_execute_model,
-)
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_dp_group,
@@ -453,12 +450,7 @@ class MultiprocExecutor(Executor):
             unique_reply_rank=self.output_rank,
             non_block=non_block,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
-            # KV connector output came with the execute_model() reply.
-            kv_output_aggregator=(
-                None
-                if kv_output_in_execute_model(self.vllm_config)
-                else self.kv_output_aggregator
-            ),
+            kv_output_aggregator=self.kv_output_aggregator,
             ec_output_aggregator=self.ec_output_aggregator,
         )
 
@@ -1198,10 +1190,19 @@ class WorkerProc:
 
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers."""
-        assert self.rpc_broadcast_mq is not None
+        rpc_mq = self.rpc_broadcast_mq
+        watch_dog = get_watch_dog()
+        assert rpc_mq is not None
         while True:
-            with get_watch_dog().disable():
-                rpc_request = self.rpc_broadcast_mq.dequeue(indefinite=True)
+            # Poll for finished KV transfers until the next RPC arrives.
+            while (poll_time := self.worker.next_kv_transfer_poll_time()) is not None:
+                rpc_mq.spin_until_readable((), poll_time)
+                if rpc_mq.shutting_down or rpc_mq.readable():
+                    break
+                watch_dog.feed()
+                self.worker.poll_kv_transfers()
+            with watch_dog.disable():
+                rpc_request = rpc_mq.dequeue(indefinite=True)
             self._execute_worker_rpc(rpc_request)
             del rpc_request
 

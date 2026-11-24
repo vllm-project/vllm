@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
+import time
+from collections.abc import Callable
+from copy import copy
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -16,6 +21,7 @@ from vllm.forward_context import (
     is_forward_context_available,
     set_forward_context,
 )
+from vllm.logger import init_logger
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     KVConnectorOutput,
@@ -25,6 +31,22 @@ from vllm.v1.outputs import (
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu.input_batch import InputBatch
+
+logger = init_logger(__name__)
+
+# Minimum time between polls for finished transfers.
+_POLL_INTERVAL_S = 0.0002
+# Stop polling once no step has run for this long: the engine is idle or paused.
+_POLL_ACTIVE_WINDOW_S = 1.0
+
+
+def _merge_transfer_results(dst: KVConnectorOutput, src: KVConnectorOutput) -> None:
+    if src.finished_sending:
+        dst.finished_sending = src.finished_sending | (dst.finished_sending or set())
+    if src.finished_recving:
+        dst.finished_recving = src.finished_recving | (dst.finished_recving or set())
+    dst.failed_recving |= src.failed_recving
+    dst.invalid_block_ids |= src.invalid_block_ids
 
 
 class KVConnector:
@@ -55,6 +77,20 @@ class KVConnector:
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         return EMPTY_MODEL_RUNNER_OUTPUT
 
+    def next_poll_time(self) -> float | None:
+        """When poll() is next due (time.monotonic()), or None if not needed."""
+        return None
+
+    def poll(self) -> None:
+        pass
+
+    def transfer_results_taker(
+        self,
+    ) -> Callable[[ModelRunnerOutput], None] | None:
+        """For an output whose step's GPU work is pending: a function that
+        adds held transfer results to it once that work is done. Thread-safe."""
+        return None
+
     def set_disabled(self, disabled: bool) -> None:
         pass
 
@@ -83,6 +119,31 @@ class ActiveKVConnector(KVConnector):
         )
         self._mrope_position_deltas: dict[str, int] = {}
 
+        # With polling, transfer results are held until an output takes them
+        # after its step's GPU work.
+        parallel_config = vllm_config.parallel_config
+        self._polls = (
+            self.kv_connector.supports_transfer_polling
+            and parallel_config.pipeline_parallel_size == 1
+            and vllm_config.model_config.runner_type != "pooling"
+        )
+        self._results_lock = threading.Lock()
+        self._held_results = KVConnectorOutput()
+        # Outputs that will take held results once their GPU work is done.
+        self._num_pending_takers = 0
+        # Takers are numbered in step order. Those before _first_taker leave
+        # the results of a later step's synchronous loads to that step.
+        self._last_taker = 0
+        self._first_taker = 0
+        self._has_sync_loads = False
+        # Set until a step with synchronous loads has collected their failures.
+        self._polls_paused = False
+        # Raised by the next post_forward(); polls have no RPC to fail.
+        self._poll_error: Exception | None = None
+        self._has_pending_loads = False
+        self._last_step_time = 0.0
+        self._next_poll_time = 0.0
+
     def pre_forward(
         self,
         scheduler_output: "SchedulerOutput",
@@ -92,6 +153,8 @@ class ActiveKVConnector(KVConnector):
         if self._disabled:
             return
 
+        self._has_pending_loads = scheduler_output.has_pending_kv_loads
+        self._last_step_time = time.monotonic()
         kv_connector_metadata = scheduler_output.kv_connector_metadata
         assert kv_connector_metadata is not None
         self.kv_connector.handle_preemptions(kv_connector_metadata)
@@ -100,7 +163,10 @@ class ActiveKVConnector(KVConnector):
             scheduler_output, input_batch, attn_metadata
         )
 
-        if scheduler_output.has_sync_kv_loads:
+        self._has_sync_loads = scheduler_output.has_sync_kv_loads
+        if self._has_sync_loads:
+            # Leave the loads' failures to this step's post_forward().
+            self._polls_paused = True
             # Sync loads need to run before this step's forward.
             self._start_load_kv()
         # Otherwise start the async load after forward to keep submission
@@ -153,14 +219,16 @@ class ActiveKVConnector(KVConnector):
         if self._pending_load_kwargs is not None:
             self._start_load_kv()
 
-        output = KVConnectorOutput()
+        self._polls_paused = False
+        if self._poll_error is not None:
+            error, self._poll_error = self._poll_error, None
+            raise error
         if not defer_finalize:
             self.kv_connector.wait_for_save()
-        transfer_results = self.kv_connector.get_transfer_results(finished_req_ids)
-        output.finished_sending = transfer_results.finished_sending or None
-        output.finished_recving = transfer_results.finished_recving or None
-        output.failed_recving = transfer_results.failed_recving
-        output.invalid_block_ids = self.kv_connector.get_block_ids_with_load_errors()
+        output = self._get_transfer_results(finished_req_ids)
+        if self._polls:
+            self._hold_transfer_results(output)
+            output = KVConnectorOutput()
         output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
         output.kv_cache_events = self.kv_connector.get_kv_connector_kv_cache_events()
         output.kv_connector_worker_meta = (
@@ -191,7 +259,80 @@ class ActiveKVConnector(KVConnector):
         self.finish_forward()
         finished_req_ids = scheduler_output.finished_req_ids
         kv_connector_output = self.post_forward(finished_req_ids)
-        return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+        output = ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+        if self._polls:
+            if output is EMPTY_MODEL_RUNNER_OUTPUT:
+                output = copy(output)
+            self._take_transfer_results(output)
+        return output
+
+    def next_poll_time(self) -> float | None:
+        if (
+            (not self._polls or self._disabled or not self._has_pending_loads)
+            or (self._polls_paused or self._poll_error is not None)
+            or time.monotonic() - self._last_step_time > _POLL_ACTIVE_WINDOW_S
+        ):
+            return None
+        return self._next_poll_time
+
+    def poll(self) -> None:
+        try:
+            with torch.inference_mode():
+                results = self._get_transfer_results(set())
+        except Exception as e:
+            logger.exception("Polling for finished KV transfers failed")
+            self._poll_error = e
+            return
+        finally:
+            # From the end of a poll, so that slow polls don't run back to back.
+            self._next_poll_time = time.monotonic() + _POLL_INTERVAL_S
+        self._hold_transfer_results(results)
+
+    def _get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorOutput:
+        results = self.kv_connector.get_transfer_results(finished_req_ids)
+        return KVConnectorOutput(
+            finished_sending=results.finished_sending or None,
+            finished_recving=results.finished_recving or None,
+            failed_recving=results.failed_recving,
+            invalid_block_ids=self.kv_connector.get_block_ids_with_load_errors(),
+        )
+
+    def _hold_transfer_results(self, results: KVConnectorOutput) -> None:
+        # Failures are held with their requests' completions, so the scheduler
+        # never sees a load finish before learning that it failed.
+        with self._results_lock:
+            if self._has_sync_loads:
+                # Failed sync loads must be reported with this step's output.
+                self._first_taker = self._last_taker
+            _merge_transfer_results(self._held_results, results)
+
+    def transfer_results_taker(self) -> Callable[[ModelRunnerOutput], None] | None:
+        if not self._polls:
+            return None
+        with self._results_lock:
+            self._num_pending_takers += 1
+            self._last_taker += 1
+            return partial(self._take_transfer_results, taker=self._last_taker)
+
+    def _take_transfer_results(
+        self, output: ModelRunnerOutput, taker: int | None = None
+    ) -> None:
+        """Move held results to `output`. Outputs are processed in step order,
+        so one without pending GPU work (no `taker`) leaves them to pending ones."""
+        with self._results_lock:
+            if taker is not None:
+                self._num_pending_takers -= 1
+                if taker < self._first_taker:
+                    return
+            elif self._num_pending_takers:
+                return
+            if self._held_results.is_empty():
+                return
+            held, self._held_results = self._held_results, KVConnectorOutput()
+        if output.kv_connector_output is None:
+            output.kv_connector_output = held
+        else:
+            _merge_transfer_results(output.kv_connector_output, held)
 
     def set_disabled(self, disabled: bool) -> None:
         # Ensure that layer-wise connector hooks aren't called when disabled.
