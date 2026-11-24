@@ -129,6 +129,7 @@ steps:
       - tests/models/test_deepseek_v4_vl.py
       - tests/models/test_hyv4_rocm.py
       - vllm/models/hy_v4/
+      - vllm/models/hy_v4_flash/
       - vllm/v1/worker/gpu/spec_decode/dfly/
       - vllm/config/
       - tests/models/transformers/test_layer_registry_e2e.py
@@ -148,6 +149,7 @@ steps:
       - tests/models/test_utils.py
       - tests/models/hy_v4/test_triton_ihc.py
       - tests/models/hy_v4/test_flash_decode_bench_config.py
+      - tests/models/hy_v4/test_flash_dp_config.py
       - vllm/models/muse_spark/
       - vllm/v1/worker/gpu/spec_decode/dspark/
       - vllm/v1/worker/gpu/sample/gumbel.py
@@ -186,6 +188,7 @@ steps:
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
       - pytest -v -s models/hy_v4/test_triton_ihc.py
       - pytest -v -s models/hy_v4/test_flash_decode_bench_config.py
+      - pytest -v -s models/hy_v4/test_flash_dp_config.py
       - pytest -v -s models/test_dsv4_mono_decode.py
 
 - label: ":nvidia: (B200) Inkling"
@@ -690,6 +693,23 @@ steps:
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_all_gather.py
   - pytest -v -s distributed/test_custom_all_reduce.py -k all_reduce_mhc
   - pytest -v -s kernels/test_engram.py
+
+- label: ":nvidia: (4xH100) GLM-5.3-Flash mHC Boundary"
+  key: glm5next-mhc-boundary-4xh100
+  optional: true
+  timeout_in_minutes: 15
+  device: h100
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/models/glm5next/nvidia/specialized_decode/all_reduce_mhc.py
+  - vllm/models/glm5next/nvidia/specialized_decode/runtime/
+  - vllm/models/glm5next/common/mtp.py
+  - vllm/models/glm5next/nvidia/specialized_decode/cutedsl/finalize_publish.py
+  - vllm/models/common/ops/moe_tail_fusion/primitives.py
+  - tests/models/glm5next/test_specialized_decode_ar_mhc.py
+  - tests/models/glm5next/tp4.py
+  commands:
+  - pytest -v -s models/glm5next/test_specialized_decode_ar_mhc.py
 
 - label: ":nvidia: (4xB200) GLM-5.3-Flash Specialized Decode"
   key: glm5next-nvidia-specialized-decode-4xb200
