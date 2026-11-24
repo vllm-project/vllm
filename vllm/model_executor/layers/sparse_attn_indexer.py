@@ -645,11 +645,25 @@ def sparse_attn_indexer(
         )
         assert candidate_block_size > 0
 
+    has_dcp_shardq = dcp_world_size > 1 and bool(
+        getattr(
+            forward_context.no_compile_layers.get(k_cache_prefix),
+            "shardq_layer_name",
+            "",
+        )
+    )
     fused_mqa_topk = use_fused_mqa_topk(
         query_shape=q_quant.shape[1:],
         topk=topk_tokens,
         fp4_cache=use_fp4_cache,
         full_context=use_pcp or dcp_world_size == 1,
+        candidate_selection=candidate_blocks is not None,
+    )
+    fused_mqa_topk_dcp_shardq = has_dcp_shardq and use_fused_mqa_topk(
+        query_shape=q_quant.shape[1:],
+        topk=topk_tokens,
+        fp4_cache=use_fp4_cache,
+        full_context=True,
         candidate_selection=candidate_blocks is not None,
     )
 
@@ -686,7 +700,7 @@ def sparse_attn_indexer(
             )
             profile_specs.extend(gather_spec * 2)
         current_workspace_manager().get_simultaneous(*profile_specs)
-        if fused_mqa_topk:
+        if fused_mqa_topk or fused_mqa_topk_dcp_shardq:
             # Allocate the largest fused_mqa_topk workspaces so they are
             # accounted for (freed again, they overlap the dense logits below).
             get_fused_mqa_topk_workspaces(q_quant.device, q_quant.shape[0])
@@ -844,6 +858,11 @@ def sparse_attn_indexer(
             prefill_chunks = gathered_context.indexer_chunks
             prefill_dcp_world_size = 1
             indices = gathered_context.gather_indices
+        prefill_fused_mqa_topk = (
+            fused_mqa_topk_dcp_shardq
+            if prefill_dcp_world_size != dcp_world_size
+            else fused_mqa_topk
+        )
 
         # Get the shared workspace buffers once, sized for this batch's largest
         # chunk rather than the profiled bound (total_seq_lens), so the scratch
@@ -939,12 +958,12 @@ def sparse_attn_indexer(
             if chunk.local_total_seq_lens == 0 or q_slice.shape[0] == 0:
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
                 topk_indices.fill_(-1)
-            elif fused_mqa_topk and fused_mqa_topk_chunk(
+            elif prefill_fused_mqa_topk and fused_mqa_topk_chunk(
                 chunk.max_seqlen_k,
                 k_quant.shape[0],
                 topk_tokens,
                 q_slice.shape[0],
-                dense_rows,
+                heads=q_slice.shape[1],
             ):
                 fused_mqa_topk_prefill(
                     q_slice,

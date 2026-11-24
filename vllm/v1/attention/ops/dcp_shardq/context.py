@@ -280,6 +280,7 @@ def build_dcp_shardq_context(
     world: int,
     rank: int,
     device: torch.device,
+    fused_mqa_topk_eligible: bool = False,
 ) -> DcpShardQContext | None:
     """The context plan of `split`'s step on DCP rank `rank` of `world`, or
     None when its prefill requests do not fit `max_pages` workspace pages.
@@ -346,6 +347,7 @@ def build_dcp_shardq_context(
         max_indexer_keys,
         max_logits_bytes,
         request_offset=num_decodes,
+        fused_mqa_topk_eligible=fused_mqa_topk_eligible,
     )
     indexer_chunks = [
         build_prefill_chunk_metadata(
@@ -397,10 +399,21 @@ def make_dcp_shardq_planner(
         )
         return None
     # gather imports cutlass, so import it only on the SM100 path.
+    from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+        use_fused_mqa_topk_for_config,
+    )
+    from vllm.v1.attention.backends.mla.indexer import dsa_indexer_uses_fp4
     from vllm.v1.attention.ops.dcp_shardq.gather import DCP_CONTEXT_PUSH_KERNEL
 
     vllm_config = mla_layer._vllm_config
     world = get_dcp_group().world_size
+    model_config = vllm_config.model_config
+    cfg = model_config.hf_text_config if model_config is not None else None
+    fused_mqa_topk_eligible = use_fused_mqa_topk_for_config(
+        cfg,
+        fp4_cache=dsa_indexer_uses_fp4(vllm_config),
+        full_context=True,
+    )
     DCP_CONTEXT_PUSH_KERNEL.register_warmup(
         world=world, mla_token_bytes=mla_bytes, index_token_bytes=index_bytes
     )
@@ -414,4 +427,5 @@ def make_dcp_shardq_planner(
         world=world,
         rank=get_dcp_group().rank_in_group,
         device=device,
+        fused_mqa_topk_eligible=fused_mqa_topk_eligible,
     )
