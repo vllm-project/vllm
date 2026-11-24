@@ -1043,14 +1043,12 @@ def _flush_old_blocks_to_lru_head(
     gpu_pool: BlockPool,
     num_filler_blocks: int,
 ) -> list:
-    """Allocate filler blocks so that previously-freed (hashed) blocks migrate
-    to the LRU head of the free queue.  Returns the filler blocks (caller must
-    free them later to restore pool capacity).
+    """Allocate filler blocks from the LRU head of the free queue.  Returns the
+    filler blocks (caller must free them later to restore pool capacity).
 
     In a real engine the same thing happens naturally: after one request
     finishes and frees its blocks, subsequent requests allocate from the LRU
-    head, consuming the unhashed blocks and leaving the old hashed blocks at
-    the front of the queue.
+    head and, once the unhashed blocks run out, reuse the old hashed blocks.
     """
     fillers = gpu_pool.get_new_blocks(num_filler_blocks)
     return fillers
@@ -1060,11 +1058,10 @@ def _flush_old_blocks_to_lru_head(
 @pytest.mark.parametrize("num_lookahead", [0, 1, 5])
 def test_lazy_store_and_load_roundtrip(num_lookahead) -> None:
     """Lazy mode: schedule a request, finish it so its hashed blocks are freed,
-    then schedule new requests so the old blocks migrate to the LRU head.
-    The lazy scanner offloads them to CPU.  Re-scheduling the old request
-    triggers a CPU cache hit + load.
+    then schedule new requests that reuse the old blocks, which offloads them
+    to CPU.  Re-scheduling the old request triggers a CPU cache hit + load.
 
-    GPU pool: 8 blocks (7 usable).  _target_free = ceil(64/16) = 4.
+    GPU pool: 8 blocks (7 usable).
     """
     fix = make_scheduler(
         num_cpu_blocks=8,
@@ -1090,11 +1087,10 @@ def test_lazy_store_and_load_roundtrip(num_lookahead) -> None:
     gpu_blocks_old = _allocate_gpu_blocks(gpu_pool, req_old, num_blocks, group_id=0)
     gpu_pool.free_blocks(gpu_blocks_old)
 
-    # Allocate filler blocks so req_old's hashed blocks move to LRU head.
-    # 7 usable - 2 (req_old freed) = 5 other free blocks to consume.
-    fillers = _flush_old_blocks_to_lru_head(gpu_pool, num_filler_blocks=5)
+    # Allocate all 7 usable blocks, reusing req_old's hashed blocks.
+    fillers = _flush_old_blocks_to_lru_head(gpu_pool, num_filler_blocks=7)
 
-    # --- Step 2: Lazy scanner should offload req_old's blocks ---
+    # --- Step 2: Lazy store should offload req_old's reused blocks ---
     sched_out = make_scheduler_output({})
     meta = sched.build_connector_meta(sched_out)
     assert meta.store_event >= 0, "Expected lazy store to offload old blocks"
@@ -1257,7 +1253,7 @@ def test_eager_in_flight_store_dedup_across_steps() -> None:
 def test_lazy_duplicate_store_skipped() -> None:
     """Lazy: blocks already offloaded to CPU should not be offloaded again.
 
-    Same pattern as the lazy roundtrip: flush old blocks to LRU head, offload,
+    Same pattern as the lazy roundtrip: reuse old blocks to offload them,
     then repeat with the same hashes and verify no new CPU allocation.
     """
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=8, lazy=True)
@@ -1271,8 +1267,8 @@ def test_lazy_duplicate_store_skipped() -> None:
     gpu_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
     gpu_pool.free_blocks(gpu_blocks)
 
-    # Flush old blocks to LRU head, then trigger lazy offload.
-    fillers = _flush_old_blocks_to_lru_head(gpu_pool, num_filler_blocks=5)
+    # Reuse the old blocks, then trigger lazy offload.
+    fillers = _flush_old_blocks_to_lru_head(gpu_pool, num_filler_blocks=7)
     meta1 = sched.build_connector_meta(make_scheduler_output({}))
     assert meta1.store_event >= 0
     simulate_store_completion(sched, meta1.store_event)
@@ -1280,7 +1276,7 @@ def test_lazy_duplicate_store_skipped() -> None:
     cpu_free_after_first = get_cpu_free_blocks(sched)
 
     # Allocate blocks with the same hashes and free them again.
-    # The scanner should see they are already in CPU cache and skip them.
+    # Their reuse should find them already in CPU cache and skip them.
     req2 = Request(
         request_id="req-dup-lazy",
         prompt_token_ids=req.prompt_token_ids,
@@ -1292,8 +1288,8 @@ def test_lazy_duplicate_store_skipped() -> None:
     gpu_blocks2 = _allocate_gpu_blocks(gpu_pool, req2, num_blocks, group_id=0)
     gpu_pool.free_blocks(gpu_blocks2)
 
-    # Flush again so the hashed blocks are at LRU head for the scanner.
-    fillers2 = _flush_old_blocks_to_lru_head(gpu_pool, num_filler_blocks=5)
+    # Reuse the hashed blocks again.
+    fillers2 = _flush_old_blocks_to_lru_head(gpu_pool, num_filler_blocks=7)
     meta2 = sched.build_connector_meta(make_scheduler_output({}))
     gpu_pool.free_blocks(fillers2)
 
@@ -1306,72 +1302,20 @@ def test_lazy_duplicate_store_skipped() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 2d: Lazy walk covers bounded-replay SWA allocations
+# Test 2d: Lazy stores wait for reuse
 # ---------------------------------------------------------------------------
-def test_lazy_walk_covers_bounded_replay_swa_groups() -> None:
-    """Lazy: the walk covers what every group, offloaded or not, takes per step."""
-    config = _make_kv_cache_config(num_blocks=32, num_groups=3)
-    for group in config.kv_cache_groups[1:]:
-        group.manager_config = SlidingWindowManager.config(
-            sliding_window=BLOCK_SIZE * 4, bounded_replay=True
-        )
-    fix = make_scheduler(
-        num_cpu_blocks=32, num_gpu_blocks=32, lazy=True, kv_cache_config=config
-    )
-    gpu_pool = fix.gpu_block_pool
-
-    # One step takes cdiv(64, 16) blocks per group.
-    num_blocks = 3 * 4
-    blocks = _allocate_gpu_blocks(gpu_pool, make_request(num_blocks), num_blocks)
-    _flush_old_blocks_to_lru_head(gpu_pool, gpu_pool.get_num_free_blocks())
-    gpu_pool.free_blocks(blocks)
-
-    meta = fix.scheduler.build_connector_meta(make_scheduler_output({}))
-    assert sorted(meta.store_gpu_blocks) == [b.block_id for b in blocks]
-
-
-# ---------------------------------------------------------------------------
-# Test 2e: Lazy stores return offloaded blocks to the eviction end
-# ---------------------------------------------------------------------------
-def test_lazy_store_returns_blocks_to_eviction_end() -> None:
-    """Lazy: the allocator evicts offloaded blocks before newer cached ones."""
+def test_lazy_store_waits_for_reuse() -> None:
+    """Lazy: cached blocks the allocator has not reused are not offloaded."""
     fix = make_scheduler(num_cpu_blocks=32, num_gpu_blocks=32, lazy=True)
     sched = fix.scheduler
     gpu_pool = fix.gpu_block_pool
-    target = sched._target_free
+    num_blocks = 4
 
-    for _ in range(2):
-        req = make_request(num_blocks=target)
-        gpu_pool.free_blocks(_allocate_gpu_blocks(gpu_pool, req, target))
+    req = make_request(num_blocks=num_blocks)
+    gpu_pool.free_blocks(_allocate_gpu_blocks(gpu_pool, req, num_blocks))
+    # Take every block ahead of the cached ones, but not the cached ones.
     fillers = _flush_old_blocks_to_lru_head(
-        gpu_pool, num_filler_blocks=gpu_pool.get_num_free_blocks() - 2 * target
-    )
-
-    # The scan offloads the older request's blocks.
-    meta = sched.build_connector_meta(make_scheduler_output({}))
-    assert len(meta.store_gpu_blocks) == target
-    simulate_store_completion(sched, meta.store_event)
-
-    evicted = gpu_pool.get_new_blocks(target)
-    assert [b.block_id for b in evicted] == list(meta.store_gpu_blocks)
-    gpu_pool.free_blocks(fillers + evicted)
-
-
-# ---------------------------------------------------------------------------
-# Test 2f: Lazy walk stays at the eviction end
-# ---------------------------------------------------------------------------
-def test_lazy_walk_does_not_offload_past_eviction_window() -> None:
-    """Lazy: blocks past target_free from the queue head are not offloaded yet."""
-    fix = make_scheduler(num_cpu_blocks=32, num_gpu_blocks=32, lazy=True)
-    sched = fix.scheduler
-    gpu_pool = fix.gpu_block_pool
-    target = sched._target_free
-
-    req = make_request(num_blocks=target)
-    gpu_pool.free_blocks(_allocate_gpu_blocks(gpu_pool, req, target))
-    # The queue now holds target uncached blocks, then target cached ones.
-    fillers = _flush_old_blocks_to_lru_head(
-        gpu_pool, num_filler_blocks=gpu_pool.get_num_free_blocks() - 2 * target
+        gpu_pool, num_filler_blocks=gpu_pool.get_num_free_blocks() - num_blocks
     )
 
     for _ in range(2):
@@ -2326,10 +2270,10 @@ def test_reset_pending_lazy_stores() -> None:
     gpu_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
     gpu_pool.free_blocks(gpu_blocks)
 
-    # Push hashed blocks to LRU head
-    fillers = _flush_old_blocks_to_lru_head(gpu_pool, num_filler_blocks=5)
+    # Reuse the hashed blocks
+    fillers = _flush_old_blocks_to_lru_head(gpu_pool, num_filler_blocks=7)
 
-    # Lazy scanner offloads old hashed blocks
+    # Lazy store offloads the reused hashed blocks
     sched_out = make_scheduler_output({})
     meta = sched.build_connector_meta(sched_out)
     assert meta.store_event >= 0
@@ -2729,32 +2673,6 @@ def test_cp_effective_block_size_store_and_load(
     assert len(m3.load_gpu_blocks) == expected_blocks
     assert len(m3.load_cpu_blocks) == expected_blocks
     assert m3.load_gpu_blocks == [kv3.get_block_ids()[0][0]]
-
-
-# ---------------------------------------------------------------------------
-# Test 17: CP lazy target blocks are scaled correctly
-# ---------------------------------------------------------------------------
-@pytest.mark.parametrize("cp_world_size", [1, 2, 4])
-def test_cp_lazy_target_blocks_scaling(cp_world_size: int) -> None:
-    """_estimate_lazy_target_blocks returns fewer blocks when cp_world_size > 1
-    because each virtual block covers more tokens."""
-    kv_cache_config = _make_kv_cache_config(num_blocks=16)
-    max_batched = 64
-
-    target_base = SimpleCPUOffloadScheduler._estimate_lazy_target_blocks(
-        kv_cache_config, max_batched, cp_world_size=1
-    )
-    target_cp = SimpleCPUOffloadScheduler._estimate_lazy_target_blocks(
-        kv_cache_config, max_batched, cp_world_size=cp_world_size
-    )
-
-    if cp_world_size == 1:
-        assert target_cp == target_base
-    else:
-        assert target_cp < target_base, (
-            f"cp_world_size={cp_world_size}: target_cp={target_cp} should be "
-            f"less than target_base={target_base}"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -3475,7 +3393,7 @@ def test_boundary_handoff_keeps_block_meta_index_parallel() -> None:
         },
     )
 
-    gpu_ids, cpu_ids, req_ids, block_meta = sched.prepare_store_specs(output)
+    gpu_ids, cpu_ids, req_ids, block_meta = sched._prepare_eager_store_specs(output)
     assert mamba_blocks[1].block_id in gpu_ids
     assert set(gpu_ids) == {
         *(block.block_id for block in attn_blocks),
@@ -3629,20 +3547,3 @@ def test_qsa_ring_group_is_never_stored_or_loaded() -> None:
     assert set(meta2.load_gpu_blocks) == {block.block_id for block in fa_blocks2}
     assert ring_block2.block_id not in meta2.load_gpu_blocks
     assert len(meta2.load_cpu_blocks) == num_blocks
-
-
-def test_lazy_target_blocks_ignore_non_prefix_cacheable_groups() -> None:
-    with_ring = _make_qsa_hybrid_kv_cache_config(num_blocks=16)
-    without_ring = KVCacheConfig(
-        num_blocks=16,
-        kv_cache_tensors=with_ring.kv_cache_tensors[:1],
-        kv_cache_groups=with_ring.kv_cache_groups[:1],
-    )
-    max_batched = 64
-    target_with = SimpleCPUOffloadScheduler._estimate_lazy_target_blocks(
-        with_ring, max_batched
-    )
-    target_without = SimpleCPUOffloadScheduler._estimate_lazy_target_blocks(
-        without_ring, max_batched
-    )
-    assert target_with == target_without

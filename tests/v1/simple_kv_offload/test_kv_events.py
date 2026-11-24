@@ -563,9 +563,9 @@ def test_lazy_store_emits_block_stored() -> None:
     )
     gpu_pool.free_blocks(gpu_blocks)
 
-    # Push hashed blocks to LRU head (8 total - 1 null = 7 usable; 2 freed
-    # hashed + 5 other free -> consume 5 fillers).
-    fillers = gpu_pool.get_new_blocks(5)
+    # Reuse the hashed blocks (8 total - 1 null = 7 usable; 5 other free
+    # blocks come first, then the 2 freed hashed ones).
+    fillers = gpu_pool.get_new_blocks(7)
 
     meta = sched.build_connector_meta(make_scheduler_output({}))
     assert meta.store_event >= 0

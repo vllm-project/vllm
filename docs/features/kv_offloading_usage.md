@@ -567,6 +567,14 @@ selects disk slots and is checked against `disk_capacity_bytes`. Omitting
 `num_cpu_blocks` preserves automatic per-worker sizing. This option applies
 to `SimpleCPUOffloadConnector`, separately from `OffloadingConnector` above.
 
+## Lazy offloading with `SimpleCPUOffloadConnector`
+
+By default, `SimpleCPUOffloadConnector` stores each block to the CPU once it
+is computed. With `"lazy_offload": true`, it stores a cached GPU block only
+when the allocator reuses it and the CPU holds no copy. The copy runs before
+the step writes the block, so a block leaves the GPU cache with no CPU copy
+only when the CPU pool has no free block for it. Lazy mode supports only `kv_offload_backend="cpu"`.
+
 ## Chunked-local attention with `SimpleCPUOffloadConnector`
 
 For chunked-local attention, CPU cache reuse requires the GPU-local prefix to
