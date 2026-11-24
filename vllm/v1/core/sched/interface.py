@@ -207,6 +207,11 @@ class SchedulerInterface(ABC):
         not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
 
+    def run_idle_work(self) -> bool:
+        """Do a slice of deferrable work while the engine waits for a step's
+        output. Returns whether work remains."""
+        return False
+
     @property
     @abstractmethod
     def pause_state(self) -> PauseState:
