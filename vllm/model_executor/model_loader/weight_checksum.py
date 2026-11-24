@@ -121,20 +121,15 @@ def _possible_aliases(
                 yield weight, other
 
 
-def _tensor_mapping(weight: torch.Tensor):
-    return (
-        weight.device,
-        weight.data_ptr() or id(weight),
-        weight.dtype,
-        weight.shape,
-        weight.stride(),
-    )
+def _tensor_mapping(span: _TensorSpan):
+    tensor = span.tensor
+    return span.start, tensor.dtype, tensor.shape, tensor.stride()
 
 
 def select_reset_weights(
     target: nn.Module, draft: nn.Module | None, model: "WeightCheckerModel"
 ) -> tuple[torch.Tensor, ...] | str:
-    """Select unique in-place writes after checking cross-model aliases."""
+    """Select in-place writes after checking cross-model aliases."""
     target_weights = list(_weights(target))
     draft_weights = (
         [(name, weight) for name, weight in _weights(draft) if weight.numel()]
@@ -144,36 +139,38 @@ def select_reset_weights(
     if model == "draft" and not draft_weights:
         return "Weight Checker found no resettable draft weights."
 
+    shared_draft = set()
     for target_span, draft_span in _possible_aliases(target_weights, draft_weights):
-        if _tensor_mapping(target_span.tensor) != _tensor_mapping(draft_span.tensor):
+        if _tensor_mapping(target_span) != _tensor_mapping(draft_span):
             return (
                 f"Cannot reset {model} weights: target parameter {target_span.name!r} "
                 f"and draft parameter {draft_span.name!r} have ambiguous "
                 "overlapping storage."
             )
+        shared_draft.add(id(draft_span.tensor))
 
-    selected = {}
+    selected = []
     for owner, weights, other in (
         ("target", target_weights if model != "draft" else [], draft),
         ("draft", draft_weights if model != "target" else [], target),
     ):
-        # For both, exact aliases already belong to the target's write plan.
-        writes = []
-        for name, weight in weights:
-            mapping = _tensor_mapping(weight)
-            if mapping not in selected:
-                selected[mapping] = weight
-                writes.append((name, weight))
-        if writes and other is not None:
+        if weights and other is not None:
             buffers = (
                 item
                 for name, buffer in other.named_buffers()
                 for item in _tensors(name, buffer)
             )
-            if alias := next(_possible_aliases(writes, buffers), None):
-                param, buffer = alias
+            for param, buffer in _possible_aliases(weights, buffers):
+                # With both selected, the target write already covers this alias.
+                if (
+                    model == "both"
+                    and owner == "draft"
+                    and id(param.tensor) in shared_draft
+                ):
+                    continue
                 return (
                     f"Cannot reset {model} weights: {owner} parameter {param.name!r} "
                     f"overlaps buffer {buffer.name!r} in the other model."
                 )
-    return tuple(selected.values())
+        selected.extend(weight for _, weight in weights)
+    return tuple(selected)

@@ -38,7 +38,7 @@ both models' keys.
 | --- | --- | --- |
 | `target` | Target-private and target-owned shared weights | Transfer target weights. The draft's aliases see the restored values. |
 | `draft` | Draft-private and shared weights visible to the draft | Include shared parameters in the draft transfer to verify that the draft update restores them. |
-| `both` | Target-owned and draft-private weights, with shared weights cleared once | Complete the target transfer, then transfer the draft-private weights. |
+| `both` | Target and draft weights. Both passes clear shared weights. | Complete the target transfer, then transfer the draft-private weights. |
 
 Draft reset also clears the target's view of shared parameters. If the draft
 transfer omits them, compare reports any omitted weight whose baseline differs

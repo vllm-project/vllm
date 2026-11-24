@@ -103,7 +103,7 @@ def test_reset_covers_selected_model_weights(model):
 
     plan = select_reset_weights(target, draft, model)
     assert not isinstance(plan, str)
-    assert len(plan) == {"target": 3, "draft": 4, "both": 5}[model]
+    assert len(plan) == {"target": 3, "draft": 4, "both": 7}[model]
     zero_selected_weights(plan)
 
     assert draft.embed_tokens is target.embed_tokens
@@ -136,7 +136,8 @@ def test_reset_accepts_a_draft_with_only_shared_weights(model):
     draft = nn.Sequential(target)
     plan = select_reset_weights(target, draft, model)
     assert not isinstance(plan, str)
-    assert len(plan) == 1 and plan[0] is target.weight
+    assert len(plan) == (2 if model == "both" else 1)
+    assert all(weight is target.weight for weight in plan)
     zero_selected_weights(plan)
     torch.testing.assert_close(target.weight, torch.zeros_like(target.weight))
 
@@ -160,7 +161,7 @@ def test_draft_reset_checks_new_shared_writes_against_target_buffers():
     assert isinstance(error, str) and "overlaps buffer 'alias'" in error
     plan = select_reset_weights(target, draft, "both")
     assert not isinstance(plan, str)
-    assert len(plan) == 1 and plan[0] is target.weight
+    assert len(plan) == 2 and all(weight is target.weight for weight in plan)
 
 
 @pytest.mark.parametrize("model", ["target", "draft", "both"])
