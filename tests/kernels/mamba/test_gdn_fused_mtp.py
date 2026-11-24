@@ -567,12 +567,17 @@ def test_fused_prefill_conv_matches_stock(
     (ref_out, ref_conv, ref_ssm), (out, conv, ssm) = results
     torch.testing.assert_close(conv, ref_conv, atol=0, rtol=0)
     torch.testing.assert_close(out, ref_out, atol=2e-2, rtol=2e-2)
-    torch.testing.assert_close(ssm, ref_ssm, atol=2e-3, rtol=2e-3)
+    # The fused and stock q/k/v round differently in bf16, and the state carries
+    # it: H200 sees an outlier of 2.5e-3.
+    torch.testing.assert_close(ssm, ref_ssm, atol=5e-3, rtol=5e-3)
 
 
 # Kernel vs the stock chain. Measured max error over this matrix (bf16,
 # L <= 35008): |dq|, |dk| <= 5.9e-3, |dv| <= 6.3e-2, g rel <= 5e-5,
 # beta rel <= 4e-7.
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="The fused GDN prefill conv is CUDA only."
+)
 @pytest.mark.parametrize(
     "seqlens,dim_first,output_g_exp,num_spec,beta_scale",
     [
