@@ -52,9 +52,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-OUTPUT_HEAD_ATTR = "output_head"
-"""Attribute in which to store the output head."""
-
 
 class _BaseModelOutput(BaseModelOutputWithPast):
     """Has every other output a `ForCausalLM` may read (e.g. `cross_attentions`),
@@ -170,7 +167,7 @@ def to_output_head(model: PreTrainedModel) -> OutputHead | None:
                 delattr(module, child_name)
                 setattr(module, child_name, output_embeddings)
     for name, _ in model.named_parameters():
-        renames[name] = maybe_prefix(OUTPUT_HEAD_ATTR, name)
+        renames[name] = maybe_prefix("output_head", name)
     # Quantization configs name modules, not parameters
     for name, new_name in list(renames.items()):
         if "." in name:
@@ -216,20 +213,21 @@ class CausalMixin(VllmModelForTextGeneration, Base):
             vllm_config=vllm_config, prefix=prefix
         )
 
-        output_head = self._output_head
+        spec = self._head_spec
+        self.output_head: nn.Module | None = None
         if not self.pp_group.is_last_rank:
             self.lm_head = PPMissingLayer()
-            if output_head.model is not None:
-                setattr(self, OUTPUT_HEAD_ATTR, PPMissingLayer())
+            if spec.model is not None:
+                self.output_head = PPMissingLayer()
             return
 
         vocab_size = self.text_config.vocab_size
         self.logits_processor = LogitsProcessor(
-            vocab_size, scale=output_head.scale, soft_cap=output_head.soft_cap
+            vocab_size, scale=spec.scale, soft_cap=spec.soft_cap
         )
         self.lm_head = ParallelLMHead(
             vocab_size,
-            output_head.in_features,
+            spec.in_features,
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
@@ -238,13 +236,13 @@ class CausalMixin(VllmModelForTextGeneration, Base):
                 if isinstance(module, VocabParallelEmbedding):
                     self.lm_head = self.lm_head.tie_weights(module)
                     break
-        if (model := output_head.model) is not None:
+        if (model := spec.model) is not None:
             # The head runs after the projection, so every rank needs all logits
             self.logits_processor.use_all_gather = True
-            output_head.output_embeddings.project = self._project
-            self.replace_modules(model, prefix=OUTPUT_HEAD_ATTR)
+            spec.output_embeddings.project = self._project
+            self.replace_modules(model, prefix="output_head")
             self.init_parameters(model)
-            setattr(self, OUTPUT_HEAD_ATTR, model)
+            self.output_head = model
         else:
             # Batch-sharded sampling checks for this, and kept heads need the full vocab
             self.compute_logits_local = lambda hidden_states: self.logits_processor(
@@ -254,9 +252,9 @@ class CausalMixin(VllmModelForTextGeneration, Base):
     def _create_hf_to_vllm_mapper(self):
         super()._create_hf_to_vllm_mapper()
         # Created here so the quantization config also gets the head's renames
-        self._output_head = self._create_output_head()
+        self._head_spec = self._create_output_head()
         # Before the base model's mappings, which expect the base model's names
-        mapper = self._output_head.weights_mapper
+        mapper = self._head_spec.weights_mapper
         self.hf_to_vllm_mapper = mapper | self.hf_to_vllm_mapper
 
     def _create_output_head(self) -> OutputHead:
@@ -328,7 +326,7 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         return super().load_weights(auto_load_lm_head_bias(weights)) | lm_head_bias
 
     def compute_logits(self, hidden_states: "torch.Tensor") -> "torch.Tensor | None":
-        output_head = getattr(self, OUTPUT_HEAD_ATTR, None)
-        if output_head is None:
+        if self.output_head is None:
             return self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
-        return output_head(inputs_embeds=hidden_states.unsqueeze(0)).logits.squeeze(0)
+        output = self.output_head(inputs_embeds=hidden_states.unsqueeze(0))
+        return output.logits.squeeze(0)

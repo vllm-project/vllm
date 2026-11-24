@@ -196,7 +196,7 @@ def test_output_head_moe(
     monkeypatch.setattr(causal, "probe_output_head", lambda *args: None)
     model = "ibm-granite/granite-3.0-1b-a400m-base"
     with vllm_runner(model, **OUTPUT_HEAD_KWARGS) as model_test:
-        has_head = model_test.apply_model(lambda model: hasattr(model, "output_head"))
+        has_head = model_test.apply_model(lambda model: model.output_head is not None)
         assert has_head == [True]
         model_test.generate_greedy(["Hello"], max_tokens=4)
 
@@ -223,7 +223,7 @@ def test_output_head_fallback(
 
     monkeypatch.setattr(causal._OpaqueBaseModel, "forward", forward)
     with vllm_runner("jhu-clsp/ettin-decoder-17m", **OUTPUT_HEAD_KWARGS) as model_test:
-        has_head = model_test.apply_model(lambda model: hasattr(model, "output_head"))
+        has_head = model_test.apply_model(lambda model: model.output_head is not None)
         assert has_head == [False]
 
 
