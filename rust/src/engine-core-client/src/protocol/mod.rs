@@ -35,6 +35,7 @@ pub mod sampling_mask;
 mod serde_utils;
 pub mod stats;
 pub mod structured_outputs;
+pub mod task;
 pub mod tensor;
 pub mod utility;
 

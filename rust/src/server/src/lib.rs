@@ -168,6 +168,14 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     })
     .await
     .context("failed to connect to engine core")?;
+    // Python's API server resolves the same tasks at startup to decide which
+    // task-specific routes to register.
+    let supported_tasks = client
+        .get_supported_tasks()
+        .await
+        .context("failed to query the engine's supported tasks")?
+        .to_vec();
+    info!(?supported_tasks, "engine supported tasks");
     let server_info = ServerInfoSnapshot::new(config, &client);
     let system_fingerprint = config
         .fingerprint_mode
@@ -205,6 +213,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_cors(config.cors.clone())
             .with_access_log(config.access_log.clone())
             .with_profiler(config.profiler.clone())
+            .with_supported_tasks(supported_tasks)
             .with_default_mm_lora_modalities(config.default_mm_loras.keys().copied().collect()),
     );
 
