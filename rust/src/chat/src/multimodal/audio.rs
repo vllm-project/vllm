@@ -36,7 +36,12 @@ impl MultimodalModelInfo {
             modality: Modality::Audio.to_string(),
         })?;
 
-        let sources = izip!(clips, uuids).collect::<Vec<_>>();
+        let sources = izip!(clips, uuids)
+            .map(|(clip, uuid)| {
+                let key = super::mm_hash(uuid.as_deref(), &clip.hash);
+                (clip, key)
+            })
+            .collect();
         let compute = async |misses| self.preprocess_audio_batch(support, misses).await;
         let (replacements, items) = match self.mm_cache_for(Modality::Audio) {
             Some(cache) => cache.prepare_cached(sources, compute).await?,
@@ -56,9 +61,9 @@ impl MultimodalModelInfo {
     async fn preprocess_audio_batch(
         &self,
         support: &AudioModalitySupport,
-        misses: Vec<(Arc<AudioClip>, Option<String>)>,
+        misses: Vec<(Arc<AudioClip>, String)>,
     ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)> {
-        let (clips, uuids): (Vec<_>, Vec<_>) = misses.into_iter().unzip();
+        let (clips, hashes): (Vec<_>, Vec<_>) = misses.into_iter().unzip();
         let preprocessed = self.preprocess_audios(support, &clips).await?;
         let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
         if replacements.len() != clips.len() {
@@ -69,14 +74,8 @@ impl MultimodalModelInfo {
             );
         }
 
-        let hashes = clips.iter().map(|clip| clip.hash.clone()).collect();
-        let items = item::build_batched_items(
-            &support.spec,
-            preprocessed,
-            hashes,
-            uuids,
-            ModelDtype::Float32,
-        )?;
+        let items =
+            item::build_batched_items(&support.spec, preprocessed, hashes, ModelDtype::Float32)?;
         Ok((replacements, items))
     }
 
@@ -269,7 +268,6 @@ mod tests {
             &support.spec,
             preprocessed,
             vec!["<hash>".to_string()],
-            vec![None],
             ModelDtype::Float32,
         )
         .unwrap()
@@ -338,7 +336,6 @@ mod tests {
     async fn tracker_processor_and_lowering_preserve_audio_contract() {
         let info = qwen3_asr_info();
         let wav = wav_i16_mono(16_000, &[0; 1_600]);
-        let expected_hash = llm_multimodal::hasher::hash_audio(&wav);
         let fetched = info
             .fetch_media(vec![MediaContentPart::AudioData {
                 data: wav,
@@ -358,8 +355,7 @@ mod tests {
                 .all(|token| *token == AUDIO_PAD_ID as i32)
         );
         let item = &prepared.items[0];
-        assert_eq!(item.hash, expected_hash);
-        assert_eq!(item.uuid.as_deref(), Some("audio-1"));
+        assert_eq!(item.mm_hash, "uuid:audio-1");
 
         let features = &item.data[AUDIO_PRIMARY_KEY];
         assert!(matches!(&features.field, MmField::Batched(_)));
@@ -381,7 +377,6 @@ mod tests {
     async fn inkling_tracker_and_processor_use_standard_audio_key() {
         let info = inkling_info(serde_json::json!(1024));
         let wav = wav_i16_mono(16_000, &[0; 1_600]);
-        let expected_hash = llm_multimodal::hasher::hash_audio(&wav);
         let fetched = info
             .fetch_media(vec![MediaContentPart::AudioData {
                 data: wav,
@@ -404,8 +399,7 @@ mod tests {
                 .all(|token| *token == INKLING_AUDIO_EMBED_ID)
         );
         let item = &prepared.items[0];
-        assert_eq!(item.hash, expected_hash);
-        assert_eq!(item.uuid.as_deref(), Some("audio-1"));
+        assert_eq!(item.mm_hash, "uuid:audio-1");
 
         let features = &item.data[AUDIO_PRIMARY_KEY];
         assert!(matches!(&features.field, MmField::Flat(_)));

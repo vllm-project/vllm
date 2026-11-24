@@ -55,11 +55,17 @@ impl MultimodalModelInfo {
             modality: Modality::Video.to_string(),
         })?;
 
-        let sources = izip!(clips, uuids).collect::<Vec<_>>();
-        let compute = async |misses: Vec<(Arc<VideoClip>, Option<String>)>| {
+        let sources = izip!(clips, uuids)
+            .map(|(clip, uuid)| {
+                let key = super::mm_hash(uuid.as_deref(), &clip.hash);
+                (clip, key)
+            })
+            .collect();
+        let compute = async |misses: Vec<(Arc<VideoClip>, String)>| {
             let mut computed = Vec::with_capacity(misses.len());
-            for (clip, uuid) in misses {
-                computed.push(self.preprocess_video_item(support, clip, uuid, model_dtype).await?);
+            for (clip, mm_hash) in misses {
+                computed
+                    .push(self.preprocess_video_item(support, clip, mm_hash, model_dtype).await?);
             }
             Ok(computed.into_iter().unzip())
         };
@@ -81,7 +87,7 @@ impl MultimodalModelInfo {
         &self,
         support: &VisionModalitySupport,
         clip: Arc<VideoClip>,
-        uuid: Option<String>,
+        mm_hash: String,
         model_dtype: ModelDtype,
     ) -> Result<(PromptReplacement, PreparedItem)> {
         let preprocessed = self.preprocess_video_clip(support, Arc::clone(&clip)).await?;
@@ -105,7 +111,7 @@ impl MultimodalModelInfo {
                 clip_replacements.len()
             );
         }
-        let item = build_video_item(support, preprocessed, clip.hash.clone(), uuid, model_dtype)?;
+        let item = build_video_item(support, preprocessed, mm_hash, model_dtype)?;
         Ok((clip_replacements.pop().unwrap(), item))
     }
 
@@ -163,8 +169,7 @@ impl MultimodalModelInfo {
 fn build_video_item(
     support: &VisionModalitySupport,
     preprocessed: PreprocessedEncoderInputs,
-    hash: String,
-    uuid: Option<String>,
+    mm_hash: String,
     model_dtype: ModelDtype,
 ) -> Result<PreparedItem> {
     let tensors = tensor::collect_tensors(preprocessed, support.spec.primary_key(), model_dtype)?;
@@ -212,7 +217,7 @@ fn build_video_item(
         );
     }
 
-    Ok(PreparedItem { data, hash, uuid })
+    Ok(PreparedItem { data, mm_hash })
 }
 
 #[cfg(test)]
@@ -334,7 +339,6 @@ mod tests {
             info.video.as_ref().unwrap(),
             preprocessed,
             "<hash>".to_string(),
-            None,
             ModelDtype::Float32,
         )
         .unwrap();
@@ -357,7 +361,7 @@ mod tests {
         };
         assert_eq!(grid_tensor.shape, vec![3]);
 
-        assert_eq!(item.hash, "<hash>");
+        assert_eq!(item.mm_hash, "<hash>");
     }
 
     /// GLM-5.3-Flash stamps each temporal group with the whole second of its

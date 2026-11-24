@@ -435,8 +435,17 @@ struct PreparedMedia {
 /// One media item's complete engine kwargs plus identity metadata.
 struct PreparedItem {
     data: MmKwargsItem,
-    hash: String,
-    uuid: Option<String>,
+    mm_hash: String,
+}
+
+fn mm_hash(uuid: Option<&str>, content_hash: &str) -> String {
+    // Like Python, tag the cache key with its source, so a client
+    // `uuid` spelled like another item's content hash cannot hit
+    // that item's entries in the engine's caches.
+    match uuid {
+        Some(uuid) => format!("uuid:{uuid}"),
+        None => format!("content:{content_hash}"),
+    }
 }
 
 impl MultimodalModelInfo {
@@ -1094,13 +1103,6 @@ impl MultimodalModelInfo {
                 );
             }
             for (item, range) in izip!(media.items, media_ranges) {
-                // Like Python, tag the cache key with its source, so a client
-                // `uuid` spelled like another item's content hash cannot hit
-                // that item's entries in the engine's caches.
-                let cache_key = match item.uuid {
-                    Some(uuid) => format!("uuid:{uuid}"),
-                    None => format!("content:{}", item.hash),
-                };
                 features.push(MmFeatureSpec {
                     data: Some(item.data),
                     modality: match media.modality {
@@ -1108,9 +1110,9 @@ impl MultimodalModelInfo {
                         Modality::Video => MmModality::Video,
                         Modality::Audio => MmModality::Audio,
                     },
-                    identifier: cache_key.clone(),
+                    identifier: item.mm_hash.clone(),
                     mm_position: range,
-                    mm_hash: Some(cache_key),
+                    mm_hash: Some(item.mm_hash),
                 });
             }
         }

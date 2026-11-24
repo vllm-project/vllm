@@ -1441,7 +1441,6 @@ mod tests {
             &spec,
             preprocessed,
             vec!["first".to_string(), "second".to_string()],
-            vec![None, None],
             ModelDtype::Float32,
         )
         .unwrap();

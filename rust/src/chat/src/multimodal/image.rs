@@ -43,7 +43,12 @@ impl MultimodalModelInfo {
             modality: Modality::Image.to_string(),
         })?;
 
-        let sources = izip!(frames, uuids).collect::<Vec<_>>();
+        let sources = izip!(frames, uuids)
+            .map(|(frame, uuid)| {
+                let key = super::mm_hash(uuid.as_deref(), &frame.hash);
+                (frame, key)
+            })
+            .collect();
         let compute = async |misses| {
             self.preprocess_image_batch(support, misses, model_dtype, preprocessing_context)
                 .await
@@ -66,11 +71,11 @@ impl MultimodalModelInfo {
     async fn preprocess_image_batch(
         &self,
         support: &VisionModalitySupport,
-        misses: Vec<(Arc<ImageFrame>, Option<String>)>,
+        misses: Vec<(Arc<ImageFrame>, String)>,
         model_dtype: ModelDtype,
         preprocessing_context: VisionPreprocessingContext,
     ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)> {
-        let (frames, uuids): (Vec<_>, Vec<_>) = misses.into_iter().unzip();
+        let (frames, hashes): (Vec<_>, Vec<_>) = misses.into_iter().unzip();
         let preprocessed = self.preprocess_images(support, &frames, preprocessing_context).await?;
         let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
         if replacements.len() != frames.len() {
@@ -80,9 +85,7 @@ impl MultimodalModelInfo {
                 frames.len()
             );
         }
-        let hashes = frames.iter().map(|frame| frame.hash.clone()).collect();
-        let items =
-            item::build_batched_items(&support.spec, preprocessed, hashes, uuids, model_dtype)?;
+        let items = item::build_batched_items(&support.spec, preprocessed, hashes, model_dtype)?;
         Ok((replacements, items))
     }
 

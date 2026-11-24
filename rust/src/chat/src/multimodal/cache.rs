@@ -67,26 +67,18 @@ impl MmProcessorCache {
         }
     }
 
-    /// Look up one fetched media item by cache key.
-    ///
-    /// The cache key is the feature-facing `mm_hash` itself: the client UUID
-    /// when supplied, otherwise the content hash.
+    /// Look up one fetched media item by its engine-facing `mm_hash`.
     ///
     /// On a hit, bumps writer_flag and returns the address item plus the
     /// shadowed prompt replacement. On a miss — including a shadowed entry
     /// whose shm data vanished under a concurrent eviction — returns `None`.
-    pub(super) fn lookup(
-        &self,
-        key: &str,
-        uuid: Option<String>,
-    ) -> Option<(PreparedItem, PromptReplacement)> {
+    pub(super) fn lookup(&self, key: &str) -> Option<(PreparedItem, PromptReplacement)> {
         let replacement = self.shadow.lock().get(key).cloned()?;
         let data = self.shm.address_item_for_cached(key)?;
         Some((
             PreparedItem {
                 data,
-                hash: key.to_owned(),
-                uuid,
+                mm_hash: key.to_owned(),
             },
             replacement,
         ))
@@ -123,76 +115,38 @@ impl MmProcessorCache {
         data
     }
 
-    /// Look up fetched items by client UUID or content hash so only misses
-    /// reach `compute`; computed misses are put into shm and shadowed.
+    /// Look up fetched items by their final `mm_hash` so only misses reach
+    /// `compute`; computed misses are put into shm and shadowed.
     pub(super) async fn prepare_cached<M, F>(
         &self,
-        sources: Vec<(M, Option<String>)>,
+        sources: Vec<(M, String)>,
         compute: F,
     ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>
     where
-        M: HashedMedia,
-        F: AsyncFnOnce(
-            Vec<(M, Option<String>)>,
-        ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>,
+        F: AsyncFnOnce(Vec<(M, String)>) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>,
     {
         let mut slots: Vec<Option<(PreparedItem, PromptReplacement)>> =
             Vec::with_capacity(sources.len());
         let mut pending = Vec::new();
-        let mut pending_keys = Vec::new();
-        for (media, uuid) in sources {
-            let key = uuid.clone().unwrap_or_else(|| media.content_hash().to_owned());
-            match self.lookup(&key, uuid.clone()) {
+        for (media, key) in sources {
+            match self.lookup(&key) {
                 Some(hit) => slots.push(Some(hit)),
                 None => {
                     slots.push(None);
-                    pending_keys.push(key);
-                    pending.push((media, uuid));
+                    pending.push((media, key));
                 }
             }
         }
 
         let mut misses = Vec::with_capacity(pending.len());
         if !pending.is_empty() {
-            let (replacements, mut items) = compute(pending).await?;
-            for (key, item, replacement) in izip!(&pending_keys, &mut items, &replacements) {
-                // UUID-keyed items report the UUID as `mm_hash` (Python
-                // parity: `hashes.append(uuid_item)`); for content-keyed
-                // items this is a no-op.
-                item.hash = key.clone();
-                item.data =
-                    self.put_or_inline_and_track(key, replacement, std::mem::take(&mut item.data));
+            let (replacements, items) = compute(pending).await?;
+            for (mut item, replacement) in izip!(items, replacements) {
+                item.data = self.put_or_inline_and_track(&item.mm_hash, &replacement, item.data);
+                misses.push((item, replacement));
             }
-            misses = izip!(items, replacements).collect();
         }
         Ok(merge_slots(slots, misses))
-    }
-}
-
-/// Fetched media carrying its raw-content hash, used for cache keying.
-pub(super) trait HashedMedia {
-    fn content_hash(&self) -> &str;
-}
-
-macro_rules! impl_hashed_media {
-    ($($ty:ty),*) => {$(
-        impl HashedMedia for $ty {
-            fn content_hash(&self) -> &str {
-                &self.hash
-            }
-        }
-    )*};
-}
-
-impl_hashed_media!(
-    llm_multimodal::ImageFrame,
-    llm_multimodal::VideoClip,
-    llm_multimodal::AudioClip
-);
-
-impl<T: HashedMedia + ?Sized> HashedMedia for Arc<T> {
-    fn content_hash(&self) -> &str {
-        (**self).content_hash()
     }
 }
 
@@ -280,15 +234,14 @@ pub(super) mod tests {
     #[test]
     fn hit_reuses_shadowed_replacement_and_address() {
         let cache = MmProcessorCache::new(test_shm_cache());
-        let sent = cache.put_or_inline_and_track("uuid-1", &test_replacement(), test_item(11));
+        let sent = cache.put_or_inline_and_track("uuid:uuid-1", &test_replacement(), test_item(11));
         assert!(is_address_item(&sent));
 
-        let Some((hit, replacement)) = cache.lookup("uuid-1", Some("uuid-1".into())) else {
+        let Some((hit, replacement)) = cache.lookup("uuid:uuid-1") else {
             panic!("uuid-1 should be cached");
         };
         assert_eq!(replacement.tokens, test_replacement().tokens);
-        assert_eq!(hit.hash, "uuid-1");
-        assert_eq!(hit.uuid.as_deref(), Some("uuid-1"));
+        assert_eq!(hit.mm_hash, "uuid:uuid-1");
         assert!(is_address_item(&hit.data));
         assert_eq!(address_of(&hit.data), address_of(&sent));
     }
@@ -297,8 +250,7 @@ pub(super) mod tests {
     fn merge_slots_restores_request_order() {
         let item = |value: i64| PreparedItem {
             data: test_item(value),
-            hash: format!("hash-{value}"),
-            uuid: None,
+            mm_hash: format!("hash-{value}"),
         };
         let slots = vec![
             Some((item(1), test_replacement())),
@@ -310,7 +262,7 @@ pub(super) mod tests {
 
         let (replacements, items) = merge_slots(slots, misses);
 
-        let hashes: Vec<&str> = items.iter().map(|item| item.hash.as_str()).collect();
+        let hashes: Vec<&str> = items.iter().map(|item| item.mm_hash.as_str()).collect();
         assert_eq!(hashes, ["hash-1", "hash-2", "hash-3", "hash-4"]);
         assert_eq!(replacements.len(), 4);
     }
@@ -325,45 +277,44 @@ pub(super) mod tests {
 
         use super::super::tests::{QWEN3_IMAGE_PAD_ID, qwen3_vl_info};
 
-        let info = qwen3_vl_info().with_mm_processor_cache(Some(test_shm_cache()));
-        let media_part = || MediaContentPart::ImageUrl {
-            max_long_side_pixel: None,
-            url: format!("data:image/png;base64,{TEST_PNG_BASE64}"),
-            detail: None,
-            uuid: None,
+        let shm = test_shm_cache();
+        let info = qwen3_vl_info().with_mm_processor_cache(Some(shm.clone()));
+        let prepare = async |uuid| {
+            let media_part = MediaContentPart::ImageUrl {
+                max_long_side_pixel: None,
+                url: format!("data:image/png;base64,{TEST_PNG_BASE64}"),
+                detail: None,
+                uuid,
+            };
+            let mut tokens = vec![1, QWEN3_IMAGE_PAD_ID, 2];
+            let [feature] = info
+                .prepare_multimodal(vec![media_part], &mut tokens, ModelDtype::Float32, None)
+                .await
+                .unwrap()
+                .try_into()
+                .unwrap();
+            assert!(is_address_item(feature.data.as_ref().unwrap()));
+            assert!(
+                shm.is_cached(feature.mm_hash.as_deref().unwrap()),
+                "SHM key must match feature mm_hash"
+            );
+            (tokens, feature)
         };
 
-        let mut tokens_first = vec![1, QWEN3_IMAGE_PAD_ID, 2];
-        let first = info
-            .prepare_multimodal(
-                vec![media_part()],
-                &mut tokens_first,
-                ModelDtype::Float32,
-                None,
-            )
-            .await
-            .expect("first image prepare should succeed");
-        let data_first = first[0].data.as_ref().expect("feature data");
-        assert!(is_address_item(data_first));
+        let by_content = prepare(None).await;
+        let content_key = by_content.1.mm_hash.as_deref().unwrap();
+        let uuid = content_key.strip_prefix("content:").unwrap().to_owned();
+        let by_uuid = prepare(Some(uuid.clone())).await;
+        assert_eq!(
+            by_uuid.1.mm_hash.as_deref().unwrap(),
+            format!("uuid:{uuid}")
+        );
+        assert_ne!(
+            address_of(by_content.1.data.as_ref().unwrap()),
+            address_of(by_uuid.1.data.as_ref().unwrap())
+        );
 
-        let mut tokens_second = vec![1, QWEN3_IMAGE_PAD_ID, 2];
-        let second = info
-            .prepare_multimodal(
-                vec![media_part()],
-                &mut tokens_second,
-                ModelDtype::Float32,
-                None,
-            )
-            .await
-            .expect("second image prepare should succeed");
-        let data_second = second[0].data.as_ref().expect("feature data");
-        assert!(is_address_item(data_second));
-        assert_eq!(address_of(data_second), address_of(data_first));
-
-        assert_eq!(tokens_second, tokens_first);
-        assert_eq!(first[0].mm_hash, second[0].mm_hash);
-        assert_eq!(first[0].identifier, second[0].identifier);
-        assert_eq!(first[0].mm_position.offset, second[0].mm_position.offset);
-        assert_eq!(first[0].mm_position.length, second[0].mm_position.length);
+        assert_eq!(prepare(None).await, by_content);
+        assert_eq!(prepare(Some(uuid)).await, by_uuid);
     }
 }
