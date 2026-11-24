@@ -2356,7 +2356,7 @@ def test_sparse_backend_prefill_correctness(
 
 
 @pytest.mark.parametrize(
-    "seq_lens,query_lens,workspace_size,max_logits_bytes,expected",
+    "seq_lens,query_lens,workspace_size,max_logits_bytes,expected,fused_mqa_topk_eligible",
     [
         (
             torch.tensor([0]),
@@ -2364,6 +2364,7 @@ def test_sparse_backend_prefill_correctness(
             100,
             1000,
             [],
+            False,
         ),
         # Logits constraint triggers split (M*N exceeds budget)
         # req0: M=10, N=100 -> 1000 elems (4000 bytes) - fits in 5000
@@ -2378,6 +2379,7 @@ def test_sparse_backend_prefill_correctness(
                 (slice(1, 2), slice(0, 10)),
                 (slice(2, 3), slice(0, 10)),
             ],
+            False,
         ),
         # Both constraints satisfied - all fit in one chunk
         (
@@ -2386,6 +2388,7 @@ def test_sparse_backend_prefill_correctness(
             100,
             10000,  # 2500 elems, M*N = 15*30 = 450 < 2500
             [(slice(0, 3), slice(0, 15))],
+            False,
         ),
         # Workspace constraint triggers first
         (
@@ -2398,6 +2401,7 @@ def test_sparse_backend_prefill_correctness(
                 (slice(1, 2), slice(0, 1)),
                 (slice(2, 3), slice(0, 1)),
             ],
+            False,
         ),
         # Greedy filling: first two fit, third doesn't
         # req0: M=5, N=10 -> 50 elems
@@ -2409,17 +2413,49 @@ def test_sparse_backend_prefill_correctness(
             100,
             1000,  # 250 elems
             [(slice(0, 2), slice(0, 10)), (slice(2, 3), slice(0, 5))],
+            False,
+        ),
+        # Fused planning bypasses the dense budget while retaining kernel limits.
+        (
+            torch.tensor([1_024_000]),
+            torch.tensor([4096]),
+            40 * 2**20,
+            512 * 2**20,
+            [(slice(0, 1), slice(0, 4096))],
+            True,
+        ),
+        (
+            torch.tensor([1_024_000]),
+            torch.tensor([20_000]),
+            40 * 2**20,
+            512 * 2**20,
+            [(slice(0, 1), slice(0, 16384)), (slice(0, 1), slice(16384, 20000))],
+            True,
+        ),
+        (
+            torch.tensor([2**20 + 4]),
+            torch.tensor([4096]),
+            40 * 2**20,
+            512 * 2**20,
+            [(slice(0, 1), slice(i, min(i + 127, 4096))) for i in range(0, 4096, 127)],
+            True,
         ),
     ],
 )
 def test_split_indexer_prefill_chunks(
-    seq_lens, query_lens, workspace_size, max_logits_bytes, expected
+    seq_lens,
+    query_lens,
+    workspace_size,
+    max_logits_bytes,
+    expected,
+    fused_mqa_topk_eligible,
 ):
     out = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
         seq_lens,
         query_lens,
         workspace_size,
         max_logits_bytes,
+        fused_mqa_topk_eligible=fused_mqa_topk_eligible,
     )
     assert out == expected
 
