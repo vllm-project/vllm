@@ -16,7 +16,11 @@ image_base64 = {"url": encode_image_url(fetch_image(image_url))}
 
 @pytest.mark.parametrize(
     "dual_encoder_model",
-    ["openai/clip-vit-base-patch32", "google/siglip-base-patch16-224"],
+    [
+        "openai/clip-vit-base-patch32",
+        "google/siglip-base-patch16-224",
+        "google/siglip2-base-patch16-224",
+    ],
 )
 def test_dual_encoder_chat_text_matches_input(dual_encoder_model: str):
     args = ["--runner", "pooling", "--enforce-eager", "--max-num-seqs", "5"]

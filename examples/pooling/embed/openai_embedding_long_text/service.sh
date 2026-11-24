@@ -104,7 +104,6 @@ vllm serve "$MODEL_NAME" \
   --pooler-config "$POOLER_CONFIG" \
   --served-model-name "${MODEL_CODE}" \
   --api-key "$API_KEY" \
-  --trust-remote-code \
   --port "$PORT" \
   --host 0.0.0.0
 
