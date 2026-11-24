@@ -547,6 +547,11 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
         # Track whether we're using vllm's FA or upstream (for ROCm)
         self._is_vllm_fa = current_platform.is_cuda() or current_platform.is_xpu()
+        self._is_aiter_triton_fa = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            self._is_aiter_triton_fa = on_gfx1250()
 
         if (
             vllm_config.kernel_config.enable_jit_warmup
@@ -618,6 +623,9 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             kwargs["output_scale"] = output_scale
             if envs.VLLM_BATCH_INVARIANT:
                 kwargs["num_splits"] = 1
+        elif self._is_aiter_triton_fa:
+            kwargs["return_lse"] = return_softmax_lse
+            assert out is None and output_scale is None
         else:
             # ROCm leverages the upstream flash_attn, which takes a parameter
             # called "return_attn_probs" instead of return_softmax_lse
@@ -637,6 +645,8 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         lse = None
         if isinstance(attn_out, tuple):
             attn_out, lse = attn_out[0], attn_out[1]
+        if self._is_aiter_triton_fa and lse is not None:
+            lse = lse.transpose(0, 1).contiguous()
 
         # Upstream flash_attn on ROCm may return a head-major output.
         # merge_attn_states needs token-major partials, so normalize it here.
