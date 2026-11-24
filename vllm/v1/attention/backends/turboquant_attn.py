@@ -832,8 +832,10 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 if q_len <= _CONTINUATION_DECODE_THRESHOLD:
                     # Fast path: treat each query as a decode request
                     # with incremental seq_lens for causal masking.
-                    # Slice from pre-built arange (no kernel launch)
-                    synth_seq_lens = _arange_cache[cached_len + 1 : seq_len + 1]
+                    # seq_len is an upper bound under async spec decode.
+                    synth_seq_lens = (
+                        attn_metadata.seq_lens[i] - (q_len - 1) + _arange_cache[:q_len]
+                    )
                     synth_bt = attn_metadata.block_table[i : i + 1].expand(q_len, -1)
                     if self._soa_store:
                         # The cache was written in SoA layout (always, for FlyDSL),
