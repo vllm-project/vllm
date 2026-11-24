@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import uuid
 from collections.abc import Mapping
+from functools import cache
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, TypeVar, final, overload
 
+import pybase64
 import torch
 from pydantic import (
     ConfigDict,
@@ -18,11 +21,33 @@ from pydantic_core import core_schema
 
 import vllm.envs as envs
 from vllm.config.ec_transfer import ECTransferConfig
-from vllm.config.utils import CompileFactors, config, get_compile_factors
+from vllm.config.utils import (
+    CompileFactors,
+    config,
+    get_compile_factors,
+    get_from_deprecated_env_if_set,
+)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
+
+
+@cache
+def _generate_shm_name() -> str:
+    # Fit macOS's 30-character limit without truncating the UUID.
+    encoded_uuid = pybase64.urlsafe_b64encode(uuid.uuid4().bytes).decode("ascii")
+    return "vllm_mm_" + encoded_uuid.rstrip("=")
+
+
+def _get_default_shm_name() -> str:
+    name = get_from_deprecated_env_if_set(
+        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
+        "v0.36.0",
+        "mm_shm_cache_buffer_name",
+    )
+    return name if name is not None else _generate_shm_name()
+
 
 _T = TypeVar("_T")
 
@@ -211,13 +236,15 @@ def _merge_mm_processor_kwargs(
 class BaseDummyOptions:
     """Base options for generating dummy data during profiling."""
 
-    count: int = Field(default=999, ge=0)
+    count: int | None = Field(default=999, ge=0)
+    allow_embeds: bool = True
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
 class VideoDummyOptions(BaseDummyOptions):
     """Options for generating dummy video data during profiling."""
 
+    count: int | None = Field(default=None, ge=0)
     num_frames: int | None = Field(default=None, gt=0)
     width: int | None = Field(default=None, gt=0)
     height: int | None = Field(default=None, gt=0)
@@ -309,7 +336,8 @@ class MultiModalConfig:
     """The maximum number of input items and options allowed per
     prompt for each modality.
 
-    Defaults to 999 for each modality.
+    Defaults to 999 for each modality unless the model processor provides a
+    lower default.
 
     Legacy format (count only):
         {"image": 16, "video": 2}
@@ -321,6 +349,10 @@ class MultiModalConfig:
     Mixed format (combining both):
         {"image": 16, "video": {"count": 1, "num_frames": 32, "width": 512,
         "height": 512}}
+
+    Set `"allow_embeds": false` to reject pre-computed embeddings of a modality
+    even when `enable_mm_embeds` is on:
+        {"image": 0, "video": {"count": 0, "allow_embeds": false}}
     """
     enable_mm_embeds: bool = False
     """If `True`, enables passing multimodal embeddings:
@@ -375,6 +407,9 @@ class MultiModalConfig:
     """Size limit (in MiB) for each object stored in the multi-modal processor
     shared memory cache. Only effective when `mm_processor_cache_type` is
     `"shm"`."""
+    mm_shm_cache_buffer_name: str = Field(default_factory=_get_default_shm_name)
+    """Name of the shared memory buffer used by the multi-modal processor cache.
+    Only effective when `mm_processor_cache_type` is `"shm"`."""
     mm_encoder_only: bool = False
     """
     When enabled, skips the language component of the model.
@@ -471,7 +506,7 @@ class MultiModalConfig:
     @classmethod
     def _validate_limit_per_prompt(
         cls,
-        value: dict[str, int | dict[str, int]],
+        value: dict[str, int | dict[str, Any]],
     ) -> MultiModalDummyOptions:
         out = MultiModalDummyOptions()
 
@@ -682,6 +717,7 @@ class MultiModalConfig:
             "mm_processor_cache_gb",
             "mm_processor_cache_type",
             "mm_hasher_algorithm",
+            "mm_shm_cache_buffer_name",
             "mm_shm_cache_max_object_size_mb",
             "mm_encoder_only",
             "mm_encoder_fp8_scale_save_path",
@@ -705,11 +741,20 @@ class MultiModalConfig:
 
         limit_data = self.limit_per_prompt.get(modality)
 
-        if limit_data is None:
+        if limit_data is None or limit_data.count is None:
             # Unspecified modality is set to 999 by default
             return 999
 
         return limit_data.count
+
+    def is_mm_embeds_enabled(self, modality: str) -> bool:
+        """Whether pre-computed embeddings are accepted for the given modality."""
+        if not self.enable_mm_embeds:
+            return False
+
+        limit_data = self.limit_per_prompt.get(modality)
+
+        return limit_data is None or limit_data.allow_embeds
 
     def merge_mm_processor_kwargs(
         self,
