@@ -159,7 +159,9 @@ def _qsa_mqa_paged_grouped_kernel(
                 dot = tl.maximum(tl.dot(q_run, keys), 0.0)
                 # Sum the heads of each row; every query entry of a row then
                 # holds that row's score.
-                score = tl.dot(head_sum, dot) / score_divisor
+                # Both operands are fp32. ieee keeps the head sum exact on gfx942, which
+                # would otherwise round them to xf32 in its MFMA.
+                score = tl.dot(head_sum, dot, input_precision="ieee") / score_divisor
                 store = (
                     in_run[:, None]
                     & (q_head[:, None] == 0)
