@@ -573,6 +573,8 @@ steps:
   - vllm/models/hy_v4/nvidia/flashmla_sparse.py
   - vllm/models/hy_v4/nvidia/model.py
   - vllm/models/hy_v4/nvidia/moe.py
+  - vllm/models/hy_v4/common/mrope.py
+  - vllm/models/hy_v4/weight_utils.py
   - vllm/models/common/ops/sequence_parallel.py
   - vllm/model_executor/layers/attention/
   - vllm/model_executor/models/deepseek_v2.py
