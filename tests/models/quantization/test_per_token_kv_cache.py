@@ -64,6 +64,7 @@ def test_per_token_head_kv_cache_accuracy(
             # After this prompt's first token "**" the next-token distribution
             # is flat and int4 logprobs move by over a nat with bf16 rounding
             # (which GEMM kernel ran), so top-8 membership there is not stable.
+            # See #69766.
             prompts = [p for p in prompts if "major milestones" not in p]
 
         with vllm_runner(
