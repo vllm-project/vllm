@@ -464,6 +464,8 @@ from the LRU. The budget limits cache storage, not transient per-request memory.
 
 If you do not benefit much from the cache, you can disable both IPC
 and processor caching completely via `mm_processor_cache_gb=0`.
+With the cache disabled, the API server preprocesses up to
+`renderer_num_workers` multi-modal requests in parallel instead of one at a time.
 
 Examples:
 
