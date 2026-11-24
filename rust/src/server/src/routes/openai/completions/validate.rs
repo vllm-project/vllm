@@ -1,23 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use serde_json::Value;
+
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::model_names::ServedModelNames;
 use crate::routes::openai::utils::validate_generation_prompt_truncation;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
     request: &CompletionRequest,
-    served_model_names: &[String],
+    served_model_names: &ServedModelNames,
 ) -> Result<(), ApiError> {
     // This path is intentionally scoped to the minimum surface needed by
     // `vllm-bench` random workload compatibility, so unsupported legacy
     // completions features fail early here.
-    if let Some(model) = request.model.as_ref().filter(|model| !model.is_empty())
-        && !served_model_names.iter().any(|name| name == model)
-    {
-        return Err(ApiError::model_not_found(model.clone()));
-    }
+    served_model_names.check(request.model.as_deref())?;
 
     if request.stream_options.as_ref().is_some_and(|options| !options.is_empty()) && !request.stream
     {
@@ -27,10 +26,6 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if request.n.unwrap_or(1) > 1 {
-        bail_invalid_request!(param = "n", "Only n=1 is supported.");
-    }
-
     if request.max_tokens == Some(0) && !request.echo {
         bail_invalid_request!(
             param = "max_tokens",
@@ -38,20 +33,12 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if request.suffix.is_some() {
-        bail_invalid_request!(param = "suffix", "suffix is not supported.");
-    }
-
-    if request.prompt_embeds.is_some() {
+    // Python's prompt-presence validator treats an empty `prompt_embeds` list
+    // like an absent one; lowering ignores it.
+    if (request.prompt_embeds.as_ref())
+        .is_some_and(|embeds| !matches!(embeds, Value::Array(embeds) if embeds.is_empty()))
+    {
         bail_invalid_request!(param = "prompt_embeds", "prompt_embeds is not supported.");
-    }
-
-    // TODO: return the per-choice `weight_versions` spans.
-    if request.return_weight_versions == Some(true) {
-        bail_invalid_request!(
-            param = "return_weight_versions",
-            "return_weight_versions is not supported."
-        );
     }
 
     if let Some(logprobs) = request.logprobs
@@ -110,13 +97,7 @@ pub(super) fn validate_request_compat(
     if request.length_penalty.is_some_and(|penalty| penalty != 1.0) {
         bail_invalid_request!(param = "length_penalty", "length_penalty is not supported.");
     }
-    if !request.spaces_between_special_tokens {
-        bail_invalid_request!(
-            param = "spaces_between_special_tokens",
-            "spaces_between_special_tokens is not supported."
-        );
-    }
-    validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
+    validate_generation_prompt_truncation(request.truncate_prompt_tokens)?;
 
     Ok(())
 }
@@ -126,6 +107,7 @@ mod tests {
     use serde_json::json;
 
     use super::validate_request_compat;
+    use crate::model_names::ServedModelNames;
     use crate::routes::openai::completions::types::CompletionRequest;
 
     fn base_request() -> CompletionRequest {
@@ -137,8 +119,8 @@ mod tests {
         .expect("parse request")
     }
 
-    fn served_names(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| s.to_string()).collect()
+    fn served_names(names: &[&str]) -> ServedModelNames {
+        ServedModelNames::new(names.iter().map(|s| s.to_string()).collect())
     }
 
     fn non_streaming_request(stream_options: serde_json::Value) -> CompletionRequest {
@@ -172,6 +154,17 @@ mod tests {
                 "{stream_options}"
             );
         }
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_spaces_between_special_tokens_false() {
+        let request = CompletionRequest {
+            spaces_between_special_tokens: false,
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
     }
 
     #[test]
@@ -244,30 +237,6 @@ mod tests {
         .expect("parse request");
         assert!(
             validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
-        );
-    }
-
-    #[test]
-    fn validate_request_compat_rejects_return_weight_versions() {
-        for return_weight_versions in [json!(null), json!(false)] {
-            let request: CompletionRequest = serde_json::from_value(json!({
-                "prompt": "hello",
-                "return_weight_versions": return_weight_versions,
-            }))
-            .expect("parse request");
-            assert!(
-                validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"]))
-                    .is_ok()
-            );
-        }
-
-        let request: CompletionRequest = serde_json::from_value(json!({
-            "prompt": "hello",
-            "return_weight_versions": true,
-        }))
-        .expect("parse request");
-        assert!(
-            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
         );
     }
 

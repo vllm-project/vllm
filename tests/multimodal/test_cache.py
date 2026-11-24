@@ -269,8 +269,18 @@ class _StubModelConfig:
     real model, keeping this unit test free of any Hugging Face / network lookup.
     """
 
-    def __init__(self, mm_processor_cache_gb: float) -> None:
-        self._mm_config = MultiModalConfig(mm_processor_cache_gb=mm_processor_cache_gb)
+    def __init__(
+        self,
+        mm_processor_cache_gb: float,
+        mm_shm_cache_buffer_name: str | None = None,
+    ) -> None:
+        mm_config_kwargs: dict[str, str] = {}
+        if mm_shm_cache_buffer_name is not None:
+            mm_config_kwargs["mm_shm_cache_buffer_name"] = mm_shm_cache_buffer_name
+        self._mm_config = MultiModalConfig(
+            mm_processor_cache_gb=mm_processor_cache_gb,
+            **mm_config_kwargs,
+        )
 
     def get_multimodal_config(self) -> MultiModalConfig:
         return self._mm_config
@@ -309,9 +319,9 @@ def test_mm_cache_miss_raises_and_recovers():
     """A P0/P1 multimodal cache drift must be recoverable, not a hard crash.
 
     Reproduces the production failure: the P0 sender cache believes an item is
-    cached on P1 (so it sends ``data=None``), but the P1 receiver cache does not
-    have it. The receiver must raise ``MultiModalCacheMissError`` (carrying the
-    hash) instead of asserting; ``P0.invalidate()`` must drop the stale shadow
+    cached on P1 (so it sends `data=None`), but the P1 receiver cache does not
+    have it. The receiver must raise `MultiModalCacheMissError` (carrying the
+    hash) instead of asserting; `P0.invalidate()` must drop the stale shadow
     entry; and resending the item with data must repopulate both caches.
 
     Caches are built directly (not via the registry) so the test needs no real
@@ -399,6 +409,78 @@ def test_receiver_cache_features_keep_resent_payload():
     assert updated[0].mm_position.length == 2048
 
 
+@pytest.mark.skip_global_cleanup
+def test_receiver_cache_keeps_metadata_only_features_out():
+    """An EC consumer's metadata-only item must not replace a cached item the
+    encoder can run on, nor be cached to stand in for one later."""
+    from vllm.distributed.ec_transfer.ec_connector.utils import (
+        PlaceholderMetadataResolver,
+    )
+
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    model_config._mm_config.allow_missing_mm_embeddings = True
+    p1 = LruKeyReplicatedReceiverCache(model_config)
+    resolver = PlaceholderMetadataResolver(model_config)
+    resolver._cache["image"] = {"image_grid_thw"}
+    p1._metadata_resolver = resolver
+
+    def _feature(data: MultiModalKwargsItem | None, mm_hash: str):
+        return MultiModalFeatureSpec(
+            data=data,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=4),
+            mm_hash=mm_hash,
+        )
+
+    def _grid() -> MultiModalKwargsItem:
+        return MultiModalKwargsItem(
+            {
+                "image_grid_thw": MultiModalFieldElem(
+                    data=torch.tensor([1, 2, 2]), field=MultiModalBatchedField()
+                )
+            }
+        )
+
+    pixels = MultiModalKwargsItem.dummy(nbytes=64)
+    p1.get_and_update_features([_feature(pixels, "seen")])
+    grid = _grid()
+    (served,) = p1.get_and_update_features([_feature(grid, "seen")])
+    assert served.data is grid
+    assert p1.get_and_update_item(None, "seen") is pixels
+
+    p1.get_and_update_features([_feature(_grid(), "fresh")])
+    assert "fresh" not in p1._cache
+    with pytest.raises(MultiModalCacheMissError):
+        p1.get_and_update_item(None, "fresh")
+
+
+@pytest.mark.skip_global_cleanup
+def test_receiver_cache_caches_everything_off_ec_consumers():
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    p1 = LruKeyReplicatedReceiverCache(model_config)
+    grid = MultiModalKwargsItem(
+        {
+            "image_grid_thw": MultiModalFieldElem(
+                data=torch.tensor([1, 2, 2]), field=MultiModalBatchedField()
+            )
+        }
+    )
+    p1.get_and_update_features(
+        [
+            MultiModalFeatureSpec(
+                data=grid,
+                modality="image",
+                identifier="h",
+                mm_position=PlaceholderRange(offset=0, length=4),
+                mm_hash="h",
+            )
+        ]
+    )
+    assert p1._metadata_resolver is None
+    assert p1.get_and_update_item(None, "h") is grid
+
+
 def test_mm_cache_miss_batches_all_drifted_hashes():
     """All hashes drifted within one request must surface in a single error.
 
@@ -438,7 +520,7 @@ def test_mm_cache_miss_batches_all_drifted_hashes():
     assert "A" in p1._cache and "C" in p1._cache
 
 
-def test_shm_receiver_handles_prefix_covered_items(monkeypatch):
+def test_shm_receiver_handles_prefix_covered_items():
     """Regression test for the EngineCore crash with prefix caching + SHM cache.
 
     On a repeated request, prefix caching can fully cover an item's
@@ -449,12 +531,12 @@ def test_shm_receiver_handles_prefix_covered_items(monkeypatch):
     (vllm-project/vllm#54994). The address item must still be resolved and
     acknowledged so the object stays reclaimable.
     """
-    monkeypatch.setenv(
-        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME", "test_shm_prefix_covered_items"
-    )
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(world_size=1),
-        model_config=_StubModelConfig(mm_processor_cache_gb=4 * MiB_bytes / GiB_bytes),
+        model_config=_StubModelConfig(
+            mm_processor_cache_gb=4 * MiB_bytes / GiB_bytes,
+            mm_shm_cache_buffer_name="test_shm_prefix_covered_items",
+        ),
     )
     p0 = ShmObjectStoreSenderCache(vllm_config)
     p1 = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())
@@ -1077,7 +1159,7 @@ async def test_release_kv_cache_resends_mm_payload(use_async, release_error):
     renderer = renderer_from_config(VllmConfig(model_config=model_config))
     renderer._mm_processor_cache = sender
 
-    def release():
+    def release(reset_connector: bool):
         if release_error:
             raise RuntimeError(release_error)
         receiver.clear_cache()
@@ -1154,7 +1236,7 @@ async def test_cache_drift_invalidation_waits_for_render_without_delaying_output
         return result
 
     monkeypatch.setattr(processor, "_get_cache_missing_items", hold_cache_hit)
-    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    output_processor = OutputProcessor(tokenizer=None, collect_stats=False)
     collectors = []
     for idx in range(2):
         request = EngineCoreRequest(
@@ -1177,7 +1259,7 @@ async def test_cache_drift_invalidation_waits_for_render_without_delaying_output
         output_handler=None,
         engine_core=SimpleNamespace(get_output_async=outputs.get),
         output_processor=output_processor,
-        log_stats=False,
+        collect_stats=False,
         logger_manager=None,
         renderer=renderer,
     )

@@ -14,7 +14,10 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
     CUSTOM_ALL_REDUCE_MAX_SIZES,
     gpu_p2p_access_check,
 )
-from vllm.distributed.parallel_state import in_the_same_node_as
+from vllm.distributed.device_communicators.nvlink_fabric import (
+    SymmetricMemoryTopology,
+    get_symmetric_memory_topology,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -70,9 +73,9 @@ def _group_can_attempt_mnnvl(
 
     MNNVL is available only on Blackwell-class GPUs. Local multicast support
     is necessary but does not establish that the process group spans an MNNVL
-    domain; the symmetric-memory rendezvous below performs that group-level
-    check. The CPU all-reduce keeps every rank on the same control-flow path
-    when a heterogeneous or partially configured group is encountered.
+    domain; the caller performs that group-level topology check before this
+    local capability probe. The CPU all-reduce keeps every rank on the same
+    control-flow path for heterogeneous or partially configured groups.
     """
     device_index = device.index
     local_support = (
@@ -154,8 +157,9 @@ class CustomAllreduce:
                 it will be bound to f"cuda:{local_rank}".
             register_graph_buffers: whether graph capture IPC-registers its buffers.
         It is the caller's responsibility to make sure each communicator
-        is bind to a unique device, and all communicators in this group
-        are in the same node.
+        is bound to a unique device. CUDA IPC collectives require all ranks
+        to be on the same node; cross-node groups only support MNNVL
+        all-gather and reduce-scatter.
 
         """
         self._IS_CAPTURING = False
@@ -198,7 +202,8 @@ class CustomAllreduce:
             "CustomAllreduce should be attached to a non-NCCL group."
         )
 
-        same_node = all(in_the_same_node_as(group, source_rank=0))
+        topology = get_symmetric_memory_topology(group)
+        same_node = topology is SymmetricMemoryTopology.INTRA_NODE
         self.mnnvl_only = not same_node
 
         rank = dist.get_rank(group=self.group)
@@ -215,6 +220,13 @@ class CustomAllreduce:
                 "warning, specify disable_custom_all_reduce=True explicitly.",
                 world_size,
                 str(CustomAllreduce._SUPPORTED_WORLD_SIZES),
+            )
+            return
+
+        if topology is SymmetricMemoryTopology.UNSUPPORTED:
+            logger.warning(
+                "Custom collectives are disabled because this multi-node "
+                "group does not share an NVLink fabric."
             )
             return
 
@@ -475,6 +487,9 @@ class CustomAllreduce:
                 self.register_graph_buffers()
 
     def register_graph_buffers(self):
+        if self.mnnvl_only:
+            # MNNVL collectives use pre-registered symmetric memory, not CUDA IPC.
+            return
         handle, offset = ops.get_graph_buffer_ipc_meta(self._ptr)
         logger.debug("Registering %d cuda graph addresses", len(offset))
         # We cannot directly use `dist.all_gather_object` here
@@ -494,7 +509,7 @@ class CustomAllreduce:
         ops.register_graph_buffers(self._ptr, handles, offsets)
 
     def should_custom_ar(self, inp: torch.Tensor):
-        if self.disabled or self.world_size > 8:
+        if self.disabled or self.mnnvl_only or self.world_size > 8:
             return False
         if inp.dtype not in (torch.float32, torch.float16, torch.bfloat16):
             return False
