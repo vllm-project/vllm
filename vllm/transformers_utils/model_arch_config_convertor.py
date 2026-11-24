@@ -29,8 +29,6 @@ logger = init_logger(__name__)
 
 
 class ModelArchConfigConvertorBase:
-    transformers_backend: bool = False
-
     def __init__(
         self,
         hf_config: PreTrainedConfig,
@@ -40,6 +38,7 @@ class ModelArchConfigConvertorBase:
         self.hf_config = hf_config
         self.hf_text_config = hf_text_config
         self.revision = revision
+        self.transformers_backend = False
 
     def get_per_layer_hf_configs(
         self,
