@@ -197,6 +197,21 @@ def rotary_embedding(
         )
 
 
+def rotary_embedding_out(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor | None,
+    query_out: torch.Tensor,
+    key_out: torch.Tensor | None,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    torch.ops._C.rotary_embedding_out(
+        positions, query, key, query_out, key_out, head_size, cos_sin_cache, is_neox
+    )
+
+
 # layer norm ops
 def rms_norm(
     out: torch.Tensor,
@@ -703,6 +718,36 @@ def moe_gptq_gemm_rdna3(
         block_size_m,
         mul_topk_weight,
         output_topk,
+    )
+
+
+def moe_w4a8_decode_rdna3(
+    out: torch.Tensor,
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    expert_map: torch.Tensor | None,
+    workspace: torch.Tensor,
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w13_zp: torch.Tensor | None,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w2_zp: torch.Tensor | None,
+) -> None:
+    torch.ops._rocm_C.moe_w4a8_decode_rdna3(
+        out,
+        x,
+        topk_ids,
+        topk_weights,
+        expert_map,
+        workspace,
+        w13,
+        w13_scale,
+        w13_zp,
+        w2,
+        w2_scale,
+        w2_zp,
     )
 
 
@@ -2283,6 +2328,69 @@ def fp32_router_gemm(
     return output
 
 
+def hy_v4_ihc_boundary_supported(hc_mult: int, hidden_size: int) -> bool:
+    return (
+        hc_mult == 4
+        and hidden_size % 64 == 0
+        and hidden_size <= 8192
+        and hasattr(torch.ops._C, "hy_v4_ihc_boundary")
+    )
+
+
+def hy_v4_ihc_boundary(
+    residual: torch.Tensor,
+    x: torch.Tensor | None,
+    post: torch.Tensor | None,
+    weight: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    norm_weight: torch.Tensor | None,
+    magnitude: float,
+    hc_eps: float,
+    rms_eps: float,
+    variance_eps: float,
+    round_before_norm: bool = False,
+    fp8_out: bool = False,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    tuple[torch.Tensor, torch.Tensor] | None,
+]:
+    """HY V4 iHC boundary: optional post step, then pre and RMSNorm.
+
+    Returns `(residual, hidden_states, post_gates, hidden_fp8)`. With `x`
+    and `post` the residual is a new tensor holding `post * x + residual`;
+    otherwise it is the input residual. All inputs must be contiguous. The
+    gated reduction enters the norm in FP32, as in the HPC library's fused
+    kernel, unless `round_before_norm` rounds it to BF16 first, as the
+    unfused path does. With `fp8_out`, `hidden_fp8` equals
+    `per_token_group_quant_fp8_packed_for_deepgemm(hidden_states, 128)`;
+    otherwise it is None.
+    """
+    hidden, post_out, residual_out, q, s = torch.ops._C.hy_v4_ihc_boundary(
+        residual,
+        x,
+        post,
+        weight,
+        hc_scale,
+        hc_base,
+        norm_weight,
+        magnitude,
+        hc_eps,
+        rms_eps,
+        variance_eps,
+        round_before_norm,
+        fp8_out,
+    )
+    return (
+        residual_out if x is not None else residual,
+        hidden,
+        post_out,
+        (q, s) if fp8_out else None,
+    )
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -3247,6 +3355,10 @@ def top_k_per_row_decode(
     stride1: int,
     topk_tokens: int,
 ) -> None:
+    """Select per-row indices with a runtime width in [1, 8192].
+
+    Device shared-memory limits can further restrict the width for a given launch.
+    """
     torch.ops._C.top_k_per_row_decode(
         logits,
         next_n,

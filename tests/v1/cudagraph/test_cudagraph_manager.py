@@ -469,6 +469,22 @@ def test_decode_capture_sizes_are_request_counts(monkeypatch, decode_query_len):
     assert capture_plan([2], []) == ([(2, 2 * q)], [])
 
 
+def test_recoverssm_keeps_mixed_graphs_past_the_decode_token_cap(monkeypatch):
+    """KDA RecoverSSM keeps the mixed graphs above max_num_seqs * (num_spec + 1)
+    tokens."""
+
+    def mixed_sizes(use_kda_recoverssm: bool) -> list[int]:
+        manager = _make_spec_decode_manager(
+            monkeypatch, max_num_seqs=2, use_kda_recoverssm=use_kda_recoverssm
+        )
+        return sorted(
+            d.num_tokens for d in manager._capture_descs[CUDAGraphMode.PIECEWISE]
+        )
+
+    assert max(mixed_sizes(True)) > 2 * _DECODE_QUERY_LEN
+    assert mixed_sizes(True) == mixed_sizes(False)
+
+
 def test_varlen_decode_graphs_take_the_decode_cap_as_a_token_budget(monkeypatch):
     """Adaptive verification's decode graphs are token-keyed up to the decode
     request cap times the query length, whatever the prefill sizes are."""
@@ -913,7 +929,7 @@ def test_speculator_replays_graph_for_runtime_width(monkeypatch, specialize):
 
     def capture(manager, create_forward_fn, progress_bar_desc):
         for desc in manager._capture_descs[CUDAGraphMode.FULL]:
-            create_forward_fn(desc, warmup=False)(CUDAGraphMode.NONE)
+            create_forward_fn(desc, warmup=False)(CUDAGraphMode.FULL)
             k = forward.call_args.kwargs["num_speculative_steps"]
             graph = MagicMock()
             graph.replay.side_effect = lambda k=k: replayed_widths.append(k)

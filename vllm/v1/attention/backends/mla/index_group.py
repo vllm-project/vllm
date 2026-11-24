@@ -268,21 +268,8 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         prefill = attn_metadata.prefill
         staging_plan = prefill.host_staging_plan if prefill is not None else None
         assert staging_plan is not None
-        resident_cache = None
-        if cache.view is not None and cache.block_table is not None:
-            state_indices = cache.runtime.request_state_indices
-            assert state_indices is not None
-            resident_cache, block_stride = cache.view.pages(staging_plan.block_size)
-            staging_plan.ensure_gpu_sources(
-                cache.block_table,
-                state_indices[attn_metadata.num_decodes :],
-                cache.view.block_size,
-                block_stride,
-            )
-        staged_cache = cache.runtime.gather_prefill_cache(
-            kv_cache,
-            staging_plan,
-            resident_cache=resident_cache,
+        staged_cache = cache.stage_prefill_rows(
+            kv_cache, staging_plan, attn_metadata.num_decodes
         )
         req_ids = attn_metadata.req_id_per_token[attn_metadata.num_decode_tokens :]
         if attn_metadata.num_decodes > 0:
@@ -297,15 +284,8 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         prefill = attn_metadata.prefill
         plan = prefill.host_staging_plan if prefill is not None else None
         assert plan is not None
-        assert cache.view is not None and cache.block_table is not None
-        state_indices = cache.runtime.request_state_indices
-        assert state_indices is not None
-        resident_pages, block_stride = cache.view.pages(plan.block_size)
-        plan.ensure_gpu_sources(
-            cache.block_table,
-            state_indices[attn_metadata.num_decodes :],
-            cache.view.block_size,
-            block_stride,
+        resident_pages = cache.ensure_prefill_gpu_sources(
+            plan, attn_metadata.num_decodes
         )
         assert plan.gpu_row_ids is not None
         return plan, resident_pages

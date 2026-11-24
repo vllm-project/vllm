@@ -32,7 +32,6 @@ def main():
     llm = LLM(
         model="ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
         skip_tokenizer_init=True,
-        trust_remote_code=True,
         enforce_eager=True,
         # Limit the maximum number of parallel requests
         # to avoid the model going OOM.

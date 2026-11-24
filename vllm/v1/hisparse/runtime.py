@@ -528,6 +528,10 @@ class HiSparsePrefillStagingPlan:
         self.gpu_source_key = source_key
 
 
+def hisparse_staging_block_capacity(seq_lens_cpu: torch.Tensor, block_size: int) -> int:
+    return int(((seq_lens_cpu + block_size - 1) // block_size).sum())
+
+
 def build_hisparse_prefill_staging_plan(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -1236,6 +1240,36 @@ class HiSparseCacheHandle:
         )
         self.block_table = block_table
         self.slot_mapping = slot_mapping
+
+    def ensure_prefill_gpu_sources(
+        self, plan: HiSparsePrefillStagingPlan, num_decodes: int
+    ) -> torch.Tensor:
+        """Resolve the plan's GPU sources; return the resident pages its GPU
+        rows index."""
+        assert self.view is not None and self.block_table is not None
+        state_indices = self.runtime.request_state_indices
+        assert state_indices is not None
+        resident_pages, block_stride = self.view.pages(plan.block_size)
+        plan.ensure_gpu_sources(
+            self.block_table,
+            state_indices[num_decodes:],
+            self.view.block_size,
+            block_stride,
+        )
+        return resident_pages
+
+    def stage_prefill_rows(
+        self,
+        source_cache: torch.Tensor,
+        plan: HiSparsePrefillStagingPlan,
+        num_decodes: int,
+    ) -> torch.Tensor:
+        resident_cache = None
+        if self.view is not None and self.block_table is not None:
+            resident_cache = self.ensure_prefill_gpu_sources(plan, num_decodes)
+        return self.runtime.gather_prefill_cache(
+            source_cache, plan, resident_cache=resident_cache
+        )
 
     def swap_in(
         self,
