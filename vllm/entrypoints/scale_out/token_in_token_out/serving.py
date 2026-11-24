@@ -399,6 +399,7 @@ class ServingTokens(GenerateBaseServing):
                 mm_hashes=mm_hashes,
                 mm_placeholders=mm_placeholders,
                 cache_salt=request.cache_salt,
+                skip_mm_cache=not request.content_parts,
             )
         elif not request.content_parts:
             (engine_input,) = await self.online_renderer.preprocess_completion(

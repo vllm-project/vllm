@@ -994,7 +994,11 @@ class BaseRenderer(ABC, Generic[_T]):
             mm_uuid_items,
             hf_processor_mm_kwargs=mm_processor_kwargs or {},
             media_io_kwargs=media_io_kwargs or {},
-            cache=(None if skip_mm_cache else self._mm_processor_cache),
+            cache=(
+                self._mm_processor_only_cache
+                if skip_mm_cache
+                else self._mm_processor_cache
+            ),
         )
         mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
 
