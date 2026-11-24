@@ -107,6 +107,8 @@ impl Error {
             | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
             | Self::Llm(LlmError::Unsupported { .. })
             | Self::Llm(LlmError::PromptLogprobsUnsupported { .. })
+            | Self::Llm(LlmError::MmEmbedsExceedEncoderCache { .. })
+            | Self::Llm(LlmError::InvalidMultimodalInput { .. })
             | Self::Llm(LlmError::RemoteInvalidRequest { .. })
             | Self::Llm(LlmError::EngineCoreClient(
                 EngineCoreError::InvalidDataParallelRank { .. },

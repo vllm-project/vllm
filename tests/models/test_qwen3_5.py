@@ -5,17 +5,21 @@ import importlib
 
 import pytest
 
+from vllm.platforms import current_platform
+
 
 def test_qwen3_5_models_use_platform_specific_implementation():
     from vllm.models.qwen3_5 import Qwen3_5ForCausalLM, Qwen3_5MTP
-    from vllm.platforms import current_platform
 
-    # The NVIDIA and ROCm variants drop torch.compile; other platforms
+    # NVIDIA, XPU and ROCm variants drop torch.compile; other platforms
     # keep the previous torch.compile implementation in
     # vllm/model_executor/models/qwen3_5{,_mtp}.py.
     if current_platform.is_cuda():
         model_module = "vllm.models.qwen3_5.nvidia.model"
         mtp_module = "vllm.models.qwen3_5.nvidia.mtp"
+    elif current_platform.is_xpu():
+        model_module = "vllm.models.qwen3_5.xpu.model"
+        mtp_module = "vllm.models.qwen3_5.xpu.mtp"
     elif current_platform.is_rocm():
         model_module = "vllm.models.qwen3_5.amd.model"
         mtp_module = "vllm.models.qwen3_5.amd.mtp"
@@ -26,7 +30,7 @@ def test_qwen3_5_models_use_platform_specific_implementation():
     assert Qwen3_5MTP.__module__ == mtp_module
 
 
-@pytest.mark.parametrize("platform", ["nvidia", "amd"])
+@pytest.mark.parametrize("platform", ["nvidia", "xpu", "amd"])
 def test_qwen3_5_platform_models_do_not_use_torch_compile_wrapper(platform: str):
     # Import the platform modules directly so the assertion is independent of
     # the platform this test runs on.

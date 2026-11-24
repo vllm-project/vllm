@@ -473,7 +473,7 @@ def _make_kv_cache_config(cfg: _TestConfig, layer_names: list[str]) -> KVCacheCo
         dtypes=(cfg.dtype, cfg.dtype),
     )
     group = new_kv_cache_group(
-        layer_names, mamba_spec, MambaManager.config(mamba_cache_mode="align")
+        layer_names, mamba_spec, MambaManager.config(enable_prefix_caching=True)
     )
     return KVCacheConfig(
         num_blocks=cfg.num_blocks,
@@ -663,7 +663,7 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
         config,
         [
             new_kv_cache_group(
-                layer_names, spec, MambaManager.config(mamba_cache_mode="align")
+                layer_names, spec, MambaManager.config(enable_prefix_caching=True)
             )
         ],
         5 * (2 * spec.page_size_bytes + 8),
@@ -716,7 +716,7 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
     computed_gpu = torch.tensor([0, computed], dtype=torch.int32, device=device)
     query_start = torch.tensor([0, scheduled], dtype=torch.int32, device=device)
     model_state = object.__new__(MambaHybridModelState)
-    model_state._align_mode = True
+    model_state.prefix_caching = True
     model_state._mamba_ctx = ctx
     model_state._mamba_state_idx_gpu = torch.tensor(
         [-1, previous_column], dtype=torch.int32, device=device
@@ -785,13 +785,13 @@ def test_mamba_groups_support_different_state_specs():
     )
     # Groups may differ in prefill checkpointing.
     gdn_config = MambaManager.config(
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
         num_speculative_blocks=3,
         num_prefill_checkpoint_blocks=1,
         prefill_checkpoint_alignment=16,
     )
     short_conv_config = MambaManager.config(
-        mamba_cache_mode="align", num_speculative_blocks=3
+        enable_prefix_caching=True, num_speculative_blocks=3
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=8,
@@ -859,7 +859,7 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
         mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
     )
     mamba_config = MambaManager.config(
-        mamba_cache_mode="align", num_speculative_blocks=3
+        enable_prefix_caching=True, num_speculative_blocks=3
     )
     layer_specs = {
         "gdn.0": gdn_spec,
@@ -949,8 +949,8 @@ def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
     )
 
     state = object.__new__(MambaHybridModelState)
-    state.cache_config = CacheConfig(mamba_cache_mode="align")
-    state._align_mode = True
+    state.cache_config = CacheConfig(enable_prefix_caching=True)
+    state.prefix_caching = True
     state._use_replayssm_trackers = False
     state._mamba_state_copy_funcs = _COPY_FUNCS
     state.max_num_reqs = cfg.max_num_reqs
@@ -972,9 +972,11 @@ def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 @pytest.mark.parametrize(
-    ("num_spec", "cache_mode"), [(0, "none"), (3, "align")], ids=["stp", "mtp3"]
+    ("num_spec", "enable_prefix_caching"), [(0, False), (3, True)], ids=["stp", "mtp3"]
 )
-def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_mode):
+def test_replayssm_resumed_prefill_resets_history_before_decode(
+    num_spec, enable_prefix_caching
+):
     """A resumed prefill replaces the SSM state, so decode must ignore old rings."""
     from vllm.v1.worker.replayssm_utils import (
         ReplaySSMModelContext,
@@ -1001,6 +1003,7 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
         _replayssm_prev_num_accepted=committed,
         replayssm_buffer_len=16,
         mamba_config=MambaConfig(),
+        cache_config=SimpleNamespace(enable_prefix_caching=enable_prefix_caching),
     )
     spec = MambaSpec(
         block_size=128,
@@ -1010,7 +1013,7 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
     replay = ReplaySSMModelContext.create(
         [([mixer], spec, torch.tensor([[1]], dtype=torch.int32, device=device))],
         max_num_reqs=1,
-        materialize_prefixes=cache_mode == "align",
+        materialize_prefixes=enable_prefix_caching,
     )
     _postprocess_replayssm_kernel[(1, 1)](
         None,
@@ -1036,7 +1039,7 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
         QUERY_METADATA_IS_CUMULATIVE=False,
         NUM_COMPUTED_IS_POST_STEP=False,
         HAS_IDX_MAPPING=False,
-        MATERIALIZE_PREFIXES=cache_mode == "align",
+        MATERIALIZE_PREFIXES=enable_prefix_caching,
         LIVE_COL_IS_ZERO=True,
     )
     assert starts.tolist() == [7, 0, 7]

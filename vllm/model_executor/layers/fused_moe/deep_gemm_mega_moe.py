@@ -6,7 +6,8 @@ Each `MEGA_MOE_*` format is one row of the feature matrix. MX weights and
 activations carry one UE8M0 scale per 1x32 block (`MEGA_MOE_MXFP4_SM90`
 activations use one FP32 scale per 1x128 block). NVFP4 weights carry one
 E4M3 scale per 1x16 block plus a per-expert FP32 global scale; NVFP4 dispatch
-scales each token by its own FP32 scale.
+scales each token by its own FP32 scale. `MEGA_MOE_FP8_BLOCK_SM90` weights
+carry one FP32 scale per 128x128 block.
 """
 
 import math
@@ -39,7 +40,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 
 logger = init_logger(__name__)
 
@@ -96,7 +97,7 @@ class MegaMoEWeightSpec:
     values_per_element: int = 1
     # K values per block scale; None for unscaled weights.
     scale_group_k: int | None = None
-    # Block scale dtype: UE8M0 (MX) or E4M3 (NVFP4).
+    # Block scale dtype: UE8M0 (MX), E4M3 (NVFP4) or FP32 (block FP8, SM90).
     scale_dtype: torch.dtype | None = None
 
     @property
@@ -121,6 +122,9 @@ _NVFP4_WEIGHT = MegaMoEWeightSpec(
     scale_dtype=torch.float8_e4m3fn,
 )
 _BF16_WEIGHT = MegaMoEWeightSpec(torch.bfloat16)
+_FP8_BLOCK_WEIGHT = MegaMoEWeightSpec(
+    torch.float8_e4m3fn, scale_group_k=128, scale_dtype=torch.float32
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +141,8 @@ class MegaMoEWeightFormat:
     # Quantization of the dispatched hidden states; None dispatches BF16.
     hidden_quant: QuantKey | None
     activations: frozenset[str]
+    # SM90 kernel: FP32 1x128 activation scales and a BLOCK_M all ranks agree on.
+    sm90: bool = False
 
     @property
     def uses_nvfp4_api(self) -> bool:
@@ -192,6 +198,15 @@ MEGA_MOE_MXFP4_SM90 = replace(
         symmetric=True,
     ),
     activations=frozenset({"swiglu"}),
+    sm90=True,
+)
+# Block-FP8 routed and shared experts on SM90, lossless (no MXFP8 requant).
+MEGA_MOE_FP8_BLOCK_SM90 = replace(
+    MEGA_MOE_MXFP4_SM90,
+    name="fp8_block_sm90",
+    mma_type="fp8xfp8",
+    routed=_FP8_BLOCK_WEIGHT,
+    shared=(_FP8_BLOCK_WEIGHT,),
 )
 
 
@@ -210,13 +225,15 @@ def check_deep_gemm_mega_moe_supported(
     """
     device_id = device.index or 0
     if current_platform.is_device_capability(90, device_id=device_id):
-        if weight_format.mma_type != MEGA_MOE_MXFP4.mma_type:
+        if not (weight_format.sm90 or weight_format == MEGA_MOE_MXFP4):
             raise NotImplementedError(
-                "DeepGEMM MegaMoE on SM90 supports MXFP4 experts only, "
-                f"not {weight_format.name}."
+                "DeepGEMM MegaMoE on SM90 supports MXFP4 and block-FP8 experts "
+                f"only, not {weight_format.name}."
             )
     elif not current_platform.is_device_capability_family(100, device_id=device_id):
         raise NotImplementedError("DeepGEMM MegaMoE requires SM90 or SM100 GPUs.")
+    elif weight_format.sm90:
+        raise NotImplementedError(f"{weight_format.name} requires SM90 GPUs.")
     if hidden_size % 128 != 0 or intermediate_size % 128 != 0:
         raise ValueError(
             "DeepGEMM MegaMoE requires hidden and intermediate sizes "
@@ -255,7 +272,8 @@ class DeepGemmMegaMoEExperts(nn.Module):
 
     Parameters are registered in the kernel layout and every checkpoint shard is
     written straight into it, so loading (and reloading) needs no post-load
-    transform, except the SM90 requantization of a fused FP8 shared expert.
+    transform, except the SM90 requantization of a fused FP8 shared expert
+    and the SM90 layout of FP32 block scales.
     Whether the shared expert runs inside the launch is decided here, before
     any weight loads; a fused layer owns the shared-expert weights and the
     caller drops its shared MLP.
@@ -484,7 +502,13 @@ class DeepGemmMegaMoEExperts(nn.Module):
             f"{name}_weight",
             torch.zeros(*outer, n, k // spec.values_per_element, dtype=spec.dtype),
         )
-        if spec.scale_group_k is not None:
+        if spec.scale_dtype == torch.float32:
+            # 128x128 block scales, MN-major with a 16-byte aligned MN stride.
+            scale = torch.zeros(
+                *outer, k // 128, round_up(n // 128, 4), dtype=spec.scale_dtype
+            )
+            register(f"{name}_weight_scale", scale[..., : n // 128].transpose(-1, -2))
+        elif spec.scale_group_k is not None:
             # Block scales, MN-major, four per int32 along K.
             scale_k = k // (4 * spec.scale_group_k)
             scale = torch.zeros(*outer, scale_k, n, dtype=torch.int32)
@@ -869,11 +893,15 @@ class DeepGemmMegaMoEExperts(nn.Module):
             assert t.shape[0] == self.num_local_experts
             if t.is_contiguous():
                 return t.view(self.num_local_experts, -1)
-            elif t.dim() == 3 and t.stride(1) == 1 and t.stride(2) == t.shape[1]:
-                # scales have shape (E, M, N) with memory layout (E, N, M)
-                back = torch.transpose(t, 1, 2)
-                assert back.is_contiguous()
-                return back.view(self.num_local_experts, -1)
+            elif (
+                t.dim() == 3
+                and t.stride(1) == 1
+                and t.stride(2) >= t.shape[1]
+                and t.stride(0) == t.shape[2] * t.stride(2)
+            ):
+                # Scales of shape (E, M, N) laid out as (E, N, M'), M' >= M
+                # (SM90 FP32 block scales pad M to a multiple of 4).
+                return t.as_strided((t.shape[0], t.stride(0)), (t.stride(0), 1))
 
             raise AssertionError(
                 f"MegaMoE EPLB {name}: non-contiguous expert tensor with "
@@ -967,7 +995,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         symm_buffer = self.get_symm_buffer()
         kwargs = dict(self._kernel_kwargs)
         block_m_num_tokens = num_tokens
-        if fmt == MEGA_MOE_MXFP4_SM90:
+        if fmt.sm90:
             # Pick BLOCK_M from the mean tokens per rank so all ranks agree.
             block_m_num_tokens = self._mean_num_tokens(num_tokens)
             kwargs["num_tokens_for_block_m"] = block_m_num_tokens
