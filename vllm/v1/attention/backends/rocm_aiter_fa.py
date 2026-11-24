@@ -1919,7 +1919,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
         )
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        return rocm_aiter_ops.is_enabled()
+        return rocm_aiter_ops.is_enabled() and (
+            not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+            or rocm_aiter_ops.qk_norm_rope_shuffle_layout_supported(
+                self.head_size, self.kv_cache_dtype
+            )
+        )
 
     def do_qk_norm_rope_kvcache_update(
         self,
@@ -1937,6 +1942,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         layer_slot_mapping: torch.Tensor,
         q_out_fp8: torch.Tensor | None = None,
         q_scale: torch.Tensor | None = None,
+        v_norm: bool = False,
     ):
         key_cache, value_cache = self._split_kv_cache(kv_cache)
         rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
@@ -1962,6 +1968,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             return_kv=True,
             q_out_fp8=q_out_fp8,
             q_scale=q_scale,
+            v_norm=v_norm,
         )
 
     def do_rope_and_kv_cache_update(
