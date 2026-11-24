@@ -12,7 +12,6 @@ they cannot be dropped before the exchange.
 
 import torch
 
-from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group
 from vllm.models.minimax_m3.amd.ops.sparse_pa import (
     PAGES_PER_SPARSE_BLOCK,
     _write_sparse_block_table_row_from_values,
@@ -238,45 +237,6 @@ def local_topk_keys(
         num_warps=DECODE_TOPK_NUM_WARPS,
     )
     return out
-
-
-def aiter_all_gather(x: torch.Tensor) -> torch.Tensor | None:
-    """AITER IPC all-gather over the TP group as `[world, *x.shape]`, or None.
-
-    The payload is viewed as int32 so AITER's pybind layer (which has no
-    float64 after it relabels integers as floats) accepts it -- int64 keys and
-    bf16 index queries alike. Concatenates along dim 0,
-    then views back to `x`'s dtype.
-    """
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    comm = rocm_aiter_ops.get_aiter_allreduce()
-    if comm is None or comm.disabled:
-        return None
-    if not x.is_contiguous() or (x.shape[-1] * x.element_size()) % 4:
-        return None
-    packed = x.view(torch.int32)
-    if not comm.should_custom_ag(packed):
-        return None
-    gathered = comm.custom_all_gather(packed, dim=0)
-    if gathered is None:
-        return None
-    world = get_tp_group().world_size
-    return gathered.view(x.dtype).view(world, *x.shape)
-
-
-def all_gather(x: torch.Tensor, group: GroupCoordinator) -> torch.Tensor:
-    """All-gather contiguous `x` over `group` to `[world, *x.shape]`.
-
-    AITER's IPC all-gather is tried first: on ROCm the TP communicator's
-    `all_gather` stays on the RCCL collective, and its AITER path is only
-    enabled for DP groups, so it would not pick AITER for these small
-    per-layer payloads.
-    """
-    gathered = aiter_all_gather(x)
-    if gathered is None:
-        gathered = group.all_gather(x, dim=0)
-    return gathered.view(group.world_size, *x.shape)
 
 
 def merge_topk_keys(

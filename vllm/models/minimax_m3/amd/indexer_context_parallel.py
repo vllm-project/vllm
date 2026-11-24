@@ -26,6 +26,7 @@ import torch
 
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.device_communicators.aiter_all_gather import all_gather
 from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.models.minimax_m3.amd.ops.index_topk import (
@@ -38,7 +39,6 @@ from vllm.models.minimax_m3.amd.ops.indexer_context_parallel import (
     indexer_context_scores,
 )
 from vllm.models.minimax_m3.amd.ops.indexer_cp_exchange import (
-    all_gather,
     local_topk_keys,
     merge_topk_keys,
 )
