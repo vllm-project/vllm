@@ -15,9 +15,12 @@ it in vLLM comes down to two things, both exercised here:
 """
 
 import contextlib
+import math
 
 import pytest
 import torch
+from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_humming
 
 from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
     HummingExpertsBase,
@@ -29,7 +32,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kNvfp4Dynamic,
 )
-from vllm.utils.import_utils import has_humming
 
 # make_humming_moe_quant_config stores per-sublayer humming LayerConfigs but the
 # config-plumbing asserts below never read them, so a placeholder satisfies the
@@ -60,11 +62,12 @@ def test_mxfp4_weight_with_per_token_fp8_activation_still_supported():
     ],
 )
 def test_humming_fp8_input_schema_to_quant_key(group_size, expected_key):
+    from vllm.utils.humming import HummingInputSchema
+    from vllm.utils.humming import dtypes as humming_dtypes
+
     from vllm.model_executor.layers.quantization.utils.humming import (
         input_schema_to_quant_key,
     )
-    from vllm.utils.humming import HummingInputSchema
-    from vllm.utils.humming import dtypes as humming_dtypes
 
     schema = HummingInputSchema(
         a_dtype=humming_dtypes.float8e4m3,
@@ -75,10 +78,11 @@ def test_humming_fp8_input_schema_to_quant_key(group_size, expected_key):
 
 @pytest.mark.skipif(not has_humming(), reason="humming is not installed")
 def test_humming_bf16_input_schema_is_unquantized():
+    from vllm.utils.humming import HummingInputSchema
+
     from vllm.model_executor.layers.quantization.utils.humming import (
         input_schema_to_quant_key,
     )
-    from vllm.utils.humming import HummingInputSchema
 
     # No a_dtype -> unquantized (bf16/fp16) inputs -> None.
     assert (
@@ -93,11 +97,12 @@ def test_block_fp8_activation_quant_config_is_block_quantized():
     DeepEP prepare/finalize step quantize activations to block FP8 *before* the
     all-to-all dispatch instead of deferring to Humming -- and what makes
     HummingExpertsBase.expects_unquantized_inputs return False."""
+    from vllm.platforms import current_platform
+
     from vllm.model_executor.layers.quantization.utils.humming import (
         make_humming_moe_quant_config,
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-    from vllm.platforms import current_platform
 
     qc = make_humming_moe_quant_config(
         quant_dtype=current_platform.fp8_dtype(),
@@ -115,10 +120,11 @@ def test_default_activation_quant_config_defers_to_humming():
     """Without a block activation shape the config stays per-token (the deferred
     path): Humming quantizes internally, preserving pre-existing behavior for
     every non-block-FP8 scheme."""
+    from vllm.platforms import current_platform
+
     from vllm.model_executor.layers.quantization.utils.humming import (
         make_humming_moe_quant_config,
     )
-    from vllm.platforms import current_platform
 
     qc = make_humming_moe_quant_config(
         quant_dtype=current_platform.fp8_dtype(),
@@ -143,8 +149,9 @@ def test_checkpoint_mxfp8_runs_as_block_fp8_on_hopper(
 ):
     """A checkpoint's MXFP8 MoE activations (e.g. DeepSeek V4) run as block
     FP8 on Humming's SM90 kernels; an explicit user request is honored."""
-    from vllm.model_executor.layers.fused_moe.oracle import mxfp4
     from vllm.platforms import current_platform
+
+    from vllm.model_executor.layers.fused_moe.oracle import mxfp4
 
     # Patch the class, not the instance: before pytest 9.2, undoing an instance
     # patch leaves the class attribute shadowed in the instance's __dict__.
@@ -156,10 +163,132 @@ def test_checkpoint_mxfp8_runs_as_block_fp8_on_hopper(
     monkeypatch.setattr(mxfp4, "_user_moe_activation_override", lambda: user_override)
     monkeypatch.delenv("VLLM_HUMMING_INPUT_QUANT_CONFIG", raising=False)
 
-    schema = mxfp4._humming_input_schema(kMxfp8Dynamic)
+    schema = mxfp4._humming_input_schema(
+        kMxfp8Dynamic, hidden_size=5120, intermediate_size=2304
+    )
 
     assert str(schema.a_dtype) == "float8e4m3"
     assert schema.input_scale_group_size == expected_group_size
+
+
+@pytest.mark.skipif(
+    not (has_humming() and current_platform.is_device_capability_family(90)),
+    reason="requires Humming on Hopper",
+)
+@pytest.mark.parametrize("intermediate_size", [288, 576])
+def test_humming_mxfp4_unaligned_expert_width_runs(
+    tmp_path, monkeypatch, vllm_runner, intermediate_size
+):
+    from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
+
+    from vllm import SamplingParams
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    config = DeepseekV41Config(
+        text_config={
+            "vocab_size": 128,
+            "hidden_size": 512,
+            "moe_intermediate_size": intermediate_size,
+            "num_hidden_layers": 3,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 1,
+            "head_dim": 512,
+            "qk_rope_head_dim": 64,
+            "q_lora_rank": 64,
+            "o_lora_rank": 64,
+            "o_groups": 8,
+            "index_n_heads": 8,
+            "index_head_dim": 128,
+            "index_topk": 512,
+            "n_routed_experts": 8,
+            "n_shared_experts": 1,
+            "num_experts_per_tok": 2,
+            "compress_ratios": [0, 0, 2],
+            "kv_source_layer_ids": [2],
+            "index_source_layer_ids": [2],
+            "candidate_source_layer_id": 2,
+            "candidate_block_size": 8,
+            "candidate_topk_blocks": 8,
+            "engram_layer_ids": [],
+            "hc_mult": 4,
+            "hc_sinkhorn_iters": 20,
+            "hc_eps": 1e-6,
+            "rms_norm_eps": 1e-6,
+            "norm_topk_prob": True,
+            "scoring_func": "sqrtsoftplus",
+            "topk_method": "noaux_tc",
+            "routed_scaling_factor": 1.5,
+            "swiglu_limit": 10.0,
+            "hidden_act": "silu",
+            "initializer_range": 0.02,
+            "attention_bias": False,
+            "attention_dropout": 0.0,
+            "use_cache": True,
+            "sliding_window": 128,
+            "rope_theta": 10000.0,
+            "compress_rope_theta": 160000.0,
+            "max_position_embeddings": 256,
+            "num_nextn_predict_layers": 0,
+        },
+        architectures=["DeepseekV41ForCausalLM"],
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+        quantization_config={
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [32, 32],
+            "scale_fmt": "ue8m0",
+            "expert_dtype": "fp4",
+            "ignored_layers": ["lm_head", "model.layers.*.attn.*"],
+        },
+    )
+    config.save_pretrained(tmp_path)
+
+    def check_experts(model):
+        experts = [
+            layer for layer in model.modules() if isinstance(layer, RoutedExperts)
+        ]
+        assert len(experts) == 3
+        assert all(
+            layer.humming_configs["w2"].input_scale_group_size == 0
+            and str(layer.humming_configs["w2"].a_dtype) == "float8e4m3"
+            for layer in experts
+        )
+
+    with vllm_runner(
+        str(tmp_path),
+        dtype="bfloat16",
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+        kernel_config={"moe_backend": "humming", "enable_flashinfer_autotune": False},
+        attention_config={
+            "backend": "FLASHMLA_SPARSE_DSV41",
+            "indexer_kv_dtype": "fp8",
+            "indexer_sparse_logits": False,
+        },
+        max_model_len=256,
+        max_num_seqs=1,
+        max_num_batched_tokens=32,
+        kv_cache_dtype="fp8",
+        limit_mm_per_prompt={"image": 0},
+        kv_cache_memory_bytes=16 << 20,
+    ) as runner:
+        runner.apply_model(check_experts)
+        outputs = runner.get_llm().generate(
+            [{"prompt_token_ids": [1, 2, 3]}],
+            SamplingParams(temperature=0, max_tokens=2, ignore_eos=True, logprobs=1),
+        )
+        completion = outputs[0].outputs[0]
+        assert len(completion.token_ids) == 2
+        assert len(completion.logprobs) == 2
+        assert all(
+            math.isfinite(value.logprob)
+            for step in completion.logprobs
+            for value in step.values()
+        )
 
 
 @pytest.mark.skipif(not has_humming(), reason="humming is not installed")
@@ -182,7 +311,6 @@ def test_humming_nvfp4_linear_declares_executed_activation(
     selection needs the same answer up front so VLLM_STRICT_QUANT_SCHEME can
     move on to another kernel instead of failing at load."""
     import humming.schema.humming as humming_schema
-
     from vllm.model_executor.kernels.linear import HummingNvFp4LinearKernel
     from vllm.platforms import current_platform
     from vllm.platforms.interface import DeviceCapability

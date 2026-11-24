@@ -52,6 +52,13 @@ Other transforms, older GPUs, and an explicit `--linear-backend` other than `aut
 
 ## Activation Quantization Fallbacks
 
+On Hopper, Humming runs a checkpoint's MXFP8 MoE activations as block FP8
+with 128-element groups when both local GEMM input widths are divisible by
+128. Tensor-parallel expert shards with unaligned widths use per-token FP8
+with float32 scales, so their down projection can run without an input-tuning
+alignment error. This changes activation scaling granularity for those shards.
+Explicit activation overrides remain unchanged.
+
 A quantized checkpoint (or `--quantization` / `--quantization-config`) requests both a weight and an activation scheme, for example FP8 W8A8 or NVFP4 W4A4. When the kernels that run the requested activation quantization are unavailable for the device or deployment, vLLM by default falls back to a weight-only kernel (Marlin, Humming, the CPU W8A16 kernels) that keeps the quantized weights but runs activations in 16-bit, so W8A8 runs as W8A16 and W4A4 as W4A16. This costs no accuracy, but it is not the scheme the checkpoint was calibrated and benchmarked with, and it is logged once as a warning:
 
 ```text
