@@ -9,6 +9,8 @@ import sys
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from torch._subclasses.fake_tensor import is_fake
+
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -21,18 +23,23 @@ _routes: dict[str, list[tuple[dict[str, Any], Callable[..., Any]]]] = {}
 
 def kernel_site(fn: Callable[..., Any]) -> Callable[..., Any]:
     site = f"{fn.__module__}.{fn.__qualname__}"
-    params = inspect.signature(fn).parameters
+    signature = inspect.signature(fn)
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         if routes := _routes.get(site):
-            arguments = dict(zip(params, args)) | kwargs
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            arguments = bound.arguments
+            # On fake tensors a compiler is tracing this call: the choice made
+            # here is compiled into its graph, and no request is being served.
+            traced = any(map(is_fake, arguments.values()))
             for definition, run in routes:
                 if not (reason := _misfit(definition, arguments)):
                     result = run(**{n: arguments[n] for n in definition["inputs"]})
-                    _count(site, "hit")
+                    _count(site, "hit", traced)
                     return result
-            _count(site, f"fallback_{reason}")
+            _count(site, f"fallback_{reason}", traced)
         return fn(*args, **kwargs)
 
     return wrapper
@@ -94,6 +101,8 @@ def _misfit(definition: dict[str, Any], arguments: dict[str, Any]) -> str:
     }
     for name, spec in inputs.items():
         if (value := arguments.get(name)) is None:
+            if spec.get("optional"):
+                continue
             return f"missing_{name}"
         if not (shape := spec.get("shape")):
             continue
@@ -103,14 +112,23 @@ def _misfit(definition: dict[str, Any], arguments: dict[str, Any]) -> str:
             return f"dtype_{name}"
         for axis, size in zip(shape, value.shape):
             bound = axes.setdefault(axis, int(axis) if str(axis).isdigit() else size)
-            if bound != size:
+            # A pinned size is never compared with a symbolic one: a compiled
+            # graph would keep that one answer for every shape it serves.
+            if isinstance(bound, int) != isinstance(size, int) or bound != size:
                 return f"axis_{axis}"
-    extra = [n for n, v in arguments.items() if n not in inputs and v is not None]
+    extra = [
+        n
+        for n, v in arguments.items()
+        if n not in inputs and n != "self" and v is not None
+    ]
     return f"extra_{extra[0]}" if extra else ""
 
 
-def _count(site: str, status: str) -> None:
-    from flashinfer.trace_apply.apply import bump_stat
+def _count(site: str, status: str, traced: bool) -> None:
+    if traced:
+        status = f"compiled_{status}"
+    else:
+        from flashinfer.trace_apply.apply import bump_stat
 
-    bump_stat(site, status)
+        bump_stat(site, status)
     logger.info_once("%s: FlashInfer kernel package %s.", site, status)

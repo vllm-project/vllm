@@ -4,10 +4,16 @@ import hashlib
 import json
 
 import pytest
+import torch
+from torch.fx.experimental.proxy_tensor import make_fx
 
-from vllm import LLM, SamplingParams
+from tests.compile.backend import TestBackend
+from vllm import LLM, SamplingParams, ir
+from vllm.compilation.passes.ir.lowering_pass import VllmIRLoweringPass
+from vllm.config import get_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor import kernel_packages
+from vllm.platforms import current_platform
 
 SITE = "vllm.model_executor.layers.mamba.ops.ssd_chunk_scan._chunk_scan_fwd"
 # A pass-through Solution with a setup step, fitting one-chunk prefills (K == 1).
@@ -74,6 +80,57 @@ def seal(root, kernel=KERNEL, chunks=1):
     for name, data in files.items():
         (root / digest / "bundle" / name).write_bytes(data)
     return digest
+
+
+class Doubler:
+    @kernel_packages.kernel_site
+    def forward(self, x, k=None, scale=2.0):
+        return x * scale
+
+
+def test_site_fit_rules(monkeypatch):
+    stats = pytest.importorskip("flashinfer.trace_apply").stats
+    site = f"{__name__}.Doubler.forward"
+    inputs = {"x": {"shape": ["T", "H"]}, "k": {"optional": True}, "scale": {}}
+    pinned = {"inputs": inputs, "axes": {"T": {"type": "const", "value": 2}}}
+    routes = [
+        (pinned, lambda x, k, scale: x + 1),
+        ({"inputs": inputs}, lambda x, k, scale: x - 1),
+    ]
+    monkeypatch.setitem(kernel_packages._routes, site, routes)
+    forward = Doubler().forward
+
+    # A method, a parameter left at its default and an optional input at None fit.
+    assert forward(torch.zeros(2, 4)).sum() == 8
+    assert forward(torch.zeros(3, 4)).sum() == -12  # T is not 2: the next package
+    assert forward(torch.ones(4)).sum() == 8  # no package fits: the stock function
+    counts = stats()[site]
+    assert counts == {"hit": 2, "fallback_rank_x": 1}
+
+    # A compiler tracing the call: a pinned size is not matched against a symbolic
+    # one, the package that fits is compiled in, and no request is counted.
+    trace = make_fx(lambda x: forward(x), tracing_mode="symbolic")
+    traced = trace(torch.zeros(2, 4))
+    assert "sub" in traced.code and "add" not in traced.code
+    assert stats()[site] == counts
+
+
+def test_package_is_compiled_into_a_lowered_norm(monkeypatch, default_vllm_config):
+    stats = pytest.importorskip("flashinfer.trace_apply").stats
+    site = "vllm.ir.ops.layernorm.rms_norm"
+    inputs = {"x": {"shape": ["T", "H"]}, "weight": {"shape": ["H"]}, "epsilon": {}}
+    routes = [({"inputs": inputs}, lambda x, weight, epsilon: x + 1)]
+    monkeypatch.setitem(kernel_packages._routes, site, routes)
+    torch.set_default_device(current_platform.device_type)
+    x, weight = torch.randn(8, 16), torch.ones(16)
+
+    backend = TestBackend(VllmIRLoweringPass(get_current_vllm_config()))
+    with ir.ops.rms_norm.set_priority(["native"]), ir.enable_torch_wrap(True):
+        norm = torch.compile(
+            lambda x: ir.ops.rms_norm(x, weight, 1e-5), backend=backend, fullgraph=True
+        )
+        assert torch.equal(norm(x), x + 1)
+    assert site not in stats()  # chosen at compile time: no request is counted
 
 
 def test_package_serves_mamba2_chunk_scan(tmp_path, monkeypatch):
