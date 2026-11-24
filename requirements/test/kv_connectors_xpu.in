@@ -1,0 +1,2 @@
+# XPU KV connector test dependencies; NIXL itself is built into the XPU image.
+lmcache==0.5.7.post1
