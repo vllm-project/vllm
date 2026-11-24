@@ -874,7 +874,11 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                 num_video_frames = min(num_video_frames, video_overrides.num_frames)
             if video_overrides.width or video_overrides.height:
                 video_frame_overrides = ImageDummyOptions(
-                    count=video_overrides.count,
+                    count=(
+                        video_overrides.count
+                        if video_overrides.count is not None
+                        else 999
+                    ),
                     width=video_overrides.width,
                     height=video_overrides.height,
                 )
