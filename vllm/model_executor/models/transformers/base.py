@@ -132,23 +132,23 @@ class SplitWeights:
         converter = self.converter
         sources, targets = converter.source_patterns, converter.target_patterns
         for name, tensor in weights:
-            if not re.search(sources[0], name):
+            # Match like Transformers does (whole names, scoped, first occurrence)
+            first, source = converter.rename_source_key(name)
+            if source is None:
                 yield name, tensor
                 continue
-            # The name of the first target, as `Split` looks it up in the model
-            first = self.mapper.map_name(re.sub(sources[0], targets[0], name))
-            pieces = {sources[0]: tensor}
+            pieces = {source: tensor}
             for op in converter.operations:
                 pieces = op.convert(
                     pieces,
                     sources,
                     targets,
-                    full_layer_name=first,
+                    full_layer_name=self.mapper.map_name(first),
                     model=self,
                     config=self.config,
                 )
             for target, piece in pieces.items():
-                yield re.sub(sources[0], target, name), piece
+                yield first.replace(targets[0], target), piece
 
 
 VLLM_ATTN_ATTR = "attn"

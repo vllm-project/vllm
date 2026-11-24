@@ -1076,7 +1076,8 @@ def test_init_parameters_keeps_declared_dtype_and_requires_grad():
 )
 def test_split_weights_splits_fused_gqa_qkv():
     """A checkpoint that fuses GQA `[q|k|v]` into one tensor (Sarvam-30B) is split
-    into each projection's size, matched before and named after the renamings."""
+    into each projection's size, matched before and named after the renamings. Like
+    in Transformers, a longer name that only starts with the pattern is not split."""
     with torch.device("meta"):
         model = nn.Module()
         model.config = PreTrainedConfig()
@@ -1095,12 +1096,15 @@ def test_split_weights_splits_fused_gqa_qkv():
     fused = torch.arange(12 * 8, dtype=torch.float32).reshape(12, 8)
 
     weights = SplitWeights(converter, mapper, model)
-    pieces = dict(weights([("attention.query_key_value.weight", fused)]))
+    other = ("attention.query_key_value_bias", torch.zeros(12))
+    pieces = dict(weights([("attention.query_key_value.weight", fused), other]))
 
     assert list(pieces) == [
         "attention.q_proj.weight",
         "attention.k_proj.weight",
         "attention.v_proj.weight",
+        "attention.query_key_value_bias",
     ]
-    torch.testing.assert_close(torch.cat(list(pieces.values())), fused)
-    assert [p.shape[0] for p in pieces.values()] == [8, 2, 2]
+    split = [pieces[f"attention.{p}_proj.weight"] for p in "qkv"]
+    torch.testing.assert_close(torch.cat(split), fused)
+    assert [p.shape[0] for p in split] == [8, 2, 2]
