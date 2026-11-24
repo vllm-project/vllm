@@ -538,6 +538,7 @@ def compile_flash_attn_varlen_func_from_specs(
     seqused_k_shape: tuple[int, ...] | None = None,
     page_table_shape: tuple[int, ...] | None = None,
     softcap: float | None = None,
+    dynamic_causal_shape: tuple[int, ...] | None = None,
 ) -> None:
     if fa_version != 4:
         raise ValueError(
@@ -601,6 +602,9 @@ def compile_flash_attn_varlen_func_from_specs(
         max_seqlen_k=max_seqlen_k,
         softmax_scale=softmax_scale,
         causal=causal,
+        dynamic_causal=_make_compile_only_tensor_spec(
+            dynamic_causal_shape, torch.int32, 4
+        ),
         softcap=softcap,
         window_size_left=real_window_size[0],
         window_size_right=real_window_size[1],

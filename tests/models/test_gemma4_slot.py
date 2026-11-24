@@ -10,7 +10,6 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.models.gemma4_slot import Gemma4SlotDecisionModelState
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 pytestmark = pytest.mark.cpu_test
 
@@ -26,7 +25,10 @@ OVERRIDES = {
 
 
 def tiny_gemma4_config(
-    moe: bool, overrides: dict | None = OVERRIDES, **config
+    moe: bool,
+    overrides: dict | None = OVERRIDES,
+    head_dims: tuple[int, int] = (64, 128),
+    **config,
 ) -> Gemma4Config:
     """A small Gemma 4 with the layout of bison-1, or groundhog-1 if `moe`."""
     text_config = {
@@ -36,9 +38,9 @@ def tiny_gemma4_config(
         "layer_types": ["sliding_attention", "full_attention"] * 2,
         "num_attention_heads": 4,
         "num_key_value_heads": 2,
-        "head_dim": 64,
+        "head_dim": head_dims[0],
         # Builds per_layer_config for the full layers, as in the checkpoints.
-        "global_head_dim": 128,
+        "global_head_dim": head_dims[1],
         "num_global_key_value_heads": 1,
         "attention_k_eq_v": True,
         # Shorter than the test prompts, so the window matters.
@@ -80,12 +82,12 @@ def tiny_gemma4_config(
 
 
 def make_vllm_config(
-    tmp_path, overrides=OVERRIDES, head_dtype=None, **engine_args
+    tmp_path, overrides=OVERRIDES, head_dtype=None, head_dims=(64, 128), **engine_args
 ) -> VllmConfig:
     """The engine config of a checkpoint with only a config.json."""
-    tiny_gemma4_config(False, overrides, head_dtype=head_dtype).save_pretrained(
-        tmp_path
-    )
+    tiny_gemma4_config(
+        False, overrides, head_dims=head_dims, head_dtype=head_dtype
+    ).save_pretrained(tmp_path)
     return EngineArgs(
         model=str(tmp_path), skip_tokenizer_init=True, **engine_args
     ).create_engine_config()
@@ -127,7 +129,6 @@ def test_published_configs(model, moe):
     assert model_config.max_model_len == 131072
     assert model_config.head_dtype == torch.float32
     assert bool(model_config.hf_text_config.enable_moe_block) == moe
-    assert config.attention_config.backend == AttentionBackendEnum.TRITON_ATTN
     assert config.scheduler_config.scheduler_cls == (
         "vllm.v1.core.sched.prefix_lm_scheduler.PrefixLMScheduler"
     )
@@ -158,6 +159,7 @@ def test_stock_gemma4_is_not_routed(tmp_path):
             {"disable_hybrid_kv_cache_manager": True},
             "disable-hybrid-kv-cache-manager",
         ),
+        (OVERRIDES, {"attention_backend": "FLEX_ATTENTION"}, "not FLEX_ATTENTION"),
     ],
 )
 def test_config_rejects_unsupported_overrides_and_features(

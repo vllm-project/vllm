@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.single_type_kv_cache_manager import get_kv_cache_kind
@@ -17,6 +18,7 @@ from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
+from .gemma4 import Gemma4Attention
 from .gemma4_mm import Gemma4ForConditionalGeneration
 from .slot_decision import PrefixLMBlocksMixin
 
@@ -126,6 +128,12 @@ class Gemma4SlotDecisionModelState(PrefixLMBlocksMixin, DefaultModelState):
 
 
 class Gemma4ForSlotDecision(Gemma4ForConditionalGeneration):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        for module in self.modules():
+            if isinstance(module, Gemma4Attention) and not module.is_sliding:
+                module.attn.doc_range_segments = True
+
     @staticmethod
     def get_model_state_cls() -> type[Gemma4SlotDecisionModelState]:
         return Gemma4SlotDecisionModelState

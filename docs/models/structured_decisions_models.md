@@ -450,8 +450,9 @@ vllm serve baselabs/bison-1 --tensor-parallel-size 2
   with every attention backend.
 - On `/v1/systemone` and `/v1/decisions`, media inputs return 400.
   `/v1/chat/completions` takes images as stock Gemma 4 does.
-- Only the `TRITON_ATTN` attention backend is supported for full attention,
-  and it is selected automatically. The flags Mammoth-1 refuses are refused
-  here too, as is `--disable-hybrid-kv-cache-manager`.
+- The attention backend is selected automatically: `FLASH_ATTN`
+  (FlashAttention 4) on Hopper, `FLASHINFER` on Blackwell, and `TRITON_ATTN`
+  elsewhere or with an fp32 model or a quantized KV cache. The flags Mammoth-1
+  refuses are refused here too, as is `--disable-hybrid-kv-cache-manager`.
 - The `choice`, `instructions` and `chat_template_kwargs` limits are those of
   Mammoth-1.
