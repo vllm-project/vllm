@@ -208,6 +208,7 @@ class GDNRecoverSSMMetadataBuilder(GDNAttentionMetadataBuilder):
                 m.query_start_loc_cpu,
                 num_decode_draft_tokens_cpu,
                 m.num_reqs,
+                spec_query_len=1 + self.num_spec,
             )
         meta = super().build(
             common_prefix_len,

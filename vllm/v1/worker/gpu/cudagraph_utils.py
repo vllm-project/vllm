@@ -367,10 +367,12 @@ class CudaGraphManager:
         for num_tokens, num_active_loras in product(
             prefill_sizes, self.lora_capture_cases
         ):
-            # GDN RecoverSSM cannot capture a dummy query wider than its workspace:
-            # its builder sends every active decode row to the spec path.
+            # KDA RecoverSSM cannot capture a dummy query wider than its workspace:
+            # its builder sends every active decode row to the spec path. GDN
+            # RecoverSSM caps decode rows at the spec window, so wider dummy rows run
+            # the prefill path and the wide mixed graphs can be captured.
             if mixed_mode and (
-                not self.vllm_config.cache_config.use_gdn_recoverssm
+                not self.vllm_config.cache_config.use_kda_recoverssm
                 or num_tokens <= max_decode_tokens
             ):
                 # for PIECEWISE graphs there is no limit on requests when replaying

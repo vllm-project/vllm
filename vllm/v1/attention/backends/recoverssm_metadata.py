@@ -31,6 +31,7 @@ def recoverssm_spec_rows(
     query_start_loc_cpu: torch.Tensor,
     num_decode_draft_tokens_cpu: torch.Tensor,
     num_reqs: int,
+    spec_query_len: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Which batch rows take the RecoverSSM spec path, shared by the RecoverSSM metadata
     builders (GDN, PLE).
@@ -39,9 +40,17 @@ def recoverssm_spec_rows(
     every row that has drafts. Only the first ``num_reqs`` rows are real; padding rows
     never take the spec path. Returns the draft-count vector to hand to the base builder
     (1 for spec rows, -1 otherwise, padding included) and the spec rows in batch order,
-    which is also the order of the base builder's spec state indices."""
+    which is also the order of the base builder's spec state indices.
+
+    ``spec_query_len`` (1 + drafts) caps the decode rows: a row with more tokens than a
+    spec window cannot be a decode row, so it runs the prefill path. Real decode rows
+    never exceed it. The cap matters for the dummy batches of wide PIECEWISE CUDA graph
+    capture, whose rows are not marked as prefilling and would otherwise overflow the
+    spec workspace."""
     query_lens = query_start_loc_cpu[: num_reqs + 1].diff()
     active_decode = (~is_prefilling_cpu[:num_reqs]) & (query_lens > 0)
+    if spec_query_len is not None:
+        active_decode &= query_lens <= spec_query_len
     spec_mask = (num_decode_draft_tokens_cpu[:num_reqs] >= 0) | active_decode
     drafts = torch.full_like(num_decode_draft_tokens_cpu, -1)
     drafts[:num_reqs] = torch.where(spec_mask, 1, -1).to(drafts.dtype)

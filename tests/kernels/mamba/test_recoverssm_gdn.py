@@ -267,6 +267,23 @@ def test_spec_rows_mixed_batch():
         recoverssm_request_indices(rows, 2, torch.device("cuda"))
 
 
+def test_spec_rows_cap_wide_dummy_rows():
+    """Wide PIECEWISE capture builds dummy rows that are not marked as prefilling. With
+    the spec window cap they run the prefill path, so they cannot overflow the spec
+    workspace. Rows inside the window stay spec rows."""
+    is_prefilling = torch.zeros(3, dtype=torch.bool)
+    qsl = torch.tensor([0, 4, 1004, 1006], dtype=torch.int32)
+    drafts_in = torch.full((3,), -1, dtype=torch.int32)
+    drafts, rows = recoverssm_spec_rows(
+        is_prefilling, qsl, drafts_in, num_reqs=3, spec_query_len=4
+    )
+    assert rows.tolist() == [0, 2]
+    assert drafts.tolist() == [1, -1, 1]
+    # Without the cap, every non-prefilling row is a spec row (old behavior).
+    _, rows = recoverssm_spec_rows(is_prefilling, qsl, drafts_in, num_reqs=3)
+    assert rows.tolist() == [0, 1, 2]
+
+
 def test_commit_maps_noncontiguous_requests_in_align_mode():
     """Spec rows 0, 2, 3 of a 5-request batch; accepted counts, block table and
     num_computed are indexed by request row. Every spec request must commit its own
