@@ -199,6 +199,26 @@ class RayPerfMetricsProm(PerfMetricsProm):
     _counter_cls = RayCounterWrapper
 
 
+class RayLoRAAdapterLoaded:
+    """`vllm:lora_adapter_loaded` as a Ray gauge. Ray metrics cannot drop a
+    series, so an adapter that leaves the caches is set to 0."""
+
+    def __init__(self, documentation: str, labelnames: list[str]) -> None:
+        self._gauge = RayGaugeWrapper(
+            name="vllm:lora_adapter_loaded",
+            documentation=documentation,
+            labelnames=labelnames,
+        )
+        self._series: dict[int, set[tuple[str, ...]]] = {}
+
+    def set_series(self, engine_idx: int, series: set[tuple[str, ...]]) -> None:
+        for labels in self._series.get(engine_idx, set()) - series:
+            self._gauge.labels(*labels).set(0)
+        for labels in series:
+            self._gauge.labels(*labels).set(1)
+        self._series[engine_idx] = series
+
+
 class RayPrometheusStatLogger(PrometheusStatLogger):
     """RayPrometheusStatLogger uses Ray metrics instead."""
 
@@ -208,3 +228,4 @@ class RayPrometheusStatLogger(PrometheusStatLogger):
     _spec_decoding_cls = RaySpecDecodingProm
     _kv_connector_cls = RayKVConnectorProm
     _perf_metrics_cls = RayPerfMetricsProm
+    _lora_adapter_loaded_cls = RayLoRAAdapterLoaded
