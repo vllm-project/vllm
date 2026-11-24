@@ -408,7 +408,9 @@ def test_write_scheduler_deduplicates_layers_and_seals_expected_count():
     request_info = RemoteAllocInfo(block_ids=[[4, 5]])
     wrapper = _wrapper_for_messages()
     wrapper.done_remote_allocate_req_dict["xfer"] = request_info
-    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper))
+    writer = make_moriio_writer(
+        SimpleNamespace(moriio_wrapper=wrapper, world_size=1, pp_size=1)
+    )
 
     assert writer.schedule_write(_write_task("dense0"))
     assert not writer.schedule_write(_write_task("dense0"))
