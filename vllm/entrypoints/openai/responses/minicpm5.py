@@ -16,6 +16,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
     _resolve_named_tool_choice,
     _tool_field,
+    _validate_custom_tool_formats,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.tool_parsers.utils import flat_namespace_tool_name, get_function_tools
@@ -106,7 +107,7 @@ def replay_minicpm5_tool_search(
     """Use the tools from search results and omit search records from the prompt."""
     input_items = request.input
     try:
-        loaded = []
+        loaded: list[object] = []
         if isinstance(input_items, list):
             filtered = []
             for item in input_items:
@@ -138,7 +139,7 @@ def replay_minicpm5_tool_search(
     replayed = _merge_search_tools(previous_tools, discovered)
     tools = _merge_search_tools(request.tools, replayed)
     names = _check_tool_names(tools)
-    request.check_custom_tool_format({"tools": tools})
+    _validate_custom_tool_formats(tools)
     declared_tools = request.tools
     request = request.model_copy(update={"input": input_items, "tools": tools})
     request._declared_tools = declared_tools

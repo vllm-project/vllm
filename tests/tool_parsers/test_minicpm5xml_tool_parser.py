@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
-from transformers import PreTrainedTokenizerFast
+from transformers import TokenizersBackend
 
 from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.generate.base.protocol import FunctionCall, ToolCall
@@ -898,7 +898,7 @@ def test_missing_cdata_end_keeps_next_call(
 
 def test_unified_stream_drains_last_delta() -> None:
     request = make_request(make_tools_weather() + make_tools_write())
-    tokenizer = PreTrainedTokenizerFast(
+    tokenizer = TokenizersBackend(
         tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
     )
     parser_cls = ParserManager.get_parser(

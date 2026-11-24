@@ -184,6 +184,27 @@ def _tool_field(tool: Any, field: str) -> Any:
     return tool.get(field) if isinstance(tool, dict) else getattr(tool, field, None)
 
 
+def _validate_custom_tool_formats(tools: list[Any]) -> None:
+    for tool in tools:
+        if isinstance(tool, dict):
+            tool_dict = tool
+        elif hasattr(tool, "model_dump"):
+            tool_dict = tool.model_dump()
+        else:
+            continue
+        tool_format = tool_dict.get("format")
+        if (
+            tool_dict.get("type") == "custom"
+            and isinstance(tool_format, dict)
+            and tool_format.get("type") == "grammar"
+        ):
+            raise VLLMValidationError(
+                "Custom tools with a grammar format are not supported; "
+                "only free-form text custom tools are accepted.",
+                parameter="tools",
+            )
+
+
 def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
     """Resolve a named tool choice to the flat `<namespace>__<name>` form."""
     from vllm.tool_parsers.utils import flat_namespace_tool_name
@@ -846,29 +867,8 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_custom_tool_format(cls, data):
-        if not isinstance(data, dict):
-            return data
-        tools = data.get("tools")
-        if not isinstance(tools, list):
-            return data
-        for tool in tools:
-            if isinstance(tool, dict):
-                tool_dict = tool
-            elif hasattr(tool, "model_dump"):
-                tool_dict = tool.model_dump()
-            else:
-                continue
-            tool_format = tool_dict.get("format")
-            if (
-                tool_dict.get("type") == "custom"
-                and isinstance(tool_format, dict)
-                and tool_format.get("type") == "grammar"
-            ):
-                raise VLLMValidationError(
-                    "Custom tools with a grammar format are not supported; "
-                    "only free-form text custom tools are accepted.",
-                    parameter="tools",
-                )
+        if isinstance(data, dict) and isinstance(tools := data.get("tools"), list):
+            _validate_custom_tool_formats(tools)
         return data
 
     @model_validator(mode="before")

@@ -3,10 +3,10 @@
 
 import html
 import json
-import re
 from collections.abc import Sequence
 from typing import Any
 
+import regex as re
 from openai.types.responses import FunctionTool
 
 from vllm.entrypoints.generate.base.protocol import (

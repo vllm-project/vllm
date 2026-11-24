@@ -1112,6 +1112,7 @@ def test_minicpm5_replays_tools_from_multiple_search_outputs():
     replayed = replay_minicpm5_tool_search(request, [])
     assert replayed.tool_choice.name == "weather__forecast"
     functions = construct_tool_dicts(replayed.tools, replayed.tool_choice)
+    assert functions is not None
     assert {
         tool["function"]["name"]: tool["function"]["description"] for tool in functions
     } == {
