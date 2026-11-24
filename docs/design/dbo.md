@@ -67,6 +67,8 @@ The batch is sliced before its attention metadata is built. `prepare` splits the
 
 Capture uses the same path through `begin_capturable_run`, which parks the threads before the caller enters the capture context. `CudaGraphManager` adds a microbatched capture candidate for each eligible uniform Full graph. Once a DBO CUDA graph has been captured, it can be replayed without any multithreading or CPU synchronization.
 
+The runner creates the communication stream with `Platform.create_ubatch_comm_stream`. On ROCm this is a CU-masked stream (mask: every CU). HIP maps the other streams of a process onto a pool of `GPU_MAX_HW_QUEUES` hardware queues whatever their priority, so a pooled communication stream can land on the compute stream's queue, where the all-reduce serializes with compute for the life of the server. A CU-masked stream gets a queue outside that pool. Serve DBO on ROCm with `GPU_MAX_HW_QUEUES=3`: with the default of 4, the extra queue can share a command-processor pipe with the compute stream's queue and slow the step by a few percent (observed on MI350X, TP2, not checked on other parts). With `DEBUG_HIP_DYNAMIC_QUEUES=0`, which assigns queues in creation order, the compute stream always lands on that queue: if `DEBUG_HIP_IGNORE_STREAM_PRIORITY=0` is set as well, the high-priority pooled stream already gets a queue of its own and the runner keeps it; otherwise set `GPU_MAX_HW_QUEUES=3` there too. If the CU-masked stream cannot be created, the runner logs a warning and uses a pooled stream.
+
 ### UBatchContext
 
 `UBatchContext`, in `vllm/v1/worker/ubatching.py`, is a `ForwardContext` wrapper class that is used by `UBatchRunner` to synchronize the two UBatch threads. It should only be instantiated by using `make_ubatch_contexts`.
@@ -93,3 +95,5 @@ The `dbo_yield` method puts the current thread to sleep and wakes up the other U
 * `all-reduce-overlap` makes each TP all-reduce a hand-off, in `GroupCoordinator._all_reduce_out_place`: the all-reduce runs on the comm stream while the other microbatch computes. It needs tensor parallelism on one DP rank without expert parallelism.
 
 Under `all-reduce-overlap` there is no DP handshake: the runner decides per step by the thresholds alone, and a split step runs eagerly. No all-to-all backend is needed, and multimodal models are supported, since the vision encoder runs outside the split.
+
+On ROCm at TP2, `VLLM_DBO_TP_DMA_AR=1` runs a microbatch's all-reduce as a one-shot INT4 all-reduce over the SDMA copy engines instead of a CU kernel, so it can hide under the other microbatch's GEMMs. It is lossy (INT4, one fp16 scale per 32 values) and off by default, it applies only inside a split step, and it is ignored with a warning on other platforms or at other TP sizes.

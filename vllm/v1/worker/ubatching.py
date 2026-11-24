@@ -4,6 +4,7 @@ import threading
 
 import torch
 
+import vllm.envs as envs
 from vllm import forward_context
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
@@ -269,3 +270,108 @@ def dbo_comm_stream_priority() -> int:
     from vllm.platforms import current_platform
 
     return -1 if current_platform.is_rocm() else 0
+
+
+def enable_dma_all_reduce(tp, vllm_config) -> bool:
+    """Run the TP group's microbatch all-reduces as a one-shot INT4 all-reduce
+    over the SDMA copy engines (`VLLM_DBO_TP_DMA_AR=1`, ROCm, TP2). It needs no
+    CUs while the other microbatch computes; QuickReduce and RCCL are CU kernels
+    that contend with the GEMMs under DBO. Returns whether it is on. Collective:
+    every rank calls it in the same order."""
+    if not envs.VLLM_DBO_TP_DMA_AR:
+        return False
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        logger.warning("DBO: VLLM_DBO_TP_DMA_AR=1 is ROCm only; ignored")
+        return False
+    if tp.world_size != 2:
+        logger.warning(
+            "DBO: VLLM_DBO_TP_DMA_AR=1 needs TP 2, got %d; ignored", tp.world_size
+        )
+        return False
+    from vllm.distributed.device_communicators.dma_all_reduce import DmaAllReduce
+
+    # Largest all-reduce: one full batch of hidden states, 2 bytes per value.
+    max_elems = (
+        vllm_config.scheduler_config.max_num_batched_tokens
+        * vllm_config.model_config.get_hidden_size()
+    )
+    # Raises on a ROCm runtime without the needed HIP calls.
+    tp.device_communicator.dma_ar = DmaAllReduce(
+        tp.cpu_group, tp.device, max_bytes=max_elems * 2
+    )
+    logger.info(
+        "DBO: microbatch all-reduces up to %d MiB run as one-shot INT4 over SDMA",
+        max_elems * 2 >> 20,
+    )
+    return True
+
+
+def dbo_tp_all_reduce(device_communicator, input_: torch.Tensor) -> torch.Tensor:
+    """The TP all-reduce of a microbatch, issued on the current (comm) stream.
+
+    With `VLLM_DBO_TP_DMA_AR` set (TP2, ROCm) and `input_` small enough, it runs
+    over the SDMA engines. Both microbatches share one comm stream and only one
+    microbatch thread runs at a time, so the calls are issued in the same order
+    on every rank and never overlap.
+    """
+    dma = getattr(device_communicator, "dma_ar", None)
+    # Outside a microbatch (no split, warmup, decode) this is the regular TP
+    # all-reduce: the SDMA path only pays off when it overlaps compute. Stream
+    # write/wait operations cannot be captured into a graph either.
+    if (
+        dma is not None
+        and threading.get_ident() in _THREAD_ID_TO_CONTEXT
+        and dma.should_reduce(input_)
+        and not torch.cuda.is_current_stream_capturing()
+    ):
+        logger.info_once("DBO: microbatch all-reduces run over SDMA (one-shot INT4)")
+        return dma.all_reduce(input_)
+    return device_communicator.all_reduce(input_)
+
+
+def dbo_tp_all_reduce_add_rmsnorm_mxfp8(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    also_bf16: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor] | None:
+    """A microbatch's TP all-reduce fused with the residual add + Gemma RMSNorm
+    + MXFP8 quant after it (`VLLM_DBO_TP_DMA_AR_FUSED_NORM`): the SDMA push on
+    the comm stream, then one kernel on the compute stream that reads the two
+    INT4 messages.
+
+    Returns:
+        `(x_q, x_scale, normed, residual_out)` as
+        `DmaAllReduce.add_rmsnorm_mxfp8`, or None where it does not apply (the
+        caller keeps the unfused path): flag off, not a microbatch, no SDMA
+        all-reduce for `input_`, graph capture, or a residual it does not take.
+
+    """
+    if not (
+        envs.VLLM_DBO_TP_DMA_AR_FUSED_NORM
+        and threading.get_ident() in _THREAD_ID_TO_CONTEXT
+    ):
+        return None
+    from vllm.distributed.parallel_state import get_tp_group
+
+    dma = getattr(get_tp_group().device_communicator, "dma_ar", None)
+    if (
+        dma is None
+        or input_.dim() != 2
+        or not dma.should_reduce(input_)
+        or torch.cuda.is_current_stream_capturing()
+        or residual.shape != input_.shape
+        or residual.dtype != input_.dtype
+        or residual.stride(-1) != 1
+    ):
+        return None
+    logger.info_once("DBO: all-reduce + add + RMSNorm + MXFP8 fused (SDMA push)")
+    # The hand-off of `GroupCoordinator._all_reduce_out_place`: launch the push on
+    # the comm stream, then let the other microbatch run while it is in flight.
+    dbo_switch_to_comm_sync("all-reduce-overlap")
+    pending = dma.push(input_)
+    dbo_yield_and_switch_from_comm_to_compute("all-reduce-overlap")
+    return dma.add_rmsnorm_mxfp8(pending, residual, weight, eps, also_bf16)
