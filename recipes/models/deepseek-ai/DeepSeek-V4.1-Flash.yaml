@@ -72,22 +72,23 @@ features:
       - "--reasoning-parser"
       - "deepseek_v41"
   spec_decoding:
-    description: "DSpark multi-token drafting, 5 tokens per round (the trained block size). On NVIDIA, adaptive verification scores each (request, position) slot and only high-scoring slots are verified, up to a startup-profiled compute budget. On AMD, vLLM currently refuses that flag, so the generated command sets enable_adaptive_verification:false and verifies the full 5-token block. Remove the AMD override only after a serve with the true flag actually starts on ROCm."
+    description: "DSpark multi-token drafting, 5 tokens per round (the trained block size). Adaptive verification scores each (request, position) slot and verifies only high-scoring slots, up to a startup-profiled compute budget. On AMD it is on for MI350X and MI355X; MI300X and MI325X set enable_adaptive_verification:false and verify the full 5-token block."
     args:
       - "--speculative-config"
       - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}'
     hardware_overrides:
-      # Adaptive verification writes query_start_loc on device and captures
-      # varlen decode CUDA graphs. maybe_create_adaptive_verification_manager
-      # therefore requires both supports_device_cpu_query_lens_mismatch()
-      # and AttentionCGSupport.ALWAYS on every target attention builder.
-      # On ROCm, DeepseekV41IndexerBackend fails the first check because
-      # the helpers it inherits are CUDA plus DeepGEMM only. Forcing that
-      # helper True still dies: DeepseekV41ROCMAiterSparseSWABackend reports
-      # UNIFORM_BATCH. Features emit last in resolveCommand, so this
-      # replacement must live here rather than in
-      # hardware_overrides.amd.extra_args. Remove this override only when
-      # a vLLM serve with enable_adaptive_verification:true starts on AMD.
+      # Adaptive verification is validated on gfx950 (MI350X, MI355X) only;
+      # MI300X and MI325X keep fixed verification. Features emit last in
+      # resolveCommand, so these replacements must live here rather than in
+      # hardware_overrides.<gpu>.extra_args. Exact-GPU keys win over the brand key.
+      mi350x:
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}'
+      mi355x:
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}'
       amd:
         args:
           - "--speculative-config"
@@ -1425,6 +1426,9 @@ presets:
       - "1024"
     env:
       OMP_NUM_THREADS: "1"
+    # The lane verifies every DSpark block (no adaptive verification).
+    json_args:
+      "--speculative-config": { enable_adaptive_verification: false }
     points:
       tp2_c1:
         label: "1 (TP2)"
@@ -1821,8 +1825,10 @@ presets:
       - "8"
     env:
       OMP_NUM_THREADS: "1"
+    # The lane verifies every DSpark block (no adaptive verification).
     json_args:
       "--engram-config": { cpu_offload: false }
+      "--speculative-config": { enable_adaptive_verification: false }
     points:
       tp8_c1:
         label: "1"
@@ -1890,6 +1896,9 @@ presets:
       VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: "1"
       VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "NONE"
       OMP_NUM_THREADS: "1"
+    # The lane verifies every DSpark block (no adaptive verification).
+    json_args:
+      "--speculative-config": { enable_adaptive_verification: false }
     points:
       # The GPU KV cache holds the working set at 128, where UMBP did not help.
       dp2_c128:
@@ -2055,14 +2064,9 @@ guide: |
 
   DSpark is the only speculative method for this checkpoint. V4.1 dropped the MTP module
   that V3 and V4 trained alongside the backbone. **Speculative decoding** enables a 5-token
-  block. On NVIDIA it also turns on adaptive verification (see the feature description).
-  On AMD, vLLM currently refuses adaptive verification. The generated command sets
-  `enable_adaptive_verification:false` and verifies the full block. Two checks in
-  `maybe_create_adaptive_verification_manager` fail on ROCm: the indexer helper
-  `supports_device_cpu_query_lens_mismatch()` is False, and
-  `DeepseekV41ROCMAiterSparseSWABackend` reports `AttentionCGSupport.UNIFORM_BATCH`
-  rather than `ALWAYS`. Remove the AMD override only after a serve with the true flag
-  starts. Acceptance depends on the workload, so measure it on your own traffic before
+  block. On NVIDIA, MI350X and MI355X it also turns on adaptive verification (see the
+  feature description); MI300X and MI325X verify the full block.
+  Acceptance depends on the workload, so measure it on your own traffic before
   sizing a deployment around it.
   The drafter's experts add roughly 14B parameters to the load.
 
@@ -2137,7 +2141,6 @@ guide: |
   - On AMD, the generated command sets `VLLM_USE_BREAKABLE_CUDAGRAPH=1`. DeepSeek-V4.1-Flash does not support `torch.compile`, and the ROCm sparse SWA backend only supports uniform-batch CUDA graphs. Without breakable CUDA graphs, default `FULL_AND_PIECEWISE` dies at capture.
   - On AMD, the generated command passes `--moe-backend aiter` rather than naming a kernel. Naming `aiter_triton_mxfp4_bf16` pins the Triton W4A16 `_moe_gemm_a16w4` kernel; the plain name lets vLLM select the Composable Kernel a8w4 experts, used in the MI355X benchmark below. It also sets `AITER_TRITON_LOG_LEVEL=ERROR` to drop AITER's per-call "Gluon unavailable" warning, which is constant on gfx950 and dominated the server log.
   - On MI355X, **Tensor Parallel** inherits vLLM's scheduler limits. Tune `--max-num-seqs` for your traffic and memory budget if needed. The benchmark configuration below records an explicit limit for reproducibility.
-  - On AMD, ticking **Speculative decoding** also sets `enable_adaptive_verification:false`. vLLM currently refuses the true flag: `DeepseekV41IndexerBackend.supports_device_cpu_query_lens_mismatch()` is False, and `DeepseekV41ROCMAiterSparseSWABackend` reports `UNIFORM_BATCH` rather than `ALWAYS`. DSpark still drafts 5 tokens per round.
 
   ## Verifying
 
