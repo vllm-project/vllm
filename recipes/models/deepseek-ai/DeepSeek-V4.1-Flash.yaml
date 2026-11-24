@@ -5,7 +5,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
-  date_updated: 2026-11-17
+  date_updated: 2026-11-19
   tasks:
     - text
     - multimodal
@@ -383,7 +383,7 @@ strategy_overrides:
           - '{"embedding_across_dp":true}'
   pd_cluster:
     # Verified 1P1D on GB200 NVL4: one tray per role, TP4 each, NIXL transfer.
-    # GB300's DEP4 prefill + DEP16 decode is the gb300_agentx_pd preset.
+    # GB300's DEP2 prefill + DEP16/DEP32 decode is the gb300_agentx_pd preset.
     env:
       VLLM_DEEP_GEMM_WARMUP: "skip"
     prefill:
@@ -1527,57 +1527,275 @@ presets:
       Throughput runs use DSpark's synthetic golden acceptance length (3.51); the
       preset keeps real block rejection for ordinary serving and accuracy evaluation.
 
-  gb300_agentx_pd:
-    label: "AgentX PD"
+  gb300_agentx_tp:
+    label: "AgentX TP4 (Dynamo)"
     hardware: gb300
-    strategy: pd_cluster
-    # The lane served the 0909 launch checkpoint; 1017 shares its format and memory layout.
-    variants: [fp8, default]
+    strategy: single_node_tp
+    # The lane served the 0909 launch checkpoint.
+    variants: [fp8]
     workload: "Agentic (InferenceX AgentX)"
-    description: "The lane's engine settings in a 1P1D layout: one tray of DEP4 prefill (the lane runs several DEP2 prefill engines behind Dynamo) and four trays of DEP16 decode, with MegaMoE, MegaAttention and Engram offload; KV moves over the NVLink fabric."
-    source: { label: "InferenceX #3941", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/3941", key: "dsv41flash-fp4-gb300-dynamo-vllm-agentic-dspark-disagg", revision: f516173 }
+    description: "TP4 for concurrency 1 to 8: latency-specialized decode steps, prefill admitted every 24 steps, host Engram tables and FlashInfer autotuning."
+    source: { label: "InferenceX #5015", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5015", key: "dsv41flash-fp4-gb300-dynamo-vllm-agentic-dspark-agg", revision: 1b1eec0 }
+    image: &gb300_dynamo_image
+      vllm: "vllm/vllm-openai:cu134-nightly-aarch64-01fba62-1111d@sha256:9aa51d63c0f9e408a6a38df5aaeac2794da5de766d7398035a380bdf3d41389a"
+      dynamo: "1.6.0.dev20261010"
+    select:
+      frontend: rust
+      features: { spec_decoding: true, text_only: true, encoder_parallel: false }
+    tp: 4
     args:
-      - "--kv-cache-dtype"
-      - "fp8"
-      - "--attention-config"
-      - '{"backend":"FLASHMLA_MEGA_ATTN_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
       - "--kernel-config"
-      - '{"moe_backend":"deep_gemm_mega_moe","sparse_indexer_topk_backend":"deep_select"}'
+      - '{"enable_flashinfer_autotune":true}'
       - "--engram-config"
-      - '{"cpu_offload":true}'
-      - "--enable-ep-weight-filter"
-      - "--gpu-memory-utilization"
-      - "0.95"
+      - '{"cpu_offload":true,"use_thp":false}'
+      - "--additional-config"
+      - '{"decode_backend":"latency_specialized"}'
+      - "--prefill-schedule-interval"
+      - "24"
+      - "--max-model-len"
+      - "1048576"
       - "--numa-bind"
     env:
       VLLM_USE_V2_MODEL_RUNNER: "1"
+      # FlashInfer autotuning lengthens the first startup.
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      PYTHONHASHSEED: "0"
+    # The lane verifies every DSpark block (no adaptive verification).
+    json_args:
+      "--speculative-config": { enable_adaptive_verification: false }
+    points:
+      c1:
+        label: "1"
+        concurrency: 1
+        default: true
+        # Size 5 gives the DSpark draft a one-request graph.
+        args:
+          - "--max-num-seqs"
+          - "1"
+          - "--max-num-batched-tokens"
+          - "4096"
+          - "--compilation-config"
+          - '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[5,6,10,12,15,18,20,24,25,30,35,36,40,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092]}'
+          - "--max-cudagraph-capture-size"
+          - "4092"
+      c4:
+        label: "4"
+        concurrency: 4
+        args:
+          - "--max-num-seqs"
+          - "8"
+          - "--max-num-batched-tokens"
+          - "4096"
+          - "--compilation-config"
+          - *dsv41_cg4092
+          - "--max-cudagraph-capture-size"
+          - "4092"
+      c8:
+        label: "8"
+        concurrency: 8
+        args:
+          - "--max-num-seqs"
+          - "16"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--compilation-config"
+          - *dsv41_cg8190
+          - "--max-cudagraph-capture-size"
+          - "8190"
+    runbook: |
+      The aggregated engine settings of
+      [InferenceX #5015](https://github.com/SemiAnalysisAI/InferenceX/pull/5015) at
+      [`1b1eec0`](https://github.com/SemiAnalysisAI/InferenceX/blob/1b1eec0819566a70a51ee041528d447f1472634d/inferencex-e2e/benchmarks/multi_node/srt-slurm-recipes/dsv41flash/vllm/gb300-fp4/agentx/agg-variants.yaml),
+      on the 0909 launch checkpoint. All three points and the c8 GSM8K eval
+      (strict-match 0.978) passed in
+      [this sweep](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/43089248484).
+
+      The image is vLLM main at `01fba62` with
+      [vllm-project/vllm#66552](https://github.com/vllm-project/vllm/pull/66552)
+      applied; main from `2acfc19` on carries every flag here. The measured
+      deployment ran one Dynamo `1.6.0.dev20261010` worker behind the Dynamo
+      frontend (etcd, TCP request plane, ZMQ events, KV-aware routing with a
+      14400-second session-affinity TTL, `deepseek_v41` tool and reasoning
+      parsers in the frontend), not the native frontend the builder renders.
+      The throughput harness's synthetic DSpark acceptance is not a serving
+      setting and is left out.
+
+  gb300_agentx_pd:
+    label: "AgentX DEP2 prefill / DEP decode (Dynamo)"
+    hardware: gb300
+    strategy: pd_cluster
+    # The lane served the 0909 launch checkpoint.
+    variants: [fp8]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "DEP2 prefill workers with lazy host-KV offload and Engram tables split across all prefill GPUs, and one DEP16 or DEP32 decode worker; KV moves by NIXL push over the NVLink fabric. Worker counts are in the runbook."
+    source: { label: "InferenceX #5015", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/5015", key: "dsv41flash-fp4-gb300-dynamo-vllm-agentic-dspark-disagg", revision: 1b1eec0 }
+    image: *gb300_dynamo_image
+    select:
+      pd_router: dynamo
+      pd_connector: nixl
+      kv_offload: simple
+      frontend: rust
+      # Dynamo parses tool calls and reasoning in its frontend (see the runbook).
+      features: { tool_calling: false, reasoning: false, spec_decoding: true, text_only: true, encoder_parallel: false }
+    args:
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--max-model-len"
+      - "1048576"
+      - "--attention-config"
+      - '{"backend":"FLASHMLA_MEGA_ATTN_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
+      - "--enable-cumem-allocator"
+      - "--enable-ep-weight-filter"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--enable-eplb"
+      - "--numa-bind"
+    env:
+      PYTHONHASHSEED: "0"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+      VLLM_RPC_TIMEOUT: "600000"
+      VLLM_ALLREDUCE_USE_SYMM_MEM: "0"
+      VLLM_RANDOMIZE_DP_DUMMY_INPUTS: "1"
+      NCCL_CUMEM_ENABLE: "1"
+      NCCL_MNNVL_ENABLE: "1"
+      NCCL_NVLS_ENABLE: "1"
       # KV moves over the NVLink fabric between trays.
       UCX_TLS: "cuda_copy,cuda_ipc,tcp"
       UCX_CUDA_IPC_ENABLE_MNNVL: "y"
+      UCX_MEMTYPE_CACHE: "n"
+      UCX_MEMTYPE_REG_WHOLE: "n"
+      UCX_RNDV_PIPELINE_ERROR_HANDLING: "y"
+      UCX_MODULE_DIR: "/usr/local/lib/python3.12/dist-packages/nixl_cu13.libs/ucx"
+      NIXL_UCX_SGL_ENABLE: "1"
+      # The lane keeps vLLM's default DeepGEMM warmup (pd_cluster skips it).
+      VLLM_DEEP_GEMM_WARMUP: "relax"
+    json_args:
+      "--speculative-config": { rejection_sample_method: null, enable_adaptive_verification: false, disable_eagle_block_drop: true }
+      "--kv-transfer-config":
+        NixlConnector:
+          kv_buffer_device: cuda
+          kv_load_failure_policy: fail
+          kv_connector_extra_config: { transfer_mode: push, backends: [UCX], enforce_handshake_compat: false, kv_lease_duration: 120 }
     roles:
       prefill:
+        nodes: 1
         parallelism: dep
+        # One worker is DEP2 (TP1, DP2, EP2); a tray holds two.
+        env: { CUDA_VISIBLE_DEVICES: "0,1" }
         args:
+          - "--data-parallel-size"
+          - "2"
+          - "--data-parallel-size-local"
+          - "2"
+          - "--kernel-config"
+          - '{"enable_flashinfer_autotune":true,"moe_backend":"deep_gemm_mega_moe","sparse_indexer_topk_backend":"deep_select","linear_backend_per_quant":{"mxfp8":"torch"}}'
+          - "--eplb-config"
+          - '{"communicator":"symm_mem","num_redundant_experts":2,"window_size":1000,"step_interval":2000,"use_async":true,"log_balancedness":true,"log_balancedness_interval":1000}'
           - "--max-num-seqs"
           - "64"
           - "--max-num-batched-tokens"
           - "32768"
           - "--long-prefill-token-threshold"
           - "8192"
+          - "--prefix-cache-retention-interval"
+          - "32768"
+          - "--safetensors-load-strategy"
+          - "prefetch"
           - "--compilation-config"
-          - '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046],"max_cudagraph_capture_size":2046}'
+          - '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046],"decoder_replay_cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2048],"max_cudagraph_capture_size":2046}'
+        json_args:
+          "--kv-transfer-config":
+            SimpleCPUOffloadConnector:
+              kv_connector_extra_config: { cpu_bytes_to_use: 182536110080, cpu_bytes_to_use_per_rank: null, lazy_offload: true }
       decode:
         nodes: 4
         parallelism: dep
-        # 40 sequences per rank; graph sizes are multiples of 1 + 5 DSpark tokens.
         args:
-          - "--max-num-seqs"
-          - "40"
-          - "--max-num-batched-tokens"
-          - "400"
-          - "--compilation-config"
-          - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126,132,138,144,150,156,162,168,174,180,186,192,198,204,210,216,222,228,234,240],"max_cudagraph_capture_size":240}'
+          - "--kernel-config"
+          - '{"enable_flashinfer_autotune":true,"moe_backend":"deep_gemm_mega_moe","sparse_indexer_topk_backend":"deep_select"}'
+          - "--engram-config"
+          - '{"cpu_offload":false,"embedding_across_dp":true,"use_thp":false}'
+          - "--additional-config"
+          - '{"dspark_fused_markov":true}'
           - "--no-enable-prefix-caching"
+          - "--numa-bind-nodes"
+          - "0"
+          - "0"
+          - "1"
+          - "1"
+        json_args:
+          "--kv-transfer-config": { NixlConnector: { kv_role: kv_consumer } }
+    # Decode graph sizes are multiples of 1 + 5 DSpark tokens. Each prefill
+    # worker's Engram peer group spans every prefill GPU of the point.
+    points:
+      c3200:
+        label: "3200 (5P1D, DEP32 decode)"
+        concurrency: 3200
+        default: true
+        roles:
+          prefill:
+            args: ["--engram-config", '{"cpu_offload":false,"embedding_across_dp":true,"use_thp":false,"peer_group_size":10,"peer_group_store":"/logs/engram-peers/store"}']
+          decode:
+            nodes: 8
+            args: ["--eplb-config", '{"communicator":"symm_mem","num_redundant_experts":32,"window_size":1000,"step_interval":3000,"use_async":true,"log_balancedness":false,"log_balancedness_interval":3000}', "--max-num-seqs", "18", "--max-num-batched-tokens", "180", "--max-num-inflight-kv-loads", "40", "--max-async-kv-loads-per-step", "3", "--compilation-config", '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":108,"cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108]}']
+      c6600:
+        label: "6600 (7P1D, DEP16 decode)"
+        concurrency: 6600
+        roles:
+          prefill:
+            args: ["--engram-config", '{"cpu_offload":false,"embedding_across_dp":true,"use_thp":false,"peer_group_size":14,"peer_group_store":"/logs/engram-peers/store"}']
+          decode:
+            args: ["--eplb-config", '{"communicator":"symm_mem","num_redundant_experts":16,"window_size":1000,"step_interval":3000,"use_async":true,"log_balancedness":false,"log_balancedness_interval":3000}', "--max-num-seqs", "128", "--max-num-batched-tokens", "1280", "--max-num-inflight-kv-loads", "128", "--max-async-kv-loads-per-step", "3", "--compilation-config", '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":768,"cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126,132,138,144,150,156,162,168,174,180,186,192,198,204,210,216,222,228,234,240,246,252,258,264,270,276,282,288,294,300,306,312,318,324,330,336,342,348,354,360,366,372,378,384,390,396,402,408,414,420,426,432,438,444,450,456,462,468,474,480,486,492,498,504,510,516,522,528,534,540,546,552,558,564,570,576,582,588,594,600,606,612,618,624,630,636,642,648,654,660,666,672,678,684,690,696,702,708,714,720,726,732,738,744,750,756,762,768]}']
+      c10288:
+        label: "10288 (12P1D, DEP32 decode)"
+        concurrency: 10288
+        roles:
+          prefill:
+            args: ["--engram-config", '{"cpu_offload":false,"embedding_across_dp":true,"use_thp":false,"peer_group_size":24,"peer_group_store":"/logs/engram-peers/store"}']
+          decode:
+            nodes: 8
+            args: ["--eplb-config", '{"communicator":"symm_mem","num_redundant_experts":32,"window_size":1000,"step_interval":3000,"use_async":true,"log_balancedness":false,"log_balancedness_interval":3000}', "--max-num-seqs", "72", "--max-num-batched-tokens", "720", "--max-num-inflight-kv-loads", "72", "--max-async-kv-loads-per-step", "3", "--compilation-config", '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":432,"cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126,132,138,144,150,156,162,168,174,180,186,192,198,204,210,216,222,228,234,240,246,252,258,264,270,276,282,288,294,300,306,312,318,324,330,336,342,348,354,360,366,372,378,384,390,396,402,408,414,420,426,432]}']
+    runbook: |
+      The disaggregated engine settings of
+      [InferenceX #5015](https://github.com/SemiAnalysisAI/InferenceX/pull/5015) at
+      [`1b1eec0`](https://github.com/SemiAnalysisAI/InferenceX/blob/1b1eec0819566a70a51ee041528d447f1472634d/inferencex-e2e/benchmarks/multi_node/srt-slurm-recipes/dsv41flash/vllm/gb300-fp4/agentx/disagg-variants.yaml),
+      on the 0909 launch checkpoint. All three points and their GSM8K evals
+      (strict-match 0.976, 0.975 and 0.973) passed in
+      [this sweep](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/43089248484).
+      The image is vLLM main at `01fba62` with
+      [vllm-project/vllm#66552](https://github.com/vllm-project/vllm/pull/66552)
+      applied; main from `2acfc19` on carries every flag here.
+
+      ### Worker layout
+
+      The builder renders one prefill worker and one decode worker. The lane runs:
+
+      | point | prefill | decode |
+      |---|---|---|
+      | 3200 | 5 DEP2 workers on 3 trays | DEP32 on 8 trays |
+      | 6600 | 7 DEP2 workers on 4 trays | DEP16 on 4 trays |
+      | 10288 | 12 DEP2 workers on 6 trays | DEP32 on 8 trays |
+
+      Two prefill workers share a tray: start the second with
+      `CUDA_VISIBLE_DEVICES=2,3`. Every prefill worker passes the same
+      `--engram-config`. Its `peer_group_size` is the point's total prefill
+      GPU count, and `peer_group_store` must be one path that every prefill
+      worker can reach and that is fresh per launch (the lane uses its job
+      log directory). The workers meet there once at startup, so all of them
+      must start. The point's `cpu_bytes_to_use` (170 GiB) is per prefill
+      worker: two workers use 340 GiB of a tray's 840 GiB of host memory.
+
+      ### Dynamo
+
+      Dynamo `1.6.0.dev20261010` with etcd, the TCP request plane and ZMQ
+      events, and the gRPC sidecar with a 3600-second startup deadline. The
+      frontend runs on its own node with KV-aware routing (14400-second soft
+      session affinity, KV events off) and picks the decode worker by least
+      active requests (`dynamo-two-tier-cost-fn`, `cache_threshold: 1.0`);
+      prefill and decode thresholds are off. Tool calls and reasoning are
+      parsed in the frontend with `deepseek_v41` (`--dyn-tool-call-parser`,
+      `--dyn-reasoning-parser`), so the workers run without vLLM parsers.
 
   mi355x_agentx_tp8:
     label: "AgentX TP8 conc 1"
@@ -1869,22 +2087,11 @@ guide: |
 
   ### GB300
 
-  GB300's default **AgentX PD** preset runs both pools as DEP, per
-  [SemiAnalysisAI/InferenceX#3941](https://github.com/SemiAnalysisAI/InferenceX/pull/3941):
-  one tray of DEP4 prefill, four trays of DEP16 decode. Keep them on DEP; MegaMoE needs
-  expert parallelism.
-
-  To scale prefill, InferenceX ran two DEP2 engines per tray. Drop the
-  `--data-parallel-{start-rank,address,rpc-port}` flags from the prefill command and
-  run it twice:
-
-  ```bash
-  CUDA_VISIBLE_DEVICES=0,1 VLLM_NIXL_SIDE_CHANNEL_PORT=5557 vllm serve ... --port 8001 \
-    --data-parallel-size 2 --data-parallel-size-local 2
-  CUDA_VISIBLE_DEVICES=2,3 VLLM_NIXL_SIDE_CHANNEL_PORT=5559 vllm serve ... --port 8011 \
-    --data-parallel-size 2 --data-parallel-size-local 2
-  # vllm-router: list both ports, with --intra-node-data-parallel-size 1
-  ```
+  GB300's **AgentX DEP2 prefill / DEP decode (Dynamo)** preset runs both pools as DEP,
+  per [SemiAnalysisAI/InferenceX#5015](https://github.com/SemiAnalysisAI/InferenceX/pull/5015):
+  5 to 12 DEP2 prefill workers and one DEP16 or DEP32 decode worker. Keep them on DEP;
+  MegaMoE needs expert parallelism. The preset's runbook covers the worker layout, the
+  Engram peer group across prefill workers, and the Dynamo frontend.
 
   ## Memory
 
@@ -2122,27 +2329,28 @@ guide: |
     ([InferenceX #4786](https://github.com/SemiAnalysisAI/InferenceX/pull/4786)).
   - **B300**: **AgentX TP4** and **AgentX DEP2** on the specialized decode image
     ([InferenceX #4332](https://github.com/SemiAnalysisAI/InferenceX/pull/4332)).
+  - **GB300**: **AgentX TP4 (Dynamo)** (TP4 at concurrency 1, 4 and 8, with
+    latency-specialized decode)
+    ([InferenceX #5015](https://github.com/SemiAnalysisAI/InferenceX/pull/5015)).
 
   The lanes served the 0909 launch checkpoint, **FP8 (0909)**. Where a DEP point uses
   fewer than the node's GPUs (DEP4 on B200), run one server per GPU group, each behind
   its own vLLM Router.
 
-  ### Dynamo disaggregated serving on B300 and GB300
+  ### Dynamo disaggregated serving on B300
 
-  The AgentX lanes in
-  [InferenceX #4231](https://github.com/SemiAnalysisAI/InferenceX/pull/4231) (B300) and
-  [InferenceX #4266](https://github.com/SemiAnalysisAI/InferenceX/pull/4266) (GB300) run
+  The AgentX lane in
+  [InferenceX #4231](https://github.com/SemiAnalysisAI/InferenceX/pull/4231) runs
   N DEP2 prefill engines and one DEP decode engine, each with its own sidecar, behind one
   KV-routing frontend. Prefill pushes KV to decode with NIXL and keeps a host KV tier.
   The `push_as_nixl` connector and `VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP` come from the dev
-  images `vllm/vllm-openai:nightly-x86_64-dev-20261012-59e75f4` (B300) and
-  `vllm/vllm-openai:cu134-nightly-aarch64-dev-20261019` (GB300).
+  image `vllm/vllm-openai:nightly-x86_64-dev-20261012-59e75f4`. GB300's Dynamo lane is
+  the **AgentX DEP2 prefill / DEP decode (Dynamo)** preset (see **GB300** under
+  Prefill/Decode disaggregation).
 
-  | GPU | Clients | Prefill engines | Decode | Decode `--max-num-seqs` | `VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP` |
-  |---|---|---:|---|---|---|
-  | B300 | 256, 768, 1280, 2048, 3584 | 2, 2, 3, 4, 5 | DEP8 | 18, 40, 72, 132, 168 | 4 |
-  | GB300 | 3018, 7388, 10888 | 6, 12, 16 | DEP32 | 18, 50, 76 | 2, 4, 5 |
-  | GB300 | 9888 | 12 | DEP16 | 253 | 6 |
+  | Clients | Prefill engines | Decode | Decode `--max-num-seqs` | `VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP` |
+  |---|---:|---|---|---|
+  | 256, 768, 1280, 2048, 3584 | 2, 2, 3, 4, 5 | DEP8 | 18, 40, 72, 132, 168 | 4 |
 
   Both roles use TP1 with expert parallelism and these settings:
 
@@ -2156,17 +2364,17 @@ guide: |
   --kv-cache-dtype fp8 --gpu-memory-utilization 0.95 --prefill-schedule-interval 2 --enable-ep-weight-filter --numa-bind
   ```
 
-  | | B300 | GB300 |
-  |---|---|---|
-  | NIXL backend | `LIBFABRIC` over EFA | `UCX` over MNNVL |
-  | Env | `FI_PROVIDER=efa FI_EFA_USE_DEVICE_RDMA=1 FI_EFA_FORK_SAFE=1 UCX_TLS=cuda_copy,cuda_ipc,srd,tcp NIXL_UCX_SGL_ENABLE=0` | `UCX_TLS=cuda_copy,cuda_ipc,tcp UCX_CUDA_IPC_ENABLE_MNNVL=y NIXL_UCX_SGL_ENABLE=1 NCCL_MNNVL_ENABLE=1 NCCL_NVLS_ENABLE=1 VLLM_RS_TOKEN_IDS_AS_BYTES=1` |
-  | Allocator | `--no-enable-cumem-allocator` (EFA cannot register VMM memory) | `--enable-cumem-allocator` |
-  | DSpark | adds `"rejection_sample_method":"block"` | as above |
-  | Engram | `{"cpu_offload":true,"embedding_across_dp":true,"use_thp":false}` | same; decode sets `"cpu_offload":false` |
-  | Host KV per prefill rank | 70 GiB | 80 GiB |
-  | Prefill `--max-num-batched-tokens` | 16384 | 32768 |
-  | Decode EPLB redundant experts | 16 | 16 at DEP16, 32 at DEP32 |
-  | Decode `--numa-bind-nodes` | `0 0 0 0 1 1 1 1` | `0 0 1 1` |
+  | Setting | B300 |
+  |---|---|
+  | NIXL backend | `LIBFABRIC` over EFA |
+  | Env | `FI_PROVIDER=efa FI_EFA_USE_DEVICE_RDMA=1 FI_EFA_FORK_SAFE=1 UCX_TLS=cuda_copy,cuda_ipc,srd,tcp NIXL_UCX_SGL_ENABLE=0` |
+  | Allocator | `--no-enable-cumem-allocator` (EFA cannot register VMM memory) |
+  | DSpark | adds `"rejection_sample_method":"block"` |
+  | Engram | `{"cpu_offload":true,"embedding_across_dp":true,"use_thp":false}` |
+  | Host KV per prefill rank | 70 GiB |
+  | Prefill `--max-num-batched-tokens` | 16384 |
+  | Decode EPLB redundant experts | 16 |
+  | Decode `--numa-bind-nodes` | `0 0 0 0 1 1 1 1` |
 
   On B300, set `--cpu-distributed-timeout-seconds 7200` for the Engram load. NIXL's
   LIBFABRIC plugin also needs libfabric and rdma-core from the AWS EFA installer and the
@@ -2174,7 +2382,7 @@ guide: |
 
   Prefill runs `--data-parallel-size 2` per GPU pair with `--max-num-seqs 64`,
   `--long-prefill-token-threshold 8192` and `--prefix-cache-retention-interval 32768`. Its
-  KV config, shown for B300 (GB300 uses `"backends":["UCX"]` and `85899345920` bytes):
+  KV config:
 
   ```json
   {"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[
@@ -2194,7 +2402,7 @@ guide: |
   Launch the sidecars as in **Dynamo sidecar serving**, with
   `--grpc-startup-deadline-secs 3600`. Start the frontend so that every request prefills
   on a prefill engine and each session stays on one prefill engine's prefix and host KV
-  cache. On GB300, also set `DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT=10000000`.
+  cache.
 
   ```bash
   export DYN_ROUTER_TEMPERATURE=0 DYN_ROUTER_QUEUE_THRESHOLD=None DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600
@@ -2254,7 +2462,7 @@ guide: |
   ```
 
   For disaggregated serving, configure the engines as in
-  **Dynamo disaggregated serving on B300 and GB300**. Add `--disaggregation-mode prefill --component prefill` to prefill sidecars
+  **Dynamo disaggregated serving on B300** (GB300: its preset runbook). Add `--disaggregation-mode prefill --component prefill` to prefill sidecars
   and `--disaggregation-mode decode` to decode sidecars. Allocate distinct
   gRPC and KV-event ports when running several engines on the same host.
 
