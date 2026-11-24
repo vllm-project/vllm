@@ -1251,7 +1251,7 @@ mod tests {
             matches!(&error, Error::ChatTemplateThrown { message } if message == "No user query found in messages."),
             "expected an exception thrown by the template, got: {error:?}"
         );
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
     }
 
     #[test]
@@ -1509,7 +1509,7 @@ mod tests {
 
         let error = renderer.render(&request).unwrap_err();
         assert!(matches!(error, Error::UntrustedRequestChatTemplate));
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
 
         request.chat_options.chat_template = None;
         assert_eq!(
@@ -1529,8 +1529,10 @@ mod tests {
         request.chat_options.chat_template = Some(template.to_string());
         let error =
             render(None, &request).expect_err("expected the request template to run out of fuel");
-        assert!(error.is_request_validation_error());
-        assert_eq!(error.param(), Some("chat_template"));
+        assert_eq!(
+            error.kind(),
+            crate::ErrorKind::invalid_param("chat_template")
+        );
         let Error::InvalidRequestChatTemplate(message) = error else {
             panic!("expected InvalidRequestChatTemplate, got: {error:?}");
         };
@@ -1544,8 +1546,10 @@ mod tests {
 
         let error = render(None, &request).unwrap_err();
         assert!(matches!(error, Error::InvalidRequestChatTemplate(_)));
-        assert!(error.is_request_validation_error());
-        assert_eq!(error.param(), Some("chat_template"));
+        assert_eq!(
+            error.kind(),
+            crate::ErrorKind::invalid_param("chat_template")
+        );
     }
 
     #[test]

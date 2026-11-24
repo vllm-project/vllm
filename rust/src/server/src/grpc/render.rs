@@ -383,7 +383,7 @@ fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {
 /// the HTTP render route.
 fn chat_error_to_status(error: vllm_chat::Error) -> Status {
     let message = error.to_report_string();
-    if error.is_request_validation_error()
+    if error.kind().is_invalid_request()
         || matches!(
             error,
             vllm_chat::Error::Multimodal(_) | vllm_chat::Error::Media(_)

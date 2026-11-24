@@ -189,19 +189,27 @@ impl IntoResponse for ApiError {
 /// the client's fault and map to HTTP 400, mirroring the Python frontend.
 /// Everything else stays an internal 500.
 pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiError {
-    if error.is_request_validation_error() {
-        return invalid_request!(param = error.param(), "{}", error.as_report());
+    match error.kind() {
+        vllm_text::ErrorKind::InvalidRequest { param } => {
+            invalid_request!(param = param, "{}", error.as_report())
+        }
+        vllm_text::ErrorKind::Internal => {
+            server_error!("{}: {}", context, error.to_report_string())
+        }
     }
-    server_error!("{}: {}", context, error.to_report_string())
 }
 
 /// Like [`text_submit_error`], for the chat pipeline, which wraps the text
 /// errors.
 pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
-    if error.is_request_validation_error() {
-        return invalid_request!(param = error.param(), "{}", error.as_report());
+    match error.kind() {
+        vllm_chat::ErrorKind::InvalidRequest { param } => {
+            invalid_request!(param = param, "{}", error.as_report())
+        }
+        vllm_chat::ErrorKind::Internal => {
+            server_error!("{}: {}", context, error.to_report_string())
+        }
     }
-    server_error!("{}: {}", context, error.to_report_string())
 }
 
 /// Classify an engine-reported request failure: a validation error (e.g. a

@@ -543,7 +543,7 @@ mod tests {
         assert_eq!(lower(None).unwrap(), 0);
         assert_eq!(lower(Some(3)).unwrap(), 3);
         let error = lower(Some(4)).unwrap_err();
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
         assert!(error.to_string().contains("routed_experts_prompt_start"));
     }
 
@@ -649,7 +649,7 @@ mod tests {
         };
 
         let error = lower(StructuredOutputBackend::Xgrammar).unwrap_err();
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
         assert!(error.to_report_string().contains("not supported by xgrammar"));
 
         let params = lower(StructuredOutputBackend::Guidance).unwrap();
@@ -1519,7 +1519,10 @@ mod tests {
                     vocab_size: 2000,
                 }) if *parameter == expected_param && token_ids == &[2000]
             ));
-            assert_eq!(error.param(), Some(expected_param));
+            assert_eq!(
+                error.kind(),
+                crate::ErrorKind::invalid_param(expected_param)
+            );
         }
     }
 
@@ -1561,7 +1564,10 @@ mod tests {
             error,
             Error::TokenIds(TokenIdsError::EmptyBadWordSequence)
         ));
-        assert_eq!(error.param(), Some("bad_words_token_ids"));
+        assert_eq!(
+            error.kind(),
+            crate::ErrorKind::invalid_param("bad_words_token_ids")
+        );
 
         // Pre-tokenized bad-word OOV and limit errors report
         // `bad_words_token_ids`, while a combined limit failure stays unset.
@@ -1573,7 +1579,10 @@ mod tests {
             sample_sampling_limits(),
         )
         .unwrap_err();
-        assert_eq!(oov.param(), Some("bad_words_token_ids"));
+        assert_eq!(
+            oov.kind(),
+            crate::ErrorKind::invalid_param("bad_words_token_ids")
+        );
 
         let too_many_raw = lower_sampling_params_with_limits(
             SamplingParams {
@@ -1583,7 +1592,10 @@ mod tests {
             sample_sampling_limits(),
         )
         .unwrap_err();
-        assert_eq!(too_many_raw.param(), Some("bad_words_token_ids"));
+        assert_eq!(
+            too_many_raw.kind(),
+            crate::ErrorKind::invalid_param("bad_words_token_ids")
+        );
 
         let combined_too_many = lower_sampling_params(
             SamplingParams {
@@ -1605,7 +1617,10 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(combined_too_many.param(), None);
+        assert_eq!(
+            combined_too_many.kind(),
+            crate::ErrorKind::invalid_request()
+        );
     }
 
     #[test]
@@ -2027,7 +2042,7 @@ mod tests {
                 error,
                 Error::SamplingParams(SamplingParamsError::InvalidMaxTokens)
             ));
-            assert_eq!(error.param(), Some("max_tokens"));
+            assert_eq!(error.kind(), crate::ErrorKind::invalid_param("max_tokens"));
         }
     }
 

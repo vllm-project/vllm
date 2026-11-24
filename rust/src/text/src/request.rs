@@ -380,7 +380,7 @@ mod tests {
             let result = request.validate();
             assert_eq!(result.is_ok(), valid, "{salt:?}");
             if let Err(err) = result {
-                assert!(err.is_request_validation_error());
+                assert!(err.kind().is_invalid_request());
             }
         }
     }
@@ -393,7 +393,7 @@ mod tests {
 
         let err = request.validate().expect_err("empty stop strings should be rejected");
 
-        assert!(err.is_request_validation_error());
+        assert!(err.kind().is_invalid_request());
         assert!(err.to_string().contains("stop strings cannot be empty"));
         assert!(err.to_string().contains("req-empty-stop"));
     }

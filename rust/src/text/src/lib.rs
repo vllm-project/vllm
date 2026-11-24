@@ -15,7 +15,7 @@ pub use backend::{
     DefaultMaxTokens, DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits,
     TextBackend,
 };
-pub use error::{Error, LogprobsError, Result, SamplingParamsError, TokenIdsError};
+pub use error::{Error, ErrorKind, LogprobsError, Result, SamplingParamsError, TokenIdsError};
 use futures::Stream;
 pub use lower::{
     EffectiveSampling, PreparedTextRequest, lower_sampling_params, lower_text_request,
@@ -473,10 +473,7 @@ mod tests {
         ]
         .map(|result| {
             let error = result.unwrap_err();
-            (
-                error.is_request_validation_error(),
-                error.to_report_string(),
-            )
+            (error.kind().is_invalid_request(), error.to_report_string())
         });
         expect_test::expect![[r#"
             [

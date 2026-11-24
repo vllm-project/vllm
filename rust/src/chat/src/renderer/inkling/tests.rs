@@ -409,8 +409,10 @@ fn rejects_continue_final_message() {
             renderer: "Inkling"
         }
     ));
-    assert!(error.is_request_validation_error());
-    assert_eq!(error.param(), Some("continue_final_message"));
+    assert_eq!(
+        error.kind(),
+        crate::ErrorKind::invalid_param("continue_final_message")
+    );
     assert!(error.as_report().to_string().contains("continue_final_message"));
 }
 

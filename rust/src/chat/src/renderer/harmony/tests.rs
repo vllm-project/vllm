@@ -233,8 +233,10 @@ fn rejects_continue_final_assistant() {
     request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
 
     let error = test_renderer(false).render(&request).unwrap_err();
-    assert!(error.is_request_validation_error());
-    assert_eq!(error.param(), Some("continue_final_message"));
+    assert_eq!(
+        error.kind(),
+        crate::ErrorKind::invalid_param("continue_final_message")
+    );
 
     expect!["Harmony renderer does not support continue_final_message"]
         .assert_eq(&error.to_report_string());

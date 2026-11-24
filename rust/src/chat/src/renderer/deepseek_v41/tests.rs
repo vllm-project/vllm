@@ -228,7 +228,7 @@ fn rejects_image_placeholder_in_message_text() {
             ..ChatRequest::for_test()
         };
         let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
     }
 }
 
@@ -277,7 +277,7 @@ fn rejects_requests_whose_tools_are_all_deferred() {
 
     let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
 
-    assert!(error.is_request_validation_error());
+    assert!(error.kind().is_invalid_request());
     expect!["at least one tool must have defer_loading=false; all tools cannot be deferred"]
         .assert_eq(&error.to_report_string());
 
@@ -397,13 +397,13 @@ fn rejects_undefined_effort_names_and_invalid_numeric_budgets() {
         let mut request = request();
         request.chat_options.template_kwargs.insert("reasoning_effort".into(), effort);
         let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
     }
     for effort in [EffortValue::from("minimal"), EffortValue::from("medium")] {
         let mut request = request();
         request.chat_options.reasoning_effort = Some(effort);
         let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
-        assert!(error.is_request_validation_error());
+        assert!(error.kind().is_invalid_request());
     }
 }
 

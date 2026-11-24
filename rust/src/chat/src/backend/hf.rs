@@ -564,8 +564,10 @@ mod tests {
             crate::Error::UntrustedRequestChatTemplate
         ));
         let error = prepare(NATIVE_CONFIG).await;
-        assert!(error.is_request_validation_error());
-        assert_eq!(error.param(), Some("chat_template"));
+        assert_eq!(
+            error.kind(),
+            crate::ErrorKind::invalid_param("chat_template")
+        );
         expect_test::expect!["chat_template is not supported by this chat renderer"]
             .assert_eq(&error.to_report_string());
     }
@@ -726,7 +728,7 @@ mod tests {
                 .unwrap(),
         ];
         for error in errors {
-            assert!(error.is_request_validation_error());
+            assert!(error.kind().is_invalid_request());
             assert_eq!(
                 error.to_report_string(),
                 "this request needs a tokenizer, which is not loaded when \
