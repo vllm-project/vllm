@@ -67,6 +67,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (
     AttentionStoreLayout,
     KeyMetadata,
     MambaStoreLayout,
+    PoolKey,
     RankLocalStoreLayout,
     StoreLayout,
     StoreShardId,
@@ -1660,10 +1661,10 @@ class MooncakeStoreWorker:
             local_hostname = rdma_utils.get_requester_local_hostname(get_ip())
 
         self.store = MooncakeDistributedStore()
-        if not callable(getattr(self.store, "batch_is_exist_hashed", None)):
+        if not callable(getattr(self.store, "create_key_prober", None)):
             raise RuntimeError(
                 "MooncakeStoreConnector needs a Mooncake version whose "
-                "MooncakeDistributedStore has batch_is_exist_hashed."
+                "MooncakeDistributedStore has create_key_prober."
             )
         self.store_service = MooncakeStoreService(self.store)
         setup_mooncake_store(
@@ -1751,6 +1752,8 @@ class MooncakeStoreWorker:
         self._kv_cache_config = kv_cache_config
         self.token_dbs: list[ChunkedTokenDatabase] = []
         self._selective_lease: SelectiveLookupLease | None = None
+        # Mooncake KeyProber per block-hash length.
+        self._key_probers: dict[int, Any] = {}
 
         # a capacity-only instance does not need below utils
         if self._capacity_only:
@@ -2605,19 +2608,17 @@ class MooncakeStoreWorker:
             assert len(blob) == hash_len * len(block_hashes), (
                 "Mooncake lookups need equal-length block hashes"
             )
-        prefixes = [self._lookup_key_prefixes[g] for g, _ in candidates]
-        hash_ids = [ends // self.hash_block_size - 1 for _, ends in candidates]
-        num_keys = sum(len(i) * len(p) for i, p in zip(hash_ids, prefixes))
-        probe = (
-            self.store.batch_is_exist_hashed
-            if self._selective_lease is None
-            else self._selective_lease.probe
+        hash_ids = [np.empty(0, dtype=np.int64)] * len(self.token_dbs)
+        for g_idx, ends in candidates:
+            hash_ids[g_idx] = ends // self.hash_block_size - 1
+        num_keys = sum(
+            len(ends) * len(self._lookup_key_prefixes[g]) for g, ends in candidates
         )
+        prober = self._key_prober(hash_len)
+        probe = prober.is_exist if self._selective_lease is None else prober.probe
         start = time.perf_counter()
         try:
-            res = np.frombuffer(
-                probe(blob, hash_len, prefixes, hash_ids), dtype=np.int8
-            )
+            results = probe(blob, hash_ids)
         except Exception as e:
             self._record_kv_connector_operation(
                 "lookup_exists",
@@ -2628,8 +2629,9 @@ class MooncakeStoreWorker:
             )
             logger.error("Remote connection failed in lookup: %s", e)
             return None
-        assert len(res) == num_keys, f"Got {len(res)} results for {num_keys} keys"
-        failed_keys = int(np.count_nonzero(res < 0))
+        codes = [np.frombuffer(results[g], dtype=np.int8) for g, _ in candidates]
+        assert sum(map(len, codes)) == num_keys, f"Expected {num_keys} results"
+        failed_keys = sum(int(np.count_nonzero(c < 0)) for c in codes)
         status = "ok"
         if failed_keys:
             status = "error" if failed_keys == num_keys else "partial_failure"
@@ -2644,21 +2646,33 @@ class MooncakeStoreWorker:
             return None
 
         loadable: dict[int, np.ndarray] = {}
-        pos = 0
-        for (g_idx, ends), ids, group_prefixes in zip(candidates, hash_ids, prefixes):
-            n = len(ends) * len(group_prefixes)
-            present = (res[pos : pos + n] == 1).reshape(len(ends), -1).all(axis=1)
-            pos += n
+        for (g_idx, ends), group_codes in zip(candidates, codes):
+            present = (group_codes == 1).reshape(len(ends), -1).all(axis=1)
             missing_end = ~present & (ends % self.token_dbs[g_idx].chunk_size == 0)
             missing_before = np.cumsum(missing_end) - missing_end
             pages = (ends - 1) // self._kv_cache_groups[g_idx].block_size
             page_start = np.searchsorted(pages, pages)
             group_loadable = np.zeros(len(block_hashes), dtype=bool)
             group_loadable[
-                ids[present & (missing_before == missing_before[page_start])]
+                hash_ids[g_idx][
+                    present & (missing_before == missing_before[page_start])
+                ]
             ] = True
             loadable[g_idx] = group_loadable
         return LoadablePairs(blob, hash_len, loadable)
+
+    def _key_prober(self, hash_len: int) -> Any:
+        """Mooncake prober for every group's lookup keys, created on first use
+        since lookup requests carry their hash length."""
+        prober = self._key_probers.get(hash_len)
+        if prober is None:
+            templates = [
+                [PoolKey.build_key_string(prefix, "{hash}") for prefix in prefixes]
+                for prefixes in self._lookup_key_prefixes
+            ]
+            prober = self.store.create_key_prober(templates, hash_len)
+            self._key_probers[hash_len] = prober
+        return prober
 
     def _longest_hit(
         self,

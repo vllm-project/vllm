@@ -30,7 +30,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
 )
 from tests.v1.kv_connector.unit.utils import (
     create_model_runner_output,
-    serve_hashed_lookups,
+    serve_key_probers,
 )
 from vllm.distributed import mooncake_store
 from vllm.distributed.kv_events import KVEventAggregator
@@ -3548,7 +3548,7 @@ def test_pp_stages_write_distinct_keys_with_pcp(tmp_path, monkeypatch):
 def test_hybrid_lookup_uses_each_pp_stage_schema(
     tmp_path, monkeypatch, tp_size, missing_group
 ):
-    store = serve_hashed_lookups(MagicMock())
+    store = serve_key_probers(MagicMock())
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
     _patch_worker_runtime(monkeypatch, tp_size=tp_size)
@@ -4599,13 +4599,14 @@ def _make_bare_worker(
     worker = object.__new__(mooncake_store_worker.MooncakeStoreWorker)
     worker.cache_config = MagicMock()
     worker.cache_config.num_gpu_blocks = num_gpu_blocks
-    worker.store = serve_hashed_lookups(MagicMock())
+    worker.store = serve_key_probers(MagicMock())
     worker.store_service = mooncake_store_worker.MooncakeStoreService(worker.store)
     worker.store.register_buffer.return_value = 0
     worker.kv_role = kv_role
     worker.can_put = kv_role in ("kv_producer", "kv_both") or save_decode_cache
     worker._capacity_only = False
     worker._selective_lease = None
+    worker._key_probers = {}
     worker.block_size = block_size
     worker._is_hma_required = False
     worker.tp_rank = 0

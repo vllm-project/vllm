@@ -22,7 +22,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     mamba_layer,
     sliding_window_layer,
 )
-from tests.v1.kv_connector.unit.utils import hashed_mooncake_keys
+from tests.v1.kv_connector.unit.utils import FakeKeyProber
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     worker as mooncake_store_worker,
 )
@@ -79,8 +79,8 @@ class _DictStore:
     def batch_is_exist(self, keys):
         return [1 if k in self._data else 0 for k in keys]
 
-    def batch_is_exist_hashed(self, *args):
-        return bytes(self.batch_is_exist(hashed_mooncake_keys(*args)))
+    def create_key_prober(self, groups, hash_len):
+        return FakeKeyProber(self, groups, hash_len)
 
     def batch_put_from_multi_buffers(self, keys, addrs, sizes, *_args, **_kwargs):
         for k in keys:
@@ -1253,9 +1253,6 @@ class _LeaseTrackingStore(_DictStore):
         self.probed.extend(keys)
         return [1 if k in self._data else 0 for k in keys]
 
-    def batch_probe_key_hashed(self, *args):
-        return bytes(self.batch_probe_key(hashed_mooncake_keys(*args)))
-
     def batch_is_exist(self, keys):
         if self.evictions:
             for key in self.evictions.pop(0):
@@ -1504,21 +1501,13 @@ def test_selective_lease_with_partial_hash_hits(monkeypatch):
     assert sorted(store.lease_calls[0]) == sorted(store._data)
 
 
-def test_selective_lease_requires_probe_support(monkeypatch):
-    """Enabling the flag on a Mooncake without `batch_probe_key_hashed` fails
-    at startup instead of silently leasing every key."""
-    monkeypatch.setenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "1")
-    with pytest.raises(RuntimeError, match="batch_probe_key_hashed"):
-        _full_plus_mamba_worker(_DictStore())
-
-
-def test_worker_requires_hashed_lookup_support():
-    """A Mooncake without `batch_is_exist_hashed` fails at startup."""
+def test_worker_requires_key_prober_support():
+    """A Mooncake without `create_key_prober` fails at startup."""
 
     class _OldMooncake(_DictStore):
-        batch_is_exist_hashed = None
+        create_key_prober = None
 
-    with pytest.raises(RuntimeError, match="batch_is_exist_hashed"):
+    with pytest.raises(RuntimeError, match="create_key_prober"):
         _full_plus_mamba_worker(_OldMooncake())
 
 

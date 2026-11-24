@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Selective read leases for Mooncake store prefix lookups.
 
-`batch_is_exist_hashed` leases every key it finds, so a lookup renews every stored
+`KeyProber.is_exist` leases every key it finds, so a lookup renews every stored
 key of the prompt, including keys a load of the hit skips, such as blocks
 outside a sliding window or states at earlier block boundaries. With
 `VLLM_MOONCAKE_STORE_SELECTIVE_LEASE` the lookup probes lease-free
-(`batch_probe_key_hashed`) and leases only the keys the hit will load.
+(`KeyProber.probe`) and leases only the keys the hit will load.
 """
 
 import time
@@ -66,31 +66,11 @@ class SelectiveLookupLease:
         lookup_key_prefixes: Sequence[Sequence[str]],
         record_operation: _RecordOperation,
     ):
-        self._check_supported(store)
         self.store = store
         self.token_dbs = token_dbs
         self.kv_cache_groups = kv_cache_groups
         self.lookup_key_prefixes = lookup_key_prefixes
         self.record_operation = record_operation
-
-    @staticmethod
-    def _check_supported(store: Any) -> None:
-        if not callable(getattr(store, "batch_probe_key_hashed", None)):
-            raise RuntimeError(
-                "VLLM_MOONCAKE_STORE_SELECTIVE_LEASE requires "
-                "MooncakeDistributedStore.batch_probe_key_hashed, which the "
-                "installed Mooncake version does not provide."
-            )
-
-    def probe(
-        self,
-        hashes: memoryview,
-        hash_len: int,
-        prefixes: list[tuple[str, ...]],
-        indices: list[Any],
-    ) -> bytes:
-        """`batch_is_exist_hashed` without granting a lease."""
-        return self.store.batch_probe_key_hashed(hashes, hash_len, prefixes, indices)
 
     def lease_hit(
         self,

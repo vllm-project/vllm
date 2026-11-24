@@ -19,7 +19,7 @@ uv pip install mooncake-transfer-engine
 
 Refer to the [Mooncake official repository](https://github.com/kvcache-ai/Mooncake) for more installation instructions and building from source.
 
-The connector's prefix lookup needs `MooncakeDistributedStore.batch_is_exist_hashed`,
+The connector's prefix lookup needs `MooncakeDistributedStore.create_key_prober`,
 which builds and probes the lookup keys in C++ without holding the GIL. With a
 Mooncake version that lacks it, the connector fails at startup.
 
