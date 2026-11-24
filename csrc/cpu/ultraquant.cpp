@@ -48,8 +48,7 @@ inline int64_t perm_elem(int64_t i) {
   return i < kGroupSize / 2 ? 2 * i : 2 * (i - kGroupSize / 2) + 1;
 }
 
-#if defined(__AVX512F__) && defined(__AVX512BW__) && \
-    defined(__AVX512BF16__)
+#if defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512BF16__)
 
 // The 16 FP4 levels as bf16 bit patterns, padded to a 32-entry VPERMW table.
 alignas(64) constexpr uint16_t kFp4Bf16[32] = {
@@ -123,12 +122,11 @@ constexpr int kSpecializedHeadDim = 128;
 // Dequantized values are consumed straight out of registers; staging them in a
 // buffer that the dot then reloads costs more than the dequant itself.
 template <int NJ, int HD>
-inline void qk_dots_lanes(const uint8_t* __restrict__ blk,
-                          int64_t bsz_stride, int64_t codes_bytes,
+inline void qk_dots_lanes(const uint8_t* __restrict__ blk, int64_t bsz_stride,
+                          int64_t codes_bytes,
                           const uint16_t* __restrict__ qbase, int64_t ntok,
                           int64_t head_dim_rt, float scale,
-                          float* __restrict__ out_logits,
-                          int64_t out_stride) {
+                          float* __restrict__ out_logits, int64_t out_stride) {
   const int64_t head_dim = HD ? HD : head_dim_rt;
   const int64_t ngroup = head_dim / kGroupSize;
   for (int64_t n = 0; n < ntok; ++n) {
@@ -137,13 +135,13 @@ inline void qk_dots_lanes(const uint8_t* __restrict__ blk,
     // A horizontal reduction costs more than the FMAs feeding it, so the dot
     // stays in a vector accumulator and is reduced once per query head.
     __m512 dacc[NJ];
-#pragma GCC unroll 8
+  #pragma GCC unroll 8
     for (int j = 0; j < NJ; ++j) dacc[j] = _mm512_setzero_ps();
     for (int64_t g = 0; g < ngroup; ++g) {
       const __m512i k =
           decode_group_bf16(codes + g * (kGroupSize / 2), scales[g]);
       const uint16_t* qg = qbase + g * kGroupSize;
-#pragma GCC unroll 8
+  #pragma GCC unroll 8
       for (int j = 0; j < NJ; ++j) {
         const __m512i q = _mm512_loadu_si512(
             reinterpret_cast<const void*>(qg + j * head_dim));
@@ -151,7 +149,7 @@ inline void qk_dots_lanes(const uint8_t* __restrict__ blk,
                                    reinterpret_cast<__m512bh>(q));
       }
     }
-#pragma GCC unroll 8
+  #pragma GCC unroll 8
     for (int j = 0; j < NJ; ++j)
       out_logits[j * out_stride + n] = _mm512_reduce_add_ps(dacc[j]) * scale;
   }
@@ -171,12 +169,12 @@ inline void qk_dots_block_hd(const uint8_t* __restrict__ blk,
     qk_dots_lanes<kMaxLanes, HD>(blk, bsz_stride, codes_bytes,
                                  qbase + j0 * head_dim, ntok, head_dim, scale,
                                  out_logits + j0 * out_stride, out_stride);
-#define UQ_QK_CASE(n)                                                        \
-  case n:                                                                    \
-    qk_dots_lanes<n, HD>(blk, bsz_stride, codes_bytes, qbase + j0 * head_dim, \
-                         ntok, head_dim, scale,                              \
-                         out_logits + j0 * out_stride, out_stride);          \
-    break;
+  #define UQ_QK_CASE(n)                                                  \
+    case n:                                                              \
+      qk_dots_lanes<n, HD>(blk, bsz_stride, codes_bytes,                 \
+                           qbase + j0 * head_dim, ntok, head_dim, scale, \
+                           out_logits + j0 * out_stride, out_stride);    \
+      break;
   switch (q_per_kv - j0) {
     case 0:
       break;
@@ -188,15 +186,14 @@ inline void qk_dots_block_hd(const uint8_t* __restrict__ blk,
       UQ_QK_CASE(6)
       UQ_QK_CASE(7)
   }
-#undef UQ_QK_CASE
+  #undef UQ_QK_CASE
 }
 
 inline void qk_dots_block(const uint8_t* __restrict__ blk, int64_t bsz_stride,
                           int64_t codes_bytes,
                           const uint16_t* __restrict__ qbase, int64_t ntok,
                           int64_t q_per_kv, int64_t head_dim, float scale,
-                          float* __restrict__ out_logits,
-                          int64_t out_stride) {
+                          float* __restrict__ out_logits, int64_t out_stride) {
   if (head_dim == kSpecializedHeadDim)
     qk_dots_block_hd<kSpecializedHeadDim>(blk, bsz_stride, codes_bytes, qbase,
                                           ntok, q_per_kv, head_dim, scale,
@@ -211,12 +208,11 @@ inline void qk_dots_block(const uint8_t* __restrict__ blk, int64_t bsz_stride,
 // block_size * slot_size bytes, already resident from the QK pass, which is
 // what makes the strided walk over tokens cheap.
 template <int NJ, int HD>
-inline void pv_accum_lanes(const uint8_t* __restrict__ blk,
-                           int64_t bsz_stride, int64_t v_codes_off,
-                           int64_t v_scales_off,
-                           const float* __restrict__ probs,
-                           int64_t prob_stride, int64_t ntok,
-                           int64_t head_dim_rt, float* __restrict__ acc) {
+inline void pv_accum_lanes(const uint8_t* __restrict__ blk, int64_t bsz_stride,
+                           int64_t v_codes_off, int64_t v_scales_off,
+                           const float* __restrict__ probs, int64_t prob_stride,
+                           int64_t ntok, int64_t head_dim_rt,
+                           float* __restrict__ acc) {
   const int64_t head_dim = HD ? HD : head_dim_rt;
   const int64_t ngroup = head_dim / kGroupSize;
   // Group outermost: the accumulator then lives in registers for the whole
@@ -224,7 +220,7 @@ inline void pv_accum_lanes(const uint8_t* __restrict__ blk,
   // this walks the block once per group.
   for (int64_t g = 0; g < ngroup; ++g) {
     __m512 acc_lo[NJ], acc_hi[NJ];
-#pragma GCC unroll 8
+  #pragma GCC unroll 8
     for (int j = 0; j < NJ; ++j) {
       const float* a = acc + j * head_dim + g * kGroupSize;
       acc_lo[j] = _mm512_loadu_ps(a);
@@ -235,14 +231,14 @@ inline void pv_accum_lanes(const uint8_t* __restrict__ blk,
       __m512 vlo, vhi;
       decode_group(slot + v_codes_off + g * (kGroupSize / 2),
                    slot[v_scales_off + g], vlo, vhi);
-#pragma GCC unroll 8
+  #pragma GCC unroll 8
       for (int j = 0; j < NJ; ++j) {
         const __m512 p = _mm512_set1_ps(probs[j * prob_stride + n]);
         acc_lo[j] = _mm512_fmadd_ps(p, vlo, acc_lo[j]);
         acc_hi[j] = _mm512_fmadd_ps(p, vhi, acc_hi[j]);
       }
     }
-#pragma GCC unroll 8
+  #pragma GCC unroll 8
     for (int j = 0; j < NJ; ++j) {
       float* a = acc + j * head_dim + g * kGroupSize;
       _mm512_storeu_ps(a, acc_lo[j]);
@@ -256,24 +252,21 @@ inline void pv_accum_lanes(const uint8_t* __restrict__ blk,
 // block_size * slot_size bytes, already resident from the QK pass, which is
 // what makes the strided walk over tokens cheap.
 template <int HD>
-inline void pv_accum_block_hd(const uint8_t* __restrict__ blk,
-                              int64_t bsz_stride, int64_t v_codes_off,
-                              int64_t v_scales_off,
-                              const float* __restrict__ probs,
-                              int64_t prob_stride, int64_t ntok,
-                              int64_t q_per_kv, int64_t head_dim,
-                              float* __restrict__ acc) {
+inline void pv_accum_block_hd(
+    const uint8_t* __restrict__ blk, int64_t bsz_stride, int64_t v_codes_off,
+    int64_t v_scales_off, const float* __restrict__ probs, int64_t prob_stride,
+    int64_t ntok, int64_t q_per_kv, int64_t head_dim, float* __restrict__ acc) {
   int64_t j0 = 0;
   for (; j0 + kMaxLanes <= q_per_kv; j0 += kMaxLanes)
     pv_accum_lanes<kMaxLanes, HD>(blk, bsz_stride, v_codes_off, v_scales_off,
                                   probs + j0 * prob_stride, prob_stride, ntok,
                                   head_dim, acc + j0 * head_dim);
-#define UQ_PV_CASE(n)                                                     \
-  case n:                                                                 \
-    pv_accum_lanes<n, HD>(blk, bsz_stride, v_codes_off, v_scales_off,     \
-                          probs + j0 * prob_stride, prob_stride, ntok,    \
-                          head_dim, acc + j0 * head_dim);                 \
-    break;
+  #define UQ_PV_CASE(n)                                                  \
+    case n:                                                              \
+      pv_accum_lanes<n, HD>(blk, bsz_stride, v_codes_off, v_scales_off,  \
+                            probs + j0 * prob_stride, prob_stride, ntok, \
+                            head_dim, acc + j0 * head_dim);              \
+      break;
   switch (q_per_kv - j0) {
     case 0:
       break;
@@ -285,14 +278,14 @@ inline void pv_accum_block_hd(const uint8_t* __restrict__ blk,
       UQ_PV_CASE(6)
       UQ_PV_CASE(7)
   }
-#undef UQ_PV_CASE
+  #undef UQ_PV_CASE
 }
 
 inline void pv_accum_block(const uint8_t* __restrict__ blk, int64_t bsz_stride,
                            int64_t v_codes_off, int64_t v_scales_off,
-                           const float* __restrict__ probs,
-                           int64_t prob_stride, int64_t ntok, int64_t q_per_kv,
-                           int64_t head_dim, float* __restrict__ acc) {
+                           const float* __restrict__ probs, int64_t prob_stride,
+                           int64_t ntok, int64_t q_per_kv, int64_t head_dim,
+                           float* __restrict__ acc) {
   if (head_dim == kSpecializedHeadDim)
     pv_accum_block_hd<kSpecializedHeadDim>(blk, bsz_stride, v_codes_off,
                                            v_scales_off, probs, prob_stride,
@@ -315,8 +308,7 @@ inline void qk_dots_block(const uint8_t* __restrict__ blk, int64_t bsz_stride,
                           int64_t codes_bytes,
                           const uint16_t* __restrict__ qbase, int64_t ntok,
                           int64_t q_per_kv, int64_t head_dim, float scale,
-                          float* __restrict__ out_logits,
-                          int64_t out_stride) {
+                          float* __restrict__ out_logits, int64_t out_stride) {
   for (int64_t n = 0; n < ntok; ++n) {
     const uint8_t* codes = blk + n * bsz_stride;
     const uint8_t* scales = codes + codes_bytes;
@@ -339,9 +331,9 @@ inline void qk_dots_block(const uint8_t* __restrict__ blk, int64_t bsz_stride,
 
 inline void pv_accum_block(const uint8_t* __restrict__ blk, int64_t bsz_stride,
                            int64_t v_codes_off, int64_t v_scales_off,
-                           const float* __restrict__ probs,
-                           int64_t prob_stride, int64_t ntok, int64_t q_per_kv,
-                           int64_t head_dim, float* __restrict__ acc) {
+                           const float* __restrict__ probs, int64_t prob_stride,
+                           int64_t ntok, int64_t q_per_kv, int64_t head_dim,
+                           float* __restrict__ acc) {
   for (int64_t n = 0; n < ntok; ++n) {
     const uint8_t* slot = blk + n * bsz_stride;
     for (int64_t g = 0; g < head_dim / kGroupSize; ++g) {
@@ -384,7 +376,7 @@ inline uint8_t ue8m0_byte(float s_raw, float& s_recip) {
 inline __m512i snap_fp4(__m512 xn) {
   const __m512i one = _mm512_set1_epi32(1);
   __m512i idx = _mm512_setzero_si512();
-#pragma GCC unroll 14
+  #pragma GCC unroll 14
   for (int i = 0; i < 14; ++i) {
     const __mmask16 gt =
         _mm512_cmp_ps_mask(xn, _mm512_set1_ps(kMidpoints[i]), _CMP_GT_OQ);
@@ -427,12 +419,10 @@ template <typename T>
 inline uint8_t encode_group(const T* __restrict__ x,
                             uint8_t* __restrict__ codes, float constant_c) {
 #if defined(__AVX512F__)
-  alignas(64) static constexpr int32_t kEven[16] = {0,  2,  4,  6,  8,  10,
-                                                    12, 14, 16, 18, 20, 22,
-                                                    24, 26, 28, 30};
-  alignas(64) static constexpr int32_t kOdd[16] = {1,  3,  5,  7,  9,  11,
-                                                   13, 15, 17, 19, 21, 23,
-                                                   25, 27, 29, 31};
+  alignas(64) static constexpr int32_t kEven[16] = {
+      0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30};
+  alignas(64) static constexpr int32_t kOdd[16] = {
+      1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31};
   __m512 a, b;
   load_group(x, a, b);
   const __m512 absmask = _mm512_castsi512_ps(_mm512_set1_epi32(0x7FFFFFFF));
@@ -527,11 +517,11 @@ inline void apply_block_softmax(const float* __restrict__ logits,
 
 template <typename T>
 void store_slots(const T* __restrict__ kp, const T* __restrict__ vp,
-                 uint8_t* __restrict__ cache,
-                 const int64_t* __restrict__ slots, int64_t num_tokens,
-                 int64_t num_kv_heads, int64_t head_dim, int64_t num_groups,
-                 int64_t codes_bytes, int64_t block_size, int64_t block_stride,
-                 int64_t head_stride, int64_t bsz_stride, float c) {
+                 uint8_t* __restrict__ cache, const int64_t* __restrict__ slots,
+                 int64_t num_tokens, int64_t num_kv_heads, int64_t head_dim,
+                 int64_t num_groups, int64_t codes_bytes, int64_t block_size,
+                 int64_t block_stride, int64_t head_stride, int64_t bsz_stride,
+                 float c) {
 #pragma omp parallel for collapse(2) schedule(static)
   for (int64_t t = 0; t < num_tokens; ++t) {
     for (int64_t h = 0; h < num_kv_heads; ++h) {
@@ -570,7 +560,8 @@ void ultraquant_store(const torch::Tensor& key,    // [num_tokens, Hk, D]
               "kv_cache must be uint8 for the UltraQuant path");
 
   TORCH_CHECK_EQ(slot_mapping.numel(), key.size(0));
-  TORCH_CHECK(key.sizes() == value.sizes(), "key and value must agree in shape");
+  TORCH_CHECK(key.sizes() == value.sizes(),
+              "key and value must agree in shape");
   TORCH_CHECK(slot_mapping.scalar_type() == at::ScalarType::Long,
               "slot_mapping must be int64");
 
@@ -625,7 +616,7 @@ void ultraquant_store(const torch::Tensor& key,    // [num_tokens, Hk, D]
 }
 
 void ultraquant_decode_attention(
-    const torch::Tensor& query,     // [num_seqs, Hq, D] fp32, pre-rotated
+    const torch::Tensor& query,  // [num_seqs, Hq, D] fp32, pre-rotated
     // Logical [blocks, Hk, block_size, slot_size] u8, as the KV cache views
     // are shaped; the physical order is carried by the strides.
     const torch::Tensor& kv_cache,
@@ -667,8 +658,7 @@ void ultraquant_decode_attention(
 
   // A bf16 query needs no conversion at all: the dots run in bf16, so the
   // kernel reads the caller's rows where it would otherwise round its own.
-  const float* __restrict__ qp =
-      q_is_bf16 ? nullptr : q.data_ptr<float>();
+  const float* __restrict__ qp = q_is_bf16 ? nullptr : q.data_ptr<float>();
   const uint16_t* __restrict__ qbf =
       q_is_bf16 ? reinterpret_cast<const uint16_t*>(q.data_ptr<c10::BFloat16>())
                 : nullptr;
