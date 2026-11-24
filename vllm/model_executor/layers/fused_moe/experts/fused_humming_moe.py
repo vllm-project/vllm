@@ -171,7 +171,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def init_humming_moe(self):
         from vllm.utils.humming import get_heuristics_config
 
-        self._activation_kwargs: dict[MoEActivation, dict[str, str]] = {}
         self._init_buffer_layout()
 
         self.compute_config = {
@@ -256,6 +255,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         scatter_idx: torch.Tensor | None = None,
         num_valid_tokens: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        from vllm.model_executor.layers.quantization.utils.humming.activation import (
+            get_humming_activation,
+        )
+
         if input_scale is not None:
             assert scatter_idx is None
             if activation is not None:
@@ -280,7 +283,9 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
         activation_kwargs = {}
         if activation is not None:
-            activation_kwargs = self._get_activation_kwargs(activation)
+            activation_kwargs = get_humming_activation(
+                activation, self.activation_config
+            )
 
         scale = getattr(quant_config, f"{prefix}_input_scale")
         scale2 = getattr(quant_config, f"{prefix}_input_scale_2")
@@ -305,19 +310,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         input_scale = group_scales if mode.has_group_scale else token_scales
         input_scale_2 = token_scales if mode.has_secondary_scale else None
         return inputs, input_scale, input_scale_2
-
-    def _get_activation_kwargs(self, activation: MoEActivation) -> dict[str, str]:
-        kwargs = self._activation_kwargs.get(activation)
-        if kwargs is None:
-            from vllm.model_executor.layers.quantization.utils.humming import (
-                activation as humming_activation,
-            )
-
-            kwargs = humming_activation.get_humming_activation(
-                activation, self.activation_config
-            )
-            self._activation_kwargs[activation] = kwargs
-        return kwargs
 
     def humming_forward(
         self,
