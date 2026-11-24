@@ -8201,6 +8201,32 @@ def test_ec_connector_schedules_evicted_local_runner_hit(connector_name, tmp_pat
         scheduler.shutdown()
 
 
+def test_prefill_schedules_placeholder_tokens_without_encoder_embeddings():
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=48,
+    )
+    scheduler.max_num_encoder_input_tokens = 0
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=128,
+        mm_positions=[
+            [
+                PlaceholderRange(
+                    offset=32,
+                    length=32,
+                    is_embed=torch.tensor([False] * 16 + [True] * 16),
+                ),
+            ]
+        ],
+    )
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 48
+    assert not output.scheduled_encoder_inputs
+
+
 @pytest.mark.parametrize(
     "replay_tokens,window_loaded,local_hit",
     [(128, False, True), (128, False, False), (0, False, False), (128, True, False)],

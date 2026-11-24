@@ -2255,6 +2255,16 @@ class Scheduler(SchedulerInterface):
                     # previous step.
                     continue
 
+            start_idx_rel = max(0, num_computed_tokens - start_pos)
+            end_idx_rel = min(num_encoder_tokens, encoder_window_end - start_pos)
+            curr_embeds_start, curr_embeds_end = (
+                mm_feature.mm_position.get_embeds_indices_in_range(
+                    start_idx_rel, end_idx_rel
+                )
+            )
+            if curr_embeds_start == curr_embeds_end:
+                continue
+
             # Earlier allocations may evict a runner hit. If the connector
             # still needs to fetch it, retry admission on the next step.
             needs_readmission = (
@@ -2283,20 +2293,6 @@ class Scheduler(SchedulerInterface):
                     # the request in this step.
                     num_new_tokens = 0
                 break
-
-            # Calculate the number of embeddings to schedule in the current range
-            # of scheduled encoder placeholder tokens.
-            start_idx_rel = max(0, num_computed_tokens - start_pos)
-            end_idx_rel = min(num_encoder_tokens, encoder_window_end - start_pos)
-            curr_embeds_start, curr_embeds_end = (
-                mm_feature.mm_position.get_embeds_indices_in_range(
-                    start_idx_rel, end_idx_rel
-                )
-            )
-            # There's no embeddings in the current range of encoder placeholder tokens
-            # so we can skip the encoder input.
-            if curr_embeds_end - curr_embeds_start == 0:
-                continue
 
             if self.ec_connector is not None and self.ec_connector.has_cache_item(
                 item_identifier
