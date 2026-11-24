@@ -212,9 +212,9 @@ class CacheConfig:
     inside a physical block. It controls matching granularity only, not how
     often states are stored.
 
-    If unset with hybrid prefix caching, vLLM chooses the smallest supported
-    value of at least 64 tokens. An explicit value fails at startup if it
-    would disable fine-grained hits.
+    An explicit value fails at startup if prefix-cache hits would fall back
+    to the scheduler block size (for example, when a sliding-window group
+    requires block-aligned lookups).
 
     This equals to the `hash_block_size` used throughout the KV cache code.
     """
