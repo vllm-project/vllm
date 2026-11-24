@@ -6,6 +6,7 @@
 use std::{fmt, str::FromStr};
 
 use serde::Serialize;
+use serde_json::{Map, json};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
 use xgrammar_structural_tag::builders::{StructuralTagBuilder, StructuralTagOptions};
@@ -218,7 +219,15 @@ pub(crate) fn tool_params(tools: &[Tool], strict_level: ToolStrictLevel) -> Vec<
             ToolParam::Function(FunctionToolParam::new(FunctionDefinition {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: Some(tool.parameters.clone()),
+                // A missing (`Null`) or empty schema still constrains the arguments
+                // to a JSON object, like Python's forced-tool path
+                // (`_params_or_empty_object`): such a function takes `{}`.
+                parameters: Some(match &tool.parameters {
+                    schema if schema.is_null() || schema.as_object().is_some_and(Map::is_empty) => {
+                        json!({"type": "object", "properties": {}})
+                    }
+                    schema => schema.clone(),
+                }),
                 strict: Some(
                     strict_level >= ToolStrictLevel::Parameter || tool.strict == Some(true),
                 ),
@@ -271,7 +280,7 @@ pub(crate) fn tool_grammar_applies(ctx: &OutputGrammarContext<'_>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
     use xgrammar_structural_tag::builders::Qwen3Builder;
 
     use super::*;
@@ -434,6 +443,41 @@ mod tests {
 
         assert_eq!(tag_string(&pinned), tag_string(&strict));
         assert_ne!(tag_string(&pinned), tag_string(&envelope_only));
+    }
+
+    #[test]
+    fn strict_tool_without_parameters_takes_an_empty_object() {
+        let with_parameters = |parameters, strict| Tool {
+            parameters,
+            ..tool("get_time", strict)
+        };
+        let empty_object = build_at_level(
+            ToolChoice::required(),
+            vec![with_parameters(
+                json!({"type": "object", "properties": {}}),
+                Some(true),
+            )],
+            ToolStrictLevel::Auto,
+        );
+
+        // An omitted `parameters` deserializes to `Null`, which is not a schema.
+        for parameters in [Value::Null, json!({})] {
+            for (strict, level) in [
+                (Some(true), ToolStrictLevel::Auto),
+                (None, ToolStrictLevel::Parameter),
+            ] {
+                let pinned = build_at_level(
+                    ToolChoice::required(),
+                    vec![with_parameters(parameters.clone(), strict)],
+                    level,
+                );
+                assert_eq!(
+                    tag_string(&pinned),
+                    tag_string(&empty_object),
+                    "parameters: {parameters}, strict: {strict:?}, level: {level:?}"
+                );
+            }
+        }
     }
 
     #[test]

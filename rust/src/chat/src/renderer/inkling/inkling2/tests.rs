@@ -13,8 +13,8 @@ use super::super::tests::{FixtureTokenizer, render_symbolic_tokens};
 use super::tml_float;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::request::{
-    ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice, GenerationPromptMode,
-    ResolvedToolContext,
+    AllowedToolsMode, ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice,
+    GenerationPromptMode, ResolvedToolContext,
 };
 use crate::{ChatOptions, ChatRenderer, EffortValue};
 
@@ -289,6 +289,21 @@ fn renders_tool_choice_as_an_instruction() {
         (
             with_tool_choice(without_system(), tools(), ChatToolChoice::None, true),
             format!("{effort}<|end_message|>{user}"),
+        ),
+        (
+            with_tool_choice(
+                with_system(),
+                tools(),
+                ChatToolChoice::AllowedTools {
+                    mode: AllowedToolsMode::Required,
+                    names: vec!["search".to_string()],
+                },
+                false,
+            ),
+            format!(
+                "{declare_both}<|message_system|><|content_text|>Be terse.<|end_message|>\
+                 {effort}<|end_message|>{user}"
+            ),
         ),
     ] {
         assert_eq!(render(&request), expected);
