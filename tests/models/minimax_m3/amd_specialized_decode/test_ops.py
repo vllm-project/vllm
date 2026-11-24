@@ -84,17 +84,24 @@ def weights():
         )
 
     def param(t):
-        return torch.nn.Parameter(t, requires_grad=False)
+        return torch.nn.Parameter(t.clone(), requires_grad=False)
 
+    raw = SimpleNamespace(
+        w13=codes(E, 2 * INTER, H // 2),
+        w2=codes(E, H, INTER // 2),
+        s13=scales(E, 2 * INTER, H // 32),
+        s2=scales(E, H, INTER // 32),
+    )
     w13, w2, s13, s2, _, _ = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         layer=torch.nn.Module(),
-        w13_weight=param(codes(E, 2 * INTER, H // 2)),
-        w2_weight=param(codes(E, H, INTER // 2)),
-        w13_weight_scale=param(scales(E, 2 * INTER, H // 32)),
-        w2_weight_scale=param(scales(E, H, INTER // 32)),
+        w13_weight=param(raw.w13),
+        w2_weight=param(raw.w2),
+        w13_weight_scale=param(raw.s13),
+        w2_weight_scale=param(raw.s2),
     )
     return SimpleNamespace(
+        raw=raw,
         w13=w13,
         w2=w2,
         s13=s13,
@@ -105,23 +112,25 @@ def weights():
     )
 
 
-def _native_experts(x, w, ids, wts):
-    from aiter import ActivationType, QuantType
-    from aiter.fused_moe import fused_moe
+def _dequant_mxfp4(codes, scales):
+    from aiter.utility.fp4_utils import e8m0_to_f32, mxfp4_to_f32
 
-    return fused_moe(
-        x,
-        w.w13,
-        w.w2,
-        wts,
-        ids,
-        activation=ActivationType.Swiglu,
-        quant_type=QuantType.per_1x32,
-        w1_scale=w.s13,
-        w2_scale=w.s2,
-        gate_mode="separated",
-        swiglu_limit=ffn.LIMIT,
-    )
+    return mxfp4_to_f32(codes) * e8m0_to_f32(scales).repeat_interleave(32, -1)
+
+
+def _reference_experts(x, w, ids, wts):
+    """FP32 A16W4 experts on the dequantized weights with a bf16 intermediate.
+    Not AITER's fused_moe: its tuned configs may quantize the activations."""
+    out = torch.zeros(x.shape[0], H, dtype=torch.float32, device=x.device)
+    for e in ids.unique().tolist():
+        rows, slot = (ids == e).nonzero(as_tuple=True)
+        h = x[rows].float() @ _dequant_mxfp4(w.raw.w13[e], w.raw.s13[e]).T
+        gate = h[:, :INTER].clamp(max=ffn.LIMIT)
+        up = h[:, INTER:].clamp(-ffn.LIMIT, ffn.LIMIT)
+        mid = (gate * torch.sigmoid(ffn.ALPHA * gate) * (up + ffn.BETA)).bfloat16()
+        y = mid.float() @ _dequant_mxfp4(w.raw.w2[e], w.raw.s2[e]).T
+        out.index_add_(0, rows, wts[rows, slot, None] * y)
+    return out
 
 
 def _native_route(logits, bias):
@@ -203,7 +212,7 @@ def _run(weights, s, seed=1, inputs=None, slots=None):
 @pytest.mark.parametrize("s", [1, 3, 16])
 def test_ffn_stages_match_native(weights, s):
     """Seam residual (exact), Gemma norm, FP32 router, top-4 and the shared +
-    routed A16W4 experts, each against its native op."""
+    routed A16W4 experts, each against its native op or an FP32 reference."""
     r = _run(weights, s)
     want_x, want_res = gemma_fused_add_rmsnorm(
         r.part, r.residual, weights.post_norm, ffn.EPS
@@ -231,7 +240,7 @@ def test_ffn_stages_match_native(weights, s):
     shared = torch.full((s, 1), ffn.SHARED, dtype=torch.int32, device=r.x.device)
     all_ids = torch.cat([r.ids, shared], 1)
     all_wts = torch.cat([r.wts, torch.ones_like(r.wts[:, :1])], 1)
-    cos, rel = _metrics(r.out, _native_experts(r.x, weights, all_ids, all_wts))
+    cos, rel = _metrics(r.out, _reference_experts(r.x, weights, all_ids, all_wts))
     assert cos > 0.9999 and rel < 1e-2
 
 
