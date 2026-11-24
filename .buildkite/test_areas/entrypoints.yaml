@@ -2,321 +2,252 @@ group: Entrypoints
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) [Nightly] Initialized Snapshot E2E"
+- label: Initialized Snapshot E2E
   key: initialized-snapshot-e2e
-  device: h200
-  num_devices: 1
+  devices:
+    h200:
+      optional: true
+      num_devices: 1
+      timeout_in_minutes: 60
   no_plugin: true
-  optional: true
-  timeout_in_minutes: 60
   working_dir: "."
   env:
     SNAPSHOT_E2E_RUN_LIMIT_S: "1200"
     NVIDIA_VISIBLE_DEVICES: "0"
   source_file_dependencies:
-  - .buildkite/scripts/initialized-snapshot-e2e.sh
-  - .buildkite/test_areas/entrypoints.yaml
-  - docker/Dockerfile
-  - tools/install_snapshot_runtime.sh
-  - vllm/entrypoints/cli/
-  - vllm/snapshot/
+    - .buildkite/scripts/initialized-snapshot-e2e.sh
+    - .buildkite/test_areas/entrypoints.yaml
+    - docker/Dockerfile
+    - tools/install_snapshot_runtime.sh
+    - vllm/entrypoints/cli/
+    - vllm/snapshot/
   commands:
-  - bash .buildkite/scripts/initialized-snapshot-e2e.sh "$IMAGE_TAG" "$BUILDKITE_COMMIT"
+    - bash .buildkite/scripts/initialized-snapshot-e2e.sh "$IMAGE_TAG" "$BUILDKITE_COMMIT"
 
-- label: ":nvidia: (H200 MIG 35GB) Entrypoints Unit"
-  device: h200_35gb
+- label: Entrypoints Unit
   key: entrypoints-unit-tests
+  devices:
+    h200_35gb:
+      timeout_in_minutes: 40
+    mi355_dpx:
+      timeout_in_minutes: 50
+      source_file_dependencies:
+        - vllm/platforms/rocm.py
   automatic_shard: true
-  timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/entrypoints
-  - vllm/utils/flashinfer.py
-  - tests/entrypoints/unit_tests
-  - tests/entrypoints/launchers
-  - tests/entrypoints/common
+    - vllm/entrypoints
+    - vllm/utils/flashinfer.py
+    - tests/entrypoints/unit_tests
+    - tests/entrypoints/launchers
+    - tests/entrypoints/common
   commands:
-  - pytest -v -s entrypoints/unit_tests
-  - pytest -v -s entrypoints/launchers
-  - pytest -v -s entrypoints/common
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Entrypoints Unit"
-      dind: false
-      automatic_shard: true
-      device: mi355_dpx
-      timeout_in_minutes: 50
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - vllm/platforms/rocm.py
+    - pytest -v -s entrypoints/unit_tests
+    - pytest -v -s entrypoints/launchers
+    - pytest -v -s entrypoints/common
 
-- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (LLM)"
-  device: h200_35gb
+- label: Entrypoints Integration (LLM)
   key: entrypoints-integration-llm
-  automatic_shard: true
-  timeout_in_minutes: 60
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/entrypoints/llm
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - >-
-    pytest -v -s
-    entrypoints/llm
-    --ignore=entrypoints/llm/test_generate.py
-    --ignore=entrypoints/llm/test_collective_rpc.py
-    --ignore=entrypoints/llm/offline_mode
-  - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
-  - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Entrypoints Integration (LLM)"
-      automatic_shard: true
-      dind: false
-      device: mi355_dpx
-      timeout_in_minutes: 90
-      depends_on:
-      - image-build-amd
-
-- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server)"
-  key: entrypoints-integration-api-server
-  automatic_shard: true
-  device: h200_35gb
-  timeout_in_minutes: 75
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/entrypoints/serve
-  - tests/entrypoints/scale_out
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - >-
-    pytest -v -s
-    entrypoints/serve
-    --ignore=entrypoints/serve/dev/rpc
-  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
-  - pytest -v -s entrypoints/scale_out
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Entrypoints Integration (API Server)"
-      automatic_shard: true
-      dind: false
-      device: mi355_dpx
-      timeout_in_minutes: 65
-      depends_on:
-      - image-build-amd
-
-- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (OpenAI API completion)"
-  device: h200_35gb
-  key: entrypoints-integration-api-server-openai-completion
-  automatic_shard: true
-  timeout_in_minutes: 68
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/entrypoints/openai
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - >-
-    pytest -v -s
-    entrypoints/openai/completion
-    --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
-  - >-
-    pytest -v -s
-    entrypoints/openai
-    --ignore=entrypoints/openai/completion
-    --ignore=entrypoints/openai/chat_completion
-    --ignore=entrypoints/openai/responses
-    --ignore=entrypoints/openai/correctness
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API completion)"
-      automatic_shard: true
-      dind: false
-      device: mi355_dpx
-      timeout_in_minutes: 65
-      depends_on:
-      - image-build-amd
-
-- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (OpenAI API chat_completion)"
-  device: h200_35gb
-  key: entrypoints-integration-api-server-openai-chat_completion
-  automatic_shard: true
-  timeout_in_minutes: 83
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/entrypoints/openai
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai/chat_completion
-  mirror:
-    amd:
-      automatic_shard: true
-      label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API chat_completion)"
-      dind: false
-      device: mi355_dpx
-      timeout_in_minutes: 70
-      depends_on:
-      - image-build-amd
-
-- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server Generate)"
-  device: h200_35gb
-  key: entrypoints-integration-api-server-generate
-  automatic_shard: true
-  timeout_in_minutes: 50
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/tool_use
-  - tests/entrypoints/tool_parsers
-  - tests/entrypoints/generate
-  - tests/entrypoints/anthropic
-  - tests/entrypoints/cohere
-  commands:
-  - pytest -v -s tool_use
-  - pytest -v -s entrypoints/tool_parsers
-  - pytest -v -s entrypoints/generate
-  - pytest -v -s entrypoints/anthropic
-  - pytest -v -s entrypoints/cohere
-  mirror:
-    amd:
-      automatic_shard: true
-      label: ":amd: (MI355 DPX) Entrypoints Integration (API Server Generate)"
-      dind: false
-      device: mi355_dpx
-      timeout_in_minutes: 65
-      depends_on:
-      - image-build-amd
-
-- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Responses API)"
-  device: h200_35gb
-  key: entrypoints-integration-responses-api
-  automatic_shard: true
-  timeout_in_minutes: 50
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/entrypoints/openai/responses
-  commands:
-  - pytest -v -s entrypoints/openai/responses
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Entrypoints Integration (Responses API)"
-      automatic_shard: true
-      dind: false
-      device: mi355_dpx
-      timeout_in_minutes: 50
-      depends_on:
-      - image-build-amd
-
-- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Speech to Text)"
-  device: h200_35gb
-  key: entrypoints-integration-speech_to_text
-  automatic_shard: true
-  timeout_in_minutes: 45
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/entrypoints/speech_to_text
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/speech_to_text
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Entrypoints Integration (Speech to Text)"
-      dind: false
-      automatic_shard: true
-      device: mi355_dpx
+  devices:
+    h200_35gb:
       timeout_in_minutes: 60
-      working_dir: "/vllm-workspace/tests"
-      depends_on:
-      - image-build-amd
-
-- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Multimodal)"
-  device: h200_35gb
-  key: entrypoints-integration-multimodal
+    mi355_dpx:
+      timeout_in_minutes: 90
   automatic_shard: true
-  timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/entrypoints/multimodal
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/entrypoints/llm
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/multimodal
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Entrypoints Integration (Multimodal)"
-      dind: false
-      automatic_shard: true
-      device: mi355_dpx
-      timeout_in_minutes: 55
-      depends_on:
-      - image-build-amd
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - >-
+      pytest -v -s
+      entrypoints/llm
+      --ignore=entrypoints/llm/test_generate.py
+      --ignore=entrypoints/llm/test_collective_rpc.py
+      --ignore=entrypoints/llm/offline_mode
+    - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
+    - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
 
-- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Pooling)"
-  device: h200_35gb
-  key: entrypoints-integration-pooling
-  automatic_shard: true
-  timeout_in_minutes: 75
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - "!vllm/distributed/kv_transfer/"
-  - tests/entrypoints/pooling
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/pooling
-  mirror:
-    amd:
-      label: ":amd: (MI355 DPX) Entrypoints Integration (Pooling)"
-      dind: false
-      automatic_shard: true
-      device: mi355_dpx
+- label: Entrypoints Integration (API Server)
+  key: entrypoints-integration-api-server
+  devices:
+    h200_35gb:
+      timeout_in_minutes: 75
+    mi355_dpx:
       timeout_in_minutes: 65
-      working_dir: "/vllm-workspace/tests"
-      depends_on:
-      - image-build-amd
-
-- label: ":nvidia: (H200 MIG 18GB) OpenAI API Correctness"
-  key: openai-api-correctness
   automatic_shard: true
-  timeout_in_minutes: 20
-  device: h200_18gb
+  working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/
-  - vllm/entrypoints/openai/
-  commands: # LMEval
-  - pytest -s entrypoints/openai/correctness/
-  mirror:
-    amd:
-      automatic_shard: true
-      label: ":amd: (MI355 DPX) OpenAI API Correctness"
-      dind: false
-      device: mi355_dpx
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/entrypoints/serve
+    - tests/entrypoints/scale_out
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - >-
+      pytest -v -s
+      entrypoints/serve
+      --ignore=entrypoints/serve/dev/rpc
+    - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
+    - pytest -v -s entrypoints/scale_out
+
+- label: Entrypoints Integration (OpenAI API completion)
+  key: entrypoints-integration-api-server-openai-completion
+  devices:
+    h200_35gb:
+      timeout_in_minutes: 68
+    mi355_dpx:
+      timeout_in_minutes: 65
+  automatic_shard: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/entrypoints/openai
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - >-
+      pytest -v -s
+      entrypoints/openai/completion
+      --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
+    - >-
+      pytest -v -s
+      entrypoints/openai
+      --ignore=entrypoints/openai/completion
+      --ignore=entrypoints/openai/chat_completion
+      --ignore=entrypoints/openai/responses
+      --ignore=entrypoints/openai/correctness
+
+- label: Entrypoints Integration (OpenAI API chat_completion)
+  key: entrypoints-integration-api-server-openai-chat_completion
+  devices:
+    h200_35gb:
+      timeout_in_minutes: 83
+    mi355_dpx:
+      timeout_in_minutes: 70
+  automatic_shard: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/entrypoints/openai
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s entrypoints/openai/chat_completion
+
+- label: Entrypoints Integration (API Server Generate)
+  key: entrypoints-integration-api-server-generate
+  devices:
+    h200_35gb:
+      timeout_in_minutes: 50
+    mi355_dpx:
+      timeout_in_minutes: 65
+  automatic_shard: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/tool_use
+    - tests/entrypoints/tool_parsers
+    - tests/entrypoints/generate
+    - tests/entrypoints/anthropic
+    - tests/entrypoints/cohere
+  commands:
+    - pytest -v -s tool_use
+    - pytest -v -s entrypoints/tool_parsers
+    - pytest -v -s entrypoints/generate
+    - pytest -v -s entrypoints/anthropic
+    - pytest -v -s entrypoints/cohere
+
+- label: Entrypoints Integration (Responses API)
+  key: entrypoints-integration-responses-api
+  devices:
+    h200_35gb:
+      timeout_in_minutes: 50
+    mi355_dpx:
+      timeout_in_minutes: 50
+  automatic_shard: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/entrypoints/openai/responses
+  commands:
+    - pytest -v -s entrypoints/openai/responses
+
+- label: Entrypoints Integration (Speech to Text)
+  key: entrypoints-integration-speech_to_text
+  devices:
+    h200_35gb:
+      timeout_in_minutes: 45
+    mi355_dpx:
+      timeout_in_minutes: 60
+  automatic_shard: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/entrypoints/speech_to_text
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s entrypoints/speech_to_text
+
+- label: Entrypoints Integration (Multimodal)
+  key: entrypoints-integration-multimodal
+  devices:
+    h200_35gb:
+      timeout_in_minutes: 45
+    mi355_dpx:
+      timeout_in_minutes: 55
+  automatic_shard: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/entrypoints/multimodal
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s entrypoints/multimodal
+
+- label: Entrypoints Integration (Pooling)
+  key: entrypoints-integration-pooling
+  devices:
+    h200_35gb:
+      timeout_in_minutes: 75
+    mi355_dpx:
+      timeout_in_minutes: 65
+  automatic_shard: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+    - vllm/
+    - "!vllm/distributed/kv_transfer/"
+    - tests/entrypoints/pooling
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s entrypoints/pooling
+
+- label: OpenAI API Correctness
+  key: openai-api-correctness
+  devices:
+    h200_18gb:
+      timeout_in_minutes: 20
+      commands: # LMEval
+        - pytest -s entrypoints/openai/correctness/
+    mi355_dpx:
       timeout_in_minutes: 30
-      depends_on:
-      - image-build-amd
       source_file_dependencies:
-      - csrc/
-      - vllm/entrypoints/openai/
-      - vllm/model_executor/layers/
-      - vllm/v1/attention/backends/
-      - vllm/v1/attention/selector.py
-      - vllm/_aiter_ops.py
-      - vllm/platforms/rocm.py
-      - vllm/model_executor/model_loader/
+        - vllm/model_executor/layers/
+        - vllm/v1/attention/backends/
+        - vllm/v1/attention/selector.py
+        - vllm/_aiter_ops.py
+        - vllm/platforms/rocm.py
+        - vllm/model_executor/model_loader/
       commands:
-      - bash ../tools/install_torchcodec_rocm.sh || exit 1
-      - pytest -s entrypoints/openai/correctness/
+        - bash ../tools/install_torchcodec_rocm.sh || exit 1
+        - pytest -s entrypoints/openai/correctness/
+  automatic_shard: true
+  source_file_dependencies:
+    - csrc/
+    - vllm/entrypoints/openai/
