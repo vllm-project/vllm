@@ -4382,9 +4382,9 @@ patsy==1.0.3 \
     --hash=sha256:79ebf4c93ff4d296e58a9d5be2b2ee31bd49d737cf11d70ffbd8a44b2de42e65 \
     --hash=sha256:d3dbebe8fd5f46e29912d030b63c6268647b59bf788a99e2af28a30234cf357c
     # via statsmodels
-peft==0.21.2 \
-    --hash=sha256:106ab6077ff72c54d21577f9af5970e34bac7582cb14209f7b2b511e322a4eae \
-    --hash=sha256:b803ccfb3f3f316004d850284306687833a2235ea278fb56abc856203456142e
+peft==0.22.0 \
+    --hash=sha256:397f09710e3e1b6ad730211468839aa271732b51a50e99d4f44f2a6e8d9a9f0b \
+    --hash=sha256:e7fca396b98e6c1b0b02538e45efd84875c4d0d074c29c837e372cd7c845647a
     # via -r requirements/test/xpu.in
 perf-analyzer==2.61.0 \
     --hash=sha256:b620795b3b1c12788d1c999e4631d43fbd29af5a3e4cb82699ee000cbf61de99 \
@@ -7276,9 +7276,9 @@ traitlets==5.16.1 \
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.23.0 \
-    --hash=sha256:018e82fd07490ad5bb58414f65e31576033dc7f36bed10c574843f69b90991bf \
-    --hash=sha256:19d647a4d5d903a7c644ca5cde2d86efc3dde7d8c687ae7988806ff2205efa71
+transformers==5.24.1 \
+    --hash=sha256:505b39d3e45a3715f3acb81b858eb245ce1a462373b7f99e26f0dcd41ed4cd0f \
+    --hash=sha256:71fae247d9ad61f553fb84de2089f427f5ff2c080686f9deb51e660487e8c270
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

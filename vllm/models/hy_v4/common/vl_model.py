@@ -24,6 +24,7 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+from vllm.models.hy_v4.weight_utils import HYV4_PACKED_MODULES_MAPPING
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.transformers_utils.processors.hy_v4 import (
@@ -37,7 +38,6 @@ from .mm_preprocess import (
     HYV4VLMultiModalProcessor,
     HYV4VLProcessingInfo,
 )
-from .model import HYV4ForCausalLM
 from .vision import HYV4VisionTransformer
 from .vl_cudagraph import HYV4VLEncoderCudaGraphMixin
 
@@ -75,7 +75,7 @@ class HYV4VLForConditionalGeneration(
     language_model_architecture = "HYV4ForCausalLM"
 
     packed_modules_mapping = {
-        **HYV4ForCausalLM.packed_modules_mapping,
+        **HYV4_PACKED_MODULES_MAPPING,
         "qkv": ["q_proj", "k_proj", "v_proj"],
     }
     hf_to_vllm_mapper = WeightsMapper(
