@@ -55,8 +55,8 @@ steps:
   working_dir: /vllm-workspace/
   depends_on:
   - image-build-amd
-  # csrc/ runs this step only through the csrc/ paths listed below: the sources
-  # of the kernels it launches (ROCm kernel record) and the headers they include.
+  # csrc/ runs this step only through the csrc/ paths listed below: the files
+  # of the ops it calls (ROCm kernel record) and the headers they include.
   amd_run_all_exclude_patterns:
   - csrc/
   source_file_dependencies:
@@ -68,6 +68,7 @@ steps:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - csrc/attention/dsa/topk/top_k_per_row.cu
   - csrc/layernorm_kernels.cu
+  - csrc/moe/topk_softplus_sqrt.cu
   - csrc/moe/topk_softplus_sqrt_f32_int32.cu
   - csrc/moe/topk_softplus_sqrt_kernels.cuh
   - csrc/rocm/skinny_gemms_wvsplitk.cu
@@ -156,8 +157,8 @@ steps:
   working_dir: /vllm-workspace/
   depends_on:
   - image-build-amd
-  # csrc/ runs this step only through the csrc/ paths listed below: the sources
-  # of the kernels it launches (ROCm kernel record) and the headers they include.
+  # csrc/ runs this step only through the csrc/ paths listed below: the files
+  # of the ops it calls (ROCm kernel record) and the headers they include.
   amd_run_all_exclude_patterns:
   - csrc/
   source_file_dependencies:
@@ -168,6 +169,7 @@ steps:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - csrc/attention/dsa/topk/top_k_per_row.cu
   - csrc/layernorm_kernels.cu
+  - csrc/moe/topk_softplus_sqrt.cu
   - csrc/moe/topk_softplus_sqrt_f32_int32.cu
   - csrc/moe/topk_softplus_sqrt_kernels.cuh
   - csrc/rocm/skinny_gemms_wvsplitk.cu
@@ -222,8 +224,8 @@ steps:
   working_dir: /vllm-workspace/
   depends_on:
   - image-build-amd
-  # csrc/ runs this step only through the csrc/ paths listed below: the sources
-  # of the kernels it launches (ROCm kernel record) and the headers they include.
+  # csrc/ runs this step only through the csrc/ paths listed below: the files
+  # of the ops it calls (ROCm kernel record) and the headers they include.
   amd_run_all_exclude_patterns:
   - csrc/
   source_file_dependencies:
