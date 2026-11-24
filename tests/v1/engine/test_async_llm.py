@@ -115,6 +115,25 @@ def _mock_vllm_config() -> MagicMock:
     return vllm_config
 
 
+def test_tracing_collects_stats_without_stat_loggers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Tracing needs request stats, but disabled stat logging keeps the console
+    and Prometheus stat loggers off."""
+    vllm_config = _mock_vllm_config()
+    vllm_config.observability_config.otlp_traces_endpoint = "localhost:4317"
+    vllm_config.profiler_config.should_profile_frontend = False
+    _mock_async_llm_dependencies(monkeypatch)
+    monkeypatch.setattr(async_llm_module, "init_tracer", MagicMock())
+
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+
+    assert engine.logger_manager is None
+    assert async_llm_module.OutputProcessor.call_args.kwargs["collect_stats"]
+    make_client = async_llm_module.EngineCoreClient.make_async_mp_client
+    assert make_client.call_args.kwargs["collect_stats"]
+
+
 @pytest.mark.parametrize("method", ["generate", "encode"])
 def test_retryable_request_error_reaches_caller(
     monkeypatch: pytest.MonkeyPatch, method: str
