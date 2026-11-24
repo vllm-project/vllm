@@ -1681,6 +1681,7 @@ class MLADCPManager:
         padded_num_heads: int | None,
         is_lse_base_on_e: bool,
         use_pcp: bool,
+        query_storage_heads: int | None = None,
     ) -> None:
         parallel_config = vllm_config.parallel_config
         self.group = get_dcp_group()
@@ -1699,6 +1700,7 @@ class MLADCPManager:
         self.direct_a2a: DirectDCPA2AWorkspace | None = None
         # Set when the combine can merge W_UV-projected outputs instead.
         self.v_up_proj_combine: Callable[..., None] | None = None
+        self.query_storage_heads = query_storage_heads
 
         self.combine = self._init_combine(
             num_heads,
@@ -1844,6 +1846,8 @@ class MLADCPManager:
         head_dim: int,
         dtype: torch.dtype,
     ) -> Callable[[torch.Tensor], torch.Tensor]:
+        if self.query_storage_heads is not None:
+            return self._gather_query_into_storage
         direct_workspace = get_direct_dcp_q_gather_workspace(
             self.group,
             self.device,
@@ -1868,6 +1872,18 @@ class MLADCPManager:
         if self.padded_num_heads is not None:
             query = reserve_query_head_storage(query, self.padded_num_heads)
         return query
+
+    def _gather_query_into_storage(self, query: torch.Tensor) -> torch.Tensor:
+        assert self.query_storage_heads is not None
+        world_size = self.group.world_size
+        num_tokens, num_heads, head_dim = query.shape
+        gathered = self.group.all_gather(query.contiguous(), dim=0)
+        out = query.new_empty((num_tokens, self.query_storage_heads, head_dim))
+        out = out[:, : world_size * num_heads]
+        out.unflatten(1, (world_size, num_heads)).copy_(
+            gathered.view(world_size, num_tokens, num_heads, head_dim).transpose(0, 1)
+        )
+        return out
 
     def _direct_workspace_query_gather(
         self,
