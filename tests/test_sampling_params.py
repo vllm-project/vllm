@@ -301,3 +301,18 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+@pytest.mark.parametrize(
+    "make",
+    [SamplingParams, SamplingParams.from_optional],
+    ids=["init", "from_optional"],
+)
+@pytest.mark.parametrize("return_aux_outputs", [True, False])
+def test_aux_outputs_opt_out_keeps_logprobs(make, return_aux_outputs):
+    params = make(
+        logprobs=2, logprob_token_ids=[1, 2], return_aux_outputs=return_aux_outputs
+    )
+    assert params.return_aux_outputs == return_aux_outputs
+    assert params.logprobs == 2
+    assert params.logprob_token_ids == [1, 2]

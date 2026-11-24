@@ -534,6 +534,168 @@ def test_evicted_blocks_release_their_auxiliary_outputs_past_capacity():
     assert list(metadata.released_block_hashes) == first.block_hashes[:3]
 
 
+def _aux_outputs_params(
+    return_aux_outputs: bool, max_tokens: int = 16
+) -> SamplingParams:
+    return SamplingParams(max_tokens=max_tokens, return_aux_outputs=return_aux_outputs)
+
+
+def test_aux_outputs_opt_out_is_not_recorded():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = _aux_output_connector(scheduler)
+    (recorded,) = create_requests(
+        num_requests=1, num_tokens=32, max_tokens=1, req_ids=["recorded"]
+    )
+    (skipped,) = create_requests(
+        num_requests=1,
+        num_tokens=32,
+        req_ids=["skipped"],
+        sampling_params=_aux_outputs_params(False, max_tokens=1),
+    )
+    scheduler.add_request(recorded)
+    scheduler.add_request(skipped)
+    scheduler_output = scheduler.schedule()
+    metadata = scheduler_output.aux_output_connector_metadata
+    assert metadata.requests == {"recorded": 0}
+    assert set(metadata.block_hashes) == {"recorded"}
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=["recorded", "skipped"],
+            sampled_token_ids=[[0], [0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            aux_output_connector_output={
+                "recorded": AuxRequestOutput(0, np.zeros((32, 1, 1), np.uint8))
+            },
+        ),
+    )
+    by_id = {output.request_id: output for output in outputs[0].outputs}
+    assert by_id["recorded"].routed_experts.shape == (32, 1, 1)
+    assert by_id["skipped"].routed_experts is None
+
+    metadata = scheduler.schedule().aux_output_connector_metadata
+    assert metadata.finished_requests == ("recorded",)
+
+
+def test_aux_outputs_opt_out_blocks_are_rowless():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = _aux_output_connector(scheduler)
+
+    def run(request_id: str, return_aux_outputs: bool) -> int:
+        params = _aux_outputs_params(return_aux_outputs, max_tokens=1)
+        (request,) = create_requests(
+            num_requests=1,
+            num_tokens=48,
+            req_ids=[request_id],
+            sampling_params=params,
+        )
+        scheduler.add_request(request)
+        scheduler_output = scheduler.schedule()
+        (new_request,) = scheduler_output.scheduled_new_reqs
+        rows = (
+            {request_id: AuxRequestOutput(0, np.zeros((48, 1, 1), np.uint8))}
+            if return_aux_outputs
+            else None
+        )
+        scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(
+                req_ids=[request_id],
+                sampled_token_ids=[[0]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+                aux_output_connector_output=rows,
+            ),
+        )
+        assert request.is_finished()
+        return new_request.num_computed_tokens
+
+    # Blocks an opted-out request computed have no rows: recording recomputes them.
+    assert run("skipped-0", return_aux_outputs=False) == 0
+    assert run("skipped-1", return_aux_outputs=False) == 32
+    assert run("recorded-0", return_aux_outputs=True) == 0
+    assert run("recorded-1", return_aux_outputs=True) == 32
+    assert run("skipped-2", return_aux_outputs=False) == 32
+
+
+def test_aux_outputs_opt_out_decode_blocks_are_rowless():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = _aux_output_connector(scheduler)
+
+    def step(request_id: str, rows: np.ndarray | None = None) -> SchedulerOutput:
+        scheduler_output = scheduler.schedule()
+        scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(
+                req_ids=[request_id],
+                sampled_token_ids=[[0]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+                aux_output_connector_output=(
+                    None if rows is None else {request_id: AuxRequestOutput(0, rows)}
+                ),
+            ),
+        )
+        return scheduler_output
+
+    (recorded,) = create_requests(num_requests=1, num_tokens=32, max_tokens=1)
+    scheduler.add_request(recorded)
+    step(recorded.request_id, np.zeros((32, 1, 1), np.uint8))
+    assert recorded.is_finished()
+
+    # Running opted-out request: its prompt hits rows, its decode tokens fill block 2.
+    (skipped,) = create_requests(
+        num_requests=1,
+        num_tokens=32,
+        req_ids=["skipped"],
+        sampling_params=_aux_outputs_params(False, max_tokens=30),
+    )
+    scheduler.add_request(skipped)
+    while skipped.num_computed_tokens < 48:
+        step(skipped.request_id)
+    assert not skipped.is_finished()
+
+    (late,) = create_requests(
+        num_requests=1, num_tokens=49, max_tokens=1, req_ids=["late"]
+    )
+    scheduler.add_request(late)
+    scheduler_output = scheduler.schedule()
+    (new_request,) = scheduler_output.scheduled_new_reqs
+    assert new_request.num_computed_tokens == 32
+
+
+@pytest.mark.parametrize("return_aux_outputs", [True, False])
+def test_aux_outputs_opt_out_skips_retention(return_aux_outputs):
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=32, is_async=False),
+    )
+    scheduler.aux_output_connector = _aux_output_connector(scheduler)
+    first, second = create_requests(
+        num_requests=2,
+        num_tokens=80,
+        sampling_params=_aux_outputs_params(return_aux_outputs),
+    )
+    scheduler.add_request(first)
+    output = scheduler.schedule()
+    scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
+
+    scheduler.add_request(second)
+    metadata = scheduler.schedule().aux_output_connector_metadata
+
+    if return_aux_outputs:
+        assert output.num_scheduled_tokens[first.request_id] == 80
+        assert list(metadata.retained_block_hashes) == first.block_hashes
+    else:
+        assert output.num_scheduled_tokens[first.request_id] == 80 - 32
+        assert metadata.retained_block_hashes is None
+
+
 @pytest.mark.parametrize(
     "with_config,params,expected",
     [
@@ -2075,6 +2237,51 @@ def test_update_from_output_routes_sampling_masks_by_request():
     for out in outputs:
         assert out.new_sampling_mask is not None
         assert out.new_sampling_mask.offsets is None
+
+
+def test_aux_outputs_opt_out_gets_no_sampling_mask():
+    scheduler = create_scheduler()
+    scheduler.return_sampling_mask = True
+    requests = [
+        *create_requests(num_requests=1, max_tokens=10, req_ids=["recorded"]),
+        *create_requests(
+            num_requests=1,
+            req_ids=["skipped"],
+            sampling_params=_aux_outputs_params(False, max_tokens=10),
+        ),
+    ]
+    for req in requests:
+        req.num_computed_tokens = req.num_tokens
+        scheduler.requests[req.request_id] = req
+        scheduler.running.append(req)
+        req.status = RequestStatus.RUNNING
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1 for req in requests},
+        total_num_scheduled_tokens=2,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_output = ModelRunnerOutput(
+        req_ids=["recorded", "skipped"],
+        sampled_token_ids=[[1], [3]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        sampling_masks=SamplingMaskLists(
+            np.array([1, 2, 3], dtype=np.int32), np.array([0, 2, 3])
+        ),
+    )
+
+    outputs = scheduler.update_from_output(scheduler_output, model_output)[0].outputs
+
+    by_id = {out.request_id: out for out in outputs}
+    assert by_id["recorded"].new_sampling_mask.token_ids.tolist() == [1, 2]
+    assert by_id["skipped"].new_sampling_mask is None
 
 
 def test_update_from_output_routes_multi_position_sampling_masks():

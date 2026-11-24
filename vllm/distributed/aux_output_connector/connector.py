@@ -102,11 +102,14 @@ class AuxOutputSchedulerConnector:
             OrderedDict()
         )
         self._loading: dict[str, set[ExternalBlockHash]] = {}
-        # KV blocks whose rows are not all here: loaded without rows, or
-        # computed from mid-block on. Any other cached GPU block has rows.
+        # KV blocks whose rows are not all here: loaded without rows, computed
+        # from mid-block on, or computed by an opted-out request. Any other
+        # cached GPU block has rows.
         self._rowless: dict[ExternalBlockHash, BlockHash] = {}
         # First token each active request computes here.
         self._computed_from: dict[str, int] = {}
+        # KV blocks of each active opted-out request already checked.
+        self._skip_marked: dict[str, int] = {}
         self._capacity = num_objects // (self._block_size // self._hash_block_size)
         self._retained_hashes: list[bytes] = []
         self._released_hashes: list[bytes] = []
@@ -120,8 +123,11 @@ class AuxOutputSchedulerConnector:
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
         for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
-            self._sent_hash_counts.setdefault(request_id, 0)
             request = requests[request_id]
+            if self._skips(request):
+                self._mark_rowless(request)
+                continue
+            self._sent_hash_counts.setdefault(request_id, 0)
             self._computed_from.setdefault(request_id, request.num_computed_tokens)
             packed = self._take_new_hashes(
                 request, request.num_computed_tokens + num_tokens
@@ -171,6 +177,9 @@ class AuxOutputSchedulerConnector:
         )
 
     def max_cache_hit(self, request: Request) -> int:
+        if self._skips(request):
+            self._mark_rowless(request, hits_cache=True)
+            return request.num_tokens - 1
         num_blocks = 0
         for block, keys in self._kv_blocks(request.block_hashes):
             if block in self._kv_cached:
@@ -185,6 +194,8 @@ class AuxOutputSchedulerConnector:
     def cap_external_hit(
         self, request: Request, num_local: int, num_external: int
     ) -> int:
+        if self._skips(request):
+            return num_external
         num_hit = num_local + num_external
         if num_hit <= self._emit_start(request):
             for block, keys in islice(
@@ -199,6 +210,8 @@ class AuxOutputSchedulerConnector:
         return num_external
 
     def request_loading(self, request: Request, num_tokens: int) -> None:
+        if self._skips(request):
+            return
         blocks = islice(
             self._kv_blocks(request.block_hashes), cdiv(num_tokens, self._block_size)
         )
@@ -240,6 +253,10 @@ class AuxOutputSchedulerConnector:
         output: dict[str, AuxRequestOutput] | None,
     ) -> np.ndarray | None:
         """Return the accepted R3 rows for one scheduled request."""
+        if self._skips(request):
+            # Its new tokens can complete a block before the next schedule caches it.
+            self._mark_rowless(request)
+            return None
         request_id = request.request_id
         # The block this request started mid-block has no rows here. Its hash
         # exists only once its last token is known; record the block before
@@ -279,6 +296,9 @@ class AuxOutputSchedulerConnector:
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
+        if self._skips(request):
+            self._skip_marked.pop(request.request_id, None)
+            return
         request_id = request.request_id
         self._loading.pop(request_id, None)
         if request_id in self._sent_hash_counts:
@@ -301,6 +321,23 @@ class AuxOutputSchedulerConnector:
                 self._kv_cached[block] = keys
                 self._retained_hashes.extend(keys)
         self._release_unheld()
+
+    def _mark_rowless(self, request: Request, hits_cache: bool = False) -> None:
+        """Mark the KV blocks an opted-out request computes as rowless. Only its
+        prefix lookup can hit cached blocks; every later block is its own."""
+        num_checked = self._skip_marked.get(request.request_id, 0)
+        step = self._block_size // self._hash_block_size
+        hashes = request.block_hashes
+        for block, keys in self._kv_blocks(hashes[num_checked * step :]):
+            if block in self._kv_cached or (hits_cache and self._gpu_cached(keys[-1])):
+                continue
+            self._rowless[block] = keys[-1]
+        self._skip_marked[request.request_id] = len(hashes) // step
+
+    @staticmethod
+    def _skips(request: Request) -> bool:
+        params = request.sampling_params
+        return params is not None and not params.return_aux_outputs
 
     @staticmethod
     def _pack_hashes(hashes: Sequence[bytes]) -> PackedBlockHashes | None:
