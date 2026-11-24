@@ -1305,6 +1305,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Nemotron3_5TranscribeForConditionalGeneration": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B", is_available_online=False
     ),
+    "OmniASRForConditionalGeneration": _HfExamplesInfo(
+        "hf-audio/omniasr-llm-300m-v2", min_transformers_version="5.24.1"
+    ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",
         trust_remote_code=True,
