@@ -22,7 +22,6 @@ from vllm.v1.kv_offload.base import (
     Medium,
     OffloadKey,
     ReqContext,
-    RequestOffloadingContext,
 )
 from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.tiering.base import (
@@ -194,10 +193,6 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         result = self.completed_jobs
         self.completed_jobs = []
         return result
-
-    @override
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        return RequestOffloadingContext()
 
     @override
     def drain_jobs(self) -> None:
