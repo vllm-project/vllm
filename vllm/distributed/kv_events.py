@@ -7,7 +7,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import Counter, deque
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import asdict, replace
 from itertools import count
 from queue import Queue
 from typing import Any
@@ -15,7 +15,8 @@ from typing import Any
 import msgspec
 import zmq
 
-from vllm.config.kv_events import PublisherConfig
+from vllm.config.ec_events import ECEventsConfig
+from vllm.config.kv_events import KVEventsConfig, PublisherConfig
 from vllm.logger import init_logger
 from vllm.utils.network_utils import (
     get_ip,
@@ -590,8 +591,7 @@ class EventPublisherFactory:
         "zmq": ZmqEventPublisher,
     }
 
-    # Transport settings forwarded to the publisher constructor. Subclasses of
-    # `PublisherConfig` add their own enable switch, which is not forwarded.
+    # The built-in publisher only accepts transport settings and the config.
     _TRANSPORT_FIELDS = (
         "endpoint",
         "replay_endpoint",
@@ -621,7 +621,18 @@ class EventPublisherFactory:
         except KeyError as exc:
             raise ValueError(f"Unknown event publisher '{kind}'") from exc
 
-        kwargs = {name: getattr(config, name) for name in cls._TRANSPORT_FIELDS}
-        return constructor(
-            data_parallel_rank=data_parallel_rank, config=config, **kwargs
-        )
+        if kind == "zmq":
+            kwargs = {name: getattr(config, name) for name in cls._TRANSPORT_FIELDS}
+            return constructor(
+                data_parallel_rank=data_parallel_rank, config=config, **kwargs
+            )
+
+        # Registered publishers receive individual fields, including any
+        # fields added by their own config subclass.
+        kwargs = asdict(config)
+        kwargs.pop("publisher")
+        if isinstance(config, KVEventsConfig):
+            kwargs.pop("enable_kv_cache_events")
+        elif isinstance(config, ECEventsConfig):
+            kwargs.pop("enable_ec_cache_events")
+        return constructor(data_parallel_rank=data_parallel_rank, **kwargs)
