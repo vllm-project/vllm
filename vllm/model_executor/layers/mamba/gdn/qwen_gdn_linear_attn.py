@@ -421,6 +421,7 @@ def fi_chunk_gated_delta_rule(
     checkpoint_every_n_tokens: int = 0,
     use_cp: Literal["auto"] | bool = "auto",
     output: torch.Tensor | None = None,
+    checkpoint_state_indices: torch.Tensor | None = None,
 ):
     from flashinfer.gdn_prefill import (
         chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
@@ -458,6 +459,7 @@ def fi_chunk_gated_delta_rule(
         checkpoint_every_n_tokens=checkpoint_every_n_tokens,
         use_cp=use_cp,
         backend="flashinfer",
+        checkpoint_state_indices=checkpoint_state_indices,
     )
     # FlashInfer returns (output, state) when output_final_state=True,
     # or just output when output_final_state=False.
@@ -1796,16 +1798,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # g arrives in log space (from _warmup_prefill_kernels); FlashInfer
         # takes exp(g).
         g = torch.exp(g.to(torch.float32))
-        checkpoint_buffers: list[torch.Tensor | None] = [None]
+        # Checkpoints with and without slots compile separately.
+        checkpoint_configs: list[tuple[torch.Tensor | None, ...]] = [(None, None)]
         if self._exports_checkpoints:
             (state_checkpoints,) = current_workspace_manager().get_simultaneous(
                 self._checkpoint_buffer_spec
             )
-            checkpoint_buffers.append(state_checkpoints[:1])
+            buffer = state_checkpoints[:1]
+            slots = torch.zeros(1, device=q.device, dtype=torch.int64)
+            checkpoint_configs += [(buffer, None), (buffer, slots)]
         cu_seqlens = torch.tensor([0, q.shape[1]], device=q.device, dtype=torch.int32)
         checkpoint_cu_starts = torch.tensor([0, 1], device=q.device)
-        for use_cp, state_checkpoints in itertools.product(
-            ("auto", False), checkpoint_buffers
+        for use_cp, (state_checkpoints, slots) in itertools.product(
+            ("auto", False), checkpoint_configs
         ):
             has_checkpoint = state_checkpoints is not None
             fi_chunk_gated_delta_rule(
@@ -1822,6 +1827,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 state_checkpoints=state_checkpoints,
                 checkpoint_cu_starts=checkpoint_cu_starts if has_checkpoint else None,
                 checkpoint_every_n_tokens=q.shape[1] if has_checkpoint else 0,
+                checkpoint_state_indices=slots,
             )
 
     def _forward_core_rocm(
@@ -2332,6 +2338,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             state_checkpoints=state_checkpoints,
             checkpoint_cu_starts=plan.cu_starts,
             checkpoint_every_n_tokens=plan.every_n_tokens,
+            checkpoint_state_indices=plan.slots,
         )
         assert attn_metadata.checkpoint is not None
         assert attn_metadata.non_spec_query_start_loc is not None
