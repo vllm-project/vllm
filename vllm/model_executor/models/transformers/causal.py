@@ -256,6 +256,8 @@ def probe_output_head(
 
 class CausalMixin(VllmModelForTextGeneration, Base):
     embedding_modules = {"lm_head": "output_embeddings"}
+    lm_head: nn.Module
+    logits_processor: LogitsProcessor
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip VllmModelForTextGeneration.__init__ and call the next class in MRO
@@ -265,6 +267,11 @@ class CausalMixin(VllmModelForTextGeneration, Base):
 
         spec = self._head_spec
         self.output_head: nn.Module | None = None
+        if spec.model is None:
+            # Batch-sharded sampling checks for this, and kept heads need the full vocab
+            self.compute_logits_local = lambda hidden_states: self.logits_processor(
+                self.lm_head, hidden_states, self.lm_head.bias, skip_gather=True
+            )
         if not self.pp_group.is_last_rank:
             self.lm_head = PPMissingLayer()
             if spec.model is not None:
@@ -293,11 +300,6 @@ class CausalMixin(VllmModelForTextGeneration, Base):
             self.replace_modules(model, prefix="output_head")
             self.init_parameters(model)
             self.output_head = model
-        else:
-            # Batch-sharded sampling checks for this, and kept heads need the full vocab
-            self.compute_logits_local = lambda hidden_states: self.logits_processor(
-                self.lm_head, hidden_states, self.lm_head.bias, skip_gather=True
-            )
 
     def _create_hf_to_vllm_mapper(self):
         super()._create_hf_to_vllm_mapper()
