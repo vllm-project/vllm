@@ -10,6 +10,22 @@ vLLM initially supports basic model inference and serving on Intel GPU platform.
 - Dependency: [vllm-xpu-kernels](https://github.com/vllm-project/vllm-xpu-kernels): a package provide all necessary vllm custom kernel when running vLLM on Intel GPU platform,
 - Python: 3.14
 
+!!! note "XPU kernels runtime notes"
+    Install `vllm_xpu_kernels` from `requirements/xpu.txt` (release wheel by
+    default). Rebuild or reinstall that package when you change kernel configs.
+
+    Runtime notes (enforced by the kernels package):
+
+    - **Attention fail-closed (default):** missing FA2 / paged-decode AOT
+      shapes raise instead of silently falling back to a slow PyTorch
+      reference path. For eager debug only:
+      `export VLLM_XPU_ATTN_ALLOW_FALLBACK=1` (ignored under XPUGraph
+      capture). Softcap and ALiBi are not implemented on XPU FA2 and raise
+      when requested.
+    - **Page size 128:** default decode presets may include pagesize=128
+      shapes. Serve with `--block-size 128` to use them; otherwise keep the
+      usual page-64 path.
+
 --8<-- [end:requirements]
 --8<-- [start:set-up-using-python]
 
