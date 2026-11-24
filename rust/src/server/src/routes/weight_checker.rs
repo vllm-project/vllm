@@ -22,13 +22,24 @@ enum WeightCheckerAction {
     Compare,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WeightCheckerModel {
     #[default]
     Target,
     Draft,
     Both,
+}
+
+impl WeightCheckerModel {
+    /// Name the Python worker expects; serde would encode the enum as a tuple.
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Target => "target",
+            Self::Draft => "draft",
+            Self::Both => "both",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,7 +96,7 @@ pub async fn weight_checker(
         }
         WeightCheckerAction::Reset => {
             let errors: Vec<Option<String>> = client
-                .call_utility("reset_weights", (body.model,))
+                .call_utility("reset_weights", (body.model.as_str(),))
                 .await
                 .map_err(|error| utility_call_error("reset_weights", error))?;
             if let Some(message) = errors.into_iter().flatten().next() {
@@ -103,7 +114,7 @@ pub(crate) async fn weight_checksums(
     model: WeightCheckerModel,
 ) -> Result<BTreeMap<String, String>, ApiError> {
     let results: Vec<Vec<WorkerChecksums>> = client
-        .call_utility("compute_weight_checksums", (model,))
+        .call_utility("compute_weight_checksums", (model.as_str(),))
         .await
         .map_err(|error| utility_call_error("compute_weight_checksums", error))?;
     let mut checksums = BTreeMap::new();
