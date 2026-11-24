@@ -847,10 +847,10 @@ class KVCacheManager:
 
         Only safe when no peer can still be reading the pinned blocks: they go
         back to the free queue and can be overwritten under a NIXL read in
-        flight. Nothing calls this for that reason. While pins are live
-        `reset_prefix_cache` returns False (the pinned blocks are not free) and
-        succeeds once read-done or lease expiry releases them; see
-        docs/design/nixl_peer_lookup_pin.md.
+        flight. Nothing calls this for that reason. While pins are live the
+        pinned blocks are not free, so `reset_prefix_cache` returns False, and
+        the scheduler's reset with `reset_running_requests=True` (pause, sleep,
+        checkpoint prepare) raises; see docs/design/nixl_peer_lookup_pin.md.
         """
         pins = list(self._pins)
         for pin in pins:
@@ -907,7 +907,7 @@ class KVCacheManager:
 
         Returns:
             bool: True if the prefix cache is successfully reset,
-            False otherwise, e.g. while requests or peer pins hold blocks.
+            False otherwise, e.g. while requests or live peer pins hold blocks.
 
         """
         if not self.coordinator.reset_prefix_cache():
