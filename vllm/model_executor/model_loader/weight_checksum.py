@@ -41,3 +41,33 @@ def compute_tensor_digests(model: nn.Module) -> dict[str, str]:
 def zero_weights(model: nn.Module) -> None:
     for _, weight in _weights(model):
         weight.data.zero_()
+
+
+def find_shared_weight_storage(
+    model: nn.Module, other: nn.Module
+) -> tuple[str, str] | None:
+    """Find a weight whose storage overlaps a parameter or buffer of `other`."""
+
+    def storage_ranges(tensors: Iterator[tuple[str, torch.Tensor]]):
+        for name, tensor in tensors:
+            storage = tensor.untyped_storage()
+            start = storage.data_ptr()
+            if start and storage.nbytes():
+                yield str(tensor.device), start, start + storage.nbytes(), name
+
+    def other_tensors():
+        yield from _weights(other)
+        for name, buffer in other.named_buffers():
+            yield from _tensors(name, buffer)
+
+    other_ranges = iter(sorted(storage_ranges(other_tensors())))
+    current = next(other_ranges, None)
+    for device, start, end, name in sorted(storage_ranges(_weights(model))):
+        while current is not None and (current[0], current[2]) <= (device, start):
+            current = next(other_ranges, None)
+        if current is None:
+            break
+        other_device, other_start, _, other_name = current
+        if other_device == device and other_start < end:
+            return name, other_name
+    return None

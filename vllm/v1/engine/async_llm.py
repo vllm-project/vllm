@@ -54,7 +54,12 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.v1.engine import CheckpointState, EngineCoreRequest, PauseMode
+from vllm.v1.engine import (
+    CheckpointState,
+    EngineCoreRequest,
+    PauseMode,
+    WeightCheckerModel,
+)
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -1257,8 +1262,13 @@ class AsyncLLM(EngineClient):
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
 
-    async def compute_weight_checksums(self) -> list[dict[str, str]]:
-        return await self.engine_core.compute_weight_checksums_async()
+    async def compute_weight_checksums(
+        self, model: WeightCheckerModel = "target"
+    ) -> list[dict[str, str] | str]:
+        return await self.engine_core.compute_weight_checksums_async(model)
+
+    async def reset_weights(self, model: WeightCheckerModel = "target") -> str | None:
+        return await self.engine_core.reset_weights_async(model)
 
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""

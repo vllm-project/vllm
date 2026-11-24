@@ -86,6 +86,7 @@ from vllm.model_executor.model_loader.base_loader import (
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
+    find_shared_weight_storage,
     zero_weights,
 )
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
@@ -115,6 +116,7 @@ from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtim
 from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.engine import WeightCheckerModel
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -273,6 +275,7 @@ class Worker(WorkerBase):
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
         self.weight_transfer_engine: WeightTransferEngine | None = None
+        self._prepared_weight_reset: tuple[str, tuple[nn.Module, ...]] | None = None
         self._weight_update_active = False
         # Update targets (is_draft) whose weights may be incomplete.
         self._incomplete_weight_updates: set[bool] = set()
@@ -439,13 +442,105 @@ class Worker(WorkerBase):
         tp = get_tp_group().rank_in_group
         return f"dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:"
 
-    def compute_weight_checksums(self) -> dict[str, str]:
-        prefix = self._weight_checksum_prefix()
-        digests = compute_tensor_digests(self.model_runner.get_model())
-        return {prefix + name: digest for name, digest in digests.items()}
+    def _weight_checker_draft(self) -> nn.Module | str | None:
+        spec = self.speculative_config
+        if (
+            spec is None
+            or spec.draft_model_config is None
+            or spec.prefill_context_kv_only
+        ):
+            return "Weight Checker requires a resident speculative draft model."
+        # The draft runs on the last PP stage, including when its own PP size is 1.
+        draft = self.get_draft_model()
+        if draft is None and get_pp_group().is_last_rank:
+            return f"Missing resident draft model on {self._weight_checksum_prefix()}"
+        if draft is not None and next(draft.parameters(), None) is None:
+            return "Weight Checker requires a draft model with weight parameters."
+        return draft
 
-    def reset_weights(self) -> None:
-        zero_weights(self.model_runner.get_model())
+    def compute_weight_checksums(
+        self, model: WeightCheckerModel = "target"
+    ) -> dict[str, str] | str:
+        if model not in ("target", "draft", "both"):
+            return f"Invalid Weight Checker model selection: {model!r}"
+        draft = self._weight_checker_draft() if model != "target" else None
+        if isinstance(draft, str):
+            return draft
+        prefix = self._weight_checksum_prefix()
+        checksums: dict[str, str] = {}
+        if model != "draft":
+            target_prefix = "target:" + prefix if model == "both" else prefix
+            checksums.update(
+                (target_prefix + name, digest)
+                for name, digest in compute_tensor_digests(self.get_model()).items()
+            )
+        if draft is not None:
+            draft_prefix = "draft:" + prefix if model == "both" else prefix
+            checksums.update(
+                (draft_prefix + name, digest)
+                for name, digest in compute_tensor_digests(draft).items()
+            )
+        return checksums
+
+    def _models_for_weight_reset(
+        self, model: WeightCheckerModel
+    ) -> tuple[nn.Module, ...] | str:
+        if model not in ("target", "draft", "both"):
+            return f"Invalid Weight Checker model selection: {model!r}"
+        if model != "target" and self.parallel_config.pipeline_parallel_size > 1:
+            return "Cannot reset draft weights with pipeline parallelism."
+
+        target = self.get_model()
+        draft: nn.Module | str | None
+        if model == "target":
+            draft = self.get_draft_model() if self.speculative_config else None
+        else:
+            draft = self._weight_checker_draft()
+        if isinstance(draft, str):
+            return draft
+        if draft is not None and model != "both":
+            if model == "target":
+                selected, other = target, draft
+            else:
+                selected, other = draft, target
+            if shared := find_shared_weight_storage(selected, other):
+                return (
+                    f"Cannot reset {model} weights independently: {shared[0]!r} "
+                    f"shares storage with {shared[1]!r} in the other model."
+                )
+        if model == "target":
+            return (target,)
+        assert draft is not None
+        return (draft,) if model == "draft" else (target, draft)
+
+    def _zero_reset_models(self, models: tuple[nn.Module, ...]) -> None:
+        for model in models:
+            zero_weights(model)
+        self.synchronize_device()
+
+    def prepare_weight_reset(
+        self, model: WeightCheckerModel, reset_id: str
+    ) -> str | None:
+        if self._prepared_weight_reset is not None:
+            return "Another weight reset is in progress."
+        if self._weight_update_active or self._incomplete_weight_updates:
+            return "Cannot reset weights during an active or incomplete weight update."
+        models = self._models_for_weight_reset(model)
+        if isinstance(models, str):
+            return models
+        self._prepared_weight_reset = (reset_id, models)
+        return None
+
+    def commit_weight_reset(self, reset_id: str) -> None:
+        prepared = self._prepared_weight_reset
+        if prepared is None or prepared[0] != reset_id:
+            raise RuntimeError("Weight reset was not prepared on this worker.")
+        self._zero_reset_models(prepared[1])
+
+    def release_weight_reset(self, reset_id: str) -> None:
+        prepared = self._prepared_weight_reset
+        if prepared is not None and prepared[0] == reset_id:
+            self._prepared_weight_reset = None
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
@@ -715,6 +810,8 @@ class Worker(WorkerBase):
         weights_path: str | None = None,
         is_checkpoint_format: bool = True,
     ) -> None:
+        if self._prepared_weight_reset is not None:
+            raise RuntimeError("Cannot reload weights during a weight reset.")
         # Kernel-format weights are copied into place, needing no room.
         kv_cache_loan = (
             kv_cache_lent_for_weight_update(
@@ -1749,6 +1846,8 @@ class Worker(WorkerBase):
             self._start_weight_update(is_draft=True)
 
     def _start_weight_update(self, is_draft: bool = False) -> None:
+        if self._prepared_weight_reset is not None:
+            raise RuntimeError("Cannot start a weight update during a weight reset.")
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
 

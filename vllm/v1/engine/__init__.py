@@ -31,6 +31,7 @@ from vllm.v1.serial_utils import UtilityResult
 # - "wait": Wait for in-flight requests to complete before pausing.
 # - "keep": Freeze requests in queue; they resume on resume_generation().
 PauseMode = Literal["abort", "wait", "keep"]
+WeightCheckerModel = Literal["target", "draft", "both"]
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
