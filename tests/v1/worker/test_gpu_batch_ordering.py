@@ -50,13 +50,13 @@ def _make_common_attn_metadata(query_lens: list[int]) -> CommonAttentionMetadata
 def _make_runner(
     req_states: dict[str, tuple[int, int]],
     decode_query_len: int = 8,
-    use_gdp_replay: bool = False,
+    use_gdp_replayssm: bool = False,
 ) -> Any:
     """Build a runner stub from {req_id: (num_computed_tokens, prefill_len)}."""
     prefill_lens = np.array([s[1] for s in req_states.values()], dtype=np.int32)
     num_computed = np.array([s[0] for s in req_states.values()], dtype=np.int32)
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
-    runner.vllm_config = SimpleNamespace(use_gdp_replay=use_gdp_replay)
+    runner.vllm_config = SimpleNamespace(use_gdp_replayssm=use_gdp_replayssm)
     runner.decode_query_len = decode_query_len
     runner.adaptive_verification = None
     runner.pcp_manager = None
@@ -162,7 +162,7 @@ def test_gdp_replay_runs_only_the_prompt_tail_as_decode():
     # one-token mid-prompt chunk stays a prefill. The prompt's last token still
     # runs as a decode: no prompt chunk follows it.
     batch = {"tail": (128, 129), "mid": (64, 129)}
-    runner = _make_runner(batch, decode_query_len=4, use_gdp_replay=True)
+    runner = _make_runner(batch, decode_query_len=4, use_gdp_replayssm=True)
     scheduler_output = SimpleNamespace(
         num_scheduled_tokens={"tail": 4, "mid": 1},
         total_num_scheduled_tokens=5,
@@ -264,7 +264,7 @@ def test_uniform_decode_uses_state_index_not_batch_position():
     position would read its row and wrongly reject the two decodes.
     """
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
-    runner.vllm_config = SimpleNamespace(use_gdp_replay=False)
+    runner.vllm_config = SimpleNamespace(use_gdp_replayssm=False)
     runner.decode_query_len = 8
     runner.adaptive_verification = None
     runner.pcp_manager = None

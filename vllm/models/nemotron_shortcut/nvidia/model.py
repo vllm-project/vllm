@@ -646,7 +646,7 @@ def load_nemotron_shortcut_weights(
 
 def check_supported(vllm_config: VllmConfig) -> None:
     """Refuse deployments the GDP mixers cannot serve."""
-    if vllm_config.use_gdp_replay:
+    if vllm_config.cache_config.use_replayssm:
         validate_gdp_replay(vllm_config)
 
 
@@ -680,7 +680,7 @@ class NemotronShortcutTextModel(nn.Module):
 
         # The replay cursors that every GDP layer shares under --use-replayssm.
         self.gdp_replay_trackers = (
-            GdpReplayTrackers() if vllm_config.use_gdp_replay else None
+            GdpReplayTrackers() if vllm_config.cache_config.use_replayssm else None
         )
 
         def get_layer(prefix: str):
@@ -820,7 +820,9 @@ class NemotronShortcutForCausalLM(nn.Module, SupportsPP, IsHybrid, SdsaKVCacheGr
         cls, vllm_config: VllmConfig
     ) -> tuple[torch.dtype, ...]:
         calculator = (
-            gdp_replay_state_dtype if vllm_config.use_gdp_replay else gdp_state_dtype
+            gdp_replay_state_dtype
+            if vllm_config.cache_config.use_replayssm
+            else gdp_state_dtype
         )
         return calculator(
             vllm_config.model_config.dtype,
@@ -834,7 +836,9 @@ class NemotronShortcutForCausalLM(nn.Module, SupportsPP, IsHybrid, SdsaKVCacheGr
     ) -> MambaStateShapes:
         config = vllm_config.model_config.hf_text_config
         calculator = (
-            gdp_replay_state_shape if vllm_config.use_gdp_replay else gdp_state_shape
+            gdp_replay_state_shape
+            if vllm_config.cache_config.use_replayssm
+            else gdp_state_shape
         )
         shapes = calculator(
             vllm_config.parallel_config.tensor_parallel_size,

@@ -247,7 +247,7 @@ def test_replayssm_selects_gdp_replay_only_on_gdp_models(
     """`--use-replayssm` selects GDP replay on GDP models only."""
     config = _vllm_config(heads=heads)
     config.cache_config.use_replayssm = use_replayssm
-    assert VllmConfig.use_gdp_replay.fget(config) is expected
+    assert VllmConfig.use_gdp_replayssm.fget(config) is expected
 
 
 @pytest.mark.parametrize("heads,expected", [(16, False), (None, True)])
@@ -256,5 +256,5 @@ def test_gdp_replay_stays_off_the_mamba2_flashinfer_replay(heads, expected):
     (its page alignment and autotune runs) only on models without GDP layers."""
     config = _vllm_config(heads=heads)
     config.mamba_config = SimpleNamespace(backend=MambaBackendEnum.FLASHINFER)
-    config.use_gdp_replay = VllmConfig.use_gdp_replay.fget(config)
+    config.use_gdp_replayssm = VllmConfig.use_gdp_replayssm.fget(config)
     assert VllmConfig.use_flashinfer_replayssm.fget(config) is expected

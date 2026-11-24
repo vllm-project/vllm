@@ -173,7 +173,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.speculative_config
             and self.speculative_config.enable_adaptive_verification
         )
-        self.use_gdp_replay = vllm_config.use_gdp_replay
+        self.use_gdp_replayssm = vllm_config.use_gdp_replayssm
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
             vllm_config, kv_cache_spec, self.checkpoint_alignment
         )
@@ -391,7 +391,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             )
             # Capture batches also have seq_len == query_len, but are not
             # prefills.
-            if m.is_prefilling is not None and self.use_gdp_replay:
+            if m.is_prefilling is not None and self.use_gdp_replayssm:
                 # A GDP replay block's checkpoint lags its history, so a row
                 # that left the prefill path must not come back to it: every
                 # prefilling row is a prefill, resumed one-token chunks too.

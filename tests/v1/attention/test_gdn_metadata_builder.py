@@ -153,18 +153,18 @@ def _create_gdn_builder(
     num_speculative_tokens: int = 0,
     full_cuda_graph: bool = False,
     adaptive_verification: bool = False,
-    use_gdp_replay: bool = False,
+    use_gdp_replayssm: bool = False,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
     )
-    if use_gdp_replay:
+    if use_gdp_replayssm:
         # --use-replayssm on a Gated DeltaProduct model.
         vllm_config.cache_config.use_replayssm = True
         vllm_config.model_config.hf_text_config.gdp_num_heads = 4
-    assert vllm_config.use_gdp_replay == use_gdp_replay
+    assert vllm_config.use_gdp_replayssm == use_gdp_replayssm
     vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
     )
@@ -458,15 +458,15 @@ def test_one_token_first_chunk_excludes_padding():
     assert meta.num_prefill_tokens == 1
 
 
-@pytest.mark.parametrize(("use_gdp_replay", "num_decodes"), [(False, 1), (True, 0)])
+@pytest.mark.parametrize(("use_gdp_replayssm", "num_decodes"), [(False, 1), (True, 0)])
 def test_gdp_replay_keeps_resumed_one_token_chunks_on_prefill(
-    use_gdp_replay: bool, num_decodes: int
+    use_gdp_replayssm: bool, num_decodes: int
 ):
     """With spec decode on but no decoding row, the batch takes the non-spec
     split. GDP replay sends a resumed one-token chunk to prefill as well: once
     a replay row decodes, its next prompt chunk could not return to prefill."""
     builder = _create_gdn_builder(
-        num_speculative_tokens=3, use_gdp_replay=use_gdp_replay
+        num_speculative_tokens=3, use_gdp_replayssm=use_gdp_replayssm
     )
     batch = BatchSpec(seq_lens=[65, 8], query_lens=[1, 8])
     common = _common_attn_metadata(builder, batch).replace(
@@ -492,7 +492,7 @@ def test_each_step_and_group_gets_its_own_metadata_object():
     metadata object the group's layers share, so each build and each other
     group's `update_block_table` must return a new object."""
     builder, other_group = (
-        _create_gdn_builder(num_speculative_tokens=3, use_gdp_replay=True)
+        _create_gdn_builder(num_speculative_tokens=3, use_gdp_replayssm=True)
         for _ in range(2)
     )
     # GDP replay runs without prefix caching.

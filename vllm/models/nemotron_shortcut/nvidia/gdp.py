@@ -418,14 +418,14 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         # The replay op reads them as one [A_log; dt_bias] tensor, so under replay
         # both are views of it and loading them fills it in place.
         # On GDP layers, --use-replayssm selects FlashInfer's GDP replay.
-        self.use_gdp_replay = cache_config is not None and cache_config.use_replayssm
-        if self.use_gdp_replay and gdp_replay_kernel_missing():
+        self.use_replayssm = cache_config is not None and cache_config.use_replayssm
+        if self.use_replayssm and gdp_replay_kernel_missing():
             raise RuntimeError(
                 "--use-replayssm on GDP layers needs FlashInfer's "
                 "gdp_conv_replay_decode.gdp_conv_replay"
             )
         self.gate_params: torch.Tensor | None = None
-        if self.use_gdp_replay:
+        if self.use_replayssm:
             self.gate_params = torch.empty(2, self.num_heads, dtype=torch.float32)
             a_log, dt_bias = self.gate_params[0], self.gate_params[1]
         else:
@@ -436,7 +436,7 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         # The model shares one tracker set across its GDP layers; a standalone
         # layer keeps its own.
         self.gdp_replay_trackers: GdpReplayTrackers | None = None
-        if self.use_gdp_replay:
+        if self.use_replayssm:
             self.gdp_replay_trackers = gdp_replay_trackers or GdpReplayTrackers()
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
@@ -481,7 +481,7 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None and self.cache_config is not None
-        calculator = gdp_replay_state_dtype if self.use_gdp_replay else gdp_state_dtype
+        calculator = gdp_replay_state_dtype if self.use_replayssm else gdp_state_dtype
         return calculator(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
@@ -490,7 +490,7 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         # The helper shards internally, so feed it the unsharded counts.
-        calculator = gdp_replay_state_shape if self.use_gdp_replay else gdp_state_shape
+        calculator = gdp_replay_state_shape if self.use_replayssm else gdp_state_shape
         return calculator(
             get_tensor_model_parallel_world_size(),
             self.config.gdp_num_groups,
@@ -533,7 +533,7 @@ class NemotronShortcutGDPMixer(nn.Module, MambaBase):
         # copy gives it the stride that piece was compiled for, since inductor may
         # pad the projection's rows when their width is not a multiple of 8.
         gate = gate.clone()
-        if self.use_gdp_replay:
+        if self.use_replayssm:
             # The replay op reads the decay logits from the projection itself.
             if self.g_clamp_value is not None:
                 a.copy_(self.clamp_decay_input(a))

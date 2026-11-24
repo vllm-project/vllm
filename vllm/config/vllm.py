@@ -671,7 +671,7 @@ class VllmConfig:
             self.cache_config.use_replayssm
             and self.mamba_config.backend == MambaBackendEnum.FLASHINFER
             # GDP replay runs its own FlashInfer op, not Mamba-2 ReplaySSM.
-            and not self.use_gdp_replay
+            and not self.use_gdp_replayssm
         )
 
     @property
@@ -680,12 +680,12 @@ class VllmConfig:
         return (
             self.cache_config.use_replayssm
             and not self.cache_config.use_kda_recoverssm
-            and not self.use_gdp_replay
+            and not self.use_gdp_replayssm
             and (self.use_flashinfer_replayssm or self.num_speculative_tokens > 0)
         )
 
     @property
-    def use_gdp_replay(self) -> bool:
+    def use_gdp_replayssm(self) -> bool:
         """`--use-replayssm` on a Gated DeltaProduct model: its GDP layers decode
         with FlashInfer's `gdp_conv_replay` and keep their own bookkeeping."""
         return (
@@ -3864,7 +3864,7 @@ class VllmConfig:
                 "--use-replayssm is not supported for architecture "
                 f"{self.model_config.architecture!r}"
             )
-        if self.use_gdp_replay:
+        if self.use_gdp_replayssm:
             # The model validates GDP replay deployments when it loads.
             return self
         if (
