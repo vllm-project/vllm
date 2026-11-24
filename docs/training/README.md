@@ -2,6 +2,41 @@
 
 vLLM is widely used as the high-throughput rollout and teacher-scoring engine for post-training workflows including RLHF, GRPO, Online DPO, and on-policy distillation.
 
+## Where vLLM Fits in the RL Loop
+
+A reinforcement learning (RL) rollout collects model-generated completions or interactions for training. vLLM generates these rollouts using the current policy; an external training framework evaluates them and updates the policy.
+
+```text
+Training framework                          vLLM
+------------------                          ----
+Send prompts and sampling settings -------> Generate rollouts
+Compute rewards, advantages, and loss <---- Return tokens and rollout artifacts
+Optimize the policy
+Synchronize updated policy weights ------> Load weights for subsequent generation
+```
+
+vLLM provides the inference side of this loop, not a complete RL training system. Policy optimization, backpropagation, environment and reward orchestration, and decisions about acceptable sample staleness belong to the training framework. vLLM can also run supported reward models for inference; it does not orchestrate the reward pipeline.
+
+## Capabilities at a Glance
+
+- **Rollout generation and teacher scoring**: Generate completions and expose [rollout artifacts](rollout_artifacts/README.md), including sampling masks, MoE routing information, and teacher logprobs.
+- **Policy weight synchronization**: [Load updated trainer weights](weight_updates/README.md) into a running inference engine. The trainer, not vLLM, computes the gradient updates.
+- **GPU memory handoff**: Use [Sleep Mode](../features/sleep_mode.md) to release most inference GPU memory between rollout and training phases in colocated deployments.
+- **Generation coordination**: [Pause and resume generation](async_rl.md) around weight updates or integrate with an external asynchronous RL workflow. The framework remains responsible for scheduling training and managing sample staleness.
+
+Availability and requirements vary by model, hardware, backend, and training framework; check the linked guides for each capability.
+
+## Start Here
+
+| Your goal | Starting point |
+| --- | --- |
+| Run GRPO or another supported online trainer | [TRL integration](trl.md), which links to the upstream training guides. The training framework runs optimization; vLLM generates completions. |
+| Integrate a custom trainer | [Weight Updates](weight_updates/README.md) for backend selection and trainer/engine integration. |
+| Share GPUs between training and rollout generation | [TRL colocate mode](trl.md#colocate-mode) and [Sleep Mode](../features/sleep_mode.md) for memory handoff and wake-up requirements. |
+| Coordinate generation with asynchronous training | [Async Reinforcement Learning](async_rl.md) for pause/resume behavior, weight versions, and the async RLHF example. |
+
+To test weight synchronization independently of a training algorithm, use the [HTTP NCCL example](../../examples/rl/rlhf_http_nccl.py). It requires three GPUs and demonstrates transferring weights and generating with them, not a complete GRPO training run.
+
 ## Quick Routing Guide (Task → Doc)
 
 | What you want to do | Document | Key Flags / APIs |

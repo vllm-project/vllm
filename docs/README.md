@@ -31,6 +31,7 @@ Where to get started with vLLM depends on the type of user. If you are looking t
 
 - Run open-source models on vLLM, we recommend starting with the [Quickstart Guide](./getting_started/quickstart.md)
 - Build applications with vLLM, we recommend starting with the [User Guide](./usage/README.md)
+- Generate reinforcement learning rollouts with vLLM, we recommend starting with the [Training and RL Guide](./training/README.md)
 - Build vLLM, we recommend starting with [Developer Guide](./contributing/README.md)
 
 For information about the development of vLLM, see:
@@ -55,6 +56,7 @@ vLLM is flexible and easy to use with:
 
 - Seamless integration with popular Hugging Face models
 - High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
+- [Reinforcement learning (RL) rollouts](./training/README.md) with policy weight synchronization and integration with external training frameworks
 - Tensor, pipeline, data, expert, and context parallelism for distributed inference
 - Streaming outputs
 - Generation of structured outputs using xgrammar or guidance
