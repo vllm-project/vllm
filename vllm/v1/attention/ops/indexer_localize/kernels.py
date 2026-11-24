@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CUDA kernels of the die-local indexer, compiled at runtime with NVRTC.
 
-`build.cu` (the per-step build) and `merge.cu` (the merge of both domains'
-top-k candidates) ship as source. Each configuration is compiled for the
+`build.cu` (the per-step build), `merge.cu` (the merge of both domains'
+top-k candidates) and `topk_shape.cu` (the top-k's CTA shape, for occupancy
+queries) ship as source. Each configuration is compiled for the
 current device at first use, once per process, and loaded with
 `cuLibraryLoadData`, whose kernel handle launches in any context: on full-GPU
 streams and on the locality domains' green-context streams alike. A launch is
@@ -125,6 +126,53 @@ class CudaKernel:
                 0,
             )
         )
+
+    def max_active_clusters(
+        self,
+        cluster: int,
+        block: int,
+        smem: int,
+        stream: torch.cuda.Stream,
+        device_index: int,
+    ) -> int:
+        """How many clusters of `cluster` CTAs (`block` threads and `smem`
+        bytes of dynamic shared memory each) run at once on the SMs `stream`
+        launches to: for a green-context stream, that context's SMs. CUDA's
+        occupancy query; clusters cannot span GPCs."""
+        from cuda.bindings import driver as cu
+
+        dev = _check(cu.cuDeviceGet(device_index))
+        attr = cu.CUfunction_attribute
+        _check(
+            cu.cuKernelSetAttribute(
+                attr.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                smem,
+                self._kernel,
+                dev,
+            )
+        )
+        _check(
+            cu.cuKernelSetAttribute(
+                attr.CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED,
+                1,
+                self._kernel,
+                dev,
+            )
+        )
+        config = cu.CUlaunchConfig()
+        config.gridDimX, config.gridDimY, config.gridDimZ = 1, cluster, 1
+        config.blockDimX, config.blockDimY, config.blockDimZ = block, 1, 1
+        config.sharedMemBytes = smem
+        config.hStream = cu.CUstream(stream.cuda_stream)
+        dims = cu.CUlaunchAttribute()
+        dims.id = cu.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION
+        dims.value.clusterDim.x = 1
+        dims.value.clusterDim.y = cluster
+        dims.value.clusterDim.z = 1
+        config.attrs = [dims]
+        config.numAttrs = 1
+        func = _check(cu.cuKernelGetFunction(self._kernel))
+        return int(_check(cu.cuOccupancyMaxActiveClusters(func, config)))
 
 
 _KERNELS: dict[tuple, CudaKernel | None] = {}

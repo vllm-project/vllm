@@ -436,19 +436,34 @@ def test_build_kernel_matches_reference(nvrtc, domain_plan, rows, rows_per_reque
         check()
 
 
+# Clusters of 16, 8, 4, 2 and 1 top-k CTAs a VR200 locality domain (100 SMs)
+# holds at once, as CUDA's occupancy query reports.
+_VR200_DOMAIN = {16: 4, 8: 11, 4: 23, 2: 50, 1: 100}
+
+
 def test_policy_takes_die_split_in_one_round_of_topk_ctas():
-    """A batch takes the die split when each domain's top-k CTAs (by the
-    stock selector's launch rule) fit on the domain's SMs at once."""
+    """A batch takes the die split when each domain holds all of its top-k's
+    clusters (by the stock selector's launch rule) at once."""
     assert [build.topk_ctas_per_row(n) for n in (1, 4, 5, 8, 9, 33, 34, 64, 65)] == [
         16, 16, 8, 8, 4, 4, 2, 2, 1,
     ]  # fmt: skip
-    taken = [n for n in range(1, 200) if build.use_die_split(n, [100, 100])]
-    assert taken == [*range(1, 26), *range(34, 51), *range(65, 101)]
+    taken = [n for n in range(1, 200) if build.use_die_split(n, _VR200_DOMAIN)]
+    assert taken == [*range(1, 24), *range(34, 51), *range(65, 101)]
     # DeepSeek-V4.1 with 16 requests and 1 to 6 tokens per request.
-    assert [build.use_die_split(16 * t, [100, 100]) for t in range(1, 7)] == [
+    assert [build.use_die_split(16 * t, _VR200_DOMAIN) for t in range(1, 7)] == [
         True, False, True, False, True, True,
     ]  # fmt: skip
-    assert build.use_die_split(32, [128, 100]) is False  # the smaller domain
+    assert build.use_die_split(4, {**_VR200_DOMAIN, 16: 0}) is False
+
+
+def test_topk_cluster_capacity_of_the_domains(domains):
+    """The occupancy query per domain: clusters never hold more CTAs than the
+    domain's SMs, and single-CTA clusters fill every SM (one CTA per SM)."""
+    capacity = build.topk_cluster_capacity(domains)
+    assert capacity is not None and set(capacity) == {16, 8, 4, 2, 1}
+    for cluster, n in capacity.items():
+        assert n * cluster <= min(domains.sms), (cluster, n)
+    assert capacity[1] == min(domains.sms)
 
 
 # ---------------------------------------------------------------------------
@@ -729,8 +744,10 @@ def test_localized_decode_matches_single_launch(
     assert meta is not None, "the localizer refused the batch"
     # A row count whose per-domain top-k needs a second round takes the stock
     # indexer.
+    capacity = build.topk_cluster_capacity(domains)
+    assert capacity is not None
     second_round = next(
-        n for n in range(1, 256) if not build.use_die_split(n, domains.sms)
+        n for n in range(1, 256) if not build.use_die_split(n, capacity)
     )
     assert (
         case.localizer.build(

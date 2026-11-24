@@ -33,11 +33,12 @@ bandwidth. With `VLLM_INDEXER_LOCALIZE=1`:
   the two candidate lists; otherwise the two score arrays are joined into the
   stock full-length array and the stock top-k runs.
 - A decode batch takes the die split only when each domain's top-k fits in one
-  round of CTAs on the domain's SMs: rows times the top-k's CTAs per row (16,
-  8, 4 or 2 up to 4, 8, 33 or 64 rows, then 1) at most the domain's SM count.
-  On a GPU with 100 SMs per domain that is 1-25, 34-50 and 65-100 rows; other
-  batches run the stock indexer. The rule depends only on the row count, which
-  a FULL CUDA graph fixes per captured batch size.
+  round of CTAs on the domain's SMs: at most as many rows as the domain holds
+  clusters of the top-k's size at once (16, 8, 4 or 2 CTAs per row up to 4, 8,
+  33 or 64 rows, then 1), as CUDA's occupancy query reports for the domain's
+  green context. On VR200 (100 SMs per domain) that is 1-23, 34-50 and 65-100
+  rows; other batches run the stock indexer. The rule depends only on the row
+  count, which a FULL CUDA graph fixes per captured batch size.
 
 With speculative decoding, a request has one decode row per query token (the
 last accepted token and the draft tokens), and each row sees one key more than

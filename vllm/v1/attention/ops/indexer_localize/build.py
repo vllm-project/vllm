@@ -19,7 +19,7 @@ CUDA graphs capture it and nothing runs between graphs.
 
 import ctypes
 import weakref
-from collections.abc import Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -230,18 +230,60 @@ def topk_ctas_per_row(num_rows: int) -> int:
     return 1
 
 
-def use_die_split(num_rows: int, domain_sms: Sequence[int]) -> bool:
+_TOPK_CLUSTER_SIZES = (16, 8, 4, 2, 1)
+_CAPACITY: dict[int, dict[int, int] | None] = {}
+
+
+def topk_cluster_capacity(res: DomainResources) -> dict[int, int] | None:
+    """Per top-k cluster size (16, 8, 4, 2 or 1 CTAs), how many such clusters
+    every locality domain's SMs hold at once: CUDA's occupancy query for the
+    top-k's CTA shape (`topk_shape.cu`) on each domain's green-context stream,
+    the smallest over the domains. Clusters cannot span GPCs, so this can be
+    less than the SMs over the cluster size: 23 clusters of 4 CTAs on a VR200
+    domain's 100 SMs. None when the query is unavailable. Once per device."""
+    if res.device not in _CAPACITY:
+        capacity = None
+        kernel = get_kernel("topk_shape.cu", "topk_cta_shape", (), res.device)
+        if kernel is not None:
+            # Dynamic shared memory up to the opt-in limit: one CTA per SM, as
+            # the top-k's own shared memory gives it.
+            smem = torch.cuda.get_device_properties(
+                res.device
+            ).shared_memory_per_block_optin
+            try:
+                capacity = {
+                    cluster: min(
+                        kernel.max_active_clusters(
+                            cluster, 1024, smem, stream, res.device
+                        )
+                        for stream in res.streams
+                    )
+                    for cluster in _TOPK_CLUSTER_SIZES
+                }
+            except Exception as e:  # noqa: BLE001 - the caller falls back
+                logger.warning(
+                    "Die-local indexer: no cluster occupancy query (%s: %s)",
+                    type(e).__name__,
+                    e,
+                )
+        _CAPACITY[res.device] = capacity
+    return _CAPACITY[res.device]
+
+
+def use_die_split(num_rows: int, capacity: Mapping[int, int]) -> bool:
     """Whether a decode batch of `num_rows` rows (one per query token) takes
     the die-local indexer; otherwise the whole batch takes the stock one.
 
-    Yes when each domain's top-k fits in one round of CTAs on the domain's
-    SMs. A second round costs about one CTA's fixed time, 7-9 us on VR200,
-    more than the die split saves there. The rule may depend only on the row
-    count: a FULL CUDA graph fixes the path per captured batch size, so it
-    must not depend on context lengths. The localizer sizes its buffers for
-    the largest batch this accepts.
+    Yes when each domain's top-k fits in one round of CTAs: at most as many
+    rows as every domain's SMs hold clusters of the top-k's size at once
+    (`capacity`, from `topk_cluster_capacity`). A second round costs about
+    one CTA's fixed time, 7-9 us on VR200, more than the die split saves
+    there. The rule may depend only on the row count: a FULL CUDA graph fixes
+    the path per captured batch size, so it must not depend on context
+    lengths. The localizer sizes its buffers for the largest batch this
+    accepts.
     """
-    return num_rows * topk_ctas_per_row(num_rows) <= min(domain_sms)
+    return num_rows <= capacity.get(topk_ctas_per_row(num_rows), 0)
 
 
 def _row_ranges(rows: list[int]) -> str:
@@ -334,9 +376,11 @@ class IndexerDecodeLocalizer:
         self.disabled = self.res is None
         # Buffers for the largest batch the policy sends to the die split.
         accepted = []
+        self._capacity: dict[int, int] = {}
         if self.res is not None:
+            self._capacity = topk_cluster_capacity(self.res) or {}
             accepted = [
-                n for n in range(1, max_rows + 1) if use_die_split(n, self.res.sms)
+                n for n in range(1, max_rows + 1) if use_die_split(n, self._capacity)
             ]
             logger.info_once(
                 "Die-local sparse indexer: decode batches of %s rows take the die "
@@ -473,7 +517,7 @@ class IndexerDecodeLocalizer:
         if self.disabled:
             return None
         assert self.res is not None
-        if not use_die_split(num_rows, self.res.sms) or not self._resolve():
+        if not use_die_split(num_rows, self._capacity) or not self._resolve():
             return None
         lens = seq_lens.reshape(-1)
         if (
