@@ -76,6 +76,7 @@ def _make_connector(kv_lease_duration: int = _LEASE):
         host="localhost", port=1234, remote_tp_size=1, expected_engine_id=_REMOTE
     )
     worker._remote_agents[_REMOTE] = remote_agents
+    worker._engine_by_address[("localhost", 1234)] = _REMOTE
     worker._engine_clock_offset[_REMOTE] = 0.0
     return connector, worker
 
