@@ -352,9 +352,6 @@ __global__ void __launch_bounds__(64)
     dequantize_weights(int* __restrict__ B, half* __restrict__ scaling_factors,
                        int* __restrict__ zeros, half* __restrict__ C, int G) {
   static constexpr uint32_t ZERO = 0x0;
-  half B_shared[32 * (128 + 8)];
-
-  half* B_shared_ptr2 = B_shared;
 
   int N = blockDim.x * gridDim.x;  // 2
   int col = (blockIdx.x * blockDim.x + threadIdx.x);
@@ -401,11 +398,7 @@ __global__ void __launch_bounds__(64)
                : "=r"(B_loaded_fp16.w)
                : "r"(B_loaded_fp16.w), "r"(B_loaded_scale.w), "r"(ZERO));
 
-  *(uint4*)B_shared_ptr2 = B_loaded_fp16;
-
-  for (int i = 0; i < 8; ++i) {
-    *(C_ptr2 + i) = B_shared[i];
-  }
+  *(uint4*)C_ptr2 = B_loaded_fp16;
 }
 
 }  // namespace awq
