@@ -141,7 +141,7 @@ def test_engine_core_startup_threads_are_scoped_to_launch(
             local_client=True,
             handshake_address="unused",
             executor_class=executor_class,
-            log_stats=False,
+            collect_stats=False,
         )
         manager._finalizer.detach()
     assert start_states == [expected] * (1 if fail_start else local_engine_count)
