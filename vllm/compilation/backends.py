@@ -33,7 +33,6 @@ from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, instrument_manual
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .caching import (
     VllmSerializableFunction,
@@ -107,11 +106,7 @@ def make_compiler(
     ), "VLLM_USE_MEGA_AOT_ARTIFACT=1 requires VLLM_USE_STANDALONE_COMPILE=1"
 
     if compilation_config.backend == "inductor":
-        # Use standalone compile only if requested, version is new enough,
-        # and the symbol actually exists in this PyTorch build.
-        if envs.VLLM_USE_STANDALONE_COMPILE and hasattr(
-            torch._inductor, "standalone_compile"
-        ):
+        if envs.VLLM_USE_STANDALONE_COMPILE:
             logger.debug("Using InductorStandaloneAdaptor")
             return InductorStandaloneAdaptor(
                 compilation_config.compile_cache_save_format,
@@ -624,14 +619,12 @@ def split_graph(
     # the semantics of the graph will change when we
     # have mutations in the graph
     with _use_lazy_graph_module(True):
-        has_tuple_return = is_torch_equal_or_newer("2.12.0.dev")
-        tuple_return_kwarg = {"tuple_return": True} if has_tuple_return else {}
         split_gm = torch.fx.passes.split_module.split_module(
             graph,
             None,
             lambda node: node_to_subgraph_id[node],
             keep_original_order=True,
-            **tuple_return_kwarg,
+            tuple_return=True,
         )
 
     outputs = []
