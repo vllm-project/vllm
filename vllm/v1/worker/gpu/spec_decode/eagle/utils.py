@@ -120,6 +120,9 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     draft_model_config = speculative_config.draft_model_config
+    # The target's config carries the online quantization targets; the draft's
+    # overrides do not.
+    target_vllm_config = vllm_config
     vllm_config = speculative_config.apply_draft_overrides(vllm_config)
     draft_load_config = get_draft_load_config(vllm_config)
     if draft_load_config is not vllm_config.load_config:
@@ -143,7 +146,7 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     draft_head = share_target_lm_head(
         eagle_model,
         target_lm_head,
-        resolve_draft_lm_head_copy(vllm_config, target_lm_head),
+        resolve_draft_lm_head_copy(target_vllm_config, target_lm_head),
     )
     if draft_head is not None:
         # MTP layers route logits through layer.shared_head.head, not

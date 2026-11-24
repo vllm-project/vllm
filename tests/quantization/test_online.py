@@ -2912,8 +2912,10 @@ def test_online_ptpc_activation_override(default_vllm_config) -> None:
 def _draft_copy_config(targets, alias=None, target_quant_method=None):
     """A VllmConfig stand-in for `resolve_draft_lm_head_copy`, and a target head
     that is quantized when `target_quant_method` is given."""
+    args = QuantizationConfigArgs(targets=targets)
     config = SimpleNamespace(
-        quant_config=OnlineQuantizationConfig(QuantizationConfigArgs(targets=targets)),
+        quant_config=OnlineQuantizationConfig(args),
+        model_config=SimpleNamespace(quantization_config=args),
         speculative_config=SimpleNamespace(draft_lm_head_quantization=alias),
     )
     head = SimpleNamespace(
@@ -2942,6 +2944,21 @@ def test_draft_lm_head_key_selects_only_the_copy(default_vllm_config) -> None:
     # No key, no alias: the drafter shares the target head.
     config, head = _draft_copy_config({"re:.*self_attn.*": "fp8_per_channel"})
     assert resolve_draft_lm_head_copy(config, head) is None
+
+
+def test_draft_lm_head_key_with_an_unquantized_target(default_vllm_config) -> None:
+    """A bf16 target has no quantization config, so the key is read from the
+    `quantization_config` args on the model config."""
+    from vllm.model_executor.layers.quantization.online.lm_head import (
+        DRAFT_LM_HEAD_PREFIX,
+        resolve_draft_lm_head_copy,
+    )
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    config, head = _draft_copy_config({DRAFT_LM_HEAD_PREFIX: "nvfp4_weight_only"})
+    config.quant_config = None
+    spec = resolve_draft_lm_head_copy(config, head)
+    assert spec is not None and spec.method_cls is Nvfp4WeightOnlyOnlineLinearMethod
 
 
 def test_draft_lm_head_copy_takes_formats_verify_rejects(default_vllm_config) -> None:

@@ -300,6 +300,10 @@ def resolve_draft_lm_head_copy(
     must agree. A pattern that also names the target's own head, such as
     `re:.*lm_head$`, quantizes that head instead and the drafter shares it.
     """
+    from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
     from vllm.model_executor.model_loader.base_loader import (
         _get_online_quantization_config,
     )
@@ -312,6 +316,12 @@ def resolve_draft_lm_head_copy(
     )
     alias = _alias_copy_spec(alias_name) if alias_name is not None else None
     online_config = _get_online_quantization_config(vllm_config)
+    if online_config is None:
+        # An unquantized target has no quantization config of its own; the
+        # `targets` the user passed are still on the model config.
+        args = getattr(vllm_config.model_config, "quantization_config", None)
+        if isinstance(args, QuantizationConfigArgs) and args.targets is not None:
+            online_config = OnlineQuantizationConfig(args)
     resolved = (
         online_config.resolve_quant_method_cls(
             ParallelLMHead, DRAFT_LM_HEAD_PREFIX, lm_head_copy=True
