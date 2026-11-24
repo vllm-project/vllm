@@ -198,7 +198,7 @@ class RequestState:
         max_tokens_param: int | None,
         arrival_time: float,
         queue: RequestOutputCollector | None,
-        log_stats: bool,
+        collect_stats: bool,
         stream_interval: int,
         top_p: float | None = None,
         n: int | None = None,
@@ -236,7 +236,9 @@ class RequestState:
         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
-        self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
+        self.stats = (
+            RequestStateStats(arrival_time=arrival_time) if collect_stats else None
+        )
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
@@ -282,7 +284,7 @@ class RequestState:
         parent_req: ParentRequest | None,
         request_index: int,
         queue: RequestOutputCollector | None,
-        log_stats: bool,
+        collect_stats: bool,
         stream_interval: int,
     ) -> "RequestState":
         remote_prefill_cached_tokens = None
@@ -344,7 +346,7 @@ class RequestState:
             temperature=temperature,
             arrival_time=request.arrival_time,
             queue=queue,
-            log_stats=log_stats,
+            collect_stats=collect_stats,
             stream_interval=stream_interval,
             stream_input=request.resumable,
             remote_prefill_cached_tokens=remote_prefill_cached_tokens,
@@ -558,18 +560,18 @@ class OutputProcessor:
         self,
         tokenizer: TokenizerLike | None,
         *,
-        log_stats: bool,
+        collect_stats: bool,
         stream_interval: int = 1,
         tracing_enabled: bool = False,
         admission_stats: "SharedAdmissionStats | None" = None,
     ):
-        self.log_stats = log_stats
+        self.collect_stats = collect_stats
         self.tokenizer = tokenizer
         self.stream_interval = stream_interval
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
-        self.lora_states = LoRARequestStates(log_stats)
+        self.lora_states = LoRARequestStates(collect_stats)
         self.tracing_enabled = tracing_enabled
         self.admission_stats = admission_stats
 
@@ -684,7 +686,7 @@ class OutputProcessor:
             parent_req=parent_req,
             request_index=request_index,
             queue=queue,
-            log_stats=self.log_stats,
+            collect_stats=self.collect_stats,
             stream_interval=self.stream_interval,
         )
         self.request_states[request_id] = req_state

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -392,13 +392,13 @@ class HiSparseCoordinator:
             for manager in self.resident_managers
         )
 
-    def _unpin_pages(
+    def _iter_unpinnable_pages(
         self,
         request_id: str,
         state: _HiSparseRequestState,
         page_indices: Iterable[int],
-    ) -> None:
-        """Release the pages' resident blocks to the pool, in the given order."""
+    ) -> Iterator[tuple[int, tuple[KVCacheBlock, ...]]]:
+        """Select complete, durable pages outside the active tail."""
         num_unpinnable = self._num_resident_pages(request_id) - ACTIVE_TAIL_PAGES
         pages = [
             page_idx
@@ -419,22 +419,33 @@ class HiSparseCoordinator:
             for slot, block in enumerate(column)
             if block.is_null
         }
-        slots = [slot for slot in range(len(pages)) if slot not in null_slots]
-        if not slots:
-            return
-        unpinned = [pages[slot] for slot in slots]
-        single_owners = [((request_id, page_idx),) for page_idx in unpinned]
+        for slot, blocks in enumerate(zip(*columns)):
+            if slot not in null_slots:
+                yield pages[slot], blocks
+
+    def _unpin_pages(
+        self,
+        request_id: str,
+        state: _HiSparseRequestState,
+        page_indices: Iterable[int],
+    ) -> None:
+        """Release the pages' resident blocks to the pool, in the given order."""
         owners = self._owners
+        unpinned: list[int] = []
         released: list[KVCacheBlock] = []
-        for slot, single in zip(slots, single_owners):
-            for column in columns:
-                block = column[slot]
+        for page_idx, blocks in self._iter_unpinnable_pages(
+            request_id, state, page_indices
+        ):
+            single = ((request_id, page_idx),)
+            for block in blocks:
                 current = owners.get(block.block_id)
                 owners[block.block_id] = single if current is None else current + single
-                released.append(block)
-        state.pinned_clean.difference_update(unpinned)
-        state.unpinned_pages.update(unpinned)
-        self.gpu_pool.unpin_blocks(released, self._reuse_watcher)
+            unpinned.append(page_idx)
+            released.extend(blocks)
+        if released:
+            state.pinned_clean.difference_update(unpinned)
+            state.unpinned_pages.update(unpinned)
+            self.gpu_pool.unpin_blocks(released, self._reuse_watcher)
 
     def _unpin_clean_pages(self, request_id: str, state: _HiSparseRequestState) -> None:
         # Tail first, so a prefix loses its tail pages before its head.
@@ -474,6 +485,42 @@ class HiSparseCoordinator:
             state.stale_pages.add(page_idx)
         for hot_manager in self.hot_managers:
             hot_manager.require_hot(request_id)
+
+    def get_num_reclaimable_blocks(self, request_id: str) -> int:
+        """Clean resident blocks a hot-first allocation can release immediately."""
+        state = self.request_states.get(request_id)
+        if state is None:
+            return 0
+        return sum(
+            block.ref_cnt == 1
+            for _, blocks in self._iter_unpinnable_pages(
+                request_id, state, state.pinned_clean
+            )
+            for block in blocks
+        )
+
+    def try_preallocate_hot(
+        self, request_id: str, shortfall: int, available: int
+    ) -> bool:
+        """Fund this allocation only if Hot fits and reclaim covers the shortfall."""
+        if not self.resident_managers:
+            return False
+        upfront = 0
+        for manager in self.hot_managers:
+            missing = manager.get_num_required_blocks(request_id)
+            upfront += missing
+            # A running request's ordinary estimate counts Hot only after it
+            # has been requested. Charge any additional Hot groups here.
+            if request_id not in manager.hot_required:
+                shortfall += missing
+        if not upfront or upfront > available:
+            return False
+        if self.get_num_reclaimable_blocks(request_id) < shortfall:
+            return False
+        for manager in self.hot_managers:
+            manager.preallocate(request_id)
+        self.update_residency(request_id)
+        return True
 
     def update_residency(self, request_id: str) -> None:
         """Per-step residency policy for a scheduled request.
@@ -1103,4 +1150,5 @@ def get_hisparse_coordinator(
     )
     if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")
+    kv_cache_manager.reclaim_blocks = coordinator.try_preallocate_hot
     return coordinator
