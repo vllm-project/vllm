@@ -88,6 +88,12 @@ pub trait ChatRenderer: Send + Sync {
     fn renders_request_chat_template(&self) -> bool {
         false
     }
+
+    /// Render an OpenAI completions `prompt` and `suffix` into the model's
+    /// fill-in-the-middle prompt text, or `None` if the model has none.
+    fn render_completion_suffix(&self, _prompt: &str, _suffix: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Shared trait-object form of [`ChatRenderer`].
