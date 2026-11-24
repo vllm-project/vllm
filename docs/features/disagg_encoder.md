@@ -118,8 +118,7 @@ The event types are `ECStored(mm_hashes, medium)`, `ECRemoved(mm_hashes,
 medium)` and `AllECCleared()`, delivered in an `ECEventBatch`. The GPUs of the
 scheduler's own encoder cache report `medium="GPU"`; a connector that offloads
 encoder outputs adds its own events through `ECConnectorBase.take_events()`.
-An empty publisher list means EC events do not need an EC connector: local GPU
-stores and evictions are still published.
+Local GPU cache events are published even when no EC connector is configured.
 
 Events are off by default and use the `null` publisher when disabled. Subscribe
 the same way as for KV events, decoding `ECEventBatch` from
