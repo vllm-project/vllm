@@ -51,6 +51,7 @@ hooks:
   - docs/mkdocs/hooks/remove_announcement.py
   - docs/mkdocs/hooks/url_schemes.py
   - docs/mkdocs/hooks/autoref_code.py
+  - docs/mkdocs/hooks/strip_nav_whitespace.py
 
 plugins:
   - meta
