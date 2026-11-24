@@ -391,7 +391,6 @@ class BenchmarkMetrics:
     median_e2el_ms: float
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
-    # Max output tokens per second and concurrent requests at that peak
     max_output_tokens_per_s: float
     max_concurrent_requests: int
     rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
@@ -744,7 +743,8 @@ def calculate_metrics(
         # Create second buckets (ceiling to ensure we capture all time)
         duration_seconds = int(np.ceil(max_end_time - min_start_time)) + 1
         tokens_per_second = np.zeros(duration_seconds)
-        concurrent_requests_per_second = np.zeros(duration_seconds)
+        active_requests_per_second = np.zeros(duration_seconds)
+        request_events: list[tuple[float, int]] = []
 
         for output in successful_outputs:
             # Calculate token generation timestamp using
@@ -761,20 +761,25 @@ def calculate_metrics(
                 if 0 <= second_bucket < duration_seconds:
                     tokens_per_second[second_bucket] += 1
 
-            # Track concurrent requests for each second this request was active
+            request_end_time = output.start_time + output.latency
+            if request_end_time <= output.start_time:
+                continue
+            request_events.append((output.start_time, 1))
+            request_events.append((request_end_time, -1))
+
+            # Count requests active during each second for the plot.
             request_start_second = int(output.start_time - min_start_time)
-            request_end_second = int(
-                (output.start_time + output.latency) - min_start_time
-            )
+            request_end_second = math.ceil(request_end_time - min_start_time)
+            for second in range(request_start_second, request_end_second):
+                active_requests_per_second[second] += 1
 
-            for second in range(request_start_second, request_end_second + 1):
-                concurrent_requests_per_second[second] += 1
+        # Sorting processes endings before starts at the same timestamp.
+        concurrent_requests = 0
+        for _, change in sorted(request_events):
+            concurrent_requests += change
+            max_concurrent_requests = max(max_concurrent_requests, concurrent_requests)
 
-        # Find the maximum tokens per second and corresponding
-        # concurrent requests
-        if len(tokens_per_second) > 0:
-            max_output_tokens_per_s = float(np.max(tokens_per_second))
-            max_concurrent_requests = int(np.max(concurrent_requests_per_second))
+        max_output_tokens_per_s = float(np.max(tokens_per_second))
 
         if TERM_PLOTLIB_AVAILABLE:
             import termplotlib as tpl
@@ -786,9 +791,9 @@ def calculate_metrics(
                 title="Output tokens per second",
             )
             fig.plot(
-                np.arange(len(concurrent_requests_per_second)),
-                concurrent_requests_per_second,
-                title="Concurrent requests per second",
+                np.arange(len(active_requests_per_second)),
+                active_requests_per_second,
+                title="Requests active per second",
             )
             fig.show()
         else:

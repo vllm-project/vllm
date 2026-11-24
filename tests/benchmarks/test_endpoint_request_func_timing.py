@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 
 import vllm.benchmarks.lib.endpoint_request_func as request_func_module
+from vllm.benchmarks.datasets import SampleRequest
 from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncInput,
     RequestFuncOutput,
@@ -31,7 +32,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     async_request_openai_chat_completions,
     async_request_openai_completions,
 )
-from vllm.benchmarks.serve import _get_server_metrics_results
+from vllm.benchmarks.serve import _get_server_metrics_results, calculate_metrics
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -332,6 +333,34 @@ def test_server_metrics_results_preserve_alignment() -> None:
         "server_ttfts": [0.0],
     }
     assert _get_server_metrics_results([RequestFuncOutput()]) == {}
+
+
+@pytest.mark.parametrize(
+    ("second_start", "expected_peak"),
+    [(0.25, 1), (0.125, 1), (0.0625, 2)],
+    ids=["disjoint", "back-to-back", "overlapping"],
+)
+def test_peak_concurrency_counts_overlapping_requests(
+    second_start: float, expected_peak: int
+) -> None:
+    outputs = [
+        RequestFuncOutput(
+            success=True, output_tokens=1, start_time=start, latency=0.125, ttft=0.125
+        )
+        for start in (10.0, 10.0 + second_start)
+    ]
+    metrics, _ = calculate_metrics(
+        input_requests=[
+            SampleRequest(prompt="hello", prompt_len=1, expected_output_len=1)
+            for _ in outputs
+        ],
+        outputs=outputs,
+        dur_s=1.0,
+        tokenizer=None,
+        selected_percentiles=[],
+        goodput_config_dict={},
+    )
+    assert metrics.max_concurrent_requests == expected_peak
 
 
 @pytest.mark.parametrize(
