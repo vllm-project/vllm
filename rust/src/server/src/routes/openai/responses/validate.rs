@@ -8,6 +8,10 @@ use crate::routes::openai::utils::validate_stop_strings;
 /// Validate Responses API protocol invariants and reject unimplemented request
 /// fields.
 ///
+/// Cross-route domain rules (sampling bounds, `max_tokens`, logprobs, token
+/// IDs, `cache_salt`, chat messages/tools) belong in `vllm-text` or
+/// `vllm-chat`, not here.
+///
 /// Store-dependent features are rejected because the Rust frontend has no
 /// response store (the Python frontend gates them behind
 /// `VLLM_ENABLE_RESPONSES_API_STORE=1`):

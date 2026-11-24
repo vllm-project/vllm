@@ -7,6 +7,10 @@ use crate::routes::openai::utils::validate_stop_strings;
 
 /// Validate OpenAI chat-completions protocol invariants and reject
 /// unimplemented request fields.
+///
+/// Cross-route domain rules (sampling bounds, `max_tokens`, logprobs, token
+/// IDs, `cache_salt`, chat messages/tools) belong in `vllm-text` or
+/// `vllm-chat`, not here.
 pub(super) fn validate_request(request: &ChatCompletionRequest) -> Result<(), ApiError> {
     if request.stream_options.as_ref().is_some_and(|options| !options.is_empty()) && !request.stream
     {

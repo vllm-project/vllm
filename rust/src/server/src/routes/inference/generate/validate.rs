@@ -6,6 +6,10 @@ use crate::error::{ApiError, bail_invalid_request};
 
 /// Validate raw token-generate protocol invariants and reject unimplemented
 /// request fields.
+///
+/// Cross-route domain rules (sampling bounds, `max_tokens`, logprobs, token
+/// IDs, `cache_salt`, prompt length/truncation) belong in `vllm-text`, not
+/// here.
 pub(crate) fn validate_request(request: &GenerateRequest) -> Result<(), ApiError> {
     if request.output_mode == Some(GenerateOutputMode::Text)
         && request.sampling_params.detokenize == Some(false)
