@@ -651,6 +651,72 @@ def test_aux_outputs_opt_out_decode_blocks_are_rowless():
     assert new_request.num_computed_tokens == 32
 
 
+def test_aux_outputs_opt_out_marks_survive_rowless_pruning():
+    scheduler = create_scheduler(enable_prefix_caching=True, max_num_batched_tokens=24)
+    # Capacity 1 prunes uncached rowless marks whenever an inline request finishes.
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector(
+        scheduler.kv_cache_manager, 1
+    )
+
+    def step(rows: dict[str, int]) -> SchedulerOutput:
+        scheduler_output = scheduler.schedule()
+        req_ids = list(scheduler_output.num_scheduled_tokens)
+        scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(
+                req_ids=req_ids,
+                sampled_token_ids=[
+                    []
+                    if scheduler.requests[req_id].num_computed_tokens
+                    < scheduler.requests[req_id].num_prompt_tokens
+                    else [0]
+                    for req_id in req_ids
+                ],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+                aux_output_connector_output={
+                    req_id: AuxRequestOutput(0, np.zeros((n, 1, 1), np.uint8))
+                    for req_id, n in rows.items()
+                },
+            ),
+        )
+        return scheduler_output
+
+    def inline(request_id: str, num_tokens: int, index: int = 0) -> Request:
+        return create_requests(
+            num_requests=index + 1,
+            num_tokens=num_tokens,
+            max_tokens=1,
+            req_ids=[f"{request_id}-{i}" for i in range(index + 1)],
+        )[index]
+
+    recorded = inline("recorded", 24)
+    scheduler.add_request(recorded)
+    step({recorded.request_id: 24})
+    assert recorded.is_finished()
+
+    # The inline request finishes while the opted-out prefill has stopped mid-block.
+    other = inline("other", 16, index=1)
+    (skipped,) = create_requests(
+        num_requests=1,
+        num_tokens=64,
+        req_ids=["skipped"],
+        sampling_params=_aux_outputs_params(False, max_tokens=1),
+    )
+    scheduler.add_request(other)
+    scheduler.add_request(skipped)
+    step({other.request_id: 16})
+    assert other.is_finished() and skipped.num_computed_tokens % 16 > 0
+    while not skipped.is_finished():
+        step({})
+
+    late = inline("late", 65)
+    scheduler.add_request(late)
+    (new_request,) = scheduler.schedule().scheduled_new_reqs
+    assert new_request.num_computed_tokens == 16
+
+
 @pytest.mark.parametrize("return_aux_outputs", [True, False])
 def test_aux_outputs_opt_out_skips_retention(return_aux_outputs):
     scheduler = create_scheduler(
