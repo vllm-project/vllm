@@ -448,6 +448,9 @@ class CudaGraphManager:
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
 
+    def planned_token_counts(self) -> set[int]:
+        return {d.num_tokens for descs in self._capture_descs.values() for d in descs}
+
     def _capture_stream(self, desc: BatchExecutionDescriptor) -> torch.cuda.Stream:
         """Capture on the stream used by the microbatch threads."""
         if desc.num_ubatches > 1:
@@ -696,10 +699,7 @@ class ModelCudaGraphManager(CudaGraphManager):
 
         # The first output stored (of the widest PIECEWISE graph) may be narrower
         # than the widest decode graph, so size the buffers for the widest.
-        max_tokens = max(
-            (d.num_tokens for descs in self._capture_descs.values() for d in descs),
-            default=0,
-        )
+        max_tokens = max(self.planned_token_counts(), default=0)
 
         def persistent_like(x: torch.Tensor) -> torch.Tensor:
             return x.new_empty((max(max_tokens, x.shape[0]), *x.shape[1:]))
