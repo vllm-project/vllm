@@ -26,7 +26,10 @@ from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
-from vllm.v1.kv_offload.tiering.manager import CPUPrimaryTierOffloadingManager
+from vllm.v1.kv_offload.tiering.manager import (
+    CPUPrimaryTierOffloadingManager,
+    TieringOffloadingManager,
+)
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 
@@ -175,12 +178,11 @@ def test_cpu_config_info_capacity_accounts_for_tensor_parallel_copies(
     assert _capacity_tokens(spec) == spec.num_chunks * tokens_per_block
 
 
-def test_cpu_config_info_capacity_dedups_a_replicated_layout(monkeypatch):
-    """A replicated layout stores one copy, so capacity does not divide by TP.
-
-    Same TP=4 sizing as the test above, which yields 3 slots; deduplicating to a
-    single copy yields 12.
-    """
+@pytest.mark.parametrize(("local_world_size", "chunks"), [(4, 6), (2, 3)])
+def test_cpu_config_info_capacity_dedups_a_replicated_layout(
+    monkeypatch, local_world_size, chunks
+):
+    """One page-aligned copy per host counts against the engine's budget."""
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
@@ -190,16 +192,19 @@ def test_cpu_config_info_capacity_dedups_a_replicated_layout(monkeypatch):
     alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     tokens_per_block = 8
     spec = _create_spec(
-        cpu_bytes_to_use=alignment * 12,
-        worker_kv_bytes_per_block=alignment,
+        cpu_bytes_to_use=alignment * 13,
+        worker_kv_bytes_per_block=alignment + 1,
         world_size=4,
+        local_world_size=local_world_size,
         replicated_layout=True,
         groups=(OffloadingGroupConfig(tokens_per_block, ("layer",), 0),),
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.num_chunks == 12
-    assert _capacity_tokens(spec) == 12 * tokens_per_block
+    assert spec.num_chunks == chunks
+    assert spec.kv_bytes_per_chunk == 2 * alignment
+    assert spec.cpu_info.cpu_kv_cache_size_bytes == 12 * alignment
+    assert _capacity_tokens(spec) == chunks * tokens_per_block
 
 
 def test_cpu_config_info_mirrors_spec_sizing():
@@ -306,7 +311,8 @@ def test_tiering_primary_tier_publishes_the_cpu_labels():
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="requires /dev/shm")
-def test_tiering_spec_passes_the_cpu_facts_to_the_primary_tier():
+@pytest.mark.parametrize("num_hosts", [1, 2])
+def test_tiering_spec_passes_the_cpu_facts_to_the_primary_tier(num_hosts: int):
     """The tiering spec must give the primary tier the facts that it publishes.
 
     The spec builds a real shared region before the primary tier, so this test
@@ -315,9 +321,14 @@ def test_tiering_spec_passes_the_cpu_facts_to_the_primary_tier():
     configuration have a default, so a dropped argument gives no type error.
     A unique engine_id keeps the region path of this test separate.
     """
+    budget = 16 * SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     spec = _create_spec(
         spec_name="TieringOffloadingSpec",
         engine_id=f"test-tiering-{uuid.uuid4().hex}",
+        cpu_bytes_to_use=budget,
+        world_size=2 * num_hosts,
+        local_world_size=2,
+        replicated_layout=num_hosts > 1,
         blocks_per_chunk=2,
         max_model_len=1024,
     )
@@ -325,12 +336,14 @@ def test_tiering_spec_passes_the_cpu_facts_to_the_primary_tier():
 
     manager = spec.get_manager()
     try:
+        assert isinstance(manager, TieringOffloadingManager)
+        assert manager.primary_tier.get_kv_memoryview().nbytes == budget // num_hosts
         (primary_info,) = manager.config_info()
         assert primary_info == {
             "tier": "0:primary",
             "cpu_num_chunks": spec.num_chunks,
             "cpu_blocks_per_chunk": 2,
-            "cpu_kv_cache_size_bytes": spec.num_chunks * spec.kv_bytes_per_chunk,
+            "cpu_kv_cache_size_bytes": budget,
             # 32 tokens for each chunk, over a request of 32 chunks.
             "cpu_kv_cache_size_tokens": spec.num_chunks * 32,
         }
@@ -374,7 +387,10 @@ def test_tiering_spec_replicated_sizing_removes_world_factor(world_size: int):
     assert spec.num_chunks == 8
 
 
-def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monkeypatch):
+@pytest.mark.parametrize(("rank", "local_world_size"), [(1, 4), (3, 2)])
+def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(
+    monkeypatch, rank: int, local_world_size: int
+):
     import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
 
     worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
@@ -382,8 +398,9 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
         spec_name="TieringOffloadingSpec",
         cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
-        rank=1,
+        rank=rank,
         world_size=4,
+        local_world_size=local_world_size,
         replicated_layout=True,
     )
     assert isinstance(spec, TieringOffloadingSpec)
@@ -408,8 +425,9 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
     spec.create_worker(kv_caches)
 
     assert region_calls[0]["rank"] == 0
-    # Workers share the slot, so each pre-faults only its share of the region.
-    assert region_calls[0]["populate_shard"] == (1, 4)
+    # On either host the second local worker populates the second shard.
+    assert region_calls[0]["populate_shard"] == (1, local_world_size)
+    assert region_calls[0]["num_chunks"] == 8 // (4 // local_world_size)
     assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
@@ -698,6 +716,7 @@ def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
     [
         (True, 1, 5, 4, 4, "test-engine", False),
         (True, 0, 0, 4, 4, "test-engine", False),
+        (True, 3, 1, 4, 2, "test-engine", False),
         (False, 1, 5, 4, 4, "test-engine_1", False),
         (False, 0, 5, 4, 4, "test-engine_0", False),
         (False, 3, 6, 4, 4, "test-engine_3", False),
@@ -759,7 +778,7 @@ def test_cpu_spec_create_worker_region_assignment(
     assert region_calls[0]["engine_id"] == expected_engine_id
     assert region_calls[0]["rank"] == 0
     assert region_calls[0]["populate_shard"] == (
-        (rank, world_size) if replicated_layout else None
+        (rank % local_world_size, local_world_size) if replicated_layout else None
     )
     assert region_calls[0]["private"] is not replicated_layout
     if replicated_layout:

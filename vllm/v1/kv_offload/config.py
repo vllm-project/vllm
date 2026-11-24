@@ -129,11 +129,9 @@ class OffloadingConfig:
     model: OffloadingModelConfig
     cache: OffloadingCacheConfig
     parallel: OffloadingParallelConfig
-    # True when the offloaded bytes of every worker are expected to be
-    # byte-identical per block (pure-MLA model, single-node TP-only
-    # parallelism), enabling a single-copy host layout in backends that
-    # support it. Aggregate layout decision; per-layer replication metadata
-    # is planned for CanonicalKVCacheRef (#48408).
+    # The selected layout can share one copy of each block per host. Native
+    # CPU-only backends can do this across hosts for fully replicated MLA KV
+    # under TP-only multiprocessing.
     replicated_layout: bool = False
     # True when the canonical per-layer host byte layout was requested via
     # kv_connector_extra_config; certified per-layer at worker registration.

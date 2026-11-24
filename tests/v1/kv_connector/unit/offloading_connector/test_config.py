@@ -311,6 +311,7 @@ def _parallelism_agnostic(
 def _replicated_layout(
     kv_cache_config: KVCacheConfig,
     *,
+    extra_config: dict[str, Any] | None = None,
     tensor_parallel_size: int = 4,
     pipeline_parallel_size: int = 1,
     prefill_context_parallel_size: int = 1,
@@ -321,6 +322,7 @@ def _replicated_layout(
     world_size: int | None = None,
 ) -> bool:
     config = _make_vllm_config(
+        extra_config=extra_config,
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         prefill_context_parallel_size=prefill_context_parallel_size,
@@ -1108,7 +1110,7 @@ def test_replicated_layout_for_dsa_style_groups(
         ({"distributed_executor_backend": "ray"}, "ray"),
         ({"distributed_executor_backend": "uni"}, "uni"),
         ({"distributed_executor_backend": type("DummyExecutor", (), {})}, "class"),
-        ({"nnodes": 2}, "multi-node"),
+        ({"nnodes": 4}, "one-rank-per-node"),
     ],
     ids=[
         "tp1",
@@ -1120,11 +1122,41 @@ def test_replicated_layout_for_dsa_style_groups(
         "ray",
         "uni",
         "class",
-        "multi-node",
+        "one-rank-per-node",
     ],
 )
 def test_replicated_layout_parallel_gate(kwargs: dict[str, Any], case: str):
     assert not _replicated_layout(_make_mla_kv_cache_config(), **kwargs), case
+
+
+@pytest.mark.parametrize(
+    ("extra_config", "expected"),
+    [
+        ({}, True),
+        ({"spec_name": "CPUOffloadingSpec"}, True),
+        ({"spec_name": "TieringOffloadingSpec", "secondary_tiers": []}, True),
+        (
+            {"spec_name": "TieringOffloadingSpec", "secondary_tiers": [{"type": "fs"}]},
+            False,
+        ),
+        ({"spec_name": "CustomSpec"}, False),
+        ({"canonical_layout": True}, False),
+    ],
+)
+def test_multi_node_replicated_layout_for_cpu_backends(
+    extra_config: dict[str, Any], expected: bool
+):
+    replicated = _replicated_layout(
+        _make_mla_kv_cache_config(), nnodes=2, extra_config=extra_config
+    )
+    assert replicated == expected
+
+
+def test_multi_node_replicated_layout_requires_identical_kv():
+    assert not _replicated_layout(_make_kv_cache_config(), nnodes=2)
+    assert not _replicated_layout(
+        _make_mla_kv_cache_config(), nnodes=2, decode_context_parallel_size=2
+    )
 
 
 _SWA_SPEC = SlidingWindowManager.layer_config(
