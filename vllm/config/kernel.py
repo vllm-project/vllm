@@ -349,7 +349,9 @@ class KernelConfig:
     - "cutlass": Use vLLM CUTLASS kernels
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
-    - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
+    - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (NVFP4, and
+      MXFP8 with `--all2all-backend deepep_low_latency` or `nixl_ep`, on
+      Blackwell; unquantized bf16/fp16 on Hopper)
     - "flashinfer_moe_ep_cutedsl": Use FlashInfer's CuTeDSL MoE-EP
       mega-kernel with NVFP4 or MXFP4 weights on Blackwell (SM100/SM103,
       where MXFP4 checkpoints are requantized to NVFP4 at load, or SM107,
