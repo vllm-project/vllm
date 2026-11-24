@@ -168,13 +168,13 @@ class NixlHandshakePayload:
     peer_lookup: bool = False     # True on an engine that serves lookups
 ```
 
-A producer sets it when `peer_lookup` is enabled (pull mode). msgspec skips unknown fields, so an older engine still decodes a newer engine's payload, and a new decoder reads an older engine's payload as `peer_lookup=False`. `NIXL_CONNECTOR_VERSION` stays 17. Both directions are covered by `test_handshake_payload_peer_lookup_is_compatible_both_ways`.
+A producer sets it only when it can actually serve: `peer_lookup` is enabled (pull mode), the bound cache manager supports prefix pinning, and block hashes are reproducible across processes. An engine that would refuse every lookup does not attract them. If the metadata is set before the cache manager is bound, it is re-encoded at bind. msgspec skips unknown fields, so an older engine still decodes a newer engine's payload, and a new decoder reads an older engine's payload as `peer_lookup=False`. `NIXL_CONNECTOR_VERSION` stays 17. Both directions are covered by `test_handshake_payload_peer_lookup_is_compatible_both_ways` in `test_nixl_peer_lookup_listener.py`.
 
 `PeerLookupClient` runs the probe on its background thread, so the scheduler never waits for it:
 
 1. The first lookup to a peer sends the probe and holds. Lookups that arrive for the same peer meanwhile wait for that probe instead of sending another.
-2. If the payload advertises `peer_lookup`, the lookup goes out as before. Otherwise the lookup fails with `peer_unsupported`, no `lookup_pin` frame is sent, and B computes the whole prompt.
-3. The verdict is cached per `(host, port)` and the peer's `engine_id`, so a restarted engine at the same address is probed again. A yes lasts 60 s, a no 30 s (so a peer that upgrades is found), and a failed probe (`timeout`, `send_failed`, `bad_reply`) 5 s.
+2. If the payload advertises `peer_lookup` and the engine id in its agent metadata is the one the router named (`remote_engine_id`), the lookup goes out as before. A different id (a peer restarted or downgraded at the same address) fails the lookup with `peer_engine_mismatch`. A payload that does not advertise it, or does not decode (logged once per peer), gives `peer_unsupported`. In each failing case no `lookup_pin` frame is sent and B computes the whole prompt.
+3. The verdict is cached per `(host, port)` and the peer's `engine_id`, so a restarted engine at the same address is probed again. A yes lasts 60 s, a no 30 s (so a peer that upgrades is found), and a failed probe or an engine mismatch 5 s.
 
 The probe has its own timeout, `min(peer_lookup_timeout, 2.0)` s, and the lookup that follows gets `peer_lookup_timeout`. The scheduler's deadline for the whole lookup covers both.
 
@@ -253,7 +253,7 @@ The last two have the same meaning as the `kv_transfer_params` fields of the sam
 | `none` | Every requested block was pinned |
 | `not_cached` | The run stops at a block A never held (or held too long ago to remember), or a pending pin's block failed to load |
 | `evicted` | The run stops at a block A evicted recently. The router's index is stale |
-| `pin_refused` | A holds it but cannot pin it now: pin budget reached, free-block floor, the fence did not pass in `peer_lookup_serve_timeout`, or A serves lookups but has no KV cache manager bound yet (startup). On a partial hit, the budget cut the run |
+| `pin_refused` | A holds it but cannot pin it now: pin budget reached, free-block floor, the fence did not pass in `peer_lookup_serve_timeout`, or, defensively, A serves lookups but has no KV cache manager bound (the scheduler binds before the listener starts, so this is not expected in production). On a partial hit, the budget cut the run |
 | `identity_mismatch` | Compatibility hash, block size or hash algorithm differ, A's hashes are not reproducible across processes, A does not serve lookups (a permanent setting, unlike the transient `pin_refused` before binding), or A's KV layout cannot be pinned |
 
 `evicted` comes from a bounded record of recently evicted hashes in `BlockPool` (`enable_evicted_hash_tracking`, `was_evicted`). It holds up to as many hashes as the pool has blocks, is cleared on a prefix-cache reset, and ignores blocks dropped because their load failed.
@@ -269,6 +269,8 @@ The last two have the same meaning as the `kv_transfer_params` fields of the sam
 | `closed` | The lookup client shut down |
 | `peer_unsupported` | The capability probe says the peer does not serve lookups (an older engine, or one started without `peer_lookup`). No `lookup_pin` frame was sent |
 | `lookup_id_mismatch` | The reply's `lookup_id` was not the one sent |
+| `peer_engine_mismatch` | The probe found another engine than `remote_engine_id` at the peer's address. No lookup was sent |
+| `probe_timeout`, `probe_send_failed`, `probe_bad_reply` | The capability probe failed. No lookup was sent |
 
 Every label above makes B compute the whole prompt. A lookup never fails the request.
 
@@ -401,10 +403,18 @@ PYTHONHASHSEED=0 vllm serve <MODEL> \
 - **No lookup metrics.** Pins only appear inside the existing NIXL transfer and lease metrics.
 - **One TCP connect per lookup** on the consumer, and one more per peer whenever its cached probe verdict expires.
 - **`NIXL_CONNECTOR_VERSION` is not bumped**, so mixed-version P/D pairs keep working. The price is that an older engine cannot say it does not understand a lookup: it dies instead. That is why a lookup is only sent after the [capability probe](#consumer-to-producer-the-capability-probe) finds `peer_lookup` set.
-- **`reset_prefix_cache` stalls while peer pins are live.** See [below](#prefix-cache-reset-and-live-pins).
+- **Live peer pins make cache resets fail**, and pause, sleep and checkpoint prepare raise. See [below](#prefix-cache-reset-and-live-pins).
 
 ## Prefix cache reset and live pins
 
-Pinned blocks are held through `block_pool.touch`, so each has `ref_cnt >= 1` and is not on the free queue. `BlockPool.reset_prefix_cache` only proceeds when every block but the null block is free (`num_gpu_blocks - get_num_free_blocks() == 1`). While any peer pin is live it logs "Failed to reset prefix cache because some blocks are not freed yet" and returns `False`, and so does `KVCacheManager.reset_prefix_cache`. The caller (for example the `/reset_prefix_cache` endpoint after an RLHF weight update) sees the failure and can retry. Pins end on their own: the peer's read-done notification releases a pin, and a pin whose peer never reads or heartbeats expires with its lease, so a retry succeeds within about `kv_lease_duration` (30 s by default) of the last pin's creation, or of its last heartbeat if the peer keeps renewing it.
+Pinned blocks are held through `block_pool.touch`, so each has `ref_cnt >= 1` and is not on the free queue. `BlockPool.reset_prefix_cache` only proceeds when every block but the null block is free, so while any peer pin is live it logs `Failed to reset prefix cache because some blocks (%d) are not freed yet` and returns `False`. What the caller sees depends on the path:
 
-`KVCacheManager.release_all_pins` exists but nothing calls it, on purpose. Releasing a pin returns its blocks to the free queue, where the next request can overwrite them. A peer that holds the pin may be in the middle of a NIXL read of those blocks, and it cannot be recalled, so it would load a mixture of old and new KV and carry on as if it were valid. A stall that clears itself within the lease is the safer failure, so there is no revocation path. Callers that need a reset to succeed immediately must stop routing lookups to the engine and wait out the lease, or accept that `release_all_pins` is only safe when no peer can still be reading (for example during a full engine shutdown).
+| Path | With a live pin |
+|---|---|
+| `POST /reset_prefix_cache` (dev mode) and `LLM.reset_prefix_cache()` with `reset_running_requests=False` (the default) | Returns `False` / `success: false`. A retry works once the pin is gone |
+| Any path through `EngineCore._reset_caches` (it passes `reset_running_requests=True`): `pause_scheduler(clear_cache=True)`, which is the default and what a weight update uses, `sleep()` at level 1 or more, `release_kv_cache_memory()`, and `LLM.reset_prefix_cache(reset_running_requests=True)` | `Scheduler.reset_prefix_cache` preempts the running requests, still cannot free the pinned blocks, and raises `RuntimeError("Failed to reset KV cache even when all the running requests are preempted ...")`. The message names live peer pins when there are any |
+| Checkpoint prepare (`_finish_pause` calls `_reset_caches`) | The `RuntimeError` goes to `_fail_checkpoint`, which leaves the engine in the FAILED checkpoint state |
+
+Pins end on their own. The peer's read-done notification releases a pin, and a pin whose peer never reads or heartbeats expires with its lease. A peer that keeps heartbeating a pin it has not read can hold it past `kv_lease_duration`, so the lease does not bound the stall. Operators who need a pause or sleep to succeed should stop routing lookups to the engine, let in-flight peer reads finish, and retry.
+
+`KVCacheManager.release_all_pins` exists but nothing calls it, on purpose. Releasing a pin returns its blocks to the free queue, where the next request can overwrite them. A peer that holds the pin may be in the middle of a NIXL read of those blocks, and it cannot be recalled, so it would load a mixture of old and new KV and carry on as if it were valid. A failed or retried reset is the safer outcome, so there is no revocation path. `release_all_pins` is only safe when no peer can still be reading, for example during a full engine shutdown.
