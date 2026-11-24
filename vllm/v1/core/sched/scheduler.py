@@ -933,6 +933,19 @@ class Scheduler(SchedulerInterface):
                         break
 
                     if self.policy == SchedulingPolicy.PRIORITY:
+                        preempted_encoder_inputs = scheduled_encoder_inputs.get(
+                            preempted_req.request_id
+                        )
+                        if (
+                            preempted_encoder_inputs
+                            and not self.is_encoder_decoder
+                            and not self.encoder_cache_manager.try_rollback_allocations(
+                                preempted_req, preempted_encoder_inputs
+                            )
+                        ):
+                            # Let the scheduled encode run if another request
+                            # in this step is relying on its output.
+                            break
                         victim_index = self.running.index(preempted_req)
                         del self.running[victim_index]
                         if victim_index < req_index:
@@ -946,13 +959,8 @@ class Scheduler(SchedulerInterface):
                             input_budget += restored + draft_slots
                             req_to_new_blocks.pop(preempted_req_id)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
-                                preempted_req_id, None
-                            )
                             if preempted_encoder_inputs:
-                                self.encoder_cache_manager.discard_store_events(
-                                    preempted_req, preempted_encoder_inputs
-                                )
+                                del scheduled_encoder_inputs[preempted_req_id]
                                 # Restore encoder compute budget if the preempted
                                 # request had encoder inputs scheduled in this step.
                                 num_embeds_to_restore = sum(

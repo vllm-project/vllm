@@ -115,21 +115,35 @@ class EncoderCacheManager:
         if self.enable_events:
             self.events.append(event)
 
-    def discard_store_events(self, request: Request, input_ids: list[int]) -> None:
-        """Discard store events for encoder inputs removed from this step."""
-        if not self.enable_events:
-            return
+    def try_rollback_allocations(self, request: Request, input_ids: list[int]) -> bool:
+        """Undo unexecuted allocations if no other request depends on them."""
+        cancelled = dict.fromkeys(request.mm_features[i].identifier for i in input_ids)
+        if any(len(self.cached[mm_hash]) > 1 for mm_hash in cancelled):
+            return False
 
-        cancelled = {(request.mm_features[i].identifier,) for i in input_ids}
-        self.events = [
-            event
-            for event in self.events
-            if not (
-                isinstance(event, ECStored)
-                and event.medium == MEDIUM_GPU
-                and tuple(event.mm_hashes) in cancelled
-            )
-        ]
+        for input_id in list(self.get_cached_input_ids(request)):
+            if request.mm_features[input_id].identifier in cancelled:
+                self.free_encoder_input(request, input_id)
+        for mm_hash in cancelled:
+            self.num_free_slots += self.freeable.pop(mm_hash)
+            del self.cached[mm_hash]
+            del self.num_embeds_by_hash[mm_hash]
+            # Also invalidate any connector state created by the allocation.
+            if mm_hash not in self.freed:
+                self.freed.append(mm_hash)
+
+        if self.enable_events:
+            cancelled_stores = {(mm_hash,) for mm_hash in cancelled}
+            self.events = [
+                event
+                for event in self.events
+                if not (
+                    isinstance(event, ECStored)
+                    and event.medium == MEDIUM_GPU
+                    and tuple(event.mm_hashes) in cancelled_stores
+                )
+            ]
+        return True
 
     def take_events(self) -> list[ECCacheEvent]:
         """Take the encoder cache events collected since the last call.
