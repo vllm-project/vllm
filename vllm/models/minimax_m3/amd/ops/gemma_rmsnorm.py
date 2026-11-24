@@ -18,6 +18,9 @@ Entry points:
   * `gemma_fused_add_rmsnorm_mxfp8_and_bf16(x, res, w, eps)`
         -> (MXFP8 values, E8M0 scales, normed, x + res): the same, plus the
            normed rows in the input dtype for consumers that cannot take MXFP8.
+  * `gemma_fused_add_rmsnorm_fp8_token(x, res, w, eps, fp8_dtype)`
+        -> (FP8 values, float32 per-token scales, x + res): the same with a
+           per-token FP8 epilogue, for a per-token FP8 linear.
 
 Both normalize over the last dim and broadcast `weight` (shape [N]) over it,
 so they serve both the full-hidden norms (input/post-attn/final) and the
@@ -83,6 +86,7 @@ def _gemma_fused_add_rmsnorm_kernel(
     eps,
     BLOCK_N: tl.constexpr,
     QUANT_MXFP8: tl.constexpr,
+    QUANT_FP8_TOKEN: tl.constexpr,
     ALSO_BF16: tl.constexpr,
     FP8_MAX: tl.constexpr,
     TINY: tl.constexpr,
@@ -137,6 +141,18 @@ def _gemma_fused_add_rmsnorm_kernel(
             sb.to(scale_ptr.dtype.element_ty),
             mask=blocks < n_cols // 32,
         )
+    elif QUANT_FP8_TOKEN:
+        # AITER's dynamic_per_token_scaled_quant on the input-dtype normed row:
+        # scale = amax * (1 / FP8_MAX), values multiplied by the reciprocal. A
+        # zero row gets scale 0 and zero values (no 0 * inf).
+        y = out.to(x_ptr.dtype.element_ty).to(tl.float32)
+        scale = tl.max(tl.abs(y), axis=0) * (1.0 / FP8_MAX)
+        q = y * (1.0 / tl.maximum(scale, TINY))
+        q = tl.minimum(tl.maximum(q, -FP8_MAX), FP8_MAX)
+        tl.store(
+            out_ptr + row * n_cols + cols, q.to(out_ptr.dtype.element_ty), mask=mask
+        )
+        tl.store(scale_ptr + row, scale)
     else:
         tl.store(
             out_ptr + row * n_cols + cols,
@@ -237,6 +253,29 @@ def gemma_fused_add_rmsnorm_mxfp8_and_bf16(
     return x_q, x_scale, normed.reshape(x.shape), res_out
 
 
+def gemma_fused_add_rmsnorm_fp8_token(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    fp8_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """`gemma_fused_add_rmsnorm` with the normed output quantized to FP8 per token.
+
+    Returns:
+        `(x_q, x_scale, residual_out)`: `x_q` `fp8_dtype` `[M, N]` and
+        `x_scale` float32 `[M, 1]` (the layout AITER's per-token quant returns),
+        with the leading dims of `x` flattened into `M`; `residual_out` has the
+        shape of `x`.
+
+    """
+    x_q, x_scale, res_out = _gemma_fused_add_rmsnorm(
+        x, residual, weight, eps, False, fp8_token_dtype=fp8_dtype
+    )
+    assert x_scale is not None
+    return x_q, x_scale, res_out
+
+
 @overload
 def _gemma_fused_add_rmsnorm(
     x: torch.Tensor,
@@ -245,6 +284,7 @@ def _gemma_fused_add_rmsnorm(
     eps: float,
     quant_mxfp8: bool,
     also_bf16: Literal[False] = False,
+    fp8_token_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]: ...
 
 
@@ -256,6 +296,7 @@ def _gemma_fused_add_rmsnorm(
     eps: float,
     quant_mxfp8: bool,
     also_bf16: Literal[True],
+    fp8_token_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor | None]: ...
 
 
@@ -266,6 +307,7 @@ def _gemma_fused_add_rmsnorm(
     eps: float,
     quant_mxfp8: bool,
     also_bf16: bool = False,
+    fp8_token_dtype: torch.dtype | None = None,
 ) -> (
     tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]
     | tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor | None]
@@ -275,15 +317,15 @@ def _gemma_fused_add_rmsnorm(
     x2 = x.reshape(-1, n)
     r2 = residual.reshape(-1, n)
     m = x2.shape[0]
-    out_dtype = MXFP8_VALUE_DTYPE if quant_mxfp8 else x.dtype
+    out_dtype = MXFP8_VALUE_DTYPE if quant_mxfp8 else (fp8_token_dtype or x.dtype)
     out = torch.empty((m, n), dtype=out_dtype, device=x.device)
-    scale = (
-        torch.empty(
+    scale = None
+    if quant_mxfp8:
+        scale = torch.empty(
             (m, n // MXFP8_BLOCK_SIZE), dtype=MXFP8_SCALE_DTYPE, device=x.device
         )
-        if quant_mxfp8
-        else None
-    )
+    elif fp8_token_dtype is not None:
+        scale = torch.empty((m, 1), dtype=torch.float32, device=x.device)
     res_out = torch.empty((m, n), dtype=x.dtype, device=x.device)
     normed = torch.empty((m, n), dtype=x.dtype, device=x.device) if also_bf16 else None
     block_n = triton.next_power_of_2(n)
@@ -303,8 +345,9 @@ def _gemma_fused_add_rmsnorm(
         eps,
         BLOCK_N=block_n,
         QUANT_MXFP8=quant_mxfp8,
+        QUANT_FP8_TOKEN=fp8_token_dtype is not None,
         ALSO_BF16=also_bf16,
-        FP8_MAX=float(torch.finfo(MXFP8_VALUE_DTYPE).max),
+        FP8_MAX=float(torch.finfo(fp8_token_dtype or MXFP8_VALUE_DTYPE).max),
         TINY=float(torch.finfo(torch.float32).tiny),
         num_warps=_num_warps(block_n),
     )
