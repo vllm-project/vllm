@@ -490,10 +490,10 @@ def test_recoverssm_keeps_mixed_graphs_past_the_decode_token_cap(monkeypatch):
     assert mixed_sizes(True) == mixed_sizes(False)
 
 
-def test_gdn_recoverssm_caps_mixed_graphs_at_the_decode_token_cap(monkeypatch):
-    """GDN RecoverSSM's builder sends every active decode row to the spec path,
-    whatever its width, so mixed graphs stop at max_num_seqs * (num_spec + 1)
-    tokens."""
+def test_gdn_recoverssm_keeps_mixed_graphs_past_the_decode_token_cap(monkeypatch):
+    """GDN RecoverSSM caps its decode rows at the spec window, so the wide dummy
+    rows of a mixed capture take the prefill path, and the mixed graphs above
+    max_num_seqs * (num_spec + 1) tokens are kept."""
 
     def mixed_sizes(use_gdn_recoverssm: bool) -> list[int]:
         manager = _make_spec_decode_manager(
@@ -503,11 +503,8 @@ def test_gdn_recoverssm_caps_mixed_graphs_at_the_decode_token_cap(monkeypatch):
             d.num_tokens for d in manager._capture_descs[CUDAGraphMode.PIECEWISE]
         )
 
-    assert max(mixed_sizes(False)) > 2 * _DECODE_QUERY_LEN
-    assert max(mixed_sizes(True)) <= 2 * _DECODE_QUERY_LEN
-    assert mixed_sizes(True) == [
-        n for n in mixed_sizes(False) if n <= 2 * _DECODE_QUERY_LEN
-    ]
+    assert max(mixed_sizes(True)) > 2 * _DECODE_QUERY_LEN
+    assert mixed_sizes(True) == mixed_sizes(False)
 
 
 def test_varlen_decode_graphs_take_the_decode_cap_as_a_token_budget(monkeypatch):
