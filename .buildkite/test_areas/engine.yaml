@@ -178,6 +178,8 @@ steps:
     h100:
       num_devices: 1
       timeout_in_minutes: 90
+      source_file_dependencies:
+        - tests/kernels/mamba/test_ssu_dispatch.py
       commands:
         - >-
           VLLM_TEST_REQUIRE_REPLAYSSM=1 VLLM_TEST_REPLAYSSM_NUM_GPUS=1
@@ -196,7 +198,6 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
     - tests/v1/e2e/test_replayssm_decode.py
-    - tests/kernels/mamba/test_ssu_dispatch.py
     - vllm/v1/core/sched/scheduler.py
     - vllm/v1/worker/utils.py
     - vllm/v1/kv_cache_interface.py

@@ -72,6 +72,9 @@ steps:
     h100:
       num_devices: 2
       timeout_in_minutes: 20
+      source_file_dependencies:
+        - csrc/minimax_reduce_rms_kernel.cu
+        - csrc/minimax_reduce_rms_kernel.h
       commands:
         - pytest -v -s kernels/core/test_minimax_reduce_rms.py
     mi355_2:
@@ -89,8 +92,6 @@ steps:
         - pytest -v -s kernels/core/test_minimax_reduce_rms.py kernels/core/test_fused_allreduce_gemma_rms_norm.py
   automatic_shard: true
   source_file_dependencies:
-    - csrc/minimax_reduce_rms_kernel.cu
-    - csrc/minimax_reduce_rms_kernel.h
     - csrc/ops.h
     - csrc/torch_bindings.cpp
     - vllm/model_executor/layers/minimax_rms_norm/
@@ -102,6 +103,11 @@ steps:
   devices:
     h100:
       timeout_in_minutes: 30
+      source_file_dependencies:
+        - vllm/models/deepseek_v41/nvidia/ops/candidate_indexer.py
+        - vllm/models/deepseek_v41/nvidia/ops/candidate_paged_logits.py
+        - tests/model_executor/layers/test_mla_short_prefill_indexer.py
+        - tests/models/deepseek_v41/nvidia/test_candidate_indexer.py
       commands:
         - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
         - pytest -v -s kernels/test_top_k_per_row.py
@@ -132,22 +138,21 @@ steps:
     - vllm/models/deepseek_v4/common/ops/
     - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
     - tests/kernels/test_top_k_per_row.py # it runs on Blackwell too - some kernels have arch-specific optimizations
-    - vllm/models/deepseek_v41/nvidia/ops/candidate_indexer.py
-    - vllm/models/deepseek_v41/nvidia/ops/candidate_paged_logits.py
     - vllm/models/deepseek_v41/attention.py
     - vllm/model_executor/models/config.py
     - vllm/config/attention.py
     - vllm/model_executor/layers/sparse_attn_indexer.py
     - vllm/model_executor/kernels/attention/dsa/sparse_mqa_logits.py
     - vllm/v1/attention/backends/mla/indexer.py
-    - tests/model_executor/layers/test_mla_short_prefill_indexer.py
-    - tests/models/deepseek_v41/nvidia/test_candidate_indexer.py
 
 - label: BF16x3 Router GEMM Kernels
   key: kernels-bf16x3-router-gemm-h100
   devices:
     h100:
       timeout_in_minutes: 20
+      source_file_dependencies:
+        - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm90.py
+        - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
       commands:
         - pytest -v -s kernels/test_bf16x3_router_gemm_cutedsl.py
     mi355_1:
@@ -161,9 +166,7 @@ steps:
         - pytest -v -s kernels/test_bf16x3_router_gemm_rocm.py
   automatic_shard: true
   source_file_dependencies:
-    - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm90.py
     - vllm/model_executor/layers/fused_moe/router/gate_linear.py
-    - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
 
 - label: FlashInfer CuTe-DSL SM90 MoE
   key: kernels-flashinfer-cutedsl-sm90-moe-h100
@@ -184,6 +187,13 @@ steps:
   devices:
     b200-k8s:
       timeout_in_minutes: 20
+      source_file_dependencies:
+        - vllm/models/deepseek_v4/nvidia/
+        - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
+        - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+        - tests/kernels/moe/test_deep_gemm_mega_moe.py
+        - tests/models/test_deepseek_v4_mega_moe.py
+        - tests/model_executor/layers/test_mla_short_prefill_indexer.py
       commands:
         - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
         - pytest -v -s kernels/moe/test_deep_gemm_mega_moe.py
@@ -217,16 +227,10 @@ steps:
   source_file_dependencies:
     - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
     - vllm/models/deepseek_v4/common/ops/
-    - vllm/models/deepseek_v4/nvidia/
-    - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
     - vllm/model_executor/layers/fused_moe/prepare_megamoe.py
     - vllm/utils/deep_gemm.py
-    - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
-    - tests/kernels/moe/test_deep_gemm_mega_moe.py
-    - tests/models/test_deepseek_v4_mega_moe.py
     - vllm/model_executor/kernels/attention/dsa/
     - vllm/model_executor/layers/sparse_mqa_indexer.py
-    - tests/model_executor/layers/test_mla_short_prefill_indexer.py
 
 # Own job so mHC never shares a process with FlashInfer's import-time
 # ptxas override.
@@ -237,8 +241,6 @@ steps:
       timeout_in_minutes: 25
     mi355_1:
       timeout_in_minutes: 50
-      source_file_dependencies:
-        - vllm/platforms/rocm.py
   automatic_shard: true
   source_file_dependencies:
     - csrc/
@@ -255,8 +257,6 @@ steps:
       timeout_in_minutes: 25
     mi355_1:
       timeout_in_minutes: 50
-      source_file_dependencies:
-        - vllm/platforms/rocm.py
   automatic_shard: true
   source_file_dependencies:
     - csrc/
@@ -285,6 +285,8 @@ steps:
   devices:
     b200-k8s:
       timeout_in_minutes: 20
+      source_file_dependencies:
+        - vllm/cute_utils/
     mi355_1:
       timeout_in_minutes: 20
       source_file_dependencies:
@@ -294,7 +296,6 @@ steps:
   automatic_shard: true
   source_file_dependencies:
     - vllm/models/minimax_m3/
-    - vllm/cute_utils/
     - vllm/utils/flashinfer.py
     - tests/models/minimax_m3/
   commands:
@@ -318,8 +319,6 @@ steps:
     mi355_1:
       timeout_in_minutes: 55
       working_dir: "/vllm-workspace/tests"
-      source_file_dependencies:
-        - vllm/platforms/rocm.py
       # Keep the ROCm exclusions from #50519: incompatible FlyDSL TurboQuant
       # and a CUDA source check whose files are absent from the AMD test image.
       commands:
@@ -376,6 +375,8 @@ steps:
     h100:
       num_devices: 1
       timeout_in_minutes: 20
+      source_file_dependencies:
+        - vllm/v1/attention/backends/flash_attn_diffkv.py
     mi355_dpx:
       timeout_in_minutes: 35
       working_dir: /vllm-workspace/tests
@@ -386,7 +387,6 @@ steps:
   source_file_dependencies:
     - vllm/v1/attention/ops/triton_unified_attention_diffkv.py
     - vllm/v1/attention/backends/triton_attn_diffkv.py
-    - vllm/v1/attention/backends/flash_attn_diffkv.py
     - tests/kernels/attention/test_triton_unified_attention_diffkv.py
   commands:
     - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
@@ -397,6 +397,15 @@ steps:
     h100:
       num_devices: 1
       timeout_in_minutes: 25
+      source_file_dependencies:
+        - cmake/external_projects/flashmla.cmake
+        - vllm/v1/attention/backends/mla/flashmla.py
+        - vllm/v1/attention/backends/mla/flashmla_sparse.py
+        - vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm90.py
+        - tests/kernels/attention/test_flashinfer_mla_decode.py
+        - tests/kernels/attention/test_flashmla.py
+        - tests/kernels/attention/test_flashmla_sparse.py
+        - tests/kernels/attention/test_mla_cross_layer_kernel_equivalence.py
       commands:
         - pytest -v -s kernels/attention/test_flashmla.py
         - pytest -v -s kernels/attention/test_flashmla_sparse.py
@@ -447,16 +456,8 @@ steps:
         - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_sparse_index_remap.py
   automatic_shard: true
   source_file_dependencies:
-    - cmake/external_projects/flashmla.cmake
     - vllm/v1/attention/ops/flashmla.py
-    - vllm/v1/attention/backends/mla/flashmla.py
-    - vllm/v1/attention/backends/mla/flashmla_sparse.py
-    - vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm90.py
     - vllm/utils/flashinfer.py
-    - tests/kernels/attention/test_flashinfer_mla_decode.py
-    - tests/kernels/attention/test_flashmla.py
-    - tests/kernels/attention/test_flashmla_sparse.py
-    - tests/kernels/attention/test_mla_cross_layer_kernel_equivalence.py
 
 - label: Quantization Kernels
   key: kernels-quantization-test
@@ -464,6 +465,8 @@ steps:
     l4:
       num_devices: 1
       timeout_in_minutes: 30
+      source_file_dependencies:
+        - tests/models/quantization/test_mxfp8.py
       commands:
         # test_cutlass_scaled_mm.py and test_fp8_quant.py each run in their own
         # pytest: test_fp8_quant.py ran 2.4x slower after test_cutlass_scaled_mm.py
@@ -476,7 +479,6 @@ steps:
       timeout_in_minutes: 120
       source_file_dependencies:
         - vllm/config/
-        - tests/kernels/quantization/test_rocm_skinny_gemms.py
         - vllm/_aiter_ops.py
         - vllm/kernels/aiter_ops.py
         - vllm/platforms/rocm.py
@@ -495,7 +497,6 @@ steps:
     - vllm/model_executor/layers/quantization
     - vllm/model_executor/kernels/linear/
     - tests/kernels/quantization
-    - tests/models/quantization/test_mxfp8.py
 
 - label: MoE Kernels
   key: kernels-moe-test
@@ -503,6 +504,8 @@ steps:
     l4:
       num_devices: 1
       timeout_in_minutes: 50
+      source_file_dependencies:
+        - csrc/quantization/w8a8/cutlass/moe/
     mi300_1:
       timeout_in_minutes: 55
       source_file_dependencies:
@@ -517,7 +520,6 @@ steps:
     - csrc/ops.h
     - csrc/torch_bindings.cpp
     - csrc/quantization/activation_kernels.cu
-    - csrc/quantization/w8a8/cutlass/moe/
     - csrc/moe/
     - tests/kernels/moe
     - tests/single_rank_group.py
@@ -562,6 +564,17 @@ steps:
     h100:
       num_devices: 1
       timeout_in_minutes: 35
+      source_file_dependencies:
+        - cmake/external_projects/deepgemm.cmake
+        - tools/build_deepgemm_C.py
+        - tools/setup_deepgemm_pythons.sh
+        - tools/check_wheel_deepgemm.py
+        - tests/kernels/moe/test_deepgemm.py
+        - tests/kernels/moe/test_batched_deepgemm.py
+        - tests/kernels/attention/test_deepgemm_attention.py
+        - tests/quantization/test_cutlass_w4a16.py
+        - tests/model_executor/test_deep_gemm_warmup.py
+        - tests/kernels/moe/test_deep_gemm_mega_moe.py
       commands:
         - python3 ../tools/check_wheel_deepgemm.py
         - pytest -v -s kernels/quantization/test_block_fp8.py
@@ -606,21 +619,11 @@ steps:
     - csrc/ops.h
     - csrc/torch_bindings.cpp
     - csrc/quantization/activation_kernels.cu
-    - cmake/external_projects/deepgemm.cmake
-    - tools/build_deepgemm_C.py
-    - tools/setup_deepgemm_pythons.sh
-    - tools/check_wheel_deepgemm.py
     - vllm/utils/deep_gemm.py
     - vllm/model_executor/layers/fused_moe
     - vllm/model_executor/layers/quantization
     - vllm/model_executor/warmup/deep_gemm_warmup.py
     - tests/kernels/quantization/test_block_fp8.py
-    - tests/kernels/moe/test_deepgemm.py
-    - tests/kernels/moe/test_batched_deepgemm.py
-    - tests/kernels/attention/test_deepgemm_attention.py
-    - tests/quantization/test_cutlass_w4a16.py
-    - tests/model_executor/test_deep_gemm_warmup.py
-    - tests/kernels/moe/test_deep_gemm_mega_moe.py
 
 - label: MiniMax-M3 Attention Kernels
   key: kernels-minimax-m3-attention-b200
@@ -676,6 +679,40 @@ steps:
       # optional: true
       timeout_in_minutes: 30
       working_dir: "/vllm-workspace/"
+      source_file_dependencies:
+        - csrc/quantization/fp4/
+        - csrc/nvfp4_kv_cache_kernels.cu
+        - csrc/quantization/w8a8/cutlass/
+        - csrc/attention/mla/
+        - csrc/quantization/w8a8/cutlass/moe/
+        - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutedsl_batched_moe.py
+        - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
+        - vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py
+        - vllm/v1/attention/backends/flashinfer.py
+        - vllm/v1/attention/backends/mla/cutlass_mla.py
+        - vllm/v1/attention/backends/mla/flashinfer_mla.py
+        - vllm/platforms/cuda.py
+        - vllm/cute_utils/
+        - vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl/
+        - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm100.py
+        - cmake/external_projects/fmha_sm100.cmake
+        - vllm/models/minimax_m3/nvidia/
+        - tests/kernels/attention/test_flashinfer_mla_decode.py
+        - tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
+        - tests/kernels/attention/test_cache.py
+        - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
+        - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
+        - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
+        - tests/kernels/test_top_k_per_row.py
+        - csrc/attention/dsa/fused_mqa_topk/
+        - tests/kernels/attention/test_fused_mqa_topk.py
+        - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
+        - tests/kernels/quantization/test_block_fp8.py
+        - tests/kernels/quantization/test_flashinfer_mxfp8_unaligned_n.py
+        - tests/kernels/quantization/test_flashinfer_mxfp8_trtllm.py
+        - tests/kernels/moe/test_cutedsl_moe.py
+        - tests/models/quantization/test_nvfp4.py
+        - tests/kernels/moe/test_muse_spark_trtllm_moe.py
       commands:
         - nvidia-smi
         - python3 examples/basic/offline_inference/chat.py
@@ -730,66 +767,43 @@ steps:
         - pytest -v -s kernels/quantization/test_nvfp4_emulation.py -k test_nvfp4_dense_emulation
   automatic_shard: true
   source_file_dependencies:
-    - csrc/quantization/fp4/
-    - csrc/nvfp4_kv_cache_kernels.cu
-    - csrc/quantization/w8a8/cutlass/
-    - csrc/attention/mla/
-    - csrc/quantization/w8a8/cutlass/moe/
     - vllm/model_executor/layers/fusion/
     - vllm/model_executor/kernels/linear/nvfp4/
     - vllm/model_executor/kernels/linear/mxfp8/flashinfer.py
     - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
-    - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutedsl_batched_moe.py
-    - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
-    - vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py
     - vllm/model_executor/layers/fused_moe/oracle/nvfp4.py
     - vllm/model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_one_sided.py
     - vllm/model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_two_sided.py
     - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
-    - vllm/v1/attention/backends/flashinfer.py
-    - vllm/v1/attention/backends/mla/cutlass_mla.py
-    - vllm/v1/attention/backends/mla/flashinfer_mla.py
     - vllm/v1/attention/selector.py
-    - vllm/platforms/cuda.py
-    - vllm/cute_utils/
-    - vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl/
-    - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm100.py
-    - cmake/external_projects/fmha_sm100.cmake
     - vllm/models/minimax_m3/common/sparse_attention.py
-    - vllm/models/minimax_m3/nvidia/
     - vllm/config/attention.py
     - vllm/v1/attention/backends/registry.py
     - vllm/_custom_ops.py
     - csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu
     - csrc/ops.h
     - csrc/torch_bindings.cpp
-    - tests/kernels/attention/test_flashinfer_mla_decode.py
-    - tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
-    - tests/kernels/attention/test_cache.py
     - tests/kernels/quantization/nvfp4_utils.py
-    - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
-    - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
-    - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
-    - tests/kernels/test_top_k_per_row.py
-    - csrc/attention/dsa/fused_mqa_topk/
-    - tests/kernels/attention/test_fused_mqa_topk.py
-    - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
-    - tests/kernels/quantization/test_block_fp8.py
-    - tests/kernels/quantization/test_flashinfer_mxfp8_unaligned_n.py
-    - tests/kernels/quantization/test_flashinfer_mxfp8_trtllm.py
-    - tests/kernels/moe/test_cutedsl_moe.py
-    - tests/models/quantization/test_nvfp4.py
     - vllm/model_executor/kernels/linear/nvfp4/
     - vllm/model_executor/layers/quantization/compressed_tensors/transform/
     - vllm/models/muse_spark/nvidia/muse_moe_runner.py
     - tests/kernels/moe/muse_spark_utils.py
-    - tests/kernels/moe/test_muse_spark_trtllm_moe.py
 
 - label: Gate Linear CuTeDSL Kernels
   key: kernels-gate-linear-cutedsl-b200
   devices:
     b200-k8s:
       timeout_in_minutes: 15
+      source_file_dependencies:
+        - vllm/platforms/cuda.py
+        - vllm/model_executor/kernels/linear/cute_dsl/_ll_router_common.py
+        - vllm/model_executor/kernels/linear/cute_dsl/ll_bf16.py
+        - vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_dotprod.py
+        - vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_splitk.py
+        - tests/kernels/test_ll_bf16_gemm.py
+        - vllm/model_executor/kernels/linear/cute_dsl/ll_fp32w.py
+        - vllm/model_executor/kernels/linear/cute_dsl/_ll_fp32w_dotprod.py
+        - tests/kernels/test_ll_fp32w_gemm.py
       commands:
         - nvidia-smi
         - pytest -v -s tests/kernels/test_ll_bf16_gemm.py
@@ -812,16 +826,7 @@ steps:
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
     - vllm/cute_utils/
-    - vllm/platforms/cuda.py
     - vllm/model_executor/layers/fused_moe/router/gate_linear.py
-    - vllm/model_executor/kernels/linear/cute_dsl/_ll_router_common.py
-    - vllm/model_executor/kernels/linear/cute_dsl/ll_bf16.py
-    - vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_dotprod.py
-    - vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_splitk.py
-    - tests/kernels/test_ll_bf16_gemm.py
-    - vllm/model_executor/kernels/linear/cute_dsl/ll_fp32w.py
-    - vllm/model_executor/kernels/linear/cute_dsl/_ll_fp32w_dotprod.py
-    - tests/kernels/test_ll_fp32w_gemm.py
 
 # Disabled until b12x transitive dependencies are locked.
 # - label: b12x Linear Kernels
@@ -963,6 +968,8 @@ steps:
     h100:
       num_devices: 2
       timeout_in_minutes: 30
+      source_file_dependencies:
+        - csrc/quantization/w8a8/cutlass/moe/
       commands:
         - pytest -v -s kernels/moe/test_moe_layer.py
     mi355_2:
@@ -984,7 +991,6 @@ steps:
         - pytest -v -s kernels/moe/test_moe_layer.py -k "not test_moe_layer_mori_graph"
   automatic_shard: true
   source_file_dependencies:
-    - csrc/quantization/w8a8/cutlass/moe/
     - csrc/moe/
     - tests/kernels/moe
     - vllm/model_executor/layers/fused_moe/
@@ -998,6 +1004,8 @@ steps:
     b200-k8s:
       num_devices: 2
       timeout_in_minutes: 45
+      source_file_dependencies:
+        - csrc/quantization/w8a8/cutlass/moe/
       commands:
         - pytest -v -s kernels/moe/test_moe_layer.py
         - pytest -v -s kernels/moe/test_deepep_v2_moe.py
@@ -1007,9 +1015,6 @@ steps:
       timeout_in_minutes: 20
       working_dir: "/vllm-workspace/tests"
       source_file_dependencies:
-        - tests/kernels/moe/test_mori_moe.py
-        - tests/kernels/moe/utils.py
-        - tests/kernels/moe/modular_kernel_tools/parallel_utils.py
         - tests/kernels/utils.py
         - tests/utils.py
         - tests/conftest.py
@@ -1028,7 +1033,6 @@ steps:
         - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 pytest -v -s kernels/moe/test_mori_moe.py
   automatic_shard: true
   source_file_dependencies:
-    - csrc/quantization/w8a8/cutlass/moe/
     - csrc/moe/
     - tests/kernels/moe
     - vllm/model_executor/layers/fused_moe/

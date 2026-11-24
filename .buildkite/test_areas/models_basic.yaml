@@ -55,6 +55,9 @@ steps:
   devices:
     h200_35gb:
       timeout_in_minutes: 38
+      source_file_dependencies:
+        - tests/models/test_deepseek_v41_pipeline.py
+        - tests/models/deepseek_v41/nvidia/test_fused_markov.py
       commands:
         - >-
           pytest -v -s
@@ -82,13 +85,7 @@ steps:
     mi355_1:
       timeout_in_minutes: 65
       source_file_dependencies:
-        - vllm/models/deepseek_v4/
-        - vllm/models/deepseek_v41/
         - tests/models/test_hyv4_rocm.py
-        - vllm/models/hy_v4/
-        - vllm/models/hy_v4_flash/
-        - vllm/v1/worker/gpu/spec_decode/dfly/
-        - vllm/config/
         - tests/models/test_deepseek_v41_amd_replay_forward.py
         - tests/models/test_deepseek_v4_dspark_rocm.py
         - tests/models/test_deepseek_dspark_packed_mapping.py
@@ -99,16 +96,10 @@ steps:
         - tests/models/test_utils.py
         - tests/models/hy_v4/test_triton_ihc.py
         - tests/models/hy_v4/test_rocm_aiter_mla_sparse.py
-        - vllm/models/hy_v4_flash/
         - tests/models/hy_v4_flash/
-        - vllm/model_executor/layers/fused_moe/experts/rocm_aiter_moe.py
-        - vllm/_aiter_ops.py
         - tests/kernels/test_hy_v4_flash_kernels.py
         - tests/models/hy_v4/test_flash_decode_bench_config.py
         - tests/models/hy_v4/test_flash_dp_config.py
-        - vllm/models/muse_spark/
-        - vllm/v1/worker/gpu/spec_decode/dspark/
-        - vllm/v1/worker/gpu/sample/gumbel.py
       commands:
         - >-
           pytest -v -s
@@ -158,8 +149,6 @@ steps:
     - tests/models/test_deepseek_v41_decoder_replay_layers.py
     - tests/models/test_deepseek_v41_replay_batch.py
     - tests/models/test_deepseek_v41_pcp.py
-    - tests/models/test_deepseek_v41_pipeline.py
-    - tests/models/deepseek_v41/nvidia/test_fused_markov.py
     - tests/models/transformers/test_layer_registry_e2e.py
     - tests/models/test_deepseek_v41_replay_start.py
     - tests/models/test_muse_spark_rocm_loading.py
@@ -177,6 +166,10 @@ steps:
   devices:
     b200-k8s:
       timeout_in_minutes: 40
+      source_file_dependencies:
+        - vllm/cute_utils/
+        - cmake/external_projects/tml_fa4.cmake
+        - tests/models/inkling2/
       commands:
         # FA4 kernel tests require SM100; the suite skips them elsewhere.
         - >-
@@ -195,10 +188,7 @@ steps:
   source_file_dependencies:
     - vllm/models/inkling/
     - vllm/models/inkling2/
-    - vllm/cute_utils/
-    - cmake/external_projects/tml_fa4.cmake
     - tests/models/inkling/
-    - tests/models/inkling2/
 
 - label: Inkling 2 SM12
   key: inkling2-sm12-tests
@@ -238,6 +228,8 @@ steps:
   devices:
     b200-k8s:
       timeout_in_minutes: 40
+      source_file_dependencies:
+        - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
       commands:
         # The native NVIDIA Kimi K3 kernels require the SM100 family.
         # amd_specialized_decode/ is gated on gfx950, so on B200 only its CPU-side
@@ -273,7 +265,6 @@ steps:
     - vllm/model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py
     - csrc/kimi_k3/
     - tests/models/kimi_k3/
-    - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
 
 - label: Kimi K3 Prefix Cache
   key: kimi-k3-prefix-cache-4xb200
@@ -400,6 +391,18 @@ steps:
   devices:
     b200-k8s:
       timeout_in_minutes: 20
+      source_file_dependencies:
+        - csrc/qwen4_exp/
+        - vllm/models/qwen4_exp/nvidia/hyperconnection.py
+        - vllm/models/qwen4_exp/nvidia/mega_moe.py
+        - vllm/models/qwen4_exp/nvidia/ops/hc.py
+        - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
+        - vllm/models/qwen4_exp/nvidia/ops/qsa.py
+        - vllm/models/qwen4_exp/nvidia/ops/qsa_fp8.py
+        - vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py
+        - tests/models/qwen4_exp/test_hc_ops.py
+        - tests/models/qwen4_exp/test_mega_moe.py
+        - tests/models/qwen4_exp/test_qsa_reference.py
       commands:
         - pytest -v -s models/qwen4_exp/test_hc_ops.py
         - pytest -v -s models/qwen4_exp/test_mega_moe.py
@@ -415,18 +418,6 @@ steps:
       commands:
         - pytest -v -s models/qwen4_exp/test_hc_ops_amd.py
   automatic_shard: true
-  source_file_dependencies:
-    - csrc/qwen4_exp/
-    - vllm/models/qwen4_exp/nvidia/hyperconnection.py
-    - vllm/models/qwen4_exp/nvidia/mega_moe.py
-    - vllm/models/qwen4_exp/nvidia/ops/hc.py
-    - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
-    - vllm/models/qwen4_exp/nvidia/ops/qsa.py
-    - vllm/models/qwen4_exp/nvidia/ops/qsa_fp8.py
-    - vllm/models/qwen4_exp/nvidia/ops/qsa_indexer.py
-    - tests/models/qwen4_exp/test_hc_ops.py
-    - tests/models/qwen4_exp/test_mega_moe.py
-    - tests/models/qwen4_exp/test_qsa_reference.py
 
 - label: Qwen4 Exp
   key: qwen4-exp-unit-tests-mi300

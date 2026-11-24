@@ -9,6 +9,8 @@ steps:
       optional: true
       num_devices: 4
       timeout_in_minutes: 35
+      source_file_dependencies:
+        - tests/v1/distributed/test_external_lb_dp.py
       commands:
         # Fail fast if nixl is missing; has_nixl_ep() would silently skip the tests.
         - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
@@ -28,7 +30,6 @@ steps:
         - vllm/distributed/
         - vllm/config/
         - vllm/forward_context.py
-        - vllm/v1/worker/workspace.py
         - vllm/utils/import_utils.py
         - vllm/utils/math_utils.py
         - vllm/utils/torch_utils.py
@@ -54,4 +55,3 @@ steps:
     - vllm/v1/executor/
     - vllm/v1/worker/
     - tests/v1/fault_tolerance/
-    - tests/v1/distributed/test_external_lb_dp.py

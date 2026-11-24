@@ -61,6 +61,8 @@ steps:
         - pytest -v -s models/multimodal/generation/test_unlimited_ocr.py -m core_model
     mi355_dpx:
       timeout_in_minutes: 30
+      source_file_dependencies:
+        - tests/models/multimodal/processing/test_unlimited_ocr.py
       commands:
         - >-
           pytest -v -s models/multimodal/generation/test_unlimited_ocr.py
@@ -72,7 +74,6 @@ steps:
     - vllm/
     - examples/generate/multimodal/vision_language_multi_image_offline.py
     - tests/models/multimodal/generation/test_unlimited_ocr.py
-    - tests/models/multimodal/processing/test_unlimited_ocr.py
 
 - label: 'Multimodal Models (Standard) 4: other + whisper'
   key: multi-modal-models-standard-4-other-whisper

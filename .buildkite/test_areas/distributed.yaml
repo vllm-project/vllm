@@ -108,6 +108,8 @@ steps:
     l4:
       num_devices: 2
       timeout_in_minutes: 65
+      source_file_dependencies:
+        - tests/compile/test_aot_compile.py
       commands:
         # https://github.com/NVIDIA/nccl/issues/1838
         - export NCCL_CUMEM_HOST_ENABLE=0
@@ -135,7 +137,6 @@ steps:
     - vllm/v1/engine/
     - vllm/v1/worker/
     - tests/compile/test_wrapper.py
-    - tests/compile/test_aot_compile.py
     - tests/entrypoints/llm/test_collective_rpc.py
 
 - label: Distributed Torchrun + Shutdown
@@ -286,6 +287,8 @@ steps:
       optional: true
       num_devices: 4
       timeout_in_minutes: 70
+      source_file_dependencies:
+        - tests/distributed/test_pp_transport.py
       commands:
         # https://github.com/NVIDIA/nccl/issues/1838
         - export NCCL_CUMEM_HOST_ENABLE=0
@@ -314,7 +317,6 @@ steps:
     - tests/distributed/test_events
     - tests/distributed/test_symm_mem_allreduce.py
     - tests/distributed/test_multiproc_executor.py
-    - tests/distributed/test_pp_transport.py
 
 - label: Distributed DP + EP
   key: distributed-tests-8xh100
@@ -324,6 +326,8 @@ steps:
       num_devices: 8
       timeout_in_minutes: 20
 
+      source_file_dependencies:
+        - tests/distributed/test_eplb_execute.py
       commands:
         # https://github.com/NVIDIA/nccl/issues/1838
         - export NCCL_CUMEM_HOST_ENABLE=0
@@ -355,7 +359,6 @@ steps:
     - vllm/v1/executor/uniproc_executor.py
     - vllm/v1/worker/gpu_worker.py
     - tests/distributed/test_mnnvl_alltoall.py
-    - tests/distributed/test_eplb_execute.py
 
 # Key kept from the former A100 step's mirror for job history and retries.
 - label: Distributed
@@ -560,6 +563,9 @@ steps:
     b200-k8s:
       num_devices: 2
       timeout_in_minutes: 20
+      source_file_dependencies:
+        - vllm/model_executor/kernels/linear/cute_dsl/gemm_rs_ar.py
+        - vllm/cute_utils/
       commands:
         - pytest -v -s tests/kernels/test_gemm_rs_ar.py
     mi355_4:
@@ -590,8 +596,6 @@ steps:
   automatic_shard: true
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-    - vllm/model_executor/kernels/linear/cute_dsl/gemm_rs_ar.py
-    - vllm/cute_utils/
     - tests/kernels/test_gemm_rs_ar.py
 
 - label: ":nvidia: (L4) [Nightly] Distributed 2-Node"

@@ -9,6 +9,8 @@ steps:
       # Re-enabled with no timings on main, so the runtime sharder keeps it in one
       # job (about 100 min) until main has timed it; then it splits under 20 min.
       timeout_in_minutes: 120
+      source_file_dependencies:
+        - requirements/test/quantization_deps_cuda.txt
       commands:
         # torchao and conch are installed off the default path, so only this step sees
         # them (see requirements/test/quantization_deps.in). A separate export keeps the
@@ -45,7 +47,6 @@ steps:
     - vllm/utils/humming.py
     - tests/quantization
     - tests/single_rank_group.py
-    - requirements/test/quantization_deps_cuda.txt
 
 - label: Quantized Fusions
   key: quantized-fusions
@@ -71,6 +72,12 @@ steps:
   devices:
     b200-k8s:
       timeout_in_minutes: 120
+      source_file_dependencies:
+        - tests/quantization/test_blackwell_moe.py
+        - tests/quantization/test_keep_param_objects.py
+        - tests/model_executor/model_loader/test_reload_moe_kernels.py
+        - tests/benchmarks/test_forward_cli.py
+        - vllm/v1/attention/backends/flashinfer.py
       commands:
         - >-
           pytest -v -s
@@ -100,10 +107,6 @@ steps:
   automatic_shard: true
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-    - tests/quantization/test_blackwell_moe.py
-    - tests/quantization/test_keep_param_objects.py
-    - tests/model_executor/model_loader/test_reload_moe_kernels.py
-    - tests/benchmarks/test_forward_cli.py
     - vllm/benchmarks/forward/
     - vllm/models/muse_spark/
     - vllm/model_executor/models/deepseek_v2.py
@@ -120,13 +123,15 @@ steps:
     - vllm/model_executor/utils.py
     - vllm/model_executor/model_loader/reload/
     - vllm/distributed/localization.py
-    - vllm/v1/attention/backends/flashinfer.py
 
 - label: Quantized Models
   key: quantized-models-test
   devices:
     h200_35gb:
       timeout_in_minutes: 65
+      source_file_dependencies:
+        - tests/quantization/test_fp8_dequant.py
+        - tests/single_rank_group.py
       commands:
         - >-
           pytest -v -s
@@ -151,5 +156,3 @@ steps:
     - vllm/models/glm5next/
     - vllm/models/hy_v4/
     - tests/models/quantization
-    - tests/quantization/test_fp8_dequant.py
-    - tests/single_rank_group.py

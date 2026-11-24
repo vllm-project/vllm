@@ -7,6 +7,8 @@ steps:
   devices:
     h100:
       timeout_in_minutes: 85
+      source_file_dependencies:
+        - csrc/hisparse_kernels.cu
       commands:
         - pytest -v -s v1/attention
     mi300_1:
@@ -41,7 +43,6 @@ steps:
     - vllm/models/glm5next/nvidia/ops/kpool_compress.py
     - vllm/models/hy_v4/nvidia/flashmla_sparse.py
     - vllm/v1/hisparse/
-    - csrc/hisparse_kernels.cu
     - tests/v1/attention
 
 - label: ":nvidia: (B200) ShardQ Metadata"
@@ -63,6 +64,8 @@ steps:
   devices:
     b200-k8s:
       timeout_in_minutes: 80
+      source_file_dependencies:
+        - csrc/hisparse_kernels.cu
       commands:
         - pytest -v -s v1/attention
     mi355_dpx:
@@ -96,7 +99,6 @@ steps:
     - vllm/v1/attention
     - vllm/models/glm5next/nvidia/ops/kpool_compress.py
     - vllm/v1/hisparse/
-    - csrc/hisparse_kernels.cu
     - tests/v1/attention
 
 - label: FlashInfer NVFP4 XQA

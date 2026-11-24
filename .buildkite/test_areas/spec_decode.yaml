@@ -181,6 +181,8 @@ steps:
   devices:
     h200_35gb:
       timeout_in_minutes: 30
+      source_file_dependencies:
+        - vllm/models/qwen3_5/nvidia/mtp.py
     mi355_dpx:
       timeout_in_minutes: 40
       source_file_dependencies:
@@ -197,7 +199,6 @@ steps:
     - vllm/v1/attention/backends/
     - vllm/transformers_utils/configs/speculators/
     - vllm/model_executor/models/qwen3_5_mtp.py
-    - vllm/models/qwen3_5/nvidia/mtp.py
     - vllm/model_executor/models/qwen3_next_mtp.py
     - vllm/config/speculative.py
     - tests/v1/e2e/spec_decode/

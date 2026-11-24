@@ -46,6 +46,8 @@ steps:
       timeout_in_minutes: 30
       env:
         PYTHON_BIN: "/vllm-workspace/.venv/bin/python"
+      source_file_dependencies:
+        - requirements/test/kv_connectors_cuda.txt
       commands:
         # Mooncake comes from the CI image (requirements/test/kv_connectors_cuda.txt).
         - uv venv --system-site-packages --python python3 .venv
@@ -98,4 +100,3 @@ steps:
     - tests/models/multimodal/generation/test_vit_cudagraph.py
     - examples/disaggregated/disaggregated_encoder/
     - tests/v1/ec_connector/
-    - requirements/test/kv_connectors_cuda.txt

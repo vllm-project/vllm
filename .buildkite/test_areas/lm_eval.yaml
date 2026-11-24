@@ -50,6 +50,8 @@ steps:
     h200_35gb:
       # Recorded runs took 80–140 seconds
       timeout_in_minutes: 10
+      source_file_dependencies:
+        - tests/watermarking/test_watermarking_e2e.py
       commands:
         - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
         - pytest -s -v watermarking/test_watermarking_e2e.py
@@ -66,7 +68,6 @@ steps:
   source_file_dependencies:
     - .buildkite/test_areas/lm_eval.yaml
     - tests/evals/gsm8k/
-    - tests/watermarking/test_watermarking_e2e.py
     - vllm/config/vllm.py
     - vllm/config/watermarking.py
     - vllm/sampling_params.py
@@ -199,6 +200,11 @@ steps:
       optional: true
       num_devices: 4
       timeout_in_minutes: 360
+      source_file_dependencies:
+        - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP2-PCP2-EP.yaml
+        - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-EP.yaml
+        - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-DCP4-EP.yaml
+        - vllm/v1/attention/backends/mla/flashmla_sparse.py
       commands:
         - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt
     mi355_4:
@@ -220,9 +226,6 @@ steps:
   automatic_shard: true
   source_file_dependencies:
     - csrc/
-    - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP2-PCP2-EP.yaml
-    - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-EP.yaml
-    - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-DCP4-EP.yaml
     - tests/evals/gsm8k/configs/models-pcp.txt
     - vllm/model_executor/layers/quantization
     - vllm/config/parallel.py
@@ -231,7 +234,6 @@ steps:
     - vllm/v1/attention/ops/pcp.py
     - vllm/model_executor/layers/attention/sparse_mla_attention.py
     - vllm/model_executor/layers/sparse_attn_indexer.py
-    - vllm/v1/attention/backends/mla/flashmla_sparse.py
     - vllm/v1/attention/backends/mla/indexer.py
     - vllm/v1/worker/gpu/model_runner.py
     - vllm/v1/worker/gpu/pcp_manager.py
@@ -244,6 +246,11 @@ steps:
       num_devices: 2
       # Local TP2 runs took 84–379 seconds, including startup.
       timeout_in_minutes: 15
+      source_file_dependencies:
+        - tests/watermarking/test_compatibility.py
+        - tests/watermarking/test_engine_compatibility.py
+        - tests/watermarking/test_parallel_compatibility.py
+        - tests/watermarking/test_watermarking_e2e.py
       commands:
         - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark-dspark-tp2.txt
         - >-
@@ -265,10 +272,6 @@ steps:
   source_file_dependencies:
     - .buildkite/test_areas/lm_eval.yaml
     - tests/evals/gsm8k/
-    - tests/watermarking/test_compatibility.py
-    - tests/watermarking/test_engine_compatibility.py
-    - tests/watermarking/test_parallel_compatibility.py
-    - tests/watermarking/test_watermarking_e2e.py
     - vllm/config/speculative.py
     - vllm/config/vllm.py
     - vllm/config/watermarking.py
@@ -287,6 +290,8 @@ steps:
       optional: true
       num_devices: 4
       timeout_in_minutes: 120
+      source_file_dependencies:
+        - tests/evals/gsm8k/configs/DeepSeek-V4.1-Flash-NVFP4-DSpark-TP4.yaml
       commands:
         - PYTHONPATH=/vllm-workspace pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode.txt
     mi355_4:
@@ -327,7 +332,6 @@ steps:
         - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode-rocm.txt
   source_file_dependencies:
     - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-confidence-TEP4.yaml
-    - tests/evals/gsm8k/configs/DeepSeek-V4.1-Flash-NVFP4-DSpark-TP4.yaml
     - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-EPLB-TEP4.yaml
     - tests/evals/gsm8k/configs/Kimi-K3-pruned75-DSpark-TP4.yaml
     - tests/evals/gsm8k/configs/models-spec-decode.txt
@@ -351,6 +355,8 @@ steps:
       optional: true
       num_devices: 2
       timeout_in_minutes: 60
+      source_file_dependencies:
+        - tests/evals/gsm8k/configs/Nemotron-3-Super-120B-A12B-NVFP4-ReplaySSM-align.yaml
       commands:
         - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-replayssm.txt
     mi355_2:
@@ -370,7 +376,6 @@ steps:
   source_file_dependencies:
     - .buildkite/test_areas/lm_eval.yaml
     - tests/evals/gsm8k/configs/models-replayssm.txt
-    - tests/evals/gsm8k/configs/Nemotron-3-Super-120B-A12B-NVFP4-ReplaySSM-align.yaml
     - tests/evals/gsm8k/test_gsm8k_correctness.py
     - tests/evals/gsm8k/gsm8k_eval.py
     - tests/evals/gsm8k/conftest.py
