@@ -700,7 +700,6 @@ class KimiK3DSAAttention(nn.Module):
         self.defer_topk = (
             envs.VLLM_INDEXER_OVERLAP
             and self.q_lora_rank is not None
-            and vllm_config.speculative_config is None
             and indexer_overlap.index_group_joins_topk(self.mla_attn.mla_attn.impl)
         )
 

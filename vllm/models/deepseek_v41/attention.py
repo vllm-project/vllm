@@ -594,7 +594,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             envs.VLLM_INDEXER_OVERLAP
             and not self.use_pcp
             and not vllm_config.parallel_config.use_ubatching
-            and vllm_config.speculative_config is None
         )
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
         # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins

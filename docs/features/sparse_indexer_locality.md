@@ -90,7 +90,7 @@ order.
   per domain and joins the two score arrays as part of the deferred candidate
   work.
 
-The overlap works with and without `VLLM_INDEXER_LOCALIZE`. It is off with
-micro-batching (`--enable-dbo` or `--ubatch-size`), with speculative decoding,
-and for Kimi K3.1 with an attention backend whose top-k conversion does not go
-through the shared sparse MLA index group.
+The overlap works with and without `VLLM_INDEXER_LOCALIZE`, and with
+speculative decoding. It is off with micro-batching (`--enable-dbo` or
+`--ubatch-size`), and for Kimi K3.1 with an attention backend whose top-k
+conversion does not go through the shared sparse MLA index group.

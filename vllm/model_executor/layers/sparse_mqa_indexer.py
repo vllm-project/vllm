@@ -130,7 +130,6 @@ class SparseMQAIndexer(nn.Module):
         self.use_fp4_cache = dsa_indexer_uses_fp4(vllm_config)
         indexer_overlap.init_candidate_stream(
             not vllm_config.parallel_config.use_ubatching
-            and vllm_config.speculative_config is None
         )
 
     def _reserve_workspaces(self, device: torch.device) -> None:
