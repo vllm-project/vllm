@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
-from transformers import AutoImageProcessor, AutoProcessor
+from transformers import AutoImageProcessor, AutoProcessor, AutoTokenizer
 
 from vllm.config import (
     CacheConfig,
@@ -20,6 +20,7 @@ from vllm.distributed.ec_transfer.ec_connector.utils import (
     PlaceholderMetadataResolver,
     collect_ec_item_metadata,
 )
+from vllm.exceptions import PromptUpdateMismatchError
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -171,9 +172,8 @@ def _image_part(index: int) -> dict:
     return {"type": "image", "image": _CHAT_IMAGES[index]}
 
 
-def _render_chat(messages: list[dict]) -> tuple[dict, int]:
-    """Render HF-processor-style messages as a chat request with image URLs."""
-    config = VllmConfig(
+def _two_image_config() -> VllmConfig:
+    return VllmConfig(
         model_config=ModelConfig(
             _MODEL_ID,
             tokenizer_mode="kimi_k3",
@@ -184,6 +184,11 @@ def _render_chat(messages: list[dict]) -> tuple[dict, int]:
         cache_config=CacheConfig(enable_prefix_caching=False),
         device_config=DeviceConfig(device="cpu"),
     )
+
+
+def _render_chat(messages: list[dict]) -> tuple[dict, int]:
+    """Render HF-processor-style messages as a chat request with image URLs."""
+    config = _two_image_config()
 
     def to_request(content):
         if isinstance(content, str):
@@ -282,6 +287,36 @@ def test_chat_placeholder_text_is_not_an_image_slot():
     )
     assert literal["mm_placeholders"] == plain["mm_placeholders"]
     assert len(literal["prompt_token_ids"]) > len(plain["prompt_token_ids"])
+
+
+_TEXT_PROMPT = "Compare <|kimi_image_placeholder|><|kimi_image_placeholder|>\nbriefly."
+
+
+def _render_cmpl(prompt: dict) -> dict:
+    """Render a completion-style prompt that carries both chat images."""
+    renderer = renderer_from_config(_two_image_config())
+    try:
+        return renderer.render_cmpl(
+            [{**prompt, "multi_modal_data": {"image": _CHAT_IMAGES}}]
+        )[0]
+    finally:
+        renderer.shutdown()
+
+
+def test_text_prompt_finds_adjacent_image_placeholders():
+    """Placeholders that touch each other or other text each get their image."""
+    prompt = _render_cmpl({"prompt": _TEXT_PROMPT})
+    assert len(prompt["mm_placeholders"]["image"]) == len(_CHAT_IMAGES)
+
+
+def test_token_prompt_is_not_retokenized_to_find_images():
+    """Token ids are used as given: when they hold no image placeholder, the
+    request is rejected instead of rebuilding the prompt from its text."""
+    tokenizer = AutoTokenizer.from_pretrained(_MODEL_ID, trust_remote_code=True)
+    # Encoded in one piece, the placeholders merge with the text around them.
+    token_ids = tokenizer.encode(_TEXT_PROMPT, add_special_tokens=False)
+    with pytest.raises(PromptUpdateMismatchError):
+        _render_cmpl({"prompt_token_ids": token_ids})
 
 
 @pytest.mark.parametrize(

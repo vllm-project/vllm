@@ -6,6 +6,7 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -14,12 +15,13 @@ from vllm.renderers.chat_utils import (
     parse_chat_messages_async,
 )
 from vllm.tokenizers.hf import HfTokenizer, ThreadSafeHFTokenizerMixin
+from vllm.transformers_utils.processors.kimi_k3 import encode_k3_text_prompt
 from vllm.utils.async_utils import make_async
 
 from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
-from .params import ChatParams
+from .params import ChatParams, TokenizeParams
 
 # Keep the original image mode (including the alpha channel) for K3 instead of
 # flattening images onto a background color. Server-level (--media-io-kwargs)
@@ -221,6 +223,23 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
             kwargs["response_format"] = _dump_k3_template_value(params.response_format)
         kwargs["tokenize"] = True
         return tokenizer.apply_chat_template(conversation, **kwargs)
+
+    def _tokenize_prompt(
+        self,
+        prompt: TextPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt:
+        if not (prompt.get("multi_modal_data") or prompt.get("multi_modal_uuids")):
+            return super()._tokenize_prompt(prompt, params)
+
+        # Truncation is applied to the token ids after tokenization.
+        token_ids = encode_k3_text_prompt(
+            self.get_tokenizer(),
+            prompt["prompt"],
+            self.model_config.hf_config.image_placeholder,
+            add_special_tokens=params.add_special_tokens,
+        )
+        return self._build_tokens_prompt(token_ids, prompt)
 
     def render_messages(
         self,
