@@ -917,10 +917,29 @@ def _largestep_hook(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
 
 def _check_largestep_hook(rank: int, tp: int, device) -> None:
     """One MoE layer with random weights, built the way the model builds it at
-    load: the gfx942 copies of the routed experts (`mono942`), then the hook.
-    The block's output (routed + shared, all-reduced) against the layer's own
-    forward on the same input, with the same router."""
+    load (the gfx942 copies of the routed experts, `mono942`, then the hook).
+    Three implementations of the same layer on the same input:
+
+    - ref: `tests/kernels/models/amd/dsv41_largestep_reference.py`, torch only,
+      float64, no activation quantization, the exact weight values;
+    - stock: `DeepseekV4MoE.forward`, vLLM's a16w4 MoE (the layer has no hook);
+    - block: this PR's `LargeStepHook.forward`.
+
+    Routing: the block runs the layer's router (`select_experts`) and the
+    reference routes in float64, so the test checks that both pick the same
+    experts. Stock routes inside AITER's fused kernel and does not expose its
+    ids; it gets the same logits and bias, and its output error says whether it
+    routed alike. Rows whose 6th and 7th biased scores are closer than
+    TIE_MARGIN are ties that any implementation may break either way, and are
+    left out of the id check.
+
+    Pass: stock's error against ref is below STOCK_RTOL and the block's below
+    BLOCK_RTOL. The block quantizes x and the intermediate to MXFP8 (as the
+    mono decode layer does), stock keeps them in bf16, so the block is further
+    from the float64 reference than stock by design; both errors are printed."""
+    from tests.kernels.models.amd import dsv41_largestep_reference as R
     from vllm.config import set_current_vllm_config
+    from vllm.distributed import tensor_model_parallel_all_reduce
     from vllm.engine.arg_utils import EngineArgs
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -928,6 +947,13 @@ def _check_largestep_hook(rank: int, tp: int, device) -> None:
     from vllm.models.deepseek_v41.amd.largestep.moe import LargeStepHook
     from vllm.models.deepseek_v41.amd.model import DeepseekV4MoE
     from vllm.utils.torch_utils import set_default_torch_dtype
+
+    # Tolerances against the float64 reference (relative L2), about 1.5x the
+    # errors measured on MI300X (printed with -s). A wrong expert, weight or
+    # scale gives about 1.
+    STOCK_RTOL = 3e-2  # bf16 activations and h, f32 accumulation
+    BLOCK_RTOL = 6e-2  # x and h to MXFP8 (3 mantissa bits), h and picks to bf16
+    TIE_MARGIN = 1e-4  # float64 score gap below which a row is a routing tie
 
     vc = EngineArgs(
         model=MODEL,
@@ -941,36 +967,64 @@ def _check_largestep_hook(rank: int, tp: int, device) -> None:
         moe = DeepseekV4MoE(vc, prefix="model.layers.21.ffn")
     # The load hook that gives the routed experts their gfx942 copies.
     mono_decode._capture_plain_experts(moe.experts.routed_experts)
+    inter = mono_decode._routed_inter_942()
     _random_moe(
         moe,
         torch.Generator(device=device).manual_seed(2001 + rank),
         torch.Generator(device=device).manual_seed(2000),
-        inter=mono_decode._routed_inter_942(),
+        inter=inter,
     )
+    # The reference's weights, read before vLLM converts them at load.
+    e, sh = moe.experts.routed_experts, moe.shared_experts
+    u8 = torch.uint8
+    plain = [t.data.view(u8).clone() for t in (
+        e.w13_weight, e.w13_weight_scale, e.w2_weight, e.w2_weight_scale)]  # fmt: skip
+    gate_w = moe.gate.weight.data.double().clone()
+    bias = moe.gate.e_score_correction_bias.data.double().clone()
+    s_gu = R.dequant_fp8_blocks(
+        sh.gate_up_proj.weight.data, sh.gate_up_proj.weight_scale.data.view(u8)
+    )
+    s_dn = R.dequant_fp8_blocks(
+        sh.down_proj.weight.data, sh.down_proj.weight_scale.data.view(u8)
+    )
+    scale = float(moe.routed_scaling_factor)
     process_weights_after_loading(moe, vc.model_config, device)
-    # The hook keeps a weak reference to its decoder layer, used only by
-    # `takes`. forward does not read it, so an empty module stands in.
     hook = LargeStepHook(torch.nn.Module(), moe, tp, device)
+
     g = torch.Generator(device=device).manual_seed(3000)
     for rows in (48, 144, 256):
         x = (torch.randn(rows, HIDDEN, generator=g, device=device) * 0.5).to(
             torch.bfloat16
         )
         ids = torch.randint(0, 1000, (rows,), generator=g, device=device)
-        # The layer has no hook (`moe.largestep` is None), so `moe(...)` is the
-        # original path. Both run under the same forward context.
         with set_forward_context(None, vc):
-            got = hook.forward(moe, x.clone(), ids).float()
-            want = moe(x.clone(), ids).float()
-        assert not torch.isnan(got).any(), rows
-        cos, err = _cos(got, want), _rel(got, want)
-        # The block quantizes x and the intermediate to MXFP8, while vLLM's
-        # a16w4 MoE keeps them in bf16, so the two differ by that rounding:
-        # cos 0.99902 and rel L2 0.044 at 48, 144 and 256 rows on MI325X TP4.
-        # A wrong expert, weight or scale gives rel L2 near 1.
-        assert cos > 0.998 and err < 6e-2, (
-            f"TP{tp} rank {rank}, {rows} rows: cos {cos:.6f}, rel L2 {err:.3e}"
+            logits, _ = moe.gate(x)
+            _, got_ids = moe.experts.router.select_experts(x, logits, input_ids=ids)
+            block = hook.forward(moe, x.clone(), ids).double()
+            stock = moe(x.clone(), ids).double()
+
+        ref_ids, ref_w, margin = R.route_fp64(x, gate_w, bias, scale)
+        order = got_ids.long().argsort(-1)
+        sure = margin > TIE_MARGIN
+        same = (got_ids.long().gather(1, order) == ref_ids).all(-1)
+        assert bool(same[sure].all()), (
+            f"{rows} rows: router and float64 reference pick different experts "
+            f"in {int((~same & sure).sum())} rows that are not ties"
         )
+        part = R.routed_fp64(x, *plain, ref_ids, ref_w, inter) + R.shared_fp64(
+            x, s_gu, s_dn
+        )
+        # The all-reduce runs in float32: summing 4 or 8 parts adds about 1e-7.
+        ref = tensor_model_parallel_all_reduce(part.float()).double()
+        assert torch.isfinite(block).all() and torch.isfinite(stock).all(), rows
+        err_block, err_stock = _rel(block, ref), _rel(stock, ref)
+        print(
+            f"TP{tp} rank {rank}, {rows} rows: block {err_block:.3e}, "
+            f"stock {err_stock:.3e} (relative L2 against float64), "
+            f"ties {int((~sure).sum())}"
+        )
+        assert err_stock < STOCK_RTOL, f"{rows} rows: stock {err_stock:.3e}"
+        assert err_block < BLOCK_RTOL, f"{rows} rows: block {err_block:.3e}"
 
 
 @pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")

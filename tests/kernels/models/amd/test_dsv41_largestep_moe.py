@@ -1,21 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The gfx942 grouped-GEMM routed MoE of DeepSeek-V4.1-Flash's large decode
-steps (`vllm/models/deepseek_v41/amd/largestep`): stage 1, the h
-quantization, stage 2 and the combine, on one GPU, for one TP rank's share,
-against the torch reference with the same rounding points
-(`dsv41_largestep_ref.ref_routed`).
+"""The gfx942 large-step routed MoE of DeepSeek-V4.1-Flash
+(`vllm/models/deepseek_v41/amd/largestep`), one GPU, one TP rank's share.
 
-The share is the intermediate width: 288 at TP 8 (MI300X), 576 at TP 4
-(MI325X). Steps of 16, 48, 96 and 144 rows (tokens), random routing of 6 of
-384 experts a token. The weights are random plain MXFP4 tensors in the
-layout vLLM loads, turned into the gfx942 copies by the mono kernels'
-`weights942.moe_copies`, as the model does at load.
+The reference is `dsv41_largestep_reference.py` in this folder: torch only,
+float64, no activation quantization, with the exact values of the MXFP4
+weights. The block quantizes x and the intermediate h to MXFP8 and rounds h
+and each pick's output to bf16, so it is close to the reference but not
+equal. The tolerances below are set from that rounding, and each says why.
 
-Pass: the relative L2 error of the step's output under 2e-2, no NaN. Both
-sides round h and each pick's output to bf16 and quantize the same values to
-MXFP8; the f32 sums run in different orders, so a value near a rounding
-boundary can land on the other side.
+Stage tests (`test_stage_*`) feed each kernel the exact input of the
+previous stage, so a stage's error is measured alone. Layout tests
+(`test_pick_sort_*`, `test_quant_x_*`) check the bytes and tables bit for
+bit. The vLLM MoE against the same reference, on the same weights, is in
+`tests/models/test_dsv41_mono_numerics.py::test_largestep_hook_matches_moe`
+(it needs the layer, so 4 GPUs).
 
     pytest -s tests/kernels/models/amd/test_dsv41_largestep_moe.py
 """
@@ -23,9 +22,32 @@ boundary can land on the other side.
 import pytest
 import torch
 
+from tests.kernels.models.amd import dsv41_largestep_reference as R
 from vllm.platforms import current_platform
 
-E, TOPK, HID = 384, 6, 5120
+E, TOPK, HID = R.EXPERTS, R.TOPK, R.HIDDEN
+
+# Tolerances, as relative L2 error against the float64 reference. MXFP8 (e4m3,
+# 3 mantissa bits, one power-of-two scale per 32 values) rounds each value by up
+# to 2^-4 of its block's scale; over random data that is a relative error of a
+# few percent per value, and the dot products do not average it away because
+# the reference has no quantization at all. The measured errors are printed
+# with -s; the bounds keep about 1.5x headroom over them.
+STAGE1_RTOL = 3e-2  # x to MXFP8, then swiglu, then h to bf16
+STAGE2_RTOL = 3e-2  # h to MXFP8, then the down projection, a pick to bf16
+COMBINE_RTOL = 1e-2  # bf16 picks summed in f32, the token to bf16 (2^-8)
+BLOCK_RTOL = 5e-2  # all of the above, x and h both quantized
+# A wrong expert, row or scale gives a relative error near 1, so every bound
+# above is far from a real bug.
+
+ROWS = [
+    pytest.param(16, id="M16"),
+    pytest.param(48, id="M48-8req"),
+    pytest.param(96, id="M96-16req"),
+    pytest.param(144, id="M144-24req"),
+    pytest.param(256, id="M256-max"),
+]
+TPS = [pytest.param(8, id="TP8-inter288"), pytest.param(4, id="TP4-inter576")]
 
 
 def _on_gfx942() -> bool:
@@ -36,7 +58,20 @@ def _on_gfx942() -> bool:
     return get_cdna_version() == 3
 
 
-def _plain_weights(inter, dev, g):
+needs_gfx942 = pytest.mark.skipif(
+    not _on_gfx942(), reason="the gfx942 large-step kernels"
+)
+
+
+def _rel(got: torch.Tensor, want: torch.Tensor) -> float:
+    got, want = got.double(), want.double()
+    return ((got - want).norm() / want.norm()).item()
+
+
+def _plain_weights(inter: int, dev, g):
+    """Random MXFP4 expert weights in the layout vLLM loads: w13 [E, 2 Np,
+    H / 2] (gate rows, then up rows, each padded to Np with zeros), w2 [E, H,
+    Np / 2], E8M0 codes 118..122 (scales 2^-9..2^-5)."""
     np_ = -(-inter // 128) * 128
     u8 = torch.uint8
 
@@ -53,117 +88,158 @@ def _plain_weights(inter, dev, g):
     return w13, w13_s, w2, w2_s
 
 
-@pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")
-@pytest.mark.parametrize("tp", [8, 4])
-@pytest.mark.parametrize("rows", [16, 48, 96, 144])
-def test_routed_moe_matches_reference(tp: int, rows: int):
-    pytest.importorskip("flydsl")
-    from tests.kernels.models.amd import dsv41_largestep_ref as H
-    from vllm.models.deepseek_v41.amd.largestep.moe_down import build_moe_down
-    from vllm.models.deepseek_v41.amd.largestep.moe_small import (
-        build_combine,
-        build_quant_h,
-    )
-    from vllm.models.deepseek_v41.amd.largestep.moe_ug import build_moe_ug
-    from vllm.models.deepseek_v41.amd.mono.weights942 import moe_copies
-
-    dev = torch.device("cuda:0")
-    g = torch.Generator(device=dev).manual_seed(rows + tp)
-    inter = 2304 // tp
-    w13, w13_s, w2, w2_s = _plain_weights(inter, dev, g)
-    c13, c13_s, c2, c2_s = moe_copies(w13.clone(), w13_s, w2.clone(), w2_s, inter)
-    x = (torch.randn(rows, HID, generator=g, device=dev) * 0.5).to(torch.bfloat16)
-    topk = torch.stack(
-        [torch.randperm(E, generator=g, device=dev)[:TOPK] for _ in range(rows)]
-    )
-    tw = torch.rand(rows, TOPK, generator=g, device=dev) * 0.5
-    picks = rows * TOPK
-    xb, xs = H.quant_rows(x)
-    table, ng = H.pick_groups(topk, E)
-    count = torch.tensor([ng], dtype=torch.int32, device=dev)
-    h = torch.zeros(picks, inter, dtype=torch.bfloat16, device=dev)
-    hq = torch.zeros(picks, inter, dtype=torch.uint8, device=dev)
-    hqs = torch.zeros(picks, inter // 32, dtype=torch.uint8, device=dev)
-    y = torch.zeros(picks, HID, dtype=torch.bfloat16, device=dev)
-    out = torch.zeros(rows, HID, dtype=torch.bfloat16, device=dev)
-    wts = tw.reshape(-1).float().contiguous()
-
-    build_moe_ug(tp)(
-        c13.data_ptr(), c13_s.data_ptr(), xb.data_ptr(), xs.data_ptr(),
-        table.data_ptr(), count.data_ptr(), h.data_ptr(),
-    )  # fmt: skip
-    build_quant_h(inter)(
-        h.data_ptr(), hq.data_ptr(), hqs.data_ptr(), picks * (inter // 32)
-    )
-    build_moe_down(tp)(
-        c2.data_ptr(), c2_s.data_ptr(), hq.data_ptr(), hqs.data_ptr(),
-        wts.data_ptr(), table.data_ptr(), count.data_ptr(), y.data_ptr(),
-    )  # fmt: skip
-    build_combine()(y.data_ptr(), out.data_ptr(), rows)
-    torch.accelerator.synchronize()
-
-    ref = H.ref_routed(x, w13, w13_s, w2, w2_s, topk, tw, inter)
-    got = out.float()
-    assert not torch.isnan(got).any()
-    err = ((got - ref).norm() / ref.norm()).item()
-    assert err < 2e-2, f"TP{tp}, {rows} rows: relative L2 error {err:.3e}"
-
-
 class _Experts:
-    """The routed experts' gfx942 copies, as the mono decode layer's load hook
-    stores them (`experts.mono942`)."""
+    """Stands in for the routed experts as the mono decode layer's load hook
+    leaves them: only `mono942`, the gfx942 copies, is read."""
 
     def __init__(self, copies):
         self.mono942 = copies
 
 
-@pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")
-@pytest.mark.parametrize("tp", [8, 4])
-@pytest.mark.parametrize("rows", [48, 144, 256])
-def test_block_matches_reference(tp: int, rows: int):
-    """The whole routed block as the model builds it (`LargeStepMoE`: pick
-    sort, x quantization, both stages, combine, shared scratch) against the
-    reference, so a change in how the block builds or chains its kernels shows
-    up here and not only in the model test."""
-    pytest.importorskip("flydsl")
-    from tests.kernels.models.amd import dsv41_largestep_ref as H
-    from vllm.models.deepseek_v41.amd.largestep.moe import LargeStepMoE
-    from vllm.models.deepseek_v41.amd.mono.weights942 import moe_copies
+class _Case:
+    """One TP share's weights, inputs and routing, plus `LargeStepMoE` built
+    the way the model builds it."""
 
-    dev = torch.device("cuda:0")
-    g = torch.Generator(device=dev).manual_seed(1000 + rows + tp)
-    inter = 2304 // tp
-    w13, w13_s, w2, w2_s = _plain_weights(inter, dev, g)
-    copies = moe_copies(w13.clone(), w13_s, w2.clone(), w2_s, inter)
-    block = LargeStepMoE(_Experts(copies), tp, dev)
-    x = (torch.randn(rows, HID, generator=g, device=dev) * 0.5).to(torch.bfloat16)
-    topk = torch.stack(
-        [torch.randperm(E, generator=g, device=dev)[:TOPK] for _ in range(rows)]
-    )
-    tw = torch.rand(rows, TOPK, generator=g, device=dev) * 0.5
-    got = block(x, topk, tw).float()
+    def __init__(self, tp: int, rows: int, seed: int):
+        pytest.importorskip("flydsl")
+        from vllm.models.deepseek_v41.amd.largestep.moe import LargeStepMoE
+        from vllm.models.deepseek_v41.amd.mono.weights942 import moe_copies
+
+        self.dev = dev = torch.device("cuda:0")
+        g = torch.Generator(device=dev).manual_seed(seed)
+        self.tp, self.rows, self.inter = tp, rows, 2304 // tp
+        self.w13, self.w13_s, self.w2, self.w2_s = _plain_weights(self.inter, dev, g)
+        copies = moe_copies(
+            self.w13.clone(), self.w13_s, self.w2.clone(), self.w2_s, self.inter
+        )
+        self.block = LargeStepMoE(_Experts(copies), tp, dev)
+        self.x = (torch.randn(rows, HID, generator=g, device=dev) * 0.5).to(
+            torch.bfloat16
+        )
+        self.topk = torch.stack(
+            [torch.randperm(E, generator=g, device=dev)[:TOPK] for _ in range(rows)]
+        )
+        self.tw = torch.rand(rows, TOPK, generator=g, device=dev) * 0.5
+        self.picks = rows * TOPK
+
+
+@needs_gfx942
+@pytest.mark.parametrize("tp", TPS)
+@pytest.mark.parametrize("rows", ROWS)
+def test_block_matches_fp64_reference(tp: int, rows: int):
+    """`LargeStepMoE` as the model calls it (pick sort, x quantization, both
+    stages, combine, shared scratch) against the float64 reference."""
+    c = _Case(tp, rows, seed=1000 + rows + tp)
+    got = c.block(c.x, c.topk, c.tw)
     torch.accelerator.synchronize()
-    ref = H.ref_routed(x, w13, w13_s, w2, w2_s, topk, tw, inter)
-    assert not torch.isnan(got).any()
-    err = ((got - ref).norm() / ref.norm()).item()
-    assert err < 2e-2, f"TP{tp}, {rows} rows: relative L2 error {err:.3e}"
+    want = R.routed_fp64(c.x, c.w13, c.w13_s, c.w2, c.w2_s, c.topk, c.tw, c.inter)
+    assert torch.isfinite(got).all()
+    err = _rel(got, want)
+    print(f"block {tp=} {rows=}: rel L2 {err:.3e}")
+    assert err < BLOCK_RTOL, f"relative L2 {err:.3e}"
 
 
-@pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")
-@pytest.mark.parametrize("rows", [1, 16, 96, 256])
-def test_pick_sort_matches_host(rows: int):
-    """The GPU pick sort (`moe_sort.py`) writes the table and group count of
-    `dsv41_largestep_ref.pick_groups` exactly, including a step where many tokens pick
-    the same expert (more than one group for it)."""
+@needs_gfx942
+@pytest.mark.parametrize("tp", TPS)
+@pytest.mark.parametrize("rows", ROWS)
+def test_stage_ug_matches_fp64_reference(tp: int, rows: int):
+    """Stage 1 alone (`moe_ug`): h = swiglu(W_gate x, W_up x) of each pick.
+    The kernel reads x as MXFP8 bytes, so its quantization is part of this
+    stage's error."""
+    c = _Case(tp, rows, seed=2000 + rows + tp)
+    b = c.block
+    s = b.scratch
+    st = torch.cuda.current_stream()
+    ids = c.topk.to(torch.int32).contiguous()
+    b.sort(ids.data_ptr(), c.picks, s.table.data_ptr(), s.count.data_ptr(), st)
+    b.qx(c.x.data_ptr(), s.xb.data_ptr(), s.xs.data_ptr(), c.rows, st)
+    b.ug(
+        b.w13.data_ptr(), b.w13_s.data_ptr(), s.xb.data_ptr(), s.xs.data_ptr(),
+        s.table.data_ptr(), s.count.data_ptr(), s.h.data_ptr(), st,
+    )  # fmt: skip
+    torch.accelerator.synchronize()
+    got = s.h[: c.picks]
+    want = R.stage1_fp64(c.x, c.w13, c.w13_s, c.topk, c.inter)
+    assert torch.isfinite(got).all()
+    err = _rel(got, want)
+    print(f"stage ug {tp=} {rows=}: rel L2 {err:.3e}")
+    assert err < STAGE1_RTOL, f"relative L2 {err:.3e}"
+
+
+@needs_gfx942
+@pytest.mark.parametrize("tp", TPS)
+@pytest.mark.parametrize("rows", ROWS)
+def test_stage_down_matches_fp64_reference(tp: int, rows: int):
+    """The h quantization and stage 2 (`quant_h`, `moe_down`) on a given h: each
+    pick's routing weight x W_down h. The reference takes the same bf16 h, so
+    only this stage's error is measured."""
+    c = _Case(tp, rows, seed=3000 + rows + tp)
+    b = c.block
+    s = b.scratch
+    st = torch.cuda.current_stream()
+    g = torch.Generator(device=c.dev).manual_seed(rows)
+    h = (torch.randn(c.picks, c.inter, generator=g, device=c.dev) * 2).to(
+        torch.bfloat16
+    )
+    s.h[: c.picks].copy_(h)
+    ids = c.topk.to(torch.int32).contiguous()
+    wts = c.tw.float().reshape(-1).contiguous()
+    b.sort(ids.data_ptr(), c.picks, s.table.data_ptr(), s.count.data_ptr(), st)
+    b.qh(
+        s.h.data_ptr(), s.hq.data_ptr(), s.hqs.data_ptr(),
+        c.picks * (c.inter // 32), st,
+    )  # fmt: skip
+    b.down(
+        b.w2.data_ptr(), b.w2_s.data_ptr(), s.hq.data_ptr(), s.hqs.data_ptr(),
+        wts.data_ptr(), s.table.data_ptr(), s.count.data_ptr(), s.y.data_ptr(),
+        st,
+    )  # fmt: skip
+    torch.accelerator.synchronize()
+    got = s.y[: c.picks]
+    want = R.stage2_fp64(h, c.w2, c.w2_s, c.topk, c.tw, c.inter)
+    assert torch.isfinite(got).all()
+    err = _rel(got, want)
+    print(f"stage down {tp=} {rows=}: rel L2 {err:.3e}")
+    assert err < STAGE2_RTOL, f"relative L2 {err:.3e}"
+
+
+@needs_gfx942
+@pytest.mark.parametrize("rows", ROWS)
+def test_stage_combine_matches_fp64_reference(rows: int):
+    """The combine (`combine`): each token's 6 pick rows summed, to bf16."""
+    c = _Case(8, rows, seed=4000 + rows)
+    b = c.block
+    s = b.scratch
+    g = torch.Generator(device=c.dev).manual_seed(rows)
+    y = torch.randn(c.picks, HID, generator=g, device=c.dev).to(torch.bfloat16)
+    s.y[: c.picks].copy_(y)
+    b.combine(s.y.data_ptr(), s.routed.data_ptr(), rows, torch.cuda.current_stream())
+    torch.accelerator.synchronize()
+    want = y.double().view(rows, TOPK, HID).sum(1)
+    err = _rel(s.routed[:rows], want)
+    print(f"combine {rows=}: rel L2 {err:.3e}")
+    assert err < COMBINE_RTOL, f"relative L2 {err:.3e}"
+
+
+@needs_gfx942
+@pytest.mark.parametrize(
+    "rows",
+    [
+        pytest.param(1, id="M1"),
+        pytest.param(16, id="M16-one-group-per-expert"),
+        pytest.param(96, id="M96-several-groups"),
+        pytest.param(256, id="M256-max"),
+    ],
+)
+def test_pick_sort_matches_reference_table(rows: int):
+    """The GPU pick sort (`moe_sort`) writes the table and group count of
+    `pick_groups` exactly. Every token picks expert 5 first, so expert 5 has
+    `rows` picks and more than one group of 16 from 17 rows on."""
     pytest.importorskip("flydsl")
-    from tests.kernels.models.amd import dsv41_largestep_ref as H
     from vllm.models.deepseek_v41.amd.largestep.moe_sort import build_moe_sort
 
     dev = torch.device("cuda:0")
     g = torch.Generator(device=dev).manual_seed(rows)
-    # Every token picks expert 5 first, then 5 others, so expert 5 has
-    # `rows` picks and more than one group from 17 rows on. A token never
-    # picks an expert twice.
     others = [
         torch.randperm(E - 1, generator=g, device=dev)[: TOPK - 1] for _ in range(rows)
     ]
@@ -174,7 +250,7 @@ def test_pick_sort_matches_host(rows: int):
         ]
     )
     topk = topk.to(torch.int32).contiguous()
-    want, ng = H.pick_groups(topk, E)
+    want, ng = R.pick_groups(topk, E)
     table = torch.full(
         (E + rows * TOPK // 16 + 1, 4 + 16), -7, dtype=torch.int32, device=dev
     )
@@ -185,15 +261,21 @@ def test_pick_sort_matches_host(rows: int):
     assert torch.equal(table[:ng], want.to(torch.int32))
 
 
-@pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")
-@pytest.mark.parametrize(("rows", "pad"), [(43, 5), (78, 18), (250, 6)])
+@needs_gfx942
+@pytest.mark.parametrize(
+    ("rows", "pad"),
+    [
+        pytest.param(43, 5, id="M43-pad5"),
+        pytest.param(78, 18, id="M78-pad18"),
+        pytest.param(250, 6, id="M250-pad6-to-max"),
+    ],
+)
 def test_pick_sort_skips_padding_rows(rows: int, pad: int):
     """CUDA graph padding rows at the end of a captured step come from the
     router with expert -1 in every pick (VLLM_MOE_SKIP_PADDING). The sort
-    leaves them out: the table and the count equal those of the real rows
-    alone, and no word past the table's groups is written."""
+    leaves them out: the table and count equal those of the real rows alone,
+    and no word past the table's groups is written."""
     pytest.importorskip("flydsl")
-    from tests.kernels.models.amd import dsv41_largestep_ref as H
     from vllm.models.deepseek_v41.amd.largestep.moe_sort import build_moe_sort
 
     dev = torch.device("cuda:0")
@@ -204,7 +286,7 @@ def test_pick_sort_skips_padding_rows(rows: int, pad: int):
     topk = torch.cat(
         [real, torch.full((pad, TOPK), -1, dtype=torch.int32, device=dev)]
     ).contiguous()
-    want, ng = H.pick_groups(real, E)
+    want, ng = R.pick_groups(real, E)
     groups = E + (rows + pad) * TOPK // 16 + 1
     table = torch.full((groups, 4 + 16), -7, dtype=torch.int32, device=dev)
     count = torch.zeros(1, dtype=torch.int32, device=dev)
@@ -217,24 +299,26 @@ def test_pick_sort_skips_padding_rows(rows: int, pad: int):
     assert bool((table[ng:] == -7).all())
 
 
-@pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 large-step kernels")
-@pytest.mark.parametrize("rows", [1, 48, 256])
-def test_quant_x_matches_host(rows: int):
-    """`moe_xq.build_quant_x` writes the bytes and codes of
-    `dsv41_largestep_ref.quant_rows` exactly."""
+@needs_gfx942
+@pytest.mark.parametrize(
+    "rows", [pytest.param(1, id="M1"), pytest.param(48, id="M48"),
+             pytest.param(256, id="M256")]
+)  # fmt: skip
+def test_quant_x_matches_reference_bytes(rows: int):
+    """`moe_xq.build_quant_x` writes the bytes and codes of `quant_rows`
+    exactly, including an all-zero 32-value block (amax floor 1e-10)."""
     pytest.importorskip("flydsl")
-    from tests.kernels.models.amd import dsv41_largestep_ref as H
     from vllm.models.deepseek_v41.amd.largestep.moe_xq import build_quant_x
 
     dev = torch.device("cuda:0")
     g = torch.Generator(device=dev).manual_seed(rows)
     x = (torch.randn(rows, HID, generator=g, device=dev) * 3).to(torch.bfloat16)
-    x[0, :32] = 0  # an all-zero block: the 1e-10 floor
+    x[0, :32] = 0
     bufs = [torch.zeros(rows, n, dtype=torch.uint8, device=dev)
             for n in (HID, HID // 32)]  # fmt: skip
     build_quant_x()(x.data_ptr(), *[b.data_ptr() for b in bufs], rows)
     torch.accelerator.synchronize()
-    xb, xs = H.quant_rows(x)
+    xb, xs = R.quant_rows(x)
     for got, want in zip(bufs, (xb, xs), strict=True):
         assert torch.equal(got, want)
 
@@ -242,12 +326,12 @@ def test_quant_x_matches_host(rows: int):
 @pytest.mark.parametrize(
     "rows,prefills,decodes,decode_tokens,takes",
     [
-        (48, 0, 8, 48, True),  # a decode-only verify step
-        (256, 0, 42, 252, True),  # the largest step, CUDA graph padded to 256
-        (42, 0, 7, 42, False),  # the mono decode layer's steps
-        (257, 0, 43, 257, False),  # above the block's limit
-        (96, 1, 0, 0, False),  # a prefill chunk of 96 tokens
-        (96, 1, 8, 48, False),  # a mixed batch
+        pytest.param(48, 0, 8, 48, True, id="decode-only-verify-step"),
+        pytest.param(256, 0, 42, 252, True, id="largest-step-graph-padded-to-256"),
+        pytest.param(42, 0, 7, 42, False, id="mono-decode-layer-step"),
+        pytest.param(257, 0, 43, 257, False, id="above-block-limit"),
+        pytest.param(96, 1, 0, 0, False, id="prefill-chunk"),
+        pytest.param(96, 1, 8, 48, False, id="mixed-batch"),
     ],
 )
 def test_takes_decode_only_steps(rows, prefills, decodes, decode_tokens, takes):
