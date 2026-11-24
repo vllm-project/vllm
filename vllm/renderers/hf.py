@@ -56,6 +56,7 @@ from vllm.transformers_utils.chat_templates import (
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
+from vllm.v1.engine.tensor_ipc import maybe_share_tensor_memory
 
 from .base import BaseRenderer
 from .inputs.preprocess import parse_dec_only_prompt
@@ -236,14 +237,31 @@ def _build_mixed_prompt_embeds(
     token_ids: list[int],
     prompt_embeds_tensors: Sequence[torch.Tensor],
     positions: list[tuple[int, int]],
+    *,
+    share_memory: bool = False,
 ) -> tuple[torch.Tensor, list[bool]]:
     """Build the full-length `prompt_embeds` tensor and the `is_token_ids`
-    mask aligned to `token_ids`."""
+    mask aligned to `token_ids`.
+
+    With `share_memory`, the tensor is built directly in shared memory when
+    possible, ready for `torch_shm` IPC without another copy.
+    """
     total_len = len(token_ids)
     hidden_size = prompt_embeds_tensors[0].shape[1]
     dtype = prompt_embeds_tensors[0].dtype
 
-    full_embeds = torch.zeros(total_len, hidden_size, dtype=dtype)
+    if share_memory:
+        full_embeds = maybe_share_tensor_memory(
+            torch.empty(total_len, hidden_size, dtype=dtype)
+        )
+        # Zero only the token rows; the embeds rows are overwritten below.
+        gap_start = 0
+        for start, length in sorted(positions):
+            full_embeds[gap_start:start].zero_()
+            gap_start = start + length
+        full_embeds[gap_start:].zero_()
+    else:
+        full_embeds = torch.zeros(total_len, hidden_size, dtype=dtype)
     is_token_ids = torch.ones(total_len, dtype=torch.bool)
 
     for (start, length), tensor in zip(positions, prompt_embeds_tensors, strict=True):
@@ -1060,6 +1078,9 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self._apply_chat_template_async = make_async(
             safe_apply_chat_template, executor=self._executor
         )
+        self._apply_prompt_embeds_to_prompt_async = make_async(
+            self._apply_prompt_embeds_to_prompt, executor=self._executor
+        )
 
     def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
         # Skip for mock configs
@@ -1225,6 +1246,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 prompt,
                 prompt_embeds_tensors,
                 prompt_embeds_placeholder_token_id,
+                share_memory=self._shm_tensor_ipc,
             )
 
         if mm_data is not None:
@@ -1334,10 +1356,12 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 cast(dict, prompt)["mm_processor_kwargs"] = params.mm_processor_kwargs
         elif prompt_embeds_tensors:
             assert prompt_embeds_placeholder_token_id is not None
-            self._apply_prompt_embeds_to_prompt(
+            # Off the event loop: this copies every embeds row.
+            await self._apply_prompt_embeds_to_prompt_async(
                 prompt,
                 prompt_embeds_tensors,
                 prompt_embeds_placeholder_token_id,
+                share_memory=self._shm_tensor_ipc,
             )
 
         if mm_data is not None:
@@ -1417,6 +1441,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         prompt: DictPrompt,
         prompt_embeds_tensors: list[torch.Tensor],
         placeholder_token_id: int,
+        *,
+        share_memory: bool = False,
     ) -> None:
         """Mutate `prompt` from `TokensPrompt` to `EmbedsPrompt` shape.
 
@@ -1450,7 +1476,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         embeds_prompt = cast(EmbedsPrompt, prompt)
         embeds_prompt["prompt_token_ids"] = expanded
         full_embeds, is_token_ids_mask = _build_mixed_prompt_embeds(
-            expanded, prompt_embeds_tensors, positions
+            expanded,
+            prompt_embeds_tensors,
+            positions,
+            share_memory=share_memory,
         )
         embeds_prompt["prompt_embeds"] = full_embeds
         embeds_prompt["prompt_is_token_ids"] = is_token_ids_mask

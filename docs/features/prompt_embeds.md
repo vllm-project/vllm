@@ -83,6 +83,17 @@ The tensor represents only the reasoning content. Use a chat template that rende
     The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!
 
+### Large prompt embeddings
+
+By default, `prompt_embeds` are serialized into the request message sent from the API server to the engine. Long prompts make that expensive: 262,144 tokens at hidden size 4096 in bfloat16 are 2 GiB. With `--mm-tensor-ipc torch_shm`, the API server instead writes them to shared memory, off the event loop, and passes the engine a handle:
+
+```bash
+VLLM_WORKER_MULTIPROC_METHOD=spawn vllm serve meta-llama/Llama-3.2-1B-Instruct \
+  --enable-prompt-embeds --mm-tensor-ipc torch_shm
+```
+
+This works with tensor and pipeline parallelism, but not with data parallelism. The shared memory is allocated on the engine's NUMA node when vLLM binds the engine to one. Each in-flight request holds its `prompt_embeds` in `/dev/shm` until it finishes, so size `/dev/shm` (for example `docker run --shm-size`) accordingly.
+
 ### Transformers Inputs via OpenAI Client
 
 First, launch the OpenAI-compatible server:

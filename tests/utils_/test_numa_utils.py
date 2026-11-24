@@ -1035,3 +1035,19 @@ def test_auto_numa_checks_cpu_affinity(monkeypatch, affinity):
     assert numa_utils._is_auto_numa_available(
         verbose=False, require_unbound_process=True
     ) is (affinity == [3, 2, 1, 0])
+
+
+def test_api_servers_get_exported_enginecore_memory_nodes(monkeypatch):
+    """API servers rebuild their config from CLI args, so `numa_bind` is
+    unresolved there; they must read the EngineCore nodes the launching process
+    exported, to place torch_shm tensors where EngineCore reads them."""
+    monkeypatch.delenv(numa_utils._ENGINECORE_NUMA_NODES_ENV, raising=False)
+    launcher = _make_config(
+        numa_bind=True, numa_bind_nodes=[1, 1, 0, 0], tensor_parallel_size=2
+    ).parallel_config
+    numa_utils.export_enginecore_memory_nodes(launcher)
+    assert numa_utils.enginecore_memory_nodes() == [1]
+
+    unbound = _make_config(numa_bind=False).parallel_config
+    numa_utils.export_enginecore_memory_nodes(unbound)
+    assert numa_utils.enginecore_memory_nodes() is None

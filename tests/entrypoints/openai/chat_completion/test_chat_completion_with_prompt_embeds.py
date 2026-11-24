@@ -295,6 +295,13 @@ async def test_text_content_and_prompt_embeds_match(
     """Equal content in text and `prompt_embeds` should yield identical
     Chat Completions output under greedy decoding.
     """
+    await _assert_text_and_prompt_embeds_match(client, aligned_content_and_embeds_b64)
+
+
+async def _assert_text_and_prompt_embeds_match(
+    client: openai.AsyncOpenAI,
+    aligned_content_and_embeds_b64: tuple[str, str],
+):
     content, encoded_embeds = aligned_content_and_embeds_b64
 
     text_resp, embeds_resp = await asyncio.gather(

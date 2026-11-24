@@ -622,7 +622,11 @@ def test_build_positions_length_mismatch(tokenizer):
         "three-spans",
     ],
 )
-def test_build_mixed_prompt_embeds(stream):
+@pytest.mark.parametrize("share_memory", [False, True])
+def test_build_mixed_prompt_embeds(stream, share_memory):
+    """With `share_memory` (torch_shm IPC), the tensor is built in shared
+    memory, and its token rows must still be zero though it starts uninitialized:
+    they feed the prefix-cache block hashes."""
     H = 8
     _PLACEHOLDER = 0  # sentinel for embed positions in token_ids
 
@@ -641,8 +645,11 @@ def test_build_mixed_prompt_embeds(stream):
             token_ids.append(item)
             cursor += 1
 
-    embeds, mask = _build_mixed_prompt_embeds(token_ids, tensors, positions)
+    embeds, mask = _build_mixed_prompt_embeds(
+        token_ids, tensors, positions, share_memory=share_memory
+    )
 
+    assert embeds.is_shared() == share_memory
     assert embeds.shape == (len(token_ids), H)
     assert len(mask) == len(token_ids)
 

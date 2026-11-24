@@ -1237,12 +1237,11 @@ def launch_core_engines(
 
     offline_mode = local_start_index is not None
 
-    # Create a single tensor IPC queue for sharing multimodal tensors between
-    # API servers and engine core. Returns a single queue since we only support
-    # DP=1 for this data flow.
+    # Create a single tensor IPC queue for sharing multimodal tensors and
+    # prompt_embeds between API servers and engine core. Returns a single queue
+    # since we only support DP=1 for this data flow.
     tensor_queue: Queue | None = None
-    multimodal_config = vllm_config.model_config.multimodal_config
-    if multimodal_config is not None and multimodal_config.mm_tensor_ipc == "torch_shm":
+    if vllm_config.model_config.tensor_ipc == "torch_shm":
         tensor_queue = get_mp_context().Queue()
 
     # Run the DP Coordinator process with rank 0 when in online DP mode.
@@ -1402,6 +1401,9 @@ def launch_core_engines(
             and (local_engine_manager is not None)
         ):
             local_engine_manager._coord_store = coord_store
+
+        if tensor_queue is not None:
+            numa_utils.export_enginecore_memory_nodes(parallel_config)
 
         launch = CoreEngineLaunch(
             local_engine_manager, coordinator, addresses, tensor_queue
