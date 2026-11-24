@@ -36,13 +36,15 @@ if TYPE_CHECKING:
 class ClassifierWithReshape(nn.Module):
     """Token extraction has already been applied in `pooler.pooling`.
 
-    Add dim to match expected input shape of `classifier.forward`.
+    Add dim to match expected input shape of `classifier.forward`, and remove it
+    again if the classifier is applied at every position (e.g. LayoutLMv3's).
     """
 
     def forward(self, *args, **kwargs):
         if len(args) > 0:
             args = (args[0].unsqueeze(1), *args[1:])
-        return super().forward(*args, **kwargs)
+        output = super().forward(*args, **kwargs)
+        return output.squeeze(1) if output.dim() == 3 else output
 
 
 class EmbeddingMixin(VllmModelForPooling, Base):
@@ -98,10 +100,9 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling, Ba
             )
         self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
 
-        # Only heads that select their own token (e.g. RoBERTa's) need the
-        # sequence dim back. Order `ClassifierWithReshape` ahead of the
-        # classifier's own class so that its `super().forward(...)` reaches the
-        # original implementation.
+        # `nn.Linear` heads need no reshape. For other heads, order
+        # `ClassifierWithReshape` ahead of the classifier's own class so that
+        # its `super().forward(...)` reaches the original implementation.
         if not isinstance(self.classifier, nn.Linear):
             self.classifier.__class__ = type(
                 "ClassifierWithReshape",
