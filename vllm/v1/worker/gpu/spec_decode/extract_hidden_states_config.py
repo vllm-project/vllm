@@ -19,6 +19,7 @@ class ExtractHiddenStatesSpeculatorConfig(SpeculatorConfig):
         "ExtractHiddenStatesSpeculator"
     )
     proposes_draft_tokens = False
+    supported_options = frozenset({"disable_extract_hidden_states_decode_drafts"})
 
     @classmethod
     def configure(cls, spec: "SpeculativeConfig") -> None:
@@ -44,6 +45,18 @@ class ExtractHiddenStatesSpeculatorConfig(SpeculatorConfig):
         )
         spec.update_arch_()
         spec.draft_parallel_config = spec.target_parallel_config
+
+    @classmethod
+    def apply_options(cls, spec: "SpeculativeConfig") -> None:
+        if not spec.disable_extract_hidden_states_decode_drafts:
+            return
+        if spec.num_speculative_tokens_per_batch_size not in (None, [(1, 1, 0)]):
+            raise ValueError(
+                "disable_extract_hidden_states_decode_drafts=True sets "
+                "num_speculative_tokens_per_batch_size, so the two cannot be "
+                "combined."
+            )
+        spec.num_speculative_tokens_per_batch_size = [(1, 1, 0)]
 
     @property
     def uses_aux_hidden_states(self) -> bool:

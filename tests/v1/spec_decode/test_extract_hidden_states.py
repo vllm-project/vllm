@@ -234,7 +234,11 @@ def test_no_decode_drafts_rejects_other_schedule():
 
 
 def test_no_decode_drafts_rejects_other_methods():
-    with pytest.raises(ValueError, match="requires method='extract_hidden_states'"):
+    with pytest.raises(
+        ValueError,
+        match="disable_extract_hidden_states_decode_drafts is not supported with "
+        "speculative method 'ngram'",
+    ):
         SpeculativeConfig(
             method="ngram",
             num_speculative_tokens=1,
