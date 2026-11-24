@@ -76,7 +76,6 @@ tests/kernels/helion/test_config_manager.py  # CI jobs disabled pending locked h
 tests/kernels/helion/test_dynamic_per_token_scaled_fp8_quant.py  # CI jobs disabled pending locked helion transitive dependencies
 tests/kernels/helion/test_fused_qk_norm_rope.py  # CI jobs disabled pending locked helion transitive dependencies
 tests/kernels/helion/test_helion_available.py  # CI jobs disabled pending locked helion transitive dependencies
-tests/kernels/helion/test_pattern_matching.py  # CI jobs disabled pending locked helion transitive dependencies
 tests/kernels/helion/test_per_token_group_fp8_quant.py  # CI jobs disabled pending locked helion transitive dependencies
 tests/kernels/helion/test_register.py  # CI jobs disabled pending locked helion transitive dependencies
 tests/kernels/helion/test_rms_norm_dynamic_per_token_quant.py  # CI jobs disabled pending locked helion transitive dependencies
