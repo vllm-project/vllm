@@ -1165,9 +1165,10 @@ def test_output_head_loads_checkpoint(model_type, arch, overrides, tmp_path, tp_
     vllm_config = VllmConfig(model_config=model_config)
     with set_current_vllm_config(vllm_config):
         vllm_model = model_loader.get_model(vllm_config=vllm_config)
+    device = next(vllm_model.parameters()).device
     with torch.no_grad():
-        logits = vllm_model.compute_logits(hidden_states)
-    torch.testing.assert_close(logits, expected)
+        logits = vllm_model.compute_logits(hidden_states.to(device))
+    torch.testing.assert_close(logits.cpu(), expected)
 
 
 # The smallest sizes the fused MoE kernels accept
