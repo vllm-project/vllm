@@ -4,12 +4,11 @@
 
 from __future__ import annotations
 
-import json
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from itertools import chain, islice
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -25,11 +24,9 @@ from vllm.v1.core.kv_cache_utils import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import ExternalBlockHash
-    from vllm.sampling_params import SamplingParams
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
     from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.engine import EngineCoreRequest
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -52,34 +49,6 @@ def retained_objects(
     if vllm_config.kv_transfer_config is not None:
         num_blocks *= 2
     return num_blocks * (block_size // hash_block_size), hash_block_size
-
-
-_AUX_SALT_PREFIX = "vllm-aux:"
-
-
-def aux_output_cache_salt(
-    cache_salt: str | None, sampling_params: SamplingParams | None
-) -> str | None:
-    """Salt a request by the auxiliary outputs its KV blocks carry. A request
-    that skips them has blocks without recorded routing, so it gets a salt in
-    the reserved form, which no other request can produce."""
-    salt: dict[str, Any] = {}
-    if sampling_params is not None and not sampling_params.return_aux_outputs:
-        salt["aux_outputs"] = False
-    if not salt and not (cache_salt or "").startswith(_AUX_SALT_PREFIX):
-        return cache_salt
-    salt["cache_salt"] = cache_salt
-    return _AUX_SALT_PREFIX + json.dumps(salt, sort_keys=True)
-
-
-def salt_aux_outputs(request: EngineCoreRequest) -> None:
-    """Apply aux_output_cache_salt to a request entering an engine that records
-    auxiliary outputs. Frontend prompt hashes do not include a changed salt, so
-    they are dropped and the engine hashes the prompt."""
-    cache_salt = aux_output_cache_salt(request.cache_salt, request.sampling_params)
-    if cache_salt != request.cache_salt:
-        request.cache_salt = cache_salt
-        request.block_hashes = None
 
 
 @dataclass(slots=True)
@@ -133,11 +102,14 @@ class AuxOutputSchedulerConnector:
             OrderedDict()
         )
         self._loading: dict[str, set[ExternalBlockHash]] = {}
-        # KV blocks whose rows are not all here: loaded without rows, or
-        # computed from mid-block on. Any other cached GPU block has rows.
+        # KV blocks whose rows are not all here: loaded without rows, computed
+        # from mid-block on, or computed by an opted-out request. Any other
+        # cached GPU block has rows.
         self._rowless: dict[ExternalBlockHash, BlockHash] = {}
         # First token each active request computes here.
         self._computed_from: dict[str, int] = {}
+        # KV blocks of each active opted-out request already checked.
+        self._skip_marked: dict[str, int] = {}
         self._capacity = num_objects // (self._block_size // self._hash_block_size)
         self._retained_hashes: list[bytes] = []
         self._released_hashes: list[bytes] = []
@@ -153,6 +125,7 @@ class AuxOutputSchedulerConnector:
         for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
             request = requests[request_id]
             if self._skips(request):
+                self._mark_rowless(request)
                 continue
             self._sent_hash_counts.setdefault(request_id, 0)
             self._computed_from.setdefault(request_id, request.num_computed_tokens)
@@ -205,6 +178,7 @@ class AuxOutputSchedulerConnector:
 
     def max_cache_hit(self, request: Request) -> int:
         if self._skips(request):
+            self._mark_rowless(request, hits_cache=True)
             return request.num_tokens - 1
         num_blocks = 0
         for block, keys in self._kv_blocks(request.block_hashes):
@@ -280,6 +254,8 @@ class AuxOutputSchedulerConnector:
     ) -> np.ndarray | None:
         """Return the accepted R3 rows for one scheduled request."""
         if self._skips(request):
+            # Its new tokens can complete a block before the next schedule caches it.
+            self._mark_rowless(request)
             return None
         request_id = request.request_id
         # The block this request started mid-block has no rows here. Its hash
@@ -321,6 +297,7 @@ class AuxOutputSchedulerConnector:
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
         if self._skips(request):
+            self._skip_marked.pop(request.request_id, None)
             return
         request_id = request.request_id
         self._loading.pop(request_id, None)
@@ -344,6 +321,18 @@ class AuxOutputSchedulerConnector:
                 self._kv_cached[block] = keys
                 self._retained_hashes.extend(keys)
         self._release_unheld()
+
+    def _mark_rowless(self, request: Request, hits_cache: bool = False) -> None:
+        """Mark the KV blocks an opted-out request computes as rowless. Only its
+        prefix lookup can hit cached blocks; every later block is its own."""
+        num_checked = self._skip_marked.get(request.request_id, 0)
+        step = self._block_size // self._hash_block_size
+        hashes = request.block_hashes
+        for block, keys in self._kv_blocks(hashes[num_checked * step :]):
+            if block in self._kv_cached or (hits_cache and self._gpu_cached(keys[-1])):
+                continue
+            self._rowless[block] = keys[-1]
+        self._skip_marked[request.request_id] = len(hashes) // step
 
     @staticmethod
     def _skips(request: Request) -> bool:

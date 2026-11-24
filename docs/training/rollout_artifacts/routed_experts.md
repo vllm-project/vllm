@@ -71,7 +71,7 @@ The opt-out removes the per-request work; the batch-wide work stays as long as t
 | `routed_experts` | Recording and storing its routing rows, keeping them for cached blocks, and returning them. A step with no recording request skips the routing copy to the host entirely. | Routing capture on the GPU for the whole batch, and the host copy of the whole batch when any request in the step records. |
 | `sampling_mask` | Extracting, packing and returning its mask. | Mask computation for the whole batch and the PyTorch sampling path; the request still needs `temperature > 0` and `top_k > 0`. |
 
-Requests that opt out get their own prefix-cache namespace, because their KV blocks have no stored routing. They share cached prefixes with each other but not with requests that record routing.
+Opted-out requests share the prefix cache with every other request. The KV blocks they compute have no stored routing, so a request that records routing recomputes from the first such block.
 
 ## Row storage
 

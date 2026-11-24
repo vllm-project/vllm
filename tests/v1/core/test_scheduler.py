@@ -25,7 +25,6 @@ from vllm.config.watermarking import WatermarkConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
-    aux_output_cache_salt,
     retained_objects,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
@@ -563,26 +562,7 @@ def test_aux_outputs_opt_out_is_not_recorded():
     assert metadata.finished_requests == ("recorded",)
 
 
-@pytest.mark.parametrize("salt", [None, "user"])
-@pytest.mark.parametrize("pooling", [True, False], ids=["pooling", "records"])
-def test_aux_output_cache_salt_keeps_recording_salt(salt, pooling):
-    params = None if pooling else _aux_outputs_params(True)
-    assert aux_output_cache_salt(salt, params) == salt
-
-
-def test_aux_output_cache_salt_is_injective():
-    salts = [None, "", "user", "other"]
-    salts += [aux_output_cache_salt(s, _aux_outputs_params(False)) for s in salts]
-    salts.append("vllm-aux:user")
-    outputs = [
-        aux_output_cache_salt(s, _aux_outputs_params(flag))
-        for s in salts
-        for flag in (True, False)
-    ]
-    assert len(set(outputs)) == len(outputs)
-
-
-def test_aux_outputs_opt_out_prefix_cache_is_separate():
+def test_aux_outputs_opt_out_blocks_are_rowless():
     scheduler = create_scheduler(enable_prefix_caching=True)
     scheduler.aux_output_connector = _aux_output_connector(scheduler)
 
@@ -593,7 +573,6 @@ def test_aux_outputs_opt_out_prefix_cache_is_separate():
             num_tokens=48,
             req_ids=[request_id],
             sampling_params=params,
-            cache_salt=aux_output_cache_salt(None, params),
         )
         scheduler.add_request(request)
         scheduler_output = scheduler.schedule()
@@ -617,10 +596,59 @@ def test_aux_outputs_opt_out_prefix_cache_is_separate():
         assert request.is_finished()
         return new_request.num_computed_tokens
 
+    # Blocks an opted-out request computed have no rows: recording recomputes them.
     assert run("skipped-0", return_aux_outputs=False) == 0
     assert run("skipped-1", return_aux_outputs=False) == 32
     assert run("recorded-0", return_aux_outputs=True) == 0
     assert run("recorded-1", return_aux_outputs=True) == 32
+    assert run("skipped-2", return_aux_outputs=False) == 32
+
+
+def test_aux_outputs_opt_out_decode_blocks_are_rowless():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.aux_output_connector = _aux_output_connector(scheduler)
+
+    def step(request_id: str, rows: np.ndarray | None = None) -> SchedulerOutput:
+        scheduler_output = scheduler.schedule()
+        scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(
+                req_ids=[request_id],
+                sampled_token_ids=[[0]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+                aux_output_connector_output=(
+                    None if rows is None else {request_id: AuxRequestOutput(0, rows)}
+                ),
+            ),
+        )
+        return scheduler_output
+
+    (recorded,) = create_requests(num_requests=1, num_tokens=32, max_tokens=1)
+    scheduler.add_request(recorded)
+    step(recorded.request_id, np.zeros((32, 1, 1), np.uint8))
+    assert recorded.is_finished()
+
+    # Running opted-out request: its prompt hits rows, its decode tokens fill block 2.
+    (skipped,) = create_requests(
+        num_requests=1,
+        num_tokens=32,
+        req_ids=["skipped"],
+        sampling_params=_aux_outputs_params(False, max_tokens=30),
+    )
+    scheduler.add_request(skipped)
+    while skipped.num_computed_tokens < 48:
+        step(skipped.request_id)
+    assert not skipped.is_finished()
+
+    (late,) = create_requests(
+        num_requests=1, num_tokens=49, max_tokens=1, req_ids=["late"]
+    )
+    scheduler.add_request(late)
+    scheduler_output = scheduler.schedule()
+    (new_request,) = scheduler_output.scheduled_new_reqs
+    assert new_request.num_computed_tokens == 32
 
 
 @pytest.mark.parametrize("return_aux_outputs", [True, False])

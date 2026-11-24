@@ -30,7 +30,6 @@ from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
 )
-from vllm.distributed.aux_output_connector.connector import salt_aux_outputs
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
@@ -1285,8 +1284,6 @@ class EngineCore:
                 warn_watermarking_override()
             params.watermarking = True
 
-        if self.vllm_config.aux_output_config.enabled:
-            salt_aux_outputs(request)
         frontend_hashes = frontend_block_hashes(request, self.prefix_hash_config)
         req = Request.from_engine_core_request(
             request, self.request_block_hasher, frontend_hashes
