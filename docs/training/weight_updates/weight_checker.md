@@ -21,11 +21,13 @@ All three actions accept `"model": "target"`, `"draft"`, or `"both"`. Omitting
 
 For a single model, keys have the form `dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:{tensor_name}`.
 Selecting `both` adds a `target:` or `draft:` prefix to each key. With pipeline
-parallelism, draft keys come from the last stage. The endpoint keeps no state,
-so the caller holds the baseline.
+parallelism, draft keys come from the last stage. Save the `checksums` mapping
+from the response and pass it as `baseline` when comparing.
 
-Invalid requests return HTTP 400, and selecting a draft without resident draft
-weights returns HTTP 409.
+A completed comparison returns HTTP 200 even when `match` is `false`.
+`mismatches` lists keys whose digest changed and keys missing from either side.
+An explicit `"model": null` or a compare request without a baseline returns
+HTTP 400. Selecting a draft without resident draft weights returns HTTP 409.
 
 ## Shared weights and reset scope
 
@@ -62,10 +64,10 @@ reset, while `draft` and `both` resets return HTTP 409.
 ```bash
 set -eo pipefail
 URL=http://localhost:8000
-MODEL=both  # Use target or draft to verify a single model.
+MODEL=target  # For a resident drafter with PP=1, choose draft or both to reset it.
 
 # 1. Stop serving, then save the original digests.
-curl -X POST "$URL/pause?mode=abort"
+curl --fail-with-body -X POST "$URL/pause?mode=abort"
 curl --fail-with-body -X POST "$URL/weight_checker" -H 'Content-Type: application/json' \
   -d "{\"action\":\"checksum\",\"model\":\"$MODEL\"}" > baseline.json
 
@@ -73,18 +75,21 @@ curl --fail-with-body -X POST "$URL/weight_checker" -H 'Content-Type: applicatio
 curl --fail-with-body -X POST "$URL/weight_checker" -H 'Content-Type: application/json' \
   -d "{\"action\":\"reset\",\"model\":\"$MODEL\"}"
 
-# 3. Compare again to confirm the reset changed weights before restoring them.
+# 3. Inspect which weights changed. Weights that were already zero can still match.
 jq --arg model "$MODEL" '{action:"compare", model:$model, baseline:.checksums}' \
   baseline.json | curl --fail-with-body -X POST "$URL/weight_checker" \
   -H 'Content-Type: application/json' -d @-
+```
 
-# 4. Transfer the original target weights with /start_weight_update,
-#    /update_weights, /finish_weight_update. For the draft, use
-#    /start_draft_weight_update, then the same update and finish routes.
-#    For draft-only verification, include the shared weights in the draft transfer.
-#    For both, complete the target transfer before starting the draft transfer.
+While inference is paused, use your trainer to restore the selected weights.
+Start a target transfer with `/start_weight_update` or a draft transfer with
+`/start_draft_weight_update`. Both use `/update_weights` and
+`/finish_weight_update`. For `both`, finish the target transfer before starting
+the draft transfer.
 
-# 5. Compare against the baseline. Resume only after match is true.
+After recovery, run the following in the same shell to resume only on a match.
+
+```bash
 jq --arg model "$MODEL" '{action:"compare", model:$model, baseline:.checksums}' \
   baseline.json | curl --fail-with-body -X POST "$URL/weight_checker" \
   -H 'Content-Type: application/json' -d @- | jq -e '.match == true' && \
@@ -92,32 +97,46 @@ jq --arg model "$MODEL" '{action:"compare", model:$model, baseline:.checksums}' 
 ```
 
 For a target-only update, save the target baseline while paused and before
-resetting or transferring weights. Pass it to `/finish_weight_update` at the
-end of the transfer.
+resetting or transferring weights.
 
 ```bash
 curl --fail-with-body -X POST "$URL/weight_checker" -H 'Content-Type: application/json' \
   -d '{"action":"checksum","model":"target"}' > target-baseline.json
+```
 
-# After /start_weight_update and /update_weights:
+After `/start_weight_update` and `/update_weights`, finish the transfer and
+check the returned `match` field.
+
+```bash
 jq '{baseline: .checksums}' target-baseline.json | \
   curl --fail-with-body -X POST "$URL/finish_weight_update" \
-    -H 'Content-Type: application/json' -d @-
+    -H 'Content-Type: application/json' -d @- | jq -e '.match == true'
 ```
 
 For a draft or both-model baseline, use the matching `model` selection in a
 separate `/weight_checker` compare after the required updates have finished.
 
-With a trainer-side weight transfer engine, which finishes the update inside
-`send_weights()`, bind the target baseline to the HTTP client. `finish_weight_update`
-then raises `RuntimeError` on a mismatch:
+With a trainer-side weight transfer engine, `send_weights()` calls
+`finish_weight_update` internally. Bind the saved target digests to the HTTP
+client so a mismatch raises `RuntimeError` in the trainer. Use the trainer's
+existing `init_info` and weight `source`.
 
 ```python
+import json
 from functools import partial
+from pathlib import Path
 
-client = HTTPVLLMWeightSyncClient(URL)
+from vllm.distributed.weight_transfer import (
+    HTTPVLLMWeightSyncClient,
+    WeightTransferTrainerFactory,
+)
+
+baseline = json.loads(Path("target-baseline.json").read_text())["checksums"]
+client = HTTPVLLMWeightSyncClient("http://localhost:8000")
 client.finish_weight_update = partial(client.finish_weight_update, baseline=baseline)
-trainer = WeightTransferTrainerFactory.trainer_init(init_info, client=client, source=source)
+trainer = WeightTransferTrainerFactory.trainer_init(
+    init_info, client=client, source=source
+)
 trainer.send_weights()
 ```
 
