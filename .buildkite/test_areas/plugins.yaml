@@ -13,14 +13,16 @@ steps:
   - vllm/plugins/
   - tests/plugins/
   commands:
-  # These plugins act only when a test names them (io_processor and endpoint)
-  # or add new model names (dummy_model), so they can all be installed at once.
-  - pip install -e ./plugins/prithvi_io_processor_plugin -e ./plugins/bge_m3_sparse_plugin -e ./plugins/colbert_query_plugin -e ./plugins/vllm_add_dummy_endpoint_plugin -e ./plugins/vllm_add_dummy_model
+  # These plugins act only when a test names them (io_processor, endpoint and
+  # metadata_provider) or add new model names (dummy_model), so they can all be
+  # installed at once.
+  - pip install -e ./plugins/prithvi_io_processor_plugin -e ./plugins/bge_m3_sparse_plugin -e ./plugins/colbert_query_plugin -e ./plugins/vllm_add_dummy_endpoint_plugin -e ./plugins/vllm_add_dummy_model -e ./plugins/vllm_add_dummy_metadata_provider
   - pytest -v -s plugins_tests/test_io_processor_plugins.py
   - pytest -v -s plugins_tests/test_terratorch_io_processor_plugins.py
   - pytest -v -s plugins_tests/test_bge_m3_sparse_io_processor_plugins.py
   - pytest -v -s plugins_tests/test_colbert_query_io_processor_plugins.py
   - pytest -v -s plugins_tests/test_endpoint_plugins.py
+  - pytest -v -s plugins_tests/test_model_metadata.py
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pytest -v -s distributed/test_distributed_oot.py
   - pytest -v -s plugins_tests/test_oot_registration_online.py # it needs a clean process
