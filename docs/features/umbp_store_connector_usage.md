@@ -143,6 +143,21 @@ examples above. An object can be evicted between lookup and load; the default
 
 With `kv_role: "kv_consumer"` the connector only restores and never stores.
 
+## Scheduling hints
+
+The connector exposes `get_known_num_matched_tokens` for cache-aware request
+ordering. This optional hook reads the usable prefix length from a previous
+normal lookup; it performs no lookup, allocation, pinning, or KV transfer.
+An unqueried request returns `None`, while a completed miss returns its local
+prefix length (zero when there is no local hit).
+
+With `lookup_async`, a returned runtime reply remains unknown to this hook until
+the normal scheduler path has reduced it across cache groups. This includes
+hybrid attention/state layouts. Reading the hint does not consume the reply or
+run that reduction. Hints are discarded after allocation, request completion,
+or reset, and rejected if the request identity or token/hash context changes.
+They are advisory: the ordinary lookup/load path remains authoritative.
+
 ## Limitations
 
 - Pipeline parallelism is rejected.
