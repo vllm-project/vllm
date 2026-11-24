@@ -485,6 +485,15 @@ def test_load_base64_jpeg_raises_on_zero_num_frames():
         videoio.load_base64("video/jpeg", data)
 
 
+@pytest.mark.parametrize("fps", [float("nan"), float("inf"), float("-inf")])
+def test_load_base64_jpeg_raises_on_non_finite_fps(fps: float):
+    data = ",".join(_make_jpeg_b64_frames(3))
+    videoio = VideoMediaIO(ImageMediaIO(), num_frames=3, fps=fps)
+
+    with pytest.raises(ValueError, match="fps must be a finite number"):
+        videoio.load_base64("video/jpeg", data)
+
+
 def test_pynvvideocodec_unrelated_error_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ):
