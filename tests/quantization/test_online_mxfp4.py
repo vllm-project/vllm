@@ -10,6 +10,7 @@ against the pure-torch reference in `reference_mxfp4.py`.
 import pytest
 import torch
 
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import ModelConfig
@@ -283,12 +284,13 @@ def test_online_mxfp4_tp_weight_quant_matches_unsharded(tp_size: int):
         pytest.param(240, 208, id="padding"),
     ],
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_mxfp4_moe_matches_quark(
     moe_backend: MoEBackend,
     unpadded_hidden_size: int,
     unpadded_intermediate_size: int,
     default_vllm_config,
-    dist_init,
     monkeypatch,
 ):
     """Ensures `Mxfp4OnlineMoEMethod` (online quantization)
@@ -492,8 +494,10 @@ def test_online_mxfp4_moe_matches_quark(
     not current_platform.is_cuda_alike(), reason="Only tested on ROCm/CUDA."
 )
 @pytest.mark.parametrize("linear_backend", ["emulation", "aiter", "marlin"])
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_mxfp4_dense_matches_quark(
-    linear_backend: str, default_vllm_config, dist_init, monkeypatch
+    linear_backend: str, default_vllm_config, monkeypatch
 ):
     """Ensures `Mxfp4OnlineLinearMethod` (online quantization)
     and `QuarkOCP_MX` (AMD Quark checkpoints) produce the same weights,

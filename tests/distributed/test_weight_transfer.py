@@ -2444,6 +2444,45 @@ def test_nccl_trainer_sends_metadata_only_when_changed():
     assert client.last_update_info["shapes"] == [[8]]
 
 
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 1,
+    reason="Need at least 1 GPU (NCCL broadcast / CUDA stream).",
+)
+def test_nccl_trainer_resends_metadata_after_a_failed_update():
+    """The workers keep the metadata of an update whose finish failed (a
+    partial update a direct reload refuses): the next update must send its
+    own metadata, not reuse the one before the failed update."""
+
+    class FailingFinish(RecordingClient):
+        fail = False
+
+        def finish_weight_update(self, weight_version=None):
+            super().finish_weight_update(weight_version)
+            if self.fail:
+                raise RuntimeError("refused")
+
+    def source(*names):
+        pairs = [(n, torch.zeros(4, device="cuda")) for n in names]
+        return ModuleSource(_module_with(*pairs))
+
+    client = FailingFinish()
+    engine = NCCLTrainerWeightTransferEngine(
+        client=client, source=source("v", "w"), packed=False
+    )
+    engine.model_update_group = MagicMock(rank=0)
+
+    engine.send_weights()  # full
+    engine.source, client.fail = source("w"), True  # partial, refused
+    with pytest.raises(RuntimeError, match="refused"):
+        engine.send_weights()
+    assert client.last_update_info is not None
+    assert client.last_update_info["names"] == ["w"]
+    engine.source, client.fail = source("v", "w"), False  # full again
+    engine.send_weights()
+    assert client.last_update_info is not None
+    assert client.last_update_info["names"] == ["v", "w"]
+
+
 def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
     """Empty update info reuses the previous call's metadata for the same
     (model, src) and receives from that src; re-init clears every entry, and

@@ -28,7 +28,7 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
 - The submitting human must review every changed line and run relevant tests.
 - PR descriptions for AI-assisted work **must** include:
     - Why this is not duplicating an existing PR.
-    - Test commands run and results.
+    - Test commands run and results (for unit tests, reproducible pytest command and exact pytest summary line including time).
     - Model evaluation results when the change affects output, accuracy, or serving.
     - Clear statement that AI assistance was used.
 - User-visible changes (features, CLI args, config fields, env vars, models,

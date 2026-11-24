@@ -478,7 +478,10 @@ mod tests {
             Some(vec!["hello".to_string()])
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
-        assert!(!prepared.text_request.decode_options.skip_special_tokens);
+        assert_eq!(
+            prepared.text_request.decode_options.skip_special_tokens,
+            Some(false)
+        );
         assert_eq!(
             prepared.text_request.sampling_params.stream_interval,
             NonZeroU32::new(4)

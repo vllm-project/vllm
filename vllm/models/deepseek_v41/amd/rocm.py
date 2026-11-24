@@ -24,6 +24,7 @@ from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
     RocmSparseAttnIndexer,
     RocmSparseMQAIndexer,
 )
+from vllm.models.deepseek_v4.amd.model import mxfp8_input
 from vllm.models.deepseek_v4.amd.rocm import (
     _plain_fp8_sparse_mla,
     _register_plain_fp8_kv_scales,
@@ -698,6 +699,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             return self._bpre_attn_gemm(
                 self.fused_wqa_wkv.weight, self._wqa_wkv_scale, hidden_states, False
             )
+        # The fused mHC seam may hand over the layer input already in MXFP8.
+        qa = mxfp8_input(hidden_states)
+        if qa is not None:
+            qr_kv, _ = self.fused_wqa_wkv(qa)
+            return qr_kv
         return super()._fused_wqa_wkv_gemm(hidden_states)
 
     def _run_parallel_input_projections(

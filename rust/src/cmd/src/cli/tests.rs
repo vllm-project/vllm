@@ -95,9 +95,6 @@ fn render_args_build_config_without_tls() {
         // hidden flag.
         "--skip-model-name-validation",
         "True",
-        // Set through `VLLM_MAX_N_SEQUENCES`, which binds this hidden flag.
-        "--max-n-sequences",
-        " 4 ",
     ])
     .unwrap();
 
@@ -125,7 +122,6 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.max_model_len, Some(32768));
     assert_eq!(config.served_model_name, ["qwen"]);
     assert!(config.skip_model_name_validation);
-    assert_eq!(config.max_n_sequences, 4);
     assert_eq!(config.tool_call_parser, ParserSelection::Auto);
     assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
@@ -147,7 +143,6 @@ fn render_args_allow_omitted_max_model_len() {
 
     assert_eq!(config.max_model_len, None);
     assert!(!config.skip_model_name_validation);
-    assert_eq!(config.max_n_sequences, 16384);
 }
 
 #[test]
@@ -274,6 +269,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             {},
                         ),
                         generation_config: Auto,
+                        override_generation_config: {},
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
@@ -2337,6 +2333,7 @@ fn frontend_args_accept_json() {
                             {},
                         ),
                         generation_config: Auto,
+                        override_generation_config: {},
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: None,
                         reasoning_parser: None,
@@ -2702,6 +2699,64 @@ fn hf_overrides_reject_non_object_inputs() {
         .unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
     }
+}
+
+#[test]
+fn override_generation_config_reaches_frontend_and_engine() {
+    let overrides = r#"{"temperature":0.5,"max_new_tokens":100,"top_k":null}"#;
+    let expected: serde_json::Value = serde_json::from_str(overrides).unwrap();
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--override-generation-config",
+        overrides,
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args")
+    };
+    // The managed Python engine reads it too, so it is forwarded unchanged.
+    let engine = args.to_managed_engine_config(1234, &topology(&args), None);
+    let index = engine
+        .python_args
+        .iter()
+        .position(|arg| arg == "--override-generation-config")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&engine.python_args[index + 1]).unwrap(),
+        expected
+    );
+    let config = args.to_frontend_config("tcp://127.0.0.1:1234".to_string(), &topology(&args));
+    assert_eq!(
+        serde_json::Value::Object(config.override_generation_config),
+        expected
+    );
+
+    let payload = serde_json::json!({
+        "model_tag": "Qwen/Qwen3-0.6B",
+        "override_generation_config": expected,
+    });
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        &payload.to_string(),
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args")
+    };
+    assert_eq!(
+        serde_json::Value::Object(args.into_config().override_generation_config),
+        expected
+    );
 }
 
 #[test]
@@ -3365,6 +3420,7 @@ fn serve_args_accept_handshake_aliases() {
                             {},
                         ),
                         generation_config: Auto,
+                        override_generation_config: {},
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
@@ -3672,6 +3728,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 {},
             ),
             generation_config: Auto,
+            override_generation_config: {},
             served_model_name: [],
             listener_mode: BindTcp {
                 host: "127.0.0.1",
@@ -3808,6 +3865,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 {},
             ),
             generation_config: Auto,
+            override_generation_config: {},
             served_model_name: [],
             listener_mode: BindTcp {
                 host: "127.0.0.1",
@@ -4058,6 +4116,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 {},
             ),
             generation_config: Auto,
+            override_generation_config: {},
             served_model_name: [],
             listener_mode: InheritedFd {
                 fd: 3,

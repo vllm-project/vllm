@@ -843,12 +843,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self._prefill_kernels_warmed_up = False
         self.vllm_config = vllm_config
         # The FlashInfer and Triton/FLA prefills emit mid-prefill states, so an
-        # align-mode checkpoint needs no split prefill.
+        # align-mode checkpoint needs no split prefill. AITER FlyDSL cannot, so
+        # its steps that carry a checkpoint run the Triton/FLA prefill instead.
         self._checkpoint_alignment: int | None = None
         if vllm_config.cache_config.mamba_cache_mode == "align":
             if self.gdn_prefill_backend == "flashinfer":
                 self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
-            elif self.gdn_prefill_backend == "triton" and current_platform.is_cuda():
+            elif (
+                self.gdn_prefill_backend in ("triton", "aiter_flydsl")
+                and current_platform.is_cuda_alike()
+            ):
                 self._checkpoint_alignment = FLA_CHUNK_SIZE
         if self._checkpoint_alignment is not None:
             self._max_num_batched_tokens = (
@@ -922,7 +926,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.head_v_dim,
             self.head_k_dim,
         )
-        if self.gdn_prefill_backend == "triton":
+        if self.gdn_prefill_backend != "flashinfer":
             # One state per sequence, in the cache dtype.
             return (
                 (self.vllm_config.scheduler_config.max_num_seqs, *state_shape),
@@ -2245,7 +2249,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         buffer, which the exporter moves into the checkpoint block together
         with the conv window. Returns the output and the rows' final states.
         """
-        assert self.gdn_prefill_backend == "triton"
+        assert self.gdn_prefill_backend in ("triton", "aiter_flydsl")
         checkpoint = attn_metadata.checkpoint
         assert checkpoint is not None
         assert attn_metadata.prefill_state_indices is not None
