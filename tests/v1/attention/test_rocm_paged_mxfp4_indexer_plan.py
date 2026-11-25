@@ -7,6 +7,7 @@ long request, and both have to come back with the right rows and the right
 block-table rows.
 """
 
+import sys
 import types
 
 import pytest
@@ -18,7 +19,7 @@ if not current_platform.is_rocm():
     pytest.skip("ROCm-only", allow_module_level=True)
 
 from tests.v1.attention.utils import create_vllm_config
-from vllm.config import SpeculativeConfig
+from vllm.config import SpeculativeConfig, set_current_vllm_config
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla import rocm_paged_mxfp4_indexer
 from vllm.v1.attention.backends.mla.indexer import (
@@ -36,6 +37,8 @@ from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
     plan_prefill_chunks,
     split_prefill_chunks,
 )
+from vllm.v1.attention.ops import rocm_paged_mxfp4_indexer as ops
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _max_decode_logits_rows
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
     RocmPagedMxfp4CacheLayout,
     _fill_topk_rows,
@@ -453,3 +456,39 @@ def test_decode_metadata_matches_torch_path(monkeypatch, cls, ratio, adaptive):
             assert torch.equal(a, b) and a.data_ptr() == buf.data_ptr()
         assert out.decode.block_table.shape == ref.decode.block_table.shape
         assert out.decode.requires_padding == ref.decode.requires_padding
+
+
+@pytest.fixture
+def _fused_topk_cache():
+    ops._aiter_fused_topk.cache_clear()
+    yield
+    ops._aiter_fused_topk.cache_clear()
+
+
+@pytest.mark.parametrize("flag, aiter_has_op", [("0", True), ("1", False)])
+def test_fused_topk_needs_the_flag_and_aiters_op(
+    monkeypatch, _fused_topk_cache, flag, aiter_has_op
+):
+    """Off by default, and an aiter without the op keeps the chain."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MXFP4_INDEXER_TOPK", flag)
+    if not aiter_has_op:
+        monkeypatch.setitem(sys.modules, "aiter.ops.flydsl", None)
+    assert ops._aiter_fused_topk() is None
+
+
+def test_decode_rows_bound_outside_a_config_context():
+    """Kernel warm-up runs outside any config context: given the config, the
+    decode row bound is the one the profile run reserves scratch for
+    (max_num_seqs x next_n), not max_num_batched_tokens."""
+    config = create_vllm_config(
+        model_name="vllm-project/tiny-random-LlamaForCausalLM",
+        max_num_seqs=8,
+        max_num_batched_tokens=2048,
+    )
+    config.speculative_config = SpeculativeConfig(
+        method="ngram", num_speculative_tokens=5
+    )
+    assert _max_decode_logits_rows(2048, config) == 48
+    with set_current_vllm_config(config):
+        assert _max_decode_logits_rows(2048) == 48

@@ -14,6 +14,8 @@ from torch import nn
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
+    register_rocm_mxfp4_fused_topk_warmup,
+    rocm_mxfp4_fused_topk_kind,
     rocm_mxfp4_sparse_attn_indexer,
     rocm_mxfp4_sparse_mqa_indexer,
 )
@@ -23,6 +25,14 @@ class RocmSparseAttnIndexer(SparseAttnIndexer):
     """`SparseAttnIndexer` whose HIP path walks the paged MXFP4 cache with
     aiter's kernel. A two-level indexer's source layer also publishes its
     candidate pool here."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        register_rocm_mxfp4_fused_topk_warmup(
+            rocm_mxfp4_fused_topk_kind(self.candidate_blocks, self.candidate_write),
+            self.k_cache,
+            self.max_model_len,
+        )
 
     def forward_hip(
         self,
@@ -88,6 +98,7 @@ class RocmSparseMQAIndexer(nn.Module):
         self.candidate_blocks = candidate_blocks
         self.candidate_block_size = candidate_block_size
         self.num_candidate_cols = candidate_blocks.shape[1] * candidate_block_size
+        register_rocm_mxfp4_fused_topk_warmup("consumer", k_cache, self.max_model_len)
 
     def forward(
         self,
