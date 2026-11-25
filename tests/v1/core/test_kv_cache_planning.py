@@ -124,7 +124,6 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             distributed_executor_backend="mp",
         ),
         cache_config=SimpleNamespace(
-            num_gpu_blocks_override=7,
             prefix_cache_retention_interval=None,
             kv_cache_layout=KVCacheLayout.BLHNC.name,
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
@@ -133,8 +132,8 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     monkeypatch.setattr(
         kv_cache_planning, "get_hisparse_host_pool_bytes", lambda _: 2**30
     )
-    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        config, get_hisparse_kv_cache_groups(config, specs), available_memory=2**30
+    cache_config = DefaultKVCacheConfigBuilder().get_kv_cache_config_from_groups(
+        config, get_hisparse_kv_cache_groups(config, specs), num_blocks=7
     )
     assert cache_config.num_blocks == 7
     assert cache_config.hisparse_host_num_blocks is not None
@@ -248,7 +247,6 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(monkeypatch)
             distributed_executor_backend="mp",
         ),
         cache_config=SimpleNamespace(
-            num_gpu_blocks_override=7,
             prefix_cache_retention_interval=None,
             enable_prefix_caching=False,
             kv_cache_layout=KVCacheLayout.BLNHC.name,
@@ -269,8 +267,8 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(monkeypatch)
         for name in source_names | indexer_names
     }
     layer_configs = resolve_hisparse_specs(config, layer_configs, layers)
-    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        config, get_kv_cache_groups(config, layer_configs), available_memory=2**20
+    cache_config = DefaultKVCacheConfigBuilder().get_kv_cache_config_from_groups(
+        config, get_kv_cache_groups(config, layer_configs), num_blocks=7
     )
 
     # A logical block has 2 layers x 16 tokens x 2 unique heads x K/V x

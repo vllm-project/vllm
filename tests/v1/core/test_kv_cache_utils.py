@@ -1719,7 +1719,8 @@ def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
     merged = new_kv_cache_group(["draft.0", "draft.1"], draft)
     assert not merged.dcp_sharded
     assert merged.max_num_blocks_per_req(config, 1024) == 64
-    assert merged.max_memory_usage_bytes(config) == 2 * 64 * draft.page_size_bytes
+    assert merged.max_allocated_blocks_per_request(config) == 64
+    assert merged.page_size_bytes == 2 * draft.page_size_bytes
     assert kv_cache_utils.resolve_dcp_kv_block_size(merged, 4) == 16
     with pytest.raises(AssertionError):
         KVCacheGroup.from_layers(

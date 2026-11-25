@@ -3,8 +3,8 @@
 """KV cache planning: grouping, sizing, and memory-fit logic."""
 
 import math
-from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
+from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import replace
 from functools import reduce
 from typing import TYPE_CHECKING, Any
@@ -165,23 +165,10 @@ def _bucket_layers(
     return buckets
 
 
-def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
-    """Override the number of kv cache blocks if `num_gpu_blocks_override` is set.
-    The override is logged once, at the call site in `get_kv_cache_configs`.
-    """
-    if vllm_config.cache_config.num_gpu_blocks_override is not None:
-        num_blocks = vllm_config.cache_config.num_gpu_blocks_override
-    return num_blocks
-
-
 def _pool_bytes_per_block(
     vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroup]
 ) -> int:
-    """Bytes consumed by one block in the worker's shared KV cache pool, mirroring
-    the divisor used by `get_kv_cache_config_from_groups` to convert
-    `available_memory` into `num_blocks`. Used to compute the effective KV cache
-    capacity once `num_gpu_blocks_override` is applied.
-    """
+    """Bytes consumed by one block in the worker's shared device KV cache pool."""
     return _get_kv_cache_bytes_per_block(
         [group for group in kv_cache_groups if not group.host_resident],
         vllm_config.cache_config.get_resolved_kv_cache_layout(),
@@ -200,7 +187,6 @@ def _pool_bytes_per_block_from_builder(
     value through `KVCacheConfigBuilder._get_pool_bytes_per_block`. HiSparse
     keeps the pure computation, since probing its placement would check the host
     pool against `max_model_len` before auto-fit shortens it.
-    `num_gpu_blocks_override` is suppressed so it cannot inflate the probe.
     """
     if not kv_cache_groups:
         return 0
@@ -209,14 +195,9 @@ def _pool_bytes_per_block_from_builder(
     pool_bytes = builder._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
     if pool_bytes is not None:
         return pool_bytes
-    saved_override = vllm_config.cache_config.num_gpu_blocks_override
-    vllm_config.cache_config.num_gpu_blocks_override = None
-    try:
-        probe = builder.get_kv_cache_config_from_groups(
-            vllm_config, kv_cache_groups, num_blocks=1
-        )
-    finally:
-        vllm_config.cache_config.num_gpu_blocks_override = saved_override
+    probe = builder.get_kv_cache_config_from_groups(
+        vllm_config, kv_cache_groups, num_blocks=1
+    )
     backing_sizes = {
         tensor.size for tensor in probe.kv_cache_tensors if not tensor.host_resident
     }
@@ -228,13 +209,6 @@ def _pool_bytes_per_block_from_builder(
             "with several device allocations."
         )
     return backing_sizes.pop()
-
-
-def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
-    """Get the page size of the KV cache."""
-    page_sizes = {layer.page_size_bytes for layer in kv_cache_specs}
-    assert len(page_sizes) == 1
-    return page_sizes.pop()
 
 
 def unify_kv_cache_spec_page_size(
@@ -301,11 +275,6 @@ def unify_kv_cache_spec_page_size(
             assert new_spec.page_size_bytes == max_page_size
             new_layer_configs[layer_name] = replace(layer_config, spec=new_spec)
     return new_layer_configs
-
-
-def is_kv_cache_type_attention_free(configs: dict[str, KVCacheLayerConfig]) -> bool:
-    # configs is an empty dict for attention free models
-    return not configs
 
 
 def _get_kv_cache_groups_uniform_page_size(
@@ -541,22 +510,13 @@ def validate_kv_cache_layout(
         )
 
 
-def get_kv_cache_config_from_groups(
+def _build_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroup],
-    available_memory: int,
+    num_blocks: int,
 ) -> KVCacheConfig:
-    """Generate the KV cache configuration from the KV cache groups and spec
-    of each layer.
-
-    Args:
-        vllm_config: The global VllmConfig
-        kv_cache_groups: The KV cache groups
-        available_memory: Memory available for KV cache in bytes
-    Returns:
-        The generated KVCacheConfig
-
-    """
+    """Materialize KV cache tensors for `kv_cache_groups` and exactly
+    `num_blocks` blocks."""
     if len(kv_cache_groups) == 0:
         # Attention free models do not have KV cache.
         # Return num_blocks=1 as BlockPool always needs a null_block.
@@ -572,16 +532,13 @@ def get_kv_cache_config_from_groups(
     if vllm_config.attention_config.hisparse_config is not None:
         host_budget = get_hisparse_host_pool_bytes(vllm_config)
         return get_hisparse_kv_cache_config(
-            vllm_config, kv_cache_groups, available_memory, host_budget
+            vllm_config, kv_cache_groups, num_blocks, host_budget
         )
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
     bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups, layout)
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
-
-    num_blocks = available_memory // bytes_per_block
-    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     size = bytes_per_block * num_blocks
 
     # Groups alias from byte 0. Spec regions are laid out differently:
@@ -632,6 +589,21 @@ def get_kv_cache_config_from_groups(
         prefix_cache_retention_interval=(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
+    )
+
+
+def get_kv_cache_config_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroup],
+    available_memory: int,
+) -> KVCacheConfig:
+    """Generate the KV cache configuration from the KV cache groups and
+    available memory in bytes."""
+    if not kv_cache_groups:
+        return _build_kv_cache_config_from_groups(vllm_config, kv_cache_groups, 1)
+    bytes_per_block = _pool_bytes_per_block(vllm_config, kv_cache_groups)
+    return _build_kv_cache_config_from_groups(
+        vllm_config, kv_cache_groups, available_memory // bytes_per_block
     )
 
 
@@ -729,8 +701,6 @@ def _try_get_full_allocation_fallback_groups(
     try:
         promoted_specs = _promote_local_kv_cache_specs(layer_configs)
     except ValueError:
-        return None
-    if not can_share_block_table(promoted_specs):
         return None
     logger.warning(
         "KV cache page sizes cannot be unified; treating sliding-window "
@@ -834,18 +804,17 @@ def _get_packed_kv_cache_groups(
         balanced = len(set(map(len, page_size_layers.values()))) == 1
         bucketed.append((bucket_group, page_size_layers, balanced))
 
-    def max_layers_per_page_size(group: KVCacheGroup) -> int:
+    def repeats_in(page_size_layers: dict[int, list[str]]) -> int:
         """Repeats of the layer pattern, for a balanced bucket."""
-        pages = Counter(spec.page_size_bytes for spec in group.kv_cache_specs.values())
-        return pages.most_common(1)[0][1]
+        return len(next(iter(page_size_layers.values())))
 
     # Balanced buckets that mix page sizes must stay whole, so the largest one
     # sets a floor on the repeats per group; larger single-size buckets are
     # split down toward it. No such bucket means nothing needs packing.
     min_repeats_per_group = max(
         (
-            max_layers_per_page_size(spec)
-            for spec, page_size_layers, balanced in bucketed
+            repeats_in(page_size_layers)
+            for _, page_size_layers, balanced in bucketed
             if balanced and len(page_size_layers) > 1
         ),
         default=0,
@@ -853,8 +822,8 @@ def _get_packed_kv_cache_groups(
     repeats_per_group = (
         _approximate_gcd(
             [
-                max_layers_per_page_size(spec)
-                for spec, _, balanced in bucketed
+                repeats_in(page_size_layers)
+                for _, page_size_layers, balanced in bucketed
                 if balanced
             ],
             lower_bound=min_repeats_per_group,
@@ -863,9 +832,9 @@ def _get_packed_kv_cache_groups(
         else None
     )
 
-    def num_groups_for(spec: KVCacheGroup, balanced: bool) -> int:
+    def num_groups_for(page_size_layers: dict[int, list[str]], balanced: bool) -> int:
         if balanced and repeats_per_group is not None:
-            return cdiv(max_layers_per_page_size(spec), repeats_per_group)
+            return cdiv(repeats_in(page_size_layers), repeats_per_group)
         return 1
 
     def widest_group_bytes(page_size_layers: dict[int, list[str]], n: int) -> int:
@@ -890,7 +859,7 @@ def _get_packed_kv_cache_groups(
                 page_size_layers,
                 len(spec.kv_cache_specs)
                 if is_state_bucket(spec)
-                else num_groups_for(spec, balanced),
+                else num_groups_for(page_size_layers, balanced),
             )
             for spec, page_size_layers, balanced in bucketed
         ),
@@ -899,7 +868,7 @@ def _get_packed_kv_cache_groups(
 
     groups = []
     for spec, page_size_layers, balanced in bucketed:
-        num_groups = num_groups_for(spec, balanced)
+        num_groups = num_groups_for(page_size_layers, balanced)
         # Cap a state group at the states a block already fits rather than let
         # it widen the block.
         if anchor_bytes and is_state_bucket(spec):
@@ -987,9 +956,8 @@ def get_kv_cache_groups(
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(layer_configs)
 
-    if is_kv_cache_type_attention_free(layer_configs):
-        # This returns an empty list to allow for the KVCacheManager to handle
-        # attention free models.
+    if not layer_configs:
+        # Attention-free models have no KV cache groups.
         return []
 
     if hisparse_groups := get_hisparse_kv_cache_groups(vllm_config, layer_configs):
@@ -1035,9 +1003,11 @@ def get_kv_cache_groups(
 
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:
-        common_page = get_uniform_page_size(
-            [spec for g in groups for spec in g.kv_cache_specs.values()]
-        )
+        page_sizes = {
+            spec.page_size_bytes for g in groups for spec in g.kv_cache_specs.values()
+        }
+        assert len(page_sizes) == 1
+        common_page = page_sizes.pop()
         # TP may shrink the common page below hidden-state per-token cost.
         groups, common_page = _ensure_min_page_size(groups, common_page, hidden_specs)
         group_block_size = math.gcd(*(g.block_size for g in groups))
@@ -1640,20 +1610,8 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
         num_blocks: int,
     ) -> KVCacheConfig:
         """See `KVCacheConfigBuilder.get_kv_cache_config_from_groups`."""
-        if len(kv_cache_groups) == 0:
-            # Attention free models do not have KV cache.
-            # Return num_blocks=1 as BlockPool always needs a null_block.
-            return KVCacheConfig(
-                num_blocks=1,
-                kv_cache_tensors=[],
-                kv_cache_groups=kv_cache_groups,
-                prefix_cache_retention_interval=(
-                    vllm_config.cache_config.prefix_cache_retention_interval
-                ),
-            )
-        bytes_per_block = _pool_bytes_per_block(vllm_config, kv_cache_groups)
-        return get_kv_cache_config_from_groups(
-            vllm_config, kv_cache_groups, num_blocks * bytes_per_block
+        return _build_kv_cache_config_from_groups(
+            vllm_config, kv_cache_groups, num_blocks
         )
 
 
