@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::borrow::Cow;
+
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::http::StatusCode;
@@ -19,8 +21,12 @@ pub enum ApiError {
         message: String,
         param: Option<&'static str>,
     },
-    /// The requested model name does not match the single configured model.
-    ModelNotFound { model: String },
+    /// The requested model name is neither a served base model nor a loaded
+    /// LoRA adapter. `served_names` lists the base names, as Python does.
+    ModelNotFound {
+        model: String,
+        served_names: Vec<String>,
+    },
     /// A resource other than the model, such as a LoRA adapter, does not exist.
     NotFound { message: String },
     /// The request body could not be parsed as valid JSON.
@@ -61,9 +67,16 @@ impl ApiError {
                 message.clone(),
                 param.map(str::to_string),
             ),
-            Self::ModelNotFound { model } => (
+            Self::ModelNotFound {
+                model,
+                served_names,
+            } => (
                 "NotFoundError",
-                format!("The model `{model}` does not exist."),
+                format!(
+                    "The model `{}` does not exist. Valid aliases: {}.",
+                    truncate_echoed_model(model),
+                    served_names.join(", ")
+                ),
                 Some("model".to_string()),
             ),
             Self::NotFound { message } => ("NotFoundError", message.clone(), None),
@@ -92,6 +105,16 @@ impl ApiError {
                 code: self.status_code().as_u16(),
             },
         }
+    }
+}
+
+/// Bound the client-supplied model name echoed in an error message to 256
+/// characters, like Python.
+fn truncate_echoed_model(model: &str) -> Cow<'_, str> {
+    const MAX_CHARS: usize = 256;
+    match model.char_indices().nth(MAX_CHARS) {
+        Some((end, _)) => Cow::Owned(format!("{}...", &model[..end])),
+        None => Cow::Borrowed(model),
     }
 }
 
@@ -130,11 +153,17 @@ impl IntoResponse for ApiError {
 }
 
 /// Classify a text-pipeline submit failure: request validation failures are
-/// the client's fault and map to HTTP 400, mirroring the Python frontend.
-/// Everything else stays an internal 500.
+/// the client's fault and map to HTTP 400, mirroring the Python frontend. A
+/// request that cannot be taken now, such as one over a queue limit, maps to
+/// a retryable 503. Everything else stays an internal 500.
 pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiError {
     if error.is_request_validation_error() {
         return invalid_request!(param = error.param(), "{}", error.as_report());
+    }
+    if error.is_unavailable() {
+        return ApiError::ServiceUnavailable {
+            message: error.to_report_string(),
+        };
     }
     server_error!("{}: {}", context, error.to_report_string())
 }
@@ -144,6 +173,11 @@ pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiE
 pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
     if error.is_request_validation_error() {
         return invalid_request!(param = error.param(), "{}", error.as_report());
+    }
+    if error.is_unavailable() {
+        return ApiError::ServiceUnavailable {
+            message: error.to_report_string(),
+        };
     }
     server_error!("{}: {}", context, error.to_report_string())
 }
@@ -169,13 +203,34 @@ mod tests {
 
     use super::*;
 
+    /// The echoed model name is cut to 256 characters plus `...`, like
+    /// Python; a name of exactly 256 characters is kept whole.
+    #[test]
+    fn model_not_found_bounds_echoed_model_name() {
+        let message = |model: String| {
+            ApiError::model_not_found(model, vec!["base".to_string()])
+                .to_error_response()
+                .error
+                .message
+        };
+        let kept = "é".repeat(256);
+        assert_eq!(
+            message(kept.clone()),
+            format!("The model `{kept}` does not exist. Valid aliases: base.")
+        );
+        assert_eq!(
+            message(format!("{kept}x")),
+            format!("The model `{kept}...` does not exist. Valid aliases: base.")
+        );
+    }
+
     /// Each error class serializes like Python's `ErrorInfo`: the class name
     /// in `type` and the HTTP status as an integer `code`.
     #[test]
     fn error_response_names_error_class_and_status_code() {
         let errors = [
             ApiError::invalid_request("top_p must be in (0, 1].", Some("top_p")),
-            ApiError::model_not_found("missing"),
+            ApiError::model_not_found("missing", vec!["base".to_string(), "alias".to_string()]),
             ApiError::not_found("No adapter found for /not/an/adapter"),
             ApiError::json_parse_error("expected value at line 1 column 1"),
             ApiError::conflict("A profiling session is already active."),
@@ -188,7 +243,7 @@ mod tests {
             .join("\n");
         expect![[r#"
             {"error":{"message":"top_p must be in (0, 1].","type":"BadRequestError","param":"top_p","code":400}}
-            {"error":{"message":"The model `missing` does not exist.","type":"NotFoundError","param":"model","code":404}}
+            {"error":{"message":"The model `missing` does not exist. Valid aliases: base, alias.","type":"NotFoundError","param":"model","code":404}}
             {"error":{"message":"No adapter found for /not/an/adapter","type":"NotFoundError","param":null,"code":404}}
             {"error":{"message":"expected value at line 1 column 1","type":"Bad Request","param":null,"code":400}}
             {"error":{"message":"A profiling session is already active.","type":"Conflict","param":null,"code":409}}
@@ -414,6 +469,28 @@ mod tests {
         assert_eq!(response.error.error_type, "BadRequestError");
         assert!(response.error.message.contains("-2"));
         assert!(response.error.message.contains("must be >= -1"));
+    }
+
+    /// A request over a queue limit is retryable, with Python's message.
+    #[test]
+    fn queue_limit_errors_map_to_service_unavailable() {
+        let errors = [
+            text_submit_error(
+                "failed to submit completion request",
+                vllm_text::Error::Llm(vllm_llm::Error::QueueFull),
+            ),
+            chat_submit_error(
+                "failed to submit chat request",
+                vllm_chat::Error::Text(vllm_text::Error::Llm(vllm_llm::Error::PrefillBacklogFull)),
+            ),
+        ];
+        let rendered = errors
+            .iter()
+            .map(|error| serde_json::to_string(&error.to_error_response()).unwrap())
+            .join("\n");
+        expect![[r#"
+            {"error":{"message":"The engine is currently busy and cannot accept new requests. Please try again later or on a different instance.","type":"ServiceUnavailableError","param":null,"code":503}}
+            {"error":{"message":"The engine has reached its prefill token backlog limit. Please try again later or on a different instance.","type":"ServiceUnavailableError","param":null,"code":503}}"#]].assert_eq(&rendered);
     }
 
     #[test]

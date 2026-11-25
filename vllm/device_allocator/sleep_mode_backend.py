@@ -28,6 +28,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config.model import ModelConfig
+    from vllm.device_allocator import MemAllocator
 
 logger = init_logger(__name__)
 
@@ -123,27 +124,27 @@ class CuMemBackend(SleepModeBackend):
     host, with NCCL buffers left untouched (they are outside the allocator pool).
     """
 
-    def suspend(self, discardable: Collection[int] = ()) -> None:
+    def _get_allocator(self) -> MemAllocator:
+        """Return the platform allocator used by this backend.
+
+        Downstream subclasses may override this method to provide an allocator
+        that implements the `MemAllocator` protocol.
+        """
         from vllm.device_allocator import get_mem_allocator_instance
 
+        return get_mem_allocator_instance()
+
+    def suspend(self, discardable: Collection[int] = ()) -> None:
         self._state = "SUSPENDED"
-        get_mem_allocator_instance().sleep(
-            ("weights", "runtime", "cudagraph"), discardable
-        )
+        self._get_allocator().sleep(("weights", "runtime", "cudagraph"), discardable)
 
     def resume(self, tags: list[str] | None = None) -> None:
-        from vllm.device_allocator import get_mem_allocator_instance
-
         self._state = "RESUMING"
-        allocator = get_mem_allocator_instance()
-        allocator.wake_up(tags)
+        self._get_allocator().wake_up(tags)
         self._state = "RUNNING"
 
     def discard(self, tags: tuple[str, ...]) -> None:
-        from vllm.device_allocator import get_mem_allocator_instance
-
-        allocator = get_mem_allocator_instance()
-        allocator.discard(tags)
+        self._get_allocator().discard(tags)
         self._state = "SUSPENDED"
 
     @classmethod

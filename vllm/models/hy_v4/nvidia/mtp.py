@@ -117,23 +117,22 @@ def _prepare_mtp_fp8_expert_scale(
     name: str,
     loaded_weight: torch.Tensor,
 ) -> tuple[str, torch.Tensor]:
-    """Normalize block-wise FP8 expert scale names and dtypes."""
+    """Normalize block scales while preserving packed MXFP4 expert bytes."""
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
     if (
         isinstance(quant_config, Fp8Config)
         and quant_config.weight_block_size is not None
-        and ".mlp.experts." in name
         and name.endswith(".scale")
     ):
         name = name[: -len(".scale")] + ".weight_scale_inv"
-        if (
-            getattr(quant_config, "is_scale_e8m0", False)
-            and loaded_weight.dtype == torch.uint8
-        ):
-            # UE8M0 scale exponents are stored as raw uint8 bytes: reinterpret
-            # the bits instead of numerically converting them.
-            loaded_weight = loaded_weight.view(torch.float8_e8m0fnu)
+        if loaded_weight.dtype == torch.uint8:
+            if getattr(quant_config, "is_scale_e8m0", False):
+                loaded_weight = loaded_weight.view(torch.float8_e8m0fnu)
+            elif ".mlp.experts." not in name:
+                # Linear scales are FP32 parameters. Decode UE8M0 exponents;
+                # a numeric uint8-to-float cast would load the encoded bytes.
+                loaded_weight = loaded_weight.view(torch.float8_e8m0fnu).float()
     return name, loaded_weight
 
 
@@ -491,7 +490,10 @@ class HYV4MultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-        inputs_embeds = torch.where((positions == 0).unsqueeze(-1), 0, inputs_embeds)
+        token_positions = positions[0] if positions.ndim == 2 else positions
+        inputs_embeds = torch.where(
+            (token_positions == 0).unsqueeze(-1), 0, inputs_embeds
+        )
 
         current_step_idx = self.spec_step_idx % self.num_mtp_layers
         return self.layers[str(self.mtp_start_layer_idx + current_step_idx)](
@@ -838,4 +840,37 @@ class HYV4MTP(nn.Module):
             loaded_params.add(name)
 
         logger.info_once("HYV4 MTP draft model loaded: %d params", len(loaded_params))
+        unassigned_all = sorted(set(params_dict) - loaded_params)
+        # KVCacheScaleParameter (``k_scale`` / ``v_scale`` / ``q_scale`` /
+        # ``prob_scale``) is created by ``BaseKVCacheMethod.create_weights`` for
+        # every Attention layer that runs on an fp8-family quant method, and
+        # its -1.0 sentinel is replaced by the runtime default (1.0) in
+        # ``process_weights_after_loading`` -- which runs *after* this method.
+        # HY V4 checkpoints intentionally omit these (``kv_cache_quant_algo:
+        # null``); silence them only when the parameter is actually the
+        # sentinel type so a genuine mismatch on a same-named tensor still
+        # reaches the warning.
+        from vllm.model_executor.layers.quantization.kv_cache import (
+            KVCacheScaleParameter,
+        )
+
+        unassigned = [
+            name
+            for name in unassigned_all
+            if not isinstance(params_dict.get(name), KVCacheScaleParameter)
+        ]
+        missing_scales = [name for name in unassigned if "weight_scale" in name]
+        if missing_scales:
+            raise ValueError(
+                "Missing MTP checkpoint weight scales: " + ", ".join(missing_scales)
+            )
+        if unassigned:
+            # A draft parameter with no checkpoint source keeps its sentinel
+            # init value (FP8 scales start at finfo(float32).min), which
+            # silently destroys draft quality instead of failing the load.
+            logger.warning(
+                "HYV4 MTP draft model: %d parameters received no checkpoint value: %s",
+                len(unassigned),
+                ", ".join(unassigned),
+            )
         return loaded_params

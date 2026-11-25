@@ -41,6 +41,7 @@ def _input_processor(
     renderer = MagicMock(spec=BaseRenderer)
     renderer.tokenizer = None
     renderer._executor = None
+    renderer._mm_executor = None
     return InputProcessor(config, renderer)
 
 
@@ -446,7 +447,7 @@ def test_parallel_opt_out_stats_use_resolved_watermarking(enforce):
     request = _engine_core_request(params)
     request.external_req_id = request.request_id
     parent = ParentRequest(request)
-    output_processor = OutputProcessor(None, log_stats=True)
+    output_processor = OutputProcessor(None, collect_stats=True)
 
     for index in range(params.n):
         child = copy(request)

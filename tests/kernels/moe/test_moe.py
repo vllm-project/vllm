@@ -50,6 +50,9 @@ from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
     TritonExperts,
     TritonWNA16Experts,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+    MoEPrepareAndFinalizeNoDPEPModular,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     masked_amax_scale,
     moe_kernel_quantize_input,
@@ -75,6 +78,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
+    kInt8StaticTensorSym,
     quantize_weights,
 )
 from vllm.platforms import current_platform
@@ -88,6 +92,110 @@ DEVICE_TYPE = current_platform.device_type
 requires_deep_ep_v2 = pytest.mark.skipif(
     not has_deep_ep_v2(), reason="Requires DeepEP v2 (ElasticBuffer)"
 )
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+def test_xpu_qwen3_5_shared_expert_decode(tmp_path):
+    """FP8 shared-expert B1 decode uses the native kernel and matches stock MoE."""
+    from transformers import Qwen3_5MoeConfig, Qwen3_5MoeTextConfig
+
+    from vllm.config import ModelConfig
+    from vllm.distributed import (
+        cleanup_dist_env_and_memory,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsFp8
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
+    from vllm.models.qwen3_5.xpu.model import Qwen3_5SparseMoeBlock
+    from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
+        initialize_specialized_decode,
+    )
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
+
+    text_config = Qwen3_5MoeTextConfig(
+        hidden_size=128,
+        moe_intermediate_size=128,
+        shared_expert_intermediate_size=128,
+        num_experts=8,
+        num_experts_per_tok=2,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        head_dim=32,
+        vocab_size=128,
+        layer_types=["full_attention"],
+    )
+    Qwen3_5MoeConfig(text_config=text_config).save_pretrained(tmp_path)
+    config = VllmConfig(
+        additional_config={"decode_backend": "latency_specialized"},
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            dtype=torch.float16,
+            max_model_len=128,
+        ),
+        quant_config=Fp8Config(is_checkpoint_fp8_serialized=True),
+    )
+    try:
+        with set_current_vllm_config(config), set_default_torch_dtype(torch.float16):
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                local_rank=0,
+                backend=current_platform.dist_backend,
+                distributed_init_method=f"file://{tmp_path / 'distributed'}",
+            )
+            initialize_model_parallel(1, 1)
+            init_workspace_manager(torch.device(DEVICE_TYPE))
+            with torch.device(DEVICE_TYPE):
+                block = Qwen3_5SparseMoeBlock(config, prefix="model.layers.0.mlp")
+                torch.manual_seed(7)
+                with torch.no_grad():
+                    for name, param in block.named_parameters():
+                        if "scale" in name:
+                            param.fill_(0.0625)
+                        else:
+                            values = torch.randn(param.shape, dtype=torch.float32)
+                            if param.dtype != torch.float8_e4m3fn:
+                                values *= 0.0625
+                            param.copy_(values.to(param.dtype))
+                for layer in block.modules():
+                    method = getattr(layer, "quant_method", None)
+                    if method is not None:
+                        method.process_weights_after_loading(layer)
+                kernel = block.experts.routed_experts.quant_method.moe_kernel
+                assert kernel is not None
+                experts = kernel.fused_experts
+                assert isinstance(experts, XPUExpertsFp8)
+                provider = experts.fused_moe_impl
+                assert provider is not None
+                initialize_specialized_decode(block)
+                assert block._decode is not None
+                block._decode.runtime.prepare_capture(1, 1)
+                x = torch.randn(1, 128, dtype=torch.float16)
+            with set_forward_context(None, config), torch.inference_mode():
+                expected = Qwen3NextSparseMoeBlock.forward(block, x)
+                with torch.profiler.profile(
+                    activities=[torch.profiler.ProfilerActivity.CPU]
+                ) as profiler:
+                    actual = block(x)
+            assert experts.fused_moe_impl is provider
+            assert (
+                sum(
+                    event.count
+                    for event in profiler.key_averages()
+                    if event.key == "_xpu_C::moe_shared_fused_decode_interface"
+                )
+                == 1
+            )
+            torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+    finally:
+        reset_workspace_manager()
+        cleanup_dist_env_and_memory()
 
 
 def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:
@@ -629,6 +737,7 @@ def test_host_resident_weights_take_sorted_path(
     """At small batch the naive path reads an expert once per (token, expert)
     pair. Weights read from host memory in place (UVA offloading) must take
     the sorted path instead, with the same output."""
+    from vllm.platforms import current_platform
     from vllm.utils.platform_utils import is_uva_available
     from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
@@ -679,7 +788,46 @@ def test_host_resident_weights_take_sorted_path(
         ref = torch_moe(a, w1.cuda(), w2.cuda(), score, topk)
     assert ref.abs().mean() > 0.1
     torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
-    assert bool(aligned) == host_resident
+    expected_aligned = host_resident or (current_platform.is_integrated_gpu() and m > 1)
+    assert bool(aligned) == expected_aligned
+
+
+@pytest.mark.parametrize("m", [1, 2, 4, 8])
+@pytest.mark.parametrize("is_integrated", [False, True])
+def test_integrated_gpu_expert_assignment(
+    m: int, is_integrated: bool, monkeypatch, workspace_init
+):
+    """Integrated GPUs (such as GB10 / DGX Spark) take the naive path only
+    at batch 1 to avoid repeated weight reads over unified memory.
+    Discrete GPUs preserve the heuristic threshold."""
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(
+        current_platform, "is_integrated_gpu", lambda device_id=0: is_integrated
+    )
+    aligned: list[int] = []
+    align = fused_moe_module.moe_align_block_size
+
+    def counting_align(*args, **kwargs):
+        aligned.append(1)
+        return align(*args, **kwargs)
+
+    monkeypatch.setattr(fused_moe_module, "moe_align_block_size", counting_align)
+
+    set_random_seed(7)
+    e, n, k, topk, dtype = 128, 256, 128, 8, torch.bfloat16
+    a = torch.randn((m, k), device="cuda", dtype=dtype)
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 8
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 8
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
+
+    with set_current_vllm_config(vllm_config):
+        out = fused_moe(a, w1, w2, score, topk, renormalize=False)
+        ref = torch_moe(a, w1, w2, score, topk)
+
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
+    expected_aligned = (m > 1) if is_integrated else (m * topk * 4 > e)
+    assert bool(aligned) == expected_aligned
 
 
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS_SMALL_M)
@@ -2855,3 +3003,98 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
 
     close = torch.isclose(trtllm_output, baseline_output, atol=1e-1, rtol=0.85)
     assert close.float().mean() > 0.925
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("per_out_ch_quant", [False, True])
+@pytest.mark.parametrize("weight_on_input", [False, True])
+def test_static_int8_modular_matches_legacy(
+    workspace_init, dtype, per_out_ch_quant, weight_on_input
+):
+    """Match legacy static scales, bias and router order for both GEMMs."""
+    # TODO: Replace the legacy comparison with a high-precision torch reference
+    # that preserves static quantization and router-weight application order.
+    experts, hidden, tokens = 3, 128, 4
+    moe = make_dummy_moe_config(
+        num_experts=experts, hidden_dim=hidden, intermediate_size=hidden, in_dtype=dtype
+    )
+    rng = torch.Generator(device="cuda").manual_seed(7)
+
+    def weights(rows):
+        return torch.randint(
+            -3,
+            4,
+            (experts, rows, hidden),
+            generator=rng,
+            device="cuda",
+            dtype=torch.int8,
+        )
+
+    def scales(rows, low, high):
+        channels = rows if per_out_ch_quant else 1
+        return torch.linspace(low, high, experts * channels, device="cuda").reshape(
+            experts, channels, 1
+        )
+
+    w1, w2 = weights(2 * hidden), weights(hidden)
+    qc = FusedMoEQuantConfig.make(
+        torch.int8,
+        w1_scale=scales(2 * hidden, 0.002, 0.018),
+        w2_scale=scales(hidden, 0.003, 0.021),
+        a1_scale=torch.tensor(0.035, device="cuda"),
+        a2_scale=torch.tensor(0.02, device="cuda"),
+        w1_bias=torch.linspace(
+            -0.25, 0.25, experts * 2 * hidden, device="cuda"
+        ).reshape(experts, 2 * hidden),
+        w2_bias=torch.linspace(-0.125, 0.125, experts * hidden, device="cuda").reshape(
+            experts, hidden
+        ),
+        per_out_ch_quant=per_out_ch_quant,
+    )
+    kernel = mk.FusedMoEKernel(
+        MoEPrepareAndFinalizeNoDPEPModular(),
+        TritonExperts(moe, qc, activation_key=kInt8StaticTensorSym),
+    )
+    x = torch.randn((tokens, hidden), device="cuda", dtype=dtype, generator=rng)
+    ids = torch.tensor([[0], [2], [1], [2]], device="cuda", dtype=torch.int32)
+    router = torch.tensor([[0.0], [0.37], [0.9], [1.0]], device="cuda")
+
+    def modular(inputs, topk_weights, topk_ids):
+        return kernel.apply(
+            hidden_states=inputs,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=experts,
+            expert_map=None,
+            apply_router_weight_on_input=weight_on_input,
+        )
+
+    with set_current_vllm_config(VllmConfig()):
+        expected = fused_moe_module.fused_experts(
+            x,
+            w1,
+            w2,
+            router,
+            ids,
+            apply_router_weight_on_input=weight_on_input,
+            quant_config=qc,
+        )
+        actual = modular(x, router, ids)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        empty = modular(x[:0], router[:0], ids[:0])
+        assert empty.shape == (0, hidden)
+        assert empty.dtype == dtype
+
+        if dtype == torch.bfloat16 and per_out_ch_quant and weight_on_input:
+            torch.accelerator.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = modular(x, router, ids)
+            graph.replay()
+            torch.testing.assert_close(captured, actual, rtol=0, atol=0)

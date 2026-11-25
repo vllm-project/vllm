@@ -151,7 +151,7 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 1,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -173,7 +173,7 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 2,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -192,11 +192,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 1,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 3, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 3, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_3_1": TestConfig(
@@ -213,11 +213,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 2,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 5, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 5, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_3_2": TestConfig(
@@ -232,7 +232,7 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 3,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -249,11 +249,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 1,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 4, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 4, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_1": TestConfig(
@@ -267,11 +267,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 1,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 5, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 5, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_2": TestConfig(
@@ -285,11 +285,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 2,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 6, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 6, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_3": TestConfig(
@@ -303,11 +303,11 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 3,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
-                StepAction(B + 7, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(B + 7, 4, [1, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
         "accept_4_4": TestConfig(
@@ -321,7 +321,7 @@ def get_mamba_prefix_cache_step_configs(
                 StepAction(
                     B + 4,
                     4,
-                    [1, 1, 1, 1, 1] if a else [0, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
                     (-1, -1),
                     (-1, -1),
                 ),
@@ -559,7 +559,7 @@ def _run_mamba_prefix_cache_mrv2(
 ):
     backend = additional_config["gdn_prefill_backend"]
     internal_checkpoints = backend == "flashinfer" or (
-        backend == "triton" and current_platform.is_cuda()
+        backend == "triton" and current_platform.is_cuda_alike()
     )
     global async_scheduling_mode
     async_scheduling_mode = async_scheduling
@@ -924,9 +924,21 @@ def test_mamba_prefix_cache_mrv2_async_flashinfer(monkeypatch: pytest.MonkeyPatc
     ),
     reason="FlashInfer GDN prefill needs SM90, or SM100/SM120 with CUDA 13.",
 )
+@pytest.mark.parametrize(
+    "model,backend,enforce_eager",
+    [
+        (MODEL, "flashinfer", True),
+        (MODEL, "triton", True),
+        ("allenai/Olmo-Hybrid-7B", "triton", True),
+        ("allenai/Olmo-Hybrid-7B", "auto", False),
+    ],
+)
 @create_new_process_for_each_test()
 def test_mamba_mid_block_resume_exports_into_resumed_block(
     monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    backend: str,
+    enforce_eager: bool,
 ):
     """A partial hit resuming mid-block whose prompt ends in the next block
     prefills in one step, exporting the checkpoint into the resumed block.
@@ -1003,14 +1015,14 @@ def test_mamba_mid_block_resume_exports_into_resumed_block(
     monkeypatch.setattr(MRV2GPUModelRunner, "execute_model", wrapped_execute_model)
 
     engine = LLM(
-        model=MODEL,
+        model=model,
         load_format="dummy",
-        enforce_eager=True,
+        enforce_eager=enforce_eager,
         skip_tokenizer_init=True,
         enable_prefix_caching=True,
         block_size=B,
         prefix_match_unit=64,
-        additional_config={"gdn_prefill_backend": "flashinfer"},
+        additional_config={"gdn_prefill_backend": backend},
         max_num_batched_tokens=3072,
         max_model_len=B * 4,
         # Layer 3 is full attention: a single (GDN-only) KV cache group only
