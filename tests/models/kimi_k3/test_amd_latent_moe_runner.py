@@ -19,6 +19,7 @@ from tests.utils import (
     init_test_distributed_environment,
     multi_gpu_test,
 )
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import get_tp_group
 from vllm.model_executor.layers.fused_moe.runner import moe_runner
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -442,3 +443,50 @@ def test_falls_back_when_the_config_breaks_the_shard(
 
     assert not runner._tail_shardable
     assert runner._up_proj_shard_size == 0
+
+
+SHARD_SIZE = HIDDEN_SIZE // 8
+
+
+@pytest.mark.parametrize("aiter_linear", [True, False], ids=["aiter", "no-aiter"])
+@pytest.mark.parametrize("num_tokens", [1, 16, 112, 336, 512, 513, 2048])
+def test_up_proj_accumulate_adds_into_its_shard_only(
+    num_tokens: int, aiter_linear: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The atomic GEMM runs only at decode M with aiter linear on; both paths
+    add latent @ W.T into the rank's columns and leave the rest untouched."""
+    atomic = pytest.importorskip("aiter.ops.triton.gemm.basic.gemm_a16w16_atomic")
+    real_atomic = atomic.gemm_a16w16_atomic
+    accumulate_flags: list = []
+
+    def _spy(*args, **kwargs):
+        accumulate_flags.append(kwargs.get("accumulate"))
+        return real_atomic(*args, **kwargs)
+
+    monkeypatch.setattr(atomic, "gemm_a16w16_atomic", _spy)
+    monkeypatch.setattr(rocm_aiter_ops, "is_linear_enabled", lambda: aiter_linear)
+
+    torch.manual_seed(num_tokens)
+    latent = torch.randn(num_tokens, LATENT_SIZE, device="cuda", dtype=DTYPE)
+    up_proj_shard = (
+        torch.randn(SHARD_SIZE, LATENT_SIZE, device="cuda", dtype=DTYPE)
+        / LATENT_SIZE**0.5
+    )
+    shared_output = torch.randn(num_tokens, HIDDEN_SIZE, device="cuda", dtype=DTYPE)
+    before = shared_output.clone()
+    start, end = 3 * SHARD_SIZE, 4 * SHARD_SIZE
+
+    torch.ops.vllm.k3_latent_up_proj_accumulate(
+        latent, up_proj_shard, shared_output, start
+    )
+
+    use_atomic = aiter_linear and num_tokens <= latent_moe_runner._ATOMIC_MAX_TOKENS
+    assert accumulate_flags == ([True] if use_atomic else [])
+    expected = before[:, start:end].float() + latent.float() @ up_proj_shard.float().t()
+    torch.testing.assert_close(
+        shared_output[:, start:end].float(), expected, atol=8e-2, rtol=3e-2
+    )
+    torch.testing.assert_close(
+        shared_output[:, :start], before[:, :start], atol=0, rtol=0
+    )
+    torch.testing.assert_close(shared_output[:, end:], before[:, end:], atol=0, rtol=0)
