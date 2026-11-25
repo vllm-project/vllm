@@ -12,6 +12,9 @@ import pytest
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     DeferredBlockRelease,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
+    NixlBaseConnector,
+)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -69,9 +72,13 @@ def _host_pinned_d_scheduler(kv_buffer_device: str = "cuda", kv_role="kv_consume
     """A D-side scheduler with the NIXL connector and a host-pinned KV cache."""
     vllm_config = create_vllm_config(kv_role=kv_role)
     vllm_config.cache_config.kv_cache_host_pinned = True
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_buffer_device = kv_buffer_device
     scheduler = create_scheduler(vllm_config)
-    return scheduler, scheduler.connector.connector_scheduler
+    connector = scheduler.connector
+    assert isinstance(connector, NixlBaseConnector)
+    assert connector.connector_scheduler is not None
+    return scheduler, connector.connector_scheduler
 
 
 def _with_kv_output(**kwargs):
