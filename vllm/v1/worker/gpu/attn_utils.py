@@ -28,6 +28,7 @@ from vllm.v1.hisparse.binding import (
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
+    KVCacheGroup,
     KVCacheLayerConfig,
     KVCacheSpec,
     MambaSpec,
@@ -197,32 +198,22 @@ def get_kv_sharing_fast_prefill_eligible_layers(
     return eligible_layers
 
 
-def init_attn_backend(
-    kv_cache_config: KVCacheConfig,
+def _discover_attn_groups(
+    kv_cache_groups: list[KVCacheGroup],
     vllm_config: VllmConfig,
-    device: torch.device,
-    active_layer_names: set[str] | None = None,
-    draft_layer_names: set[str] | None = None,
-    kernel_block_sizes: list[int] | None = None,
-    no_attn_metadata_layer_names: Collection[str] = (),
-) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
-    # Phase 1: discover attention groups for each kv cache group.
+    active_layer_names: set[str] | None,
+    draft_layer_names: set[str] | None,
+) -> list[list[AttentionGroup]]:
     attn_groups: list[list[AttentionGroup]] = []
 
-    # Add KV-sharing layers to their target's kv cache group so they are
-    # discovered alongside the target layer in Phase 1 below.
+    # Discover KV-sharing layers alongside their target.
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
-    add_kv_sharing_layers_to_kv_cache_groups(
-        shared_kv_cache_layers, kv_cache_config.kv_cache_groups
-    )
+    add_kv_sharing_layers_to_kv_cache_groups(shared_kv_cache_layers, kv_cache_groups)
     fast_prefill_eligible_layers = get_kv_sharing_fast_prefill_eligible_layers(
         vllm_config, draft_layer_names
     )
 
-    # Phase 1: discover attention groups for each kv cache group.
-    for kv_cache_group_id, kv_cache_group_spec in enumerate(
-        kv_cache_config.kv_cache_groups
-    ):
+    for kv_cache_group_id, kv_cache_group_spec in enumerate(kv_cache_groups):
         layer_names = kv_cache_group_spec.layer_names
         if not all(
             spec.has_layer_views for spec in kv_cache_group_spec.kv_cache_specs.values()
@@ -270,6 +261,60 @@ def init_attn_backend(
 
         attn_groups.append([group_map[key] for key in group_order])
 
+    return attn_groups
+
+
+# A planner belongs to one attention group in one runner. Microbatches have
+# separate mutable plans even when all their layers have the same KV spec.
+AttentionWorkspaces = dict[tuple[int, frozenset[str]], list[Any]]
+
+
+def reserve_attn_workspaces(
+    kv_cache_groups: list[KVCacheGroup],
+    vllm_config: VllmConfig,
+    device: torch.device,
+    *,
+    active_layer_names: set[str] | None = None,
+    draft_layer_names: set[str] | None = None,
+    no_attn_metadata_layer_names: Collection[str] = (),
+) -> AttentionWorkspaces:
+    """Reserve optional builder workspaces for KV sizing and reuse at initialization."""
+    workspaces: AttentionWorkspaces = {}
+    for groups in _discover_attn_groups(
+        kv_cache_groups, vllm_config, active_layer_names, draft_layer_names
+    ):
+        for group in groups:
+            allocate = getattr(group.backend, "reserve_metadata_workspace", None)
+            names = frozenset(group.layer_names)
+            if allocate is not None and not names.issubset(
+                no_attn_metadata_layer_names
+            ):
+                workspaces[group.kv_cache_group_id, names] = [
+                    allocate(
+                        group.kv_cache_spec, group.layer_names, vllm_config, device
+                    )
+                    for _ in range(get_num_ubatches(vllm_config.parallel_config))
+                ]
+    return workspaces
+
+
+def init_attn_backend(
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+    device: torch.device,
+    active_layer_names: set[str] | None = None,
+    draft_layer_names: set[str] | None = None,
+    kernel_block_sizes: list[int] | None = None,
+    no_attn_metadata_layer_names: Collection[str] = (),
+    workspaces: AttentionWorkspaces | None = None,
+) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
+    attn_groups = _discover_attn_groups(
+        kv_cache_config.kv_cache_groups,
+        vllm_config,
+        active_layer_names,
+        draft_layer_names,
+    )
+
     # Phase 2: pick a kernel block size per kv cache group that is supported
     # by all backends within that group.
     if kernel_block_sizes is None:
@@ -282,21 +327,26 @@ def init_attn_backend(
         if kv_cache_group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[kv_cache_group_id]
         for group in groups:
+            names = frozenset(group.layer_names)
+            num_builders = (
+                0
+                if names.issubset(no_attn_metadata_layer_names)
+                else get_num_ubatches(vllm_config.parallel_config)
+            )
+            group_workspaces = None
+            if (
+                workspaces is not None
+                and num_builders
+                and hasattr(group.backend, "reserve_metadata_workspace")
+            ):
+                group_workspaces = workspaces[kv_cache_group_id, names]
             group.create_metadata_builders(
                 vllm_config=vllm_config,
                 device=device,
                 kernel_block_size=kernel_block_size,
                 kv_cache_group=kv_cache_config.kv_cache_groups[kv_cache_group_id],
-                # Microbatches build attention metadata concurrently, and some
-                # builders keep the prepared metadata on themselves (MLA stores
-                # it on the prefill backend), so each ubatch needs its own.
-                # Layers in no_attn_metadata_layer_names get none and keep their
-                # kernel-block layout.
-                num_metadata_builders=(
-                    0
-                    if set(group.layer_names).issubset(no_attn_metadata_layer_names)
-                    else get_num_ubatches(vllm_config.parallel_config)
-                ),
+                num_metadata_builders=num_builders,
+                workspaces=group_workspaces,
             )
             # The microbatches' builders share the workspace: they all issue
             # attention on the one compute stream the threads hand off, so the

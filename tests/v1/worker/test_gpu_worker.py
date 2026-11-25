@@ -406,6 +406,7 @@ def test_cudagraph_memory_profile_runs_only_when_applied(
 def _plan_worker(config_hash="abc123", free_memory=78 * GiB_bytes, kv_bytes=None):
     """The minimal Worker surface the startup-plan entry points touch."""
     return SimpleNamespace(
+        model_runner=SimpleNamespace(profile_kv_cache_groups=None),
         vllm_config=SimpleNamespace(compile_factors=lambda: {"id": config_hash}),
         rank=0,
         parallel_config=SimpleNamespace(world_size=1),
@@ -465,6 +466,17 @@ def test_startup_plan_apply_gate(plan_env):
     explicit = _plan_worker(kv_bytes=7 * GiB_bytes)
     maybe_apply_startup_plan(explicit)
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
+
+
+def test_startup_plan_reprofiles_after_attention_workspace_is_reserved(plan_env):
+    worker = _plan_worker()
+    maybe_save_startup_plan(worker, 4096)
+    worker.model_runner.profile_kv_cache_groups = ["sparse"]
+    maybe_apply_startup_plan(worker)
+    assert worker.cache_config.kv_cache_memory_bytes is None
+    maybe_save_startup_plan(worker, 2048)
+    maybe_apply_startup_plan(worker)
+    assert worker.cache_config.kv_cache_memory_bytes == 2048
 
 
 def test_startup_plan_rejects_budget_recorded_before_aux_capture(plan_env):

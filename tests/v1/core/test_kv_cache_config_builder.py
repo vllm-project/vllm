@@ -189,7 +189,7 @@ class TestProjectionPreservesGroupMetadata:
     """PP projection must carry host_resident/role/enable_kv_transfer."""
 
     def test_partial_projection_preserves_metadata(self):
-        from vllm.v1.core.kv_cache_planning import _project_kv_cache_groups_to_worker
+        from vllm.v1.core.kv_cache_planning import project_kv_cache_groups_to_worker
         from vllm.v1.kv_cache_interface import KVCacheGroupRole
 
         layer = full_layer(
@@ -203,7 +203,7 @@ class TestProjectionPreservesGroupMetadata:
             role=KVCacheGroupRole.HISPARSE_INDEXER,
         )
 
-        projected = _project_kv_cache_groups_to_worker(
+        projected = project_kv_cache_groups_to_worker(
             [group], {"layer1": layer, "layer2": layer}
         )
         assert len(projected) == 1

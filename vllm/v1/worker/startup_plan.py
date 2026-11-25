@@ -44,7 +44,12 @@ def _pp_transport_in_use(worker: "Worker") -> str:
 
 
 def compute_plan_fingerprint(
-    vllm_config: VllmConfig, rank: int, world_size: int, pp_transport: str = "nccl"
+    vllm_config: VllmConfig,
+    rank: int,
+    world_size: int,
+    pp_transport: str = "nccl",
+    *,
+    profiled_attention_workspace: bool = False,
 ) -> str:
     """Hash everything the profiled KV-cache memory value depends on.
 
@@ -78,8 +83,21 @@ def compute_plan_fingerprint(
         # cache, and "auto" may pick either.
         "pp_transport": pp_transport,
     }
+    if profiled_attention_workspace:
+        factors["profiled_attention_workspace"] = True
     digest = hashlib.sha256(json.dumps(factors, sort_keys=True).encode()).hexdigest()
     return digest[:16]
+
+
+def _worker_plan_fingerprint(worker: "Worker") -> str:
+    return compute_plan_fingerprint(
+        worker.vllm_config,
+        worker.rank,
+        worker.parallel_config.world_size,
+        _pp_transport_in_use(worker),
+        profiled_attention_workspace=worker.model_runner.profile_kv_cache_groups
+        is not None,
+    )
 
 
 def _plan_path(fingerprint: str) -> str:
@@ -148,12 +166,7 @@ def maybe_apply_startup_plan(worker: "Worker") -> None:
         or worker.cache_config.kv_cache_memory_bytes is not None
     ):
         return
-    fingerprint = compute_plan_fingerprint(
-        worker.vllm_config,
-        worker.rank,
-        worker.parallel_config.world_size,
-        _pp_transport_in_use(worker),
-    )
+    fingerprint = _worker_plan_fingerprint(worker)
     plan = _load_plan(fingerprint)
     if plan is None:
         return
@@ -181,12 +194,7 @@ def maybe_save_startup_plan(worker: "Worker", kv_cache_memory_bytes: int) -> Non
     never raised."""
     if not envs.VLLM_ENABLE_STARTUP_PLAN:
         return
-    fingerprint = compute_plan_fingerprint(
-        worker.vllm_config,
-        worker.rank,
-        worker.parallel_config.world_size,
-        _pp_transport_in_use(worker),
-    )
+    fingerprint = _worker_plan_fingerprint(worker)
     path = _plan_path(fingerprint)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)

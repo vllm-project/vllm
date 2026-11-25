@@ -28,6 +28,7 @@ from vllm.v1.watermarking.spec_decode import (
     create_speculative_draft_watermarker,
 )
 from vllm.v1.worker.gpu.attn_utils import (
+    AttentionWorkspaces,
     build_attn_metadata,
     build_slot_mappings_by_layer,
     init_attn_backend,
@@ -176,6 +177,7 @@ class DraftModelSpeculator(BaseSpeculator):
             vllm_config.parallel_config = replace_config(
                 parallel_config, decode_context_parallel_size=dcp
             )
+        self.attn_workspaces: AttentionWorkspaces | None = None
         self.vllm_config = vllm_config
         self.device = device
 
@@ -424,6 +426,7 @@ class DraftModelSpeculator(BaseSpeculator):
             self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
+            workspaces=self.attn_workspaces,
             kernel_block_sizes=kernel_block_sizes,
             no_attn_metadata_layer_names=(
                 self.draft_attn_layer_names

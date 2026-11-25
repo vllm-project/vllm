@@ -32,7 +32,7 @@ per-token x 128-channel-group `ckv_scale_arr` layout is supported by the
 kernel but not wired yet (it needs a group-quantizing cache-write op).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 import torch
@@ -67,6 +67,9 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
+# MLAPlan caps works at 16384 in FlashInfer 0.7.4; budget 8192 query tiles.
+# https://github.com/flashinfer-ai/flashinfer/pull/5170
+_MAX_PLAN_QUERY_TILES = 8192
 # TODO: FlashInfer bakes per-row kv_len into the plan on the host, which
 # forces a D2H sync under async scheduling. The plan-info layout constants
 # below and the int-workspace clamp in _SM90State work around this by
@@ -87,6 +90,17 @@ _PI_WORK_INDPTR = 15
 # plan stays reusable across draft steps and consecutive decode steps; the
 # device-side clamp restores the exact lengths.
 _PLAN_SLACK = 32
+
+
+def _max_plan_chunk_rows(num_heads: int) -> int:
+    # MLAPlan packs a row's heads into 64-query-row CTA tiles and pairs two CTAs
+    # per cluster only when the batch-average packed query length exceeds 64
+    # (scheduler.cuh). The plan is padded to max_tokens with zero-length rows,
+    # so a partly filled chunk falls back to one CTA per cluster even above 64
+    # heads: divide by that worst-case cdiv(num_heads, 64) tile count. It caps
+    # the query-tile works at 8192, and split-KV works add at most one cluster
+    # each, so the plan stays under MLAPlan's 16384-work capacity.
+    return _MAX_PLAN_QUERY_TILES // triton.cdiv(num_heads, 64)
 
 
 @triton.jit
@@ -111,7 +125,7 @@ def _pack_topk_indices(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["row_offset"])
 def _clamp_work_kv_end(
     int_ws,
     saved_kv_end,
@@ -122,6 +136,7 @@ def _clamp_work_kv_end(
     q_indptr_off,
     kv_start_off,
     kv_end_off,
+    row_offset,
     TOPK: tl.constexpr,
     KPOOL: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -131,6 +146,7 @@ def _clamp_work_kv_end(
     works = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = works < tl.load(int_ws + num_works_idx)
     row = tl.load(int_ws + q_indptr_off + works, mask=mask, other=0)
+    row += row_offset
     req = tl.load(req_id_per_token + row, mask=mask, other=0)
     seq_len = tl.load(seq_lens + req, mask=mask, other=0)
     query_end = tl.load(query_start_loc + req + 1, mask=mask, other=0)
@@ -169,6 +185,23 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["FlashInferMLASparseSM90Builder"]:
         return FlashInferMLASparseSM90Builder
+
+    @staticmethod
+    def reserve_metadata_workspace(
+        kv_cache_spec: "AttentionSpec",
+        layer_names: list[str],
+        vllm_config: "VllmConfig",
+        device: torch.device,
+    ) -> list["_SM90State"]:
+        states = FlashInferMLASparseSM90Builder.make_chunk_states(
+            kv_cache_spec, layer_names, vllm_config, device
+        )
+        # FlashInfer allocates each wrapper's device and pinned integer buffers
+        # on its first plan. A single real row materializes them before KV sizing.
+        one = torch.ones(1, dtype=torch.int32, device="cpu")
+        for state in states:
+            state.plan(1, one, None, None)
+        return states
 
     @staticmethod
     def get_impl_cls() -> type[MLAAttentionImpl]:
@@ -255,10 +288,15 @@ class _SM90State:
         sm_scale: float,
         index_topk: int,
         index_kpool: int,
+        workspace: torch.Tensor | None = None,
     ) -> None:
         from flashinfer.mla import BatchMLAPagedAttentionWrapper
 
-        self.workspace = torch.empty(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
+        self.workspace = (
+            torch.empty(_WORKSPACE_BYTES, dtype=torch.uint8, device=device)
+            if workspace is None
+            else workspace
+        )
         self.device = device
         self.num_heads = num_heads
         self.kv_dtype = kv_dtype
@@ -302,12 +340,29 @@ class _SM90State:
         self._int_ws: torch.Tensor | None = None
         self._plan_offsets: tuple[int, int, int, int] | None = None
 
+    def clone(self, max_tokens: int) -> "_SM90State":
+        """A second plan state for another chunk, sharing the float workspace."""
+        return _SM90State(
+            self.device,
+            self.num_heads,
+            self.kv_dtype,
+            max_tokens,
+            self.topk_width,
+            self.kv_lora_rank,
+            self.qk_rope_head_dim,
+            self.sm_scale,
+            self.index_topk,
+            self.index_kpool,
+            workspace=self.workspace,
+        )
+
     def plan(
         self,
         num_tokens: int,
         kv_lens: torch.Tensor,
         cam: CommonAttentionMetadata | None,
         req_id_per_token: torch.Tensor | None,
+        row_offset: int = 0,
     ) -> None:
         """Plan per-row KV lengths (CPU int32, `[num_tokens]`).
 
@@ -340,7 +395,7 @@ class _SM90State:
                 num_tokens, torch.clamp(kv_lens + _PLAN_SLACK, max=self.max_valid)
             )
             self._planned_num_tokens = num_tokens
-        self._clamp_kv_end(cam, req_id_per_token)
+        self._clamp_kv_end(cam, req_id_per_token, row_offset)
 
     def _plan(self, num_tokens: int, kv_lens: torch.Tensor) -> None:
         # CPU staging buffers are filled in place: plan() runs per step
@@ -397,7 +452,10 @@ class _SM90State:
         self._saved_kv_end.copy_(self._int_ws[kv_end_off : kv_end_off + max_works])
 
     def _clamp_kv_end(
-        self, cam: CommonAttentionMetadata, req_id_per_token: torch.Tensor
+        self,
+        cam: CommonAttentionMetadata,
+        req_id_per_token: torch.Tensor,
+        row_offset: int,
     ) -> None:
         assert self._int_ws is not None and self._plan_offsets is not None
         block = 1024
@@ -408,6 +466,7 @@ class _SM90State:
             cam.query_start_loc,
             req_id_per_token,
             *self._plan_offsets,
+            row_offset,
             TOPK=self.index_topk,
             KPOOL=self.index_kpool,
             BLOCK_SIZE=block,
@@ -423,6 +482,8 @@ class _SM90State:
 @dataclass
 class FlashInferMLASparseSM90Metadata(FlashInferMLASparseMetadata):
     state: _SM90State | None = None
+    # One (row start, row end, plan state) per planner chunk; always set by build().
+    chunk_states: list[tuple[int, int, _SM90State]] = field(default_factory=list)
 
 
 class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
@@ -444,8 +505,28 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         layer_names: list[str],
         vllm_config: "VllmConfig",
         device: torch.device,
+        *,
+        workspace: list[_SM90State] | None = None,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._chunk_states = (
+            workspace
+            if workspace is not None
+            else self.make_chunk_states(kv_cache_spec, layer_names, vllm_config, device)
+        )
+        self.state = self._chunk_states[0]
+        spec_config = vllm_config.speculative_config
+        self._adaptive_verification = bool(
+            spec_config is not None and spec_config.enable_adaptive_verification
+        )
+
+    @staticmethod
+    def make_chunk_states(
+        kv_cache_spec: "AttentionSpec",
+        layer_names: list[str],
+        vllm_config: "VllmConfig",
+        device: torch.device,
+    ) -> list[_SM90State]:
         attention_layer = vllm_config.compilation_config.static_forward_context[
             layer_names[0]
         ]
@@ -465,11 +546,14 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             if kv_cache_spec.dtype == torch.uint8
             else kv_cache_spec.dtype
         )
-        self.state = _SM90State(
+        first = _SM90State(
             device,
             impl.num_heads,
             kv_plan_dtype,
-            vllm_config.scheduler_config.max_num_batched_tokens,
+            min(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                _max_plan_chunk_rows(impl.num_heads),
+            ),
             topk_indices_buffer.shape[1],
             kv_lora_rank=impl.kv_lora_rank,
             qk_rope_head_dim=impl.qk_rope_head_dim,
@@ -477,10 +561,14 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             index_topk=int(hf_config.index_topk),
             index_kpool=int(getattr(hf_config, "index_kpool", 1) or 1),
         )
-        spec_config = vllm_config.speculative_config
-        self._adaptive_verification = bool(
-            spec_config is not None and spec_config.enable_adaptive_verification
-        )
+        # Each plan has private indices and shares scratch. Size the last
+        # chunk for the remaining rows only.
+        budget = vllm_config.scheduler_config.max_num_batched_tokens
+        chunk_rows = first.max_tokens
+        return [first] + [
+            first.clone(min(chunk_rows, budget - start))
+            for start in range(chunk_rows, budget, chunk_rows)
+        ]
 
     def _kv_lens_host(
         self, cam: CommonAttentionMetadata
@@ -549,13 +637,26 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         ):
             num_rows = metadata.num_decode_tokens
             kv_lens = kv_lens[:num_rows]
-        if exact:
-            self.state.plan(num_rows, kv_lens, None, None)
-        else:
-            self.state.plan(
-                num_rows, kv_lens, common_attn_metadata, metadata.req_id_per_token
-            )
         metadata.state = self.state
+        # One plan per chunk of at most `state.max_tokens` rows, so no plan can
+        # exceed FlashInfer's work-list capacity. A small batch is one chunk.
+        metadata.chunk_states = []
+        start = 0
+        while start < num_rows:
+            i = len(metadata.chunk_states)
+            if i == len(self._chunk_states):
+                self._chunk_states.append(self.state.clone(self.state.max_tokens))
+            state = self._chunk_states[i]
+            end = min(start + state.max_tokens, num_rows)
+            state.plan(
+                end - start,
+                kv_lens[start:end],
+                None if exact else common_attn_metadata,
+                None if exact else metadata.req_id_per_token,
+                row_offset=start,
+            )
+            metadata.chunk_states.append((start, end, state))
+            start = end
         return metadata
 
 
@@ -634,10 +735,6 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
             NUM_TOPK_TOKENS=topk_indices.shape[1],
             return_valid_counts=True,
         )
-        state = attn_metadata.state
-        assert state is not None
-        # Pack valid prefixes at the offsets refreshed by plan() before replay.
-        state.pack_indices(topk_slots)
 
         flat = (
             kv_c_and_k_pe_cache.view(torch.float8_e4m3fn)
@@ -652,5 +749,16 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
             if self.use_fp8_kv_cache
             else {}
         )
-        out = state.wrapper.run(q_nope, q_pe, ckv, kpe, **scale_kwargs)
+        out = torch.empty_like(q_nope)
+        for start, end, chunk_state in attn_metadata.chunk_states:
+            # Pack valid prefixes at the offsets refreshed before replay.
+            chunk_state.pack_indices(topk_slots[start:end])
+            chunk_state.wrapper.run(
+                q_nope[start:end],
+                q_pe[start:end],
+                ckv,
+                kpe,
+                out=out[start:end],
+                **scale_kwargs,
+            )
         return out, None
