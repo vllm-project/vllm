@@ -22,7 +22,7 @@ use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::{
     DecodedPromptLogprobs, DecodedTextEvent, FinishReason, SampledDelta, TextOutputStream,
-    TextOutputStreamExt as _, TextRequest, TextRequestProcessor,
+    TextOutputStreamExt as _, TextRequest,
 };
 
 use self::convert::{PreparedPrompt, ResponseOptions, prepare_completion_request};
@@ -36,6 +36,7 @@ use super::utils::types::{StreamResponseEnvelope, Usage};
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
 use crate::lora::LoraModelResolution;
+use crate::render::RenderContext;
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionResponse, CompletionSseChunk, CompletionStreamChoice,
     CompletionStreamResponse,
@@ -60,9 +61,9 @@ pub(crate) fn lower_completion_request(
     request: CompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
-    processor: &TextRequestProcessor,
+    processors: &impl RenderContext,
 ) -> Result<Vec<TextRequest>, ApiError> {
-    let prepared = prepare_completion_request(request, lora_resolution, ctx, processor)?;
+    let prepared = prepare_completion_request(request, lora_resolution, ctx, processors)?;
     Ok(prepared.prompts.into_iter().map(|prompt| prompt.text_request).collect())
 }
 
@@ -78,12 +79,8 @@ pub async fn completions(
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
-    let prepared = prepare_completion_request(
-        body,
-        &lora_resolution,
-        request_context,
-        state.chat.text().request_processor(),
-    )?;
+    let prepared =
+        prepare_completion_request(body, &lora_resolution, request_context, state.as_ref())?;
     validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)?;
     for prompt in &prepared.prompts {
         validate_max_output_tokens(
