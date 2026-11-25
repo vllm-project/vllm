@@ -110,16 +110,20 @@ def _warmup_block_counter(
     return block_count
 
 
+def _num_draft_slots(model_runner: GPUModelRunner) -> int:
+    """Token budget the scheduler reserves per request for drafting."""
+    spec_config = model_runner.speculative_config
+    return spec_config.max_num_new_slots_for_drafting if spec_config is not None else 0
+
+
 def _cap_num_warmup_reqs(
     model_runner: GPUModelRunner, num_reqs: int, num_tokens_per_req: int
 ) -> int:
     """Limit synthetic requests to the scheduler's token budget."""
-    spec_config = model_runner.speculative_config
-    num_draft_slots = (
-        spec_config.max_num_new_slots_for_drafting if spec_config is not None else 0
-    )
     return min(
-        num_reqs, model_runner.max_num_tokens // (num_tokens_per_req + num_draft_slots)
+        num_reqs,
+        model_runner.max_num_tokens
+        // (num_tokens_per_req + _num_draft_slots(model_runner)),
     )
 
 
@@ -172,20 +176,23 @@ def run_mixed_prefill_decode_warmup(
     req_id_prefix: str = "_v2_mixed_warmup",
     prompt_logprobs: int | None = None,
     prefill_only_fallback: bool = False,
+    max_prefill_len: int | None = None,
 ) -> bool:
     """Run a V2 mixed prefill+decode step through normal scheduler inputs,
     requesting prompt_logprobs on the prefill requests.
 
-    Prefill tokens beyond what one request can hold (max_model_len - 1) are
-    split across further prefill requests, up to max_num_reqs. If
-    prefill_only_fallback, the prefills run alone when request slots rather
-    than tokens limit them, including on a runner limited to one request.
+    Prefill tokens beyond max_prefill_len (by default what one request can
+    hold, max_model_len - 1) are split across further prefill requests, up to
+    max_num_reqs. If prefill_only_fallback, the prefills run alone when
+    request slots rather than tokens limit them, including on a runner
+    limited to one request.
     """
     with_decode = model_runner.max_num_reqs >= 2
     if model_runner.is_pooling_model or not (with_decode or prefill_only_fallback):
         return False
 
-    max_prefill_len = model_runner.max_model_len - 1
+    if max_prefill_len is None:
+        max_prefill_len = model_runner.max_model_len - 1
     # The decode request verifies a full set of drafts, as in serving: some
     # backends allocate their largest decode workspace only to verify.
     num_spec_steps = model_runner.vllm_config.num_scheduled_spec_tokens
@@ -522,6 +529,27 @@ def run_kv_cache_sizing_warmup(
         prefill_only_fallback=True,
         mixed_step_context=_measure_sizing_step(model_runner),
     )
+    # Kernels that keep state per sequence (e.g. GDN's chunked prefill) need
+    # far more for the budget spread over every request slot, as a burst of
+    # short prompts schedules it, than for a few long prompts.
+    short_prompt_len = max(
+        max_num_tokens // model_runner.max_num_reqs - _num_draft_slots(model_runner),
+        1,
+    )
+    num_short_prompts = _cap_num_warmup_reqs(
+        model_runner, model_runner.max_num_reqs, short_prompt_len
+    )
+    num_long_prompts = cdiv(max_num_tokens, model_runner.max_model_len - 1)
+    if num_short_prompts > num_long_prompts:
+        run_mixed_prefill_decode_warmup(
+            model_runner,
+            worker_execute_model,
+            worker_sample_tokens,
+            num_short_prompts * short_prompt_len,
+            prefill_only_fallback=True,
+            max_prefill_len=short_prompt_len,
+            mixed_step_context=_measure_sizing_step(model_runner),
+        )
     if model_runner.model_config.use_mla:
         from vllm.model_executor.layers.attention.mla_attention import (
             MLACommonMetadataBuilder,

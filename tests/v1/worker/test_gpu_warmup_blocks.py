@@ -716,10 +716,74 @@ def test_sizing_warmup_fills_token_budget_beyond_max_model_len(
         runner, outputs.append, lambda grammar_output: None
     )
 
-    step = max(outputs, key=lambda o: o.total_num_scheduled_tokens)
+    # The step whose prompts run up to max_model_len - 1.
+    step = max(
+        outputs,
+        key=lambda o: max(
+            (len(r.prompt_token_ids) for r in o.scheduled_new_reqs), default=0
+        ),
+    )
     prefill_lens = [len(r.prompt_token_ids) for r in step.scheduled_new_reqs]
     assert prefill_lens == expected_prefill_lens
     num_decode_reqs = len(step.scheduled_cached_reqs.req_ids)
     assert num_decode_reqs == (1 if max_num_reqs > 2 else 0)
     assert step.total_num_scheduled_tokens == num_decode_reqs + sum(prefill_lens)
     assert step.total_num_scheduled_tokens == sum(step.num_scheduled_tokens.values())
+
+
+@pytest.mark.parametrize(
+    "max_num_reqs, max_model_len, num_draft_slots, expected_step",
+    [
+        # The 2048-token budget over 4 request slots.
+        (4, MAX_MODEL_LEN, 0, ([512] * 4, 0)),
+        # Each request also takes its draft slots from the budget.
+        (4, MAX_MODEL_LEN, 3, ([509] * 4, 0)),
+        # Draft slots leave room for 512 one-token prompts, as the scheduler
+        # would admit; the decode request takes the place of a few.
+        (1024, MAX_MODEL_LEN, 3, ([1] * 508, 1)),
+        # The full-budget step already holds a prompt in every slot.
+        (4, 514, 0, None),
+    ],
+)
+def test_sizing_warmup_spreads_token_budget_over_every_request_slot(
+    monkeypatch, max_num_reqs, max_model_len, num_draft_slots, expected_step
+):
+    """Kernels that keep state per sequence need far more for the budget
+    spread over every request slot than for a few long prompts, so the sizing
+    warmup also measures a step of as many short prompts as the scheduler
+    could admit, unless the full-budget step holds as many already."""
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    runner.model_config = SimpleNamespace(
+        get_vocab_size=lambda: 64, max_logprobs=0, use_mla=False
+    )
+    runner.max_num_reqs = max_num_reqs
+    runner.max_model_len = max_model_len
+    runner.speculative_config.max_num_new_slots_for_drafting = num_draft_slots
+    measuring = False
+
+    @contextlib.contextmanager
+    def measure_sizing_step(runner):
+        nonlocal measuring
+        measuring = True
+        yield
+        measuring = False
+
+    monkeypatch.setattr(warmup, "_measure_sizing_step", measure_sizing_step)
+    measured_steps: list[SchedulerOutput] = []
+
+    def execute_model(scheduler_output) -> None:
+        if measuring:
+            measured_steps.append(scheduler_output)
+
+    warmup.run_kv_cache_sizing_warmup(
+        runner, execute_model, lambda grammar_output: None
+    )
+
+    if expected_step is None:
+        assert len(measured_steps) == 1
+        return
+    assert len(measured_steps) == 2
+    step = measured_steps[-1]
+    prefill_lens, num_decodes = expected_step
+    assert [len(r.prompt_token_ids) for r in step.scheduled_new_reqs] == prefill_lens
+    assert len(step.scheduled_cached_reqs.req_ids) == num_decodes
