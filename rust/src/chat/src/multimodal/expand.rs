@@ -173,6 +173,7 @@ mod tests {
             placeholder: ResolvedPlaceholder {
                 token: placeholder_token.to_string(),
                 marker_token_ids: vec![marker_token_id],
+                rendered_marker_ids: Vec::new(),
                 embed_token_id,
             },
             replacements,
@@ -194,6 +195,7 @@ mod tests {
             placeholder: ResolvedPlaceholder {
                 token: "<image-placeholder>".to_string(),
                 marker_token_ids: marker_token_ids.clone(),
+                rendered_marker_ids: Vec::new(),
                 embed_token_id: QWEN3_IMAGE_PAD_ID,
             },
             replacements: vec![replacement],
@@ -663,6 +665,7 @@ mod tests {
             placeholder: ResolvedPlaceholder {
                 token: placeholder_token.to_string(),
                 marker_token_ids: vec![start, embed, end],
+                rendered_marker_ids: Vec::new(),
                 embed_token_id: embed,
             },
             replacements,

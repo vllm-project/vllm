@@ -32,6 +32,8 @@ Since we call HF processor without the input text, we have to perform this updat
 
 Some HF processors additionally transform the prompt itself regardless of the multi-modal inputs (such as `ChameleonProcessor` appending a sep token for chat mode). Since the prompt tokens likewise bypass the HF processor, such transformations are replicated via [_postprocess_prompt][vllm.multimodal.processing.BaseMultiModalProcessor._postprocess_prompt] before the prompt updates are located or applied.
 
+The Rust frontend accepts Nemotron's `<video>` marker in tokenized prompts with raw video data, including native gRPC requests. Clients do not need to supply its internal anchor token. Prompts that already use the internal anchor remain supported.
+
 ## Processor Output Caching
 
 Some HF processors, such as the one for Qwen2-VL, are [very slow](https://github.com/vllm-project/vllm/issues/9238). To alleviate this problem, we cache the multi-modal outputs of HF processor to avoid processing the same multi-modal input (e.g. image) again.
