@@ -3,12 +3,14 @@
 """Inkling2 NVFP4 experts as one DeepGEMM MegaMoE launch (SM90) vs. Humming,
 on the Inkling-2-Mini checkpoint."""
 
+import contextlib
 import json
 import os
 from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.multiprocessing as mp
 
 from vllm.platforms import current_platform
 
@@ -22,38 +24,54 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (  # noqa: E
 )
 from vllm.models.inkling2.nvidia.moe import Inkling2MoE  # noqa: E402
 from vllm.models.inkling2.nvidia.ops.moe_sm90 import select_experts  # noqa: E402
+from vllm.models.inkling2.nvidia.ops.moe_sm90_mega import (  # noqa: E402
+    Inkling2LocalMegaMoEExperts,
+    Inkling2MegaMoEExperts,
+)
 
 MODEL = "thinkingmachines/Inkling-2-Mini"
 E2M1 = [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6]
 
 
 @pytest.fixture(scope="module")
-def checkpoint():
+def checkpoint_path():
     from huggingface_hub.errors import LocalEntryNotFoundError
-    from safetensors import safe_open
 
     from vllm.transformers_utils.repo_utils import hf_api
 
     if not deep_gemm_supports_sm90_nvfp4():
         pytest.skip("DeepGEMM has no SM90 NVFP4 MegaMoE")
     try:
-        path = hf_api().snapshot_download(
+        return hf_api().snapshot_download(
             MODEL, local_files_only=True, allow_patterns=["*.json", "*.safetensors"]
         )
     except LocalEntryNotFoundError:
         pytest.skip(f"{MODEL} is not in the local HF cache")
+
+
+@contextlib.contextmanager
+def _open_checkpoint(path: str):
+    from safetensors import safe_open
+
     with open(os.path.join(path, "config.json")) as f:
         config = SimpleNamespace(**json.load(f)["text_config"])
+    device = torch.accelerator.current_device_index()
     with safe_open(
-        os.path.join(path, "model-00001-of-00001.safetensors"), "pt", device="cuda"
+        os.path.join(path, "model-00001-of-00001.safetensors"), "pt", device=device
     ) as tensors:
         yield config, tensors
 
 
-def _layer(checkpoint, layer: int, backend: str) -> Inkling2MoE:
+@pytest.fixture(scope="module")
+def checkpoint(checkpoint_path):
+    with _open_checkpoint(checkpoint_path) as checkpoint:
+        yield checkpoint
+
+
+def _layer(checkpoint, layer: int, backend: str, **kwargs) -> Inkling2MoE:
     config, tensors = checkpoint
     prefix = f"model.llm.layers.{layer}.mlp"
-    vllm_config = VllmConfig(kernel_config=KernelConfig(moe_backend=backend))
+    vllm_config = VllmConfig(kernel_config=KernelConfig(moe_backend=backend), **kwargs)
     with set_current_vllm_config(vllm_config), torch.device("cuda"):
         moe = Inkling2MoE(config, "nvfp4", prefix=prefix)
         for name, param in moe.named_parameters():
@@ -127,6 +145,7 @@ def test_mega_moe_matches_humming(dist_init, checkpoint, monkeypatch, layer: int
     humming = _layer(checkpoint, layer, "auto")
     mega = _layer(checkpoint, layer, "deep_gemm_mega_moe")
     assert humming.experts.mega is None and mega.experts.humming is None
+    assert type(mega.experts.mega) is Inkling2MegaMoEExperts
     assert mega.experts.w13_weight.numel() == 0
     torch.manual_seed(layer)
     for tokens in (1, 8, 128, 1024):
@@ -168,3 +187,120 @@ def test_mega_moe_graph_replays_padded_batch(dist_init, checkpoint, monkeypatch)
         graph.replay()
         torch.testing.assert_close(captured, expected, atol=0, rtol=0)
         assert (captured[tokens:] == 0).all()
+
+
+def _data_parallel_worker(rank: int, world: int, port: int, path: str, queue) -> None:
+    """One data-parallel rank of `test_data_parallel_matches_single_rank_humming`."""
+    from vllm.config import ParallelConfig
+    from vllm.distributed import (
+        cleanup_dist_env_and_memory,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+    from vllm.forward_context import set_forward_context
+
+    torch.accelerator.set_device_index(rank)
+
+    def dp(enable_expert_parallel: bool = True) -> dict:
+        parallel_config = ParallelConfig(
+            data_parallel_size=world,
+            data_parallel_rank=rank,
+            enable_expert_parallel=enable_expert_parallel,
+        )
+        return dict(parallel_config=parallel_config)
+
+    failures = []
+    init_distributed_environment(
+        world, rank, f"tcp://127.0.0.1:{port}", local_rank=rank, backend="nccl"
+    )
+    with set_current_vllm_config(VllmConfig(**dp())):
+        initialize_model_parallel(1, 1)
+    with _open_checkpoint(path) as checkpoint:
+        for layer in (0, 9, 19):
+            humming = _layer(checkpoint, layer, "auto")
+            ep_humming = _layer(checkpoint, layer, "auto", **dp())
+            ep_mega = _layer(checkpoint, layer, "deep_gemm_mega_moe", **dp())
+            # Experts replicated on every data-parallel rank.
+            dp_mega = _layer(checkpoint, layer, "deep_gemm_mega_moe", **dp(False))
+            assert ep_humming.experts.mega is None and ep_mega.experts.humming is None
+            assert type(ep_mega.experts.mega) is Inkling2MegaMoEExperts
+            assert type(dp_mega.experts.mega) is Inkling2LocalMegaMoEExperts
+            assert ep_mega.experts.mega.num_experts == humming.experts.num_experts
+            # Unequal (eager) and equal per-rank token counts.
+            for counts in ([1, 8, 128, 1024], [1024, 128, 8, 1], [8] * world):
+                tokens = counts[rank]
+                torch.manual_seed(1000 * layer + 10 * rank + counts[0])
+                x = _input(checkpoint, layer, tokens)
+                with set_forward_context(
+                    None,
+                    VllmConfig(**dp()),
+                    num_tokens=tokens,
+                    num_tokens_across_dp=torch.tensor(counts, dtype=torch.int32),
+                ):
+                    ours, ep_control = ep_mega(x), ep_humming(x)
+                replicated, control = dp_mega(x), humming(x)
+                ref = _reference(checkpoint, layer, humming, x)
+                humming_vs_ref = _rel_l2(control, ref)
+                case = f"layer {layer} counts {counts}"
+                for name, out in (("ep", ours), ("replicated", replicated)):
+                    vs_humming, vs_ref = _rel_l2(out, control), _rel_l2(out, ref)
+                    if not (vs_humming <= 1e-3 or vs_ref <= 1.01 * humming_vs_ref):
+                        failures.append(
+                            f"{case} {name}: {vs_humming=:.2e} {vs_ref=:.2e} "
+                            f"{humming_vs_ref=:.2e}"
+                        )
+                # Each of the 4 partials is rounded to bf16 (up to 2**-9 of it).
+                scale = control.abs().max().item()
+                if not torch.allclose(
+                    ep_control, control, atol=world * 2**-9 * scale, rtol=1e-2
+                ):
+                    failures.append(f"{case}: gathered Humming differs")
+
+        # CUDA graph replay of padded batches, padding rows (NaN) out as 0.
+        padded, real = 8, 2 + rank
+        ep_humming = _layer(checkpoint, 0, "auto", **dp())
+        ep_mega = _layer(checkpoint, 0, "deep_gemm_mega_moe", **dp())
+        x = _input(checkpoint, 0, padded)
+        x[real:] = float("nan")
+        context = set_forward_context(
+            None,
+            VllmConfig(**dp()),
+            num_tokens=padded,
+            num_tokens_across_dp=torch.tensor([padded] * world, dtype=torch.int32),
+            is_padding=torch.arange(padded, device="cuda") >= real,
+        )
+        with context:
+            ep_mega(x), ep_humming(x)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = ep_mega(x), ep_humming(x)
+            for i in range(3):
+                torch.manual_seed(rank + 10 * i)
+                x.copy_(_input(checkpoint, 0, padded))
+                x[real:] = float("nan")
+                expected = ep_mega(x), ep_humming(x)
+                graph.replay()
+                for name, out, eager in zip(("mega", "humming"), captured, expected):
+                    if not torch.equal(out, eager):
+                        failures.append(f"graph replay {i}: {name} differs")
+                    if not (out[real:] == 0).all():
+                        failures.append(f"graph replay {i}: {name} padding rows")
+    queue.put((rank, failures))
+    cleanup_dist_env_and_memory()
+
+
+def test_data_parallel_matches_single_rank_humming(checkpoint_path):
+    """4 data-parallel ranks: with expert parallelism the 4-rank MegaMoE
+    launch and the all-gather / reduce-scatter Humming path, and with
+    replicated experts each rank's own launch, match one rank's Humming over
+    all experts on each rank's own tokens, also with unequal token counts.
+    The expert-parallel paths replay bitwise from a CUDA graph."""
+    world = 4
+    if torch.accelerator.device_count() < world:
+        pytest.skip(f"needs {world} GPUs")
+    queue = mp.get_context("spawn").Queue()
+    mp.spawn(
+        _data_parallel_worker, args=(world, 29680, checkpoint_path, queue), nprocs=world
+    )
+    results = dict(queue.get() for _ in range(world))
+    assert all(not f for f in results.values()), results

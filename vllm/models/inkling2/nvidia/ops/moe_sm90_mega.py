@@ -34,9 +34,8 @@ def mega_rank_group() -> GroupCoordinator:
 class Inkling2MegaMoEExperts(DeepGemmMegaMoEExperts):
     """MegaMoE experts whose parameters are the `w13` and `w2` NVFP4 weights
     already in the SM90 kernel layout
-    (`transform_nvfp4_weights_for_sm90_mega_moe`). Each rank launches alone over
-    its own experts (`Inkling2Experts` shards them over the TP group) and
-    returns its partial sum.
+    (`transform_nvfp4_weights_for_sm90_mega_moe`), this rank's contiguous
+    slice of the experts of the launch group (`_group`, the EP group).
 
     Args:
         l1: `w13` codes, scales and global scales; rows interleave gate/up.
@@ -49,7 +48,6 @@ class Inkling2MegaMoEExperts(DeepGemmMegaMoEExperts):
 
     # `Inkling2MoE` captures the routed experts of each layer visit itself.
     capture_fn = property(lambda self: None, lambda self, fn: None)
-    _group = staticmethod(mega_rank_group)
 
     def __init__(
         self,
@@ -63,12 +61,13 @@ class Inkling2MegaMoEExperts(DeepGemmMegaMoEExperts):
         prefix: str,
     ):
         self._kernel_layout_weights = {"w13": l1, "w2": l2}
-        num_experts, gate_up_size, packed_hidden_size = l1[0].shape
+        num_local_experts, gate_up_size, packed_hidden_size = l1[0].shape
+        group = self._group()
         super().__init__(
             vllm_config,
-            num_experts=num_experts,
-            num_local_experts=num_experts,
-            experts_start_idx=0,
+            num_experts=num_local_experts * group.world_size,
+            num_local_experts=num_local_experts,
+            experts_start_idx=num_local_experts * group.rank_in_group,
             top_k=top_k,
             hidden_size=2 * packed_hidden_size,
             intermediate_size=gate_up_size // 2,
@@ -77,10 +76,6 @@ class Inkling2MegaMoEExperts(DeepGemmMegaMoEExperts):
             prefix=prefix,
         )
 
-    def _mean_num_tokens(self, num_tokens: int) -> int:
-        # About 1 / tp of the tokens' slots land on this rank's experts.
-        return -(-num_tokens // get_tensor_model_parallel_world_size())
-
     def _create_weights(self) -> None:
         for name, tensors in self._kernel_layout_weights.items():
             suffixes = ("weight", "weight_scale", "weight_scale_2")
@@ -88,3 +83,14 @@ class Inkling2MegaMoEExperts(DeepGemmMegaMoEExperts):
                 param = nn.Parameter(tensor, requires_grad=False)
                 self.register_parameter(f"{name}_{suffix}", param)
         del self._kernel_layout_weights
+
+
+class Inkling2LocalMegaMoEExperts(Inkling2MegaMoEExperts):
+    """Each rank launches alone over its own experts (`Inkling2Experts`
+    shards them over the TP group) and returns its partial sum."""
+
+    _group = staticmethod(mega_rank_group)
+
+    def _mean_num_tokens(self, num_tokens: int) -> int:
+        # About 1 / tp of the tokens' slots land on this rank's experts.
+        return -(-num_tokens // get_tensor_model_parallel_world_size())
