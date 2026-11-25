@@ -146,21 +146,48 @@ def test_no_snapshot_of_shared_dtype_registry():
 
 
 def test_int4_per_token_head_customize_spec_d128():
-    """D=128 int4 packs to C=136 B/token-head (64+64 data + 2?fp32 scales)."""
+    """D=128 int4 packs to C=136 B/token-head (64+64 data + 2×fp32 scales)."""
     from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 
     head_size = 128
     num_kv_heads = 8
     block_size = 16
-    spec = TritonAttentionBackend.customize_spec(
-        FullAttentionSpec(
+    for dtype in (torch.uint8, torch.float16):
+        full = TritonAttentionBackend.customize_spec(
+            FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=num_kv_heads,
+                head_size=head_size,
+                dtype=dtype,
+                kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+            )
+        )
+        assert full.state_content_bytes == 136
+        assert full.page_size_bytes == num_kv_heads * block_size * 136
+
+        sw = TritonAttentionBackend.customize_spec(
+            SlidingWindowSpec(
+                block_size=block_size,
+                num_kv_heads=num_kv_heads,
+                head_size=head_size,
+                dtype=dtype,
+                kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+                sliding_window=4096,
+            )
+        )
+        assert sw.state_content_bytes == 136
+        assert sw.page_size_bytes == num_kv_heads * block_size * 136
+
+        # Dense fallback (no customize) must also pack — SW pages that skip
+        # customize_spec used to budget C=256/264 and break reshape.
+        raw = SlidingWindowSpec(
             block_size=block_size,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
-            dtype=torch.uint8,
+            dtype=dtype,
             kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+            sliding_window=4096,
         )
-    )
-    assert spec.state_content_bytes == 136
-    assert spec.page_size_bytes == num_kv_heads * block_size * 136
+        assert raw.state_content_size_bytes == 136
+        assert raw.page_size_bytes == num_kv_heads * block_size * 136
