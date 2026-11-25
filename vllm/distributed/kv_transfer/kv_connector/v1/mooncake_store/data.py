@@ -116,17 +116,6 @@ class ChunkedTokenDatabase:
             metadata, chunk_size, self.hash_block_size
         )
 
-    def _rank_local_layout(self) -> RankLocalStoreLayout:
-        if not isinstance(self.store_layout, RankLocalStoreLayout):
-            raise RuntimeError("This operation requires a rank-local Store layout")
-        return self.store_layout
-
-    def set_kv_caches_base_addr(self, kv_caches_base_addr: list[int]):
-        self._rank_local_layout().set_kv_caches_base_addr(kv_caches_base_addr)
-
-    def set_block_len(self, block_len: list[int]):
-        self._rank_local_layout().set_block_len(block_len)
-
     def process_tokens(
         self,
         token_len: int,
@@ -283,7 +272,7 @@ class ReqMeta:
 
     can_save: bool | None = None
     load_spec: LoadSpec | None = None
-    current_event: torch.cuda.Event | None = None
+    current_event: torch.Event | None = None
 
     token_ids: list[int] | None = None
     # Absolute request offset represented by token_ids[0].

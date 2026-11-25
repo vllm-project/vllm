@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
+import torch
 
 from vllm.platforms import current_platform
 
@@ -25,3 +26,20 @@ def _mock_cpu_backend_block_sizes(monkeypatch):
         "get_supported_kernel_block_sizes",
         staticmethod(lambda kv_cache_spec=None: [MultipleOf(16)]),
     )
+
+
+@pytest.fixture
+def register_mooncake_store_caches():
+    """Keep CPU tensors alive while Store layouts retain their raw addresses."""
+    buffers: list[torch.Tensor] = []
+
+    def register(layout, block_lens: list[int], num_blocks: int = 32):
+        tensors = [
+            torch.zeros((num_blocks, length), dtype=torch.uint8, device="cpu")
+            for length in block_lens
+        ]
+        layout.register_kv_caches(tensors, num_blocks)
+        buffers.extend(tensors)
+        return tensors
+
+    return register
