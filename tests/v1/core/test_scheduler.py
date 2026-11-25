@@ -8206,6 +8206,117 @@ def test_ec_connector_ensure_cache_available_defers_request(use_kv_connector):
     _assert_right_encoder_inputs(output, expected_total_reqs=0)
 
 
+@pytest.mark.parametrize("running", [False, True])
+def test_ec_connector_does_not_pin_future_runner_hits_at_admission(running):
+    """Future hits remain evictable so they cannot block earlier inputs."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=32,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=128,
+        mm_positions=[[PlaceholderRange(offset=80, length=32)]],
+    )
+    scheduler.add_request(request)
+    if running:
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens[request.request_id] == 32
+
+    manager = scheduler.encoder_cache_manager
+    manager.allocate(request, 0)
+    manager.free(request)
+    request.mm_features[0].data = None
+    mm_hash = request.mm_features[0].identifier
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 32
+    assert not output.scheduled_encoder_inputs
+    assert request.request_id not in manager.cached[mm_hash]
+
+
+@pytest.mark.parametrize("connector_name", ["ECExampleConnector", "ECTieringConnector"])
+def test_ec_connector_schedules_evicted_local_runner_hit(connector_name, tmp_path):
+    """A local input can be re-encoded when its runner hit is evicted."""
+    ec_config = ECTransferConfig(
+        ec_connector=connector_name,
+        ec_role="ec_both",
+        ec_connector_extra_config={
+            "ec_cpu_bytes": 1 << 20,
+            "shared_storage_path": str(tmp_path),
+        },
+    )
+    ec_config.mm_encoder_output_widths = {"image": 4096}
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=64,
+        use_ec_connector=ec_config,
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=128,
+        mm_hashes_list=[["new-image", "cached-image"]],
+        mm_positions=[
+            [
+                PlaceholderRange(offset=0, length=32),
+                PlaceholderRange(offset=32, length=32),
+            ]
+        ],
+    )
+    (other,) = create_requests(
+        num_requests=1,
+        mm_hashes_list=[["other-image"]],
+        mm_positions=[[PlaceholderRange(offset=0, length=32)]],
+        req_ids=["other"],
+    )
+    manager = EncoderCacheManager(cache_size=64)
+    scheduler.encoder_cache_manager = manager
+    connector = scheduler.get_ec_connector()
+    assert connector is not None
+    connector.bind_encoder_cache_query(manager.get_cached_num_encoder_embeds)
+    manager.allocate(request, 1)
+    manager.free(request)
+    manager.allocate(other, 0)
+    manager.free(other)
+    request.ec_transfer_params = {"new-image": {}}
+    scheduler.add_request(request)
+
+    try:
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens[request.request_id] == 64
+        assert output.scheduled_encoder_inputs[request.request_id] == [0, 1]
+    finally:
+        scheduler.shutdown()
+
+
+def test_prefill_schedules_placeholder_tokens_without_encoder_embeddings():
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=48,
+    )
+    scheduler.max_num_encoder_input_tokens = 0
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=128,
+        mm_positions=[
+            [
+                PlaceholderRange(
+                    offset=32,
+                    length=32,
+                    is_embed=torch.tensor([False] * 16 + [True] * 16),
+                ),
+            ]
+        ],
+    )
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 48
+    assert not output.scheduled_encoder_inputs
+
+
 @pytest.mark.parametrize(
     "replay_tokens,window_loaded,local_hit",
     [(128, False, True), (128, False, False), (0, False, False), (128, True, False)],

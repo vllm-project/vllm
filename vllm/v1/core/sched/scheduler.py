@@ -318,7 +318,7 @@ class Scheduler(SchedulerInterface):
             and not self.is_mm_encoder_only
             else None
         )
-        if self.ec_connector is not None:
+        if self.ec_connector is not None and not self.is_encoder_decoder:
             self.ec_connector.bind_encoder_cache_query(
                 self.encoder_cache_manager.get_cached_num_encoder_embeds
             )
@@ -808,13 +808,8 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            if (
-                self.ec_connector is not None
-                and request.mm_features
-                and not self.ec_connector.ensure_cache_available(
-                    request,
-                    request.num_computed_tokens - request.num_output_placeholders,
-                )
+            if self._ec_transfer_pending(
+                request, request.num_computed_tokens - request.num_output_placeholders
             ):
                 req_index += 1
                 continue
@@ -2160,6 +2155,19 @@ class Scheduler(SchedulerInterface):
         if self.is_encoder_decoder:
             lo = 0
 
+        cached_inputs = set()
+        if (
+            self.ec_connector is not None
+            and request.ec_transfer_params
+            and not self.is_encoder_decoder
+        ):
+            cached_inputs = {
+                i
+                for i in range(lo, hi)
+                if self.encoder_cache_manager.get_cached_num_encoder_embeds(request, i)
+                == request.get_num_encoder_embeds(i)
+            }
+
         for i in range(lo, hi):
             mm_feature = mm_features[i]
             start_pos = mm_feature.mm_position.offset
@@ -2245,7 +2253,24 @@ class Scheduler(SchedulerInterface):
                     # previous step.
                     continue
 
-            if not self.encoder_cache_manager.can_allocate(
+            start_idx_rel = max(0, num_computed_tokens - start_pos)
+            end_idx_rel = min(num_encoder_tokens, encoder_window_end - start_pos)
+            curr_embeds_start, curr_embeds_end = (
+                mm_feature.mm_position.get_embeds_indices_in_range(
+                    start_idx_rel, end_idx_rel
+                )
+            )
+            if curr_embeds_start == curr_embeds_end:
+                continue
+
+            # Earlier allocations may evict a runner hit. If the connector
+            # still needs to fetch it, retry admission on the next step.
+            needs_readmission = (
+                i in cached_inputs
+                and self.ec_connector is not None
+                and self.ec_connector.requires_encoder_cache_readmission(request, i)
+            )
+            if needs_readmission or not self.encoder_cache_manager.can_allocate(
                 request, i, encoder_compute_budget, num_embeds_to_schedule
             ):
                 # The encoder cache is full or the encoder budget is exhausted.
@@ -2266,20 +2291,6 @@ class Scheduler(SchedulerInterface):
                     # the request in this step.
                     num_new_tokens = 0
                 break
-
-            # Calculate the number of embeddings to schedule in the current range
-            # of scheduled encoder placeholder tokens.
-            start_idx_rel = max(0, num_computed_tokens - start_pos)
-            end_idx_rel = min(num_encoder_tokens, encoder_window_end - start_pos)
-            curr_embeds_start, curr_embeds_end = (
-                mm_feature.mm_position.get_embeds_indices_in_range(
-                    start_idx_rel, end_idx_rel
-                )
-            )
-            # There's no embeddings in the current range of encoder placeholder tokens
-            # so we can skip the encoder input.
-            if curr_embeds_end - curr_embeds_start == 0:
-                continue
 
             if self.ec_connector is not None and self.ec_connector.has_cache_item(
                 item_identifier
