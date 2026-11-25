@@ -16,8 +16,9 @@ from vllm.multimodal.utils import encode_video_url
 MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
-def test_chat_render_reserves_deepseek_tokenizer_options(tmp_path):
-    vocab = {"[UNK]": 0, "<s>": 1, "</s>": 2}
+@pytest.fixture
+def local_chat_model(tmp_path):
+    vocab = {"[UNK]": 0, "<s>": 1, "</s>": 2, "rendered": 3}
     LlamaConfig(max_position_embeddings=32, vocab_size=len(vocab)).save_pretrained(
         tmp_path
     )
@@ -26,11 +27,15 @@ def test_chat_render_reserves_deepseek_tokenizer_options(tmp_path):
         unk_token="[UNK]",
         bos_token="<s>",
         eos_token="</s>",
+        chat_template="{{ 'rendered' }}",
     )
     tokenizer.save_pretrained(tmp_path)
+    return str(tmp_path)
 
+
+def test_chat_render_reserves_deepseek_tokenizer_options(local_chat_model):
     with RemoteLaunchRenderServer(
-        str(tmp_path), ["--tokenizer-mode", "deepseek_v32"]
+        local_chat_model, ["--tokenizer-mode", "deepseek_v32"]
     ) as server:
         url = server.url_for("v1/chat/completions/render")
         request = {"messages": [{"role": "user", "content": "Hello"}]}
@@ -49,6 +54,28 @@ def test_chat_render_reserves_deepseek_tokenizer_options(tmp_path):
         )
         assert rendered.status_code == 200, rendered.text
         assert rendered.json()["token_ids"]
+
+
+@pytest.mark.parametrize(
+    ("key", "value"), [("return_dict", False), ("return_tensors", None)]
+)
+def test_chat_render_reserves_hf_tokenizer_output_options(local_chat_model, key, value):
+    with RemoteLaunchRenderServer(
+        local_chat_model, ["--tokenizer-mode", "hf"]
+    ) as server:
+        url = server.url_for("v1/chat/completions/render")
+        request = {"messages": [{"role": "user", "content": "Hello"}]}
+        rendered = httpx.post(url, json=request, timeout=10)
+        assert rendered.status_code == 200, rendered.text
+        assert rendered.json()["token_ids"] == [3]
+
+        rejected = httpx.post(
+            url, json={**request, "chat_template_kwargs": {key: value}}, timeout=10
+        )
+        assert rejected.status_code == 400, rejected.text
+        error = rejected.json()["error"]
+        assert error["param"] == "chat_template_kwargs"
+        assert key in error["message"]
 
 
 @pytest.mark.parametrize(

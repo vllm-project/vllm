@@ -82,6 +82,10 @@ _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 SERVER_OWNED_CHAT_TEMPLATE_KWARGS = frozenset(
     {"tokenize", "padding", "max_length", "tokenizer_kwargs"}
 )
+HF_SERVER_OWNED_CHAT_TEMPLATE_KWARGS = SERVER_OWNED_CHAT_TEMPLATE_KWARGS | {
+    "return_dict",
+    "return_tensors",
+}
 
 
 class _SwappableExecutor(Executor):

@@ -194,6 +194,7 @@ where supported by the renderer. The Python frontend reserves `tokenize`,
 `padding`, `max_length`, and `tokenizer_kwargs` for tokenizer configuration
 with its HF, Mistral, DeepSeek V3.2/V4/V4.1, and Kimi K3 renderers. Requests
 containing these keys in `chat_template_kwargs` receive HTTP 400 on these renderers.
+The HF and Kimi K3 renderers also reserve `return_dict` and `return_tensors`.
 
 We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
 [Audio](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in)-related parameters;
