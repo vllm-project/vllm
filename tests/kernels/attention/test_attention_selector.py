@@ -869,18 +869,8 @@ def test_gemma4_without_fa4_backend(architecture, kv_cache_dtype, expected):
     assert config.attention_config.backend == AttentionBackendEnum[expected]
 
 
-@pytest.fixture
-def ampere():
-    with patch.object(
-        type(current_platform),
-        "get_device_capability",
-        return_value=DeviceCapability(8, 0),
-    ):
-        yield
-
-
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only backends")
-def test_encoder_only_attention_with_sinks_selects_sink_backend(ampere):
+def test_encoder_only_attention_with_sinks_selects_sink_backend():
     """FA2 has no sinks, so on SM8x an encoder-only layer with sinks (e.g.
     openai/privacy-filter) must select a backend that supports them."""
     from vllm.model_executor.layers.attention.encoder_only_attention import (
