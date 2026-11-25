@@ -34,8 +34,8 @@ def load_backend() -> Any:
             "Mooncake compression requires KVServe's runtime extra "
             "and the nvCOMP extra matching your CUDA version."
         ) from exc
-    if getattr(backend, "API_VERSION", None) != 1:
-        raise RuntimeError("Unsupported KVServe compression API version")
+    if getattr(backend, "API_VERSION", None) != 2:
+        raise RuntimeError("Mooncake requires KVServe compression API version 2")
     return backend
 
 

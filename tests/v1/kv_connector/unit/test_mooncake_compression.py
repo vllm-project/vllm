@@ -68,7 +68,7 @@ def test_missing_backend_fails_explicitly(monkeypatch):
 
 def test_incompatible_backend_api_is_rejected(monkeypatch):
     monkeypatch.setattr(
-        adapter, "import_module", lambda name: SimpleNamespace(API_VERSION=2)
+        adapter, "import_module", lambda name: SimpleNamespace(API_VERSION=1)
     )
     with pytest.raises(RuntimeError, match="API version"):
         adapter.load_backend()

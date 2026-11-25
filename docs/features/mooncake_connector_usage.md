@@ -148,7 +148,7 @@ layouts are rejected. Padding and strided layer views of dense K/V are supported
 The compression runtime, algorithms, Python/CUDA backends and kernel tests are
 maintained in [KVServe](https://github.com/hpdss-group/KVServe), outside vLLM.
 vLLM adapts cache geometry and retains Mooncake transfer and session ownership.
-The adapter requires the KVServe runtime with `resource_requirements` and
+The adapter requires KVServe runtime API v2 with `resource_requirements` and
 `ChunkIO`. Install the same revision on both endpoints in the vLLM environment.
 
 ```bash

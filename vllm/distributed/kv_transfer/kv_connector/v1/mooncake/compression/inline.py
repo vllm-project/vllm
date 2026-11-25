@@ -245,7 +245,7 @@ class InlineCompression:
             await asyncio.shield(future)
             raise
 
-    def _encode_send(
+    def _compress_and_send(
         self, slot_id: int, transfer: _Transfer, request: CompressionChunkPull
     ):
         blocks, tokens, part = self._chunk(
@@ -286,7 +286,9 @@ class InlineCompression:
         try:
             if self._cancelled[key].is_set():
                 raise RuntimeError("Pull was cancelled")
-            response = await self._execute(self._encode_send, slot, transfer, request)
+            response = await self._execute(
+                self._compress_and_send, slot, transfer, request
+            )
             transfer.completed += 1
             transfer.last_activity = time.monotonic()
             if transfer.completed == transfer.chunks:
@@ -362,7 +364,7 @@ class InlineCompression:
                 self._cancelled.pop(key, None)
                 self._rejected.pop(key, None)
 
-    def _decode(self, slot_id, pull_meta, count, valid, ready):
+    def _decompress(self, slot_id, pull_meta, count, valid, ready):
         blocks, tokens, part = self._chunk(
             pull_meta.local_block_ids, valid, count, ready.chunk_id
         )
@@ -444,9 +446,9 @@ class InlineCompression:
                     )
                     await sock.send(self.worker._encoder.encode(message))
 
-            async def decode_and_release(slot_id, response):
+            async def decompress_and_release(slot_id, response):
                 await self._execute(
-                    self._decode, slot_id, pull_meta, expected, valid, response
+                    self._decompress, slot_id, pull_meta, expected, valid, response
                 )
                 owned.remove(slot_id)
                 self._receiver_slots.put_nowait(slot_id)
@@ -476,7 +478,7 @@ class InlineCompression:
                         )
                     slot_id = inflight.pop(response.chunk_id)
                     decodes.add(
-                        asyncio.create_task(decode_and_release(slot_id, response))
+                        asyncio.create_task(decompress_and_release(slot_id, response))
                     )
                     receiver = asyncio.ensure_future(sock.recv())
                 if issuer in done:
