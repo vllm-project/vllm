@@ -718,6 +718,7 @@ def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
     llm = LLM(
         model=model,
         max_model_len=block_size * 10,
+        max_num_seqs=8,
         gpu_memory_utilization=0.85,
         tensor_parallel_size=tp_size,
         kv_transfer_config=kv_transfer_config,
