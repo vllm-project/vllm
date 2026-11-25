@@ -1,0 +1,5 @@
+# Core BYOG Phase 0 harness dependencies.
+# Compile into tools/byog/requirements.lock via:
+#   uv pip compile --python-version 3.12 tools/byog/requirements.d/*.txt -o tools/byog/requirements.lock
+pydantic>=2.7,<3
+PyYAML>=6.0,<7
