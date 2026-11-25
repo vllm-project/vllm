@@ -359,6 +359,7 @@ async fn generate_stream_responses(
                         token_ids,
                         logprobs,
                         sampling_mask: delta_sampling_mask,
+                        ..
                     },
                 finished,
             }) => {
@@ -448,6 +449,7 @@ mod tests {
         let delta = |token_id: u32, finished: Option<Finished>| DecodedTextEvent::TextDelta {
             decoded: DecodedText::default(),
             sampled: SampledDelta {
+                timestamp: 0.0,
                 token_ids: vec![token_id],
                 logprobs: None,
                 sampling_mask: Some(SamplingMask {
