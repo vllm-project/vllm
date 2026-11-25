@@ -493,6 +493,15 @@ def _check_bits(host_layer, aux):
                     assert torch.equal(got, want), (host_layer, b, variant, shot)
 
 
+def _clear_oproj_cache():
+    for compile_kind in (
+        oproj_prepared._compile_producer,
+        oproj_prepared._compile_consumer,
+        oproj_prepared._compile_fused,
+    ):
+        compile_kind.cache_clear()
+
+
 @requires_sm100
 @pytest.mark.parametrize(
     "host_layer,aux",
@@ -501,8 +510,8 @@ def _check_bits(host_layer, aux):
 )
 def test_statistics_ahead_bitwise(host_layer, aux, monkeypatch):
     monkeypatch.setattr(producer.OprojProducer, "publish", _local_publish)
-    oproj_prepared.compile_oproj.cache_clear()  # compile with the local publish
+    _clear_oproj_cache()  # compile with the local publish
     try:
         _check_bits(host_layer, aux)
     finally:
-        oproj_prepared.compile_oproj.cache_clear()
+        _clear_oproj_cache()
