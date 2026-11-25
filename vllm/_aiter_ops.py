@@ -3286,10 +3286,13 @@ class rocm_aiter_ops:
     @staticmethod
     @functools.cache
     def _gfx942_flydsl_decode_top_k_available() -> bool:
-        from vllm.platforms.rocm import on_gfx942
+        from vllm.platforms.rocm import get_cdna_version
         from vllm.utils.platform_utils import num_compute_units
 
-        if not on_gfx942() or num_compute_units() != _GFX942_FLYDSL_TOP_K_CU_COUNT:
+        if (
+            get_cdna_version() != 3
+            or num_compute_units() != _GFX942_FLYDSL_TOP_K_CU_COUNT
+        ):
             return False
         try:
             from aiter.ops.flydsl.topk.topk_per_row import (  # noqa: F401
