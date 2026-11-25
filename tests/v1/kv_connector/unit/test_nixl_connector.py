@@ -5160,7 +5160,7 @@ def test_mla_broadcast_notif_uses_remote_request_id(
     """
     decode_tp_size = 1
     prefill_tp_size = 4
-    block_size = 16 if current_platform.is_cpu() else 64
+    block_size = maybe_update_block_size(16)
     model_path = tmp_path / "mla-model"
     DeepseekV2Config(
         architectures=["DeepseekV2ForCausalLM"],
@@ -5278,6 +5278,7 @@ def test_mla_broadcast_notif_uses_remote_request_id(
                     assert done_recving == {decode_req_id}
                     break
                 assert time.monotonic() < deadline, "NIXL receive did not complete"
+                time.sleep(0.01)
 
         assert socket.recv_multipart.call_count == prefill_tp_size
         assert [
