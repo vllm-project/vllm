@@ -122,19 +122,21 @@ def compute_model_weight_checksums(
     return checksums
 
 
-def resolve_weight_reset_draft(
+def reset_model_weights(
     model: "WeightCheckerModel",
     parallel_config: "ParallelConfig",
     speculative_config: "SpeculativeConfig | None",
+    get_model: Callable[[], nn.Module],
     get_draft_model: Callable[[], nn.Module | None],
     supports_draft_weight_updates: Callable[[], bool],
-) -> nn.Module | str | None:
+) -> str | None:
+    """Validate the selection and zero the selected models' weights in place."""
     if model in ("draft", "both") and parallel_config.pipeline_parallel_size > 1:
         return "Cannot reset draft weights with pipeline parallelism."
     draft = _resolve_weight_checker_draft(
         model, parallel_config, speculative_config, get_draft_model
     )
-    if draft is None or isinstance(draft, str):
+    if isinstance(draft, str):
         return draft
     # This model-specific hook only runs after target updates.
     if getattr(draft, "refresh_derived_weights", None) is not None:
@@ -142,6 +144,11 @@ def resolve_weight_reset_draft(
             "Cannot reset draft weights with model-specific derived weights "
             "that require a target update to refresh."
         )
-    if not supports_draft_weight_updates():
+    if draft is not None and not supports_draft_weight_updates():
         return "Draft reset requires a backend that supports draft weight updates."
-    return draft
+
+    if model != "draft":
+        zero_weights(get_model())
+    if draft is not None:
+        zero_weights(draft)
+    return None

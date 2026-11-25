@@ -86,8 +86,7 @@ from vllm.model_executor.model_loader.base_loader import (
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_model_weight_checksums,
-    resolve_weight_reset_draft,
-    zero_weights,
+    reset_model_weights,
 )
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
@@ -445,19 +444,16 @@ class Worker(WorkerBase):
         )
 
     def reset_weights(self, model: WeightCheckerModel = "target") -> str | None:
-        draft = resolve_weight_reset_draft(
+        error = reset_model_weights(
             model,
             self.parallel_config,
             self.speculative_config,
+            self.get_model,
             self.get_draft_model,
             self.supports_draft_weight_updates,
         )
-        if isinstance(draft, str):
-            return draft
-        if model != "draft":
-            zero_weights(self.get_model())
-        if draft is not None:
-            zero_weights(draft)
+        if error is not None:
+            return error
         self.synchronize_device()
         return None
 
