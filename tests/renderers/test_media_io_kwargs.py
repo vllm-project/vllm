@@ -7,10 +7,16 @@ import sys
 
 import pytest
 
+from vllm.assets.video import VideoAsset
+from vllm.config import ModelConfig, VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.media.connector import merge_media_io_kwargs
+from vllm.multimodal.utils import encode_video_url
 from vllm.renderers.base import BaseRenderer
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
+from vllm.renderers.hf import HfRenderer
 from vllm.renderers.params import ChatParams
+from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 # Sentinel distinguishing "key absent" from an explicit `None`/`{}`.
 _UNSET = object()
@@ -197,6 +203,32 @@ class TestCmplPath:
         r = self._run([{"multi_modal_data": {"image": "<img>"}}], REQ_KW, is_async)
         assert "media_io_kwargs" not in r._applied_extras[-1]
 
+    @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+    def test_prompt_extras_is_not_mutated(self, is_async):
+        renderer = _StubRenderer()
+        prompt_extras = {"media_io_kwargs": REQ_KW, "cache_salt": "request-1"}
+
+        if is_async:
+            asyncio.run(
+                renderer.render_cmpl_async(
+                    [{"multi_modal_data": {"image": "<img>"}}],
+                    object(),
+                    prompt_extras=prompt_extras,
+                )
+            )
+        else:
+            renderer.render_cmpl(
+                [{"multi_modal_data": {"image": "<img>"}}],
+                object(),
+                prompt_extras=prompt_extras,
+            )
+
+        assert prompt_extras == {
+            "media_io_kwargs": REQ_KW,
+            "cache_salt": "request-1",
+        }
+        assert renderer._applied_extras[-1] == {"cache_salt": "request-1"}
+
     def test_empty_prompts_raises(self):
         with pytest.raises(VLLMValidationError):
             self._run([], REQ_KW, is_async=False)
@@ -277,6 +309,36 @@ class TestChatPath:
         r = self._run(REQ_KW, is_async=is_async)
         assert "media_io_kwargs" not in r._applied_extras[-1]
 
+    @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+    def test_prompt_extras_is_not_mutated(self, is_async):
+        renderer = _StubRenderer()
+        chat_params = _make_chat_params()
+        prompt_extras = {"media_io_kwargs": REQ_KW, "cache_salt": "request-1"}
+        conversations = [[{"role": "user", "content": "hi"}]]
+
+        if is_async:
+            asyncio.run(
+                renderer.render_chat_async(
+                    conversations,
+                    chat_params,
+                    object(),
+                    prompt_extras=prompt_extras,
+                )
+            )
+        else:
+            renderer.render_chat(
+                conversations,
+                chat_params,
+                object(),
+                prompt_extras=prompt_extras,
+            )
+
+        assert prompt_extras == {
+            "media_io_kwargs": REQ_KW,
+            "cache_salt": "request-1",
+        }
+        assert renderer._applied_extras[-1] == {"cache_salt": "request-1"}
+
     def test_sync_async_parity(self):
         sync_r = self._run(REQ_KW, chat_media_io_kwargs=DEFAULT_KW, is_async=False)
         async_r = self._run(REQ_KW, chat_media_io_kwargs=DEFAULT_KW, is_async=True)
@@ -284,3 +346,49 @@ class TestChatPath:
             sync_r._chat_params_seen[-1].media_io_kwargs
             == async_r._chat_params_seen[-1].media_io_kwargs
         )
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+def test_chat_media_io_kwargs_scope_uuid_cache_key(is_async):
+    """Same video UUID with different frame counts must not share a cache key."""
+    video_data_url = encode_video_url(VideoAsset("baby_reading").np_ndarrays)
+    model_config = ModelConfig(
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+        max_model_len=4096,
+        mm_processor_cache_gb=4.0,
+    )
+    renderer = HfRenderer(
+        VllmConfig(model_config=model_config),
+        cached_tokenizer_from_config(model_config),
+    )
+    messages: list[ChatCompletionMessageParam] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "video_url",
+                    "video_url": {"url": video_data_url},
+                    "uuid": "shared-video-uuid",
+                },
+                {"type": "text", "text": "Describe the video."},
+            ],
+        }
+    ]
+    chat_params_8 = ChatParams(media_io_kwargs={"video": {"num_frames": 8}})
+    chat_params_16 = ChatParams(media_io_kwargs={"video": {"num_frames": 16}})
+
+    if is_async:
+
+        async def get_hash(chat_params):
+            _, inputs = await renderer.render_chat_async([[*messages]], chat_params)
+            return inputs[0]["mm_hashes"]["video"][0]
+
+        hash_8 = asyncio.run(get_hash(chat_params_8))
+        hash_16 = asyncio.run(get_hash(chat_params_16))
+    else:
+        _, inputs_8 = renderer.render_chat([[*messages]], chat_params_8)
+        _, inputs_16 = renderer.render_chat([[*messages]], chat_params_16)
+        hash_8 = inputs_8[0]["mm_hashes"]["video"][0]
+        hash_16 = inputs_16[0]["mm_hashes"]["video"][0]
+
+    assert hash_8 != hash_16

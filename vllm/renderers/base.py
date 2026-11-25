@@ -1444,6 +1444,10 @@ class BaseRenderer(ABC, Generic[_T]):
             out_conversations.append(conv)
             dict_prompts.append(prompt)
 
+        self._merge_prompt_extras_media_io_kwargs(
+            dict_prompts, chat_params.media_io_kwargs
+        )
+
         tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
@@ -1488,6 +1492,10 @@ class BaseRenderer(ABC, Generic[_T]):
         for conv, prompt in await asyncio.gather(*rendered):
             out_conversations.append(conv)
             dict_prompts.append(prompt)
+
+        self._merge_prompt_extras_media_io_kwargs(
+            dict_prompts, chat_params.media_io_kwargs
+        )
 
         tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
 
