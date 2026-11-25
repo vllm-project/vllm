@@ -68,7 +68,16 @@ async def _assert_children_cleaned_up(
     )
 
 
-@dataclass
+def _wait_for_server_exit(proc: subprocess.Popen, timeout: float) -> None:
+    """Children such as multiprocessing's resource_tracker only exit after the
+    server process does, so wait for it before checking them."""
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"Server did not exit within {timeout}s")
+
+
+@dataclass(slots=True)
 class ShutdownState:
     got_503: bool = False
     got_500: bool = False
@@ -250,6 +259,7 @@ async def test_shutdown_on_engine_failure(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_wait_timeout_completes_requests():
     """Verify wait timeout: new requests rejected, in-flight requests complete."""
+    shutdown_timeout = 30
     server_args = [
         "--dtype",
         "bfloat16",
@@ -261,7 +271,7 @@ async def test_wait_timeout_completes_requests():
         "--max-num-seqs",
         "4",
         "--shutdown-timeout",
-        "30",
+        str(shutdown_timeout),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
@@ -307,6 +317,7 @@ async def test_wait_timeout_completes_requests():
             f"completed: {state.requests_after_sigterm}, errors: {state.errors}"
         )
 
+        _wait_for_server_exit(proc, shutdown_timeout)
         await _assert_children_cleaned_up(child_pids)
 
 
@@ -572,6 +583,7 @@ async def test_abort_timeout_fails_inflight_requests():
 @pytest.mark.asyncio
 async def test_request_rejection_during_shutdown():
     """Verify new requests are rejected with error during shutdown."""
+    shutdown_timeout = 30
     server_args = [
         "--dtype",
         "bfloat16",
@@ -583,7 +595,7 @@ async def test_request_rejection_during_shutdown():
         "--max-num-seqs",
         "4",
         "--shutdown-timeout",
-        "30",
+        str(shutdown_timeout),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
@@ -615,6 +627,7 @@ async def test_request_rejection_during_shutdown():
             f"but {rejected_count} were rejected out of 10"
         )
 
+        _wait_for_server_exit(proc, shutdown_timeout)
         await _assert_children_cleaned_up(child_pids)
 
 

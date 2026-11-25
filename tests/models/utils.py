@@ -431,10 +431,11 @@ def softmax(data):
         return F.softmax(data, dim=-1)
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelInfo:
     name: str
     revision: str | None = None
+    trust_remote_code: bool = False
     architecture: str = ""
     dtype: str = "auto"
     max_model_len: int | None = None
@@ -448,7 +449,7 @@ class ModelInfo:
     enable_test: bool = True
 
 
-@dataclass
+@dataclass(slots=True)
 class EmbedModelInfo(ModelInfo):
     mteb_score: float | None = None
     # Per-model MTEB score tolerance; falls back to MTEB_EMBED_TOL.
@@ -457,7 +458,7 @@ class EmbedModelInfo(ModelInfo):
     matryoshka_dimensions: list[int] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class RerankModelInfo(ModelInfo):
     mteb_score: float | None = None
     # Per-model MTEB score tolerance; falls back to MTEB_RERANK_TOL.
@@ -465,7 +466,7 @@ class RerankModelInfo(ModelInfo):
     chat_template_name: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class GenerateModelInfo(ModelInfo):
     hf_dtype: str = "auto"
     hf_ppl: float | None = None
@@ -485,6 +486,7 @@ def get_vllm_extra_kwargs(model_info: ModelInfo, vllm_extra_kwargs):
     # Allow vllm to test using the given dtype, such as float32
     vllm_extra_kwargs = vllm_extra_kwargs or {}
     vllm_extra_kwargs["dtype"] = ci_envs.VLLM_CI_DTYPE or model_info.dtype
+    vllm_extra_kwargs.setdefault("trust_remote_code", model_info.trust_remote_code)
 
     # Allow vllm to test using hf_overrides
     if model_info.hf_overrides is not None:
@@ -561,6 +563,28 @@ def dummy_hf_overrides(
             else 1
         )
 
+    if (
+        model_arch == "HYV4DFlyModel"
+        and text_config.model_type == "hy_v4_flash"
+        and not use_original_num_layers
+    ):
+        # DFly needs distinct sparse target layers after layer zero. Keep the
+        # smallest prefix containing enough layers, and remap the draft metadata.
+        from vllm.models.hy_v4_flash.configs import SPARSE_ATTENTION
+
+        draft_layers = hf_config.dfly_num_hidden_layers
+        target_layers = [
+            i
+            for i, kind in enumerate(text_config.layer_types)
+            if i > 0 and kind == SPARSE_ATTENTION
+        ][:draft_layers]
+        if len(target_layers) != draft_layers:
+            raise ValueError("Not enough sparse target layers for the dummy DFly model")
+        num_hidden_layers = max(num_hidden_layers, target_layers[-1] + 1)
+        num_layers = num_hidden_layers
+        hf_config.dfly_target_index_layer = target_layers
+        hf_config.dfly_target_kv_layers = target_layers
+
     update_dict = {
         "num_layers": num_layers,
         # For Gemma-3n
@@ -615,6 +639,16 @@ def dummy_hf_overrides(
         "LongcatFlashNgramForCausalLM",
     ):
         update_dict["num_hidden_layers"] = num_hidden_layers
+
+    if text_config.model_type == "hy_v4_flash":
+        # Flash validates per-layer metadata on every update.
+        for name in ("layer_types", "mlp_layer_types", "indexer_types"):
+            update_dict[name] = getattr(text_config, name)[:num_hidden_layers]
+        update_dict["engram_layer_ids"] = [
+            layer
+            for layer in text_config.engram_layer_ids or ()
+            if layer <= num_hidden_layers
+        ]
 
     text_config.update(update_dict)
 

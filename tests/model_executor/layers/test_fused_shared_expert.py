@@ -16,11 +16,15 @@ from torch import nn
 from transformers import MiniMaxM3VLTextConfig, Qwen3_5MoeTextConfig
 
 import vllm.config as vllm_config_module
+from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.logger import _print_warning_once
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
+from vllm.model_executor.layers.fused_moe.router.aiter_shared_routed_fused_moe_router import (  # noqa: E501
+    AiterSharedRoutedFusedMoERouter,
+)
 from vllm.model_executor.layers.quantization.experts_int8 import ExpertsInt8Config
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
@@ -1327,65 +1331,6 @@ def _build_mtp_for_model(
     return _build_mtp_model(getattr(module, class_name), vllm_config, config, **kwargs)
 
 
-# TODO: move to conftest.py.
-class _SingleRankGroup:
-    """No-op single-rank stand-in for a compiled `GroupCoordinator`."""
-
-    world_size = 1
-    rank_in_group = 0
-    local_rank = 0
-    is_first_rank = True
-    is_last_rank = True
-
-    @property
-    def device_group(self):
-        return self
-
-    @property
-    def cpu_group(self):
-        return self
-
-    @property
-    def device_communicator(self):
-        return self
-
-    def rank(self) -> int:
-        return 0
-
-    def size(self) -> int:
-        return 1
-
-    def all_reduce(self, input_: torch.Tensor, *args: Any, **kwargs: Any):
-        return input_
-
-    def all_gather(self, input_: torch.Tensor, dim: int = 0):
-        return input_
-
-    def all_gatherv(self, inputs: Any, dim: int = 0, sizes: Any = None):
-        return inputs
-
-    def reduce_scatter(self, input_: torch.Tensor, dim: int = 0):
-        return input_
-
-    def reduce_scatterv(self, input_: Any, dim: int = 0, sizes: Any = None):
-        return input_
-
-    def broadcast(self, input_: torch.Tensor, src: int = 0):
-        return input_
-
-    def send(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-    def recv(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-    def barrier(self) -> None:
-        return None
-
-    def destroy(self) -> None:
-        return None
-
-
 def _load_minimax_m3_weights(
     model: nn.Module, weights: list[tuple[str, torch.Tensor]]
 ) -> set[str]:
@@ -1394,24 +1339,6 @@ def _load_minimax_m3_weights(
     mapper = minimax_m3_model.MiniMaxM3SparseForCausalLM.hf_to_vllm_mapper
     mapper = mapper | WeightsMapper(weights_transforms=[redirect])
     return AutoWeightsLoader(model).load_weights(weights, mapper=mapper)
-
-
-@pytest.fixture
-def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
-    """Single rank parallel groups without initializing a process group.
-
-    This is faster than the `dist_init` fixture.
-    """
-    for name in ("_WORLD", "_TP", "_ETP", "_DCP", "_PP", "_DP", "_EP", "_PCP"):
-        monkeypatch.setattr(
-            f"vllm.distributed.parallel_state.{name}", _SingleRankGroup()
-        )
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
-    )
 
 
 @pytest.mark.parametrize(
@@ -1441,12 +1368,13 @@ def single_rank_parallel_state(monkeypatch: pytest.MonkeyPatch):
         (True, [r"re:.*\.shared_experts?\..*"]),
     ],
 )
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_models_fse_init(
     model_type: str,
     shared_expert_precision: str,
     use_fse: bool,
     exclude: list[str],
-    single_rank_parallel_state: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Construction and loading preserve each shared expert's precision."""
@@ -1558,6 +1486,9 @@ def test_models_fse_init(
     if model_type == "glm5_next":
         from vllm.models.glm5next.common import model as glm5_next_model
 
+        # The default decode backend checks the whole deployment config; only
+        # the shared-expert wiring is under test here.
+        vllm_config.additional_config = {"decode_backend": "stock"}
         for attention in ("Glm5NextLinearAttention", "Glm5NextMLAAttention"):
             monkeypatch.setattr(glm5_next_model, attention, _StubGlm5NextAttention)
         # The gate allows fusion only at TP4/TP8 on gfx950, and this test
@@ -1575,7 +1506,8 @@ def test_models_fse_init(
     if model_type == "glm4_moe_lite":
         from vllm.model_executor.models import glm4_moe_lite as glm4_moe_lite_model
 
-        # Only the MoE/shared-expert wiring is under test here; the MLA backend
+        # The default decode backend checks the whole deployment config; only
+        # the shared-expert wiring is under test here. the MLA backend
         # does not accept this test's default dtype.
         for attention in ("Glm4MoeLiteAttention", "Glm4MoeLiteMLAAttention"):
             monkeypatch.setattr(glm4_moe_lite_model, attention, _StubGlm5NextAttention)
@@ -1590,7 +1522,8 @@ def test_models_fse_init(
     if model_type == "qwen4_exp":
         from vllm.models.qwen4_exp.amd import model as qwen4_exp_model
 
-        # Only the MoE/shared-expert wiring is under test here.
+        # The default decode backend checks the whole deployment config; only
+        # the shared-expert wiring is under test here.
         monkeypatch.setattr(
             qwen4_exp_model, "Qwen3NextAttention", _StubGlm5NextAttention
         )
@@ -1663,6 +1596,11 @@ def test_models_fse_init(
                     moe.experts.moe_config.is_fused_shared_expert_requested
                     is aiter_fse_enabled
                 )
+                router = moe.experts.router
+                if isinstance(router, AiterSharedRoutedFusedMoERouter):
+                    assert router.has_shared_expert_gate is (
+                        shared_name == "shared_expert"
+                    )
                 if not fused and not exclude and model_type != "deepseek_v4":
                     scheme = getattr(moe, shared_name).gate_up_proj.scheme
                     expected_dtype = (
