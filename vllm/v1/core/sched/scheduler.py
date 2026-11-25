@@ -3789,16 +3789,21 @@ class Scheduler(SchedulerInterface):
         request.replay_start = num_hit_tokens - num_replay_tokens
         return num_replay_tokens
 
-    def _update_waiting_for_remote_kv(self, request: Request) -> None:
+    def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """KV Connector: update request state after async recv is finished.
 
         When the kv transfer is ready, we cache the blocks
         and the request state will be moved back to WAITING from
         WAITING_FOR_REMOTE_KV.
+
+        Returns:
+            Whether the request retains KV that needs a parked reservation.
+
         """
         assert self.connector is not None
 
         load_failed = request.request_id in self.failed_recving_kv_req_ids
+        retains_kv = not load_failed or bool(request.num_computed_tokens)
         if load_failed:
             # Request had KV load failures; num_computed_tokens was already
             # updated in _update_requests_with_invalid_blocks
@@ -3840,6 +3845,7 @@ class Scheduler(SchedulerInterface):
         elif request.num_computed_tokens == request.num_tokens:
             request.num_computed_tokens = request.num_tokens - 1
         self.finished_recving_kv_req_ids.remove(request.request_id)
+        return retains_kv
 
     def _handle_blocked_waiting_request(self, request: Request) -> bool:
         """Returns True if scheduling of this request should proceed, False if
@@ -3851,8 +3857,11 @@ class Scheduler(SchedulerInterface):
                 logger.debug("%s is still in WAITING_FOR_REMOTE_KVS state.", request_id)
                 return False
             # Promote request to waiting or preempted.
-            self._update_waiting_for_remote_kv(request)
-            self._reserve_parked(request)
+            if self._update_waiting_for_remote_kv(request):
+                self._reserve_parked(request)
+            else:
+                self._unreserve_parked(request)
+                self._inflight_prefills.discard(request)
             if request.num_preemptions:
                 request.status = RequestStatus.PREEMPTED
             else:

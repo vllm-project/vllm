@@ -8751,13 +8751,106 @@ def test_async_load_admission_reads_parked_reservations_from_cache(monkeypatch):
     assert scheduler._parked_reserved_blocks == sum(map(remaining, parked)) > 0
 
 
-def test_failed_load_reservation_keeps_new_async_loads_out():
-    """Promotion frees a failed load's blocks, but it still needs its full sequence.
-    A stale reservation would admit a new load into them and overcommit the pool."""
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_failed_async_retries_release_unowned_reservations(async_scheduling):
+    """Failed shared-prefix loads must not reserve freed KV and strand retries."""
     from tests.v1.kv_connector.unit.utils import create_model_runner_output
 
     scheduler = create_scheduler(
-        num_blocks=16, use_kv_connector=mock_kv(matched_tokens=96, is_async=True)
+        num_blocks=12,
+        enable_prefix_caching=True,
+        device="cpu",
+        async_scheduling=async_scheduling,
+        use_kv_connector=mock_kv(matched_tokens=16, is_async=True),
+    )
+    scheduler.recompute_kv_load_failures = True
+    phase = ["seed"]
+
+    def match(request, computed):
+        return {
+            "seed": (0, False),
+            "load": (16, True),
+            "defer": (None, False),
+        }[phase[0]]
+
+    assert scheduler.connector is not None
+    scheduler.connector.get_num_new_matched_tokens = match  # type: ignore[method-assign]
+    [seed] = create_requests(1, num_tokens=64, same_prompt=True, req_ids=["seed"])
+    scheduler.add_request(seed)
+    scheduled = scheduler.schedule()
+    scheduler.update_from_output(scheduled, create_model_runner_output([seed]))
+    scheduler.finish_requests(seed.request_id, RequestStatus.FINISHED_ABORTED)
+
+    requests = create_requests(3, num_tokens=96, same_prompt=True)
+    phase[0] = "load"
+    for request in requests:
+        scheduler.add_request(request)
+    scheduled = scheduler.schedule()
+    assert all(r.status == RequestStatus.WAITING_FOR_REMOTE_KVS for r in requests)
+    failed = {r.request_id for r in requests}
+    scheduler.update_from_output(
+        scheduled,
+        create_model_runner_output([], finished_recving=failed, failed_recving=failed),
+    )
+    # Busy lookup lets every failed load be promoted before the next async retry.
+    phase[0] = "defer"
+    scheduler.schedule()
+    assert not scheduler.running and len(scheduler.waiting) == 3
+    free = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+    reserved = scheduler._inflight_prefill_reserved_blocks()
+    phase[0] = "load"
+    retried = scheduler.schedule()
+    assert any(r.status == RequestStatus.WAITING_FOR_REMOTE_KVS for r in requests), (
+        f"No running request or admitted retry: {reserved=} {free=}"
+    )
+    assert reserved <= free, (reserved, free)
+    assert reserved == 0
+    assert not retried.num_scheduled_tokens
+
+
+def test_successful_load_waiting_for_prefill_keeps_its_reservation():
+    """Releasing failed ownership must not drop a promoted load's valid KV."""
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+
+    scheduler = create_scheduler(
+        device="cpu",
+        num_blocks=64,
+        use_kv_connector=mock_kv(matched_tokens=64, is_async=True),
+    )
+    assert scheduler.connector is not None
+    scheduler.connector.get_num_new_matched_tokens = lambda r, _: (  # type: ignore[method-assign]
+        (0, False) if r.request_id == "decode" else (64, True)
+    )
+    [decoder] = create_requests(1, num_tokens=8, req_ids=["decode"])
+    scheduler.add_request(decoder)
+    scheduler.update_from_output(
+        scheduler.schedule(), create_model_runner_output([decoder])
+    )
+    [loaded] = create_requests(1, num_tokens=160, req_ids=["loaded"])
+    scheduler.add_request(loaded)
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        create_model_runner_output([decoder], finished_recving={loaded.request_id}),
+    )
+    throttled = scheduler.schedule(throttle_prefills=True)
+    assert loaded.status == RequestStatus.WAITING
+    assert loaded.request_id not in throttled.num_scheduled_tokens
+    assert scheduler._parked_reservations[loaded] > 0
+    assert any(scheduler.kv_cache_manager.get_blocks(loaded.request_id).get_block_ids())
+    scheduler.update_from_output(throttled, create_model_runner_output([decoder]))
+    assert loaded.request_id in scheduler.schedule().num_scheduled_tokens
+    assert loaded.status == RequestStatus.RUNNING
+    assert loaded not in scheduler._parked_reservations
+
+
+def test_failed_load_without_blocks_does_not_reserve_a_recompute():
+    """A failed load with no KV is preemptible recompute, not a parked owner."""
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+
+    scheduler = create_scheduler(
+        num_blocks=16,
+        device="cpu",
+        use_kv_connector=mock_kv(matched_tokens=96, is_async=True),
     )
     scheduler.recompute_kv_load_failures = True
     failed, new = create_requests(2, num_tokens=160, req_ids=["failed", "new"])
@@ -8777,9 +8870,15 @@ def test_failed_load_reservation_keeps_new_async_loads_out():
     scheduler.schedule()
     assert failed.status == RequestStatus.WAITING
     scheduler.add_request(new)
-    scheduler.schedule()
-    assert new.status == RequestStatus.WAITING
+    admitted = scheduler.schedule()
+    assert new.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert failed not in scheduler._parked_reservations
 
+    # The other admitted load still owns its KV until its receive is accounted.
+    scheduler.finish_requests(new.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.update_from_output(
+        admitted, create_model_runner_output([], finished_recving={new.request_id})
+    )
     lookups["failed"] = (0, False)
     scheduler.schedule()
     assert failed.status == RequestStatus.RUNNING
@@ -8813,8 +8912,6 @@ def _run_async_load_events(spec, num_spec_tokens, seed, on_demand):
         parked = s._parked_reservations
         assert parked == {r: s._request_remaining_blocks(r) for r in parked}
         assert s._parked_reserved_blocks == sum(parked.values())
-        if any(r.status != RequestStatus.WAITING_FOR_REMOTE_KVS for r in parked):
-            events.add("promoted_load_held")
         # The queues' tally follows every transition too.
         assert dataclasses.astuple(_queued_workload(s)) == pytest.approx(
             dataclasses.astuple(_scan_queued_workload(s))
@@ -8833,7 +8930,17 @@ def _run_async_load_events(spec, num_spec_tokens, seed, on_demand):
                     1, tokens, max_tokens=max_tokens, req_ids=ids, ignore_eos=True
                 )[0]
             )
+        parked_before = [
+            r
+            for r in s.requests.values()
+            if r.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        ]
         output = s.schedule()
+        if any(
+            r.status in (RequestStatus.WAITING, RequestStatus.PREEMPTED)
+            for r in parked_before
+        ):
+            events.add("promoted_load_waiting")
         check_reservations()
         requests = sorted(s.requests.items())
         states = [(k, r.status, r.num_computed_tokens) for k, r in requests]
@@ -8894,7 +9001,7 @@ def test_cached_reservations_admit_like_on_demand_sum(spec, num_spec_tokens):
         "failed",
         "invalid_blocks",
         "aborted",
-        "promoted_load_held",
+        "promoted_load_waiting",
     }
 
 
