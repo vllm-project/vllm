@@ -154,16 +154,6 @@ class StructuredOutputManager:
                 tokenizer=self.tokenizer,
                 vocab_size=vocab_size,
             )
-        elif backend_name == "lm-format-enforcer":
-            from vllm.v1.structured_output.backend_lm_format_enforcer import (
-                LMFormatEnforcerBackend,
-            )
-
-            backend = LMFormatEnforcerBackend(
-                self.vllm_config,
-                tokenizer=self.tokenizer,
-                vocab_size=vocab_size,
-            )
         else:
             raise ValueError(f"Unsupported structured output backend: {backend_name}")
 
