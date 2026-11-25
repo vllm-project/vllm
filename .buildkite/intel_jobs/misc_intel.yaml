@@ -247,7 +247,8 @@ steps:
     - tests/v1/ec_connector/integration/
   commands:
       - cd tests
-      - USE_TWO_IMAGE_PROMPT=0 DEVICE_PLATFORM=xpu GPU_MEMORY_UTILIZATION=0.8 bash v1/ec_connector/integration/run_epd_correctness_test.sh
+      # ze_ipc needs a shared ZE_AFFINITY_MASK and SYS_PTRACE; this script uses per-instance masks.
+      - UCX_TLS=^ze_ipc USE_TWO_IMAGE_PROMPT=0 DEVICE_PLATFORM=xpu GPU_MEMORY_UTILIZATION=0.8 bash v1/ec_connector/integration/run_epd_correctness_test.sh
 
 - label: ":intel: (BMG) Regression"
   key: regression
