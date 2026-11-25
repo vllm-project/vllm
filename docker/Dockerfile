@@ -730,7 +730,11 @@ WORKDIR /vllm-workspace
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
 
-# Install Python and system dependencies
+# Install Python and system dependencies. The deadsnakes PPA sometimes returns
+# 503s over https, so its packages are downloaded in a retry loop (see the
+# gcc-15 loop in Dockerfile.cpu). After a failed attempt the PPA is used over
+# http, which kept serving during those outages; apt still checks every file
+# against the PPA's signing key.
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -754,7 +758,16 @@ RUN apt-get update -y \
             { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
         done ; \
     fi \
-    && apt-get update -y \
+    && for attempt in 1 2 3 4 5 6; do \
+        { apt-cache show python${PYTHON_VERSION}-dev >/dev/null 2>&1 || apt-get update -y -o Acquire::Retries=5; } \
+        && apt-get install -y --no-install-recommends --download-only -o Acquire::Retries=5 \
+            python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv libibverbs-dev \
+        && break; \
+        if [ "$attempt" = 6 ]; then exit 1; fi; \
+        echo "PPA download incomplete (attempt $attempt of 6); retrying over http in 30s"; \
+        sed -i 's|https://ppa.launchpadcontent.net|http://ppa.launchpadcontent.net|' /etc/apt/sources.list.d/*; \
+        sleep 30; \
+    done \
     && apt-get install -y --no-install-recommends \
         python${PYTHON_VERSION} \
         python${PYTHON_VERSION}-dev \
