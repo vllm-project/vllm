@@ -156,3 +156,50 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
         assert block_id not in cached_block_ids, (
             f"invalid block {block_id} at index {idx} should not be in cache hash table"
         )
+
+
+@pytest.mark.parametrize("policy", ["fail", "recompute"])
+def test_blocks_computed_over_shared_invalid_block_evicted(policy: str):
+    """A request that only shares an invalid block computed its own blocks over
+    it. They must leave the prefix cache too, or a later request hits them once
+    the shared prefix has been recomputed.
+    """
+    scheduler = create_scheduler(create_vllm_config(kv_load_failure_policy=policy))
+    block_size = scheduler.block_size
+    num_shared_tokens = 2 * block_size
+    # request1 loads the shared prefix; request2 hits it in the same step and
+    # computes two blocks of its own.
+    request1 = create_request(
+        num_tokens=3 * block_size, common_prefix_len=num_shared_tokens
+    )
+    request2 = create_request(
+        num_tokens=4 * block_size, common_prefix_len=num_shared_tokens
+    )
+    scheduler.add_request(request1)
+    scheduler.add_request(request2)
+
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(
+            {request1.request_id: num_shared_tokens}, False
+        )
+    )
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = scheduler.schedule()
+    (block_ids1,), (block_ids2,) = (
+        new_req.block_ids for new_req in scheduler_output.scheduled_new_reqs
+    )
+    assert block_ids2[:2] == block_ids1[:2]
+    blocks = scheduler.kv_cache_manager.block_pool.blocks
+    assert all(blocks[block_id].block_hash is not None for block_id in block_ids2)
+
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            [request1, request2], invalid_block_ids={block_ids1[0]}
+        ),
+    )
+
+    assert all(blocks[block_id].block_hash is None for block_id in block_ids2)
