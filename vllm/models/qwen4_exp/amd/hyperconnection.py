@@ -233,6 +233,11 @@ class GatedResidual(nn.Module):
                 self.hc_two_stage_max_tokens
                 and not rocm_aiter_ops.hc_two_stage_takes_unfolded_weight()
             ):
+                logger.warning_once(
+                    "AITER does not export SKINNY_DECODE_UNFOLDED; keeping a "
+                    "norm-folded copy of each HC down+inject weight. AITER with "
+                    "ROCm/aiter#8087 removes this copy."
+                )
                 self.register_buffer(
                     "w_down_inject_folded",
                     torch.empty(
