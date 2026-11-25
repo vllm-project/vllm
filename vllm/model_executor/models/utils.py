@@ -20,6 +20,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.model_loader.utils import get_model_cls
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
@@ -1181,11 +1182,23 @@ def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | Non
     draft_model_config = speculative_config.draft_model_config
     draft_load_config = vllm_config.load_config
 
-    return (
-        VllmConfig.get_quantization_config(draft_model_config, draft_load_config)
-        if draft_model_config
-        else None
+    if not draft_model_config:
+        return None
+    quant_config = VllmConfig.get_quantization_config(
+        draft_model_config, draft_load_config
     )
+    if quant_config is None:
+        return None
+
+    # The draft model's packed_modules_mapping never reaches the draft's quant
+    # config: SupportsQuant and configure_quant_config() set it only on the
+    # target's config. Without it, fused layers such as qkv_proj and gate_up_proj
+    # match none of the checkpoint's per-projection targets and are built
+    # unquantized.
+    draft_cls = get_model_cls(draft_model_config)
+    if packed_modules_mapping := getattr(draft_cls, "packed_modules_mapping", None):
+        quant_config.packed_modules_mapping.update(packed_modules_mapping)
+    return quant_config
 
 
 def map_draft_quant_config(
