@@ -224,7 +224,9 @@ class PoolingIOProcessor:
             target_params = None
         else:
             target_params = pooling_params
-        prompt_extras = ctx.build_prompt_extras(target_params)
+        prompt_extras = ctx.build_prompt_extras(
+            target_params, self.model_config.multimodal_config
+        )
 
         # Clone to avoid modifying the caller's pooling parameters.
         params_seq = [

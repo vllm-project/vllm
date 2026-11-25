@@ -615,9 +615,19 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         cmpl_tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
         chat_tok_params = ctx.build_tok_params(self.renderer.default_chat_tok_params)
 
+        if isinstance(ctx.pooling_params, Sequence):
+            logger.warning(
+                "Received a Sequence of PoolingParams in offline scoring; "
+                "skipping per-item extra_kwargs extraction because per-item "
+                "pooling params are not supported here."
+            )
+            target_params = None
+        else:
+            target_params = ctx.pooling_params
+
         prompt_extras = dict(
             ctx.build_prompt_extras(
-                ctx.pooling_params, self.model_config.multimodal_config
+                target_params, self.model_config.multimodal_config
             )
         )
         pooling_extra_kwargs = (
