@@ -212,7 +212,7 @@ def _offline_quantize(weight, target):
 
 
 def _assert_requantized_weights(offline, online, target, *stems):
-    from tests.quantization.test_online_mxfp4 import fix_negative_zeros
+    from tests.quantization.reference_mxfp4 import fix_negative_zeros
 
     for stem in stems:
         expected = getattr(offline, f"{stem}weight")

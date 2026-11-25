@@ -25,6 +25,33 @@ BFLOAT16_SIGN_EXPONENT_MASK = (
 ) << BFLOAT16_MANTISSA_BITS
 
 
+def fix_negative_zeros(tensor: torch.Tensor) -> torch.Tensor:
+    """Normalize FP4 e2m1 negative-zero codewords (0b1000) to positive zero
+    (0b0000) in a packed uint8 tensor (two e2m1 values per byte, low nibble
+    first).
+
+    -0.0 and +0.0 dequantize to the same float value, but different MXFP4
+    quantization backends disagree on which one they emit for values that
+    round to zero magnitude. This normalizes both packed representations so
+    tensors from different backends can be compared with `torch.equal`.
+    """
+    assert tensor.dtype == torch.uint8, (
+        f"Expected a torch.uint8 tensor, got {tensor.dtype}"
+    )
+
+    low_nibble = tensor & 0x0F
+    high_nibble = tensor & 0xF0
+
+    low_nibble = torch.where(
+        low_nibble == 0x08, torch.zeros_like(low_nibble), low_nibble
+    )
+    high_nibble = torch.where(
+        high_nibble == 0x80, torch.zeros_like(high_nibble), high_nibble
+    )
+
+    return low_nibble | high_nibble
+
+
 def e8m0_to_half(scale, half_dtype: torch.dtype):
     assert scale.dtype == torch.uint8
 
