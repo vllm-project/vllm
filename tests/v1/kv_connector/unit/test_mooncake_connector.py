@@ -23,7 +23,6 @@ import zmq.asyncio
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
-from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm import envs
 from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
@@ -50,7 +49,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     _coalesce_contiguous_transfer_regions,
     _compute_sender_transfer_plan,
     _contiguous_runs,
-    _get_draft_context_kv_compatibility,
     _has_opaque_packed_row,
     _normalize_paired_block_order,
     _pp_mismatch_hides_packed_layers,
@@ -500,44 +498,12 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("prefill_method", "decode_method", "decode_revision", "reject"),
-    [
-        (None, None, None, False),
-        (None, "mtp", None, False),
-        (None, "dspark", None, True),
-        ("dspark", "dspark", None, False),
-        ("dspark", "dspark", "different-revision", True),
-    ],
-)
 async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
     monkeypatch,
-    prefill_method,
-    decode_method,
-    decode_revision,
-    reject,
 ):
-    """Transfer the matching PP shard or reject incompatible draft context KV."""
+    """Producer sends its PP layer shard to the matching consumer layer address."""
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = _make_worker_vllm_config("kv_producer")
-    decode_config = _make_worker_vllm_config("kv_consumer")
-    for config, method, revision in (
-        (vllm_config, prefill_method, None),
-        (decode_config, decode_method, decode_revision),
-    ):
-        if method is not None:
-            config.speculative_config = fake_speculative_config(
-                method=method,
-                draft_model_config=SimpleNamespace(
-                    model="draft",
-                    revision=revision,
-                    code_revision=None,
-                    hf_config=SimpleNamespace(),
-                ),
-                kv_cache_dtype=None,
-                enable_adaptive_verification=False,
-                prefill_context_kv_only=config is vllm_config,
-            )
 
     with set_current_vllm_config(vllm_config), patch_worker_dependencies():
         prefill_connector = MooncakeConnector(
@@ -590,12 +556,6 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
             ],
             {"d-req-layer-align": (transfer_id, [[20]])},
         )
-        xfer_meta.required_draft_context = _get_draft_context_kv_compatibility(
-            decode_config
-        )
-        xfer_meta = prefill_worker._xfer_meta_decoder.decode(
-            msgspec.msgpack.encode(xfer_meta)
-        )
         mock_socket = AsyncMock(spec=zmq.asyncio.Socket)
         mock_socket.send_multipart = AsyncMock()
         identity = b"consumer-layer-align"
@@ -605,25 +565,19 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
         ) as mock_send_blocks:
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
 
-        prefill_worker.sender_loop = origin_sender_loop
-        prefill_worker.shutdown()
+        src_ptrs, dst_ptrs, lengths = mock_send_blocks.call_args[0][1:]
+        np.testing.assert_array_equal(src_ptrs, [0x1000 + 10 * block_len])
+        np.testing.assert_array_equal(dst_ptrs, [0xB000 + 20 * block_len])
+        np.testing.assert_array_equal(lengths, [block_len])
 
         sent_identity, sent_payload = mock_socket.send_multipart.call_args[0][0]
         assert sent_identity == identity
         response = prefill_worker._xfer_resp_decoder.decode(sent_payload)
-        if reject:
-            assert response.status == MooncakeXferResponseStatus.ERROR
-            assert response.err_msg is not None
-            assert "requires compatible dspark draft context KV" in response.err_msg
-            assert "Configure the same drafter on prefill" in response.err_msg
-            mock_send_blocks.assert_not_called()
-        else:
-            assert response.status == MooncakeXferResponseStatus.FINISH
-            assert response.ok_reqs == ["d-req-layer-align"]
-            src_ptrs, dst_ptrs, lengths = mock_send_blocks.call_args[0][1:]
-            np.testing.assert_array_equal(src_ptrs, [0x1000 + 10 * block_len])
-            np.testing.assert_array_equal(dst_ptrs, [0xB000 + 20 * block_len])
-            np.testing.assert_array_equal(lengths, [block_len])
+        assert response.status == MooncakeXferResponseStatus.FINISH
+        assert response.ok_reqs == ["d-req-layer-align"]
+
+        prefill_worker.sender_loop = origin_sender_loop
+        prefill_worker.shutdown()
 
 
 def test_basic_interface():
@@ -3108,6 +3062,11 @@ def test_prepare_transfer_regions_reuses_success_and_error():
     assert calls == 2
     assert worker._prepare_transfer_regions(meta) == prepared
     assert calls == 2
+
+    needs_draft = msgspec.structs.replace(meta, requires_draft_context_kv=True)
+    local, remote, err = worker._prepare_transfer_regions(needs_draft)
+    assert not local and not remote
+    assert err is not None and "Configure the same drafter on prefill" in err
 
     mismatch = _xfer_meta(
         [

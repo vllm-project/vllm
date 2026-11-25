@@ -6,11 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.utils import (
-    BlockIds,
-    EngineId,
-    get_speculative_kv_compatibility_factors,
-)
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
@@ -121,7 +117,38 @@ def _get_speculative_compatibility_factors(
     if speculative_config is None or not speculative_config.uses_target_hidden_states:
         return None
 
-    return get_speculative_kv_compatibility_factors(vllm_config)
+    draft_model_config = speculative_config.draft_model_config
+    assert draft_model_config is not None
+    auxiliary_layer_ids = getattr(
+        draft_model_config.hf_config,
+        "eagle_aux_hidden_state_layer_ids",
+        None,
+    )
+
+    # kv_cache_dtype is a user override that defaults to None, meaning "inherit
+    # the target's --kv-cache-dtype". Resolve it to the effective value so an
+    # explicit setting on one side and inheritance on the other (same effective
+    # dtype) don't spuriously mismatch.
+    kv_cache_dtype = (
+        speculative_config.kv_cache_dtype or vllm_config.cache_config.cache_dtype
+    )
+
+    # Note: the draft attention_backend is intentionally not hashed. Its only
+    # transfer-relevant effect is the KV block layout/size, which is validated
+    # per region at runtime in _validate_remote_agent_handshake. The connector
+    # only sees the raw override here (usually None = auto-select), never the
+    # resolved backend, so hashing it would cause false mismatches without
+    # catching anything the runtime layout check misses.
+    return {
+        "method": speculative_config.method,
+        "model": draft_model_config.model,
+        "revision": draft_model_config.revision,
+        "code_revision": draft_model_config.code_revision,
+        "kv_cache_dtype": str(kv_cache_dtype),
+        "auxiliary_layer_ids": (
+            tuple(auxiliary_layer_ids) if auxiliary_layer_ids is not None else None
+        ),
+    }
 
 
 def compute_nixl_compatibility_hash(

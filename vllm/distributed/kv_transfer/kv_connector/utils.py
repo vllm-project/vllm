@@ -86,41 +86,6 @@ def get_max_offload_tokens(kv_transfer_params: dict[str, Any] | None) -> int | N
     return None
 
 
-def get_speculative_kv_compatibility_factors(
-    vllm_config: VllmConfig,
-) -> dict[str, Any]:
-    """Return the drafter configuration that affects KV transfer."""
-    speculative_config = vllm_config.speculative_config
-    assert speculative_config is not None
-    draft_model_config = speculative_config.draft_model_config
-    assert draft_model_config is not None
-    auxiliary_layer_ids = getattr(
-        draft_model_config.hf_config,
-        "eagle_aux_hidden_state_layer_ids",
-        None,
-    )
-
-    # kv_cache_dtype is a user override that defaults to None, meaning "inherit
-    # the target's --kv-cache-dtype". Resolve it to the effective value so an
-    # explicit setting on one side and inheritance on the other (same effective
-    # dtype) don't spuriously mismatch.
-    kv_cache_dtype = (
-        speculative_config.kv_cache_dtype or vllm_config.cache_config.cache_dtype
-    )
-
-    # Transfer layout validation checks the resolved KV block geometry.
-    return {
-        "method": speculative_config.method,
-        "model": draft_model_config.model,
-        "revision": draft_model_config.revision,
-        "code_revision": draft_model_config.code_revision,
-        "kv_cache_dtype": str(kv_cache_dtype),
-        "auxiliary_layer_ids": (
-            tuple(auxiliary_layer_ids) if auxiliary_layer_ids is not None else None
-        ),
-    }
-
-
 def clip_ssm_state_blocks(blocks: list[int], num_spec_blocks: int) -> list[int]:
     """Drop speculative scratch slots and keep only the running-state slot."""
     if not blocks:

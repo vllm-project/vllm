@@ -27,14 +27,12 @@ from numpy.typing import NDArray
 from vllm import envs
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.config.kv_transfer import KVCacheAccess
-from vllm.config.utils import hash_factors
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
     check_compressed_kernel_split,
     get_current_attn_backends,
     get_current_attn_backends_and_specs,
-    get_speculative_kv_compatibility_factors,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -655,25 +653,6 @@ def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
     return None
 
 
-class DraftContextKVCompatibility(msgspec.Struct, frozen=True):
-    method: str
-    config_hash: str
-
-
-def _get_draft_context_kv_compatibility(
-    vllm_config: VllmConfig,
-) -> DraftContextKVCompatibility | None:
-    spec = vllm_config.speculative_config
-    if spec is None or not spec.speculator_config.projects_context_kv:
-        return None
-
-    method = spec.custom_method or spec.method
-    assert method is not None
-    factors = get_speculative_kv_compatibility_factors(vllm_config)
-    factors["method"] = method
-    return DraftContextKVCompatibility(method, hash_factors(factors))
-
-
 class MooncakeXferMetadata(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -699,9 +678,7 @@ class MooncakeXferMetadata(
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
     layout_id: int = 0
-    # Sent with the full layout when decode needs context KV from a drafter
-    # that projects it from target hidden states.
-    required_draft_context: DraftContextKVCompatibility | None = None
+    requires_draft_context_kv: bool = False
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -1414,6 +1391,10 @@ class MooncakeConnectorWorker:
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
+        spec = vllm_config.speculative_config
+        self.projects_draft_context_kv = (
+            spec is not None and spec.speculator_config.projects_context_kv
+        )
         # Capture device BEFORE TransferEngine init — MNNVL's NVLink allocator
         # may change the current CUDA device during engine.initialize().
         self.device_id = torch.accelerator.current_device_index()
@@ -1832,19 +1813,6 @@ class MooncakeConnectorWorker:
             response = MooncakeXferResponse(
                 status=MooncakeXferResponseStatus.ERROR,
                 err_msg=msg,
-            )
-            await sock.send_multipart((identity, self._encoder.encode(response)))
-            return
-        required_draft = meta.required_draft_context
-        if required_draft is not None and required_draft != (
-            _get_draft_context_kv_compatibility(self.vllm_config)
-        ):
-            response = MooncakeXferResponse(
-                status=MooncakeXferResponseStatus.ERROR,
-                err_msg=(
-                    f"Mooncake decode requires compatible {required_draft.method} "
-                    "draft context KV. Configure the same drafter on prefill."
-                ),
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
@@ -3195,6 +3163,9 @@ class MooncakeConnectorWorker:
         `send_kv_to_decode` runs on every scheduler batch. The registered
         layout does not change until the next `register_kv_caches`.
         """
+        if meta.requires_draft_context_kv and not self.projects_draft_context_kv:
+            msg = "Missing draft context KV. Configure the same drafter on prefill."
+            return [], [], msg
         cache_key = (
             meta.remote_hostname,
             meta.remote_port,
@@ -3386,9 +3357,7 @@ class MooncakeConnectorWorker:
                 list(groups) for groups in self.region_shared_groups
             ],
             registered_row_offsets=self.region_row_offsets,
-            required_draft_context=_get_draft_context_kv_compatibility(
-                self.vllm_config
-            ),
+            requires_draft_context_kv=self.projects_draft_context_kv,
         )
 
     def _validate_head_resharding_layout(
