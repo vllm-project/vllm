@@ -28,6 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     KVConnectorRole,
     MambaTransferGeometry,
     MooncakeConnector,
+    MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
     MooncakeXferMetadata,
@@ -62,7 +63,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
-from .test_mooncake_connector import patch_worker_dependencies
+from .test_mooncake_connector import _stub_worker_shutdown, patch_worker_dependencies
 from .utils import (
     create_request,
     create_scheduler,
@@ -210,6 +211,7 @@ def test_hybrid_gdn_remote_prefill_keeps_local_attention_prefix(
     scheduler.add_request(replay)
     output = scheduler.schedule()
 
+    assert isinstance(output.kv_connector_metadata, MooncakeConnectorMetadata)
     [pull] = output.kv_connector_metadata.reqs_to_recv["prefill-engine"].values()
     attn_pull, gdn_pull = pull.local_block_ids
     assert len(attn_pull) == expected_attn_pull_blocks
@@ -238,6 +240,7 @@ def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
     assert request._all_token_ids == original_tokens[:-1]
     assert request.num_prompt_tokens == len(original_tokens) - 1
     assert request.max_tokens == 1
+    assert request.kv_transfer_params is not None
     assert request.kv_transfer_params["_p_side_truncated"] is True
 
     # Re-adding or rescheduling the request must not truncate another token.
@@ -351,6 +354,7 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         num_blocks = kv_cache_config.num_blocks
         fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
@@ -395,7 +399,7 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
         assert worker.kv_block_len_per_layer == [fa_spec.page_size_bytes, 36, 8]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
 
@@ -419,6 +423,7 @@ def test_register_kv_caches_keeps_gdn_states_inside_a_packed_block(monkeypatch):
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         num_blocks = kv_cache_config.num_blocks
         gdn_spec = group_spec(kv_cache_config.kv_cache_groups[1])
@@ -437,7 +442,7 @@ def test_register_kv_caches_keeps_gdn_states_inside_a_packed_block(monkeypatch):
         assert worker.kv_block_len_per_layer == [36, 8]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
 
@@ -459,6 +464,7 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
         factor = 4
         worker._physical_blocks_per_logical_kv_block = factor
 
@@ -476,7 +482,7 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
         assert worker.kv_block_len_per_layer == [physical_page_bytes]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
 
@@ -489,7 +495,7 @@ def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
 async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_offsets):
     kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
     worker = object.__new__(MooncakeConnectorWorker)
-    worker.shutdown = noop_shutdown
+    _stub_worker_shutdown(worker, noop_shutdown)
     # __new__ skips __init__, where these caches are created.
     worker._prepared_transfer_regions = {}
     worker._layout_by_peer = OrderedDict()
@@ -513,11 +519,6 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
         for layer_name, spec in group.kv_cache_specs.items()
     }
     worker._ring_buffer_layers = set()
-    worker._layer_group_indices = {
-        layer_name: group_index
-        for group_index, group in enumerate(kv_cache_config.kv_cache_groups)
-        for layer_name in group.layer_names
-    }
 
     ratio = 4
     worker._physical_blocks_per_logical_kv_block = ratio
@@ -667,6 +668,7 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         fa_spec = uniform_spec(kv_cache_config.kv_cache_groups[0])
         fa_cache_width = (
@@ -699,7 +701,7 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
         ]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
 
@@ -721,6 +723,7 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         block_len = 0x100
         transfer_id = "xfer-hybrid-gdn"
@@ -821,13 +824,13 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
         np.testing.assert_array_equal(lengths, [block_len, 2 * block_len])
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
 
 def test_logical_to_kernel_block_ids_expands_fa_not_gdn():
     worker = object.__new__(MooncakeConnectorWorker)
-    worker.shutdown = noop_shutdown
+    _stub_worker_shutdown(worker, noop_shutdown)
     worker._physical_blocks_per_logical_kv_block = 17
     worker.kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=544)
 
@@ -857,6 +860,7 @@ def test_hybrid_gdn_keeps_packed_fa_and_gdn_regions_whole(
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         worker.transfer_topo = SimpleNamespace(is_kv_layout_blocks_first=False)
         regions = worker._get_transfer_regions(
@@ -880,7 +884,7 @@ def test_hybrid_gdn_keeps_packed_fa_and_gdn_regions_whole(
         ]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
 
@@ -904,6 +908,7 @@ def test_get_transfer_regions_tolerates_peer_pp_stage_layers(monkeypatch):
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         regions = worker._get_transfer_regions(
             base_addrs=[0x1000, 0x2000, 0x3000],
@@ -928,7 +933,7 @@ def test_get_transfer_regions_tolerates_peer_pp_stage_layers(monkeypatch):
         ]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
 
@@ -995,6 +1000,7 @@ def test_transfer_rule_follows_plain_head_mapping_for_hybrid_attention(monkeypat
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         assert worker._transfer_rule("model.layers.0.self_attn") == (
             False,
@@ -1012,7 +1018,7 @@ def test_transfer_rule_follows_plain_head_mapping_for_hybrid_attention(monkeypat
         assert worker._transfer_rule("model.layers.3.compressed_key") == (True, None)
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
 
     # P TP2 -> D TP4 with 2 KV heads: each consumer rank holds a whole replica
@@ -1205,6 +1211,7 @@ def test_hetero_tp_keeps_sharded_gdn_states_uncoalesced(monkeypatch):
             kv_cache_config,
         )
         worker = connector.connector_worker
+        assert worker is not None
         gdn_spec = group_spec(kv_cache_config.kv_cache_groups[1])
         # The same page as the fixture's state, shaped as an SD state that
         # shards across TP2: conv (3 rows, Q/K/V dims 1/1/4), ssm (2, 2, 1).
@@ -1226,7 +1233,7 @@ def test_hetero_tp_keeps_sharded_gdn_states_uncoalesced(monkeypatch):
         gdn_cache = packed.view(-1, stride)[:, : gdn_spec.page_size_bytes]
         worker.register_kv_caches({"model.layers.1.linear_attn": gdn_cache})
         assert worker.kv_block_len_per_layer == [36, 8]
-        worker._producer_cache_is_replicated = lambda: True
+        worker._producer_cache_is_replicated = lambda: True  # type: ignore[method-assign]
 
         # The consumer at twice the TP holds half of each state.
         remote_base = 0x100000
@@ -1254,7 +1261,7 @@ def test_hetero_tp_keeps_sharded_gdn_states_uncoalesced(monkeypatch):
         assert [region.kv_block_len for region in remote_regions] == [18, 4]
 
         worker.shutdown()
-        worker.shutdown = noop_shutdown
+        _stub_worker_shutdown(worker, noop_shutdown)
         connector.connector_worker = None
     get_conv_state_layout.cache_clear()
 
@@ -1294,6 +1301,7 @@ def test_register_kv_caches_keeps_replicated_conv_state_whole(monkeypatch):
                 kv_cache_config,
             )
             worker = connector.connector_worker
+            assert worker is not None
             raw = torch.empty(16 * spec.page_size_bytes, dtype=torch.int8)
             cache = raw.view(16, spec.page_size_bytes)
             worker.register_kv_caches({"model.layers.0.ple": cache})
@@ -1302,7 +1310,7 @@ def test_register_kv_caches_keeps_replicated_conv_state_whole(monkeypatch):
             assert worker.kv_block_len_per_layer == [4 * 3 * 2]
 
             worker.shutdown()
-            worker.shutdown = noop_shutdown
+            _stub_worker_shutdown(worker, noop_shutdown)
             connector.connector_worker = None
     finally:
         get_conv_state_layout.cache_clear()
@@ -1353,6 +1361,7 @@ def test_prepared_regions_revalidate_changed_peer_geometry(
             vllm_config, KVConnectorRole.WORKER, kv_cache_config
         )
         worker = connector.connector_worker
+        assert worker is not None
         try:
             worker._layer_specs[layer] = gdn(1)
             stride = 128
@@ -1388,6 +1397,7 @@ def test_prepared_regions_revalidate_changed_peer_geometry(
                     layer: msgspec.structs.replace(geometry, **{field: value})
                 }
             local, remote, error = worker._prepare_transfer_regions(meta)
+            assert error is not None
             assert local == remote == []
             assert expected_error in error
 
@@ -1399,7 +1409,7 @@ def test_prepared_regions_revalidate_changed_peer_geometry(
         finally:
             get_conv_state_layout.cache_clear()
             worker.shutdown()
-            worker.shutdown = noop_shutdown
+            _stub_worker_shutdown(worker, noop_shutdown)
             connector.connector_worker = None
 
 
@@ -1444,6 +1454,7 @@ def test_hetero_tp_validates_mamba_geometry(monkeypatch):
             vllm_config, KVConnectorRole.WORKER, kv_cache_config
         )
         worker = connector.connector_worker
+        assert worker is not None
         try:
             worker._layer_specs[gdn_layer] = gdn(1)
             peer = {gdn_layer: mamba_geometry(gdn(2), "SD")}
@@ -1452,14 +1463,18 @@ def test_hetero_tp_validates_mamba_geometry(monkeypatch):
             assert worker._validate_mamba_unequal_tp(1, {}, regions) is None
 
             err = worker._validate_mamba_unequal_tp(2, {}, regions)
+
+            assert err is not None
             assert "omitted Mamba transfer geometry" in err
             ds_peer = {gdn_layer: mamba_geometry(gdn(2), "DS")}
             err = worker._validate_mamba_unequal_tp(2, ds_peer, regions)
+            assert err is not None
             assert "incompatible Mamba transfer geometry" in err
             # A peer state that is not half of ours (e.g. Mamba2 B/C
             # replicated across ranks) cannot be resharded by slicing.
             padded = {gdn_layer: mamba_geometry(gdn(1), "SD")}
             err = worker._validate_mamba_unequal_tp(2, padded, regions)
+            assert err is not None
             assert "not an exact TP shard" in err
 
             # A sharded short conv has no sub-projection split to reshard by.
@@ -1490,11 +1505,12 @@ def test_hetero_tp_validates_mamba_geometry(monkeypatch):
                     ),
                 ],
             )
+            assert err is not None
             assert "cannot reshard the conv state of model.layers.2.conv" in err
         finally:
             get_conv_state_layout.cache_clear()
             worker.shutdown()
-            worker.shutdown = noop_shutdown
+            _stub_worker_shutdown(worker, noop_shutdown)
             connector.connector_worker = None
 
 
@@ -1529,6 +1545,7 @@ def test_register_kv_caches_splits_gdn_conv_sub_projections(monkeypatch):
                 kv_cache_config,
             )
             worker = connector.connector_worker
+            assert worker is not None
 
             fa_page_bytes = group_spec(
                 kv_cache_config.kv_cache_groups[0]
@@ -1563,7 +1580,7 @@ def test_register_kv_caches_splits_gdn_conv_sub_projections(monkeypatch):
             assert worker.kv_block_len_per_layer == [fa_page_bytes, 12, 12, 12, 8]
 
             worker.shutdown()
-            worker.shutdown = noop_shutdown
+            _stub_worker_shutdown(worker, noop_shutdown)
             connector.connector_worker = None
     finally:
         get_conv_state_layout.cache_clear()
@@ -1640,6 +1657,7 @@ def test_sd_conv_resharding_matches_layer_and_address(monkeypatch):
                 vllm_config, KVConnectorRole.WORKER, kv_cache_config
             )
             worker = connector.connector_worker
+            assert worker is not None
             # SD-shaped GDN conv state: 3 rows of Q/K/V dims (2, 2, 2), fp16.
             worker._layer_specs["model.layers.1.linear_attn"] = MambaSpec(
                 block_size=vllm_config.cache_config.block_size,
@@ -1674,7 +1692,7 @@ def test_sd_conv_resharding_matches_layer_and_address(monkeypatch):
             assert row_copies == [(0, 0, 1024)]
 
             worker.shutdown()
-            worker.shutdown = noop_shutdown
+            _stub_worker_shutdown(worker, noop_shutdown)
             connector.connector_worker = None
     finally:
         get_conv_state_layout.cache_clear()
@@ -1867,6 +1885,7 @@ async def test_hetero_tp_reshards_sd_conv_state(monkeypatch, mamba_type, p_tp, d
                     vllm_config, KVConnectorRole.WORKER, kv_cache_config
                 )
             worker = connector.connector_worker
+            assert worker is not None
             try:
                 await _plan_and_apply_sd_reshard(
                     worker,
@@ -1880,7 +1899,7 @@ async def test_hetero_tp_reshards_sd_conv_state(monkeypatch, mamba_type, p_tp, d
                 )
             finally:
                 worker.shutdown()
-                worker.shutdown = noop_shutdown
+                _stub_worker_shutdown(worker, noop_shutdown)
                 connector.connector_worker = None
 
         for d_rank, consumer in enumerate(consumer_pages):

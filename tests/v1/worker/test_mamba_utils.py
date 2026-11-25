@@ -666,7 +666,7 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
                 layer_names, spec, MambaManager.config(enable_prefix_caching=True)
             )
         ],
-        5 * (2 * spec.page_size_bytes + 8),
+        num_blocks=5,
     )
     pages = allocate_kv_cache(kv_config, device, layout)
 
