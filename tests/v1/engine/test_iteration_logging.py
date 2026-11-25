@@ -160,13 +160,10 @@ def test_idle_state_is_reported_once_per_change():
     engine = make_fake_engine()
     engine.scheduler = SimpleNamespace(make_stats=SchedulerStats)
     engine.output_queue = queue.Queue()
-    engine._idle_state_callbacks = [EngineCoreProc._report_idle]
+    engine._reported_idle = False
 
-    # The engine stops, is woken without work, resumes, and stops again.
-    EngineCoreProc._notify_idle_state_callbacks(engine)
-    EngineCoreProc._notify_idle_state_callbacks(engine)
-    EngineCoreProc._report_idle(engine, False)
-    EngineCoreProc._notify_idle_state_callbacks(engine)
+    for idle in (True, True, False, False, True):
+        EngineCoreProc._report_idle(engine, idle)
 
     sent = [outputs for _, outputs in engine.output_queue.queue]
     assert [o.scheduler_stats.engine_idle for o in sent] == [True, False, True]
