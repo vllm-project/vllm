@@ -79,6 +79,7 @@ class CudaKernel:
     ) -> None:
         from cuda.bindings import driver as cu
 
+        self.device_index = device_index
         major, minor = torch.cuda.get_device_capability(device_index)
         arch = f"sm_{major}{minor}{'a' if major >= 9 else ''}"
         start = time.perf_counter()
@@ -108,12 +109,7 @@ class CudaKernel:
         _check(cu.cuLaunchKernel(self._kernel, *config, ctypes.addressof(ptrs), 0))
 
     def max_active_clusters(
-        self,
-        cluster: int,
-        block: int,
-        smem: int,
-        stream: torch.cuda.Stream,
-        device_index: int,
+        self, cluster: int, block: int, smem: int, stream: torch.cuda.Stream
     ) -> int:
         """How many clusters of `cluster` CTAs (`block` threads and `smem`
         bytes of dynamic shared memory each) run at once on the SMs `stream`
@@ -121,7 +117,7 @@ class CudaKernel:
         occupancy query; clusters cannot span GPCs."""
         from cuda.bindings import driver as cu
 
-        dev = _check(cu.cuDeviceGet(device_index))
+        dev = _check(cu.cuDeviceGet(self.device_index))
         attr = cu.CUfunction_attribute
         for name, value in (
             (attr.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem),

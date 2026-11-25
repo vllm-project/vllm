@@ -567,11 +567,9 @@ def _localized_candidate_source_topk(
     if not indexer_overlap.candidate_defer_allowed():
         if envs.VLLM_INDEXER_OVERLAP:
             # This path runs only inside captures; build its merge now.
-            scan.prepare_merge(
-                topk_tokens, logits_dtype, loc.page_rows, loc.resources.device
-            )
+            scan.prepare_merge(loc, topk_tokens, logits_dtype)
         return False
-    kept: list[torch.Tensor] = []
+    scores: list[torch.Tensor] = []
     if not scan.localized_paged_mqa_topk(
         loc,
         q,
@@ -583,22 +581,22 @@ def _localized_candidate_source_topk(
         topk_tokens,
         attn_metadata_narrowed.max_seq_len,
         topk_out,
-        keep=kept,
         topk_backend=domain_topk,
+        scores_out=scores,
     ):
         return False
-    o0, o1 = kept
+    o0, o1 = scores
     row_ends = seq_lens.reshape(-1)
 
     def takes_bf16(t: torch.Tensor) -> bool:
         return selector.takes_bf16_logits(t, topk_tokens, t.shape[0])
 
-    out = scan.localized_join_alloc(o0, lambda bf16: not takes_bf16(bf16))
+    out = scan.localized_join_alloc(o0, lambda t: not takes_bf16(t))
     num_rows = out.shape[0]
     vis = row_ends[:num_rows]
     decode_candidates = candidate_blocks[:num_rows]
 
-    def candidate_work() -> None:
+    def join_select_and_expand() -> None:
         scan.localized_join_scores(loc, o0, o1, out, row_ends)
         logits = out if takes_bf16(out) else as_fp32_logits(out, row_ends)
         _select_candidate_blocks(
@@ -619,7 +617,7 @@ def _localized_candidate_source_topk(
     # stay referenced until the first candidate consumer joins, so their
     # memory is not reused before the candidate stream has read them.
     indexer_overlap.defer_candidates(
-        candidate_work, (o0, o1, out, vis, row_ends, loc.join_map)
+        join_select_and_expand, (o0, o1, out, vis, row_ends, loc.join_map)
     )
     return True
 
@@ -1365,28 +1363,23 @@ def sparse_attn_indexer(
                 topk_out = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
                 # Per-domain scan and top-k, then the merge: no full-length
                 # scores (VLLM_INDEXER_LOCALIZE).
-                if (
-                    whole_rows
-                    and candidate_blocks is None
-                    and (
-                        domain_topk := scan.localized_topk_backend(
-                            selector, num_padded_tokens, max_model_len, topk_tokens
-                        )
+                domain_topk = None
+                if whole_rows and candidate_blocks is None:
+                    domain_topk = scan.localized_topk_backend(
+                        selector, num_padded_tokens, max_model_len, topk_tokens
                     )
-                    is not None
-                    and scan.localized_paged_mqa_topk(
-                        localized,
-                        q,
-                        kv_cache,
-                        decode_weights,
-                        max_model_len,
-                        logits_dtype,
-                        decode_metadata.indices,
-                        topk_tokens,
-                        attn_metadata_narrowed.max_seq_len,
-                        topk_out,
-                        topk_backend=domain_topk,
-                    )
+                if domain_topk is not None and scan.localized_paged_mqa_topk(
+                    localized,
+                    q,
+                    kv_cache,
+                    decode_weights,
+                    max_model_len,
+                    logits_dtype,
+                    decode_metadata.indices,
+                    topk_tokens,
+                    attn_metadata_narrowed.max_seq_len,
+                    topk_out,
+                    topk_backend=domain_topk,
                 ):
                     return topk_indices_buffer
                 if (

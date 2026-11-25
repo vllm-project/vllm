@@ -190,7 +190,7 @@ def topk_cluster_capacity(res: DomainResources) -> dict[int, int] | None:
             try:
                 capacity = {
                     cluster: min(
-                        kernel.max_active_clusters(cluster, 1024, smem, s, res.device)
+                        kernel.max_active_clusters(cluster, 1024, smem, s)
                         for s in res.streams
                     )
                     for cluster in (16, 8, 4, 2, 1)
@@ -252,7 +252,7 @@ class LocalizedDecodeMetadata:
     shared by every indexer layer of one cache group."""
 
     page_rows: int
-    capacity: int
+    max_rows: int  # rows of the persistent buffers
     block_tables: list[torch.Tensor]  # [T, W] int32 per domain
     seq_lens: list[torch.Tensor]  # [T, 1] int32 per domain
     schedules: list[torch.Tensor]  # DeepGEMM schedule per domain
@@ -352,7 +352,9 @@ class IndexerDecodeLocalizer:
 
     def _resolve(self) -> bool:
         """Page-to-domain table of the bound indexer caches, recomputed when
-        they change (the builder first runs on the profiling-time cache)."""
+        they change (the builder first runs on the profiling-time cache).
+        Layer 0's table stands for the group's layers, which must match its
+        page count, page rows and page stride."""
         kv0 = self._layer_cache(self.layer_names[0]) if self.layer_names else None
         if kv0 is None:
             return False
@@ -476,7 +478,7 @@ class IndexerDecodeLocalizer:
             )
             meta = LocalizedDecodeMetadata(
                 page_rows=self.page_rows,
-                capacity=self.max_rows,
+                max_rows=self.max_rows,
                 block_tables=[b[:num_rows] for b in bufs["lbt"]],
                 seq_lens=[x[:num_rows] for x in bufs["llen"]],
                 schedules=list(bufs["sched"]),

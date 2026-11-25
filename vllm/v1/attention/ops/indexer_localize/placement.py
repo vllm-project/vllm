@@ -66,7 +66,7 @@ _RESOURCES: dict[int, DomainResources | None] = {}
 _LOCK = threading.Lock()
 
 
-def _unsupported_reason(device_index: int) -> str | None:
+def _unsupported_device_reason(device_index: int) -> str | None:
     if not hasattr(torch.cuda, "execute_on_streams"):
         return "torch.cuda.execute_on_streams is missing"
     try:
@@ -100,7 +100,7 @@ def get_domain_resources(device: torch.device) -> DomainResources | None:
             return _RESOURCES[idx]
         res = None
         try:
-            reason = _unsupported_reason(idx)
+            reason = _unsupported_device_reason(idx)
             if reason is None:
                 domains = get_locality_domain_contexts(idx)
                 res = DomainResources(
@@ -151,17 +151,13 @@ def _run_bytes(bytes_per_block: int | None, granule: int) -> int:
 
 
 def _block_bytes(kv_cache_config: Any) -> int | None:
-    """Bytes of one KV block across every layer of a block-outermost layout
-    (all tensors share the block stride), else None."""
+    """Bytes of one KV block across every layer: the block stride the
+    block-outermost tensors share (without any, the single-layer ones), else
+    None."""
     tensors = kv_cache_config.kv_cache_tensors
-    outer = {t.block_stride for t in tensors if t.block_stride > t.layer_stride}
-    if len(outer) == 1:
-        return outer.pop()
-    strides = {
-        t.block_stride
-        for t in tensors
-        if t.block_stride > t.layer_stride or len(t.layers) == 1
-    }
+    strides = {t.block_stride for t in tensors if t.block_stride > t.layer_stride}
+    if not strides:
+        strides = {t.block_stride for t in tensors if len(t.layers) == 1}
     return strides.pop() if len(strides) == 1 else None
 
 
@@ -191,6 +187,7 @@ def _place_by_domain(buffer: ExtensibleTensor, run_bytes: int) -> None:
     anywhere.location.type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
     anywhere.location.id = device_index
     granule = buffer.granularity
+    ok = cu.CUresult.CUDA_SUCCESS
     warned = False
 
     def domain_of(g: int) -> int:
@@ -199,14 +196,14 @@ def _place_by_domain(buffer: ExtensibleTensor, run_bytes: int) -> None:
     def create(nbytes: int, domain: int) -> int:
         nonlocal warned
         err, handle = cu.cuMemCreate(nbytes, props[domain], 0)
-        if err != cu.CUresult.CUDA_SUCCESS:
+        if err != ok:
             # Memory idling in torch's caching allocator may be in this domain.
             torch.accelerator.empty_cache()
             err, handle = cu.cuMemCreate(nbytes, props[domain], 0)
-        if err != cu.CUresult.CUDA_SUCCESS:
+        if err != ok:
             domain_err = err
             err, handle = cu.cuMemCreate(nbytes, anywhere, 0)
-            if err == cu.CUresult.CUDA_SUCCESS and not warned:
+            if err == ok and not warned:
                 warned = True
                 logger.warning(
                     "VLLM_INDEXER_LOCALIZE: locality domain %d is full (%r); KV "
@@ -216,7 +213,7 @@ def _place_by_domain(buffer: ExtensibleTensor, run_bytes: int) -> None:
                     domain,
                     domain_err,
                 )
-        if err != cu.CUresult.CUDA_SUCCESS:
+        if err != ok:
             raise RuntimeError(
                 f"cuMemCreate in locality domain {domain} failed: {err!r}"
             )

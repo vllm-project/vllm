@@ -35,14 +35,6 @@ def _device() -> torch.device:
     return torch.device("cuda", torch.accelerator.current_device_index())
 
 
-def _resources(num_sms: int | None = None) -> placement.DomainResources:
-    """Resources for kernels that only need the domains' SM counts."""
-    device = _device()
-    total = torch.cuda.get_device_properties(device).multi_processor_count
-    half = num_sms or total // 2
-    return placement.DomainResources(device.index, [], [half, half], total)
-
-
 @pytest.fixture(scope="module")
 def domains() -> placement.DomainResources | None:
     if not has_deep_gemm():
@@ -68,16 +60,18 @@ def _row_pages(rows: int, pages: int, page_rows: int, gen: torch.Generator):
     local = torch.arange(pages, dtype=torch.int32, device=device).expand(rows, -1)
     for d in range(2):
         jmap.scatter_(1, inv[d].long(), local * page_rows * 2 + d)
+    # The kernels read only the device and its SM count (the join's grid).
+    sms = torch.cuda.get_device_properties(device).multi_processor_count
     meta = build.LocalizedDecodeMetadata(
         page_rows=page_rows,
-        capacity=rows,
+        max_rows=rows,
         block_tables=[],
         seq_lens=[],
         schedules=[],
         join_map=jmap,
         inv_maps=inv,
         page_stride=0,
-        resources=_resources(),
+        resources=placement.DomainResources(device.index, [], [sms // 2] * 2, sms),
     )
     return inv, meta
 
@@ -155,9 +149,9 @@ def test_merge_kernel_matches_reference(nvrtc, topk, score_dtype, page_rows):
         # Short rows have fewer than K candidates.
         cols[d, topk // 3 :] = -1
         idx.append(cols.contiguous())
-    assert scan._merge_kernel(
-        topk, score_dtype == torch.float32, page_rows, device.index
-    ), "the CUDA merge does not build"
+    assert scan._merge_kernel(loc, topk, score_dtype == torch.float32), (
+        "the CUDA merge does not build"
+    )
     out = torch.full((rows, topk), -7, dtype=torch.int32, device=device)
     scan.merge_candidates(loc, scores[0], scores[1], idx, topk, out)
     assert torch.equal(out, _reference_merge(scores, idx, inv, page_rows, topk))
@@ -268,36 +262,6 @@ def _decode_rows(
     return bt, lens, indices
 
 
-def _assert_request_split(
-    out: dict,
-    bt: torch.Tensor,
-    lens: torch.Tensor,
-    indices: torch.Tensor,
-    dom: torch.Tensor,
-    page_rows: int,
-) -> None:
-    """Each row holds its request's pages up to the request's last row, split
-    by domain in order, and its own keys per domain."""
-    rows = lens.numel()
-    idx, n_keys = indices.tolist(), lens.tolist()
-    for r in range(rows):
-        e = r
-        while e + 1 < rows and idx[e + 1] == idx[r]:
-            e += 1
-        pages = bt[r, : -(-n_keys[e] // page_rows)].long()
-        on1 = dom[pages] != 0
-        own = -(-n_keys[r] // page_rows)
-        for d in range(2):
-            mine = on1 == bool(d)
-            n = int(mine.sum())
-            assert torch.equal(out["bt"][d][r, :n], pages[mine].int()), (r, d)
-            assert torch.equal(out["inv"][d][r, :n], mine.nonzero().view(-1).int())
-            keys = int((on1[:own] == bool(d)).sum()) * page_rows
-            if own and bool(on1[own - 1]) == bool(d):
-                keys -= own * page_rows - n_keys[r]
-            assert int(out["lens"][d][r, 0]) == keys, (r, d)
-
-
 def _reference_build(
     bt: torch.Tensor,
     lens: torch.Tensor,
@@ -373,7 +337,7 @@ def test_build_kernel_matches_reference(nvrtc, domain_plan, rows, rows_per_reque
         q0, k = 0, 0
         dom = torch.randint(0, 2, (num_pages,), generator=gen, device=device)
         dom = dom.to(torch.int8)
-    sms = _resources(num_sms=100).sms
+    sms = [100, 100]
 
     def int32(*shape: int) -> torch.Tensor:
         return torch.randint(
@@ -424,7 +388,6 @@ def test_build_kernel_matches_reference(nvrtc, domain_plan, rows, rows_per_reque
 
     kernel.launch([args], sms)
     check()
-    _assert_request_split(out, bt, lens, indices, dom, page_rows)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         kernel.launch([args], sms)
@@ -601,14 +564,7 @@ class _DecodeCase:
     seeing one key more than the one before; in every other request the last
     row reads only the first key of a page."""
 
-    def __init__(
-        self,
-        fp4: bool,
-        page_rows: int,
-        requests: int,
-        context: int,
-        rows_per_request: int = 1,
-    ):
+    def __init__(self, fp4: bool, page_rows: int, requests: int, rows_per_request: int):
         from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
         from vllm.utils.deep_gemm import (
             fp8_fp4_paged_mqa_logits,
@@ -620,7 +576,7 @@ class _DecodeCase:
         device = _device()
         rows = requests * rows_per_request
         gen = torch.Generator(device=device).manual_seed(rows + page_rows)
-        heads, dim = 32, 128
+        heads, dim, context = 32, 128, 96 * 1024
         key_bytes = dim // 2 if fp4 else dim
         row_bytes = key_bytes + 4
         pages = math.ceil(context / page_rows)
@@ -730,9 +686,13 @@ def _assert_same_scores(out: torch.Tensor, ref: torch.Tensor, lens: torch.Tensor
 
 
 def _assert_same_kept_scores(
-    kept: torch.Tensor, ref: torch.Tensor, scores: torch.Tensor
+    kept: torch.Tensor, scores: torch.Tensor, seq_lens: torch.Tensor
 ) -> None:
-    """Same selected score multiset per row (ties may pick other tokens)."""
+    """`kept` selects the score multiset per row of the stock top-k of
+    `scores` (ties may pick other tokens)."""
+    ref = torch.full_like(kept, -1)
+    topk = kept.shape[1]
+    get_indexer_topk("auto")(scores, seq_lens, 1, ref, topk, int(seq_lens.max()))
 
     def values(idx: torch.Tensor) -> torch.Tensor:
         v = scores.float().gather(1, idx.clamp(min=0).long())
@@ -761,7 +721,7 @@ def test_localized_decode_matches_single_launch(
     per-domain top-k (`cooperative_topk`, `persistent_topk` above 64 rows)
     and merge keep the stock top-k's scores, also deferred inside a CUDA
     graph replayed over new queries."""
-    case = _DecodeCase(fp4, page_rows, requests, 96 * 1024, rows_per_request)
+    case = _DecodeCase(fp4, page_rows, requests, rows_per_request)
     rows = case.seq_lens.shape[0]
     meta = case.localize(rows)
     assert meta is not None, "the localizer refused the batch"
@@ -782,13 +742,6 @@ def test_localized_decode_matches_single_launch(
     max_seq_len = int(case.seq_lens.max())
     backend = scan.localized_topk_backend(selector, rows, case.max_model_len, topk)
     assert backend == ("cooperative" if rows <= 64 else "persistent")
-
-    def stock_topk() -> tuple[torch.Tensor, torch.Tensor]:
-        scores = case.stock()
-        kept = torch.full((rows, topk), -1, dtype=torch.int32, device=scores.device)
-        selector(scores, case.seq_lens, 1, kept, topk, max_seq_len)
-        return kept, scores
-
     kept = torch.full((rows, topk), -7, dtype=torch.int32, device=ref.device)
 
     def localized_topk() -> bool:
@@ -807,7 +760,7 @@ def test_localized_decode_matches_single_launch(
         )
 
     assert localized_topk()
-    _assert_same_kept_scores(kept, *stock_topk())
+    _assert_same_kept_scores(kept, case.stock(), case.seq_lens)
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -824,7 +777,7 @@ def test_localized_decode_matches_single_launch(
         )
         kept.fill_(-7)
         graph.replay()
-        _assert_same_kept_scores(kept, *stock_topk())
+        _assert_same_kept_scores(kept, case.stock(), case.seq_lens)
 
 
 @pytest.fixture
@@ -861,7 +814,7 @@ def test_candidate_source_matches_stock(domains, candidate_stream, rows_per_requ
     )
 
     topk, block_size, topk_blocks, sparse_block_kv = 512, 8, 2048, 8
-    case = _DecodeCase(True, 128, 4, 96 * 1024, rows_per_request)
+    case = _DecodeCase(True, 128, 4, rows_per_request)
     rows = case.seq_lens.shape[0]
     device = case.seq_lens.device
     loc = case.localize(rows)
@@ -951,8 +904,4 @@ def test_candidate_source_matches_stock(domains, candidate_stream, rows_per_requ
     assert torch.equal(candidates, ref_candidates)
     assert torch.equal(sparse.sparse_indices, ref_sparse)
     assert torch.equal(sparse.end, ref_end)
-    ref_kept = torch.full_like(kept, -1)
-    get_indexer_topk("auto")(
-        scores, case.seq_lens, 1, ref_kept, topk, int(row_ke.max())
-    )
-    _assert_same_kept_scores(kept, ref_kept, scores)
+    _assert_same_kept_scores(kept, scores, case.seq_lens)

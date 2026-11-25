@@ -216,7 +216,8 @@ static __device__ void block_incl_scan_u32(u32* a, int n, u32* s_warp) {
 }
 
 // Both dies' DeepGEMM schedules from per-row die lens in shared memory
-// (ln0/ln1, T rows). dsm: 2 * T u32 scratch.
+// (ln0/ln1, T rows). rs, pf: T u32 of shared scratch each (request starts,
+// cost prefix sums).
 static __device__ void schedules(const Group& G, int sms0, int sms1,
                                  const u32* ln0, const u32* ln1, u32* rs,
                                  u32* pf, int* s_warp) {

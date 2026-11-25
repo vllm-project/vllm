@@ -157,10 +157,9 @@ def _join_kernel(
         e_next = tl.load(jrow + p_lo + pb, mask=(p_lo + pb) < p_hi, other=0)
         for p0 in range(p_lo, p_hi, PB):
             p = p0 + pb
-            mp = p < p_hi
+            m = p < p_hi
             e = e_next
             e_next = tl.load(jrow + p + PB, mask=(p + PB) < p_hi, other=0)
-            m = mp
             # A product keeps delta's divisibility (tl.where would not); 64-bit
             # because delta plus a column can pass 2**31.
             die = (e & 1).to(tl.int64) * delta
@@ -193,12 +192,6 @@ def _join_kernel(
             )
 
 
-# Join geometry (tuned on Rubin): 6 programs per SM, 32 pages x 4 warps.
-_JOIN_PROGRAMS_PER_SM = 6
-_JOIN_PAGES_PER_TILE = 32
-_JOIN_WARPS = 4
-
-
 def localized_join_alloc(
     o0: torch.Tensor, want_fp32: Callable[[torch.Tensor], bool]
 ) -> torch.Tensor:
@@ -229,7 +222,8 @@ def localized_join_scores(
         return
     assert o0.dtype == o1.dtype and o0.stride() == o1.stride()
     assert o0.stride(1) == 1 and out.stride(1) == 1
-    _join_kernel[(_JOIN_PROGRAMS_PER_SM * loc.resources.total_sms,)](
+    # Tuned on Rubin: 6 programs per SM, tiles of 32 pages on 4 warps.
+    _join_kernel[(6 * loc.resources.total_sms,)](
         o0,
         o1,
         o0.stride(0),
@@ -241,10 +235,10 @@ def localized_join_scores(
         num_rows,
         (o1.data_ptr() - o0.data_ptr()) // o0.element_size(),
         R=loc.page_rows,
-        PB=_JOIN_PAGES_PER_TILE,
+        PB=32,
         LV=3 if o0.element_size() == 2 else 2,
         ROWS_P2=max(16, triton.next_power_of_2(num_rows)),
-        num_warps=_JOIN_WARPS,
+        num_warps=4,
     )
 
 
@@ -261,9 +255,9 @@ def localized_paged_mqa_logits(
 ) -> torch.Tensor | None:
     """Die-split decode scan and join.
 
-    Returns the scores with the stock layout (FP32 if `want_fp32(bf16)` says
-    the consumer upcasts them), or None when this call cannot be localized
-    (the caller runs the stock scan).
+    Returns the joined scores (layout and dtype as `localized_join_alloc`),
+    or None when this call cannot be localized (the caller runs the stock
+    scan).
     """
     if not _matches(loc, q, kv_cache):
         logger.warning_once(
@@ -299,34 +293,35 @@ def _merge_smem_bytes(topk: int, threads: int, score_f32: bool) -> int:
 
 
 def _merge_kernel(
-    topk: int, score_f32: bool, page_rows: int, device_index: int
+    loc: LocalizedDecodeMetadata, topk: int, score_f32: bool
 ) -> CudaKernel | None:
-    """The CUDA merge for this shape, compiled at its first use outside a
-    CUDA graph capture; None for shapes it does not cover, when it cannot be
-    built, and inside a capture before its first build."""
-    if topk not in _MERGE_THREADS or page_rows not in _MERGE_PAGE_ROWS:
+    """The CUDA merge for this shape (top-k, score dtype and `loc`'s page
+    rows), compiled at its first use outside a CUDA graph capture; None for
+    shapes it does not cover, when it cannot be built, and inside a capture
+    before its first build."""
+    if topk not in _MERGE_THREADS or loc.page_rows not in _MERGE_PAGE_ROWS:
         return None
     defines = (
         ("TOP_K", topk),
         ("THREADS", _MERGE_THREADS[topk]),
         ("SCORE_F32", int(score_f32)),
-        ("LOG2_PAGE_ROWS", page_rows.bit_length() - 1),
+        ("LOG2_PAGE_ROWS", loc.page_rows.bit_length() - 1),
     )
     return get_kernel(
         "merge.cu",
         "indexer_localize_merge",
         defines,
-        device_index,
+        loc.resources.device,
         build=not torch.cuda.is_current_stream_capturing(),
     )
 
 
 def prepare_merge(
-    topk: int, logits_dtype: torch.dtype, page_rows: int, device_index: int
+    loc: LocalizedDecodeMetadata, topk: int, logits_dtype: torch.dtype
 ) -> None:
     """Compile the CUDA merge for a shape ahead of its first use (a no-op
     inside a CUDA graph capture)."""
-    _merge_kernel(topk, logits_dtype == torch.float32, page_rows, device_index)
+    _merge_kernel(loc, topk, logits_dtype == torch.float32)
 
 
 def _merge_fits(
@@ -357,7 +352,7 @@ def merge_candidates(
     """Merge both domains' top-k candidates into `topk_out`, on the current
     stream. The CUDA merge must be available for this shape and buffers."""
     score_f32 = o0.dtype == torch.float32
-    kernel = _merge_kernel(topk_tokens, score_f32, loc.page_rows, loc.resources.device)
+    kernel = _merge_kernel(loc, topk_tokens, score_f32)
     assert kernel is not None and _merge_fits(idx, loc.inv_maps, topk_out)
     assert o0.stride() == o1.stride() and o0.stride(1) == 1 and o0.stride(0) < 2**31
     threads = _MERGE_THREADS[topk_tokens]
@@ -404,6 +399,8 @@ _TOPK_INDICES: dict[tuple[int, int, int], torch.Tensor] = {}
 def _topk_scratch(
     loc: LocalizedDecodeMetadata, topk_tokens: int, rows: int
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Each domain's top-k workspace and `[rows, K]` int32 output, kept per
+    process and sized for at least the localizer's largest batch."""
     from vllm.model_executor.layers.indexer_topk import RADIX_TOPK_WORKSPACE_SIZE
 
     device = loc.resources.device
@@ -417,7 +414,7 @@ def _topk_scratch(
         key = (device, d, topk_tokens)
         if key not in _TOPK_INDICES or _TOPK_INDICES[key].shape[0] < rows:
             _TOPK_INDICES[key] = torch.empty(
-                (max(rows, loc.capacity), topk_tokens), dtype=torch.int32, device=device
+                (max(rows, loc.max_rows), topk_tokens), dtype=torch.int32, device=device
             )
         indices.append(_TOPK_INDICES[key][:rows])
     return workspaces, indices
@@ -434,19 +431,19 @@ def localized_paged_mqa_topk(
     topk_tokens: int,
     max_seq_len: int,
     topk_out: torch.Tensor,
-    keep: list[torch.Tensor] | None = None,
-    topk_backend: str = "cooperative",
+    topk_backend: str,
+    scores_out: list[torch.Tensor] | None = None,
 ) -> bool:
     """Per-domain scan and top-k, then the merge, into `topk_out`.
 
     `topk_out` is the `[rows, K]` int32 view of the top-k buffer, and
     `topk_backend` the per-domain top-k (`localized_topk_backend`). With
-    `keep`, both domains' compact scores are appended to it (for a join the
-    caller runs later; such a call never defers). When the caller requested
-    a deferred top-k (`indexer_overlap.request_deferred_topk`), the call
-    returns without joining: domain 0's stream waits for domain 1 and merges.
-    Returns False, without launching anything, when this call cannot be
-    localized.
+    `scores_out`, both domains' compact scores are appended to it (for a join
+    the caller runs later; such a call never defers). When the caller
+    requested a deferred top-k (`indexer_overlap.request_deferred_topk`), the
+    call returns without joining: domain 0's stream waits for domain 1 and
+    merges. Returns False, without launching anything, when this call cannot
+    be localized.
     """
     rows = q[0].shape[0] * q[0].shape[1]
     if (
@@ -460,9 +457,7 @@ def localized_paged_mqa_topk(
         )
         return False
     workspaces, idx = _topk_scratch(loc, topk_tokens, rows)
-    merge = _merge_kernel(
-        topk_tokens, logits_dtype == torch.float32, loc.page_rows, loc.resources.device
-    )
+    merge = _merge_kernel(loc, topk_tokens, logits_dtype == torch.float32)
     if merge is None or not _merge_fits(idx, loc.inv_maps, topk_out):
         logger.warning_once(
             "Die-local indexer: no CUDA merge for top-k %d, %d-row pages and "
@@ -484,7 +479,7 @@ def localized_paged_mqa_topk(
         topk_op(o, loc.seq_lens[d], idx[d], workspaces[d], topk_tokens, max_seq_len)
         return o
 
-    if keep is None and indexer_overlap.consume_deferred_topk_request():
+    if scores_out is None and indexer_overlap.consume_deferred_topk_request():
         # Fork without joining: each domain stream waits for the caller's
         # work so far, scans and selects; domain 0 then waits for domain 1
         # and merges. The caller joins on domain 0's stream.
@@ -508,7 +503,7 @@ def localized_paged_mqa_topk(
         indexer_overlap.set_deferred_topk(merge_stream, (q, weights, indices, outs))
         return True
     o0, o1 = torch.cuda.execute_on_streams(streams, scan_topk, range(len(streams)))
-    if keep is not None:
-        keep.extend((o0, o1))
+    if scores_out is not None:
+        scores_out.extend((o0, o1))
     merge_candidates(loc, o0, o1, idx, topk_tokens, topk_out)
     return True
