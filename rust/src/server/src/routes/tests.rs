@@ -992,6 +992,43 @@ async fn dev_routes_follow_api_server_options() {
     }
 }
 
+/// `VLLM_ALLOW_RUNTIME_LORA_UPDATING` reaches the router through
+/// `ApiServerOptions`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn lora_routes_follow_api_server_options() {
+    // A registered POST-only route answers GET with 405.
+    for (allow_runtime_lora_updating, expected) in [
+        (false, StatusCode::NOT_FOUND),
+        (true, StatusCode::METHOD_NOT_ALLOWED),
+    ] {
+        let (chat, engine_task) = test_chat_with_engine_handle().await;
+        let app = build_router(Arc::new(
+            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
+                ApiServerOptions {
+                    allow_runtime_lora_updating,
+                    ..Default::default()
+                },
+            ),
+        ));
+
+        for uri in ["/v1/load_lora_adapter", "/v1/unload_lora_adapter"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).expect("build request"))
+                .await
+                .expect("call app");
+            assert_eq!(
+                response.status(),
+                expected,
+                "{uri} allow_runtime_lora_updating={allow_runtime_lora_updating}"
+            );
+        }
+
+        engine_task.abort_and_join().await;
+    }
+}
+
 /// Assert that `method uri` hits the 501 placeholder for the Python route
 /// `route`.
 async fn assert_route_not_supported(app: &axum::Router, method: &str, uri: &str, route: &str) {
@@ -1304,68 +1341,6 @@ async fn generative_scoring_rejects_invalid_requests_before_submission() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn cohere_routes_follow_the_python_gates() {
-    const CHAT: &str = "/cohere/v2/chat";
-    const RENDER: &str = "/cohere/v2/chat/render";
-    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
-        b"engine-cohere-routes",
-        default_stream_output_specs(),
-        Arc::new(FakeChatBackend::new()),
-    )
-    .await;
-    let state = Arc::new(AppState::new(vec!["model".to_string()], chat));
-
-    async fn post_status(app: &axum::Router, uri: &str) -> StatusCode {
-        app.clone()
-            .call(
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .body(Body::empty())
-                    .expect("build request"),
-            )
-            .await
-            .expect("call app")
-            .status()
-    }
-
-    let enabled = build_router_with_gates(
-        state.clone(),
-        RouteGates {
-            scale_out: true,
-            cohere_api: true,
-            ..RouteGates::default()
-        },
-    );
-    assert_route_not_supported(&enabled, "POST", CHAT, CHAT).await;
-    assert_route_not_supported(&enabled, "POST", RENDER, RENDER).await;
-
-    let no_scale_out = build_router_with_gates(
-        state.clone(),
-        RouteGates {
-            cohere_api: true,
-            ..RouteGates::default()
-        },
-    );
-    assert_route_not_supported(&no_scale_out, "POST", CHAT, CHAT).await;
-    assert_eq!(
-        post_status(&no_scale_out, RENDER).await,
-        StatusCode::NOT_FOUND
-    );
-
-    let disabled = build_router_with_gates(
-        state,
-        RouteGates {
-            scale_out: true,
-            ..RouteGates::default()
-        },
-    );
-    assert_eq!(post_status(&disabled, CHAT).await, StatusCode::NOT_FOUND);
-    assert_eq!(post_status(&disabled, RENDER).await, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn scale_out_generate_and_abort_routes_are_disabled_by_default() {
     let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
         b"engine-scale-out-disabled",
@@ -1672,44 +1647,6 @@ async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn tokenizer_info_route_follows_api_server_options() {
-    for enabled in [false, true] {
-        let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
-            b"engine-tokenizer-info",
-            default_stream_output_specs(),
-            Arc::new(FakeChatBackend::new()),
-        )
-        .await;
-        let app = build_router(Arc::new(
-            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
-                ApiServerOptions {
-                    enable_tokenizer_info_endpoint: enabled,
-                    ..Default::default()
-                },
-            ),
-        ));
-
-        if enabled {
-            assert_route_not_supported(&app, "GET", "/tokenizer_info", "/tokenizer_info").await;
-        } else {
-            let response = app
-                .clone()
-                .call(
-                    Request::builder()
-                        .method("GET")
-                        .uri("/tokenizer_info")
-                        .body(Body::empty())
-                        .expect("build request"),
-                )
-                .await
-                .expect("call app");
-            assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        }
-    }
-}
-
 /// Build a dev-mode router backed by a mock engine using a custom ready
 /// response, returning the router and the engine task handle so the engine
 /// stays alive for the duration of the test.
@@ -1884,7 +1821,6 @@ where
                 dev_mode: true,
                 runtime_lora_updating: true,
                 scale_out: true,
-                ..RouteGates::default()
             },
         ),
         engine_task,
@@ -2782,6 +2718,62 @@ async fn completions_reject_missing_prompt() {
         {"model":"Qwen/Qwen1.5-0.5B-Chat","prompt":null} -> 400 Bad Request {"error":{"message":"Either prompt or prompt_embeds must be provided and non-empty.","type":"BadRequestError","param":"prompt","code":400}}
         {"model":"Qwen/Qwen1.5-0.5B-Chat","prompt":null,"prompt_embeds":[]} -> 400 Bad Request {"error":{"message":"Either prompt or prompt_embeds must be provided and non-empty.","type":"BadRequestError","param":"prompt","code":400}}
         {"model":"Qwen/Qwen1.5-0.5B-Chat","prompt_embeds":["AAAA"]} -> 400 Bad Request {"error":{"message":"prompt_embeds is not supported.","type":"BadRequestError","param":"prompt_embeds","code":400}}"#]].assert_eq(&results.join("\n"));
+    engine_task.abort_and_join().await;
+}
+
+/// A request over a queue limit gets a retryable 503 before it reaches the
+/// engine, on both the text and the chat path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn requests_over_a_queue_limit_return_503() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-queue-limit".to_vec(),
+        |_dealer, _push| boxed_test_future(async {}),
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let llm = test_llm(client).with_admission_limits(crate::AdmissionLimits {
+        max_num_queued_reqs: Some(0),
+        max_num_queued_tokens: None,
+    });
+    let chat = ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new()))
+        .with_served_model_name("test-model");
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let mut results = Vec::new();
+    for (uri, body) in [
+        (
+            "/v1/completions",
+            json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello"}),
+        ),
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": "hello"}],
+            }),
+        ),
+    ] {
+        let (status, json) = post_json(&mut app, uri, body).await;
+        results.push(format!("{uri} -> {status} {json}"));
+    }
+    expect_test::expect![[r#"
+        /v1/completions -> 503 Service Unavailable {"error":{"message":"The engine is currently busy and cannot accept new requests. Please try again later or on a different instance.","type":"ServiceUnavailableError","param":null,"code":503}}
+        /v1/chat/completions -> 503 Service Unavailable {"error":{"message":"The engine is currently busy and cannot accept new requests. Please try again later or on a different instance.","type":"ServiceUnavailableError","param":null,"code":503}}"#]].assert_eq(&results.join("\n"));
     engine_task.abort_and_join().await;
 }
 

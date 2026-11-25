@@ -4,6 +4,7 @@
 import os
 from contextlib import nullcontext
 from multiprocessing import connection
+from multiprocessing.process import BaseProcess
 from threading import Event
 from types import SimpleNamespace
 
@@ -189,7 +190,7 @@ def test_engine_core_process_shutdown_timeout(
     manager = object.__new__(CoreEngineProcManager)
     manager._request_shutdown_timeout = request_timeout
     manager.manager_stopped = Event()
-    manager.processes = [object()]
+    manager.processes = [BaseProcess()]
     detach_results = iter((object(), None))
     manager._finalizer = SimpleNamespace(detach=lambda: next(detach_results))
 
@@ -300,14 +301,19 @@ def test_freeze_gc_after_clean_rocm_engine_core_shutdown(
     assert calls == expected_calls
 
 
-class _FinishedProcess:
+class _FinishedProcess(BaseProcess):
     name = "RustFrontend"
 
-    def __init__(self, sentinel):
-        self.sentinel = sentinel
+    def __init__(self, sentinel: int):
+        super().__init__()
+        self._sentinel_fd = sentinel
 
     @property
-    def exitcode(self):
+    def sentinel(self) -> int:
+        return self._sentinel_fd
+
+    @property
+    def exitcode(self) -> int | None:
         return 1
 
 
@@ -331,7 +337,7 @@ def test_wait_for_engine_startup_reports_watched_process_exit():
             addresses=EngineZmqAddresses(inputs=[], outputs=[]),
             tensor_queue=None,
         )
-        launch.watched_frontend_processes = [_FinishedProcess(recv)]
+        launch.watched_frontend_processes = [_FinishedProcess(recv.fileno())]
         with pytest.raises(RuntimeError) as exc_info:
             wait_for_engine_startup(
                 handshake_socket,
