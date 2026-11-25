@@ -700,9 +700,8 @@ class KimiK3DSAAttention(nn.Module):
         self.defer_topk = (
             envs.VLLM_INDEXER_OVERLAP
             and self.q_lora_rank is not None
-            and not self.mla_attn.dcp_q_replicate
-            and not vllm_config.parallel_config.use_ubatching
             and vllm_config.speculative_config is None
+            and indexer_overlap.index_group_joins_topk(self.mla_attn.mla_attn.impl)
         )
 
         # Dense-MHA prefills never read the top-k indices (PCP excluded, as
@@ -781,7 +780,11 @@ class KimiK3DSAAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         if self._packed is None:
-            if self._defers_topk(hidden_states.shape[0]):
+            layer_name = self.mla_attn.mla_attn.layer_name
+            if (
+                self.defer_topk
+                and indexer_overlap.captured_decode_metadata(layer_name) is not None
+            ):
                 return self._forward_deferred_topk(positions, hidden_states)
             return self.mla_attn(positions, hidden_states)
         # As in the dense Kimi-K3 MLA: the output-gate GEMM overlaps the
@@ -801,28 +804,15 @@ class KimiK3DSAAttention(nn.Module):
             gate = self.g_proj(hidden_states)[0]
         return self.o_proj(_gate_sigmoid_mul(attn_out, gate))[0]
 
-    def _defers_topk(self, num_tokens: int) -> bool:
-        """Whether this call may defer the indexer's top-k: a FULL CUDA graph
-        capture of a decode-only batch whose sparse attention reads the top-k
-        only through its index group's conversion."""
-        if not self.defer_topk:
-            return False
-        attn = self.mla_attn.mla_attn
-        metadata = indexer_overlap.captured_decode_metadata(attn.layer_name)
-        return metadata is not None and indexer_overlap.index_group_joins_topk(
-            attn.impl, metadata, num_tokens
-        )
-
     def _forward_deferred_topk(
         self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
         """`MultiHeadLatentAttentionWrapper.forward`'s ops for this layer around a
         deferred indexer top-k: while it runs on another stream, this one issues
-        the work that never reads the kept tokens (kv norm, q_b_proj, optional
-        RoPE, output gate, MLA cache insert and query preparation). The index
-        group's conversion waits for the top-k, and attention for the conversion.
+        the work that never reads the kept tokens (kv norm, q_b_proj, output gate,
+        MLA cache insert and query preparation). The index group's conversion
+        waits for the top-k, and attention for the conversion.
         """
-        assert self.q_lora_rank is not None
         attn = cast(Any, self.mla_attn.mla_attn)
         started_wkv = self.dsa_indexer.start_wkv_index(hidden_states)
         q_c, kv_c, k_pe = self.fused_qkv_a_proj(hidden_states)[0].split(
@@ -837,10 +827,6 @@ class KimiK3DSAAttention(nn.Module):
         kv_c_normed = self.kv_a_layernorm(kv_c)
         k_pe = k_pe.unsqueeze(1)
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
-        if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
-            )
         gate = None
         if hasattr(self, "g_proj"):
             gate = self.g_proj(hidden_states)[0].sigmoid()

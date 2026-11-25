@@ -272,7 +272,6 @@ def decode_schedule(
 ) -> torch.Tensor:
     """The second step of `sparse_mqa_logits_paged_decode`: the DeepGEMM
     schedule of `op`'s decode rows over `sparse_indices`."""
-    assert rows.block_table is not None and rows.row_indices is not None
     return get_paged_sparse_mqa_logits_metadata(
         rows.row_ke,
         rows.block_table,

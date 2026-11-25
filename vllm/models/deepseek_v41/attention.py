@@ -592,13 +592,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # reorder their front end around the indexer.
         self.reorder_front_end = (
             envs.VLLM_INDEXER_OVERLAP
-            and current_platform.is_cuda()
-            and self.indexer is not None
             and not self.use_pcp
             and not vllm_config.parallel_config.use_ubatching
             and vllm_config.speculative_config is None
-            and aux_stream_list is not None
-            and len(aux_stream_list) >= 2
         )
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
         # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins
@@ -1093,17 +1089,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         aux0, aux1 = self.aux_stream_list[0], self.aux_stream_list[1]
         main = torch.cuda.current_stream()
         latent: torch.Tensor | None = None
-        if indexer.owns_k or compressor is not None:
+        if compressor is not None:
             aux1.wait_stream(main)
             with torch.cuda.stream(aux1):
                 index_q, index_q_scale, index_weights = indexer.forward_q(
                     qr, qr_scale, indexer_weights, positions, self.indexer_rotary_emb
                 )
             index_q_done = aux1.record_event()
-            if compressor is not None:
-                latent = compressor(kv_score, positions)
-            if indexer.owns_k:
-                indexer._produce_k(latent, positions, self.indexer_rotary_emb)
+            latent = compressor(kv_score, positions)
+            indexer._produce_k(latent, positions, self.indexer_rotary_emb)
             main.wait_event(index_q_done)
         else:
             index_q, index_q_scale, index_weights = indexer.forward_q(
@@ -1121,7 +1115,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         attn_inputs_ready = aux0.record_event()
         logger.info_once("Sparse indexer overlap: reordered attention front end.")
 
-        assert index_q is not None and index_weights is not None
         q_quant = (index_q, index_q_scale) if index_q_scale is not None else index_q
         indexer.indexer_op(hidden_states, q_quant, None, index_weights)
         main.wait_event(attn_inputs_ready)
