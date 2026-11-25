@@ -284,6 +284,7 @@ class OffloadingConnectorScheduler:
         self.manager: OffloadingManager = spec.get_manager()
         # Under async_init the engine serves without offloading until every
         # worker has reported ready.
+        self._async_init = spec.async_init
         self._offloading_enabled = not spec.async_init
         self._ready_ranks: set[int] = set()
         if not self._offloading_enabled:
@@ -1779,6 +1780,15 @@ class OffloadingConnectorScheduler:
         # The load flush IDs collected above must be delivered to workers.
         if self._chunks_being_loaded is not None:
             self._chunks_being_loaded.clear()
+
+    def checkpoint_restore(self) -> None:
+        """Retire drained reset jobs and wait for the new CPU tier's readiness."""
+        self._current_batch_jobs_to_flush.clear()
+        self._reset_fence.clear()
+        self._reset_fence_since = 0.0
+        self.manager.on_reset_flushed()
+        self._ready_ranks.clear()
+        self._offloading_enabled = not self._async_init
 
     def shutdown(self) -> None:
         self.manager.shutdown()

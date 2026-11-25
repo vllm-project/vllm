@@ -57,7 +57,9 @@ steps:
   automatic_shard: true
   timeout_in_minutes: 68
   device: h200_18gb
-  source_file_dependencies: *basic-correctness-deps
+  source_file_dependencies:
+  - vllm/
+  - tests/basic_correctness/
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/memory/sleep_mode

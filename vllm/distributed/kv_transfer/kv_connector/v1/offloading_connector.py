@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 
+import vllm.platforms
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
@@ -47,6 +48,7 @@ from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_offload.cpu import spec as cpu_spec
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
@@ -107,6 +109,38 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker.shutdown()
         if self.connector_scheduler is not None:
             self.connector_scheduler.shutdown()
+
+    @classmethod
+    def supports_checkpoint(cls, vllm_config: VllmConfig) -> bool:
+        """Return whether the configured CPU tier can be recreated empty.
+
+        Args:
+            vllm_config: The engine configuration.
+
+        Returns:
+            Whether the native CPU spec owns all host cache mappings.
+
+        """
+        transfer = vllm_config.kv_transfer_config
+        assert transfer is not None
+        return (
+            vllm.platforms.current_platform.is_cuda()
+            and OffloadingSpecFactory.get_spec_cls(transfer.kv_connector_extra_config)
+            is cpu_spec.CPUOffloadingSpec
+            and vllm_config.attention_config.hisparse_config is None
+        )
+
+    def checkpoint_prepare(self) -> None:
+        """Release worker CPU mappings after the engine resets its cache."""
+        if self.connector_worker is not None:
+            self.connector_worker.checkpoint_prepare()
+
+    def checkpoint_restore(self) -> None:
+        """Recreate the empty CPU tier after device communicators resume."""
+        if self.connector_worker is not None:
+            self.connector_worker.checkpoint_restore()
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.checkpoint_restore()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None

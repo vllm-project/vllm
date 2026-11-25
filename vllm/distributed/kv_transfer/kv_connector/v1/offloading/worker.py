@@ -33,6 +33,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadingWorker,
 )
+from vllm.v1.kv_offload.cpu import spec as cpu_spec
 from vllm.v1.kv_offload.pointer_utils import resolve_device_pointers
 
 logger = init_logger(__name__)
@@ -367,6 +368,19 @@ class OffloadingConnectorWorker:
         meta = self._connector_worker_meta
         self._connector_worker_meta = OffloadingWorkerMetadata()
         return meta
+
+    def checkpoint_prepare(self) -> None:
+        """Drain transfers and release the reset CPU tier before capture."""
+        assert type(self.spec) is cpu_spec.CPUOffloadingSpec
+        self.shutdown()
+        self.worker = None
+        self.spec._worker = None
+
+    def checkpoint_restore(self) -> None:
+        """Rebuild transfer handlers and host mappings from the retained layout."""
+        assert self.worker is None
+        self._report_ready = self.spec.async_init
+        self._init_worker(self._kv_caches)
 
     def shutdown(self) -> None:
         self._unsubmitted_store_jobs.clear()

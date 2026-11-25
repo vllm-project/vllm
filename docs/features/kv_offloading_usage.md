@@ -81,6 +81,37 @@ vllm serve <model> \
   }'
 ```
 
+## Process checkpoint and restore
+
+On CUDA, the native single CPU tier supports `/checkpoint/prepare` and
+`/checkpoint/restore` when the engine uses `--enable-sleep-mode`.
+Follow the [Process Checkpoint APIs](../serving/online_serving/README.md#process-checkpoint-apis)
+to prepare, poll readiness, capture with an external orchestrator, and restore.
+This support depends on the connector lifecycle hooks in
+[vLLM #64371](https://github.com/vllm-project/vllm/pull/64371); use a build
+containing both changes.
+
+```bash
+curl -X POST http://localhost:8000/checkpoint/prepare
+curl http://localhost:8000/checkpoint/status
+# Capture only after status reports prepared, then restore the process externally.
+curl -X POST http://localhost:8000/checkpoint/restore
+curl http://localhost:8000/checkpoint/status
+```
+
+Preparation drains requests, resets the connector cache, and releases its CPU
+mappings and transfer handlers before distributed communicators stop. The
+snapshot therefore does not include deleted CPU offload files.
+
+Restore recreates an empty CPU tier and its transfer handlers after the
+communicators resume. Previously offloaded prefixes are recomputed. With
+`async_init: true`, serving resumes without offloading until all workers report
+that the new host mappings are pinned. Multi-tier and HiSparse configurations
+are not supported by these checkpoint hooks.
+
+Ordinary sleep with `reset_connector=False` retains the CPU cache; it does not
+use the process-checkpoint release path.
+
 ## Multi-Tier Setup
 
 Set `spec_name` to `"TieringOffloadingSpec"` and supply a `secondary_tiers` list. Each entry is a dict with a required `type` key plus tier-specific fields (and an optional `module_path` for out-of-tree tiers). The list is ordered: tier 0 is consulted before tier 1, and so on. See [Secondary Tiers](#secondary-tiers) for tier-specific keys.

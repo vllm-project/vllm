@@ -10,9 +10,14 @@ separate paired accuracy evaluation because that mode is unsupported for GDN.
 """
 
 import os
+import pathlib
+import time
 
 import pytest
 
+import vllm
+import vllm.platforms
+import vllm.v1.engine
 from vllm import LLM, SamplingParams
 
 
@@ -130,3 +135,86 @@ def test_process_checkpoint_preserves_outputs_and_graphs(tp, transport, monkeypa
         llm.sleep(level=1)
     finally:
         llm.llm_engine.engine_core.shutdown()
+
+
+def _get_cpu_offload_mappings(worker: object) -> list[str]:
+    """Read the worker's CPU offload mappings.
+
+    Args:
+        worker: The worker supplied by collective_rpc.
+
+    Returns:
+        CPU offload mapping entries from the process's memory map.
+
+    """
+    return [
+        line
+        for line in pathlib.Path("/proc/self/maps").read_text().splitlines()
+        if "/dev/shm/vllm_offload_" in line
+    ]
+
+
+@pytest.mark.skipif(
+    not vllm.platforms.current_platform.is_cuda(),
+    reason="CPU-tier process checkpoints require CUDA",
+)
+@pytest.mark.parametrize("async_init", [False, True])
+@pytest.mark.parametrize("tp", [1, 2])
+def test_checkpoint_releases_native_cpu_tier(
+    async_init: bool, tp: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Discard host mappings during checkpoint and restore identical output.
+
+    Args:
+        async_init: Whether restored host memory is pinned in the background.
+        tp: Number of tensor-parallel workers sharing the host tier.
+        monkeypatch: Fixture for process-wide vLLM test settings.
+
+    """
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    llm = vllm.LLM(
+        os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B"),
+        enable_sleep_mode=True,
+        tensor_parallel_size=tp,
+        max_model_len=512,
+        max_num_seqs=2,
+        enforce_eager=True,
+        disable_log_stats=False,
+        kv_cache_memory_bytes=128 * 1024**2,
+        kv_transfer_config={
+            "kv_connector": "OffloadingConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "cpu_bytes_to_use": 128 * 1024**2,
+                "async_init": async_init,
+            },
+        },
+    )
+    params = vllm.SamplingParams(temperature=0, max_tokens=16)
+    prompt = "Remember this sentence about Paris. " * 40 + "The capital of France is"
+    reference = llm.generate(prompt, params, use_tqdm=False)[0].outputs[0]
+    assert all(llm.collective_rpc(_get_cpu_offload_mappings))
+    core = llm.llm_engine.engine_core
+    try:
+        for _ in range(3):
+            assert core.call_utility("checkpoint_prepare", "abort") is None
+            deadline = time.monotonic() + 60
+            while True:
+                state, error = core.call_utility("checkpoint_state")
+                assert error is None
+                if state == vllm.v1.engine.CheckpointState.PREPARED:
+                    break
+                assert time.monotonic() < deadline, state
+                time.sleep(0.01)
+            assert not any(llm.collective_rpc(_get_cpu_offload_mappings))
+            core.call_utility("checkpoint_restore")
+            assert all(llm.collective_rpc(_get_cpu_offload_mappings))
+            actual = llm.generate(prompt, params, use_tqdm=False)[0].outputs[0]
+            assert actual.token_ids == reference.token_ids
+            assert llm.reset_prefix_cache(reset_connector=False)
+            cached = llm.generate(prompt, params, use_tqdm=False)[0]
+            assert cached.outputs[0].token_ids == reference.token_ids
+            assert cached.num_cached_tokens > 0
+    finally:
+        core.shutdown()
