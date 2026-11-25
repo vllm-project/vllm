@@ -15,7 +15,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 @pytest.fixture(scope="module")
-def server():
+def server(request: pytest.FixtureRequest):
     args = [
         "--dtype",
         "bfloat16",
@@ -24,9 +24,8 @@ def server():
         "--enforce-eager",
         "--max-num-seqs",
         "32",
-        # Compare text and token IDs with the same prefill shape.
-        "--no-enable-prefix-caching",
     ]
+    args.extend(getattr(request, "param", []))
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
@@ -156,6 +155,7 @@ class TestGenerativeScoringAPI:
         assert abs(r1_score - r2_score) < 1e-6
 
     @pytest.mark.parametrize("item_first", [False, True])
+    @pytest.mark.parametrize("server", [["--no-enable-prefix-caching"]], indirect=True)
     def test_long_text_matches_token_ids(self, server: RemoteOpenAIServer, item_first):
         tokenizer = get_tokenizer(MODEL_NAME)
         text = " " * (511 * tokenizer.max_chars_per_token) + "hello world"
