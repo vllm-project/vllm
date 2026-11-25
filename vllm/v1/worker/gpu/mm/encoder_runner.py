@@ -171,11 +171,8 @@ class EncoderRunner:
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             [mm_kwargs[i] for i in order], device=self.device, pin_memory=PIN_MEMORY
         ):
-            # Bucket by true length BEFORE the cudagraph decision, at the
-            # fbank/feature stage. Each rung is a fixed-shape sub-batch, so
-            # bucketing and CUDA graphs are complementary: a rung's fixed shape
-            # matches one captured graph, and each rung picks graph or eager on
-            # its own.
+            # Bucket before the CUDA-graph decision: each rung is a fixed-shape
+            # sub-batch and picks graph or eager on its own.
             batch_outputs: list[torch.Tensor | None] = [None] * num_items
             for indices, rung_kwargs in self._bucket_mm_batch(
                 mm_kwargs_batch, num_items
@@ -204,16 +201,7 @@ class EncoderRunner:
     def _bucket_mm_batch(
         self, mm_kwargs_batch: BatchedTensorInputs, num_items: int
     ) -> list[tuple[list[int], BatchedTensorInputs]]:
-        """Split a batch into rungs when the model declares bucketing, else one.
-
-        Args:
-            mm_kwargs_batch: The batched encoder kwargs.
-            num_items: Number of items in the batch.
-
-        Returns:
-            `(indices, rung_kwargs)` pairs covering every batch row exactly once.
-
-        """
+        """Split a batch into rungs when the model declares bucketing, else one."""
         bucketer = getattr(self.model, "_encoder_bucketing", None)
         if bucketer is None:
             return [(list(range(num_items)), mm_kwargs_batch)]

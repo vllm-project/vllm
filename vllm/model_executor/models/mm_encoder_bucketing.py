@@ -1,51 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Encoder length bucketing for padded multimodal (audio) encoders in vLLM.
+"""Encoder length bucketing for padded multimodal (audio) encoders.
 
-When one batch mixes short and long clips, a padded encoder computes every item
-over the padded batch length (Qwen2-Audio pads every mel to a fixed 3000-frame
-window): a 2 s clip batched with a 30 s clip computes far more frames than it
-needs, entirely on padding. Length bucketing re-groups items by their true
-lengths into discrete length "rungs" and computes each rung over its own window,
-so short clips stop paying for long ones. It moves from *fixed padding* to
-*padding sized to the actual audio length* -- it never removes content, only the
-padding around it.
+A padded encoder computes every item over the padded window, so a 2 s clip
+batched with a 30 s clip pays for far more frames than it needs. Bucketing
+re-groups the batch by true item length into discrete length rungs and computes
+each rung over its own window: it removes padding, never content.
 
-Bucketing runs in `EncoderRunner.execute_mm_encoder`, *before* the
-CUDA-graph-or-eager decision, at the fbank/feature stage (right when the padded
-features enter, before any conv/attention compute). Each rung is a fixed-shape
-sub-batch, so bucketing and CUDA graphs are complementary rather than exclusive:
-a rung's fixed shape is exactly what one captured graph needs, so every rung can
-be captured and replayed on its own. This is why bucketing lives at the
-scheduler layer and not inside an encoder forward -- anything done inside the
-forward is invisible to the CUDA-graph path.
+It runs in `EncoderRunner.execute_mm_encoder` before the CUDA-graph-or-eager
+decision; each rung is a fixed-shape sub-batch, so the CUDA-graph path keeps
+working. Losslessness is per encoder class: mask-aware crops are bit-exact.
 
-This is complementary to vLLM's packed-varlen path (`MMEncoderAttention` +
-`cu_seqlens`). Varlen packs items into one flat sequence and removes padding
-losslessly, but only for encoders whose function is unchanged by packing. For
-padded encoders that cannot be packed (notably unmasked ones) this recovers the
-waste the packing path cannot. The two cover disjoint encoder classes and
-neither replaces the other.
-
-Numerics are classified per encoder class:
-
-- mask-aware (explicit attention mask): the mask puts padding outside the
-  function, so shrinking the padding is content-exact; in bf16 the residual is
-  ULP-level kernel rounding, the same class of non-batch-invariance vLLM
-  already documents.
-- unmasked + relative PE: approx-lossless.
-- unmasked + absolute PE: lossy by construction (padding is attended) -- opt-in
-  and off by default.
-
-The feature is opt-in via `additional_config.audio_bucket_seconds` (a ladder of
-seconds, e.g. `[2, 4, 8, 16, 30]`) and engages only for models that declare an
-`EncoderBucketingSpec` carrying the model's own length/crop semantics and
-frame-rate knobs; declaring the spec is the opt-in. Setting
+The feature is opt-in via `additional_config.audio_bucket_seconds` (a seconds
+ladder, e.g. `[2, 4, 8, 16, 30]`) and engages only for models that declare an
+`EncoderBucketingSpec`; declaring the spec is the opt-in. Setting
 `additional_config.audio_bucket_budget` additionally enables compute-budget
-merging, which keeps each encoder call's compute inside a band (see
-`EncoderBucketing`). With
-the feature off, no shim is installed and the original forward runs untouched
-(byte-identical); a per-batch waste gate keeps bucketing from ever computing more
+merging. With the feature off, no shim is installed and the original forward
+runs untouched; a per-batch waste gate keeps bucketing from ever computing more
 than the untouched forward.
 """
 
@@ -66,46 +37,20 @@ logger = init_logger(__name__)
 _CONFIG_KEY = "audio_bucket_seconds"
 _CONFIG_KEY_BUDGET = "audio_bucket_budget"
 
-# ---------------------------------------------------------- fixed-window shim
-#
-# Some encoders pin their window length inside `forward` -- an expected-length
-# assertion plus a fixed positional-embedding shape -- so a shorter rung window
-# is rejected even though the math is well defined for variable lengths. The
-# recipe is model-specific (it mirrors that encoder's own forward minus the
-# fixed-length assumption), so each adapted model registers its own shim here at
-# import time (see `qwen2_audio.py`). The shim is installed on the encoder module
-# only while bucketing is active so rung-length inputs are accepted; for a
-# full-length input it is byte-identical to the original forward in eval mode.
-#
-# Keyed by the wrapped class's exact name -- no MRO walk. A subclass that
-# changes forward semantics must not inherit the base recipe. Classes without a
-# verified variable-length recipe keep their original forward (which also serves
-# the fallback path).
+# Fixed-window encoders pin their window length inside `forward`, so rung-sized
+# inputs are rejected. Adapted models register a variable-length recipe here at
+# import time (see `qwen2_audio.py`), keyed by the wrapped class's exact name so
+# subclasses with different semantics never inherit it.
 _FORWARD_SHIMS: dict[str, Callable[..., Any]] = {}
 
 
 def register_forward_shim(class_name: str, shim_fn: Callable[..., Any]) -> None:
-    """Register a variable-length forward recipe for a fixed-window encoder class.
-
-    Called at import time by an adapted model (see `qwen2_audio.py`) to install
-    the model-specific shim that mirrors its encoder's `forward` minus the
-    fixed-length assumption. Keyed by the wrapped class's exact name -- no MRO
-    walk (see `_FORWARD_SHIMS`).
-    """
     _FORWARD_SHIMS[class_name] = shim_fn
-
-
-# ------------------------------------------------------------- length ladder
 
 
 @dataclass(frozen=True)
 class LengthBucketingConfig:
-    """A discrete length ladder used to bucket variable-length inputs.
-
-    Args:
-        buckets: Rung lengths in feature frames, sorted ascending.
-
-    """
+    """A discrete ladder of rung lengths in feature frames, sorted ascending."""
 
     buckets: tuple[int, ...]
 
@@ -115,25 +60,8 @@ class LengthBucketingConfig:
         if tuple(self.buckets) != tuple(sorted(self.buckets)):
             raise ValueError("LengthBucketingConfig.buckets must be sorted ascending")
 
-    @property
-    def max_length(self) -> int:
-        """The largest rung: the window used when no rung fits."""
-        return self.buckets[-1]
-
     def padded_length(self, length: int) -> int | None:
-        """Return the smallest rung `>=` `length`, or `None` when none fits.
-
-        `None` means the item cannot be computed over a rung without truncating
-        content -- callers fall back to the untouched full batch instead
-        (see `EncoderBucketing.bucket`).
-
-        Args:
-            length: True length in feature frames.
-
-        Returns:
-            The rung window this length should compute over, or `None`.
-
-        """
+        """Smallest rung `>=` `length`, or `None` when the item exceeds the ladder."""
         for rung in self.buckets:
             if rung >= length:
                 return rung
@@ -143,19 +71,7 @@ class LengthBucketingConfig:
 def _ladder_seconds(
     additional_config: Mapping[str, object] | None,
 ) -> tuple[float, ...] | None:
-    """Read `additional_config.audio_bucket_seconds` as a seconds ladder.
-
-    Args:
-        additional_config: The `VllmConfig.additional_config` mapping in effect,
-            or `None` to disable bucketing.
-
-    Returns:
-        Sorted unique seconds, or `None` when bucketing is not requested.
-
-    Raises:
-        ValueError: If the config value is not a list of positive numbers.
-
-    """
+    """Read `audio_bucket_seconds` as sorted unique seconds, or `None` when unset."""
     raw = (
         additional_config.get(_CONFIG_KEY)
         if isinstance(additional_config, Mapping)
@@ -189,25 +105,7 @@ def _ladder_seconds(
 def _compute_budget(
     additional_config: Mapping[str, object] | None,
 ) -> int | None:
-    """Read `additional_config.audio_bucket_budget`, or `None` to skip merging.
-
-    The budget bounds one encoder call's compute (items x padded frames):
-    oversized groups split into balanced chunks and under-filled groups fold
-    into their larger neighbor while the merged call stays within the budget.
-    The fold trigger is derived (`budget // 6`); sweeping it at c=8/32/128
-    changed throughput and TTFT by under 2%, so it is not a knob.
-
-    Args:
-        additional_config: The `VllmConfig.additional_config` mapping in effect.
-
-    Returns:
-        The per-call compute budget, or `None` when compute-budget batching is
-        off.
-
-    Raises:
-        ValueError: If the budget is not a positive int.
-
-    """
+    """Read `audio_bucket_budget` as the per-call compute bound, or `None`."""
     raw = (
         additional_config.get(_CONFIG_KEY_BUDGET)
         if isinstance(additional_config, Mapping)
@@ -231,42 +129,19 @@ def _compute_budget(
 def _rungs_from_seconds(
     seconds: tuple[float, ...], frames_per_second: int, align_to: int = 1
 ) -> tuple[int, ...]:
-    """Convert a seconds ladder to mel-frame rungs at the model's frame rate.
-
-    Args:
-        seconds: Sorted ascending bucket edges in seconds.
-        frames_per_second: Mel frames per second of input audio.
-        align_to: Align each rung up to a multiple of this many frames (e.g. a
-            conv/merge downsampling factor). `1` disables alignment.
-
-    Returns:
-        Rung lengths in mel frames (at least one frame per bucket).
-
-    """
+    """Convert seconds to mel-frame rungs; `align_to` rounds each rung up."""
     rungs = [max(1, int(round(s * frames_per_second))) for s in seconds]
     if align_to > 1:
         rungs = [((r + align_to - 1) // align_to) * align_to for r in rungs]
     return tuple(rungs)
 
 
-# ---------------------------------------------------------------- model spec
-
-
 class EncoderBucketingSpec:
-    """Per-model length extraction and field cropping for encoder bucketing.
+    """Per-model length and crop semantics; declaring a subclass opts the model in.
 
-    The encoder-owning model subclasses this and passes it to
-    `install_encoder_bucketing`, keeping the model's own length semantics (which
-    field carries the per-item length, how to crop each time-varying field to a
-    rung) and frame-rate knobs next to the model code. The generic bucketer stays
-    free of per-model field knowledge.
-
-    Subclasses must declare `frames_per_second` (mel frames per second of input
-    audio) and `context_margin` (extra frames past the published length so a
-    rung window never clips anything the encoder reads; declare `0` explicitly
-    when the encoder reads nothing past the length), plus optionally `align_to`
-    (align each rung up to a multiple of this many frames, e.g. a conv/merge
-    downsampling factor), and implement the three methods.
+    Subclasses set `frames_per_second`, `context_margin` (extra frames past the
+    published length so a rung never clips what the encoder reads; `0` is valid)
+    and optionally `align_to`, and implement the three methods.
     """
 
     frames_per_second: int | None = None
@@ -274,27 +149,11 @@ class EncoderBucketingSpec:
     align_to: int = 1
 
     def item_lengths(self, mm_kwargs_batch: Mapping[str, Any]) -> list[int] | None:
-        """Per-item true lengths in feature frames.
-
-        Args:
-            mm_kwargs_batch: The batched encoder kwargs (tensors over `num_items`).
-
-        Returns:
-            One length per item, or `None` if not derivable (skip bucketing).
-
-        """
+        """Per-item true lengths in feature frames, or `None` to skip bucketing."""
         raise NotImplementedError
 
     def padded_time(self, mm_kwargs_batch: Mapping[str, Any]) -> int:
-        """The padded time extent of the batch (the no-bucket compute per item).
-
-        Args:
-            mm_kwargs_batch: The batched encoder kwargs.
-
-        Returns:
-            Feature frames each item occupies without bucketing.
-
-        """
+        """Padded time extent of the batch (the no-bucket compute per item)."""
         raise NotImplementedError
 
     def crop(
@@ -303,26 +162,8 @@ class EncoderBucketingSpec:
         indices: list[int],
         rung: int,
     ) -> dict[str, Any]:
-        """Crop to the given rows, each truncated to `rung` feature frames.
-
-        The frames past an item's real content are the producer's own padding and
-        are carried through (never zero-filled), so the encoder sees input it saw
-        in training. Content is never truncated: callers only pass `rung` values
-        at least as large as every selected item's length.
-
-        Args:
-            mm_kwargs_batch: The batched encoder kwargs.
-            indices: Batch-row indices to select, in output order.
-            rung: Window length in feature frames to truncate each row to.
-
-        Returns:
-            Keyword arguments for the rung's fixed-shape sub-batch.
-
-        """
+        """Crop the selected rows to `rung` frames; content is never truncated."""
         raise NotImplementedError
-
-
-# ----------------------------------------------------------------- bucketer
 
 
 class EncoderBucketing:
@@ -347,8 +188,7 @@ class EncoderBucketing:
         self.spec = spec
         self.ladder = ladder
         self.compute_budget = compute_budget
-        # Derived, not a knob: sweeping it at c=8/32/128 changed throughput
-        # and TTFT by under 2% (run-to-run noise).
+        # Derived, not a knob: a c=8/32/128 sweep moved results under 2%.
         self.fill_floor = max(1, compute_budget // 6) if compute_budget else None
 
     @property
@@ -361,22 +201,7 @@ class EncoderBucketing:
         mm_kwargs_batch: dict[str, Any],
         num_items: int,
     ) -> list[tuple[list[int], dict[str, Any]]]:
-        """Split a batch into fixed-length rung sub-batches.
-
-        Falls back to a single full batch when bucketing cannot help: no
-        lengths, an item longer than the ladder (never truncate content), or the
-        waste gate (the capped windows would not reduce computed frames). Every
-        item appears in exactly one returned sub-batch.
-
-        Args:
-            mm_kwargs_batch: The batched encoder kwargs.
-            num_items: Number of items in the batch.
-
-        Returns:
-            `(indices, cropped_kwargs)` pairs; `indices` are batch-row positions
-            and `cropped_kwargs` is that rung's fixed-shape sub-batch.
-
-        """
+        """Split a batch into rung sub-batches, or one full batch when not useful."""
         full = [(list(range(num_items)), mm_kwargs_batch)]
         ladder = self.ladder
         if ladder is None or num_items == 0:
@@ -392,21 +217,16 @@ class EncoderBucketing:
         for length in lengths:
             rung = ladder.padded_length(length + margin)
             if rung is None:
-                # An item too long for the ladder has no safe rung; run the
-                # untouched forward rather than truncate content.
+                # No safe rung: run the untouched forward, never truncate.
                 return full
             windows.append(min(rung, time_extent))
-        # Waste gate: only bucket when the capped windows strictly reduce the
-        # total computed frames. Single, uniform, and no-shrink batches run the
-        # untouched forward -- the feature is never slower than off.
+        # Waste gate: only bucket when it strictly reduces computed frames.
         if sum(windows) >= num_items * time_extent:
             return full
         if self.compute_budget is not None and (
             num_items * max(windows) <= self.compute_budget
         ):
-            # Low-concurrency collapse: when the whole batch fits one call
-            # within the budget, compute it as a single sub-batch (the
-            # unbucketed behavior) -- splitting tiny batches only adds calls.
+            # Whole batch fits one call: the unbucketed behavior, no splitting.
             rung = max(windows)
             indices = list(range(num_items))
             return [(indices, self.spec.crop(mm_kwargs_batch, indices, rung))]
@@ -427,13 +247,9 @@ class EncoderBucketing:
     def _fold_rungs_to_floor(
         self, groups: dict[int, list[int]], budget: int, floor: int
     ) -> dict[int, list[int]]:
-        """Fold under-full rungs up until each call reaches the fill floor.
+        """Fold under-full rungs into the next rung, capped by the budget.
 
-        A group whose call compute (items x rung) is below `fill_floor` is
-        folded into the next (larger) rung, but only while the folded group
-        stays within `compute_budget` -- the pad inflation of a fold is capped
-        at the budget instead of gated on a raw item count. Groups already at
-        or above the floor never fold, so healthy batches are not over-merged.
+        Groups at or above the floor never fold.
         """
         rungs = sorted(groups)
         folded: dict[int, list[int]] = {}
@@ -459,14 +275,7 @@ class EncoderBucketing:
     def _split_oversized(
         self, groups: dict[int, list[int]], budget: int
     ) -> list[tuple[int, list[int]]]:
-        """Split rung groups whose call compute exceeds the budget.
-
-        A group of `n` items at rung `T` with `n * T > compute_budget` is cut
-        into `ceil(n / (budget // T))` balanced chunks, so long rungs get a
-        small per-call batch and short rungs a large one: every call computes
-        about the same `items x frames`, bounding call latency and activation
-        memory.
-        """
+        """Split groups above the budget into balanced chunks (~ budget // rung)."""
         calls: list[tuple[int, list[int]]] = []
         for rung, indices in groups.items():
             n = len(indices)
@@ -481,19 +290,10 @@ class EncoderBucketing:
         return calls
 
 
-# -------------------------------------------------------------- install
-
-
 def _gpu_execution_supported() -> bool:
     """Whether the GPU encoder runner executes on this worker.
 
-    Bucketing engages in `EncoderRunner._bucket_mm_batch`, which only the GPU
-    worker (`vllm/v1/worker/gpu/mm/encoder_runner.py`) wires into
-    `execute_mm_encoder`. On other execution paths no consumer ever reads the
-    bucketer, so the feature must stay off entirely -- no shim, original
-    forward -- rather than install a shim nothing consumes. Checked with the
-    platform API (`current_platform.is_cuda_alike()`), the repo's standard way
-    to gate a GPU-only feature.
+    The GPU encoder runner is the bucketer's only consumer.
     """
     from vllm.platforms import current_platform
 
@@ -509,15 +309,8 @@ def install_encoder_bucketing(
 ) -> None:
     """Install variable-length encoder shims and register the bucketer.
 
-    The encoder-owning model passes its encoder(s) as a `label -> module` mapping
-    and its `EncoderBucketingSpec` from its constructor; declaring the spec is
-    what opts the model in. Bucketing engages only on GPU execution paths
-    (GPU-only: the GPU encoder runner is the sole consumer) and when
-    `additional_config.audio_bucket_seconds` is set. When it engages, any encoder
-    with a fixed-window recipe gets the variable-length shim so rung inputs are
-    accepted, and the bucketer is registered on `model` for
-    `EncoderRunner.execute_mm_encoder` to use before the CUDA-graph decision.
-    Idempotent per `model`.
+    Declaring a spec opts the model in; bucketing engages only on GPU execution
+    paths and when `additional_config.audio_bucket_seconds` is set. Idempotent.
 
     Args:
         model: The encoder-owning model to register the bucketer on.
@@ -603,17 +396,7 @@ def install_encoder_bucketing(
 
 
 def uninstall_encoder_bucketing(model: nn.Module) -> list[str]:
-    """Restore every shimmed `forward`; returns the restored module class names.
-
-    Rollback for `install_encoder_bucketing` (test isolation, teardown).
-
-    Args:
-        model: The model previously passed to `install_encoder_bucketing`.
-
-    Returns:
-        Class names of the encoders whose `forward` was restored.
-
-    """
+    """Restore shimmed `forward`s and drop the bucketer; returns restored names."""
     manifest = getattr(model, "_encoder_bucketing_manifest", None) or []
     restored: list[str] = []
     for module, original in manifest:

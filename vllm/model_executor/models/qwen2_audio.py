@@ -116,13 +116,8 @@ Qwen2AudioInputs: TypeAlias = Qwen2AudioFeatureInputs | Qwen2AudioEmbeddingInput
 class Qwen2AudioBucketingSpec(EncoderBucketingSpec):
     """Bucketing semantics for Qwen2-Audio's padded mel encoder.
 
-    Per-item length is the count of valid mel frames (`feature_attention_mask`
-    summed over time). Both time-varying fields are cropped on their mel time
-    axis to the rung: `input_features` to `[rows][mel][rung]` and
-    `feature_attention_mask` to `[rows][rung]`. The conv-resolution attention
-    mask is derived downstream from the cropped feature mask, so it needs no
-    handling here. The model is mask-aware, so shrinking padding is
-    content-exact.
+    Length is the number of valid mel frames; both time-varying fields crop on
+    the mel time axis. The encoder is mask-aware, so the crop is content-exact.
     """
 
     frames_per_second = 100  # mel frames per second (WhisperFeatureExtractor)
@@ -161,40 +156,11 @@ def _qwen2audio_varlen_shim(
     attention_mask: torch.Tensor | None = None,
     **kwargs: object,
 ) -> object:
-    """Run `Qwen2AudioEncoder`'s compute without its fixed-length assumption.
+    """Mirror `Qwen2AudioEncoder.forward` minus its fixed-length assumption.
 
-    Mirrors the wrapped class's own `forward` minus the `expected_seq_length`
-    check and the eval-identity dropout, keeping its `avg_pooler` (a 2x time
-    downsampling before layer norm). `attention_mask` is the encoder's own
-    additive mask and is consumed by the layers unchanged. Input stays in the
-    module's native `[B][mel][T]` layout.
-
-    Args:
-        module: The `Qwen2AudioEncoder` whose weights run the compute.
-        input_features: Mel features, `[B][mel][T]` with `T` the rung window.
-        attention_mask: Additive attention mask over the conv output length.
-        **kwargs: Forwarded to the encoder layers unchanged, exactly as the
-            original `forward` does (`TransformersKwargs` extras are never
-            silently dropped here).
-
-    Returns:
-        A `BaseModelOutput` whose `last_hidden_state` is the encoder output.
-
+    Positional embeddings are sliced to the input length so a rung indexes only
+    the leading positions; for a full-length input the result is identical.
     """
-    # Mirrors ``Qwen2AudioEncoder.forward`` (transformers
-    # models/qwen2_audio/modeling_qwen2_audio.py) minus the fixed-length
-    # assumption; line refs are to transformers 5.20.2:
-    #   conv1 -> gelu -> conv2 -> gelu: forward L78-79 (conv1 kernel 3 stride 1,
-    #     conv2 kernel 3 stride 2);
-    #   permute + add embed_positions: forward L81-84, but sliced to
-    #     ``[:x.size(1)]`` so a rung shorter than the fixed window indexes only
-    #     the leading positions (identical to the full weight when the input is
-    #     full-length, i.e. x.size(1) == max_source_positions);
-    #   attention layers: forward L87-101 (the eval-identity dropout L85 and
-    #     layerdrop are omitted here);
-    #   permute + avg_pooler + permute + layer_norm: forward L104-108.
-    # The upstream dtype/device cast (forward L76) is omitted because the runner
-    # already hands the encoder a tensor on the module's device/dtype.
     x = F.gelu(module.conv1(input_features))
     x = F.gelu(module.conv2(x)).permute(0, 2, 1)
     x = x + module.embed_positions.weight[: x.size(1)]
@@ -484,12 +450,8 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
             )
 
         if input_features is not None:
-            # Encoder length bucketing crops the fixed 3000-frame window to a
-            # per-item length rung before the encoder runs. Those rung windows
-            # are already validated (as the full 3000 window) at the processor,
-            # so skip the fixed-size schema check only while bucketing is
-            # active; when bucketing is off the original 3000 check is kept
-            # unchanged.
+            # Rung windows are pre-validated by the processor; skip the fixed
+            # 3000-frame check only while bucketing is active.
             bucketing = getattr(self, "_encoder_bucketing", None)
             return Qwen2AudioFeatureInputs(
                 type="audio_features",

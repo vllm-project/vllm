@@ -244,19 +244,13 @@ for long clips' padding. It is opt-in and GPU-only.
 
 ### Applicability
 
-Opt-in per model: only the adapted models below declare a bucketing spec. For
-any other model the config is ignored -- the original forward runs unchanged, so
-setting the keys is always safe.
+Opt-in per model: a model declares a bucketing spec to enable it, which
+Qwen2-Audio does today. For any other model the config is ignored -- the
+original forward runs unchanged, so setting the keys is always safe.
 
 | Model | Encoder type |
 | --- | --- |
 | Qwen2-Audio | fixed-window mel encoder |
-| Canary | batch-max-padded conformer |
-| FireRed-ASR2 | fixed-window conformer |
-| Cohere-ASR | batch-max-padded encoder |
-| FunASR / SenseVoice | fixed-window SANM encoder |
-| GLM-ASR | chunked, fixed-window encoder |
-| Granite-Speech | batch-max-padded conformer + QFormer projector |
 
 ### Enabling
 
@@ -284,12 +278,13 @@ merge into the next rung up so small calls amortize fixed overhead.
 
 ### Losslessness
 
-| Encoder class | Models | Guarantee |
+| Encoder class | Model | Guarantee |
 | --- | --- | --- |
-| pad + explicit mask | Qwen2-Audio, Canary, FireRed-ASR2, Cohere-ASR | bit-exact: masked padding contributes nothing to softmax/conv |
-| pad + no mask + relative PE | GLM-ASR, Granite-Speech | output-lossless within one frame: output frame counts do not change with the rung |
-| mixed | FunASR/SenseVoice | approx: bit-exact SANM encoder, unmasked trailing adaptor |
-| pad + no mask + absolute PE | Whisper-style | lossy; not enabled |
+| pad + explicit mask | Qwen2-Audio | bit-exact: masked padding contributes nothing to softmax/conv |
+
+Other encoder classes (for example unmasked attention with relative positional
+encodings) can be supported by adding their own bucketing spec; unmasked
+absolute-PE encoders are lossy to crop and stay unsupported.
 
 bf16 residuals are ULP-level kernel rounding; the measured WER delta is within
 0.001 for all adapted models.
@@ -302,12 +297,3 @@ config, throughput off -> on:
 | Model | Config | Throughput off -> on | Delta |
 | --- | --- | --- | --- |
 | Qwen2-Audio | bucketing only | 22.0 -> 28.6 | +30% |
-| Fun-ASR / SenseVoice | bucketing + budget | 65.2 -> 114.9 | +76% |
-| FireRed-ASR2 | bucketing + budget | 45.2 -> 56.5 | +25% |
-| GLM-ASR | bucketing only | 57.5 -> 94.5 | +64% |
-| Canary | bucketing + budget | 84.0 -> 87.4 | +4% |
-| Granite-Speech | bucketing + budget | 60.2 -> 57.4 | -5% |
-| Cohere-ASR | bucketing + budget | 73.5 -> 71.8 | -2% |
-
-Fixed-window encoders gain most; batch-max-padded models need the budget for
-parity, with the gain showing at higher concurrency (Cohere-ASR +9% at c=128).
