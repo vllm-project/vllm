@@ -20,11 +20,13 @@ from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
+    get_pp_group,
     get_tensor_model_parallel_world_size,
     get_tp_group,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.distributed.utils import get_pp_indices
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -37,10 +39,13 @@ from vllm.model_executor.models.interfaces import (
     SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMultiModal,
+    SupportsPP,
 )
 from vllm.model_executor.models.utils import (
+    PPMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
+    is_pp_missing_parameter,
 )
 from vllm.models.inkling.nvidia.sconv_swa_attn import InklingConvState
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -256,18 +261,32 @@ class Inkling2Model(nn.Module):
         self.config = config
         self.block_size = config.n_layers_per_attn_res_block
         self.normalize_values = config.attn_res_normalize_values
-        self.embed_tokens = VocabParallelEmbedding(
-            config.padded_vocab_size, config.hidden_size
-        )
-        self.embed_norm = Inkling2RMSNorm(
-            config.hidden_size, config.rms_norm_eps, out_dtype=None
-        )
+        pp_group = get_pp_group()
+        if pp_group.is_first_rank:
+            self.embed_tokens: nn.Module = VocabParallelEmbedding(
+                config.padded_vocab_size, config.hidden_size
+            )
+            self.embed_norm: nn.Module = Inkling2RMSNorm(
+                config.hidden_size, config.rms_norm_eps, out_dtype=None
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
+            self.embed_norm = PPMissingLayer()
+        self.start_layer, self.end_layer = self._pp_indices(config)
+        # Completed AttnRes blocks before this stage's first layer.
+        self.init_blocks = -(-self.start_layer // self.block_size)
         self.layers = nn.ModuleList(
             self._make_layer(config, i, quant_config, f"{prefix}.layers.{i}")
+            if self.start_layer <= i < self.end_layer
+            else PPMissingLayer()
             for i in range(config.num_hidden_layers)
         )
         self.attn_res = Inkling2AttnRes(config)
-        self.norm = Inkling2RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.norm: nn.Module = (
+            Inkling2RMSNorm(config.hidden_size, config.rms_norm_eps)
+            if pp_group.is_last_rank
+            else PPMissingLayer()
+        )
         # Large batches keep a token shard of the hidden stream on each rank.
         self.allreduce_workspace = None
         self.seq_parallel = None
@@ -277,7 +296,11 @@ class Inkling2Model(nn.Module):
             self.allreduce_workspace = Inkling2AllReduceWorkspace.create(
                 group, config.hidden_size
             )
-            if self.allreduce_workspace is not None and self.seq_parallel_paths:
+            if (
+                self.allreduce_workspace is not None
+                and self.seq_parallel_paths
+                and pp_group.world_size == 1
+            ):
                 vllm_config = get_current_vllm_config()
                 spec = vllm_config.speculative_config
                 num_spec = 0 if spec is None else spec.num_speculative_tokens
@@ -290,6 +313,26 @@ class Inkling2Model(nn.Module):
         # Layers whose input (the partial block) the DSpark draft reads; layer
         # id num_hidden_layers stands for the final-norm output.
         self.aux_hidden_state_layers: tuple[int, ...] = ()
+
+    def _pp_indices(self, config: Inkling2ModelConfig) -> tuple[int, int]:
+        pp_group = get_pp_group()
+        return get_pp_indices(
+            config.num_hidden_layers, pp_group.rank_in_group, pp_group.world_size
+        )
+
+    def make_empty_intermediate_tensors(
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
+    ) -> IntermediateTensors:
+        # Dimension 0 is `batch_size` so `IntermediateTensors[:n]` slices tokens.
+        return IntermediateTensors(
+            {
+                "attn_res_stack": torch.empty(
+                    (batch_size, self.init_blocks + 1, self.config.hidden_size),
+                    dtype=dtype,
+                    device=device,
+                )
+            }
+        )
 
     def _make_layer(
         self,
@@ -316,11 +359,25 @@ class Inkling2Model(nn.Module):
         )
 
     def forward(
-        self, positions: torch.Tensor, inputs_embeds: torch.Tensor
-    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        num_tokens, hidden = inputs_embeds.shape
+        self,
+        positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None,
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        pp_group = get_pp_group()
+        is_first_rank = pp_group.is_first_rank
+        is_last_rank = pp_group.is_last_rank
+        if is_first_rank:
+            assert inputs_embeds is not None
+            num_tokens, hidden = inputs_embeds.shape
+            ref_tensor = inputs_embeds
+        else:
+            assert intermediate_tensors is not None
+            received = intermediate_tensors["attn_res_stack"]
+            num_tokens, received_blocks, hidden = received.shape
+            assert received_blocks == self.init_blocks + 1
+            ref_tensor = received
         aux_hidden_states = []
-        num_layers = len(self.layers)
         # With a conv-state cache (TP > 1), the hidden-stream conv runs fused
         # with the next AttnRes mix: small batches also fuse each sublayer's
         # all-reduce, larger ones run it on the all-reduced input. Large
@@ -329,7 +386,10 @@ class Inkling2Model(nn.Module):
         # conv-state cache) for their memory use.
         workspace = self.allreduce_workspace
         plan = [(False, False)] * 2
-        has_cache = conv_metadata(self.layers[0].conv_state) is not None
+        has_cache = (
+            self.start_layer < self.end_layer
+            and conv_metadata(self.layers[self.start_layer].conv_state) is not None
+        )
         sp = self.seq_parallel
         if sp is not None and num_tokens < sp.min_tokens:
             sp = None
@@ -340,20 +400,26 @@ class Inkling2Model(nn.Module):
         (attn_fused, attn_two_shot), (moe_fused, moe_two_shot) = plan
         # stack[:num_blocks] holds completed blocks; stack[num_blocks] is the
         # running partial block (of this rank's shard of rows[:capacity]).
-        max_blocks = -(-num_layers // self.block_size)
+        max_blocks = -(-self.end_layer // self.block_size)
         begin, end, capacity = 0, num_tokens, num_tokens
         prefix_align = 0
         if sp is not None:
             begin, end, capacity = sp.shard(num_tokens)
             prefix_align = self._prefix_align() if has_cache else 0
-        stacked = inputs_embeds.new_empty((max_blocks + 1, capacity, hidden))
+        stacked = ref_tensor.new_empty((max_blocks + 1, capacity, hidden))
         stack = stacked[:, : end - begin]
-        stack[0].copy_(inputs_embeds[begin:end])
-        num_blocks = 0
+        if is_first_rank:
+            assert inputs_embeds is not None
+            stack[0].copy_(inputs_embeds[begin:end])
+            num_blocks = 0
+        else:
+            stack[: self.init_blocks + 1].copy_(received[begin:end].transpose(0, 1))
+            num_blocks = self.init_blocks
         tau = self._log_scaling_tau(positions)
         # The fused MoE all-reduce also produces the next layer's inputs.
         inputs = None
-        for i, layer in enumerate(self.layers):
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
             partial = stack[num_blocks]
             if i in self.aux_hidden_state_layers:
                 if sp is None:
@@ -423,7 +489,8 @@ class Inkling2Model(nn.Module):
             if residual is None:
                 num_blocks += 1
             inputs = None
-            if sp is None and not conv_mix:
+            is_stage_boundary = i + 1 == self.end_layer and not is_last_rank
+            if (sp is None and not conv_mix) or is_stage_boundary:
                 layer.mlp_sconv(
                     layer.mlp(mlp_in[0]),
                     positions,
@@ -432,7 +499,7 @@ class Inkling2Model(nn.Module):
                     out=stack[num_blocks],
                 )
                 continue
-            if i + 1 < num_layers:
+            if i + 1 < self.end_layer:
                 query = self.attn_res.attn_queries[i]
                 norm = self.layers[i + 1].attn_norm
             else:
@@ -474,6 +541,10 @@ class Inkling2Model(nn.Module):
                     moe_reduced, *mix_args, addend=attn_out, residual=residual
                 )
 
+        if not is_last_rank:
+            return IntermediateTensors(
+                {"attn_res_stack": stack[: num_blocks + 1].transpose(0, 1).contiguous()}
+            )
         if inputs is not None:
             # The all-gather buffer is reused by the next forward.
             out = inputs[0] if sp is None else inputs[0].clone()
@@ -513,6 +584,7 @@ register_lora()
 class Inkling2ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsPP,
     SupportsEagle3,
     SupportsEncoderCudaGraph,
     SupportsLoRA,
@@ -552,16 +624,17 @@ class Inkling2ForConditionalGeneration(
         config: Inkling2MMConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         assert quant_config is None or isinstance(quant_config, Inkling2QuantConfig)
-        assert vllm_config.parallel_config.pipeline_parallel_size == 1
         if vllm_config.model_config.enable_prompt_embeds:
             # The reference applies embed_norm to raw input embeddings, which
             # cannot be told apart from already-normalized ones here.
             raise ValueError("Inkling2 does not support prompt embeddings")
+        pp_group = get_pp_group()
         self.config = config
         self.text_config = text_config = config.text_config
         self.visual = (
             Inkling2VisionEncoder(config.vision_config, text_config.hidden_size)
-            if config.vision_config is not None
+            if pp_group.is_first_rank
+            and config.vision_config is not None
             and vllm_config.model_config.multimodal_config is not None
             and vllm_config.model_config.multimodal_config.get_limit_per_prompt("image")
             else None
@@ -572,8 +645,10 @@ class Inkling2ForConditionalGeneration(
 
             model_cls = Inkling2LoopModel
         self.model = model_cls(text_config, quant_config, f"{prefix}model")
-        self.lm_head = ParallelLMHead(
-            text_config.padded_vocab_size, text_config.hidden_size
+        self.lm_head: nn.Module = (
+            ParallelLMHead(text_config.padded_vocab_size, text_config.hidden_size)
+            if pp_group.is_last_rank
+            else PPMissingLayer()
         )
         processor = (
             Inkling2LogitsProcessor
@@ -584,6 +659,9 @@ class Inkling2ForConditionalGeneration(
             text_config.padded_vocab_size,
             org_vocab_size=text_config.vocab_size,
             soft_cap=text_config.final_logit_softcapping,
+        )
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
+            self.model.make_empty_intermediate_tensors
         )
 
     def get_language_model(self) -> nn.Module:
@@ -743,11 +821,11 @@ class Inkling2ForConditionalGeneration(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        if inputs_embeds is None:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        if get_pp_group().is_first_rank and inputs_embeds is None:
             assert input_ids is not None
             inputs_embeds = self.model.embed_input_ids(input_ids)
-        return self.model(positions, inputs_embeds)
+        return self.model(positions, inputs_embeds, intermediate_tensors)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
@@ -761,6 +839,11 @@ class Inkling2ForConditionalGeneration(
             "attn_queries": num_layers - 1,
             "mlp_queries": num_layers,
         }
+        has_loop_core = getattr(self.model, "has_loop_core", False)
+        loop_core_params = (
+            "model.middle_cycle_cross_pass_queries",
+            "model.middle_cycle_cross_pass_kv_queries",
+        )
         loaded: set[str] = set()
         loaded_shards: set[tuple[str, int]] = set()
         visual_weights: list[tuple[str, torch.Tensor]] = []
@@ -778,6 +861,10 @@ class Inkling2ForConditionalGeneration(
                     shard_id = shard
                     break
             if name not in params:
+                if is_pp_missing_parameter(name, self):
+                    continue
+                if not has_loop_core and name in loop_core_params:
+                    continue
                 m = re.search(
                     r"\.(layers|attn_queries|mlp_queries)\.(\d+)(?:\.|$)", name
                 )

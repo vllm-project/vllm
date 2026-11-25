@@ -3,20 +3,28 @@
 """End-to-end smoke test of a tiny random-weight Inkling2 model (TP=1)."""
 
 import copy
+import hashlib
 import json
+import math
 from typing import Any
 
 import pytest
 import torch
 
+from tests.utils import multi_gpu_test
 from vllm import LLM, SamplingParams
+from vllm.config.load import LoadConfig
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.model_executor.model_loader import register_model_loader
+from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.models.inkling2.configs import (
     Inkling2DSparkConfig,
     Inkling2LoopMMConfig,
     Inkling2MMConfig,
     Inkling2ModelConfig,
 )
+from vllm.models.inkling2.nvidia.loop import _get_loop_pp_indices
 from vllm.platforms import current_platform
 
 if not (
@@ -499,6 +507,269 @@ def test_released_checkpoint_quant_config(tmp_path, quant_algo):
     assert [quant_config.is_mxfp8_layer(i) for i in range(2)] == [
         i in mxfp8 for i in range(2)
     ]
+
+
+_PP_LOAD_FORMAT = "inkling2_pp_seeded"
+
+
+@register_model_loader(_PP_LOAD_FORMAT)
+class _NameSeededInkling2Loader(DummyModelLoader):
+    """Seed every Inkling2 parameter (including packed NVFP4 / FP8 expert
+    weights and scales) deterministically by name so PP=1 and PP>1 hold
+    identical weights without downloading a checkpoint."""
+
+    def __init__(self, load_config: LoadConfig):
+        BaseModelLoader.__init__(self, load_config)
+
+    @torch.no_grad()
+    def load_weights(self, model, model_config) -> None:
+        super().load_weights(model, model_config)
+        for name, param in model.named_parameters():
+            if param.device.type == "meta":
+                continue
+            digest = hashlib.sha256(name.encode()).digest()
+            seed = int.from_bytes(digest[:8], "little") >> 1
+            generator = torch.Generator(param.device).manual_seed(seed)
+            if param.dtype == torch.uint8:
+                if name.endswith("_scale"):
+                    param.fill_(127)
+                else:
+                    values = torch.randint(
+                        0, 256, param.shape, generator=generator, device=param.device
+                    )
+                    param.copy_(values.to(torch.uint8))
+                continue
+            if param.dtype == torch.float8_e4m3fn:
+                if "scale" in name:
+                    values = 0.5 + 0.5 * torch.rand(
+                        param.shape, generator=generator, device=param.device
+                    )
+                else:
+                    values = 0.1 * torch.randn(
+                        param.shape, generator=generator, device=param.device
+                    )
+                param.copy_(values.to(param.dtype))
+                continue
+            if not torch.is_floating_point(param):
+                continue
+            values = torch.randn(param.shape, generator=generator, device=param.device)
+            if name.endswith(("amax", "outer_scale_denominator")):
+                values = 1.0 + 0.1 * values.abs()
+            elif param.dim() >= 2:
+                values /= math.sqrt(param.shape[-1])
+            elif "norm" in name or "scale" in name:
+                values = 1.0 + 0.1 * values
+            else:
+                values = 0.02 * values
+            param.copy_(values.to(param.dtype))
+
+
+class _PPSeededLoaderExtension:
+    """Worker extension that imports this module so `_PP_LOAD_FORMAT` is
+    registered in every worker process."""
+
+
+def test_loop_pp_partitioning(monkeypatch):
+    """Looped Inkling2 PP partitions keep the recurrent core on one stage and
+    reject explicit partitions that split it."""
+    monkeypatch.delenv("VLLM_PP_LAYER_PARTITION", raising=False)
+    core_mini = range(6, 18)
+    assert [_get_loop_pp_indices(24, core_mini, r, 1) for r in range(1)] == [(0, 24)]
+    assert [_get_loop_pp_indices(24, core_mini, r, 2) for r in range(2)] == [
+        (0, 6),
+        (6, 24),
+    ]
+    assert [_get_loop_pp_indices(24, core_mini, r, 3) for r in range(3)] == [
+        (0, 6),
+        (6, 18),
+        (18, 24),
+    ]
+    assert [_get_loop_pp_indices(24, core_mini, r, 4) for r in range(4)] == [
+        (0, 3),
+        (3, 6),
+        (6, 18),
+        (18, 24),
+    ]
+
+    # Asymmetric prelude/coda puts the larger non-core side on its own stage.
+    assert [_get_loop_pp_indices(10, range(2, 5), r, 2) for r in range(2)] == [
+        (0, 5),
+        (5, 10),
+    ]
+    assert [_get_loop_pp_indices(10, range(2, 5), r, 3) for r in range(3)] == [
+        (0, 2),
+        (2, 5),
+        (5, 10),
+    ]
+
+    # Tiny looped config: 1 prelude + 2-layer core + 1 coda => max 3 stages.
+    core_tiny = range(1, 3)
+    assert [_get_loop_pp_indices(4, core_tiny, r, 3) for r in range(3)] == [
+        (0, 1),
+        (1, 3),
+        (3, 4),
+    ]
+    with pytest.raises(ValueError, match="exceeds the maximum 3 stages"):
+        _get_loop_pp_indices(4, core_tiny, 0, 4)
+
+    # Zero-coda config (core_end == num_hidden_layers).
+    assert [_get_loop_pp_indices(6, range(3, 6), r, 3) for r in range(3)] == [
+        (0, 2),
+        (2, 3),
+        (3, 6),
+    ]
+    with pytest.raises(ValueError, match="exceeds the maximum 2 stages"):
+        _get_loop_pp_indices(3, range(1, 3), 0, 3)
+
+    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "18,6")
+    assert [_get_loop_pp_indices(24, core_mini, r, 2) for r in range(2)] == [
+        (0, 18),
+        (18, 24),
+    ]
+    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "12,12")
+    with pytest.raises(ValueError, match="splits the Inkling2 loop core"):
+        _get_loop_pp_indices(24, core_mini, 0, 2)
+
+
+def _run_pp_equivalence(
+    model_dir: str,
+    pp_size: int,
+    *,
+    tp_size: int = 1,
+    text_overrides: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    prompts = [list(range(2, 18)), list(range(5, 105))]
+    llm = LLM(
+        model=model_dir,
+        load_format=_PP_LOAD_FORMAT,
+        skip_tokenizer_init=True,
+        tokenizer_mode="hf",
+        tensor_parallel_size=tp_size,
+        pipeline_parallel_size=pp_size,
+        gpu_memory_utilization=0.10,
+        max_num_batched_tokens=256,
+        max_model_len=512,
+        max_num_seqs=4,
+        enable_prefix_caching=False,
+        limit_mm_per_prompt={"image": 0},
+        hf_overrides={"text_config": text_overrides} if text_overrides else None,
+        worker_extension_cls=(
+            "tests.models.inkling2.test_model._PPSeededLoaderExtension"
+        ),
+    )
+    params = SamplingParams(
+        temperature=0.0,
+        max_tokens=12,
+        ignore_eos=True,
+        prompt_logprobs=0,
+        logprobs=5,
+        detokenize=False,
+    )
+    # Generate one prompt at a time for exact comparison so async ZMQ arrival
+    # timing cannot batch prompts differently across PP=1 and PP>1, then also
+    # run a multi-request batch to exercise pipelined microbatching.
+    outputs = [llm.generate([{"prompt_token_ids": p}], params)[0] for p in prompts]
+    results = []
+    for prompt, out in zip(prompts, outputs):
+        assert out.prompt_logprobs is not None
+        comp = out.outputs[0]
+        assert comp.logprobs is not None
+        # Verify PP decode cache consistency against a single prefill over the
+        # same prompt + generated sequence.
+        full = llm.generate(
+            [{"prompt_token_ids": prompt + list(comp.token_ids)}],
+            SamplingParams(
+                max_tokens=1, prompt_logprobs=0, ignore_eos=True, detokenize=False
+            ),
+        )[0]
+        assert full.prompt_logprobs is not None
+        for step, tok in enumerate(comp.token_ids):
+            prefill_lp = full.prompt_logprobs[len(prompt) + step]
+            step_lp = comp.logprobs[step]
+            assert prefill_lp is not None and tok in prefill_lp
+            assert step_lp is not None and tok in step_lp
+            assert abs(prefill_lp[tok].logprob - step_lp[tok].logprob) < 2e-2
+        results.append(
+            {
+                "prompt_logprobs": [
+                    lp[tok].logprob
+                    for tok, lp in zip(prompt[1:], out.prompt_logprobs[1:])
+                    if lp is not None
+                ],
+                "tokens": list(comp.token_ids),
+                "top_logprobs": [
+                    {tid: entry.logprob for tid, entry in lp.items()}
+                    for lp in comp.logprobs
+                    if lp is not None
+                ],
+            }
+        )
+    if pp_size > 1:
+        batched = llm.generate(
+            [{"prompt_token_ids": p} for p in prompts],
+            SamplingParams(
+                temperature=0.0, max_tokens=4, ignore_eos=True, detokenize=False
+            ),
+        )
+        assert len(batched) == len(prompts)
+        assert all(len(o.outputs[0].token_ids) == 4 for o in batched)
+    del llm
+    cleanup_dist_env_and_memory()
+    return results
+
+
+def _assert_pp_results_close(
+    ref: list[dict[str, Any]],
+    test: list[dict[str, Any]],
+    *,
+    atol: float = 1e-2,
+) -> None:
+    for r, t in zip(ref, test):
+        torch.testing.assert_close(
+            torch.tensor(r["prompt_logprobs"]),
+            torch.tensor(t["prompt_logprobs"]),
+            atol=atol,
+            rtol=0,
+        )
+        for r_tok, t_tok, r_top, t_top in zip(
+            r["tokens"], t["tokens"], r["top_logprobs"], t["top_logprobs"]
+        ):
+            if r_tok == t_tok:
+                assert abs(r_top[r_tok] - t_top[t_tok]) < atol
+            else:
+                # Random weights can produce near-ties (< atol) between top-2
+                # logits where unfused boundary bf16 rounding flips argmax;
+                # stop comparing subsequent divergent tokens once verified.
+                assert t_tok in r_top and abs(r_top[r_tok] - r_top[t_tok]) < atol
+                break
+
+
+@multi_gpu_test(num_gpus=2)
+def test_tiny_model_pp_equivalence(tmp_path, monkeypatch):
+    """Non-looped Inkling2 with PP=2 matches PP=1 on prompt and decode."""
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    config = copy.deepcopy(TINY_CONFIG)
+    config["text_config"]["num_hidden_layers"] = 4
+    config["text_config"]["local_layer_ids"] = [0, 1, 3]
+    config["text_config"]["n_layers_per_attn_res_block"] = 2
+    (tmp_path / "config.json").write_text(json.dumps(config))
+
+    ref = _run_pp_equivalence(str(tmp_path), pp_size=1)
+    test = _run_pp_equivalence(str(tmp_path), pp_size=2)
+    _assert_pp_results_close(ref, test, atol=1e-2)
+
+
+@multi_gpu_test(num_gpus=3)
+@pytest.mark.parametrize("pp_size", [2, 3])
+def test_tiny_looped_model_pp_equivalence(tmp_path, monkeypatch, pp_size):
+    """Looped Inkling2 with PP=2 (Prelude | Core+Coda) and PP=3
+    (Prelude | Core | Coda) matches PP=1 with CUDA graphs enabled."""
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    (tmp_path / "config.json").write_text(json.dumps(TINY_LOOP_CONFIG))
+
+    ref = _run_pp_equivalence(str(tmp_path), pp_size=1)
+    test = _run_pp_equivalence(str(tmp_path), pp_size=pp_size)
+    _assert_pp_results_close(ref, test, atol=1e-2)
 
 
 @pytest.mark.parametrize("tokens", [1, 8, 17])
