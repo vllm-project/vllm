@@ -247,6 +247,8 @@ class SimpleCPUOffloadScheduler:
 
         # Store metadata
         self._lazy_mode = lazy_offload
+        # Lazy mode: walks so far, the walk each in-flight store was issued in,
+        # and how many walks recent stores took to complete.
         self._lazy_walks = 0
         self._lazy_store_walk: dict[int, int] = {}
         self._lazy_store_lags: deque[int] = deque(maxlen=32)
@@ -644,10 +646,11 @@ class SimpleCPUOffloadScheduler:
     ]:
         """Offload cached GPU blocks near eviction.
 
-        Walks the GPU free queue from its head, counting blocks that are
-        free-or-offloaded (safe for the allocator to evict). Stops when
-        target_free blocks, widened by the allocations made while recent
-        stores were in flight, are covered or CPU capacity is reached.
+        Walks the GPU free queue from its head and stores the cached blocks
+        that CPU lacks. Blocks held by in-flight stores count as covered, since
+        they return to the head once stored. Stops when CPU capacity is reached
+        or the walk covers target_free blocks plus one step's allocation
+        (target_free / 2) for each walk that recent stores took to complete.
         """
         gpu_pool = self._gpu_block_pool
         if gpu_pool is None or self._target_free <= 0:
@@ -657,12 +660,17 @@ class SimpleCPUOffloadScheduler:
         cpu_pool = self.cpu_block_pool
         num_cpu_free = cpu_pool.get_num_free_blocks()
         self._lazy_walks += 1
-        lag = max(self._lazy_store_lags, default=1)
-        window = max(self._target_free, (lag + 1) * (self._target_free // 2))
+        lag = max(self._lazy_store_lags, default=0)
+        window = self._target_free + lag * (self._target_free // 2)
+        in_flight = sum(
+            len(t.gpu_block_ids) for t in self._store_event_to_blocks.values()
+        )
 
         gpu_ids: list[int] = []
 
-        for covered, node in enumerate(free_queue.iter_blocks_after(None)):
+        for covered, node in enumerate(
+            free_queue.iter_blocks_after(None), start=in_flight
+        ):
             if covered >= window or len(gpu_ids) >= num_cpu_free:
                 break
 

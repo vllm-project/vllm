@@ -1384,11 +1384,13 @@ def test_lazy_walk_does_not_offload_past_eviction_window() -> None:
 @pytest.mark.cpu_test
 def test_lazy_walk_widens_for_slow_store_completions() -> None:
     """Lazy: stores that complete two allocations later widen the walk, so those
-    allocations evict no cached block that CPU lacks."""
+    allocations evict no cached block that CPU lacks once the lag is known.
+    Blocks held by the stores stay within the window."""
     fix = make_scheduler(num_cpu_blocks=256, num_gpu_blocks=65, lazy=True)
     sched = fix.scheduler
     gpu_pool = fix.gpu_block_pool
     step = sched._target_free // 2
+    lag = 2
     cached = [
         _allocate_gpu_blocks(gpu_pool, make_request(num_blocks=step), step)
         for _ in range(gpu_pool.get_num_free_blocks() // step)
@@ -1397,11 +1399,12 @@ def test_lazy_walk_widens_for_slow_store_completions() -> None:
         gpu_pool.free_blocks(blocks)
 
     cpu_cache = sched.cpu_block_pool.cached_block_hash_to_block
-    pending: list[tuple[int, int]] = []
+    pending: list[tuple[int, int, int]] = []
     lost: list[int] = []
-    for i in range(24):
+    held = peak = 0
+    for i in range(48):
         head = gpu_pool.free_block_queue.iter_blocks_after(None)
-        if i >= 4:
+        if i >= 4 * (lag + 1):
             lost += [
                 b.block_id
                 for b in itertools.islice(head, step)
@@ -1412,11 +1415,15 @@ def test_lazy_walk_widens_for_slow_store_completions() -> None:
         gpu_pool.free_blocks(_allocate_gpu_blocks(gpu_pool, req, step))
         meta = sched.build_connector_meta(make_scheduler_output({}))
         if meta.store_gpu_blocks:
-            pending.append((i + 2, meta.store_event))
-        for due, event in [p for p in pending if p[0] <= i]:
-            simulate_store_completion(sched, event)
-            pending.remove((due, event))
+            pending.append((i + lag, meta.store_event, len(meta.store_gpu_blocks)))
+            held += len(meta.store_gpu_blocks)
+            peak = max(peak, held)
+        for item in [p for p in pending if p[0] <= i]:
+            simulate_store_completion(sched, item[1])
+            held -= item[2]
+            pending.remove(item)
     assert not lost
+    assert peak <= sched._target_free + lag * step
 
 
 # ---------------------------------------------------------------------------
