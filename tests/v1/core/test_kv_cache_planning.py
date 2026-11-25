@@ -37,8 +37,8 @@ from vllm.config.attention import HiSparseConfig
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (
-    DefaultKVCacheConfigBuilder,
     _estimate_max_model_len_from_groups,
+    _pool_bytes_per_block,
     can_share_block_table,
     get_kv_cache_groups,
     get_pipeline_stages,
@@ -1041,8 +1041,9 @@ def test_estimate_max_model_len(model_id, max_model_len, want_estimated_max_len)
         )
     # Estimate the maximum model length, 16384 model_len need 8GB
     groups = get_kv_cache_groups(vllm_config, kv_cache_spec)
+    usable_blocks = 8 * GiB_bytes // _pool_bytes_per_block(vllm_config, groups)
     estimated_max_len = _estimate_max_model_len_from_groups(
-        DefaultKVCacheConfigBuilder(), vllm_config, groups, 8 * GiB_bytes
+        vllm_config, groups, usable_blocks
     )
     assert estimated_max_len == want_estimated_max_len
 
@@ -2466,10 +2467,16 @@ def test_shrink_kv_cache_configs_keeps_tensors_and_checks_fit():
     ]
 
     # 4 blocks are needed for max_model_len plus the null block.
+    tensors_at_10 = copy.deepcopy(config.kv_cache_tensors)
     with pytest.raises(ValueError, match="max seq len"):
         kv_cache_planning.shrink_kv_cache_configs(vllm_config, [config], 4)
+    assert config.num_blocks == 10
+    assert config.kv_cache_tensors == tensors_at_10
     kv_cache_planning.shrink_kv_cache_configs(vllm_config, [config], 5)
     assert config.num_blocks == 5
+    assert config.kv_cache_tensors == [
+        replace(tensor, size=tensor.size * 5 // 16) for tensor in tensors_before
+    ]
 
 
 def test_finalize_extensible_kv_cache_keeps_measured_count():
