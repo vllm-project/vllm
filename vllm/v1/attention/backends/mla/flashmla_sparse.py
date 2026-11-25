@@ -104,26 +104,6 @@ def use_fp8_mixed_batch(
     )
 
 
-def _padded_prefill_query_heads(
-    prefill_query_heads: int,
-    num_heads: int,
-    use_hisparse_shardq: bool,
-    tensor_parallel_size: int,
-    prefill_padding: int,
-) -> int:
-    """Width of the padded prefill workspaces.
-
-    Only a HiSparse ShardQ step needs every TP rank's heads; without HiSparse
-    ShardQ uses the mixed-batch path and the separate prefill buffers stay at
-    the local head width.
-    """
-    shardq_query_heads = num_heads * tensor_parallel_size if use_hisparse_shardq else 0
-    return round_up(
-        max(prefill_query_heads, shardq_query_heads),
-        prefill_padding,
-    )
-
-
 # Under DCP each rank owns ~1/dcp of the top-k slots. From this many tokens on,
 # compacting them to the row front and bounding the kernel with `topk_length`
 # saves more than the per-call tile-scheduler rebuild it requires (the shared
@@ -984,11 +964,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 self.use_shardq
                 and vllm_config.attention_config.hisparse_config is not None
             )
-            padded_prefill_query_heads = _padded_prefill_query_heads(
-                prefill_query_heads,
-                num_heads,
-                use_hisparse_shardq,
-                parallel_config.tensor_parallel_size,
+            shardq_query_heads = (
+                num_heads * parallel_config.tensor_parallel_size
+                if use_hisparse_shardq
+                else 0
+            )
+            padded_prefill_query_heads = round_up(
+                max(prefill_query_heads, shardq_query_heads),
                 self.prefill_padding,
             )
             self.workspace_specs.extend(
@@ -1708,7 +1690,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
         q = q[:, :kernel_num_heads]
         if out is not None:
-            out = out[:, :kernel_num_heads]
+            # out is scratch copied into compact_out; pack it so the kernel
+            # receives a contiguous view even when the workspace is wider.
+            out = out.view(-1)[
+                : num_tokens * kernel_num_heads * out.shape[-1]
+            ].view(num_tokens, kernel_num_heads, out.shape[-1])
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
         output, _, lse = flash_mla_sparse_fwd(

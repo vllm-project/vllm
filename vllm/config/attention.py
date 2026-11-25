@@ -151,13 +151,13 @@ class AttentionConfig:
     group equal to the TP group), each rank attends a gathered copy of its
     tokens' context instead of the DCP-local cache. On FlashMLA sparse,
     HiSparse host-backed KV is supported only with the quantized DS-MLA cache
-    formats and only with DCP and PCP disabled; when all attention layers use
-    ShardQ the existing model-level sequence-parallel path is enabled
-    automatically. The HY V4 sink-aware implementation keeps ordinary ShardQ
-    support but does not enable the HiSparse combination. PCP is not
-    supported. A mixed step's decode tokens stay sharded by head (on the DCP
-    path under DCP); steps whose HiSparse decode boundary disagrees with the
-    ShardQ speculative-verification boundary skip ShardQ for that step. On
+    formats and only with DCP and PCP disabled. Model-level residual sequence
+    parallelism stays disabled under HiSparse (see #68074); this path enables
+    only attention-level ShardQ. The HY V4 sink-aware implementation keeps
+    ordinary ShardQ support but does not enable the HiSparse combination. PCP
+    is not supported. A mixed step's decode tokens stay sharded by head (on the
+    DCP path under DCP); steps whose HiSparse decode boundary disagrees with
+    the ShardQ speculative-verification boundary skip ShardQ for that step. On
     ROCm, DeepSeek-V4.1 shards only its indexer prefill this way and all-gathers
     the top-k back; its attention stays sharded by head."""
 

@@ -282,9 +282,7 @@ class SparseMLACommonMetadata(MLACommonMetadata[MLACommonDecodeMetadata]):
     prefill_max_seq_len: int = 0
     prefill: SparseMLAPrefillMetadata | None = None
     cp_kv_cache_interleave_size: int = 1
-    # Number of decode requests before the shardq-narrowed batch. Backends that
-    # stage host rows against the full batch need it to align prefill rows.
-    # `shardq` itself is inherited from MLACommonMetadata.
+    # Full-batch decode count retained when ShardQ narrows the batch.
     shardq_num_decodes: int = 0
     # Index of the first query token's top-k in the top-k buffer.
     topk_start: int = 0

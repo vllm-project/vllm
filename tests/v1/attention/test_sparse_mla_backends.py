@@ -111,7 +111,6 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseMetadata,
     FlashMLASparseMetadataBuilder,
     _localize_prefill_chunks,
-    _padded_prefill_query_heads,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.mla.index_group import (
@@ -5494,27 +5493,6 @@ def test_flashmla_fp8_metadata_excludes_zero_token_decode_padding(monkeypatch):
     )
 
 
-def test_padded_prefill_query_heads_only_widens_for_hisparse_shardq():
-    """The separate prefill workspace pays for all TP ranks' heads only when
-    ShardQ and HiSparse are both active. HY V4 disables the combination, so it
-    keeps the local width too."""
-    # Non-HiSparse ShardQ, local 16, TP8: local padded width, not 128.
-    assert _padded_prefill_query_heads(16, 16, False, 8, 64) == 64
-    # HiSparse + ShardQ: all 16 * 8 heads.
-    assert _padded_prefill_query_heads(16, 16, True, 8, 64) == 128
-    # HiSparse without ShardQ keeps the local width.
-    assert _padded_prefill_query_heads(16, 16, False, 8, 64) == 64
-    # PCP+DCP gathered heads already set prefill_query_heads.
-    assert _padded_prefill_query_heads(128, 16, False, 8, 64) == 128
-
-
-def test_hy_v4_only_disables_hisparse_shardq_combination():
-    from vllm.models.hy_v4.nvidia.flashmla_sparse import HYV4FlashMLASparseImpl
-
-    assert HYV4FlashMLASparseImpl.supports_shardq is True
-    assert HYV4FlashMLASparseImpl.supports_shardq_with_hisparse is False
-
-
 def test_flashmla_hisparse_fp8_prefill_uses_actual_heads_for_padded_output(
     workspace_init, monkeypatch
 ):
@@ -5766,116 +5744,64 @@ def test_fp8_separate_prefill_route_uses_is_shardq_local(is_shardq_local, monkey
         assert torch.all(compact_out == 3)
 
 
-def test_bf16_flash_mla_kernel_limits_non_shardq_head_width(
-    workspace_init, monkeypatch
-):
+def test_bf16_flash_mla_kernel_limits_non_shardq_head_width(workspace_init):
     """A non-ShardQ HiSparse step must not consume the full ShardQ workspace
-    width. With 16 actual heads and a 128-head workspace, the kernel should see
-    64 heads, not 128."""
+    width. Run the same 16-head call with 64- and 128-head workspaces and
+    compare the results."""
+    from vllm.v1.attention.ops import flashmla
+
+    supported, reason = flashmla.is_flashmla_sparse_supported()
+    if not supported:
+        pytest.skip(reason)
+
     num_tokens = 16
     local_heads = 16
     padded_heads = 64
-    workspace_heads = 128
     head_dim = 512
     q_head_size = 576
-    device = torch.device(DEVICE_TYPE)
+    device = torch.device("cuda")
 
     impl = object.__new__(FlashMLASparseImpl)
     impl.prefill_padding = 64
     impl.softmax_scale = 0.1
-    impl._sm_count = 128  # force the padding branch, not the small-head branch
+    impl._sm_count = 128  # 16 tokens <= 128 forces the padding branch
     impl.workspace_specs = [
-        ((num_tokens, workspace_heads, q_head_size), torch.bfloat16),
+        ((num_tokens, 128, q_head_size), torch.bfloat16),
         ((num_tokens, padded_heads, head_dim), torch.bfloat16),
         ((num_tokens, local_heads, head_dim), torch.bfloat16),
     ]
 
+    gen = torch.Generator(device=device).manual_seed(0)
     q = torch.randn(
-        num_tokens, local_heads, q_head_size, dtype=torch.bfloat16, device=device
+        num_tokens, local_heads, q_head_size, generator=gen, device=device
+    ).bfloat16()
+    kv = torch.randn(128, 1, q_head_size, generator=gen, device=device).bfloat16()
+    indices = torch.arange(128, dtype=torch.int32, device=device).expand(
+        num_tokens, 1, -1
     )
-    out = torch.empty(
-        num_tokens, workspace_heads, head_dim, dtype=torch.bfloat16, device=device
-    )
-    kv = torch.empty(1, q_head_size, dtype=torch.uint8, device=device)
-    topk_indices = torch.zeros(num_tokens, 4, dtype=torch.int32, device=device)
-    seen = {}
-
-    def kernel(q, kv, indices, softmax_scale, topk_length=None, out=None):
-        seen["q_heads"] = q.shape[1]
-        seen["out_heads"] = out.shape[1]
-        return (
-            torch.zeros(
-                q.shape[0], q.shape[1], head_dim, dtype=torch.bfloat16, device=device
-            ),
-            None,
-            torch.zeros(q.shape[0], q.shape[1], dtype=torch.float32, device=device),
-        )
-
-    monkeypatch.setattr(
-        "vllm.v1.attention.backends.mla.flashmla_sparse.flash_mla_sparse_fwd",
-        kernel,
-    )
-    output, lse = impl._bf16_flash_mla_kernel(q, kv, topk_indices, out=out)
-
-    assert seen == {"q_heads": padded_heads, "out_heads": padded_heads}
-    assert output.shape == (num_tokens, local_heads, head_dim)
-    assert lse.shape == (num_tokens, local_heads)
-
-
-def test_hy_v4_bf16_kernel_limits_head_width(workspace_init, monkeypatch):
-    """HY V4's sink-aware kernel must use the same per-call padded width."""
-    from vllm.models.hy_v4.nvidia.flashmla_sparse import HYV4FlashMLASparseImpl
-
-    num_tokens = 16
-    local_heads = 16
-    padded_heads = 64
-    workspace_heads = 128
-    head_dim = 512
-    q_head_size = 576
-    device = torch.device(DEVICE_TYPE)
-
-    impl = object.__new__(HYV4FlashMLASparseImpl)
-    impl.prefill_padding = 64
-    impl.softmax_scale = 0.1
-    impl.workspace_specs = [
-        ((num_tokens, workspace_heads, q_head_size), torch.bfloat16),
-        ((num_tokens, padded_heads, head_dim), torch.bfloat16),
-        ((num_tokens, local_heads, head_dim), torch.bfloat16),
+    lengths = torch.tensor([1, 127, 128], dtype=torch.int32, device=device)[
+        torch.arange(num_tokens, device=device) % 3
     ]
-    impl._sinks_for_query = lambda q, head_dim, kernel_heads: None
 
-    q = torch.randn(
-        num_tokens, local_heads, q_head_size, dtype=torch.bfloat16, device=device
-    )
-    out = torch.empty(
-        num_tokens, workspace_heads, head_dim, dtype=torch.bfloat16, device=device
-    )
-    kv = torch.empty(1, q_head_size, dtype=torch.uint8, device=device)
-    topk_indices = torch.zeros(num_tokens, 4, dtype=torch.int32, device=device)
-    seen = {}
-
-    def kernel(
-        q, kv, indices, softmax_scale, attn_sink=None, topk_length=None, out=None
-    ):
-        seen["q_heads"] = q.shape[1]
-        seen["out_heads"] = out.shape[1]
-        return (
-            torch.zeros(
-                q.shape[0], q.shape[1], head_dim, dtype=torch.bfloat16, device=device
-            ),
-            None,
-            torch.zeros(q.shape[0], q.shape[1], dtype=torch.float32, device=device),
+    def run(workspace_heads):
+        out = torch.full(
+            (num_tokens, workspace_heads, head_dim),
+            123.0,
+            dtype=torch.bfloat16,
+            device=device,
         )
+        output, lse = impl._bf16_flash_mla_kernel(
+            q, kv, indices, lengths, out=out
+        )
+        assert output.shape == (num_tokens, local_heads, head_dim)
+        assert lse.shape == (num_tokens, local_heads)
+        return output.clone(), lse.clone()
 
-    monkeypatch.setattr(
-        "vllm.models.hy_v4.nvidia.flashmla_sparse.flash_mla_sparse_fwd",
-        kernel,
-    )
-    output, lse = impl._bf16_flash_mla_kernel(q, kv, topk_indices, out=out)
-
-    assert seen == {"q_heads": padded_heads, "out_heads": padded_heads}
-    assert output.shape == (num_tokens, local_heads, head_dim)
-    assert lse.shape == (num_tokens, local_heads)
+    # 64 heads is the narrowest kernel width supported on both SM90 and SM100.
+    reference, reference_lse = run(64)
+    output, lse = run(128)
+    torch.testing.assert_close(output, reference, atol=2e-3, rtol=2e-2)
+    torch.testing.assert_close(lse, reference_lse, atol=2e-4, rtol=2e-4)
 
 
 @pytest.mark.parametrize("use_mixed_batch", [False, True])

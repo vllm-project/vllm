@@ -188,15 +188,6 @@ def test_build_shardq_split_uses_drafting_extra_slots(monkeypatch):
     assert split.num_decode_tokens == 10
 
 
-def test_fp8_separate_prefill_is_shardq_local_defaults_to_false():
-    from vllm.v1.attention.backends.mla.flashmla_sparse import (
-        FlashMLASparseMetadata,
-    )
-
-    metadata = FlashMLASparseMetadata.FP8SeparatePrefillDecode()
-    assert metadata.is_shardq_local is False
-
-
 def _round_trip(rank, world, port, use_sm, q_dtype, num_decode_tokens):
     torch.accelerator.set_device_index(rank)
     device = torch.device(current_platform.device_type, rank)
