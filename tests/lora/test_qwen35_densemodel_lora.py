@@ -318,10 +318,13 @@ def _assert_qwen35_text_vl_and_mixed_lora(
 )
 @create_new_process_for_each_test()
 def test_qwen35_text_lora(
-    qwen35_text_lora_files, qwen35_vl_lora_files, maybe_enable_lora_dual_stream
+    vllm_runner,
+    qwen35_text_lora_files,
+    qwen35_vl_lora_files,
+    maybe_enable_lora_dual_stream,
 ):
-    llm = vllm.LLM(
-        model=MODEL_PATH,
+    with vllm_runner(
+        MODEL_PATH,
         max_model_len=4096,
         enable_lora=True,
         max_loras=2,
@@ -331,21 +334,24 @@ def test_qwen35_text_lora(
         enable_tower_connector_lora=True,
         mm_processor_cache_gb=0,
         limit_mm_per_prompt={"image": 1},
-    )
-
-    _assert_qwen35_text_vl_and_mixed_lora(
-        llm,
-        qwen35_text_lora_files,
-        qwen35_vl_lora_files,
-    )
+        enable_chunked_prefill=None,
+    ) as runner:
+        _assert_qwen35_text_vl_and_mixed_lora(
+            runner.llm,
+            qwen35_text_lora_files,
+            qwen35_vl_lora_files,
+        )
 
 
 @multi_gpu_test(num_gpus=4)
 def test_qwen35_text_lora_tp4(
-    qwen35_text_lora_files, qwen35_vl_lora_files, maybe_enable_lora_dual_stream
+    vllm_runner,
+    qwen35_text_lora_files,
+    qwen35_vl_lora_files,
+    maybe_enable_lora_dual_stream,
 ):
-    llm = vllm.LLM(
-        model=MODEL_PATH,
+    with vllm_runner(
+        MODEL_PATH,
         max_model_len=4096,
         enable_lora=True,
         max_loras=2,
@@ -359,10 +365,10 @@ def test_qwen35_text_lora_tp4(
         compilation_config=vllm.config.CompilationConfig(
             cudagraph_specialize_lora=False,
         ),
-    )
-
-    _assert_qwen35_text_vl_and_mixed_lora(
-        llm,
-        qwen35_text_lora_files,
-        qwen35_vl_lora_files,
-    )
+        enable_chunked_prefill=None,
+    ) as runner:
+        _assert_qwen35_text_vl_and_mixed_lora(
+            runner.llm,
+            qwen35_text_lora_files,
+            qwen35_vl_lora_files,
+        )

@@ -63,7 +63,8 @@ case "${test_suite}" in
       --ignore=v1/spec_decode/test_acceptance_length.py \
       --ignore=v1/spec_decode/test_speculators_correctness.py \
       --deselect=tests/v1/spec_decode/test_mtp.py::test_glm_mtp_defers_lm_head
-    pytest -v -s \
+    # cpu_test cases assume a CPU platform; upstream runs them on CPU agents.
+    pytest -v -s -m 'not cpu_test' \
       v1/kv_connector/unit \
       --ignore=v1/kv_connector/unit/test_multi_connector.py \
       --ignore=v1/kv_connector/unit/test_example_connector.py \

@@ -664,6 +664,58 @@ def test_cutedsl_gathered_select_compact_keys_match_reference(
         assert sorted(compact[row].tolist()) == want
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("world", [2, 8])
+@pytest.mark.parametrize("interleave", [1, 64])
+def test_sparse_prefill_dcp_metadata_host_extents_without_sync(
+    world: int, interleave: int
+):
+    """The DCP chunk extents come from the CPU lengths, without a device sync,
+    and equal the device-side per-rank KV lengths."""
+    device = torch.device("cuda")
+    # (context, query) per request: no prefix, long prefix hits, page tails.
+    lens = [(0, 37), (200_000, 1), (4097, 599), (63, 64), (0, 1), (129_001, 300)]
+    for trial, (start, end) in enumerate([(0, 6), (1, 4), (5, 6)]):
+        context = torch.tensor([c for c, _ in lens])
+        query_lens = torch.tensor([q for _, q in lens])
+        seq_lens_cpu = (context + query_lens).to(torch.int32)
+        query_start_loc_cpu = torch.zeros(len(lens) + 1, dtype=torch.int32)
+        query_start_loc_cpu[1:] = torch.cumsum(query_lens, 0)
+        query_start_loc = query_start_loc_cpu.to(device)
+        seq_lens = seq_lens_cpu.to(device)
+        block_table = torch.zeros((len(lens), 1), dtype=torch.int32, device=device)
+        kwargs = dict(
+            start_idx=start,
+            end_idx=end,
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            uncompressed_seq_lens=seq_lens,
+            compressed_seq_lens=seq_lens,
+            compressed_seq_lens_cpu=seq_lens_cpu,
+            block_table=block_table,
+            compress_ratio=1,
+            dcp_world_size=world,
+            cp_kv_cache_interleave_size=interleave,
+        )
+
+        if trial == 0:
+            # JIT-compiles the metadata kernel outside the sync check.
+            build_prefill_chunk_metadata(dcp_rank=0, **kwargs)
+        for rank in range(world):
+            torch.accelerator.synchronize()
+            torch.cuda.set_sync_debug_mode("error")
+            try:
+                chunk = build_prefill_chunk_metadata(dcp_rank=rank, **kwargs)
+            finally:
+                torch.cuda.set_sync_debug_mode(0)
+            assert chunk is not None
+            local = get_dcp_local_seq_lens(seq_lens[start:end], world, None, interleave)
+            assert chunk.local_total_seq_lens == int(local[:, rank].sum()), trial
+            assert chunk.max_local_total_seq_lens == int(local.sum(0).max()), trial
+            assert chunk.local_cu_seq_lens is not None
+            assert int(chunk.local_cu_seq_lens[-1]) == chunk.local_total_seq_lens
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda() or not has_cutedsl(),
     reason="This test requires CUDA and CuteDSL",
