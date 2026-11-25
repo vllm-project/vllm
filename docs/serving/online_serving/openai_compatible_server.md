@@ -19,7 +19,7 @@ We currently support the following OpenAI APIs:
 
 - [Completions API](#completions-api) (`/v1/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md).
-    - *Note: `suffix` parameter is not supported.*
+    - *Note: `suffix` parameter is only supported by models with fill-in-the-middle rendering, such as DeepSeek V4.*
 - [Chat Completions API](#chat-api) (`/v1/chat/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md) with a [chat template](../online_serving/README.md#chat-template).
     - *Note: `user` parameter is ignored.*
