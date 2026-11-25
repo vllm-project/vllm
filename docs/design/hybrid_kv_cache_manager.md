@@ -8,7 +8,7 @@
 Many recent "hybrid" LLMs combine multiple attention types within one model. For example:
 
 1. Sliding window attention (sw) + full attention (full): gpt-oss, Gemma 2/3, Ministral, cohere, etc.
-2. Mamba + full: Bamba, Jamba, Minimax, etc.
+2. Mamba + full: Bamba, Minimax, etc.
 3. Local chunked attention + full: Llama4
 
 To serve these models efficiently, our [KVCacheManager][vllm.v1.core.kv_cache_manager.KVCacheManager] must:
@@ -126,7 +126,7 @@ This case happens in Gemma-3 series models, and models in case 2 but with eagle 
 
 ### Case 4: different `kv_hidden_size` (mainly hybrid mamba models)
 
-Some architectures (e.g., Bamba, Jamba, Minimax) interleave standard attention layers with Mamba layers, where each Mamba layer's state size per token can be much larger than the attention layers' `kv_hidden_size`. Because we only support a single page size across all groups, we must reconcile these differing hidden sizes.
+Some architectures (e.g., Bamba, Minimax) interleave standard attention layers with Mamba layers, where each Mamba layer's state size per token can be much larger than the attention layers' `kv_hidden_size`. Because we only support a single page size across all groups, we must reconcile these differing hidden sizes.
 
 The current algorithm is:
 

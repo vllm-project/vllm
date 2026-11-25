@@ -5418,9 +5418,9 @@ def test_pp_rejects_mamba_with_shared_error(
                 ["mamba0"],
                 MambaSpec(
                     block_size=block_size,
-                    shapes=((16, 4), (16, 4)),
+                    shapes=((16, 3), (2, 4, 4)),
                     dtypes=(torch.float16, torch.float32),
-                    mamba_type=MambaAttentionBackendEnum.MAMBA1,
+                    mamba_type=MambaAttentionBackendEnum.MAMBA2,
                 ),
             ),
         ],
