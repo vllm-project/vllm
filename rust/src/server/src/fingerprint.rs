@@ -24,6 +24,15 @@ pub enum FingerprintMode {
 }
 
 impl FingerprintMode {
+    /// The fingerprint of a server over a caller-built `Llm`, which has no
+    /// engine handshake to describe: only `Custom` reports one.
+    pub(crate) fn without_engine(&self) -> Option<String> {
+        match self {
+            Self::Custom(value) => Some(value.clone()),
+            Self::Full | Self::Hash | Self::None => None,
+        }
+    }
+
     /// Build the fingerprint from the engines' ready responses and the
     /// deployment-wide data-parallel size, like Python's
     /// `build_system_fingerprint`.

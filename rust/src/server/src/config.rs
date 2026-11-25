@@ -403,6 +403,8 @@ pub struct ServerConfig {
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
     /// What `system_fingerprint` reports on chat and completion responses.
+    /// Every mode but `Custom` describes the engine-core config, so over a
+    /// caller-built `Llm` only `Custom` reports one.
     pub fingerprint_mode: FingerprintMode,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,

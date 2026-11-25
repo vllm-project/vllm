@@ -43,6 +43,8 @@ impl EngineHealth {
 pub(crate) struct HealthMonitor {
     reporter: HealthReporter,
     engine: EngineHealth,
+    /// Whether `vllm.Control` is served, so its health is published.
+    serves_control: bool,
     /// Readiness as last published to `readiness` and `vllm.Inference`.
     ready: bool,
 }
@@ -51,15 +53,22 @@ impl HealthMonitor {
     /// Register every named health service with the engines' current
     /// readiness. Call before the listener accepts connections so clients
     /// never see an unregistered service.
-    pub async fn register(reporter: HealthReporter, mut engine: EngineHealth) -> Self {
+    pub async fn register(
+        reporter: HealthReporter,
+        mut engine: EngineHealth,
+        serves_control: bool,
+    ) -> Self {
         let ready = *engine.readiness.borrow_and_update();
-        reporter.set_serving::<ControlGrpcService>().await;
+        if serves_control {
+            reporter.set_serving::<ControlGrpcService>().await;
+        }
         reporter.set_serving::<RenderGrpcService<AppState>>().await;
         reporter.set_service_status(LIVENESS_SERVICE, ServingStatus::Serving).await;
         set_readiness(&reporter, ready).await;
         Self {
             reporter,
             engine,
+            serves_control,
             ready,
         }
     }
@@ -151,7 +160,9 @@ impl HealthMonitor {
 
         let reporter = &mut self.reporter;
         set_readiness(reporter, false).await;
-        reporter.set_not_serving::<ControlGrpcService>().await;
+        if self.serves_control {
+            reporter.set_not_serving::<ControlGrpcService>().await;
+        }
         reporter.set_not_serving::<RenderGrpcService<AppState>>().await;
         // The gRPC services are served alongside the same engine client, so overall
         // server health mirrors its engine health.
@@ -212,7 +223,7 @@ mod tests {
             liveness,
             readiness,
         };
-        let monitor = HealthMonitor::register(reporter, engine).await;
+        let monitor = HealthMonitor::register(reporter, engine, true).await;
         (monitor, health, [liveness_tx, readiness_tx])
     }
 
