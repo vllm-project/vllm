@@ -5,8 +5,26 @@ import pytest
 
 from tests.models.utils import EmbedModelInfo
 from tests.quantization.utils import is_quant_method_supported
+from vllm.platforms import current_platform
 
 from .mteb_embed_utils import mteb_test_embed_models
+
+
+def _fp8_scaled_mm_unsupported() -> bool:
+    """Whether the ModernBERT online FP8 test should be skipped.
+
+    `is_quant_method_supported("fp8")` returns True on MI250 (gfx90a), but
+    serving a per-tensor FP8 linear layer on ROCm requires CDNA3+ or RDNA4,
+    so treat it as unsupported here.
+    """
+    if not is_quant_method_supported("fp8"):
+        return True
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import get_cdna_version, on_gfx12x
+
+        return get_cdna_version() <= 2 and not on_gfx12x()
+    return False
+
 
 MODEL_INFO = EmbedModelInfo(
     "Alibaba-NLP/gte-modernbert-base",
@@ -36,11 +54,18 @@ def _assert_modernbert_online_fp8(model) -> None:
         assert isinstance(linear.quant_method, Fp8PerTensorOnlineLinearMethod), (
             f"{name} was not quantized with online FP8"
         )
+        if current_platform.is_xpu():
+            from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
+                XPUW8A8FP8LinearKernel,
+            )
+
+            assert isinstance(linear.quant_method.fp8_linear, XPUW8A8FP8LinearKernel)
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(
-    not is_quant_method_supported("fp8"),
-    reason="FP8 is not supported on this GPU type.",
+    _fp8_scaled_mm_unsupported(),
+    reason="No FP8 ScaledMM kernel is available on this GPU type.",
 )
 def test_modernbert_online_fp8_mteb(hf_runner, vllm_runner, monkeypatch) -> None:
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -48,11 +73,15 @@ def test_modernbert_online_fp8_mteb(hf_runner, vllm_runner, monkeypatch) -> None
     def check_online_fp8(vllm_model) -> None:
         vllm_model.apply_model(_assert_modernbert_online_fp8)
 
+    vllm_extra_kwargs: dict[str, object] = {"quantization": "fp8_per_tensor"}
+    if current_platform.is_xpu():
+        vllm_extra_kwargs["kernel_config"] = {"linear_backend": "xpu"}
+
     mteb_test_embed_models(
         hf_runner,
         vllm_runner,
         MODEL_INFO,
-        vllm_extra_kwargs={"quantization": "fp8_per_tensor"},
+        vllm_extra_kwargs=vllm_extra_kwargs,
         # Account for Online FP8 kernel variance across GPU architectures.
         atol=2e-3,
         vllm_model_callback=check_online_fp8,

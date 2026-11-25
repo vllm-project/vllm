@@ -105,7 +105,7 @@ pub fn cors_layer(cfg: &CorsConfig) -> CorsLayer {
 
     // Emit `Vary: Origin` only when the allow-origin is dynamic (explicit
     // origins, or credentials); the wildcard + no-credentials case emits no
-    // `Vary` at all, and an empty list disables the header here.
+    // `Vary` at all. An empty origin list never permits an origin.
     let vary: Vec<HeaderName> = if !wildcard_origins || cfg.allow_credentials {
         vec![header::ORIGIN]
     } else {

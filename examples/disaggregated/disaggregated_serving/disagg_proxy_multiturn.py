@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Disaggregated Prefill/Decode Proxy with Bidirectional KV Transfer
+"""Disaggregated Prefill/Decode Proxy with Bidirectional KV Transfer.
 
 This proxy sits between clients and a vLLM Prefill/Decode (P/D) deployment,
 routing multi-turn chat requests so that each turn reuses KV cache blocks
@@ -31,7 +30,7 @@ Per-request flow:
     8. Proxy returns D's response to the client.
 
 Conversation isolation:
-    Each request must include a ``conversation_id`` field (top-level in
+    Each request must include a `conversation_id` field (top-level in
     the JSON body) to scope the KV cache across turns. Without it, the
     proxy cannot link turns and falls back to no-cache behavior.
 
@@ -47,14 +46,14 @@ Usage:
         --decoder-host 10.0.0.2 --decoder-port 8200
 
 Benchmarking:
-    Use ``benchmarks/multi_turn/benchmark_serving_multi_turn.py`` with
-    the ``--send-conversation-id`` flag to inject a per-conversation
-    ``conversation_id`` into every request so this proxy can key
+    Use `benchmarks/multi_turn/benchmark_serving_multi_turn.py` with
+    the `--send-conversation-id` flag to inject a per-conversation
+    `conversation_id` into every request so this proxy can key
     cross-turn KV cache reuse. The flag is *off by default*: without
     it the benchmark sends OpenAI-schema-compliant payloads and every
     turn lands as a cache MISS in this proxy.
 
-    Example:
+Example:
         python benchmarks/multi_turn/benchmark_serving_multi_turn.py \\
             --model <MODEL> --served-model-name <NAME> \\
             --url http://<proxy_host>:8000 \\
@@ -62,11 +61,12 @@ Benchmarking:
             --num-clients 2 --max-active-conversations 6 \\
             --send-conversation-id
 
-    See ``docs/features/nixl_connector_usage.md`` for the broader
+    See `docs/features/nixl_connector_usage.md` for the broader
     bidirectional-KV-transfer setup these benchmarks exercise.
 
 Dependencies:
     pip install fastapi uvicorn httpx
+
 """
 
 from __future__ import annotations
@@ -107,8 +107,8 @@ class CachedKVEntry:
 class ConversationKVCache:
     """Per-conversation KV block cache.
 
-    Each conversation is identified by a ``conversation_id`` supplied by
-    the client. After D finishes a turn, its ``kv_transfer_params`` are
+    Each conversation is identified by a `conversation_id` supplied by
+    the client. After D finishes a turn, its `kv_transfer_params` are
     stored here. On the next turn, the proxy retrieves them so P can
     read D's blocks via bidirectional KV transfer.
     """

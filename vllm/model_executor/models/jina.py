@@ -183,7 +183,9 @@ def _load_adapter(
     return adapter_config, adapter_weights
 
 
-def _build_lora_pairs(adapter_weights: dict) -> dict:
+def _build_lora_pairs(
+    adapter_weights: dict[str, torch.Tensor],
+) -> dict[str, dict[str, torch.Tensor]]:
     """Group raw adapter tensors into {base_key: {"A": tensor, "B": tensor}} pairs.
 
     Transforms adapter keys like:
@@ -191,7 +193,7 @@ def _build_lora_pairs(adapter_weights: dict) -> dict:
     Into base keys like:
         layers.0.self_attn.q_proj.weight
     """
-    lora_pairs = defaultdict(dict)
+    lora_pairs: defaultdict[str, dict[str, torch.Tensor]] = defaultdict(dict)
     for key, tensor in adapter_weights.items():
         clean_key = key
         if clean_key.startswith("base_model.model."):
@@ -232,7 +234,7 @@ def _load_jina_v5_weights(
     model: nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
 ) -> set[str]:
     """Shared loader: merge the selected task LoRA adapter into the base weights."""
-    lora_pairs: dict = {}
+    lora_pairs: dict[str, dict[str, torch.Tensor]] = {}
     scaling = 1.0
 
     result = _load_adapter(model._model_name, model._task, model._revision)
@@ -304,9 +306,9 @@ class JinaEmbeddingsV5EncoderModel(LlamaForCausalLM, VllmModelForPooling):
     """jina-embeddings-v5 with a bidirectional EuroBERT (Llama) encoder backbone.
 
     Used by encoder checkpoints such as jina-embeddings-v5-text-nano
-    (``is_decoder=False``). EuroBERT is architecturally a bidirectional Llama, so
+    (`is_decoder=False`). EuroBERT is architecturally a bidirectional Llama, so
     the LlamaModel backbone switches to EncoderOnlyAttention when the config
-    carries ``is_causal=False`` (set by ``JinaEmbeddingsV5ModelConfig``).
+    carries `is_causal=False` (set by `JinaEmbeddingsV5ModelConfig`).
     """
 
     is_pooling_model = True
@@ -330,10 +332,10 @@ class JinaEmbeddingsV5EncoderModel(LlamaForCausalLM, VllmModelForPooling):
 class JinaEmbeddingsV5Model(JinaEmbeddingsV5DecoderModel):
     """Dispatcher for the jina-embeddings-v5 family.
 
-    The family ships two backbones under one ``architectures`` entry: Qwen3
+    The family ships two backbones under one `architectures` entry: Qwen3
     decoders (-small) and bidirectional EuroBERT encoders (-nano), told apart by
-    ``is_decoder``. Inherits the decoder implementation so registry introspection
-    still sees a valid pooling model, and ``__new__`` swaps in the encoder
+    `is_decoder`. Inherits the decoder implementation so registry introspection
+    still sees a valid pooling model, and `__new__` swaps in the encoder
     variant for encoder checkpoints.
     """
 

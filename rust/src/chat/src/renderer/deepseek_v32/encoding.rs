@@ -14,7 +14,9 @@ use serde_json::Value;
 use serde_json_fmt::JsonFormat;
 
 use crate::error::{Error, Result};
-use crate::request::{ChatContent, ChatMessage, ChatRequest, ChatRole, ChatTool};
+use crate::reasoning::ReasoningControl;
+use crate::renderer::tool_call_arguments_or_empty;
+use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool};
 use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
 
 const BOS_TOKEN: &str = "<｜begin▁of▁sentence｜>";
@@ -42,8 +44,11 @@ struct RenderedToolSchema<'a> {
 }
 
 /// Render one chat request into the final prompt string.
-pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
-    let thinking_mode = match request.enable_thinking()?.unwrap_or(false) {
+pub(super) fn render_request(
+    request: &ChatRequest,
+    reasoning: &ReasoningControl,
+) -> Result<String> {
+    let thinking_mode = match reasoning.is_enabled() {
         true => ThinkingMode::Thinking,
         false => ThinkingMode::Chat,
     };
@@ -51,16 +56,13 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
         request.messages.last().map(ChatMessage::role),
         Some(ChatRole::User | ChatRole::Developer)
     );
-    let initial_tools = if request.tool_parsing_enabled() {
-        request.initial_tools()
-    } else {
-        &[]
-    };
+    let initial_tools = request.initial_tools();
     let render_offset = isize::from(!initial_tools.is_empty());
     let last_user_render_index =
         find_last_user_render_index(request.messages.as_slice(), render_offset);
     let last_user_actual_index = find_last_user_actual_index(request.messages.as_slice());
     let continue_final_message = request.chat_options.continue_final_message();
+    let add_generation_prompt = request.chat_options.add_generation_prompt();
     let mut prompt = String::from(BOS_TOKEN);
 
     if !initial_tools.is_empty() {
@@ -79,6 +81,7 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
             thinking_mode,
             drop_thinking,
             continue_final_message,
+            add_generation_prompt,
         )?;
     }
 
@@ -110,11 +113,13 @@ fn render_message(
     thinking_mode: ThinkingMode,
     drop_thinking: bool,
     continue_final_message: bool,
+    add_generation_prompt: bool,
 ) -> Result<()> {
     let render_index = message_index as isize + render_offset;
     let opens_thinking = render_index == last_user_render_index;
     let after_last_user_turn = render_index > last_user_render_index;
     let after_or_at_last_user_turn = render_index >= last_user_render_index;
+    let add_generation_prompt = message_index + 1 != messages.len() || add_generation_prompt;
 
     match message {
         ChatMessage::System { content } => render_system_message(out, Some(content), &[]),
@@ -123,11 +128,13 @@ fn render_message(
             content,
             tools.as_deref().unwrap_or(&[]),
             thinking_mode == ThinkingMode::Thinking && opens_thinking,
+            add_generation_prompt,
         ),
         ChatMessage::User { content } => render_user_message(
             out,
             content,
             thinking_mode == ThinkingMode::Thinking && opens_thinking,
+            add_generation_prompt,
         ),
         ChatMessage::Assistant { content } => render_assistant_message(
             out,
@@ -148,6 +155,7 @@ fn render_message(
             thinking_mode == ThinkingMode::Thinking && after_or_at_last_user_turn,
             content,
         ),
+        ChatMessage::Custom { role, .. } => Err(Error::UnsupportedChatRole { role: role.clone() }),
     }
 }
 
@@ -195,6 +203,7 @@ fn render_developer_message(
     content: &ChatContent,
     tools: &[ChatTool],
     opens_thinking: bool,
+    add_generation_prompt: bool,
 ) -> Result<()> {
     if content.is_empty() {
         return Err(Error::ChatTemplate(
@@ -209,7 +218,7 @@ fn render_developer_message(
     }
     out.push_str("\n\n# The user's message is: ");
     write_chat_content(out, content)?;
-    write_user_like_suffix(out, opens_thinking);
+    write_user_like_suffix(out, opens_thinking, add_generation_prompt);
     Ok(())
 }
 
@@ -219,17 +228,20 @@ fn render_user_message(
     out: &mut String,
     content: &ChatContent,
     opens_thinking: bool,
+    add_generation_prompt: bool,
 ) -> Result<()> {
     out.push_str("<｜User｜>");
     write_chat_content(out, content)?;
-    write_user_like_suffix(out, opens_thinking);
+    write_user_like_suffix(out, opens_thinking, add_generation_prompt);
     Ok(())
 }
 
 /// Shared trailing wrapper used by both real user turns and native developer
 /// turns after their content has already been written.
-// TODO: respect `add_generation_prompt` option
-fn write_user_like_suffix(out: &mut String, opens_thinking: bool) {
+fn write_user_like_suffix(out: &mut String, opens_thinking: bool, add_generation_prompt: bool) {
+    if !add_generation_prompt {
+        return;
+    }
     out.push_str("<｜Assistant｜>");
     if opens_thinking {
         out.push_str(THINKING_START_TOKEN);
@@ -422,19 +434,10 @@ fn render_tool_call(out: &mut String, tool_call: &AssistantToolCall) -> Result<(
 /// String values are emitted raw with `string="true"`, while all other JSON
 /// values are rendered with JSON syntax and `string="false"`.
 fn encode_arguments_to_dsml(out: &mut String, tool_call: &AssistantToolCall) -> Result<()> {
-    let arguments: Value = serde_json::from_str(&tool_call.arguments).map_err(|error| {
-        Error::ChatTemplate(format!(
-            "assistant tool call has invalid JSON arguments for DeepSeek V3.2: {error}"
-        ))
-    })?;
-    let Some(arguments) = arguments.as_object() else {
-        return Err(Error::ChatTemplate(
-            "assistant tool call arguments for DeepSeek V3.2 must be a JSON object".to_string(),
-        ));
-    };
+    let arguments = tool_call_arguments_or_empty(&tool_call.arguments);
 
     let mut wrote_parameter = false;
-    for (key, value) in arguments {
+    for (key, value) in &arguments {
         if wrote_parameter {
             out.push('\n');
         }
@@ -524,12 +527,24 @@ fn write_chat_content(out: &mut String, content: &ChatContent) -> Result<()> {
     match content {
         ChatContent::Text(text) => out.push_str(text),
         ChatContent::Parts(parts) => {
-            for part in parts {
-                out.push_str(part.as_text()?);
-            }
+            let texts = parts.iter().map(ChatContentPart::as_text).collect::<Result<Vec<_>>>()?;
+            write_text_parts(out, texts);
         }
     }
     Ok(())
+}
+
+/// Join text parts like Python vLLM's `string` content format, which this
+/// renderer's Python counterpart uses for every role: empty parts are dropped
+/// and the rest are separated by "\n". The official encoder takes string
+/// content only, so it defines no join of its own.
+fn write_text_parts<'a>(out: &mut String, texts: impl IntoIterator<Item = &'a str>) {
+    for (index, text) in texts.into_iter().filter(|text| !text.is_empty()).enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        out.push_str(text);
+    }
 }
 
 /// Write all reasoning blocks in encounter order.
@@ -543,11 +558,13 @@ fn write_assistant_reasoning(out: &mut String, content: &[AssistantContentBlock]
 
 /// Write all visible assistant text blocks in encounter order.
 fn write_assistant_text(out: &mut String, content: &[AssistantContentBlock]) {
-    for block in content {
-        if let AssistantContentBlock::Text { text } = block {
-            out.push_str(text);
-        }
-    }
+    write_text_parts(
+        out,
+        content.iter().filter_map(|block| match block {
+            AssistantContentBlock::Text { text } => Some(text.as_str()),
+            AssistantContentBlock::Reasoning { .. } | AssistantContentBlock::ToolCall(_) => None,
+        }),
+    );
 }
 
 /// Compact JSON serialization used by this renderer for exact prompt text.

@@ -27,31 +27,49 @@ ROCM_ATTN_BACKENDS = [
 
 ATTN_BACKENDS = ROCM_ATTN_BACKENDS if current_platform.is_rocm() else ["auto"]
 
-# Per-backend tolerance with explicit entries; "default" is the fallback
-BACKEND_TOL: dict[str, float] = {
-    "default": 0.05,  # 5% tolerance for other backends (e.g. FLASH_ATTN)
-    # Relaxed tolerances for ROCm attn
-    # See: https://github.com/vllm-project/vllm/issues/35569
-    "ROCM_ATTN": 0.09,  # gfx950:~8.45%, gfx942:~3.70%
-    "ROCM_AITER_FA": 0.045,  # gfx950:~2.00%, gfx942:~0.80%
-    "TRITON_ATTN": 0.045,  # gfx950:~3.00%, gfx942:~2.20%
-    "FLEX_ATTENTION": 0.045,  # gfx950:~3.25%, gfx942:~1.10%
-}
 
-# Some ROCm attention backends show small absolute drift on the low
-# text-vs-text probability even though larger scores remain well inside the
-# relative tolerance. The absolute drift is uniform across score magnitudes
-# (~0.005-0.010), so it only exceeds the relative tolerance for the small
-# ~0.10 text-vs-text value. Keep the relative tolerances tight and add only a
-# small absolute floor for the affected backends.
-# TRITON_ATTN: gfx942/ROCm 7.2 drifts ~0.008 abs on text-vs-text (~7.9% rel).
-BACKEND_ABS_TOL: dict[str, float] = {
-    "default": 0.0,
-    "auto": 0.007,
-    "ROCM_AITER_FA": 0.005,
-    "TRITON_ATTN": 0.009,
-    "FLEX_ATTENTION": 0.00875,
-}
+# Match the legacy string parser: image placeholders first, then text.
+_RENDER_CONTENT = """
+{%- macro render_content(parts) -%}
+  {%- for part in parts if part.type == 'image' -%}
+    {{- '<|vision_start|><|image_pad|><|vision_end|>' -}}
+  {%- endfor -%}
+  {{- parts | selectattr('type', 'eq', 'text') | map(attribute='text') | join('\\n') -}}
+{%- endmacro -%}
+"""
+
+_STRUCTURED_CONTENT = (
+    _RENDER_CONTENT
+    + """
+{%- set ns = namespace(messages=[]) -%}
+{%- for message in messages -%}
+  {%- set ns.messages = ns.messages + [
+    dict(role=message.role, content=render_content(message.content))
+  ] -%}
+{%- endfor -%}
+{%- set messages = ns.messages -%}
+"""
+)
+
+# Exercise explicit openai with a block template detected as string.
+_EXPLICIT_STRUCTURED_CONTENT = (
+    _RENDER_CONTENT
+    + """
+{%- set query_content = messages | selectattr('role', 'eq', 'query')
+    | map(attribute='content') | first -%}
+{%- set document_content = messages | selectattr('role', 'eq', 'document')
+    | map(attribute='content') | first -%}
+{%- set messages = [
+    dict(role='query', content=render_content(query_content)),
+    dict(role='document', content=render_content(document_content))
+] -%}
+"""
+)
+
+# The absolute floor matters only for the low ~0.10 text-vs-text score, where a
+# few thousandths of drift would otherwise exceed the relative bound.
+REL_TOL = 0.05
+ABS_TOL = 0.007
 
 # ROCm: disable prefix caching and eliminate batch variance to reduce
 # test flakiness.
@@ -62,17 +80,9 @@ ROCM_EXTRA_ARGS = (
 )
 
 
-def get_tol(backend: str) -> float:
-    return BACKEND_TOL.get(backend, BACKEND_TOL["default"])
-
-
-def get_abs_tol(backend: str) -> float:
-    return BACKEND_ABS_TOL.get(backend, BACKEND_ABS_TOL["default"])
-
-
 def assert_score(actual: float, expected: float, backend: str, label: str):
-    tol = get_tol(backend)
-    abs_tol = get_abs_tol(backend)
+    tol = REL_TOL
+    abs_tol = ABS_TOL
     diff = abs(actual - expected)
     rel_diff = diff / abs(expected) if expected != 0 else diff
     print(
@@ -104,27 +114,53 @@ documents = [
     },
 ]
 
-TEXT_VS_TEXT = 0.10040374100208282
-TEXT_VS_IMAGE = 0.7423753142356873
-TEXT_VS_TEXT_PLUS_IMAGE = 0.5298863053321838
+# One bf16 ULP in attention compounds to ~0.1% here, so ROCm backends each
+# settle differently; these are their midpoint across backends and archs.
+if current_platform.is_rocm():
+    TEXT_VS_TEXT = 0.105243
+    TEXT_VS_IMAGE = 0.742472
+    TEXT_VS_TEXT_PLUS_IMAGE = 0.544568
+else:
+    TEXT_VS_TEXT = 0.10040374100208282
+    TEXT_VS_IMAGE = 0.7423753142356873
+    TEXT_VS_TEXT_PLUS_IMAGE = 0.5298863053321838
 
 
-@pytest.fixture(scope="module", params=ATTN_BACKENDS)
-def server(request):
-    backend = request.param
+_SERVER_PARAMS = [
+    pytest.param((backend, None, None), id=backend) for backend in ATTN_BACKENDS
+]
+_STRUCTURED_SERVER_PARAM = pytest.param(
+    ("auto", "openai", _EXPLICIT_STRUCTURED_CONTENT), id="structured"
+)
+_DEFAULT_SERVER_PARAM = pytest.param(
+    ("auto", None, _STRUCTURED_CONTENT), id="structured-default"
+)
+
+
+@pytest.fixture(scope="module")
+def server(request, tmp_path_factory):
+    backend, content_format, template_prefix = request.param
+    template = VLLM_PATH / "examples/pooling/score/template/qwen3_vl_reranker.jinja"
+    if template_prefix is not None:
+        source_template = template.read_text()
+        template = tmp_path_factory.mktemp("scoring") / "score.jinja"
+        template.write_text(template_prefix + source_template)
     print(f"\n=== Starting server with attention backend: {backend} ===")
     args = [
         "--enforce-eager",
         "--max-model-len",
         "8192",
         "--chat-template",
-        str(VLLM_PATH / "examples/pooling/score/template/qwen3_vl_reranker.jinja"),
+        str(template),
+        *ROCM_EXTRA_ARGS,
     ]
+
+    if content_format is not None:
+        args += ["--chat-template-content-format", content_format]
 
     env = dict()
     if backend != "auto":
         args += ["--attention-config", json.dumps({"backend": backend})]
-        args += ROCM_EXTRA_ARGS
 
         if backend != "ROCM_AITER_FA":
             env["VLLM_ROCM_USE_AITER"] = "0"
@@ -136,6 +172,7 @@ def server(request):
         yield remote_server, backend
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_str(
     server: tuple[RemoteOpenAIServer, str],
@@ -159,6 +196,7 @@ async def test_score_api_queries_str_documents_str(
     assert_score(score.data[0].score, TEXT_VS_TEXT, backend, "text_vs_text")
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_text_content(
     server: tuple[RemoteOpenAIServer, str],
@@ -182,6 +220,7 @@ async def test_score_api_queries_str_documents_text_content(
     assert_score(score.data[0].score, TEXT_VS_TEXT, backend, "text_vs_text")
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_image_url_content(
     server: tuple[RemoteOpenAIServer, str],
@@ -205,6 +244,7 @@ async def test_score_api_queries_str_documents_image_url_content(
     assert_score(score.data[0].score, TEXT_VS_IMAGE, backend, "text_vs_image")
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_image_base64_content(
     server: tuple[RemoteOpenAIServer, str],
@@ -228,6 +268,9 @@ async def test_score_api_queries_str_documents_image_base64_content(
     assert_score(score.data[0].score, TEXT_VS_IMAGE, backend, "text_vs_image_base64")
 
 
+@pytest.mark.parametrize(
+    "server", _SERVER_PARAMS + [_DEFAULT_SERVER_PARAM], indirect=True
+)
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_image_url_plus_text_content(
     server: tuple[RemoteOpenAIServer, str],
@@ -253,6 +296,7 @@ async def test_score_api_queries_str_documents_image_url_plus_text_content(
     )
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_score_api_queries_str_documents_list(
     server: tuple[RemoteOpenAIServer, str],
@@ -289,6 +333,7 @@ async def test_score_api_queries_str_documents_list(
     )
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_rerank_api_queries_str_documents_list(
     server: tuple[RemoteOpenAIServer, str],
@@ -342,6 +387,7 @@ async def test_rerank_api_queries_str_documents_list(
     )
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_score_api_queries_list_documents_list(
     server: tuple[RemoteOpenAIServer, str],
@@ -384,6 +430,7 @@ INSTRUCTION = (
 )
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_score_api_instruction_field(
     server: tuple[RemoteOpenAIServer, str],
@@ -419,6 +466,7 @@ async def test_score_api_instruction_field(
     assert instruction_score.usage.prompt_tokens > default_score.usage.prompt_tokens
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_rerank_api_instruction_field(
     server: tuple[RemoteOpenAIServer, str],
@@ -462,6 +510,7 @@ async def test_rerank_api_instruction_field(
     assert instruction_rerank.usage.prompt_tokens > default_rerank.usage.prompt_tokens
 
 
+@pytest.mark.parametrize("server", _SERVER_PARAMS, indirect=True)
 @pytest.mark.asyncio
 async def test_rerank_api_instruction_field_matches_chat_template_kwargs(
     server: tuple[RemoteOpenAIServer, str],
@@ -507,6 +556,31 @@ async def test_rerank_api_instruction_field_matches_chat_template_kwargs(
     kwargs_scores = [
         r.relevance_score for r in sorted(kwargs_rerank.results, key=lambda x: x.index)
     ]
-    assert field_scores == pytest.approx(
-        kwargs_scores, rel=get_tol(backend), abs=get_abs_tol(backend)
+    assert field_scores == pytest.approx(kwargs_scores, rel=REL_TOL, abs=ABS_TOL)
+
+
+@pytest.mark.parametrize("server", [_STRUCTURED_SERVER_PARAM], indirect=True)
+@pytest.mark.asyncio
+async def test_rerank_preserves_structured_text_and_image(server):
+    remote_server, backend = server
+    response = requests.post(
+        remote_server.url_for("rerank"),
+        json={
+            "model": MODEL_NAME,
+            "query": query,
+            "documents": [{"content": [documents[0], documents[1]]}],
+        },
+    )
+    response.raise_for_status()
+    rerank = RerankResponse.model_validate(response.json())
+
+    assert len(rerank.results) == 1
+    assert rerank.results[0].index == 0
+    assert rerank.usage is not None
+    assert rerank.usage.prompt_tokens == 107
+    assert_score(
+        rerank.results[0].relevance_score,
+        TEXT_VS_TEXT_PLUS_IMAGE,
+        backend,
+        "structured_text_and_image",
     )

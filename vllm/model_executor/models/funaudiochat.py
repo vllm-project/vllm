@@ -25,8 +25,10 @@ from transformers.activations import get_activation
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput
 
+from vllm import envs
 from vllm.config import VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
@@ -36,6 +38,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
+    AudioEmbeddingItems,
     AudioProcessorItems,
     MultiModalDataItems,
     MultiModalDataParser,
@@ -48,6 +51,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.context import is_profiling_media
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import _has_module
 
@@ -529,10 +533,10 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
         return TokenizersBackend.from_pretrained(
             self.model_id,
             subfolder="speech_tokenizer",
-            revision=self.ctx.model_config.tokenizer_revision,
+            revision=self.ctx.model_config.revision,
         )
 
-    def get_feature_extractor(self) -> WhisperFeatureExtractor:
+    def get_feature_extractor(self, **kwargs: object) -> WhisperFeatureExtractor:
         return self.feature_extractor
 
     def get_speech_tokenizer(self) -> TokenizersBackend:
@@ -547,6 +551,92 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
+
+    @cached_property
+    def _waveform_preprocessing_costs(self) -> tuple[int, int]:
+        extractor = self.get_feature_extractor()
+        float_bytes = np.dtype(np.float32).itemsize
+        complex_bytes = np.dtype(np.complex64).itemsize
+        n_fft = extractor.n_fft
+        fft_frames = extractor.nb_max_frames + 1
+        frequency_bins = n_fft // 2 + 1
+        padded_bytes = extractor.n_samples * (float_bytes + np.dtype(np.int32).itemsize)
+        speech_token_bytes = (
+            2 * self.get_max_speech_frames() * np.dtype(np.int64).itemsize
+        )
+
+        spectrum_values = frequency_bins * fft_frames
+        spectrum_bytes = spectrum_values * complex_bytes
+        # STFT can hold the reflected waveform and windowed frames alongside
+        # its output. Taking the absolute value can copy the complex spectrum.
+        stft_scratch_samples = extractor.n_samples + n_fft + n_fft * fft_frames
+        stft_scratch_bytes = stft_scratch_samples * float_bytes
+        magnitude_scratch_bytes = spectrum_values * (complex_bytes + float_bytes)
+        # Out-of-place log-Mel scaling can have the Mel values, old log values,
+        # addition and division outputs live alongside the power spectrum.
+        mel_bytes = extractor.feature_size * extractor.nb_max_frames * float_bytes
+        log_mel_scratch_bytes = spectrum_values * float_bytes + 4 * mel_bytes
+        extraction_peak_bytes = spectrum_bytes + max(
+            stft_scratch_bytes, magnitude_scratch_bytes, log_mel_scratch_bytes
+        )
+
+        # Padding holds the per-item arrays while it assembles the batch.
+        bytes_per_item = (
+            speech_token_bytes + padded_bytes + max(padded_bytes, extraction_peak_bytes)
+        )
+        fixed_bytes = (n_fft + frequency_bins * extractor.feature_size) * float_bytes
+        return fixed_bytes, bytes_per_item
+
+    def validate_waveform_budget(
+        self, num_items: int, *, audio_items: AudioProcessorItems | None = None
+    ) -> None:
+        """Check fixed preprocessing costs and any available source waveforms."""
+        budget = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
+        if budget <= 0 or is_profiling_media() or not num_items:
+            return
+
+        fixed_bytes, bytes_per_item = self._waveform_preprocessing_costs
+        available_bytes = max(0, budget - fixed_bytes)
+        max_items = available_bytes // bytes_per_item
+        if num_items > max_items:
+            raise VLLMValidationError(
+                f"At most {max_items} audio(s) fit the FunAudioChat "
+                "preprocessing budget.",
+                parameter="audio",
+            )
+
+        if audio_items is None:
+            return
+
+        min_samples = self.get_feature_extractor().n_fft
+        # Float32 conversion and Whisper's batch preparation can each copy
+        # the waveform. A UUID-only item has no source samples to copy.
+        waveform_copy_samples = sum(
+            max(min_samples, len(audio)) for audio in audio_items if audio is not None
+        )
+        waveform_copy_bytes = 2 * waveform_copy_samples * np.dtype(np.float32).itemsize
+        if num_items * bytes_per_item + waveform_copy_bytes > available_bytes:
+            raise VLLMValidationError(
+                "FunAudioChat waveform preprocessing exceeds "
+                f"VLLM_MAX_MEDIA_PREPROCESSING_BYTES={budget}.",
+                parameter="audio",
+            )
+
+    def validate_num_input_items(
+        self, modality: str, num_items: int, *, is_embedding: bool
+    ) -> None:
+        super().validate_num_input_items(modality, num_items, is_embedding=is_embedding)
+        if not is_embedding:
+            self.validate_waveform_budget(num_items)
+
+    def parse_mm_data(
+        self, mm_data: MultiModalDataDict, *, validate: bool = True
+    ) -> MultiModalDataItems:
+        mm_items = super().parse_mm_data(mm_data, validate=validate)
+        audio_items = mm_items.get("audio")
+        if validate and isinstance(audio_items, AudioProcessorItems):
+            self.validate_waveform_budget(len(audio_items), audio_items=audio_items)
+        return mm_items
 
     def get_target_channels(self) -> int:
         return 1
@@ -568,6 +658,26 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
         audio_cfg = getattr(cfg, "audio_config", None)
         return int(getattr(audio_cfg, "group_size", 5))
 
+    def get_max_speech_frames(self) -> int:
+        """Maximum 25 Hz speech frames admitted for one audio item.
+
+        The discrete encoder emits `max_source_positions` replacement tokens
+        after grouping frames by `group_size` (1500 * 5 = 7500 frames, 300s).
+        """
+        cfg = self.get_hf_config()
+        audio_cfg = getattr(cfg, "audio_config", None)
+        max_audio_tokens = int(getattr(audio_cfg, "max_source_positions", 1500))
+        return max(1, max_audio_tokens) * max(1, self.get_audio_group_size())
+
+    def get_max_audio_samples(self, sampling_rate: int) -> int:
+        """Waveform samples that fill the profiled per-item speech-frame budget."""
+        token_fps = int(self.token_fps)
+        target_num_frames = self.get_max_speech_frames()
+        return max(
+            1,
+            (target_num_frames * sampling_rate + token_fps - 1) // token_fps,
+        )
+
 
 class FunAudioChatDummyInputsBuilder(
     BaseDummyInputsBuilder[FunAudioChatProcessingInfo]
@@ -580,32 +690,20 @@ class FunAudioChatDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
         sampling_rate = int(feature_extractor.sampling_rate)
 
         # Dummy inputs are used for profiling; construct the worst-case audio
         # length that maximizes the number of encoder tokens.
-        cfg = self.info.get_hf_config()
-        audio_cfg = getattr(cfg, "audio_config", None)
-        max_audio_tokens = int(getattr(audio_cfg, "max_source_positions", 1500))
-        group_size = self.info.get_audio_group_size()
-        token_fps = int(getattr(self.info, "token_fps", 25))
-        target_num_frames = max(1, max_audio_tokens) * max(1, group_size)
-        audio_len = max(
-            1,
-            (target_num_frames * sampling_rate + token_fps - 1) // token_fps,
-        )
-        num_audios = int(mm_counts.get("audio", 0))
+        audio_len = self.info.get_max_audio_samples(sampling_rate)
 
-        audio_overrides = mm_options.get("audio")
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=int(mm_counts.get("audio", 0)),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -616,31 +714,36 @@ class FunAudioChatMultiModalProcessor(
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         if not mm_data:
-            return BatchFeature(dict(passthrough_data))
+            return self._finalize_hf_mm_data(mm_data, hf_kwargs, passthrough_data)
 
         prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
         tokenizer = self.info.get_tokenizer()
         input_ids = torch.tensor([tokenizer.encode(prompt_text)])
 
-        audios = mm_data.get("audios", [])
+        audios = mm_data.get("audio", [])
         if not audios:
             processed_data = BatchFeature({"input_ids": input_ids})
-            processed_data.update(passthrough_data)
-            return processed_data
+            return self._finalize_hf_mm_data(
+                mm_data, hf_kwargs, passthrough_data, processed_data
+            )
         assert isinstance(audios, Sequence)
 
-        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+        audio_items = mm_items.get_items("audio", AudioProcessorItems)
+        self.info.validate_waveform_budget(len(audio_items), audio_items=audio_items)
+
+        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
         sr = int(feature_extractor.sampling_rate)
         min_samples = int(getattr(feature_extractor, "n_fft", 400) or 400)
+        max_samples = self.info.get_max_audio_samples(sr)
+        max_speech_frames = self.info.get_max_speech_frames()
 
         wavs: list[np.ndarray] = []
         speech_strs: list[str] = []
@@ -655,6 +758,15 @@ class FunAudioChatMultiModalProcessor(
             if min_samples > 0 and audio_np.shape[0] < min_samples:
                 audio_np = np.pad(
                     audio_np, (0, min_samples - audio_np.shape[0]), mode="constant"
+                )
+
+            if audio_np.shape[0] > max_samples:
+                duration_s = float(audio_np.shape[0]) / float(sr)
+                max_duration_s = float(max_samples) / float(sr)
+                raise ValueError(
+                    "Audio is too long for FunAudioChat: "
+                    f"{duration_s:.1f}s exceeds the profiled maximum of "
+                    f"{max_duration_s:.1f}s ({max_speech_frames} speech frames)."
                 )
 
             wavs.append(audio_np)
@@ -690,8 +802,9 @@ class FunAudioChatMultiModalProcessor(
         }
 
         processed_data = BatchFeature({"input_ids": input_ids, **mm_inputs})
-        processed_data.update(passthrough_data)
-        return processed_data
+        return self._finalize_hf_mm_data(
+            mm_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,
@@ -699,6 +812,7 @@ class FunAudioChatMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return {
+            "audio_embeds": MultiModalFieldConfig.batched("audio"),
             "speech_ids": MultiModalFieldConfig.batched("audio"),
             "speech_attention_mask": MultiModalFieldConfig.batched(
                 "audio", keep_on_cpu=True
@@ -720,8 +834,15 @@ class FunAudioChatMultiModalProcessor(
         audio_token = "<|AUDIO|>"
         audio_token_id = vocab[audio_token]
 
-        out_mm_data = out_mm_kwargs.get_data()
-        speech_attention_mask = out_mm_data.get("speech_attention_mask")
+        audio_items = mm_items.get("audio")
+        audio_embeds = (
+            audio_items if isinstance(audio_items, AudioEmbeddingItems) else None
+        )
+        speech_attention_mask = (
+            out_mm_kwargs.get_data().get("speech_attention_mask")
+            if audio_embeds is None
+            else None
+        )
         if speech_attention_mask is None:
             audio_output_lengths: list[int] = []
         else:
@@ -733,10 +854,15 @@ class FunAudioChatMultiModalProcessor(
             ).tolist()
 
         def get_replacement_funaudiochat(item_idx: int):
-            num_features = (
-                int(audio_output_lengths[item_idx]) if audio_output_lengths else 1
-            )
+            if audio_embeds is not None:
+                num_features = audio_embeds.get_feature_size(item_idx)
+            else:
+                num_features = (
+                    int(audio_output_lengths[item_idx]) if audio_output_lengths else 1
+                )
             if num_features <= 0:
+                if audio_embeds is not None:
+                    raise ValueError("audio_embeds must contain at least one token")
                 audios = mm_items.get_items("audio", AudioProcessorItems)
                 audio_len = audios.get_audio_length(item_idx)
                 raise ValueError(
@@ -835,6 +961,11 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         return audio_outputs.last_hidden_state, audio_output_lengths
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        audio_embeds = kwargs.get("audio_embeds")
+        if audio_embeds is not None:
+            assert isinstance(audio_embeds, (torch.Tensor, list, tuple))
+            return tuple(audio_embeds)
+
         speech_ids = kwargs.get("speech_ids")
         speech_attention_mask = kwargs.get("speech_attention_mask")
         input_features = kwargs.get("input_features")

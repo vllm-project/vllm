@@ -1,37 +1,30 @@
 group: CRCR Report
-# Runs only in the torch-nightly lane; the script exits 0 immediately otherwise,
-# following the same in-script gating as image_build.sh.
+# Only image-build-cpu: this step must always run.
 #
-# ORDERING (needs confirmation against the pipeline generator): this must be the
-# last step to run, because it reads final job states from the Buildkite REST
-# API and silently skips any job still in a non-terminal state. On build 83159
-# four jobs were still `scheduled` when the build was already 320 jobs deep, so
-# running early under-reports rather than erroring.
+# It was briefly gated on the build's long pole (lm-eval-large-models-4xh100)
+# so the agent would not idle. That backfired on the first nightly to use it,
+# build 91191: the long pole OOMed, hung, and was cancelled -- and a cancelled
+# dependency propagates past `allow_dependency_failure`, so the step went
+# `waiting_failed` and that nightly got no CRCR row at all. Nothing in this
+# pipeline sets timeout_in_minutes (the pipeline default and org maximum are
+# both unset), so a hung job has no terminal state to reach either: gating on
+# any single job can suppress the report indefinitely.
 #
-# depends_on across every group is brittle to maintain. If the generator emits a
-# `wait` between groups, placing this group last is enough. If not, the more
-# robust option is an agent pre-exit hook or a follow-up scheduled step, since
-# `CONTINUE_ON_FAILURE=1` means failures must not stop the report either way.
+# The bound now lives in the script, measured from the build's created_at, so
+# the report lands within CRCR_MAX_BUILD_AGE_S of the build starting whatever
+# else happens.
+depends_on:
+  - image-build-cpu
 steps:
   - label: ":satellite: Report nightly results to CRCR"
     key: crcr-report
-    # Belt and braces with the script's own TORCH_NIGHTLY check: this keeps the
-    # step out of non-nightly builds entirely, while the script gate still holds
-    # if the generator ever drops this key.
     if: build.env("TORCH_NIGHTLY") == "1"
-    # Reporting is observability, never a gate: a relay outage, an expired
-    # pipeline mapping or a missing secret must not turn the nightly red.
     soft_fail: true
     allow_dependency_failure: true
-    timeout_in_minutes: 15
-    # Reporting is a couple of REST calls and a curl: no GPU needed, so keep it
-    # off the accelerator agents the test groups queue for.
+    # The script polls from the start of the build now, so this covers the whole
+    # wait. It sits above the script's own build-age deadline (7h) so the script
+    # sends its partial report rather than being killed with nothing sent.
+    timeout_in_minutes: 480
     device: cpu-small
-    # No source_file_dependencies: this step is lane-gated, not change-gated,
-    # so it must not be skipped by the file-based step selection.
     commands:
-      - bash .buildkite/scripts/crcr-report.sh
-    # CRCR_CALLBACK_URL and BUILDKITE_API_TOKEN are deliberately not declared
-    # here. Buildkite interpolates a step-level env block at pipeline-upload
-    # time, so declaring them would substitute empty strings and shadow the
-    # values the agent already has from the pipeline/schedule environment.
+      - bash /vllm-workspace/.buildkite/scripts/crcr-report.sh
