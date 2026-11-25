@@ -256,6 +256,15 @@ impl CompiledChatTemplate {
     pub fn developer_role(&self) -> DeveloperRole {
         self.developer_role
     }
+
+    /// Whether this template dispatches on message role.
+    ///
+    /// The source is the compiled template, after the `{% generation %}` rewrite.
+    pub(super) fn filters_by_role(&self) -> bool {
+        self.env
+            .get_template("chat")
+            .is_ok_and(|template| super::dropped_roles::template_filters_by_role(template.source()))
+    }
 }
 
 #[cfg(test)]
