@@ -172,7 +172,8 @@ def _convert_object(
     elements: list[tuple[str, _Element]], schema: dict[str, Any] | None
 ) -> dict[str, Any]:
     """Convert named elements to an object; repeated names collect into a list."""
-    properties = (schema or {}).get("properties") or {}
+    raw_properties = (schema or {}).get("properties")
+    properties = raw_properties if isinstance(raw_properties, dict) else {}
     additional = (schema or {}).get("additionalProperties")
     result: dict[str, Any] = {}
     repeated: set[str] = set()

@@ -5,7 +5,11 @@ import ast
 import json
 
 import pytest
+from openai.types.responses import FunctionTool
 
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionToolsParam,
+)
 from vllm.tool_parsers.utils import (
     UnexpectedAstError,
     coerce_to_schema_type,
@@ -13,6 +17,7 @@ from vllm.tool_parsers.utils import (
     escape_ctrl_chars_in_strings,
     escape_nested_quotes_in_strings,
     extract_types_from_schema,
+    find_tool_properties,
     get_parameter_value,
     handle_single_tool,
     make_valid_python,
@@ -773,3 +778,34 @@ class TestRenameReservedKwargs:
             "path": "x",
             "from": 1,
         }
+
+
+class TestFindToolProperties:
+    @pytest.mark.parametrize(
+        ("properties", "expected"),
+        [
+            pytest.param(
+                {"city": {"type": "string"}},
+                {"city": {"type": "string"}},
+                id="dict",
+            ),
+            pytest.param([1], {}, id="list"),
+            pytest.param("x", {}, id="str"),
+            pytest.param(None, {}, id="none"),
+        ],
+    )
+    def test_non_dict_properties_returns_empty_dict(self, properties, expected):
+        chat_tool = ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": properties},
+            },
+        )
+        responses_tool = FunctionTool(
+            type="function",
+            name="get_weather",
+            parameters={"type": "object", "properties": properties},
+        )
+        assert find_tool_properties([chat_tool], "get_weather") == expected
+        assert find_tool_properties([responses_tool], "get_weather") == expected

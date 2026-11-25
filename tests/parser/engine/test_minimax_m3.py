@@ -253,3 +253,43 @@ class TestStreaming:
 def test_adjust_request_keeps_special_tokens_skipped(parser, mock_request):
     mock_request.skip_special_tokens = True
     assert parser.adjust_request(mock_request).skip_special_tokens is True
+
+
+@pytest.mark.parametrize(
+    "properties",
+    [
+        pytest.param([1], id="list"),
+        pytest.param("x", id="str"),
+    ],
+)
+def test_non_dict_tool_properties_do_not_crash(mock_request, properties):
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="create_order",
+                parameters={"type": "object", "properties": properties},
+            ),
+        ),
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="nested_order",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "shipping": {"type": "object", "properties": properties},
+                    },
+                },
+            ),
+        ),
+    ]
+    parser = MinimaxM3Parser(make_mock_tokenizer({}), tools=tools)
+
+    assert parse_arguments(parser, mock_request, element("city", "Paris")) == {
+        "city": "Paris"
+    }
+    assert parse_arguments(
+        parser,
+        mock_request,
+        element("shipping", element("city", "Paris")),
+        name="nested_order",
+    ) == {"shipping": {"city": "Paris"}}

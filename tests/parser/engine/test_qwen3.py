@@ -1534,3 +1534,53 @@ def test_mimo_preserves_verbatim_parameter_values(
     )
     assert collect_function_name(results) == "run"
     assert json.loads(collect_tool_arguments(results)) == {"text": value}
+
+
+@pytest.mark.parametrize(
+    "properties",
+    [
+        pytest.param({"city": {"type": "string"}}, id="dict"),
+        pytest.param([1], id="list"),
+        pytest.param("x", id="str"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("streaming", [False, True])
+def test_qwen3_xml_non_dict_tool_properties(mock_tokenizer, properties, streaming):
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+    )
+    from vllm.tool_parsers import ToolParserManager
+
+    request = ChatCompletionRequest(
+        model="qwen3",
+        messages=[{"role": "user", "content": "test"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": properties},
+                },
+            }
+        ],
+    )
+    parser_cls = ToolParserManager.get_tool_parser("qwen3_xml")
+    parser = parser_cls(mock_tokenizer, tools=request.tools)
+    text = (
+        "<tool_call>\n"
+        "<function=get_weather>\n"
+        "<parameter=city>\nParis\n</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+    if streaming:
+        results = simulate_tool_streaming(parser, request, list(text))
+        assert collect_function_name(results) == "get_weather"
+        assert json.loads(collect_tool_arguments(results)) == {"city": "Paris"}
+    else:
+        result = parser.extract_tool_calls(text, request)
+        assert result.tools_called
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert json.loads(result.tool_calls[0].function.arguments) == {"city": "Paris"}

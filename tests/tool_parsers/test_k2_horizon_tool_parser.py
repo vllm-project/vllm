@@ -354,3 +354,49 @@ def test_named_tool_resolves_custom_choice():
         tool_choice={"type": "custom", "name": "emit_command"},
     )
     assert K2HorizonToolParser._named_tool(request) == "emit_command"
+
+
+@pytest.mark.parametrize(
+    "properties",
+    [
+        pytest.param({"city": {"type": "string"}}, id="dict"),
+        pytest.param([1], id="list"),
+        pytest.param("x", id="str"),
+        pytest.param(None, id="none"),
+    ],
+)
+@pytest.mark.parametrize("tool_format", ["xml", "json"])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_non_dict_tool_properties_do_not_crash(
+    tokenizer, properties, tool_format, streaming
+):
+    request = ChatCompletionRequest(
+        model="k2-horizon",
+        messages=[{"role": "user", "content": "test"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": properties},
+                },
+            }
+        ],
+        chat_template_kwargs={"tool_call_format": tool_format},
+    )
+    parser = K2HorizonToolParser(tokenizer, request.tools)
+    output = _group(
+        _json_call("get_weather", {"city": "Paris"})
+        if tool_format == "json"
+        else _xml_call("get_weather", [("city", "Paris")])
+    )
+
+    if streaming:
+        content, calls = _collect_stream(parser, request, output)
+        assert content == ""
+        assert calls == [("get_weather", {"city": "Paris"})]
+    else:
+        result = parser.extract_tool_calls(output, request)
+        assert result.tools_called
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert json.loads(result.tool_calls[0].function.arguments) == {"city": "Paris"}
