@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # Minimum time between polls for finished transfers.
-_POLL_INTERVAL_S = 0.0002
+_POLL_INTERVAL_S = 0.0004
 # Stop polling once no step has run for this long: the engine is idle or paused.
 _POLL_ACTIVE_WINDOW_S = 1.0
 
