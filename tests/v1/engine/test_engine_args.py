@@ -521,7 +521,6 @@ def test_external_connector_kv_cache_access(connector, access, multi):
 
 
 _NIXL_ACCESS = KVCacheAccess.REGISTERS | KVCacheAccess.EXPORTS_FABRIC
-_LEGACY_IPC = KVCacheAccess.LEGACY_IPC
 
 # vLLM's LMCacheMPConnector imports the optional lmcache package, which is
 # only installed on some platforms (e.g. not on XPU).
@@ -538,7 +537,7 @@ requires_lmcache = pytest.mark.skipif(
         (["OffloadingConnector", "NixlConnector"], _NIXL_ACCESS),
         pytest.param(
             ["NixlConnector", "LMCacheMPConnector"],
-            _NIXL_ACCESS | _LEGACY_IPC,
+            _NIXL_ACCESS | KVCacheAccess.EXPORTS_FD,
             marks=requires_lmcache,
         ),
     ],
