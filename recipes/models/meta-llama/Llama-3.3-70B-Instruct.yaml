@@ -2,9 +2,9 @@ meta:
   title: "Llama-3.3-70B"
   slug: "llama3.3-70b"
   provider: "Meta"
-  description: "Llama 3.3 70B dense model with NVIDIA FP8/FP4 quantized variants for Hopper and Blackwell GPUs"
+  description: "Llama 3.3 70B dense model with NVIDIA FP8/FP4 quantized variants for Hopper and Blackwell GPUs and an AMD FP8 variant for Instinct GPUs"
   date_added: 2025-08-06
-  date_updated: 2026-09-22
+  date_updated: 2026-11-09
   tasks:
     - text
   performance_headline: ""
@@ -109,6 +109,37 @@ variants:
     description: "RedHatAI NVFP4 quantization"
     supported_hardware: [b200, gb200]
 
+  amd_fp8:
+    model_id: "amd/Llama-3.3-70B-Instruct-FP8-KV"
+    precision: fp8
+    label: "FP8 (AMD)"
+    # Weights are 72.7 GB on disk (embeddings and lm_head stay BF16): ceil(72.7 x 1.2).
+    vram_minimum_gb: 88
+    description: "AMD Quark FP8 weights and activations with a calibrated FP8 KV cache, for MI300X/MI325X/MI350X/MI355X"
+    supported_hardware: ["arch:gfx942", "arch:gfx950"]
+    # ROCM_AITER_FA keeps chunked and prefix-cached context only from #59098 (after v0.34.0).
+    min_vllm_version: "0.35.0"
+    tp: 1
+    extra_args:
+      - "--attention-backend"
+      - "ROCM_AITER_FA"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--block-size"
+      - "16"
+    extra_env:
+      VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
+      SAFETENSORS_FAST_GPU: "1"
+    hardware_overrides:
+      mi300x:
+        docker_image: "vllm/vllm-openai-rocm:nightly-9c1d45c21836370104d4eb51d3b46eda20719c47"
+      mi325x:
+        docker_image: "vllm/vllm-openai-rocm:nightly-9c1d45c21836370104d4eb51d3b46eda20719c47"
+      mi350x:
+        docker_image: "vllm/vllm-openai-rocm:nightly-9c1d45c21836370104d4eb51d3b46eda20719c47"
+      mi355x:
+        docker_image: "vllm/vllm-openai-rocm:nightly-9c1d45c21836370104d4eb51d3b46eda20719c47"
+
 compatible_strategies:
   - single_node_tp
   - multi_node_tp
@@ -163,6 +194,14 @@ strategy_overrides:
     tp:
       xeon6: 8
 
+troubleshooting:
+  - title: "Shuffle KV cache layout is not supported with sliding window, sinks, or speculative decoding (multi-token decode)."
+    when: { variants: [amd_fp8], features: [spec_decoding] }
+    body: |
+      The FP8 (AMD) variant sets `VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1`, which ROCM_AITER_FA
+      does not support with speculative decoding. Turn speculative decoding off, or unset
+      `VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT` to keep it.
+
 guide: |
   ## Overview
 
@@ -200,6 +239,24 @@ guide: |
   ```
 
   The first AITER launch may take several minutes while ROCm kernels are compiled and cached.
+
+  ### AMD FP8 (MI300X / MI325X / MI350X / MI355X)
+
+  The FP8 (AMD) variant serves [amd/Llama-3.3-70B-Instruct-FP8-KV](https://huggingface.co/amd/Llama-3.3-70B-Instruct-FP8-KV),
+  an AMD Quark checkpoint with FP8 weights and activations and calibrated FP8 KV-cache
+  scales. It runs on one GPU:
+
+  - The weights are 72.7 GB. With an FP8 KV cache a token takes 160 KiB
+    (80 layers x 8 KV heads x 128 x K and V). After the weights and warmup, one
+    MI300X leaves at least 85 GiB of KV cache, about 550k tokens or four full
+    131,072-token contexts. MI325X, MI350X and MI355X leave more.
+  - `--attention-backend ROCM_AITER_FA` selects the AITER flash-attention backend,
+    and `VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1` stores the KV cache in the layout
+    AITER's assembly paged-attention decode kernel reads.
+  - `--kv-cache-dtype fp8` uses the checkpoint's KV scales.
+  - `--block-size 16` is required with the shuffle layout: the default of 64 fails
+    at startup, and AITER has no FP8 decode kernel for 32-token blocks.
+  - `SAFETENSORS_FAST_GPU=1` loads the safetensors shards directly to the GPU.
 
   ### pip (Intel Xeon 6 CPUs)
   For Intel and AMD x86 CPUs, follow the [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels) installation instructions.
@@ -307,4 +364,5 @@ guide: |
   - [Llama-3.3-70B-Instruct](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct)
   - [NVIDIA FP8 variant](https://huggingface.co/nvidia/Llama-3.3-70B-Instruct-FP8)
   - [NVIDIA FP4 variant](https://huggingface.co/nvidia/Llama-3.3-70B-Instruct-FP4)
+  - [AMD FP8 variant](https://huggingface.co/amd/Llama-3.3-70B-Instruct-FP8-KV)
   - [TPU recipes: Trillium](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM/Llama3.x)
