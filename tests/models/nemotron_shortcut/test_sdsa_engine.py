@@ -6,7 +6,9 @@ chunked prefill, CUDA graphs, TP2 and MTP. The sdsa/ tests check the selection."
 
 import random
 
+import pytest
 import torch
+from safetensors.torch import save_file
 
 from tests.conftest import VllmRunner
 from tests.models.nemotron_shortcut.utils import (
@@ -29,13 +31,15 @@ PROMPTS = [[rng.randrange(VOCAB - 1) for _ in range(n)] for n in (300, K - 8, 30
 
 
 def refit_weight_buckets(model: torch.nn.Module) -> None:
-    """A validated sparse model accepts later buckets without indexer weights."""
+    """After a dummy start the indexer can arrive in any refit bucket."""
     parameters = dict(model.named_parameters())
     indexer = next(name for name in parameters if ".indexer." in name)
     # A replicated norm's local tensor also has the full checkpoint shape at TP2.
     norm = next(name for name in parameters if name.endswith(".input_layernorm.weight"))
-    for name in (indexer, norm):
+    for name in (norm, indexer, norm):
         value = parameters[name].detach().clone()
+        with torch.no_grad():
+            parameters[name].zero_()
         assert name in model.load_weights([(name, value)])
         torch.testing.assert_close(parameters[name], value, atol=0, rtol=0)
     assert model.load_weights([]) == set()
@@ -74,6 +78,37 @@ def prompt_logprobs(output) -> torch.Tensor:
     """Entry i is the log prob of prompt token i + 1, which sees i + 1 keys."""
     tokens, steps = output.prompt_token_ids[1:], output.prompt_logprobs[1:]
     return torch.tensor([step[token].logprob for token, step in zip(tokens, steps)])
+
+
+def test_sparse_checkpoint_without_indexer_is_rejected(
+    tmp_path, vllm_runner, monkeypatch
+):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    text = make_config(
+        layer_types=["full_attention"],
+        hidden_size=1024,
+        num_attention_heads=8,
+        head_dim=256,
+        index_topk=K,
+        max_position_embeddings=1024,
+    )
+    save_checkpoint_config(tmp_path, text, image_token_id=text.vocab_size - 1)
+    save_file(
+        {"model.language_model.norm.weight": torch.ones(text.hidden_size)},
+        tmp_path / "model.safetensors",
+    )
+    with pytest.raises(ValueError, match="checkpoint has no SDSA indexer weights"):
+        vllm_runner(
+            str(tmp_path),
+            load_format="safetensors",
+            trust_remote_code=True,  # the test writes its checkpoint's config module
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            max_model_len=1024,
+            enforce_eager=True,
+            block_size=None,
+            limit_mm_per_prompt={"image": 0, "video": 0},
+        )
 
 
 def test_sdsa_engine(tmp_path, monkeypatch) -> None:

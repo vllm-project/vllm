@@ -18,6 +18,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -46,6 +47,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.models.nemotron_shortcut.nvidia.moe.config import activation_clamp
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe, has_flashinfer_cutedsl
@@ -232,6 +234,7 @@ class NemotronShortcutCuteDslMxfp8Experts(mk.FusedMoEExpertsModular):
         self._w1_sf: torch.Tensor | None = None
         self._w2_sf: torch.Tensor | None = None
         self._alpha: torch.Tensor | None = None
+        self._ordered_finalize = envs.VLLM_BATCH_INVARIANT
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         from flashinfer.cute_dsl.utils import convert_row_major_sf_to_mma_layout
@@ -239,7 +242,7 @@ class NemotronShortcutCuteDslMxfp8Experts(mk.FusedMoEExpertsModular):
         # Checkpoint scales are row-major [E, rows, K // 32]; the kernel wants
         # the swizzled MMA layout. The originals stay on the layer.
         num_experts, intermediate, hidden = layer.w13_weight.shape
-        self._w1_sf = convert_row_major_sf_to_mma_layout(
+        w1_sf = convert_row_major_sf_to_mma_layout(
             layer.w13_weight_scale.data,
             m=intermediate,
             k=hidden,
@@ -247,17 +250,20 @@ class NemotronShortcutCuteDslMxfp8Experts(mk.FusedMoEExpertsModular):
             sf_vec_size=MXFP8_BLOCK_SIZE,
         )
         _, out_dim, intermediate = layer.w2_weight.shape
-        self._w2_sf = convert_row_major_sf_to_mma_layout(
+        w2_sf = convert_row_major_sf_to_mma_layout(
             layer.w2_weight_scale.data,
             m=out_dim,
             k=intermediate,
             num_groups=num_experts,
             sf_vec_size=MXFP8_BLOCK_SIZE,
         )
-        # MXFP8 has no global scales; the kernel takes a per-expert alpha of 1.
-        self._alpha = torch.ones(
-            num_experts, dtype=torch.float32, device=layer.w13_weight.device
-        )
+        refill_derived(self, "_w1_sf", w1_sf)
+        refill_derived(self, "_w2_sf", w2_sf)
+        # MXFP8 has no global scales. The kernel reads ones at a captured address.
+        if self._alpha is None:
+            self._alpha = torch.ones(
+                num_experts, dtype=torch.float32, device=layer.w13_weight.device
+            )
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -293,6 +299,10 @@ class NemotronShortcutCuteDslMxfp8Experts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
         return True
+
+    @staticmethod
+    def _supports_batch_invariance() -> bool:
+        return has_cute_dsl_options("swap_ab", "use_fused_finalize")
 
     @staticmethod
     def _supports_quant_scheme(
@@ -354,12 +364,15 @@ class NemotronShortcutCuteDslMxfp8Experts(mk.FusedMoEExpertsModular):
         x_q, x_sf = mxfp8_e4m3_quantize(
             hidden_states.contiguous(), is_sf_swizzled_layout=False
         )
+        options: dict[str, Any] = {}
         if self.clamp_limit is None:
             activation_type = activation_to_flashinfer_int(MoEActivation.RELU2_NO_MUL)
-            clamp = {}
         else:
             activation_type = int(_activation_type().ClampedRelu2)
-            clamp = {"clamped_relu2_limit": self.clamp_limit}
+            options["clamped_relu2_limit"] = self.clamp_limit
+        if self._ordered_finalize:
+            # MXFP8's ordered top-k sum uses the swap-AB GEMMs on SM10x.
+            options.update(use_fused_finalize=False, swap_ab=True)
         _cute_dsl_fused_moe()(
             x=x_q,
             x_sf=x_sf.view(torch.uint8).reshape(num_tokens, -1),
@@ -379,7 +392,7 @@ class NemotronShortcutCuteDslMxfp8Experts(mk.FusedMoEExpertsModular):
             moe_output=output,
             activation_type=activation_type,
             quant_mode="mxfp8",
-            **clamp,
+            **options,
         )
 
 

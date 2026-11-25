@@ -93,8 +93,15 @@ def test_matches_a_per_expert_reference(dtype, top_k, shared_size, bias_space):
     )
 
 
-def test_loads_packed_experts_and_router_bias():
+@pytest.mark.parametrize("layerwise", [False, True], ids=["cold", "layerwise"])
+def test_loads_packed_experts_and_router_bias(layerwise):
     """Loading overwrites every declared checkpoint tensor, experts included."""
+    from vllm.model_executor.model_loader.reload.layerwise import (
+        finalize_layerwise_reload,
+        initialize_layerwise_reload,
+        record_metadata_for_reloading,
+    )
+
     moe = build(lambda: NemotronShortcutMoE(make_config()))
     weights = {name: torch.randn_like(param) for name, param in moe.named_parameters()}
     wrapper = nn.Module()
@@ -107,9 +114,16 @@ def test_loads_packed_experts_and_router_bias():
         for name, value in weights.items()
     }
 
+    experts = moe.experts.routed_experts
+    if layerwise:
+        with torch.device(current_platform.device_type):
+            record_metadata_for_reloading(experts)
+        initialize_layerwise_reload(experts)
     assert AutoWeightsLoader(wrapper).load_weights(checkpoint.items()) == {
         "moe." + name for name in weights
     }
+    if layerwise:
+        finalize_layerwise_reload(experts, get_current_vllm_config().model_config)
     for name, param in moe.named_parameters():
         torch.testing.assert_close(param, weights[name], atol=0, rtol=0)
 

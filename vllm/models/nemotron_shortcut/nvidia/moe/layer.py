@@ -236,7 +236,7 @@ class NemotronShortcutMoE(nn.Module):
             param_name, shard_id = fused_names[name]
             param = getattr(experts, param_name)
             for expert_id, expert_weight in enumerate(weight):
-                experts.weight_loader(
+                param.weight_loader(
                     param,
                     expert_weight,
                     param_name,

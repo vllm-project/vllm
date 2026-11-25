@@ -154,8 +154,9 @@ class NemotronShortcutMultiTokenPredictor(nn.Module):
         )
         # The selection buffers of the draft's SDSA layer.
         self.sdsa_buffers = None
-        if config.index_topk is not None:
-            self.sdsa_buffers = allocate_sdsa_buffers(vllm_config, config.index_topk)
+        index_topk = getattr(config, "index_topk", None)
+        if index_topk is not None:
+            self.sdsa_buffers = allocate_sdsa_buffers(vllm_config, index_topk)
         self.layers = nn.ModuleDict(
             {
                 str(i): NemotronShortcutMTPLayer(
@@ -235,7 +236,7 @@ class NemotronShortcutMTP(
         # target's SDSA config. An hf_overrides of the target's config does not
         # reach the draft's config, so take the target's SDSA fields.
         target_config = vllm_config.model_config.hf_text_config
-        config.index_topk = target_config.index_topk
+        config.index_topk = getattr(target_config, "index_topk", None)
         config.sdsa_indexer_dtype = getattr(target_config, "sdsa_indexer_dtype", "auto")
         config.sdsa_decode_core = getattr(target_config, "sdsa_decode_core", "auto")
         config.sdsa_decode_fused = getattr(target_config, "sdsa_decode_fused", "auto")
