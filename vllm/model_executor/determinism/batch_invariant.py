@@ -19,7 +19,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.nccl import pin_nccl_env
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 def _matmul_launch_metadata(
@@ -1414,9 +1413,12 @@ def enable_batch_invariant_mode():
             _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, key)
             _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, key)
         else:
-            # Hopper (SM90) and Blackwell (SM100): the only source of batch
-            # variance is split-k, which we disable via the cuBLAS workspace
-            # config.
+            # Hopper (SM90) and Blackwell (SM100): aten matmuls are not
+            # overridden here; the cuBLAS workspace config below disables
+            # split-k. That alone does not make cuBLAS batch invariant for
+            # every shape (e.g. narrow MoE router projections), so unquantized
+            # Linear layers use the Triton linear_batch_invariant on every
+            # CUDA device (see #35404).
             os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
             os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
 
@@ -1461,9 +1463,7 @@ def enable_batch_invariant_mode():
             "aten::bmm.out", bmm_out_batch_invariant, key, allow_override=True
         )
 
-    reduced_precision_val = (
-        (False, False) if is_torch_equal_or_newer("2.10.0") else False
-    )
+    reduced_precision_val = (False, False)
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (
         reduced_precision_val
     )
@@ -1481,6 +1481,11 @@ def override_envs_for_invariance():
     if current_platform.is_rocm():
         # The skinny GEMMs pick their split of K from the batch size.
         os.environ["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
+        # MIOpen's split-K forward conv solver accumulates with atomics.
+        # TODO: Replace with torch.backends.cudnn.deterministic = True once the
+        # ROCm base image is on ROCm 10.3; on 10.0, MIOpen's deterministic mode
+        # finds no solver for some forward convs.
+        os.environ["MIOPEN_DEBUG_CONV_IMPLICIT_GEMM_ASM_FWD_GTC_XDLOPS_NHWC"] = "0"
     else:
         # NCCL determinism settings. NCCL keeps the launch mode process-wide, so,
         # unlike the pins below, it also applies to communicators shared with other

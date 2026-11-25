@@ -10,14 +10,14 @@ import torch
 
 from vllm.platforms import current_platform
 
-if not current_platform.is_cuda():
-    pytest.skip("requires CUDA", allow_module_level=True)
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+    pytest.skip("requires CUDA, ROCm or XPU", allow_module_level=True)
 
 from vllm.v1.worker.gpu.spec_decode.suffix.speculator import (  # noqa: E402
     SuffixSpeculator,
 )
 
-DEVICE = torch.device("cuda")
+DEVICE = torch.device(current_platform.device_type)
 
 
 def _local_draft(hist, k, depth):
@@ -458,7 +458,7 @@ def test_reused_slot_does_not_inherit_verification_stats():
     _set(rs, 0, [], [1, 2, 3, 1, 2])
     _propose(spec, rs, [0])  # the request finishes before this draft is verified
     # A new request takes slot 0; its first step verifies only placeholders.
-    spec.add_request(0)
+    spec.add_request(0, None)
     _set(rs, 0, [], [5, 6, 7])
     _propose(spec, rs, [0], num_sampled=[1], num_rejected=[k])
     assert spec.accept_stats.sum().item() == 0
