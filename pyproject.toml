@@ -109,6 +109,7 @@ docstring-code-format = true
 # Not run in CI, mirrors the ty config below for contributors who use mypy
 [tool.mypy]
 files = ["vllm", "tests"]
+exclude = ["/third_party/"]
 ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
@@ -180,6 +181,7 @@ output = "coverage.xml"
 
 [tool.ty.src]
 include = ["vllm", "tests"]
+exclude = ["**/third_party/**"]
 
 [tool.ty.rules]
 # Minimize noise from optional/extra dependencies not installed in pre-commit environment
