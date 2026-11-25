@@ -25,6 +25,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
+from vllm.model_executor.layers.mamba.spare import load_bases
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -66,6 +67,8 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        spare_basis: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -88,6 +91,7 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.mixer",
+            spare_basis=spare_basis,
         )
 
         self.block_sparse_moe = None
@@ -355,9 +359,32 @@ class GraniteMoeHybridModel(nn.Module):
             self.embed_tokens = PPMissingLayer()
         self.embedding_multiplier = config.embedding_multiplier
 
+        spare = vllm_config.mamba_config.spare
+        bases: dict[int, torch.Tensor] = {}
+        if spare is not None:
+            assert model_config.revision is not None
+            bases = load_bases(
+                spare.basis_path,
+                spare.basis_sha256,
+                spare.method,
+                model_config.model,
+                model_config.revision,
+                tuple(
+                    i
+                    for i, layer_type in enumerate(config.layer_types)
+                    if layer_type == "linear_attention"
+                ),
+                config.mamba_n_heads,
+                config.mamba_d_state,
+                spare.rank,
+            )
+
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
             layer_class = ALL_DECODER_LAYER_TYPES[config.layer_types[layer_idx]]
+            spare_args = (
+                {"spare_basis": bases.pop(layer_idx)} if layer_idx in bases else {}
+            )
             return layer_class(
                 config,
                 layer_idx,
@@ -365,6 +392,7 @@ class GraniteMoeHybridModel(nn.Module):
                 cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
+                **spare_args,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -641,6 +669,7 @@ class GraniteMoeHybridForCausalLM(
         hf_config = vllm_config.model_config.hf_config
         intermediate_size = hf_config.mamba_expand * hf_config.hidden_size
 
+        spare = vllm_config.mamba_config.spare
         return MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=intermediate_size,
             tp_world_size=parallel_config.tensor_parallel_size,
@@ -650,6 +679,7 @@ class GraniteMoeHybridForCausalLM(
             state_size=hf_config.mamba_d_state,
             conv_kernel=hf_config.mamba_d_conv,
             num_spec=vllm_config.num_speculative_tokens,
+            temporal_state_size=None if spare is None else spare.rank,
         )
 
     @classmethod

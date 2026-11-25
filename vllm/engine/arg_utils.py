@@ -89,7 +89,7 @@ from vllm.config.kernel import (
 from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.logging import LogLevel
 from vllm.config.lora import MaxLoRARanks
-from vllm.config.mamba import MambaBackendEnum, MambaSSUAlgorithm
+from vllm.config.mamba import MambaBackendEnum, MambaSSUAlgorithm, SpareConfig
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -815,6 +815,7 @@ class EngineArgs:
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
     mamba_prefill_backend: MambaBackendEnum = MambaConfig.prefill_backend
+    mamba_spare: SpareConfig | None = MambaConfig.spare
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
     )
@@ -882,6 +883,8 @@ class EngineArgs:
             self.aux_output_config.enable_return_routed_experts = True
         if isinstance(self.engram_config, dict):
             self.engram_config = EngramConfig(**self.engram_config)
+        if isinstance(self.mamba_spare, dict):
+            self.mamba_spare = SpareConfig(**self.mamba_spare)
         if isinstance(self.mamba_config, dict):
             self.mamba_config = MambaConfig(**self.mamba_config)
         if isinstance(self.kernel_config, dict):
@@ -1117,6 +1120,7 @@ class EngineArgs:
             description=MambaConfig.__doc__,
         )
         mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
+        mamba_group.add_argument("--mamba-spare", **mamba_kwargs["spare"])
         mamba_group.add_argument(
             "--mamba-ssu-algorithm", **mamba_kwargs["ssu_algorithm"]
         )
@@ -2819,6 +2823,8 @@ class EngineArgs:
             mamba_config.stochastic_rounding_philox_rounds = (
                 self.mamba_cache_philox_rounds
             )
+        if self.mamba_spare is not None:
+            mamba_config.spare = self.mamba_spare
         mamba_config.__post_init__()
 
         # Kernel config overrides

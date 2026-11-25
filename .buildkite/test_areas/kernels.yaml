@@ -731,6 +731,11 @@ steps:
   - vllm/model_executor/layers/mamba/gdn
   - vllm/models/qwen3_5/
   - vllm/model_executor/layers/mamba/ops
+  - vllm/model_executor/layers/mamba/mamba_mixer2.py
+  - vllm/model_executor/layers/mamba/mamba_utils.py
+  - vllm/model_executor/layers/mamba/spare.py
+  - vllm/model_executor/models/granitemoehybrid.py
+  - vllm/config/mamba.py
   - vllm/third_party/flash_linear_attention/ops/fused_recurrent_replayssm.py
   - vllm/triton_utils/allocation.py
   - vllm/triton_utils/tensor_descriptor.py

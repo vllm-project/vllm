@@ -49,7 +49,7 @@ from .kv_transfer import KVCacheAccess, KVTransferConfig, hisparse_host_pool_gib
 from .load import LoadConfig
 from .logging import LoggingConfig
 from .lora import LoRAConfig
-from .mamba import MambaBackendEnum, MambaConfig
+from .mamba import MambaBackendEnum, MambaConfig, validate_spare
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .offload import OffloadConfig
@@ -3816,6 +3816,11 @@ class VllmConfig:
             raise ValueError(
                 "--mamba-block-size can only be set with --enable-prefix-caching"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_mamba_spare(self) -> "VllmConfig":
+        validate_spare(self)
         return self
 
     @model_validator(mode="after")
