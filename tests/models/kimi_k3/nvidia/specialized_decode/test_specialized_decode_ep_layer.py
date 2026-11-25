@@ -35,7 +35,7 @@ def stand_in(latent, topk_w, topk_ids):
     not current_platform.is_device_capability_family(100), reason="needs SM100"
 )
 @pytest.mark.parametrize("impl", ["cuda", "native"])
-@pytest.mark.parametrize("tokens", [1, 5, 20, 40, 80, 96])
+@pytest.mark.parametrize("tokens", [1, 5, 8, 9, 16, 17, 20, 32, 33, 40, 64, 65, 80, 96])
 @pytest.mark.parametrize("front_gemm", [False, True])
 def test_ep_moe_layer_matches_stock_sequence(tokens, impl, front_gemm):
     from vllm import _custom_ops as ops
@@ -95,7 +95,11 @@ def test_ep_moe_layer_matches_stock_sequence(tokens, impl, front_gemm):
             atol=1e-5,
             rtol=1e-4,
         )
-        torch.testing.assert_close(out, expected, atol=3e-2, rtol=2e-2)
+        # Elementwise: up to two BF16 ulps of the output's scale. The split-K GEMMs
+        # round some elements one ulp away from cuBLAS, and cancellation can leave
+        # such an element near zero, where rtol does not cover it.
+        ulp = torch.finfo(torch.bfloat16).eps * expected.abs().max().item()
+        torch.testing.assert_close(out, expected, atol=max(3e-2, 2 * ulp), rtol=2e-2)
         rel = (out.float() - expected.float()).norm() / expected.float().norm()
         assert rel < 5e-3, rel
         # Row by row (a shared expert row read at the wrong pitch is O(1) off).

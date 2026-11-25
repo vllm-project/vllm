@@ -141,6 +141,9 @@ logger = init_logger(__name__)
 # so it falls back to sequential.
 _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD = 256
 
+# KimiMoE._hybrid_ep before the layer's first forward has built it (or not).
+_HYBRID_EP_UNBUILT = object()
+
 
 def shard_sequence_parallel_mlp(
     hidden_size: int,
@@ -518,6 +521,10 @@ class KimiMoE(nn.Module):
             self.routed_expert_up_proj = None
             self.routed_output_transform = None
 
+        # The hybrid DEP MoE schedule: a DepMoe or None once the first forward
+        # has decided (_hybrid_ep_layer).
+        self._hybrid_ep: Any = _HYBRID_EP_UNBUILT
+
         if self.use_mega_moe:
             ep_group = get_ep_group()
             ep_size = ep_group.world_size
@@ -650,9 +657,8 @@ class KimiMoE(nn.Module):
         it and MegaMoE) for a sequence-parallel MegaMoE layer with a replicated shared
         expert (hybrid decode: TP attention, a few tokens per rank, every rank streams
         the whole shared + latent weights). Built on first use; None if not eligible."""
-        ep = self.__dict__.get("_hybrid_ep", 0)
-        if ep != 0:
-            return ep
+        if self._hybrid_ep is not _HYBRID_EP_UNBUILT:
+            return self._hybrid_ep
         from .specialized_decode.cutedsl.moe.ep.layer import FRONT_MAX
         from .specialized_decode.runtime.dep import DepMoe, dep_moe_supported
 
@@ -666,12 +672,16 @@ class KimiMoE(nn.Module):
             and not se.shard_sequence_parallel
             and se.gemm_rs_ar is None
             and self.routed_expert_down_proj is not None
+            # Every weight DepMoe reads directly must be unquantized BF16.
             and all(
-                w.dtype == torch.bfloat16
-                for w in (
-                    se.gate_up_proj.weight,
-                    se.down_proj.weight,
-                    self.routed_expert_down_proj.weight,
+                getattr(linear, "weight", None) is not None
+                and linear.weight.dtype == torch.bfloat16
+                for linear in (
+                    self.gate,
+                    se.gate_up_proj,
+                    se.down_proj,
+                    self.routed_expert_down_proj,
+                    self.routed_expert_up_proj,
                 )
             )
         )
@@ -682,7 +692,7 @@ class KimiMoE(nn.Module):
             logger.info_once(
                 "Kimi K3 hybrid decode: MegaMoE layers run the DEP EpMoeLayer schedule"
             )
-        self.__dict__["_hybrid_ep"] = ep
+        self._hybrid_ep = ep
         return ep
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
