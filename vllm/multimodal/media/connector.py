@@ -4,6 +4,7 @@
 import asyncio
 import atexit
 import contextlib
+import errno
 import hashlib
 import os
 import tempfile
@@ -28,6 +29,7 @@ from vllm.connections import (
     MediaFetchDeadlineExceededError,
     MediaRequestDownloadBudget,
     MediaRequestDownloadSizeExceededError,
+    _is_retryable,
     global_http_connection,
 )
 from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
@@ -58,6 +60,51 @@ MODALITY_IO_MAP: dict[str, type[MediaIO]] = {
 }
 
 
+# Errnos meaning this server ran out of a local resource while fetching,
+# rather than the media host being unreachable.
+_LOCAL_RESOURCE_ERRNOS = frozenset(
+    {errno.EMFILE, errno.ENFILE, errno.ENOMEM, errno.ENOBUFS, errno.ENOSPC}
+)
+
+
+def _is_local_resource_error(exc: BaseException) -> bool:
+    """Return True if ``exc`` or an error it wraps is local resource exhaustion.
+
+    aiohttp's ``ClientConnectorError`` keeps the underlying ``OSError`` in
+    ``os_error``; other wrappers chain it through ``__cause__``/``__context__``.
+    """
+    seen: set[int] = set()
+    stack: list[BaseException | None] = [exc]
+    while stack:
+        cur = stack.pop()
+        if cur is None or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, OSError) and cur.errno in _LOCAL_RESOURCE_ERRNOS:
+            return True
+        stack.extend([getattr(cur, "os_error", None), cur.__cause__, cur.__context__])
+    return False
+
+
+def _unreachable_reason(exc: Exception) -> str:
+    """Describe an unreachable media host without echoing hosts or addresses."""
+    if isinstance(exc, aiohttp.ClientResponseError):
+        return f"HTTP {exc.status} error"
+    if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None:
+        return f"HTTP {exc.response.status_code} error"
+    if isinstance(
+        exc,
+        (
+            TimeoutError,
+            asyncio.TimeoutError,
+            requests.exceptions.Timeout,
+            aiohttp.ServerTimeoutError,
+        ),
+    ):
+        return "Request timed out"
+    return "Could not connect to host"
+
+
 def _wrap_media_fetch_error(
     url: str, exc: Exception, *, request_field: str = "image_url"
 ) -> VLLMUnprocessableEntityError | Exception:
@@ -66,18 +113,28 @@ def _wrap_media_fetch_error(
     Invalid media URLs (4xx responses except 408/429 and malformed URLs) and
     exceeded media fetch deadlines produce a 422 Unprocessable Entity error.
 
-    Transient errors (5xx, 408, 429, DNS failures, connection errors,
-    socket timeouts) are returned as-is to allow retry logic to handle them
-    appropriately.
+    Transient errors (5xx, DNS failures, connection errors, socket timeouts)
+    are retried inside ``HTTPConnection.get_bytes``/``async_get_bytes``. When
+    they reach this function the retries are exhausted, so they are also
+    converted to 422: the media host named by the request could not be
+    reached. Local resource exhaustion (e.g. EMFILE) is returned as-is.
 
     Returns:
-        VLLMUnprocessableEntityError for invalid URLs and exceeded deadlines.
-        Original exception for transient errors (5xx, 408, 429, network blips)
-            or other exceptions
+        VLLMUnprocessableEntityError for invalid URLs, exceeded deadlines and
+            transient errors whose retries are exhausted
+        Original exception for 408/429, local resource exhaustion, or other
+            exceptions
 
     """
     if isinstance(exc, VLLMValidationError):
         return exc
+
+    if _is_retryable(exc) and not _is_local_resource_error(exc):
+        return VLLMUnprocessableEntityError(
+            f"Failed to fetch media from URL: {_unreachable_reason(exc)}",
+            parameter=request_field,
+            value=url,
+        )
 
     if isinstance(exc, aiohttp.ClientResponseError):
         if exc.status in (408, 429):

@@ -39,6 +39,12 @@ pub enum ApiError {
     },
     /// The requested operation conflicts with current server state.
     Conflict { message: String },
+    /// The request is well-formed but names content that cannot be used,
+    /// such as a media URL whose host cannot be reached.
+    UnprocessableEntity {
+        message: String,
+        param: Option<&'static str>,
+    },
     /// An unexpected internal failure happened before streaming started.
     ServerError { message: String },
     /// The engine rejected the request with a retryable error.
@@ -52,6 +58,7 @@ impl ApiError {
             Self::InvalidRequest { .. } => StatusCode::BAD_REQUEST,
             Self::ModelNotFound { .. } | Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Conflict { .. } => StatusCode::CONFLICT,
+            Self::UnprocessableEntity { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::JsonParseError { .. } | Self::InvalidQuery { .. } => StatusCode::BAD_REQUEST,
             Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
@@ -91,6 +98,11 @@ impl ApiError {
             // Python has no error class for 409; like its `HTTPException`
             // handler, name the status.
             Self::Conflict { message } => ("Conflict", message.clone(), None),
+            Self::UnprocessableEntity { message, param } => (
+                "UnprocessableEntityError",
+                message.clone(),
+                param.map(str::to_string),
+            ),
             Self::ServerError { message } => ("InternalServerError", message.clone(), None),
             Self::ServiceUnavailable { message } => {
                 ("ServiceUnavailableError", message.clone(), None)
@@ -169,8 +181,11 @@ pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiE
 }
 
 /// Like [`text_submit_error`], for the chat pipeline, which wraps the text
-/// errors.
+/// errors. A media URL that cannot be fetched maps to HTTP 422, as in Python.
 pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
+    if error.is_unfetchable_media() {
+        return ApiError::unprocessable_entity(error.to_report_string(), None);
+    }
     if error.is_request_validation_error() {
         return invalid_request!(param = error.param(), "{}", error.as_report());
     }
@@ -234,6 +249,7 @@ mod tests {
             ApiError::not_found("No adapter found for /not/an/adapter"),
             ApiError::json_parse_error("expected value at line 1 column 1"),
             ApiError::conflict("A profiling session is already active."),
+            ApiError::unprocessable_entity("media fetch failed", None),
             ApiError::server_error("Internal server error"),
             ApiError::service_unavailable("Generation is paused."),
         ];
@@ -247,6 +263,7 @@ mod tests {
             {"error":{"message":"No adapter found for /not/an/adapter","type":"NotFoundError","param":null,"code":404}}
             {"error":{"message":"expected value at line 1 column 1","type":"Bad Request","param":null,"code":400}}
             {"error":{"message":"A profiling session is already active.","type":"Conflict","param":null,"code":409}}
+            {"error":{"message":"media fetch failed","type":"UnprocessableEntityError","param":null,"code":422}}
             {"error":{"message":"Internal server error","type":"InternalServerError","param":null,"code":500}}
             {"error":{"message":"Generation is paused.","type":"ServiceUnavailableError","param":null,"code":503}}"#]].assert_eq(&rendered);
     }
@@ -378,6 +395,43 @@ mod tests {
             "Chat template is passed with request, but --trust-request-chat-template is not set. \
              Refused request with untrusted chat template."
         );
+    }
+
+    /// A media URL that cannot be fetched is 422, as in Python; media the
+    /// request got wrong stays 400 and a failure on this side stays 500.
+    #[test]
+    fn media_fetch_failure_maps_to_unprocessable_entity() {
+        use std::time::Duration;
+
+        use llm_multimodal::{MediaConnectorError, MultiModalError};
+
+        let errors = [
+            MediaConnectorError::UnresolvableHost {
+                host: "unreachable.invalid".to_string(),
+                source: std::io::Error::other("no such host"),
+            },
+            MediaConnectorError::Timeout {
+                url: "https://example.com/a.png".to_string(),
+                budget: Duration::from_secs(5),
+            },
+            MediaConnectorError::InvalidUrl("relative URL without a base".to_string()),
+            MediaConnectorError::DataUrl("missing comma".to_string()),
+            MediaConnectorError::DecodeIo(std::io::Error::other("broken pipe")),
+        ];
+        let rendered = errors
+            .into_iter()
+            .map(|error| {
+                let error = vllm_chat::Error::from(MultiModalError::Media(error));
+                let api_error = chat_submit_error("failed to submit chat request", error);
+                serde_json::to_string(&api_error.to_error_response()).unwrap()
+            })
+            .join("\n");
+        expect![[r#"
+            {"error":{"message":"media host 'unreachable.invalid' could not be resolved: no such host","type":"UnprocessableEntityError","param":null,"code":422}}
+            {"error":{"message":"media fetch of https://example.com/a.png timed out after 5s","type":"UnprocessableEntityError","param":null,"code":422}}
+            {"error":{"message":"invalid media URL: relative URL without a base","type":"UnprocessableEntityError","param":null,"code":422}}
+            {"error":{"message":"data URL parse error: missing comma","type":"BadRequestError","param":null,"code":400}}
+            {"error":{"message":"failed to submit chat request: I/O error while decoding media: broken pipe","type":"InternalServerError","param":null,"code":500}}"#]].assert_eq(&rendered);
     }
 
     #[test]

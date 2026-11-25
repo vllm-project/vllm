@@ -151,6 +151,28 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
+    /// Whether this is a media URL the request named that could not be
+    /// fetched: a malformed URL, a host that cannot be resolved or reached,
+    /// that answered an error status or ran out of the fetch budget, or a
+    /// download over the size cap. Answered as 422, as in Python; a fetch
+    /// that failed on this side stays a server error.
+    pub fn is_unfetchable_media(&self) -> bool {
+        use llm_multimodal::{MediaConnectorError, MediaErrorCode, MediaFault};
+
+        match self {
+            Self::Media(error) => match error {
+                MediaConnectorError::InvalidUrl(_)
+                | MediaConnectorError::PayloadTooLarge { .. } => true,
+                _ => {
+                    error.code() == MediaErrorCode::FetchFailed
+                        && error.fault() != MediaFault::Internal
+                }
+            },
+            Self::MediaAfterPreprocessed { source, .. } => source.is_unfetchable_media(),
+            _ => false,
+        }
+    }
+
     /// Whether this error represents invalid user request parameters.
     pub fn is_request_validation_error(&self) -> bool {
         match self {
