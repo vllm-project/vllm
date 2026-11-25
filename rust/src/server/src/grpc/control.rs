@@ -12,6 +12,7 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::utility::{PauseMode as EnginePauseMode, SleepLevel};
 
+use super::kv_events::PublisherAddress;
 use super::{ControlServer, pb};
 use crate::config::LoraModulePath;
 use crate::lora::{
@@ -326,7 +327,7 @@ impl pb::control_server::Control for ControlServiceImpl {
         _request: Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
         let client = self.state.engine_core_client();
-        let sources = client.ready_responses().into_iter().filter_map(kv_event_source).collect();
+        let sources = client.ready_responses().into_iter().flat_map(kv_event_sources).collect();
         Ok(Response::new(pb::GetKvEventSourcesResponse { sources }))
     }
 
@@ -523,13 +524,17 @@ impl pb::control_server::Control for ControlServiceImpl {
     }
 }
 
-pub(super) fn kv_event_source(response: &EngineCoreReadyResponse) -> Option<pb::KvEventSource> {
-    let config = response.kv_events_config.as_ref()?;
+/// The engine's ZMQ publisher, and the `KvEvents` stream of this server when
+/// the engine publishes to it.
+pub(super) fn kv_event_sources(response: &EngineCoreReadyResponse) -> Vec<pb::KvEventSource> {
+    let Some(config) = response.kv_events_config.as_ref() else {
+        return Vec::new();
+    };
     if !config.enable_kv_cache_events || config.publisher != "zmq" {
-        return None;
+        return Vec::new();
     }
 
-    Some(pb::KvEventSource {
+    let mut sources = vec![pb::KvEventSource {
         transport: "zmq".to_string(),
         endpoint: config.endpoint.clone(),
         topic: config.topic.clone(),
@@ -540,7 +545,17 @@ pub(super) fn kv_event_source(response: &EngineCoreReadyResponse) -> Option<pb::
         buffer_steps: config.buffer_steps,
         hwm: config.hwm,
         max_queue_size: config.max_queue_size,
-    })
+    }];
+    if PublisherAddress::of(Some(config)).is_some() {
+        sources.push(pb::KvEventSource {
+            transport: "grpc".to_string(),
+            data_parallel_rank: Some(response.data_parallel_rank),
+            encoding: "protobuf".to_string(),
+            schema_version: 1,
+            ..Default::default()
+        });
+    }
+    sources
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@
 mod client;
 mod coordinator;
 mod error;
+pub mod kv_events;
 mod metrics;
 pub mod mock_engine;
 mod prompt_block_hasher;

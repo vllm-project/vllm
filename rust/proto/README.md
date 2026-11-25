@@ -20,7 +20,8 @@ vllm-proto = "0.7"
 ```
 
 For example, import `vllm_proto::inference_client::InferenceClient`,
-`vllm_proto::control_client::ControlClient`, or
+`vllm_proto::control_client::ControlClient`,
+`vllm_proto::kv_events_client::KvEventsClient`, or
 `vllm_proto::render_client::RenderClient`. The vLLM frontend uses this same crate.
 The package includes the canonical `.proto` files and generates bindings during
 compilation using `protox` and `tonic-prost-build`. Consumers do not need Buf
@@ -58,3 +59,23 @@ for repository `vllm-project/vllm`, workflow `proto-crate.yml`, and environment
 `crates-io`. Configure that GitHub environment to allow `proto-v*` release tags.
 Only tag pushes in the upstream repository can publish; forks do not obtain
 publishing credentials.
+
+## KV cache events
+
+`KvEvents.SubscribeKvEvents` streams the KV cache events of an engine started
+with `--kv-events-config '{"enable_kv_cache_events": true}'`, one stream per
+data-parallel rank, with the same batches and sequence numbers as the engine's
+ZMQ publisher. Nothing else needs configuring: at startup the frontend gives
+each engine a private events address, which the publisher binds in addition to
+its configured endpoint: IPC when every engine it connects to runs on its node,
+and TCP on each engine's own node otherwise (under
+`VLLM_USE_RUST_FRONTEND=1 vllm serve`, only for the engines on other nodes).
+`Control.GetKvEventSources` lists the stream as a source with transport `grpc`.
+
+The stream carries live batches only, from the next one the engine publishes;
+the frontend keeps no history and does not replay. As with a ZMQ subscriber, a
+gap in the sequence numbers means batches were lost.
+
+Each batch is one gRPC message. Requests that set `kv_cache_report_mode=full`
+can produce batches above the 4 MiB that gRPC clients accept by default, so
+subscribers should raise their receive limit.

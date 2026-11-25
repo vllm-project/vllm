@@ -3834,6 +3834,7 @@ async fn kv_event_sources_reports_each_ready_engine() {
                 hwm: 100_000,
                 max_queue_size: 100_000,
                 topic: "kv".to_string(),
+                frontend_endpoint: None,
             },
         ),
         ..default_ready_response()
@@ -3864,6 +3865,7 @@ async fn kv_event_sources_reports_each_ready_engine() {
                 "hwm": 100000,
                 "max_queue_size": 100000,
                 "topic": "kv",
+                "_frontend_endpoint": null,
             }
         })
     );

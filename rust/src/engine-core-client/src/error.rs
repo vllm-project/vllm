@@ -67,6 +67,8 @@ pub enum Error {
         context: &'static str,
         field: &'static str,
     },
+    #[error("unexpected KV event message: {message}")]
+    UnexpectedKvEventMessage { message: String },
     #[error("request `{request_id}` is already in flight")]
     DuplicateRequestId { request_id: String },
     #[error(

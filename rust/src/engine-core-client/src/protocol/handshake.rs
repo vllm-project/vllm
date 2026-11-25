@@ -35,6 +35,10 @@ pub struct KvEventsConfig {
     pub hwm: u32,
     pub max_queue_size: u32,
     pub topic: String,
+    /// The private events address this frontend asked the engine to bind, as
+    /// bound.
+    #[serde(default, rename = "_frontend_endpoint")]
+    pub frontend_endpoint: Option<String>,
 }
 
 /// What the frontend needs to compute prompt block hashes itself, reported
@@ -175,6 +179,8 @@ pub struct HandshakeAddresses {
     pub coordinator_input: Option<String>,
     pub coordinator_output: Option<String>,
     pub frontend_stats_publish_address: Option<String>,
+    /// Private address for the engine's KV event publisher to bind.
+    pub kv_events: Option<String>,
 }
 
 /// Startup handshake payload sent from the frontend to initialize an engine

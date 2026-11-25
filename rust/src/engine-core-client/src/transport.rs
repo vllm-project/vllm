@@ -266,6 +266,7 @@ pub async fn connect_handshake(
                     &engine_id,
                     &input_address,
                     &output_address,
+                    kv_event_address(local_input_address, engines.len()),
                     coordinator.as_ref(),
                     &parallel_config,
                 )
@@ -596,6 +597,16 @@ fn check_parallel_config_hash(
     Ok(())
 }
 
+/// Private KV event address for the `index`-th engine to bind: next to the
+/// local IPC input socket when the engines share this node, and on the
+/// engine's own node otherwise, which it reports back once bound.
+fn kv_event_address(local_input_address: Option<&str>, index: usize) -> String {
+    match local_input_address.filter(|address| address.starts_with("ipc://")) {
+        Some(input) => format!("{input}-kv{index}"),
+        None => "tcp://*:0".to_string(),
+    }
+}
+
 /// Send an INIT message to the engine with the local socket addresses for the
 /// engine to connect to, using the handshake socket.
 async fn send_init_message(
@@ -603,6 +614,7 @@ async fn send_init_message(
     engine_id: &EngineId,
     input_address: &str,
     output_address: &str,
+    kv_events: String,
     coordinator: Option<&CoordinatorBootstrap>,
     parallel_config: &HandshakeParallelConfig,
 ) -> Result<()> {
@@ -613,6 +625,7 @@ async fn send_init_message(
             coordinator_input: coordinator.map(|c| c.input_address.clone()),
             coordinator_output: coordinator.map(|c| c.output_address.clone()),
             frontend_stats_publish_address: coordinator.map(|c| c.frontend_publish_address.clone()),
+            kv_events: Some(kv_events),
         },
         parallel_config: parallel_config.clone(),
     };

@@ -8,7 +8,8 @@ use std::pin::Pin;
 use bytes::Bytes;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
-use zeromq::{DealerSocket, PushSocket};
+use zeromq::prelude::{Socket, SocketSend};
+use zeromq::{DealerSocket, PubSocket, PushSocket, ZmqMessage};
 
 use crate::EngineId;
 pub use crate::mock_engine::{MockCoordinatorSockets, MockEngineSockets};
@@ -16,7 +17,8 @@ use crate::mock_engine::{
     MockEngineConfig, MockEngineDataSockets, connect_to_bootstrapped_frontend, connect_to_frontend,
     connect_to_hybrid_frontends, default_ready_response,
 };
-use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage};
+use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, KvEventsConfig};
+use crate::protocol::kv_events::KvEventBatch;
 use crate::protocol::request::EngineCoreRequest;
 
 /// Decode the `[request type, payload, aux frames...]` of an add request,
@@ -236,4 +238,47 @@ where
         let _ = shutdown_rx.await;
     });
     (shutdown_tx, engine_task)
+}
+
+/// Stand-in for the engine's `ZmqEventPublisher`, publishing whatever
+/// sequence numbers a test asks for.
+pub struct MockKvEventPublisher {
+    events: PubSocket,
+    /// The configuration an engine with this publisher reports.
+    pub config: KvEventsConfig,
+}
+
+impl MockKvEventPublisher {
+    pub async fn bind(ipc: &IpcNamespace) -> Self {
+        let endpoint = ipc.endpoint("kv-events.sock");
+        let mut events = PubSocket::new();
+        events.bind(&endpoint).await.expect("bind KV event socket");
+
+        Self {
+            events,
+            // Bound as an engine binds the address its frontend asked for.
+            config: KvEventsConfig {
+                enable_kv_cache_events: true,
+                publisher: "zmq".to_string(),
+                endpoint: "tcp://*:5557".to_string(),
+                replay_endpoint: None,
+                buffer_steps: 10_000,
+                hwm: 100_000,
+                max_queue_size: 100_000,
+                topic: "kv".to_string(),
+                frontend_endpoint: Some(endpoint),
+            },
+        }
+    }
+
+    pub async fn publish(&mut self, sequence_number: u64, batch: &KvEventBatch) {
+        let payload = rmp_serde::to_vec_named(batch).expect("encode KV event batch");
+        let frames = vec![
+            Bytes::from_static(b"kv"),
+            Bytes::copy_from_slice(&sequence_number.to_be_bytes()),
+            Bytes::from(payload),
+        ];
+        let message = ZmqMessage::try_from(frames).expect("KV event frames");
+        self.events.send(message).await.expect("publish KV event batch");
+    }
 }
