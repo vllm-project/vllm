@@ -122,10 +122,6 @@ Each request produces a `.safetensors` file containing:
 
 The file path is returned in `output.kv_transfer_params["hidden_states_path"]`. Use `load_hidden_states()` from the connector module to read the file with proper synchronization.
 
-!!! note
-    With chunked prefill, the connector assembles hidden states in prompt-token
-    order across prefill steps.
-
 ## Specific Models
 
 ### Nemotron 3.5 Parse

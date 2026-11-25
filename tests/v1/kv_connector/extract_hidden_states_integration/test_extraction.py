@@ -304,7 +304,7 @@ def _run_vlm_extraction(vllm_runner, tmp_path, case, prompt, *, chunk_size=None)
         assert rendered["type"] == "multimodal"
         image_spans = rendered["mm_placeholders"]["image"]
         assert len(image_spans) == len(case.images)
-        assert all(span.get_num_embeds() > 1 for span in image_spans)
+        assert all(span.get_num_embeds() > 100 for span in image_spans)
         prompt_token_ids = rendered["prompt_token_ids"]
 
         if chunk_size is not None:

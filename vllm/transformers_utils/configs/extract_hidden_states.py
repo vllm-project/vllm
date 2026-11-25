@@ -10,15 +10,6 @@ from transformers import PreTrainedConfig
 from vllm.transformers_utils.utils import without_trust_remote_code
 
 
-def _find_text_config_key(
-    model: PreTrainedConfig, text_config: PreTrainedConfig
-) -> str:
-    for key in ("text_config", "decoder", "generator", "text_encoder"):
-        if getattr(model, key, None) is text_config:
-            return key
-    return "text_config"
-
-
 class ExtractHiddenStatesConfig(PreTrainedConfig):
     model_type = "extract_hidden_states"
 
@@ -69,3 +60,12 @@ class ExtractHiddenStatesConfig(PreTrainedConfig):
         # ExtractHiddenStatesConfig with default arguments is not supported
         del use_diff
         return super().to_json_string(use_diff=False)
+
+
+def _find_text_config_key(
+    model: PreTrainedConfig, text_config: PreTrainedConfig
+) -> str:
+    for key in ("text_config", "decoder", "generator", "text_encoder"):
+        if getattr(model, key, None) is text_config:
+            return key
+    return "text_config"
