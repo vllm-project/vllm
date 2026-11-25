@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Serialize;
 use vllm_engine_core_client::RequestObserver;
 use vllm_engine_core_client::protocol::output::EngineCoreOutput;
-use vllm_metrics::{AdmissionRejectionLabels, METRICS, U64Counter};
 
+use crate::request_metrics::AdmissionRejectionCounters;
 use crate::{Error, Result};
 
 /// Queue limits checked before a request reaches engine-core. A request over
@@ -44,27 +44,15 @@ struct Counters {
 pub(crate) struct Admission {
     limits: AdmissionLimits,
     counters: Arc<Counters>,
-    /// `vllm:admission_rejections` by `max_num_queued_reqs`.
-    queued_reqs_rejections: U64Counter,
-    /// `vllm:admission_rejections` by `max_num_queued_tokens`.
-    queued_tokens_rejections: U64Counter,
+    rejections: AdmissionRejectionCounters,
 }
 
 impl Admission {
-    /// Like Python, the rejection series of both limits exist from startup,
-    /// at zero, whether or not the limits are set.
     pub(crate) fn new(model_name: &str, limits: AdmissionLimits) -> Self {
-        let rejections = |reason| {
-            (METRICS.request.admission_rejections).get_or_create_owned(&AdmissionRejectionLabels {
-                model_name: model_name.to_string(),
-                reason,
-            })
-        };
         Self {
             limits,
             counters: Arc::default(),
-            queued_reqs_rejections: rejections("max_num_queued_reqs"),
-            queued_tokens_rejections: rejections("max_num_queued_tokens"),
+            rejections: AdmissionRejectionCounters::resolve(model_name),
         }
     }
 
@@ -83,7 +71,7 @@ impl Admission {
                 max_reqs.is_none_or(|max| requests <= max).then_some(requests)
             })
             .map_err(|_| {
-                self.queued_reqs_rejections.inc();
+                self.rejections.queued_reqs.inc();
                 Error::QueueFull
             })?;
 
@@ -91,7 +79,7 @@ impl Admission {
             && counters.prefill_tokens.load(Ordering::Acquire) >= max
         {
             counters.requests.fetch_sub(n, Ordering::AcqRel);
-            self.queued_tokens_rejections.inc();
+            self.rejections.queued_tokens.inc();
             return Err(Error::PrefillBacklogFull);
         }
         counters.prefill_tokens.fetch_add(n * prompt_len, Ordering::AcqRel);
@@ -172,8 +160,8 @@ mod tests {
     /// `max_num_queued_tokens`.
     fn rejections(admission: &Admission) -> (u64, u64) {
         (
-            admission.queued_reqs_rejections.get(),
-            admission.queued_tokens_rejections.get(),
+            admission.rejections.queued_reqs.get(),
+            admission.rejections.queued_tokens.get(),
         )
     }
 
