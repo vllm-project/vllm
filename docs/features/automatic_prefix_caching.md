@@ -30,7 +30,7 @@ vllm serve <hybrid-model> \
 
 `--prefix-match-unit` is required. It sets the granularity at which prefix-cache keys are computed. When unset it defaults to the greatest common divisor of the prefix-cacheable KV cache group block sizes. For hybrid Mamba models that is the block size itself, so no sub-block boundary exists and the flag has no effect.
 
-Choose a value that divides the block size of every prefix-cacheable KV cache group, and that is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates both at startup and names the offending sizes in the error. Read the served block size from the startup log. 64 is a reasonable starting point.
+Choose a value that divides the block size of every prefix-cacheable KV cache group, matches the block size of any group that requires block-aligned lookups (such as sliding-window attention), and is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates these at startup and fails if an explicit value would disable partial cache hits. Read the served block size from the startup log. 64 is a reasonable starting point.
 
 ### FlashInfer ReplaySSM
 
@@ -64,6 +64,23 @@ FlashInfer ReplaySSM has these limits:
 With `--mamba-backend triton` (for example on ROCm), ReplaySSM also supports speculative decoding with or without prefix caching. It has the same speculative-decoding buffer requirement and parallelism limits, has no 16-token buffer cap, and does not support stochastic rounding.
 
 Prefix reuse still requires a shared prefix with a saved Mamba checkpoint. The matching rules for hybrid Mamba models above also apply.
+
+### Gated DeltaNet ReplaySSM
+
+Qwen3.5 and Qwen4Exp models (Gated DeltaNet hybrids) support ReplaySSM for standard decoding with `--mamba-backend triton`, with or without prefix caching:
+
+```bash
+vllm serve nvidia/Qwen3.5-122B-A10B-NVFP4 \
+    --mamba-backend triton \
+    --use-replayssm \
+    --enable-prefix-caching
+```
+
+Speculative decoding, `--enable-mamba-cache-stochastic-rounding`, and a `--replayssm-buffer-len` above 32 are not supported. ReplaySSM pays off at serving batch sizes. On one GB300, Qwen3.5-122B-A10B-NVFP4 decodes 1.1–1.3x faster at 64–512 concurrent requests, and Qwen3.8-Flash-Next-NVFP4 1.1–1.2x faster at 256–512; with a single request both are 3–7% slower.
+
+The replay rings add 8–9% of an FP32 SSM state to each request's state with the default 16-token buffer. Where the existing padding of the Mamba page cannot hold them, the attention block grows and the KV cache holds up to 7% fewer tokens. With BF16 models the rings keep the cached inputs in FP16, which is more precise than BF16 but has a smaller range.
+
+With `--prefix-match-unit`, a request can resume inside a Mamba block, so ReplaySSM also flushes its exact state at every prefix match unit. A unit that is a multiple of the buffer length adds no flushes.
 
 ## Prefix caching with CPU offload
 
