@@ -459,3 +459,48 @@ def test_in_flight_hash_defers_without_second_transfer(monkeypatch):
     assert s.ensure_cache_available(req, 0) is False
     assert started == []
     s.shutdown()
+
+
+def test_peer_down_frees_blocks_once_the_read_settles(monkeypatch):
+    """Blocks of a READ in flight when its producer goes down are freed only
+    after the READ settles, and not lost with the closed session."""
+    from unittest.mock import MagicMock
+
+    from vllm.distributed.ec_transfer.ec_connector.cpu.session import ConsumerXfer
+
+    s = _consumer_sched(monkeypatch)
+    assert s._cache.alloc("h1", 2, (1, _HID)) is not None
+    data = MagicMock()
+    data.check_xfer_state.return_value = "PROC"
+    data.xfer_in_flight.return_value = False
+    xfer = ConsumerXfer(
+        mm_hash="h1",
+        block_indices=[0, 1],
+        addr=("h", 1),
+        deadline=time.monotonic() + 60,
+        data=data,
+        consumer_session_id="sess",
+    )
+    xfer.transfer_handle = 7
+
+    class _DownSession(_FakeSession):
+        def on_peer_down(self):
+            xfer.quarantine(time.monotonic())
+            self._results.quarantined.add("h1")
+
+        def take_quarantined(self):
+            return [xfer]
+
+    s._sessions[("h", 1)] = _DownSession()
+    s._in_flight.add("h1")
+    s._on_peer_down(("h", 1))
+    assert ("h", 1) not in s._sessions
+
+    s._poll_step()
+    assert s._cache.get("h1") is not None  # still being written
+
+    data.check_xfer_state.return_value = "DONE"
+    s._poll_step()
+    assert s._cache.get("h1") is None
+    assert s._orphaned_xfers == []
+    s.shutdown()

@@ -61,6 +61,36 @@ def test_string_false_in_extra_config_leaves_nixl_off(monkeypatch):
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("extra", "enabled"),
+    [
+        ({"ec_enable_p2p": True}, True),
+        ({"ec_enable_p2p": "true"}, True),
+        ({"ec_enable_nixl": True}, True),
+        ({"ec_enable_p2p": False, "ec_enable_nixl": True}, False),
+    ],
+)
+def test_p2p_switch_and_its_former_name(monkeypatch, extra, enabled):
+    """`ec_enable_p2p` turns P2P on; `ec_enable_nixl` is its former name."""
+    # Import before patching to avoid caching the missing-NIXL values.
+    from vllm.distributed.ec_transfer.ec_connector.cpu.data import nixl  # noqa: F401
+
+    monkeypatch.setattr(sched_mod, "create_ec_shared_region", lambda cfg: _region())
+    # Without NIXL, a scheduler with P2P on fails to build its data transport.
+    monkeypatch.setattr(nixl_utils, "NixlWrapper", None)
+    monkeypatch.setattr(nixl_utils, "nixl_agent_config", None)
+    cfg = create_ec_vllm_config(ec_role="ec_both")
+    cfg.ec_transfer_config.ec_connector_extra_config.update(extra)
+    if enabled:
+        with pytest.raises(RuntimeError, match="requires NIXL"):
+            ECCPUScheduler(cfg)
+    else:
+        s = ECCPUScheduler(cfg)
+        assert s._nixl_enabled is False
+        s.shutdown()
+
+
+@pytest.mark.cpu_test
 def test_missing_nixl_releases_shared_region(monkeypatch):
     """A failed constructor leaves no scheduler for the caller to shut down."""
     # Import before patching to avoid caching the missing-NIXL values.

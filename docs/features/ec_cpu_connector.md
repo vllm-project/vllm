@@ -3,16 +3,16 @@
 `ECCPUConnector` extends the GPU-based encoder cache with a CPU tier: it offloads encoder outputs (`encoder_cache[mm_hash]`) to a shared `/dev/shm` mmap region so later steps and later requests reuse them instead of recomputing.
 GPU↔CPU copies run on pooled CUDA streams via `swap_blocks_batch`, asynchronously with model compute.
 
-Setting `ec_enable_nixl: true` in `ec_connector_extra_config` additionally enables peer-to-peer (P2P) transfer: a consumer instance pulls an encoding directly out of a producer instance's CPU tier over RDMA instead of recomputing it locally — for E/PD disaggregation or encoder/decoder-instance sharing.
+Setting `ec_enable_p2p: true` in `ec_connector_extra_config` additionally enables peer-to-peer (P2P) transfer: a consumer instance pulls an encoding directly out of a producer instance's CPU tier over RDMA instead of recomputing it locally — for E/PD disaggregation or encoder/decoder-instance sharing.
 
-Two settings work together; the first name is historical:
+Two settings work together:
 
-- `ec_enable_nixl` is the **P2P on/off switch for every transport**. It was named when NIXL was the only transport and keeps that name for compatibility.
+- `ec_enable_p2p` is the **P2P on/off switch for every transport**. Its former name, `ec_enable_nixl`, is still accepted and used when `ec_enable_p2p` is absent.
 - `ec_transport` picks the **data plane** that moves the bytes: `"nixl"` (default) or `"moriio"` (AMD MoRI-IO). With `"moriio"` NIXL is neither needed nor loaded.
 
 ## Prerequisites
 
-- Local CPU-tier offload (`ec_enable_nixl` unset or `false`) needs no extra packages — the gate-off code path (`cpu/connector.py`, `cpu/scheduler/`, `cpu/worker/`, `cpu/common.py`) imports neither `nixl` nor the P2P transport modules, enforced by a repo test (`tests/v1/ec_connector/unit/test_no_nixl_imports.py`).
+- Local CPU-tier offload (`ec_enable_p2p` unset or `false`) needs no extra packages — the gate-off code path (`cpu/connector.py`, `cpu/scheduler/`, `cpu/worker/`, `cpu/common.py`) imports neither `nixl` nor the P2P transport modules, enforced by a repo test (`tests/v1/ec_connector/unit/test_no_nixl_imports.py`).
 - P2P with `ec_transport: "nixl"` (the default) requires the `nixl` package: `uv pip install nixl` (pinned to `nixl==1.3.2` in `requirements/kv_connectors.txt`, shared with `NixlConnector`). Refer to the [NIXL repository](https://github.com/ai-dynamo/nixl) for platform-specific installation. If `nixl` isn't importable, the connector raises `RuntimeError: ec_transport='nixl' (the default) requires NIXL; install the nixl package or set ec_transport to another transport.`
 - P2P with `ec_transport: "moriio"` requires the `amd-mori` package and RDMA devices in the container, and does not need `nixl`. If `mori` isn't importable, the connector raises `RuntimeError: ec_transport=moriio requires MoRI-IO; install amd-mori …`.
 
@@ -42,7 +42,7 @@ Producer — offloads to its CPU tier and serves reads from consumers:
 vllm serve <model> --ec-transfer-config '{
   "ec_connector": "ECCPUConnector",
   "ec_role": "ec_producer",
-  "ec_connector_extra_config": {"ec_enable_nixl": true, "ec_cpu_bytes": 1073741824}
+  "ec_connector_extra_config": {"ec_enable_p2p": true, "ec_cpu_bytes": 1073741824}
 }'
 ```
 
@@ -54,7 +54,7 @@ Consumer — pulls encodings named in a request's `ec_transfer_params` before fa
 vllm serve <model> --ec-transfer-config '{
   "ec_connector": "ECCPUConnector",
   "ec_role": "ec_consumer",
-  "ec_connector_extra_config": {"ec_enable_nixl": true, "ec_cpu_bytes": 1073741824}
+  "ec_connector_extra_config": {"ec_enable_p2p": true, "ec_cpu_bytes": 1073741824}
 }'
 ```
 
@@ -66,11 +66,11 @@ On AMD GPUs the data plane can run over MoRI-IO instead of NIXL. Add `"ec_transp
 vllm serve <model> --ec-transfer-config '{
   "ec_connector": "ECCPUConnector",
   "ec_role": "ec_consumer",
-  "ec_connector_extra_config": {"ec_enable_nixl": true, "ec_transport": "moriio", "ec_cpu_bytes": 1073741824}
+  "ec_connector_extra_config": {"ec_enable_p2p": true, "ec_transport": "moriio", "ec_cpu_bytes": 1073741824}
 }'
 ```
 
-`ec_enable_nixl` is still required: it turns P2P on for any transport, and `ec_transport` picks the data plane. With `"moriio"` the embeddings never touch NIXL or UCX. The control plane, protocol and fallback behaviour are the same for both transports. Set `ec_transport` identically on the producer and the consumer.
+`ec_enable_p2p` is still required: it turns P2P on for any transport, and `ec_transport` picks the data plane. With `"moriio"` the embeddings never touch NIXL or UCX. The control plane, protocol and fallback behaviour are the same for both transports. Set `ec_transport` identically on the producer and the consumer.
 
 ### Orchestration flow
 
@@ -105,17 +105,17 @@ EC transfer is configured via `--ec-transfer-config` (CLI) or the `ec_transfer_c
 | --- | --- | --- | --- |
 | `ec_connector` | `str \| None` | `None` | Connector class name. Use `"ECCPUConnector"`. |
 | `ec_role` | `"ec_producer" \| "ec_consumer" \| "ec_both" \| None` | `None` | Required whenever `ec_connector` is set. `ec_producer` offloads GPU→CPU only, `ec_consumer` reloads CPU→GPU only, `ec_both` does both in the same process. |
-| `ec_connector_extra_config` | `dict[str, Any]` | `{}` | Connector-specific settings, including `ec_enable_nixl` — see [`ec_connector_extra_config` Reference](#ec_connector_extra_config-reference). |
-| `engine_id` | `str \| None` | random UUID4 | Names this instance's P2P agent (the NIXL agent or the MoRI-IO engine) when `ec_enable_nixl=True`. |
+| `ec_connector_extra_config` | `dict[str, Any]` | `{}` | Connector-specific settings, including `ec_enable_p2p` — see [`ec_connector_extra_config` Reference](#ec_connector_extra_config-reference). |
+| `engine_id` | `str \| None` | random UUID4 | Names this instance's P2P agent (the NIXL agent or the MoRI-IO engine) when `ec_enable_p2p=True`. |
 | `ec_connector_module_path` | `str \| None` | `None` | Python module path to load an out-of-tree connector from, when `ec_connector` isn't in the built-in registry (`ECExampleConnector`, `ECCPUConnector`). |
 
 ### `ec_connector_extra_config` Reference
 
 | Key | Type | Required | Description |
 | --- | --- | --- | --- |
-| `ec_enable_nixl` | `bool` | No (default `false`) | Enables P2P transfer in addition to local CPU offload, whichever `ec_transport` is used (the name is historical). Omitted or `false` imports no NIXL/MoRI-IO/ZMQ. Extra config is not type coerced, so a string value is parsed: `"true"`, `"1"`, `"yes"` enable it, anything else does not. |
-| `ec_transport` | `"nixl" \| "moriio"` | No (default `"nixl"`) | P2P data plane, used only when `ec_enable_nixl` is true. `"nixl"` needs the `nixl` package; `"moriio"` needs the `mori` package (AMD MoRI-IO) and RDMA devices in the container, and does not use NIXL. Any other value raises `ValueError`. Use the same value on producer and consumer. |
-| `consumer_ack_timeout_s` | `float` | No (default `2.0`) | How long a consumer waits for an `XferAck` before giving up on a read. The producer answers `XferReq`s from its own scheduler step, so its reply latency scales with the encoder's `--max-num-batched-tokens`: a loaded encoder whose steps run longer than this makes consumers abandon reads the producer is about to grant. Raise it for large encoder batches. |
+| `ec_enable_p2p` | `bool` | No (default `false`) | Enables P2P transfer in addition to local CPU offload, whichever `ec_transport` is used. `ec_enable_nixl` is accepted as its former name and used when `ec_enable_p2p` is absent. Omitted or `false` imports no NIXL/MoRI-IO/ZMQ. Extra config is not type coerced, so a string value is parsed: `"true"`, `"1"`, `"yes"` enable it, anything else does not. |
+| `ec_transport` | `"nixl" \| "moriio"` | No (default `"nixl"`) | P2P data plane, used only when `ec_enable_p2p` is true. `"nixl"` needs the `nixl` package; `"moriio"` needs the `mori` package (AMD MoRI-IO) and RDMA devices in the container, and does not use NIXL. Any other value raises `ValueError`. Use the same value on producer and consumer. |
+| `consumer_ack_timeout_s` | `float` | No (default `30.0`, the producer's pin lease) | How long a consumer waits for an `XferAck` before giving up on a read. The producer answers `XferReq`s from its own scheduler step, so its reply latency scales with the encoder's `--max-num-batched-tokens`: a loaded encoder whose steps run longer than this makes consumers abandon reads the producer is about to grant. Raise it for large encoder batches. |
 | `ec_cpu_bytes` | `int` | Yes | Total size, in bytes, of the shared CPU mmap region. `ECCPUConnector` raises `ValueError` if unset. Block count = `ec_cpu_bytes // block_size_bytes`, where each block holds one LLM input-embedding vector. Entries allocate enough blocks for their modality-specific output shape, including visual DeepStack features. |
 
 The control address uses vLLM's standard IP discovery. Set `VLLM_HOST_IP` to select a specific network interface when automatic discovery is unsuitable.

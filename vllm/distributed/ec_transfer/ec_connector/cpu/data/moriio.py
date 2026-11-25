@@ -281,6 +281,10 @@ class MoRIIODataTransport(DataTransport):
             self._parked.append(handle)
         self._reap_parked()
 
+    def xfer_in_flight(self, handle: Any) -> bool:
+        # MoRI-IO cannot cancel a READ, so a released one runs to completion.
+        return handle.status.InProgress()
+
     def _reap_parked(self) -> None:
         if self._parked:
             self._parked = [h for h in self._parked if h.status.InProgress()]

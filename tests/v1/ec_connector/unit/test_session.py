@@ -31,6 +31,8 @@ def _make_data(xfer_state: str = "PROC") -> MagicMock:
     data = MagicMock()
     data.check_xfer_state.return_value = xfer_state
     data.post_read.return_value = 99
+    # Releasing a handle ends its transfer (the DataTransport default).
+    data.xfer_in_flight.return_value = False
     return data
 
 
@@ -349,6 +351,22 @@ def test_consumer_xfer_quarantined_timeout_evicts_blocks():
     assert x.transfer_handle is None
 
 
+def test_consumer_xfer_quarantine_timeout_keeps_blocks_while_transfer_runs():
+    """A release that cannot end the transfer must not free its blocks."""
+    data = _make_data(xfer_state="PROC")
+    data.xfer_in_flight.return_value = True
+    x = _started(data)
+    x.poll(time.monotonic() + 9999)  # → QUARANTINED
+    expired_time = time.monotonic() + 9999 + _CONSUMER_QUARANTINE_TIMEOUT_S + 1
+    assert x.poll(expired_time) == XferState.QUARANTINED
+    data.release_xfer_handle.assert_called_once_with(99)
+    assert x.poll(expired_time + 1) == XferState.QUARANTINED
+    data.xfer_in_flight.return_value = False
+    assert x.poll(expired_time + 2) == XferState.SETTLED
+    data.xfer_in_flight.assert_called_with(99)
+    data.release_xfer_handle.assert_called_once()
+
+
 # ── ConsumerXfer.cancel / release ────────────────────────────────────────────
 
 
@@ -478,3 +496,25 @@ def test_consumer_session_on_peer_down_cancels_waiting_ack():
     results = s.take_results()
     assert "h1" in results.retryable
     assert not results.tombstoned
+
+
+def test_consumer_session_peer_down_read_settles_once_done():
+    """A READ in flight when its producer goes down must still settle."""
+    import msgspec
+
+    data = _make_data(xfer_state="PROC")
+    data.add_remote_peer.return_value = "agent-1"
+    s = _make_consumer_session(data)
+    s.start_xfer("h1", [0, 1], deadline=time.monotonic() + 10)
+    s.poll(
+        [msgspec.msgpack.encode(_ok_ack(session_id=s._session_id))], time.monotonic()
+    )
+    s.on_peer_down()
+    assert "h1" in s.take_results().quarantined
+
+    (xfer,) = s.take_quarantined()
+    assert s.take_quarantined() == []
+    assert xfer.poll(time.monotonic()) == XferState.QUARANTINED
+    data.check_xfer_state.return_value = "DONE"
+    assert xfer.poll(time.monotonic()) == XferState.SETTLED
+    data.release_xfer_handle.assert_called_once_with(99)

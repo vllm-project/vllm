@@ -21,6 +21,14 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.data.moriio import (
     MoRIIODataTransport,
     _merge_segments,
 )
+from vllm.distributed.ec_transfer.ec_connector.cpu.protocol import (
+    XferAck,
+    XferStatus,
+)
+from vllm.distributed.ec_transfer.ec_connector.cpu.session import (
+    ConsumerXfer,
+    XferState,
+)
 from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
     deserialize_mem_descriptor,
     serialize_mem_descriptor,
@@ -433,6 +441,43 @@ def test_released_in_flight_handle_is_kept_until_it_finishes(fake_mori):
         handle.status.done = True
         consumer.get_new_notifs()
         assert consumer._parked == []
+    finally:
+        consumer.deregister()
+        producer.deregister()
+
+
+def test_timed_out_read_keeps_its_blocks_until_it_finishes(fake_mori):
+    """MoRI-IO cannot cancel a READ, so its blocks stay reserved past the
+    quarantine deadline until the READ ends."""
+    fake_mori.pending = True
+    producer = _transport("enc", 1)
+    consumer = _transport("pf", 0)
+    try:
+        agent = consumer.add_remote_peer(
+            producer.get_agent_metadata(), producer.get_mem_descriptor()
+        )
+        xfer = ConsumerXfer(
+            mm_hash="h1",
+            block_indices=[0],
+            addr=("127.0.0.1", 1),
+            deadline=0.0,
+            data=consumer,
+            consumer_session_id="s",
+        )
+        ack = XferAck(
+            mm_hash="h1", status=XferStatus.OK, session_id="s", src_block_indices=[0]
+        )
+        assert xfer.handle_ack(ack, agent)
+        status = xfer.transfer_handle.status
+        now = time.monotonic()
+
+        assert xfer.poll(now + 1_000) == XferState.QUARANTINED  # READ timed out
+        assert xfer.poll(now + 10_000) == XferState.QUARANTINED  # quarantine too
+        assert consumer.xfer_in_flight(consumer._parked[0])
+        assert xfer.poll(now + 10_001) == XferState.QUARANTINED
+
+        status.done = True
+        assert xfer.poll(now + 10_002) == XferState.SETTLED
     finally:
         consumer.deregister()
         producer.deregister()

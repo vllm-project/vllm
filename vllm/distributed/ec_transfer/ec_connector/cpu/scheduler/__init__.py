@@ -87,15 +87,18 @@ class ECCPUScheduler:
 
         self._ec_config = ec_config
         # P2P is an option of this connector, not engine-wide behavior, so it
-        # lives in extra config. The key keeps its original name ("nixl")
-        # although it now switches P2P on for every ec_transport. Extra config
-        # is not type coerced, so a value that arrived as a JSON/CLI string is
-        # parsed, not truth-tested.
-        raw_nixl = ec_config.get_from_extra_config("ec_enable_nixl", False)
+        # lives in extra config. `ec_enable_p2p` switches it on for every
+        # ec_transport; `ec_enable_nixl`, its original name, is still accepted
+        # and used when `ec_enable_p2p` is absent. Extra config is not type
+        # coerced, so a value that arrived as a JSON/CLI string is parsed, not
+        # truth-tested.
+        raw_p2p = ec_config.get_from_extra_config(
+            "ec_enable_p2p", ec_config.get_from_extra_config("ec_enable_nixl", False)
+        )
         self._nixl_enabled = (
-            raw_nixl
-            if isinstance(raw_nixl, bool)
-            else str(raw_nixl).strip().lower() in ("true", "1", "yes")
+            raw_p2p
+            if isinstance(raw_p2p, bool)
+            else str(raw_p2p).strip().lower() in ("true", "1", "yes")
         )
         # NIXL fields default to None/empty so the gate-off path is untouched.
         self._data: Any = None
@@ -107,6 +110,9 @@ class ECCPUScheduler:
         self._transport: Any = None
         self._producer_session: Any = None
         self._sessions: dict = {}
+        # Quarantined READs whose producer went down: polled until they settle,
+        # then their blocks are freed.
+        self._orphaned_xfers: list[Any] = []
         self._in_flight: set[str] = set()
         self._tombstones: set[str] = set()
         self._step_completed: set[str] = set()
@@ -482,6 +488,7 @@ class ECCPUScheduler:
             self._on_peer_down(addr)
         for session in self._sessions.values():
             self._process_session_results(session)
+        self._poll_orphaned_xfers(now)
 
     def _process_session_results(self, session: Any) -> None:
         r = session.take_results()
@@ -524,8 +531,25 @@ class ECCPUScheduler:
             return
         session.on_peer_down()
         self._process_session_results(session)
+        # A READ still in flight may write into its blocks after the session
+        # is gone, so keep polling it instead of letting close() drop it.
+        self._orphaned_xfers.extend(session.take_quarantined())
         session.close()
         logger.info("EC consumer: producer peer down addr=%s", addr)
+
+    def _poll_orphaned_xfers(self, now: float) -> None:
+        from vllm.distributed.ec_transfer.ec_connector.cpu.session import XferState
+
+        pending = []
+        for xfer in self._orphaned_xfers:
+            if xfer.poll(now) == XferState.SETTLED:
+                self._cache.discard(xfer.mm_hash)
+                logger.debug(
+                    "EC consumer: orphaned NIXL xfer mm_hash=%s settled", xfer.mm_hash
+                )
+            else:
+                pending.append(xfer)
+        self._orphaned_xfers = pending
 
     def _promote_completed_reads(self) -> None:
         """Drain the just-completed set built during `_poll_step`.
@@ -721,6 +745,13 @@ class ECCPUScheduler:
             except Exception:
                 logger.debug("ec: consumer session close failed", exc_info=True)
         self._sessions.clear()
+
+        for xfer in self._orphaned_xfers:
+            try:
+                xfer.release()
+            except Exception:
+                logger.debug("ec: orphaned xfer release failed", exc_info=True)
+        self._orphaned_xfers.clear()
 
         if self._transport is not None:
             try:
