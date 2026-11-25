@@ -1604,7 +1604,7 @@ def _maybe_pack_gfx942_strip16(weight, scale, name: str) -> None:
     if not on_gfx942():
         return
     try:
-        from aiter.ops.triton.moe.moe_op_gemm_a16w4 import gfx942_strip16_pack
+        from aiter.ops.triton.utils.shuffle import gfx942_strip16_pack
     except ImportError:
         return
     w = weight.storage.data
