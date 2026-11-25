@@ -1259,7 +1259,7 @@ inline constexpr PrefillConfig kGfx1201PrefillConfigs[] = {
 // The table of GPU family A.
 template <Arch A>
 constexpr const auto& prefill_configs() {
-  if constexpr (A == Arch::kGfx1151)
+  if constexpr (A == Arch::kGfx1151 || A == Arch::kGfx1100)
     return kGfx1151PrefillConfigs;
   else if constexpr (A == Arch::kGfx1150)
     return kGfx1150PrefillConfigs;
@@ -1269,6 +1269,7 @@ constexpr const auto& prefill_configs() {
 
 // The tables by Arch.
 inline constexpr std::span<const PrefillConfig> kPrefillConfigs[kNumArches] = {
-    kGfx1151PrefillConfigs, kGfx1150PrefillConfigs, kGfx1201PrefillConfigs};
+    kGfx1151PrefillConfigs, kGfx1150PrefillConfigs, kGfx1201PrefillConfigs,
+    kGfx1151PrefillConfigs};
 
 }  // namespace rdna

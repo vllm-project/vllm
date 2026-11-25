@@ -40,12 +40,8 @@ requires_rdna_attn_gpu = pytest.mark.skipif(
 _CONFIG_ENTRY = re.compile(r"^\s*\{([\w:, ]+)\},$")
 
 
-@pytest.mark.parametrize(
-    "kind, shape_fields",
-    [("decode", 7), ("decode_batch", 7), ("prefill", 6), ("prefill_batch", 5)],
-)
-def test_gfx1150_configs_cover_the_same_shapes(kind, shape_fields):
-    """gfx1150's tables serve the shapes gfx1151's serve."""
+def _config_shapes(kind, shape_fields):
+    """The shapes of each GPU family's table in rdna_<kind>_configs.h."""
     csrc = Path(__file__).resolve().parents[3] / "csrc" / "rocm"
     text = (csrc / f"rdna_{kind}_configs.h").read_text()
     shapes = {}
@@ -57,7 +53,23 @@ def test_gfx1150_configs_cover_the_same_shapes(kind, shape_fields):
                 if m
             ]
             shapes[name[1]] = {tuple(e[:shape_fields]) for e in entries}
+    return shapes
+
+
+@pytest.mark.parametrize(
+    "kind, shape_fields",
+    [("decode", 7), ("decode_batch", 7), ("prefill", 6), ("prefill_batch", 5)],
+)
+def test_gfx1150_configs_cover_the_same_shapes(kind, shape_fields):
+    """gfx1150's tables serve the shapes gfx1151's serve."""
+    shapes = _config_shapes(kind, shape_fields)
     assert shapes["Gfx1151"] and shapes["Gfx1151"] == shapes["Gfx1150"]
+
+
+def test_gfx1100_decode_configs_cover_the_same_shapes():
+    """gfx1100's decode table serves the shapes gfx1151's serves."""
+    shapes = _config_shapes("decode", 7)
+    assert shapes["Gfx1151"] and shapes["Gfx1151"] == shapes["Gfx1100"]
 
 
 def _built(dtype=torch.float16, batch=0, **want):

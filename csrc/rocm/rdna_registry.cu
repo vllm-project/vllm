@@ -21,27 +21,33 @@
 
 rdna::LaunchFn* rdna::decode_launchers(Arch arch) {
   static LaunchFn gfx1151[std::size(kGfx1151DecodeConfigs)] = {};
+  static LaunchFn gfx1100[std::size(kGfx1100DecodeConfigs)] = {};
   static LaunchFn gfx1150[std::size(kGfx1150DecodeConfigs)] = {};
   static LaunchFn gfx1201[std::size(kGfx1201DecodeConfigs)] = {};
   return arch == Arch::kGfx1151   ? gfx1151
+         : arch == Arch::kGfx1100 ? gfx1100
          : arch == Arch::kGfx1150 ? gfx1150
                                   : gfx1201;
 }
 
 rdna::LaunchFn* rdna::decode_batch_launchers(Arch arch) {
   static LaunchFn gfx1151[std::size(kGfx1151DecodeBatchConfigs)] = {};
+  static LaunchFn gfx1100[std::size(kGfx1151DecodeBatchConfigs)] = {};
   static LaunchFn gfx1150[std::size(kGfx1150DecodeBatchConfigs)] = {};
   static LaunchFn gfx1201[std::size(kGfx1201DecodeBatchConfigs)] = {};
   return arch == Arch::kGfx1151   ? gfx1151
+         : arch == Arch::kGfx1100 ? gfx1100
          : arch == Arch::kGfx1150 ? gfx1150
                                   : gfx1201;
 }
 
 rdna::PrefillFn* rdna::prefill_launchers(Arch arch) {
   static PrefillFn gfx1151[std::size(kGfx1151PrefillConfigs)] = {};
+  static PrefillFn gfx1100[std::size(kGfx1151PrefillConfigs)] = {};
   static PrefillFn gfx1150[std::size(kGfx1150PrefillConfigs)] = {};
   static PrefillFn gfx1201[std::size(kGfx1201PrefillConfigs)] = {};
   return arch == Arch::kGfx1151   ? gfx1151
+         : arch == Arch::kGfx1100 ? gfx1100
          : arch == Arch::kGfx1150 ? gfx1150
                                   : gfx1201;
 }
@@ -103,7 +109,7 @@ Table device_table() {
   if (is("gfx1151")) return table_of(Arch::kGfx1151);
 #endif
 #ifdef VLLM_RDNA_ATTN_GFX1100
-  if (is("gfx1100")) return table_of(Arch::kGfx1151);
+  if (is("gfx1100")) return table_of(Arch::kGfx1100);
 #endif
 #ifdef VLLM_RDNA_ATTN_GFX1152
   if (is("gfx1152")) return table_of(Arch::kGfx1150);

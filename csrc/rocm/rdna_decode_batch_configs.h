@@ -2041,7 +2041,7 @@ inline constexpr DecodeConfig kGfx1201DecodeBatchConfigs[] = {
 // The table of GPU family A.
 template <Arch A>
 constexpr const auto& decode_batch_configs() {
-  if constexpr (A == Arch::kGfx1151)
+  if constexpr (A == Arch::kGfx1151 || A == Arch::kGfx1100)
     return kGfx1151DecodeBatchConfigs;
   else if constexpr (A == Arch::kGfx1150)
     return kGfx1150DecodeBatchConfigs;
@@ -2052,6 +2052,6 @@ constexpr const auto& decode_batch_configs() {
 // The tables by Arch.
 inline constexpr std::span<const DecodeConfig> kDecodeBatchConfigs[kNumArches] =
     {kGfx1151DecodeBatchConfigs, kGfx1150DecodeBatchConfigs,
-     kGfx1201DecodeBatchConfigs};
+     kGfx1201DecodeBatchConfigs, kGfx1151DecodeBatchConfigs};
 
 }  // namespace rdna

@@ -15,11 +15,16 @@ enum class HeadDim : int {
 enum class Dtype : int { kFp16 = 0, kBf16 = 1 };
 
 // The GPU families with their own config tables, each built for its archs
-// only (cmake/rocm_rdna_attn.cmake): gfx1151, with 1536 VGPRs a SIMD lane,
-// whose tables RDNA3's gfx1100 also uses; gfx1150, with 1024, whose tables
-// gfx1152 and gfx1153 also use; and RDNA4's gfx1201, whose tables gfx1200 also
-// uses.
-enum class Arch : int { kGfx1151 = 0, kGfx1150 = 1, kGfx1201 = 2 };
-inline constexpr int kNumArches = 3;
+// only (cmake/rocm_rdna_attn.cmake): gfx1151, with 1536 VGPRs a SIMD lane;
+// RDNA3's gfx1100, which has a decode table of its own and uses gfx1151's
+// others; gfx1150, with 1024, whose tables gfx1152 and gfx1153 also use; and
+// RDNA4's gfx1201, whose tables gfx1200 also uses.
+enum class Arch : int {
+  kGfx1151 = 0,
+  kGfx1150 = 1,
+  kGfx1201 = 2,
+  kGfx1100 = 3
+};
+inline constexpr int kNumArches = 4;
 
 }  // namespace rdna
