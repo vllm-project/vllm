@@ -85,10 +85,9 @@ def decode_image(image: ImageInput) -> np.ndarray:
         with Image.open(io.BytesIO(data)) as pil:
             pil.load()
             return _pil_to_rgb(pil)
-    if (
-        isinstance(image, np.ndarray)
-        and image.dtype == np.uint8
-        and image.shape[-1] in (3, 4)
+    # PIL reads grayscale, LA and RGBA arrays, which to_pil_image rejects.
+    if isinstance(image, np.ndarray) and (
+        image.ndim == 2 or (image.dtype == np.uint8 and image.shape[-1] in (2, 3, 4))
     ):
         image = Image.fromarray(image)
     elif not isinstance(image, Image.Image):

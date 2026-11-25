@@ -8,6 +8,7 @@ import numpy as np
 import regex as re
 import torch
 from einops import rearrange
+from PIL import Image
 from timm.layers import LayerNorm2d
 from timm.layers.pos_embed import resample_abs_pos_embed
 from timm.models.regnet import RegStage
@@ -453,6 +454,15 @@ class KananaVDummyInputsBuilder(BaseDummyInputsBuilder[KananaVProcessingInfo]):
         }
 
 
+def _to_pil_image(image: Any) -> Image.Image:
+    # PIL reads grayscale, LA and RGBA arrays, which to_pil_image rejects.
+    if isinstance(image, np.ndarray) and (
+        image.ndim == 2 or (image.dtype == np.uint8 and image.shape[-1] in (2, 3, 4))
+    ):
+        return Image.fromarray(image)
+    return to_pil_image(image)
+
+
 class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo]):
     """vLLM multimodal processor for Kanana-V (text + image)."""
 
@@ -482,7 +492,7 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
         # Images
         image_inputs = cast(list[Any], hf_data.get("images", []))
         pixel_sizes = []
-        image_inputs = [to_pil_image(image) for image in image_inputs]
+        image_inputs = [_to_pil_image(image) for image in image_inputs]
 
         image_processor = self.info.get_hf_processor().image_processor
         processor_output = [image_processor(image) for image in image_inputs]
