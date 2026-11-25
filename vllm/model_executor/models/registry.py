@@ -1393,11 +1393,11 @@ class _ModelRegistry:
         if architecture in _TRANSFORMERS_BACKEND_MODELS:
             return architecture
 
-        # `architectures` may name a class that Transformers doesn't have, so use the
-        # class `AutoModel` builds for the config instead.
         if not model_config.trust_remote_code:
             if architecture in _TRANSFORMERS_SUPPORTED_MODELS:
                 return architecture
+            # `architectures` may name a class that Transformers doesn't have, so use
+            # the class `AutoModel` builds for the config instead.
             model_type = model_config.hf_config.model_type
             if name := MODEL_MAPPING_NAMES.get(model_type):
                 architecture = name[0] if isinstance(name, tuple) else name
