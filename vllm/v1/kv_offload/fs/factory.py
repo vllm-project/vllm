@@ -23,7 +23,8 @@ class FSWorkerFactory:
     and set fs_backend_module_path in the config -- see get_worker_cls.
 
     Every backend is constructed as
-    cls(file_mapper=, blocks_per_file=, device=, kv_caches=, extra_config=).
+    cls(file_mapper=, blocks_per_file=, device=, kv_caches=, root_dir=,
+    extra_config=).
     """
 
     _registry: dict[str, Callable[[], type[FSOffloadingWorker]]] = {}
@@ -93,6 +94,7 @@ class FSWorkerFactory:
         blocks_per_file: int,
         device: torch.device,
         kv_caches: CanonicalKVCaches,
+        root_dir: str,
     ) -> FSOffloadingWorker:
         worker_cls = cls.get_worker_cls(extra_config)
         logger.info("Creating FS offloading worker: %s", worker_cls.__name__)
@@ -101,6 +103,7 @@ class FSWorkerFactory:
             blocks_per_file=blocks_per_file,
             device=device,
             kv_caches=kv_caches,
+            root_dir=root_dir,
             extra_config=extra_config,
         )
 

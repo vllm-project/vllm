@@ -90,21 +90,6 @@ class FSOffloadingManager(OffloadingManager):
         return FSLoadStoreSpec(list(keys))
 
     @override
-    def complete_load(
-        self,
-        keys: Collection[OffloadKey],
-        req_context: ReqContext,
-        success: bool = True,
-    ) -> None:
-        if not success:
-            # Remove failed keys from index so they're treated as MISS
-            for key in keys:
-                self._index.pop(key, None)
-                self._storing.discard(key)
-            # Mark as missing in lookup manager
-            self._fs_lookup.mark_miss(keys)
-
-    @override
     def prepare_store(
         self,
         keys: Collection[OffloadKey],

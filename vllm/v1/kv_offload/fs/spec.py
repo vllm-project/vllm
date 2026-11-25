@@ -27,6 +27,7 @@ class FSOffloadingSpec(OffloadingSpec):
         root_dir = self.extra_config.get("root_dir")
         if not root_dir:
             raise ValueError("root_dir must be specified in kv_connector_extra_config")
+        self.root_dir: str = root_dir
         self.index_size = int(
             self.extra_config.get("fs_index_size", DEFAULT_INDEX_SIZE)
         )
@@ -60,5 +61,6 @@ class FSOffloadingSpec(OffloadingSpec):
                 blocks_per_file=self.blocks_per_chunk,
                 device=kv_caches.tensors[0].tensor.device,
                 kv_caches=kv_caches,
+                root_dir=self.root_dir,
             )
         return self._worker

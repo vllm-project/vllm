@@ -15,8 +15,6 @@ from vllm.v1.kv_offload.base import CanonicalKVCaches
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.fs.gds.cufile_bindings import (
     CUfileBoolConfigParameter,
-    cuFileBufDeregister,
-    cuFileBufRegister,
     cuFileDriverClose,
     cuFileDriverOpen,
     cuFileHandleDeregister,
@@ -54,6 +52,7 @@ class GDSOffloadingWorker(ThreadPoolFSWorker):
         blocks_per_file: int,
         device: torch.device,
         kv_caches: CanonicalKVCaches,
+        root_dir: str,
         extra_config: dict[str, Any],
     ):
         if not current_platform.is_cuda():
@@ -67,7 +66,7 @@ class GDSOffloadingWorker(ThreadPoolFSWorker):
         )
         self._driver_open = False
         try:
-            self._validate_gds(device, kv_caches, extra_config["root_dir"], io_threads)
+            self._validate_gds(device, kv_caches, root_dir, io_threads)
         except Exception:
             self.shutdown_dispatch()
             self.shutdown_backend()
@@ -82,7 +81,7 @@ class GDSOffloadingWorker(ThreadPoolFSWorker):
     ) -> None:
         """Open cuFile with compat mode off and prove the direct path works.
 
-        Registers one KV block (block 0 of the first KV tensor), writes it to
+        Takes one KV block (block 0 of the first KV tensor), writes it to
         a temp file under root_dir, reads it back, and deletes the file.  With
         compat mode off cuFile has no POSIX fallback, so success means
         GPU<->storage DMA works on this mount.  The data is not checked, only
@@ -109,7 +108,6 @@ class GDSOffloadingWorker(ThreadPoolFSWorker):
         os.makedirs(root_dir, exist_ok=True)
         path = os.path.join(root_dir, f".gds_probe_{uuid.uuid4().hex}.tmp")
         with torch.accelerator.device_index(device.index):
-            cuFileBufRegister(ptr, size)
             try:
                 fd = open_for_gds(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 try:
@@ -141,10 +139,6 @@ class GDSOffloadingWorker(ThreadPoolFSWorker):
                     "that GDS is supported for this filesystem and GPU."
                 ) from e
             finally:
-                try:
-                    cuFileBufDeregister(ptr)
-                except RuntimeError as e:
-                    logger.warning("cuFileBufDeregister failed: %s", e)
                 with contextlib.suppress(FileNotFoundError):
                     os.remove(path)
         logger.info("GDS: direct path verified (compat disabled)")
