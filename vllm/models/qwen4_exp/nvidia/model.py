@@ -106,6 +106,25 @@ def without_modelopt_fp4(
     return quant_config
 
 
+def _online_lm_head_quant_config(
+    quant_config: QuantizationConfig | None, prefix: str
+) -> QuantizationConfig | None:
+    """Return `quant_config` when `quantization_config.targets` quantizes the
+    lm_head online, else `None`.
+
+    The checkpoint keeps the lm_head in BF16, and an unquantized head takes the
+    low-latency GEMM, so the head sees the quant config only for an online
+    target.
+    """
+    online = getattr(quant_config, "online_quantization_config", None)
+    if online is None:
+        return None
+    online.packed_modules_mapping = quant_config.packed_modules_mapping
+    if online.resolve_quant_method_cls(ParallelLMHead, prefix) is None:
+        return None
+    return quant_config
+
+
 def _remap_qsa_cache_scale_name(
     name: str,
     qsa_layer_ids: frozenset[int],
@@ -763,10 +782,14 @@ class Qwen4ExpForCausalLM(
         )
         self.lm_head: ParallelLMHead | PPMissingLayer
         if get_pp_group().is_last_rank:
+            lm_head_prefix = maybe_prefix(prefix, "lm_head")
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,
-                prefix=maybe_prefix(prefix, "lm_head"),
+                quant_config=_online_lm_head_quant_config(
+                    self.quant_config, lm_head_prefix
+                ),
+                prefix=lm_head_prefix,
             )
         else:
             self.lm_head = PPMissingLayer()
@@ -775,6 +798,8 @@ class Qwen4ExpForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
         self.set_moe_parameters(self.model.layers)
+        # An lm_head quantized online keeps its online method: the low-latency
+        # swap only replaces an unquantized head.
         enable_qwen4_exp_low_latency_gemm(self, self.model_config.dtype)
         if self.model_config.dtype == torch.bfloat16:
             # Precompile the fused HC down+SiLU kernels for every CUDA-graph
