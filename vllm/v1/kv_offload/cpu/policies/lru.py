@@ -24,11 +24,11 @@ _SUBLIST_LOAD = 512
 
 
 class _SortedEntries:
-    """Sorted list of distinct index entries with O(log n + load) updates.
+    """Sorted list of distinct index entries in sublists of bounded length.
 
-    Entries live in sorted sublists of bounded length, located by bisecting
-    the per-sublist maxima, so an insert or remove never moves more than one
-    sublist's worth of elements.
+    An insert or remove bisects the per-sublist maxima, then moves at most one
+    sublist's worth of elements. Splitting a full sublist or dropping an empty
+    one also shifts the per-sublist lists, which is O(number of sublists).
     """
 
     __slots__ = ("_len", "_lists", "_maxes")
@@ -189,7 +189,8 @@ class LRUCachePolicy(CachePolicy):
             self._indexes[retained].discard(key)
 
     def _push_evictable(self, key: OffloadKey) -> None:
-        """Index a newly evictable key using its current lease state."""
+        """Index an evictable key using its current lease state."""
+        self._unindex(key)
         retained = self.chunks[key].retained
         self._evictable[key] = retained
         self._indexes[retained].add(key, self._ranks[key])
@@ -325,4 +326,5 @@ class LRUCachePolicy(CachePolicy):
     @override
     def mark_non_evictable(self, key: OffloadKey) -> None:
         # key must have been evictable before it was pinned.
-        self._unindex(key)
+        retained = self._evictable.pop(key)
+        self._indexes[retained].discard(key)

@@ -254,7 +254,7 @@ def _assert_index_invariant(policy: LRUCachePolicy) -> None:
     assert indexed_keys == set(policy._evictable)
 
 
-def _state(policy: CachePolicy):
+def _state(policy: _HeapLRUReference | LRUCachePolicy):
     return (
         sorted(
             (k, c.chunk_id, c.ref_cnt, c.lease_cnt) for k, c in policy.chunks.items()
@@ -272,8 +272,9 @@ def _evicted(result):
 @pytest.mark.parametrize("seed", range(24))
 def test_lru_eviction_matches_heap_reference(seed: int):
     rng = random.Random(seed)
+    with_retention = seed % 2 == 0
     capacity = rng.choice((8, 64, 400))
-    policies: tuple[CachePolicy, CachePolicy] = (
+    policies: tuple[_HeapLRUReference, LRUCachePolicy] = (
         _HeapLRUReference(capacity),
         LRUCachePolicy(capacity),
     )
@@ -302,7 +303,7 @@ def test_lru_eviction_matches_heap_reference(seed: int):
             if key in reference.chunks:
                 continue
             ready = rng.random() < 0.3
-            lease_count = rng.choice((0, 0, 0, 1, 2))
+            lease_count = rng.choice((0, 0, 0, 1, 2)) if with_retention else 0
             for p in policies:
                 chunk = ChunkStatus(next_chunk_id)
                 chunk.ref_cnt = 0 if ready else -1
@@ -326,7 +327,7 @@ def test_lru_eviction_matches_heap_reference(seed: int):
             for p in policies:
                 p.mark_non_evictable(key)
                 p.chunks[key].ref_cnt = 1
-        elif kind < 0.59:
+        elif with_retention and kind < 0.59:
             if not reference.chunks:
                 continue
             key = rng.choice(sorted(reference.chunks))
