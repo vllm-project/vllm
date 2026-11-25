@@ -597,6 +597,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/mamba_cpu.cpp"
         "csrc/cpu/sampling_kernels.cpp"
+        "csrc/cpu/topk_topp_exact.cpp"
         "csrc/cpu/fp8_quant.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files
@@ -616,6 +617,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/mamba_cpu.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/sampling_kernels.cpp"
+        "csrc/cpu/topk_topp_exact.cpp"
         "csrc/cpu/fp8_quant.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files

@@ -24,9 +24,16 @@ if HAS_TRITON:
 logger = init_logger(__name__)
 
 
+def _is_x86_cpu() -> bool:
+    return (
+        current_platform.is_cpu()
+        and current_platform.get_cpu_architecture() == CpuArchEnum.X86
+    )
+
+
 def register_top_k_top_p_warmups() -> None:
     """Register every native accelerator sampling kernel used at runtime."""
-    if HAS_TRITON:
+    if HAS_TRITON and not _is_x86_cpu():
         _topk_topp.register_warmup()
         if current_platform.is_cuda_alike():
             _topp_split_stats.register_warmup()
@@ -209,6 +216,9 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
+    if _is_x86_cpu():
+        return apply_top_k_top_p_x86_cpu(logits, k, p)
+
     if HAS_TRITON:
         return apply_top_k_top_p_triton(
             logits, k, p, has_topp_only_rows=has_topp_only_rows
@@ -329,6 +339,32 @@ def apply_top_k_top_p_cpu(
     # Joint k+p path.
     logits = logits.contiguous()
     _cpu_topk_topp_sampling_op(logits, k, p)
+    return logits
+
+
+def apply_top_k_top_p_x86_cpu(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+) -> torch.Tensor:
+    """Exact top-k/top-p masking with the x86 C++ kernel, in place.
+
+    Logits the kernel does not take (not FP32, vocab of at most 256) use the
+    PyTorch path, so x86 CPUs never compile the Triton kernel.
+    """
+    from vllm._cpu_ops import cpu_topk_topp_exact
+
+    if (
+        logits.dtype != torch.float32
+        or logits.stride(-1) != 1
+        or not 256 < logits.shape[-1] < (1 << 20)
+    ):
+        return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
+    if k is not None:
+        k = k.to(torch.int32).contiguous()
+    if p is not None:
+        p = p.to(torch.float32).contiguous()
+    cpu_topk_topp_exact(logits, k, p)
     return logits
 
 
