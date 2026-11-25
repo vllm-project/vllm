@@ -143,3 +143,24 @@ def test_no_snapshot_of_shared_dtype_registry():
             if pattern.search(text):
                 offenders.setdefault(pattern.pattern, []).append(str(path))
     assert not offenders, f"Shared dtype registry snapshots found: {offenders}"
+
+
+def test_int4_per_token_head_customize_spec_d128():
+    """D=128 int4 packs to C=136 B/token-head (64+64 data + 2?fp32 scales)."""
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    head_size = 128
+    num_kv_heads = 8
+    block_size = 16
+    spec = TritonAttentionBackend.customize_spec(
+        FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.uint8,
+            kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+        )
+    )
+    assert spec.state_content_bytes == 136
+    assert spec.page_size_bytes == num_kv_heads * block_size * 136

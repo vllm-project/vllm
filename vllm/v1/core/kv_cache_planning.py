@@ -258,21 +258,35 @@ def unify_kv_cache_spec_page_size(
             new_layer_configs[layer_name] = replace(layer_config, spec=new_spec)
         else:
             layer_page_size = layer_spec.page_size_bytes
+            new_spec = None
+            # Prefer scaling block_size when the page divides the max *and*
+            # the scaled spec actually publishes max_page_size. If the layer
+            # already has page_size_padded set, scaling block_size alone
+            # leaves page_size_bytes unchanged — fall through to pad.
             if max_page_size % layer_page_size == 0:
                 ratio = max_page_size // layer_page_size
-                new_block_size = layer_spec.block_size * ratio
-                new_spec = replace(layer_spec, block_size=new_block_size)
-            elif isinstance(layer_spec, AttentionSpec) and not isinstance(
-                layer_spec, MLAAttentionSpec
-            ):
-                new_spec = replace(layer_spec, page_size_padded=max_page_size)
-            else:
-                raise NotImplementedError(
-                    f"Layer {layer_name}: page size is not divisible by the "
-                    "maximum page size and cannot be padded. Padding is only "
-                    "supported for non-MLA attention layers."
+                candidate = replace(
+                    layer_spec, block_size=layer_spec.block_size * ratio
                 )
-            assert new_spec.page_size_bytes == max_page_size
+                if candidate.page_size_bytes == max_page_size:
+                    new_spec = candidate
+            if new_spec is None:
+                if isinstance(layer_spec, AttentionSpec) and not isinstance(
+                    layer_spec, MLAAttentionSpec
+                ):
+                    # Unequal AttentionSpec pages that cannot unify via
+                    # block_size: always pad physical page to group max.
+                    new_spec = replace(layer_spec, page_size_padded=max_page_size)
+                else:
+                    raise NotImplementedError(
+                        f"Layer {layer_name}: page size is not divisible by the "
+                        "maximum page size and cannot be padded. Padding is only "
+                        "supported for non-MLA attention layers."
+                    )
+            assert new_spec.page_size_bytes == max_page_size, (
+                f"Layer {layer_name}: failed to unify page_size_bytes "
+                f"({new_spec.page_size_bytes}) to max ({max_page_size})"
+            )
             new_layer_configs[layer_name] = replace(layer_config, spec=new_spec)
     return new_layer_configs
 
