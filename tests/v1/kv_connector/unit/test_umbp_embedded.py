@@ -870,3 +870,70 @@ def test_object_evicted_after_lookup_follows_failure_policy(
     _, num_cached, _ = scheduler.kv_cache_manager.get_computed_blocks(same_prompt())
     assert num_cached == (0 if policy == "fail" else num_hit_tokens)
     worker.shutdown()
+
+
+@pytest.mark.parametrize("evicted", [False, True])
+def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, evicted):
+    """New blocks are zeroed on the forward stream, which a transfer is not
+    ordered behind. Blocks a synchronous load fills must skip that zeroing, and
+    be zeroed for their next owner when the load failed."""
+    runtime = install_memory_runtime(monkeypatch)
+    kv_cache_config = _kv_cache_config()
+    (group,) = kv_cache_config.kv_cache_groups
+    # Mixed precision makes core zero new blocks.
+    mixed_specs = {
+        "layer1": group.kv_cache_specs["layer1"],
+        "layer2": replace(group.kv_cache_specs["layer2"], dtype=torch.bfloat16),
+    }
+    kv_cache_config = replace(
+        kv_cache_config, kv_cache_groups=[replace(group, kv_cache_specs=mixed_specs)]
+    )
+    vllm_config = create_vllm_config(
+        kv_connector="UMBPStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "mode": "embedded",
+            "lookup_dir": socket_dir,
+            "load_async": False,
+        },
+    )
+    scheduler = create_scheduler(
+        vllm_config,
+        num_blocks=kv_cache_config.num_blocks,
+        kv_cache_config=kv_cache_config,
+    )
+    worker = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+    kv_caches = make_kv_caches()
+    worker.register_kv_caches(kv_caches)
+    handshake(scheduler.connector, worker)
+    num_tokens = 3 * scheduler.block_size + 1
+
+    def same_prompt():
+        return create_request(
+            num_tokens=num_tokens, common_prefix_len=num_tokens, max_tokens=1
+        )
+
+    scheduler.add_request(same_prompt())
+    _run_to_completion(scheduler, worker)
+    assert scheduler.reset_prefix_cache()
+
+    request = same_prompt()
+    scheduler.add_request(request)
+    output = _engine_step(
+        scheduler, worker, before_load=runtime.evict_all if evicted else lambda: None
+    )
+    (block_ids,) = output.scheduled_new_reqs[0].block_ids
+    loaded = output.kv_connector_metadata.load_requests[request.request_id].block_ids
+    assert loaded == block_ids[:3]
+    # The block the request computes itself is still zeroed.
+    assert output.new_block_ids_to_zero == block_ids[3:]
+
+    if evicted:
+        assert request.status == RequestStatus.FINISHED_ERROR
+        _run_to_completion(scheduler, worker)
+        free_blocks = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+        scheduler.add_request(
+            create_request(num_tokens=free_blocks * scheduler.block_size, max_tokens=1)
+        )
+        assert set(loaded) <= set(_engine_step(scheduler, worker).new_block_ids_to_zero)
+    worker.shutdown()

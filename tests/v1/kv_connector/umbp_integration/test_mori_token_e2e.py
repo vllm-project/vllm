@@ -261,9 +261,9 @@ _STEP_TOKENS = 8192
     ids=["mixed-precision"],
     indirect=True,
 )
-def test_synchronous_restore_lands_after_block_zeroing(umbp_llm):
-    """A mixed-precision KV cache zeroes new blocks on the forward stream; a
-    synchronous restore queued behind a running step must land after that."""
+def test_synchronous_restore_survives_block_zeroing(umbp_llm):
+    """A mixed-precision KV cache zeroes new blocks on the forward stream; that
+    must not wipe a synchronous restore issued while an earlier step runs."""
     block_size = umbp_llm.llm_engine.vllm_config.cache_config.block_size
     prompt = _prompt(0, 8 * block_size + 7)
     computed = umbp_llm.generate(prompt, PARAMS, use_tqdm=False)

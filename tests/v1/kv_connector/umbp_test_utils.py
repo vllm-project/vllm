@@ -453,6 +453,7 @@ def make_scheduler_output(
         ),
         num_scheduled_tokens=dict(scheduled_tokens or {}),
         kv_connector_block_state=block_state,
+        new_block_ids_to_zero=None,
     )
 
 
