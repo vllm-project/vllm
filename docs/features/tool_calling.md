@@ -372,15 +372,6 @@ Known issues:
 
 Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_chat_template_internlm2_tool.jinja`
 
-### Jamba Models (`jamba`)
-
-AI21's Jamba-1.5 models are supported.
-
-* `ai21labs/AI21-Jamba-1.5-Mini`
-* `ai21labs/AI21-Jamba-1.5-Large`
-
-Flags: `--tool-call-parser jamba`
-
 ### xLAM Models (`xlam`)
 
 The xLAM tool parser is designed to support models that generate tool calls in various JSON formats. It detects function calls in several different output styles:

@@ -787,6 +787,11 @@ class ModelConfig:
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
+        self._transformers_backend = self.using_transformers_backend()
+        if self._transformers_backend:
+            # MLA detection depends on the model implementation
+            self.model_arch_config = self.get_model_arch_config()
+
         # Backend pooling classes wrap encoders and decoders, so default per model
         if (
             model_info.is_pooling_model
@@ -1106,6 +1111,7 @@ class ModelConfig:
             self.hf_text_config,
             revision=getattr(self, "revision", None),
         )
+        convertor.transformers_backend = getattr(self, "_transformers_backend", False)
         return convertor.convert(
             supports_multimodal=self._supports_multimodal_for_mm_prefix()
         )
@@ -1963,7 +1969,7 @@ class ModelConfig:
             block_configs = self.hf_config.block_configs
             return sum(not bc.attention.no_op for bc in block_configs[start:end])
         else:
-            # Hybrid model Jamba
+            # Hybrid models with `layers_block_type`, e.g. Zamba2
             layers_block_type_value = getattr(
                 self.hf_text_config, "layers_block_type", None
             )
@@ -2017,8 +2023,7 @@ class ModelConfig:
             # used by e.g. Mamba2, NemotronH, Zamba
             chunk_size = getattr(self.hf_text_config, "chunk_size", None)
 
-        # Since Mamba1 does not have a chunk notion
-        # we use a default chunk size of 2048.
+        # Models without a chunk notion use a default chunk size of 2048.
         if chunk_size is None:
             chunk_size = 2048
 
@@ -2294,11 +2299,6 @@ class ModelConfig:
     def use_mla(self) -> bool:
         if envs.VLLM_MLA_DISABLE:
             return False
-        if self.using_transformers_backend():
-            # kv_lora_rank indicates that a Transformers model implementation uses MLA
-            return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
-        # Manually maintained list of model types for vLLM model implementations
-
         # Bidirectional DeepSeek variants (is_causal=False, used by some
         # embedding models) must use the non-MLA attention path, since the
         # MLA kernels only support causal attention.

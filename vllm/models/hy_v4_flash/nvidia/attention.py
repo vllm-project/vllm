@@ -20,13 +20,18 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
+from vllm.models.hy_v4.common.mrope import fused_mrope_norm, rope_into
 from vllm.models.hy_v4.nvidia.attention import HYV4MLAAttention
-from vllm.models.hy_v4.nvidia.mrope import fused_mrope_norm, rope_into
 from vllm.models.hy_v4_flash.configs import SLIDING_ATTENTION
 from vllm.platforms import current_platform
 
 from .compressed_indexer import FlashCompressedIndexer
 from .swa import FlashSparseBackend, FlashSWABackend, FlashWindowIndexer
+
+
+class HYV4FlashMLAAttention(MLAAttention):
+    # FlashSWABackend indexes live pages and forces the paged FP8 kernel.
+    supports_fp8_ds_mla_sliding_window = True
 
 
 class HYV4FlashAttention(HYV4MLAAttention):
@@ -171,7 +176,7 @@ class HYV4FlashAttention(HYV4MLAAttention):
             self.num_local_heads, torch.float32
         )
         self._force_sparse_mqa()
-        self.mla_attn = MLAAttention(
+        self.mla_attn = HYV4FlashMLAAttention(
             num_heads=self.num_local_heads,
             scale=self.scaling,
             qk_nope_head_dim=self.qk_nope_head_dim,
