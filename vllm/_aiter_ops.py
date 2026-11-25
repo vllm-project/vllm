@@ -3322,9 +3322,6 @@ class rocm_aiter_ops:
     ) -> bool:
         """Whether AITER's sparse indexer top-k beats the in-tree kernel for
         this shape."""
-        if compress_ratio < 1:
-            return False
-
         if cls.is_gfx942_dsa_decode_top_k_enabled():
             return (
                 compress_ratio == 1
@@ -3335,7 +3332,7 @@ class rocm_aiter_ops:
                 and max_valid_seq_len >= _GFX942_DSA_FLYDSL_MIN_DECODE_SEQ_LEN
             )
 
-        if not cls.is_indexer_top_k_enabled():
+        if compress_ratio < 1 or not cls.is_indexer_top_k_enabled():
             return False
 
         if compress_ratio == 1:
