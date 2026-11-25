@@ -10,6 +10,7 @@ from torch.nn import Module
 
 if TYPE_CHECKING:
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+    from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.fused_moe import (
         FusedMoEParallelConfig,
         FusedMoEQuantConfig,
@@ -165,10 +166,14 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         *,
         moe: FusedMoEConfig,
         activation_quant_key: "QuantKey | None" = kMxfp4Dynamic,
+        activation_override: "QuantSpec | None" = None,
     ):
         super().__init__(moe)
         self.activation_quant_key = self.resolve_activation_quant_key(
             activation_quant_key, explicit=True
+        )
+        self.moe_activation_override: QuantKey | None = (
+            activation_override.activation if activation_override is not None else None
         )
         self.weight_block_size: list[int] = [1, MXFP4_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
@@ -263,6 +268,7 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
                 use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
+                activation_quant_key=self.moe_activation_override,
             )
         )
 

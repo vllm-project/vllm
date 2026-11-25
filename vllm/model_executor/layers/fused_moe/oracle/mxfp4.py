@@ -7,7 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
-from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
+from vllm.config import get_current_vllm_config_or_none
 from vllm.config.kernel import (
     FLASHINFER_MOE_EP_CUTEDSL,
     FLASHINFER_MOE_EP_DEEP_GEMM,
@@ -63,6 +63,7 @@ from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.utils.humming import BaseInputSchema
 
 
 logger = init_logger(__name__)
@@ -162,7 +163,7 @@ class Mxfp4MoeBackend(Enum):
     # FlashInfer CUTLASS backends
     FLASHINFER_CUTLASS_MXFP4_MXFP8 = "FLASHINFER_CUTLASS_MXFP4_MXFP8"
     FLASHINFER_CUTLASS_MXFP4_BF16 = "FLASHINFER_CUTLASS_MXFP4_BF16"
-    # vLLM CUTLASS backend
+    # vLLM's own CUTLASS W4A4 kernel (not the FlashInfer CUTLASS ones above)
     CUTLASS_MXFP4_MXFP4 = "CUTLASS_MXFP4_MXFP4"
     # Marlin
     BATCHED_MARLIN = "BATCHED_MARLIN"
@@ -383,6 +384,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
     """
     mapping: dict[str, list[Mxfp4MoeBackend]] = {
         "b12x": list(B12X_BACKENDS),
+        "cutlass": [Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4],
         "deep_gemm": [Mxfp4MoeBackend.DEEPGEMM_MXFP4],
         "flashinfer_trtllm": [
             Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
@@ -439,6 +441,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
         Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4,
+        Mxfp4MoeBackend.DEEPGEMM_MXFP4,
         # TRITON_UNFUSED has bug with MTP support
         # TODO re-enable after kernel is fixed
         # TRITON_UNFUSED
@@ -516,7 +519,7 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
 
 def _user_moe_activation_override() -> QuantKey | None:
     """User's MoE activation override from quantization_config, or None."""
-    return user_activation_override("moe", get_current_vllm_config())[0]
+    return user_activation_override("moe", get_current_vllm_config_or_none())[0]
 
 
 def _user_moe_activation_override_is_set() -> bool:
@@ -542,25 +545,32 @@ def _resolve_activation_key(
     return user_override
 
 
-def _humming_input_schema(model_activation_key: QuantKey | None):
-    """Humming input schema for the checkpoint activation combined with the
-    user override, or None to keep Humming's default (BF16 or the
-    VLLM_HUMMING_INPUT_QUANT_CONFIG env override, which wins)."""
-    activation_key = _resolve_activation_key(model_activation_key)
-    if activation_key is None or envs.VLLM_HUMMING_INPUT_QUANT_CONFIG:
-        return None
+def _resolve_humming_activation_key(
+    activation_key: QuantKey | None,
+    *,
+    activation_override_is_set: bool,
+) -> QuantKey | None:
+    """Resolve Humming's default activation format before weight conversion."""
     if (
         activation_key == kMxfp8Dynamic
-        and _user_moe_activation_override() is None
+        and not activation_override_is_set
+        and not envs.VLLM_HUMMING_INPUT_QUANT_CONFIG
         and current_platform.is_device_capability_family(90)
     ):
-        # Humming's SM90 W4A8 kernels are tuned for block FP8 activations, so
-        # run a checkpoint's MXFP8 that way. An explicit request is honored.
         logger.info_once(
             "Running checkpoint MXFP8 MoE activations as block FP8 "
             "(group 128) on Hopper."
         )
-        activation_key = kFp8Dynamic128Sym
+        return kFp8Dynamic128Sym
+    return activation_key
+
+
+def _humming_input_schema(
+    activation_key: QuantKey | None,
+) -> "BaseInputSchema | None":
+    """Humming input schema for an already-resolved activation key."""
+    if activation_key is None or envs.VLLM_HUMMING_INPUT_QUANT_CONFIG:
+        return None
     from vllm.model_executor.layers.quantization.utils.humming import (
         quant_key_to_input_schema,
     )
@@ -639,9 +649,9 @@ def _filter_by_activation(
 ) -> list[Mxfp4MoeBackend]:
     """Pick variants matching `requested_activation_key`, followed by BF16
     variants as a higher-precision fallback unless VLLM_STRICT_QUANT_SCHEME
-    forbids it; without one, prefer BF16 if the list has any, else keep the
-    list as-is so explicit non-BF16 picks (e.g. the `_afp8` aliases) still
-    land."""
+    forbids it; without one, prefer BF16 if the list has any, else keep explicit
+    non-BF16 picks (e.g. the `_afp8` aliases). An explicit BF16 override rules
+    out quantized-only backends."""
     bf16 = [b for b in backends if _backend_activation_key(b) is None]
     if requested_activation_key is not None:
         matching = [
@@ -657,7 +667,14 @@ def _filter_by_activation(
                 if _applies_requested_activation(b, requested_activation_key)
             ]
         return matching + [b for b in bf16 if b not in matching]
-    return bf16 if bf16 else backends
+    if bf16:
+        return bf16
+    if (
+        _user_moe_activation_override_is_set()
+        and _user_moe_activation_override() is None
+    ):
+        return []
+    return backends
 
 
 def _get_requested_backends(
@@ -668,13 +685,15 @@ def _get_requested_backends(
     if runner_backend == "b12x":
         if envs.VLLM_B12X_MOE_FP4_FORCE_A16:
             backends = [Mxfp4MoeBackend.B12X_MXFP4_BF16]
-            if requested_activation_key is None:
-                return backends
-            return _filter_by_activation(backends, requested_activation_key)
-        # W4A8 is the high-throughput b12x path and is preferred when the
-        # model does not request an activation format. Keep this as backend
-        # policy instead of exposing a separate backend name per precision.
-        if requested_activation_key is None:
+        # b12x chooses its own precision for the default MXFP4 scheme.
+        # Explicit activation overrides and strict checkpoint precision win.
+        if not _user_moe_activation_override_is_set() and (
+            requested_activation_key is None
+            or (
+                requested_activation_key == kMxfp4Dynamic
+                and not envs.VLLM_STRICT_QUANT_SCHEME
+            )
+        ):
             return backends
     return _filter_by_activation(backends, requested_activation_key)
 
@@ -682,7 +701,7 @@ def _get_requested_backends(
 def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
     activation_key: QuantKey | None = None,
-) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
+) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the primary MXFP4 MoE backend.
 
     Args:
@@ -971,6 +990,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     w13_input_scale: torch.Tensor | None = None,
     w2_input_scale: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
+    activation_quant_key: QuantKey | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1011,7 +1031,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         convert_to_humming_moe_kernel_format(
             layer,
             quant_config={"quant_method": "gpt_oss_mxfp4"},
-            input_schema=_humming_input_schema(None),
+            input_schema=_humming_input_schema(activation_quant_key),
             allow_input_schema_fallback=False,
         )
         return (
@@ -1599,7 +1619,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
     activation: MoEActivation | None = None,
     use_separated_a4w4: bool = False,
-    activation_key: QuantKey | None = None,
+    activation_quant_key: QuantKey | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1668,7 +1688,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         convert_to_humming_moe_kernel_format(
             layer,
             quant_config={"quant_method": "mxfp4"},
-            input_schema=_humming_input_schema(activation_key),
+            input_schema=_humming_input_schema(activation_quant_key),
             allow_input_schema_fallback=False,
         )
         return (
@@ -1685,6 +1705,12 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             prepare_moe_mxfp4_layer_for_marlin,
         )
 
+        logger.warning_once(
+            "Your GPU does not have native support for FP4 computation but "
+            "FP4 quantization is being used. Weight-only FP4 compression will "
+            "be used leveraging the Marlin kernel. This may degrade "
+            "performance for compute-heavy workloads."
+        )
         return prepare_moe_mxfp4_layer_for_marlin(
             layer,
             w13_weight,
@@ -1914,32 +1940,14 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     elif mxfp4_backend in TRITON_BACKENDS or (
         mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250
     ):
-        if mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
-            # AITER moe_gemm_a16w4 needs gate/up interleaved
-            def interleave_gate_up(w: torch.Tensor) -> torch.Tensor:
-                gate, up = w.chunk(2, dim=1)
-                return torch.stack((gate, up), dim=2).reshape(w.shape)
-
-            w13_weight = interleave_gate_up(w13_weight)
-            w13_weight_scale = interleave_gate_up(w13_weight_scale)
-
+        if mxfp4_backend in (
+            Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
+            Mxfp4MoeBackend.TRITON,
+        ):
+            w13_weight = _interleave_gate_up_rows(w13_weight)
+            w13_weight_scale = _interleave_gate_up_rows(w13_weight_scale)
             if w13_bias is not None:
-                w13_bias = interleave_gate_up(w13_bias.to(torch.float32))
-        elif mxfp4_backend == Mxfp4MoeBackend.TRITON:
-
-            def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
-                shape = w.shape
-                n = shape[-1]
-                first = w[..., : n // 2]
-                second = w[..., n // 2 :]
-                stacked = torch.stack((first, second), dim=-1)
-                return stacked.reshape(shape)
-
-            w13_weight = shuffle_weight(w13_weight)
-            w13_weight_scale = shuffle_weight(w13_weight_scale)
-
-            if w13_bias is not None:
-                w13_bias = shuffle_weight(w13_bias.to(torch.float32))
+                w13_bias = _interleave_gate_up_rows(w13_bias.to(torch.float32))
         else:
             if w13_bias is not None:
                 w13_bias = w13_bias.to(torch.float32)

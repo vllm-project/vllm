@@ -8,14 +8,12 @@ Validating the configuration and printing results for manual checking.
 Run `pytest tests/quantization/test_auto_round.py`.
 """
 
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe import RoutedExperts
-from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
@@ -49,6 +47,7 @@ from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear import
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_humming
 
 MODELS = [
     pytest.param(
@@ -1177,102 +1176,74 @@ def test_inc_mxfp4_linear_method_registers_and_processes_weights(
     assert captured["processed_layer"] is layer
 
 
-@pytest.mark.parametrize(
-    ("moe_backend", "is_xpu", "mxfp4_backend"),
-    [
-        ("auto", True, Mxfp4MoeBackend.XPU),
-        ("b12x", False, Mxfp4MoeBackend.B12X_MXFP4_MXFP8),
-    ],
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="MXFP4 MoE regression requires CUDA"
 )
-def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
+def test_mxfp4_moe_rejects_incompatible_activation_in_llm(
+    vllm_runner,
     monkeypatch,
-    moe_backend: str,
-    is_xpu: bool,
-    mxfp4_backend: Mxfp4MoeBackend,
-) -> None:
-    captured = {}
-    expected_quant_config = object()
-    expected_kernel = SimpleNamespace(
-        fused_experts=SimpleNamespace(
-            process_weights_after_loading=lambda layer: captured.update(
-                {"processed_layer": layer}
-            ),
-            keep_constants=lambda layer: None,
-        )
-    )
-    expected_experts_cls = object()
-
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
-        "CutlassExpertsMxfp4._supports_current_device",
-        lambda: False,
-    )
-    monkeypatch.setattr(current_platform, "is_xpu", lambda: is_xpu)
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
-        "select_mxfp4_moe_backend",
-        lambda moe: (mxfp4_backend, expected_experts_cls),
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
-        "prepare_moe_fp4_layer_for_marlin",
-        lambda layer: pytest.fail("packed backends must not use Marlin packing"),
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
-        "make_mxfp4_moe_quant_config",
-        lambda **kwargs: (
-            captured.update({"quant_config_kwargs": kwargs}) or expected_quant_config
+):
+    """The real INC model must reject an activation unsupported by DeepGEMM."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    with (
+        pytest.raises(ValueError, match="does not support activation="),
+        vllm_runner(
+            "INCModel/Qwen3-30B-A3B-12L-MXFP4-test",
+            moe_backend="deep_gemm",
+            quantization_config={"moe": {"activation": "mxfp8"}},
+            enforce_eager=True,
+            max_model_len=128,
+            max_num_seqs=1,
+            gpu_memory_utilization=0.3,
         ),
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
-        "make_mxfp4_moe_kernel",
-        lambda **kwargs: captured.update({"kernel_kwargs": kwargs}) or expected_kernel,
-    )
+    ):
+        pass
 
-    from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe import (
-        INCMxfp4MoEMethod,
-    )
 
-    expected_moe_config = SimpleNamespace(
-        w13_num_shards=2,
-        moe_backend=moe_backend,
-    )
-    method = INCMxfp4MoEMethod(moe=cast(Any, expected_moe_config))
-    layer = torch.nn.Module()
-    layer._expert_routing_tables = lambda: "routing-tables"
-
-    method.create_weights(
-        layer,
-        num_experts=2,
-        hidden_size=64,
-        intermediate_size_per_partition=32,
-        params_dtype=torch.bfloat16,
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_humming(),
+    reason="Requires CUDA Humming kernels",
+)
+@pytest.mark.parametrize("scope", ["global", "layer"])
+def test_mxfp4_moe_retains_bf16_override_after_model_loading(
+    vllm_runner, monkeypatch, scope
+):
+    """BF16 overrides must reach the loaded kernels, including a single layer."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    target = "model.layers.0.mlp.experts"
+    args = (
+        {"moe": {"activation": None}}
+        if scope == "global"
+        else {"targets": {target: {"activation": None}}}
     )
 
-    assert method.experts_cls is expected_experts_cls
-    assert layer.w13_weight_packed.shape == (2, 64, 32)
-    assert layer.w2_weight_packed.shape == (2, 64, 16)
-    assert layer.w13_weight_scale.shape == (2, 64, 2)
-    assert layer.w2_weight_scale.shape == (2, 64, 1)
+    def activations(model):
+        actual = {}
+        for layer in model.modules():
+            if isinstance(layer, RoutedExperts):
+                config = layer.quant_method.moe_quant_config
+                assert config is not None
+                actual[layer.layer_name] = config.quant_dtype
+        return actual
 
-    w13_packed_data = layer.w13_weight_packed.data
-    w2_packed_data = layer.w2_weight_packed.data
-    method.process_weights_after_loading(layer)
-
-    assert layer.w13_weight.data.data_ptr() == w13_packed_data.data_ptr()
-    assert layer.w2_weight.data.data_ptr() == w2_packed_data.data_ptr()
-    assert layer.w13_weight_packed is layer.w13_weight
-    assert layer.w2_weight_packed is layer.w2_weight
-    assert captured["quant_config_kwargs"]["w1_scale"] is layer.w13_weight_scale
-    assert captured["quant_config_kwargs"]["w2_scale"] is layer.w2_weight_scale
-    assert captured["kernel_kwargs"]["moe_quant_config"] is expected_quant_config
-    assert captured["kernel_kwargs"]["moe_config"] is expected_moe_config
-    assert captured["kernel_kwargs"]["experts_cls"] is expected_experts_cls
-    assert captured["kernel_kwargs"]["routing_tables"] == "routing-tables"
-    assert captured["processed_layer"] is layer
-    assert method.moe_kernel is expected_kernel
+    with vllm_runner(
+        "INCModel/Qwen3-30B-A3B-12L-MXFP4-test",
+        moe_backend="humming",
+        quantization_config=args,
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.3,
+    ) as llm:
+        for actual in llm.apply_model(activations):
+            assert len(actual) > 1 and target in actual
+            assert actual == {
+                name: None if scope == "global" or name == target else "float4e2m1"
+                for name in actual
+            }
+        output = llm.generate_greedy("The capital of France is", max_tokens=4)
+        assert output[0][0]
 
 
 def test_wna16_xpu_moe_routes_to_gptq_moe(monkeypatch) -> None:

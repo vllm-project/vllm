@@ -1236,6 +1236,7 @@ def test_quark_mxfp4_non_gpt_oss_uses_standard_weight_layout():
     method = QuarkOCP_MX_MoEMethod.__new__(QuarkOCP_MX_MoEMethod)
     method.model_type = "pixtral"
     method.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
+    method.moe_activation_override = None
     method.moe = SimpleNamespace(activation=MoEActivation.SILU)
     method.experts_cls = None
 

@@ -523,55 +523,57 @@ def test_deepseek_v4_flashinfer_cutlass_falls_through_to_w4a8(
     assert experts_cls is FlashInferExperts
 
 
-def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-        compressed_tensors_moe_w4a4_mxfp4 as ct_mxfp4,
+@pytest.mark.parametrize("backend", mxfp4_oracle.B12X_BACKENDS)
+def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(backend) -> None:
+    """The shared b12x converter preserves packed CT and INC checkpoint bytes."""
+    generator = torch.Generator().manual_seed(0)
+    tensors = [
+        torch.randint(0, 256, shape, dtype=torch.uint8, generator=generator)
+        for shape in ((2, 64, 32), (2, 64, 16), (2, 64, 2), (2, 64, 1))
+    ]
+    w13, w2, s13, s2 = tensors
+    converted = mxfp4_oracle.convert_weight_to_mxfp4_moe_kernel_format(
+        mxfp4_backend=backend,
+        layer=torch.nn.Module(),
+        w13_weight=w13,
+        w2_weight=w2,
+        w13_weight_scale=s13,
+        w2_weight_scale=s2,
     )
+    for actual, expected in zip(converted[:4], tensors):
+        assert actual.data_ptr() == expected.data_ptr()
+        assert torch.equal(actual, expected)
 
-    monkeypatch.setattr(
-        ct_mxfp4.CutlassExpertsMxfp4,
-        "_supports_current_device",
-        lambda: False,
-    )
-    monkeypatch.setattr(
-        ct_mxfp4,
-        "select_mxfp4_moe_backend",
-        lambda moe: (Mxfp4MoeBackend.B12X_MXFP4_MXFP8, B12xExperts),
-    )
-    monkeypatch.setattr(
-        ct_mxfp4,
-        "prepare_moe_fp4_layer_for_marlin",
-        lambda layer: pytest.fail("b12x must not use Marlin packing"),
-    )
-    moe_config = SimpleNamespace(w13_num_shards=2, moe_backend="b12x")
-    method = ct_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod(moe_config)
-    processed_layers: list[torch.nn.Module] = []
-    fake_experts = SimpleNamespace(
-        process_weights_after_loading=processed_layers.append,
-        keep_constants=lambda layer: None,
-    )
-    kernel = SimpleNamespace(fused_experts=fake_experts)
-    monkeypatch.setattr(method, "get_fused_moe_quant_config", lambda _: object())
-    monkeypatch.setattr(ct_mxfp4, "make_mxfp4_moe_kernel", lambda **_: kernel)
-    layer = torch.nn.Module()
-    layer._expert_routing_tables = lambda: ()
-    method.create_weights(
-        layer,
-        num_experts=2,
-        hidden_size=64,
-        intermediate_size_per_partition=32,
-        params_dtype=torch.bfloat16,
-    )
-    w13_packed_data = layer.w13_weight_packed.data
-    w2_packed_data = layer.w2_weight_packed.data
 
-    method.process_weights_after_loading(layer)
+@pytest.mark.parametrize(
+    "activation,strict,force_a16,expected",
+    [
+        ("default", False, False, list(mxfp4_oracle.B12X_BACKENDS)),
+        ("default", False, True, [Mxfp4MoeBackend.B12X_MXFP4_BF16]),
+        (None, False, False, [Mxfp4MoeBackend.B12X_MXFP4_BF16]),
+        ("mxfp8", True, False, [Mxfp4MoeBackend.B12X_MXFP4_MXFP8]),
+        ("mxfp4", True, False, []),
+    ],
+)
+def test_b12x_packed_mxfp4_precision_policy(
+    default_vllm_config,
+    monkeypatch,
+    activation,
+    strict,
+    force_a16,
+    expected,
+):
+    """b12x keeps its default precision while honoring explicit overrides."""
+    from vllm.config.quantization import QuantSpec, layer_target_spec_scope
 
-    assert layer.w13_weight.data.data_ptr() == w13_packed_data.data_ptr()
-    assert layer.w2_weight.data.data_ptr() == w2_packed_data.data_ptr()
-    assert processed_layers == [layer]
+    monkeypatch.setitem(vars(mxfp4_oracle.envs), "VLLM_STRICT_QUANT_SCHEME", strict)
+    monkeypatch.setitem(
+        vars(mxfp4_oracle.envs), "VLLM_B12X_MOE_FP4_FORCE_A16", force_a16
+    )
+    spec = None if activation == "default" else QuantSpec(activation=activation)
+    with layer_target_spec_scope(spec):
+        key = mxfp4_oracle._resolve_activation_key(mxfp4_oracle.kMxfp4Dynamic)
+        assert mxfp4_oracle._get_requested_backends("b12x", key) == expected
 
 
 def test_b12x_mxfp4_falls_back_to_a16(

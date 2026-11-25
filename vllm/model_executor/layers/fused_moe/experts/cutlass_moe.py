@@ -1051,6 +1051,20 @@ def swizzle_mxfp4_scales(
 class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
     """CUTLASS MXFP4 x MXFP4 fused MoE expert implementation."""
 
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if moe_config.has_bias:
+            return False, "kernel does not support expert bias"
+        return mk.FusedMoEExperts.is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True

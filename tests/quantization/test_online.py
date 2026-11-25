@@ -272,6 +272,34 @@ def test_online_linear_methods_resolve_activation_quant_key(
     assert resolved is not None and resolved[3].activation == activation_quant_key
 
 
+@pytest.mark.parametrize("targets", [False, True])
+@pytest.mark.parametrize(
+    "spec",
+    [
+        QuantSpec(weight=kMxfp4Static),
+        QuantSpec(activation=None),
+        QuantSpec(activation=kMxfp4Dynamic),
+        QuantSpec(activation=kMxfp8Dynamic),
+    ],
+)
+def test_activation_override_config_distinguishes_omitted_and_bf16(targets, spec):
+    """Layer matching must preserve explicit BF16 without an active context."""
+    prefix = "model.layers.0.mlp.experts"
+    args = (
+        QuantizationConfigArgs(targets={prefix: spec})
+        if targets
+        else QuantizationConfigArgs(moe=spec)
+    )
+    config = OnlineQuantizationConfig(args)
+    override = config.get_activation_override(RoutedExperts, prefix)
+    if "activation" in spec.fields_set:
+        assert override is not None and override.activation == spec.activation
+    else:
+        assert override is None
+    other = config.get_activation_override(RoutedExperts, "model.layers.1.mlp.experts")
+    assert other == (None if targets else override)
+
+
 @pytest.mark.parametrize(
     ("layer_kind", "layer_cls", "weight_key", "accepted", "error"),
     [
@@ -434,13 +462,20 @@ def test_online_hadamard_target_wraps_resolved_method(default_vllm_config) -> No
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Humming requires CUDA.")
 @pytest.mark.parametrize(
-    "scheme", ["fp8_per_block", "fp8_per_channel", "mxfp8", "mxfp4"]
+    "scheme,use_targets",
+    [
+        ("fp8_per_block", False),
+        ("fp8_per_channel", False),
+        ("mxfp8", False),
+        ("mxfp4", False),
+        ("mxfp4", True),
+    ],
 )
 @pytest.mark.parametrize("requantize", [False, True])
 @pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
 def test_online_moe_stages_quantized_weights_for_humming(
-    scheme, requantize, tmp_path, workspace_init
+    scheme, use_targets, requantize, tmp_path, workspace_init
 ) -> None:
     """Real online conversion and reload must match a fresh Humming layer."""
     from vllm.config import set_current_vllm_config
@@ -452,7 +487,14 @@ def test_online_moe_stages_quantized_weights_for_humming(
         ),
         kernel_config=KernelConfig(moe_backend="humming"),
     )
-    online_config = OnlineQuantizationConfig(QuantizationConfigArgs(moe=scheme))
+    args = (
+        QuantizationConfigArgs(
+            targets={"humming.*": QuantSpec(weight=scheme, activation=scheme)}
+        )
+        if use_targets
+        else QuantizationConfigArgs(moe=scheme)
+    )
+    online_config = OnlineQuantizationConfig(args)
     quant_config = online_config
     if requantize:
         quant_config = ModelOptNvFp4Config(is_checkpoint_nvfp4_serialized=True)
@@ -502,6 +544,8 @@ def test_online_moe_stages_quantized_weights_for_humming(
                     )
         runner._quant_method.process_weights_after_loading(layer)
         finalize_layerwise_reload(runner, config.model_config)
+        if use_targets:
+            assert runner._quant_method.moe_quant_config.quant_dtype == "float4e2m1"
 
     with set_current_vllm_config(config), torch.device(DEVICE):
         runner = create("humming.loaded")

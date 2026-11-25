@@ -134,6 +134,7 @@ from vllm.model_executor.utils import (
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
+    from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
 logger = init_logger(__name__)
@@ -279,10 +280,19 @@ class QuarkMoEMethod(FusedMoEMethodBase):
                 module.moe_config, weight_quant_key, activation_quant_key
             )
         elif method_cls is QuarkOCP_MX_MoEMethod:
+            online_config = quant_config.online_quantization_config
+            activation_override = (
+                online_config.get_activation_override(type(module), layer_name)
+                if online_config is not None and layer_name is not None
+                else None
+            )
             # All OCP MX schemes (W4A16, W4A8, etc.) handled by QuarkOCP_MX_MoEMethod
             # Backend selection happens inside via oracle
             return QuarkOCP_MX_MoEMethod(
-                module.moe_config, weight_quant_key, activation_quant_key
+                module.moe_config,
+                weight_quant_key,
+                activation_quant_key,
+                activation_override=activation_override,
             )
         elif method_cls is QuarkW8A8Mxfp8MoEMethod:
             return QuarkW8A8Mxfp8MoEMethod(
@@ -1575,8 +1585,12 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         moe: FusedMoEConfig,
         weight_quant_key: QuantKey,
         activation_quant_key: QuantKey | None,
+        activation_override: "QuantSpec | None" = None,
     ):
         super().__init__(moe, weight_quant_key, activation_quant_key)
+        self.moe_activation_override: QuantKey | None = (
+            activation_override.activation if activation_override is not None else None
+        )
         self.weight_dtype = next(
             dtype
             for dtype, quant_key in _WEIGHT_QUANT_KEY_MAP.items()
@@ -1830,6 +1844,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w2_bias=w2_bias,
                 w13_input_scale=layer.w13_input_scale,
                 w2_input_scale=layer.w2_input_scale,
+                activation_quant_key=self.moe_activation_override,
             )
         else:
             converted_weights = convert_weight_to_mxfp4_moe_kernel_format(
@@ -1842,6 +1857,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
                 activation=self.moe.activation,
+                activation_quant_key=self.moe_activation_override,
             )
         w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = converted_weights
 
