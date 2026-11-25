@@ -443,12 +443,11 @@ def _build_hisparse_kv_cache_tensors(
 def get_hisparse_kv_cache_config(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroup],
-    available_memory: int,
+    num_blocks: int,
     host_budget: int,
 ) -> KVCacheConfig:
     from vllm.v1.core.kv_cache_planning import (
         _get_kv_cache_bytes_per_block,
-        may_override_num_blocks,
         validate_kv_cache_layout,
     )
 
@@ -457,9 +456,6 @@ def get_hisparse_kv_cache_config(
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, device_groups)
     bytes_per_block = _get_kv_cache_bytes_per_block(device_groups, layout)
-    num_blocks = may_override_num_blocks(
-        vllm_config, available_memory // bytes_per_block
-    )
     size = bytes_per_block * num_blocks
     kv_cache_tensors = _build_hisparse_kv_cache_tensors(
         device_groups, num_blocks, size, layout, bytes_per_block

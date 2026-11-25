@@ -162,13 +162,13 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         [
             KVCacheGroup.from_layers(
                 {
-                    name: MambaManager.layer_config(spec, mamba_cache_mode="align")
+                    name: MambaManager.layer_config(spec, enable_prefix_caching=True)
                     for name in names
                 }
             )
             for names in layer_names
         ],
-        slots * (2 * spec.page_size_bytes + 24),
+        num_blocks=slots,
     )
     pages = allocate_kv_cache(config, torch.device("cuda"), layout)
     caches = {}
@@ -696,7 +696,9 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.use_flashinfer_replayssm = mixer.use_replayssm_trackers = True
     mixer.replayssm_buffer_len = 16
     mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
-    mixer.cache_config = SimpleNamespace(mamba_block_size=16, mamba_cache_mode="none")
+    mixer.cache_config = SimpleNamespace(
+        mamba_block_size=16, enable_prefix_caching=False
+    )
     mixer.conv_weights = torch.empty(0)
     mixer.conv1d = SimpleNamespace(bias=None)
     mixer.activation = "silu"

@@ -344,6 +344,45 @@ def test_render_messages_returns_token_prompt():
     assert conversation[0]["role"] == "user"
 
 
+@pytest.mark.asyncio
+async def test_render_messages_keeps_text_parts_separate():
+    """K3's encoder joins text parts with no separator, like the checkpoint's
+    and the Rust frontend's rendering, so they must not arrive pre-joined."""
+    tokenizer = StubTokenizer([1, 2, 3])
+    renderer = _make_renderer(tokenizer)
+    parts = [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]
+    messages = [
+        {"role": "user", "content": parts},
+        {
+            "role": "assistant",
+            "content": None,
+            "refusal": "I cannot help.",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_0",
+            "content": [{**part, "type": "input_text"} for part in parts],
+        },
+    ]
+
+    renderer.render_messages(messages, ChatParams())
+    await renderer.render_messages_async(messages, ChatParams())
+
+    for conversation in tokenizer.conversations:
+        assert [message["content"] for message in conversation] == [
+            parts,
+            [{"type": "text", "text": "I cannot help."}],
+            parts,
+        ]
+
+
 def test_render_messages_derives_private_xtml_tool_attrs():
     tokenizer = StubTokenizer([1, 2, 3])
     renderer = _make_renderer(tokenizer)

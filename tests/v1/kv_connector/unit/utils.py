@@ -258,7 +258,7 @@ def create_scheduler(
     return scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
-        log_stats=True,
+        collect_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
         hash_block_size=hash_block_size,
@@ -552,7 +552,7 @@ def make_kv_cache_config(
     mamba_enabled: bool = False,
     sw_size: int = 128,
     num_blocks: int = 100,
-    mamba_cache_mode: Literal["align", "none"] = "none",
+    enable_prefix_caching: bool = False,
 ) -> KVCacheConfig:
     kv_cache_groups = [
         make_kv_cache_group(
@@ -589,7 +589,7 @@ def make_kv_cache_config(
                     dtypes=(torch.float16,),
                 ),
                 MambaManager,
-                MambaManager.config(mamba_cache_mode=mamba_cache_mode),
+                MambaManager.config(enable_prefix_caching=enable_prefix_caching),
             )
         )
     return KVCacheConfig(
@@ -754,6 +754,7 @@ def make_moriio_writer(fake_worker: Any) -> Any:
     writer._scheduled_writes = defaultdict(int)
     writer._scheduled_layers = defaultdict(set)
     writer._sealed_writes = {}
+    writer._transfer_states = {}
     writer._deferred_tasks = []
     writer._defer_timeout = 60.0
     writer.ensure_worker_started = lambda: None
