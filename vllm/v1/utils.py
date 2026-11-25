@@ -363,12 +363,10 @@ class RustFrontendProcessManager:
 
         # The Rust `frontend` subcommand parses --args-json via serde_json,
         # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
-        # declarations on SharedRuntimeArgs fields. Forward the env-driven
-        # values explicitly so VLLM_ENGINE_READY_TIMEOUT_S and
-        # VLLM_HTTP_TIMEOUT_KEEP_ALIVE behave the same on both Python and Rust
-        # frontends.
+        # declarations on SharedRuntimeArgs fields. Forward the resolved
+        # timeout values explicitly for consistent Python and Rust behavior.
         args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
-        args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+        args_dict["http_timeout_keep_alive"] = args.http_timeout_keep_alive
 
         # `--log-level` and `--logging-config` default to
         # argparse.SUPPRESS, so get_non_default_args() never sees them;
