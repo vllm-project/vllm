@@ -632,7 +632,6 @@ def test_resolve_content_format_fallbacks(model, expected_format):
         ("template_falcon_180b.jinja", "string"),
         ("template_falcon.jinja", "string"),
         ("template_inkbot.jinja", "string"),
-        ("template_teleflm.jinja", "string"),
         ("pooling/embed/template/dse_qwen2_vl.jinja", "openai"),
         ("pooling/embed/template/vlm2vec_phi3v.jinja", "openai"),
         ("pooling/embed/template/vlm2vec_qwen2vl.jinja", "openai"),

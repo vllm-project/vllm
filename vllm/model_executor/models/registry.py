@@ -208,7 +208,6 @@ _TEXT_GENERATION_MODELS = {
     "Step3p5ForCausalLM": ("step3p5", "Step3p5ForCausalLM"),
     "Step5ForCausalLM": ("vllm.models.step5", "Step5ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
-    "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "UnlimitedOCR2TextForCausalLM": ("unlimited_ocr", "UnlimitedOCR2TextForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
     "ZayaForCausalLM": ("zaya", "ZayaForCausalLM"),
@@ -980,6 +979,7 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "JambaForCausalLM": "0.34.0",
     "JambaForSequenceClassification": "0.34.0",
     "MambaForCausalLM": "0.34.0",
+    "TeleFLMForCausalLM": "0.34.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
