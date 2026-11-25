@@ -144,12 +144,13 @@ class NanoNemotronVLImagePixelInputs(TensorSchema):
 class NanoNemotronVLImagePixelInputsDynamic(TensorSchema):
     """Dynamic-resolution image inputs.
 
+    pixel_values_flat: `[1, total_patches, 3 * patch_size**2]`.
     imgs_sizes: per-image (height, width) in pixels.
     num_tokens_per_image: per-image number of embedding tokens (post downsample).
     """
 
     type: Literal["pixel_values_dynamic"] = "pixel_values_dynamic"
-    pixel_values_flat: Annotated[torch.Tensor, TensorShape("bn", "h", "w")]
+    pixel_values_flat: Annotated[torch.Tensor, TensorShape("bn", "np", "pp")]
     imgs_sizes: list[tuple[int, int]]
     num_tokens_per_image: list[int]
 
@@ -391,13 +392,10 @@ class NanoNemotronVLMultiModalProcessor(
         return hf_inputs
 
     def _get_image_fields_config(self, hf_inputs: BatchFeature):
-        if self.info.is_dynamic_tiler:
-            pixel_values_flat = MultiModalFieldConfig.batched("image")
-        else:
-            image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
-            pixel_values_flat = MultiModalFieldConfig.flat_from_sizes(
-                "image", image_num_patches
-            )
+        image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
+        pixel_values_flat = MultiModalFieldConfig.flat_from_sizes(
+            "image", image_num_patches
+        )
 
         return dict(
             pixel_values_flat=pixel_values_flat,
@@ -412,12 +410,8 @@ class NanoNemotronVLMultiModalProcessor(
         )
 
     def _get_video_fields_config(self, hf_inputs: BatchFeature):
-        video_num_patches = hf_inputs.get("video_num_patches", torch.empty(0))
-
         return dict(
-            pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
-                "video", video_num_patches
-            ),
+            pixel_values_flat_video=MultiModalFieldConfig.batched("video"),
             pixel_values_raw_video=MultiModalFieldConfig.batched(
                 "video", keep_on_cpu=True
             ),
@@ -584,6 +578,9 @@ class NanoNemotronVLMultiModalProcessor(
                 img_end_token_ids=hf_processor._img_end_token_ids,
                 img_context_token_ids=hf_processor._img_context_token_ids,
                 video_temporal_patch_size=T,
+                select_token_ids=(
+                    video_pruning_rate is None or video_pruning_rate <= 0.0
+                ),
             )
 
         return PromptReplacement(
@@ -1229,9 +1226,14 @@ class NemotronH_Nano_VL_V2(
 
         if self.dynamic_resolution:
             assert isinstance(pixel_values_flat, (list, torch.Tensor))
-            pixel_values_flat = DynamicResolutionImageTiler.stack(
-                pixel_values_flat, self.patch_size
-            )
+            if isinstance(pixel_values_flat, torch.Tensor):
+                # CPU and Rust processors already return one tensor of patches.
+                pixel_values_flat = pixel_values_flat.unsqueeze(0)
+            else:
+                # device_resize still supplies resized whole images.
+                pixel_values_flat = DynamicResolutionImageTiler.stack(
+                    pixel_values_flat, self.patch_size
+                )
             imgs_sizes = kwargs.pop("imgs_sizes")
             num_tokens_per_image = kwargs.pop("num_tokens_per_image")
             assert isinstance(imgs_sizes, list)
@@ -1287,14 +1289,18 @@ class NemotronH_Nano_VL_V2(
     def _process_video_input(
         self, video_input: NanoNemotronVLVideoPixelInputs
     ) -> tuple[torch.Tensor, ...]:
-        """Process video input and create final embeddings with video content
-        and indicator tokens."""
+        """Process video input, merging indicator-token embeddings only for EVS."""
         T = self.video_temporal_patch_size
 
         if T > 1:
             video_embeddings = self._extract_video_embeddings_temporal(video_input)
         else:
             video_embeddings = self._process_image_input(video_input)
+
+        video_pruning_rate = self.video_pruning_rate
+        if video_pruning_rate is None or video_pruning_rate <= 0.0:
+            return video_embeddings
+        assert video_pruning_rate is not None
 
         final_video_embeddings: tuple[torch.Tensor, ...] = ()
 
@@ -1304,7 +1310,6 @@ class NemotronH_Nano_VL_V2(
         frame_h, frame_w = pixel_values.shape[-2], pixel_values.shape[-1]
         rows = int(frame_h * downsample_ratio // patch_size)
         cols = int(frame_w * downsample_ratio // patch_size)
-        video_pruning_rate = self.video_pruning_rate
         video_num_frames = video_input["num_patches"].tolist()
         video_frames_indices = video_input["frames_indices"].split(video_num_frames)
         # Calculate video feature dimensions (number of frames and
@@ -1317,27 +1322,19 @@ class NemotronH_Nano_VL_V2(
             num_tubelets = math.ceil(num_frames / T) if T > 1 else num_frames
             assert single_video_embeddings.shape[0] % num_tubelets == 0
 
-            if video_pruning_rate is not None and video_pruning_rate > 0.0:
-                # Start of EVS-specific code
-                retention_mask = compute_retention_mask(
-                    single_video_embeddings,
-                    video_size_thw=(num_tubelets, rows, cols),
-                    spatial_merge_size=1,
-                    q=video_pruning_rate,
-                )
+            retention_mask = compute_retention_mask(
+                single_video_embeddings,
+                video_size_thw=(num_tubelets, rows, cols),
+                spatial_merge_size=1,
+                q=video_pruning_rate,
+            )
 
-                # apply retention mask
-                single_video_embeddings = single_video_embeddings[retention_mask]
+            # apply retention mask
+            single_video_embeddings = single_video_embeddings[retention_mask]
 
-                # calculate the actual number of retained tokens per frame
-                retention_mask_thw = retention_mask.reshape(num_tubelets, rows, cols)
-                num_tokens_per_frame = (
-                    retention_mask_thw.sum(dim=(1, 2)).long().tolist()
-                )
-                # End of EVS-specific code
-            else:
-                feature_size = single_video_embeddings.shape[0] // num_tubelets
-                num_tokens_per_frame = [feature_size] * num_tubelets
+            # calculate the actual number of retained tokens per frame
+            retention_mask_thw = retention_mask.reshape(num_tubelets, rows, cols)
+            num_tokens_per_frame = retention_mask_thw.sum(dim=(1, 2)).long().tolist()
 
             final_video_embeddings += (
                 self._create_final_video_embeddings(
@@ -1527,13 +1524,16 @@ class NemotronH_Nano_VL_V2(
                 and pixel_values_flat_video.ndim == 5
             ):
                 # batched._reduce_data stacked same-shape videos into
-                # [num_videos, nf, 3, H, W]; unstack back to a list so the
-                # same-H,W cat path below handles it uniformly.
-                pixel_values_flat_video = list(pixel_values_flat_video)
+                # [num_videos, nf, 3, H, W]: join them without a copy.
+                pixel_values_flat_video = pixel_values_flat_video.flatten(0, 1)
 
             if not isinstance(pixel_values_flat_video, torch.Tensor):
                 assert isinstance(pixel_values_flat_video, (list, tuple))
-                pixel_values_flat_video = torch.cat(pixel_values_flat_video, dim=0)
+                pixel_values_flat_video = (
+                    pixel_values_flat_video[0]
+                    if len(pixel_values_flat_video) == 1
+                    else torch.cat(pixel_values_flat_video, dim=0)
+                )
 
             assert isinstance(video_num_patches, torch.Tensor)
             expected_h = pixel_values_flat_video.shape[-2]
@@ -1597,8 +1597,8 @@ class NemotronH_Nano_VL_V2(
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         sizes = kwargs.get("video_frame_sizes")
         if isinstance(sizes, torch.Tensor) and len(sizes.unique(dim=0)) > 1:
-            # device_resize videos of different frame sizes cannot share one
-            # frame tensor: embed them one at a time (all fields are per video).
+            # Videos of different frame sizes cannot share one frame tensor:
+            # embed them one at a time (all fields are per video).
             return [
                 embedding
                 for i in range(len(sizes))

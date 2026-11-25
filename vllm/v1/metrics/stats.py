@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.logger import init_logger
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.iteration_workload import QueuedWorkload, ScheduledWorkload
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -208,6 +209,8 @@ class SchedulerIterationDetails:
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
     is_dummy: bool = False
+    # Only with --enable-logging-iteration-details; None for dummy iterations.
+    scheduled_workload: ScheduledWorkload | None = None
 
 
 KV_FETCH_WAITING_TO_START = "waiting_to_start"
@@ -242,6 +245,10 @@ class SchedulerStats:
     # Iterations to report: timed on the GPU by the output worker, or untimed
     # from EngineCore.
     iteration_records: list[SchedulerIterationDetails] = field(default_factory=list)
+    # The waiting requests when these stats were made, which is later than the
+    # iterations in iteration_records ran. Only with
+    # --enable-logging-iteration-details.
+    queued_workload: QueuedWorkload | None = None
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
@@ -693,14 +700,14 @@ class LoRAStats:
 class LoRARequestStates:
     """A per-LoRA count of running and waiting requests."""
 
-    def __init__(self, log_stats: bool = False):
-        self.log_stats = log_stats
+    def __init__(self, collect_stats: bool = False):
+        self.collect_stats = collect_stats
         self.requests: defaultdict[str, LoRAStats] = defaultdict(LoRAStats)
 
     def _request_update(
         self, req_id: str, lora_name: str | None, waiting: bool, running: bool
     ):
-        if not self.log_stats or lora_name is None:
+        if not self.collect_stats or lora_name is None:
             return
 
         lora_stats = self.requests[lora_name]
@@ -718,7 +725,7 @@ class LoRARequestStates:
         self._request_update(req_id, lora_name, waiting=False, running=False)
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
-        if not self.log_stats or scheduler_stats is None:
+        if not self.collect_stats or scheduler_stats is None:
             return
         for lora_name, stats in self.requests.items():
             scheduler_stats.waiting_lora_adapters[lora_name] = len(stats.waiting)
