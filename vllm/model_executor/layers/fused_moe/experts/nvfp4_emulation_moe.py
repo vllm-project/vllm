@@ -35,6 +35,8 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     _e2m1_inline,
+    _e4m3_inline,
+    _native_e4m3,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -84,6 +86,7 @@ def fused_moe_nvfp4_emulation_kernel(
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
     group_size: tl.constexpr,
+    NATIVE_E4M3: tl.constexpr,
 ):
     """Fused MoE kernel for emulated NVFP4 weight-only dequantization + GEMM.
 
@@ -220,7 +223,10 @@ def fused_moe_nvfp4_emulation_kernel(
         else:
             b_scale_raw = tl.load(b_scale_ptrs, mask=kp_mask, other=0.0)
 
-        b_scale = tl.cast(b_scale_raw, tl.float8e4nv, bitcast=True).to(tl.float32)
+        if NATIVE_E4M3:
+            b_scale = tl.cast(b_scale_raw, tl.float8e4nv, bitcast=True).to(tl.float32)
+        else:
+            b_scale = _e4m3_inline(b_scale_raw)
         b_scale = b_scale * w_global_scale
 
         # Scale both halves with the same per-block scale (the two
@@ -275,6 +281,10 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
     w_global_scale has shape [E] (per-expert scalar).
     """
     assert B_scale is not None and B_scale.ndim == 3
+    # Pass the E4M3 scales as raw bytes: an FP8 pointer cannot be loaded
+    # below SM89, and the kernel decodes the bytes itself.
+    if B_scale.dtype == torch.float8_e4m3fn:
+        B_scale = B_scale.view(torch.uint8)
 
     N = B.size(1)
     K = A.size(1)
@@ -328,6 +338,7 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
         BLOCK_SIZE_N=config["BLOCK_SIZE_N"],
         BLOCK_SIZE_K=config["BLOCK_SIZE_K"],
         GROUP_SIZE_M=config["GROUP_SIZE_M"],
+        NATIVE_E4M3=_native_e4m3(C.device),
     )
 
 

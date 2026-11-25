@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import cast
+from typing import Any, cast
 
 import pytest
 import torch
@@ -29,12 +29,19 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
     Nvfp4QuantizationEmulationTritonExperts,
+    fused_moe_nvfp4_emulation_kernel,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.quantization.utils import (
     nvfp4_emulation_utils,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    _dequantize_nvfp4_kernel,
+    _e4m3_inline,
+    _native_e4m3,
+    _nvfp4_gathered_bias_kernel,
+    _nvfp4_quant_dequant_kernel,
+    _round_to_e4m3,
     dequantize_to_dtype,
     ref_nvfp4_quant_dequant,
 )
@@ -45,7 +52,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
-from vllm.triton_utils import triton
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import set_random_seed
 
 if current_platform.is_rocm():
@@ -921,3 +928,196 @@ def test_dequantize_nvfp4_moe_weights_chunked_matches_full(
     assert chunks[-1][0].stop == num_experts
     assert torch.equal(torch.cat([c[1] for c in chunks]), expected_w13)
     assert torch.equal(torch.cat([c[2] for c in chunks]), expected_w2)
+
+
+@triton.jit
+def _decode_e4m3_kernel(src_ptr, dst_ptr, N: tl.constexpr):
+    offsets = tl.arange(0, N)
+    codes = tl.load(src_ptr + offsets)
+    tl.store(dst_ptr + offsets, _e4m3_inline(codes))
+
+
+@triton.jit
+def _round_e4m3_kernel(src_ptr, dst_ptr, n, BLOCK: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < n
+    x = tl.load(src_ptr + offsets, mask=mask)
+    tl.store(dst_ptr + offsets, _round_to_e4m3(x), mask=mask)
+
+
+def _round_e4m3(x: torch.Tensor) -> torch.Tensor:
+    rounded = torch.empty_like(x)
+    _round_e4m3_kernel[(triton.cdiv(x.numel(), 1024),)](
+        x, rounded, x.numel(), BLOCK=1024
+    )
+    return rounded
+
+
+def _bitwise_equal(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return (a.view(torch.int32) == b.view(torch.int32)) | (a.isnan() & b.isnan())
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Triton NVFP4 kernel requires CUDA.",
+)
+def test_portable_e4m3_helpers_match_torch() -> None:
+    """The FP8-free E4M3 helpers used below SM89 must match torch exactly.
+
+    They run on any GPU here, so CI without SM8x hardware still covers the
+    path that A100 and other pre-SM89 GPUs take. Rounding runs under
+    `torch.compile`, which re-generates the kernel source as the emulation
+    linear path does.
+    """
+    device = "cuda"
+    fp8 = torch.float8_e4m3fn
+
+    codes = torch.arange(256, dtype=torch.uint8, device=device)
+    decoded = torch.empty(256, device=device)
+    _decode_e4m3_kernel[(1,)](codes, decoded, N=256)
+    assert _bitwise_equal(decoded, codes.view(fp8).float()).all()
+
+    # Every representable value, every tie, values 1 and 2 ulps either side of
+    # each tie, and random values across the whole range including subnormals.
+    values = codes.view(fp8).float()
+    values = values[values.isfinite() & (values >= 0)].unique().sort().values
+    ties = (values[:-1] + values[1:]) / 2
+    nudged = [(ties.view(torch.int32) + k).view(torch.float32) for k in (-2, -1, 1, 2)]
+    generator = torch.Generator(device=device).manual_seed(0)
+    random = torch.exp2(
+        torch.empty(1 << 20, device=device).uniform_(-14, 8.8, generator=generator)
+    )
+    x = torch.cat([values, ties, *nudged, random])
+    x = torch.cat([x, -x]).clamp(-448.0, 448.0).contiguous()
+    rounded = torch.compile(_round_e4m3, fullgraph=True)(x)
+    expected = x.to(fp8).float()
+    mismatch = ~_bitwise_equal(rounded, expected)
+    assert not mismatch.any(), (
+        f"{int(mismatch.sum())} mismatches, e.g. {x[mismatch][:4].tolist()} -> "
+        f"{rounded[mismatch][:4].tolist()} (expected {expected[mismatch][:4].tolist()})"
+    )
+
+
+# Pointer arguments of each E4M3-scaled kernel; all other runtime arguments are
+# int32 strides or sizes, except where listed.
+_E4M3_KERNELS: dict[str, tuple[Any, dict[str, str], dict[str, Any]]] = {
+    "gathered_bias": (
+        _nvfp4_gathered_bias_kernel,
+        {
+            "markov_ptr": "*bf16",
+            "packed_weight_ptr": "*u8",
+            "weight_scale_ptr": "*u8",
+            "global_scale_ptr": "*fp32",
+            "values_ptr": "*fp32",
+            "index_ptr": "*i64",
+            "logits_ptr": "*fp32",
+            "alpha": "fp32",
+        },
+        {"TOPK": 2, "K": 64, "NUM_BLOCKS": 4},
+    ),
+    "dequantize": (
+        _dequantize_nvfp4_kernel,
+        {
+            "fp4_ptr": "*u8",
+            "scale_ptr": "*u8",
+            "global_scale_ptr": "*fp32",
+            "output_ptr": "*bf16",
+        },
+        {
+            "rows_per_batch": 1,
+            "num_blocks": 4,
+            "BLOCK_SIZE": 16,
+            "has_batch_global_scale": False,
+            "TILE_BLOCKS": 4,
+        },
+    ),
+    "quant_dequant": (
+        _nvfp4_quant_dequant_kernel,
+        {"input_ptr": "*bf16", "output_ptr": "*bf16", "global_scale_ptr": "*fp32"},
+        {
+            "k": 64,
+            "num_blocks": 4,
+            "BLOCK_SIZE": 16,
+            "FP4_MAX_RECIPROCAL": 1 / 6,
+            "TILE_BLOCKS": 4,
+        },
+    ),
+    "moe": (
+        fused_moe_nvfp4_emulation_kernel,
+        {
+            "a_ptr": "*bf16",
+            "b_ptr": "*u8",
+            "c_ptr": "*bf16",
+            "b_scale_ptr": "*u8",
+            "w_global_scale_ptr": "*fp32",
+            "topk_weights_ptr": "*fp32",
+            "sorted_token_ids_ptr": "*i32",
+            "expert_ids_ptr": "*i32",
+            "num_tokens_post_padded_ptr": "*i32",
+        },
+        {
+            "N": 64,
+            "K": 64,
+            "block_k_diviable": True,
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+            "MUL_ROUTED_WEIGHT": False,
+            "top_k": 1,
+            "group_size": 16,
+        },
+    ),
+}
+# Kernels whose constexpr `compute_type` is a Triton dtype, resolved at use.
+_E4M3_KERNEL_COMPUTE_TYPE = {"moe": "bfloat16"}
+
+
+def _compile_for(kernel_name: str, arch: int, native_e4m3: bool) -> None:
+    """Compile a kernel for an explicit CUDA target, without a GPU or launch."""
+    from triton.backends.compiler import GPUTarget
+    from triton.compiler import ASTSource
+
+    fn, runtime_types, constants = _E4M3_KERNELS[kernel_name]
+    constants = {**constants, "NATIVE_E4M3": native_e4m3}
+    if kernel_name in _E4M3_KERNEL_COMPUTE_TYPE:
+        constants["compute_type"] = getattr(tl, _E4M3_KERNEL_COMPUTE_TYPE[kernel_name])
+    signature = {
+        name: "constexpr" if name in constants else runtime_types.get(name, "i32")
+        for name in fn.arg_names
+    }
+    source = ASTSource(fn, signature=signature, constexprs=constants)
+    triton.compile(source, target=GPUTarget("cuda", arch, 32))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Compiles for explicit NVIDIA targets with Triton's CUDA backend.",
+)
+@pytest.mark.parametrize("kernel_name", list(_E4M3_KERNELS))
+@pytest.mark.parametrize(
+    "archs", [(80, 90), (90, 80)], ids=["sm80_first", "sm90_first"]
+)
+def test_e4m3_kernels_compile_per_target(kernel_name: str, archs) -> None:
+    """Each launch picks its E4M3 path for its own GPU, in either order.
+
+    The portable variant must compile for SM80 whether an SM89+ variant of the
+    same kernel was compiled before or after it in the process.
+    """
+    for arch in archs:
+        _compile_for(kernel_name, arch, native_e4m3=arch >= 89)
+
+
+def test_native_e4m3_follows_each_device(monkeypatch) -> None:
+    """The E4M3 path is chosen per launch device, not once per process."""
+    capabilities = {0: (9, 0), 1: (8, 0), 2: (8, 9), 3: (12, 0)}
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_capability",
+        lambda device=None: capabilities[torch.device(device).index],
+    )
+    for order in ([0, 1, 2, 3], [1, 0, 3, 2]):
+        assert [_native_e4m3(torch.device("cuda", i)) for i in order] == [
+            capabilities[i] >= (8, 9) for i in order
+        ]
