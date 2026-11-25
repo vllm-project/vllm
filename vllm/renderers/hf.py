@@ -9,7 +9,9 @@ import itertools
 import weakref
 from collections import defaultdict, deque
 from collections.abc import Sequence
-from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache, partial
+from threading import BoundedSemaphore
 from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast, overload
 
 import jinja2
@@ -22,7 +24,11 @@ import torch
 from typing_extensions import override
 
 from vllm import envs
-from vllm.exceptions import ChatTemplateResolutionError, VLLMValidationError
+from vllm.exceptions import (
+    ChatTemplateResolutionError,
+    RetryableRequestError,
+    VLLMValidationError,
+)
 from vllm.inputs import EmbedsPrompt, TokensPrompt
 from vllm.inputs.engine import MultiModalInput
 from vllm.logger import init_logger
@@ -1132,6 +1138,52 @@ async def detokenize_prompt_async(
 
 
 _T = TypeVar("_T", bound=TokenizerLike)
+_RenderResult = TypeVar("_RenderResult")
+
+
+class _RequestTemplateExecutor:
+    """Bound active request-template renders independently of default renders."""
+
+    def __init__(self, workers: int) -> None:
+        self._executor = ThreadPoolExecutor(max_workers=workers)
+        self._slots = BoundedSemaphore(workers)
+
+    def shutdown(self) -> None:
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    async def render(
+        self, fn: Callable[[], _RenderResult], timeout: float
+    ) -> _RenderResult:
+        slots = self._slots
+        if not slots.acquire(blocking=False):
+            raise RetryableRequestError(
+                "All request chat template workers are busy. "
+                "Retry later or omit the request template."
+            )
+        try:
+            job = self._executor.submit(fn)
+        except BaseException:
+            slots.release()
+            raise
+        job.add_done_callback(lambda _: slots.release())
+
+        result = asyncio.wrap_future(job)
+
+        def consume_error(future: asyncio.Future) -> None:
+            if not future.cancelled():
+                future.exception()
+
+        result.add_done_callback(consume_error)
+        try:
+            # The thread may still be running after the caller times out or
+            # disconnects. Only the executor future can release its slot.
+            return await asyncio.wait_for(
+                asyncio.shield(result), timeout=timeout if timeout > 0 else None
+            )
+        except TimeoutError:
+            raise TimeoutError(
+                f"Chat template rendering timed out after {timeout}s."
+            ) from None
 
 
 class BaseHfRenderer(BaseRenderer[_T]):
@@ -1170,6 +1222,22 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
 
         self._apply_chat_template_async = make_async(
             safe_apply_chat_template, executor=self._executor
+        )
+        workers = config.model_config.renderer_num_workers
+        assert workers is not None
+        self._request_template_executor = _RequestTemplateExecutor(workers)
+        self._resources.callback(self._request_template_executor.shutdown)
+
+    def _apply_chat_template_with_timeout(
+        self, template_from_request: bool, *args, **kwargs
+    ):
+        if template_from_request:
+            return self._request_template_executor.render(
+                partial(safe_apply_chat_template, *args, **kwargs),
+                envs.VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT,
+            )
+        return self._render_with_timeout(
+            self._apply_chat_template_async(*args, **kwargs)
         )
 
     def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
@@ -1380,13 +1448,12 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
         if prompt_embeds_tensors:
             visibility_check_kwargs = chat_template_kwargs.copy()
             visibility_check_kwargs["tokenize"] = False
-            rendered = await self._render_with_timeout(
-                self._apply_chat_template_async(
-                    model_config,
-                    tokenizer,
-                    conversation,
-                    **visibility_check_kwargs,
-                )
+            rendered = await self._apply_chat_template_with_timeout(
+                params.template_from_request,
+                model_config,
+                tokenizer,
+                conversation,
+                **visibility_check_kwargs,
             )
             assert isinstance(rendered, str)
             prompt_embeds_tensors, conversation = _filter_prompt_embeds_by_template(
@@ -1401,13 +1468,12 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
                 logger.warning_once(_TOKENIZE_OVERRIDE_WARNING)
             chat_template_kwargs["tokenize"] = True
 
-        prompt_raw = await self._render_with_timeout(
-            self._apply_chat_template_async(
-                model_config,
-                tokenizer,
-                conversation,
-                **chat_template_kwargs,
-            )
+        prompt_raw = await self._apply_chat_template_with_timeout(
+            params.template_from_request,
+            model_config,
+            tokenizer,
+            conversation,
+            **chat_template_kwargs,
         )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5

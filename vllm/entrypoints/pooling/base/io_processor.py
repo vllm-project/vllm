@@ -11,6 +11,7 @@ from vllm import (
 )
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.chat_utils import ChatTemplateConfig
@@ -19,6 +20,7 @@ from vllm.renderers.chat_utils.item_tracker import (
     MediaRequestBudgets,
     use_media_request_budgets,
 )
+from vllm.renderers.hf import HfRenderer
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -72,9 +74,32 @@ class PoolingIOProcessor:
 
         # Shared thread pool executor for preprocessing
         self._executor: Executor = self.renderer._executor
-        self.render_async = make_async(
+        self._render_in_executor = make_async(
             self._render_with_media_budgets, executor=self._executor
         )
+
+    async def render_async(
+        self, render_params: AnyRenderParam, budgets: MediaRequestBudgets
+    ) -> PoolingEngineInput:
+        # Other renderers can implement async rendering by calling synchronous
+        # code directly, so keep them on the executor.
+        if (
+            "conversations" not in render_params
+            or not isinstance(self.renderer, HfRenderer)
+            or render_params["params"].late_chunking_params is not None
+        ):
+            return await self._render_in_executor(render_params, budgets)
+
+        chat = cast(EncodeChatRenderParams, render_params)
+        with use_media_request_budgets(budgets):
+            _, (prompt,) = await self.renderer.render_chat_async(
+                conversations=[chat["conversations"]],
+                chat_params=chat["chat_params"],
+                tok_params=chat["tok_params"],
+                prompt_extras=chat["prompt_extras"],
+                skip_mm_cache=chat["skip_mm_cache"],
+            )
+        return self._to_engine_input(prompt, chat)
 
     def _render_with_media_budgets(
         self, render_params: AnyRenderParam, budgets: MediaRequestBudgets
@@ -119,6 +144,9 @@ class PoolingIOProcessor:
                 self.chat_template, self.chat_template_content_format
             ).with_defaults(
                 default_template_kwargs,
+            )
+            chat_params = chat_params.with_request_template_source(
+                request.chat_template, request.chat_template_kwargs
             )
 
             params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
@@ -288,8 +316,14 @@ class PoolingIOProcessor:
                 f"Unsupported render_params type {render_params.__class__.__name__}"
             )
 
+        return self._to_engine_input(engine_input[0], render_params)
+
+    @staticmethod
+    def _to_engine_input(
+        prompt: EngineInput, render_params: AnyRenderParam
+    ) -> PoolingEngineInput:
         return PoolingEngineInput(
-            prompts=engine_input[0],
+            prompts=prompt,
             params=render_params["params"],
             lora_requests=render_params["lora_requests"],
             priorities=render_params["priorities"],

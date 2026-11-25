@@ -120,6 +120,21 @@ class ChatParams:
     response_format: Any | None = None
     """Request-level response format for renderers that need API metadata."""
 
+    template_from_request: bool = False
+    """Whether an online request supplied its own template source."""
+
+    def with_request_template_source(
+        self,
+        request_template: str | None,
+        request_template_kwargs: dict[str, Any] | None,
+    ) -> "ChatParams":
+        if request_template is not None or (
+            request_template_kwargs is not None
+            and request_template_kwargs.get("chat_template") is not None
+        ):
+            return replace(self, template_from_request=True)
+        return self
+
     def with_defaults(
         self,
         default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -133,9 +148,8 @@ class ChatParams:
         ):
             return self
 
-        return ChatParams(
-            chat_template=self.chat_template,
-            chat_template_content_format=self.chat_template_content_format,
+        return replace(
+            self,
             chat_template_kwargs=merge_kwargs(
                 default_chat_template_kwargs,
                 self.chat_template_kwargs,
@@ -148,9 +162,6 @@ class ChatParams:
                 default_mm_processor_kwargs,
                 self.mm_processor_kwargs,
             ),
-            tool_choice=self.tool_choice,
-            parallel_tool_calls=self.parallel_tool_calls,
-            response_format=self.response_format,
         )
 
     def get_apply_chat_template_kwargs(self) -> dict[str, Any]:

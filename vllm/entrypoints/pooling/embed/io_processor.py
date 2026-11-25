@@ -358,6 +358,9 @@ class EmbedIOProcessor(PoolingIOProcessor):
         ).with_defaults(
             default_template_kwargs,
         )
+        chat_params = chat_params.with_request_template_source(
+            request.chat_template, request.chat_template_kwargs
+        )
 
         params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
