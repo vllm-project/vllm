@@ -5,6 +5,7 @@ template <typename scalar_t>
 void rms_norm_impl(scalar_t* __restrict__ out,
                    const scalar_t* __restrict__ input,
                    const scalar_t* __restrict__ weight, const bool has_weight,
+                   const int64_t weight_stride, const int tokens_per_group,
                    const float epsilon, const int num_tokens,
                    const int hidden_size) {
   using scalar_vec_t = vec_op::vec_t<scalar_t>;
@@ -16,6 +17,7 @@ void rms_norm_impl(scalar_t* __restrict__ out,
     vec_op::FP32Vec8 variance(0.0);
     auto input_p = input + i * hidden_size;
     auto output_p = out + i * hidden_size;
+    auto weight_p = weight + (i / tokens_per_group) * weight_stride;
     for (int j = 0; j < hidden_size; j += VEC_ELEM_NUM) {
       scalar_vec_t x(input_p + j);
       vec_op::FP32Vec8 fp32_x(x);
@@ -31,7 +33,7 @@ void rms_norm_impl(scalar_t* __restrict__ out,
       vec_op::FP32Vec8 fp32_x(x);
       vec_op::FP32Vec8 fp32_out;
       if (has_weight) {
-        scalar_vec_t w(weight + j);
+        scalar_vec_t w(weight_p + j);
         vec_op::FP32Vec8 fp32_w(w);
         fp32_out = fp32_x * fp32_s_variance * fp32_w;
       } else {
@@ -101,15 +103,30 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input,
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
   const bool has_weight = weight.has_value();
+  // A 2D weight holds one row per index of the input's outermost dim.
+  int64_t weight_stride = 0;
+  int tokens_per_group = num_tokens;
   if (has_weight) {
     TORCH_CHECK(weight->is_contiguous());
+    if (weight->dim() == 1) {
+      TORCH_CHECK(weight->size(0) == hidden_size);
+    } else if (weight->dim() == 2) {
+      TORCH_CHECK(weight->size(0) == input.size(0));
+      TORCH_CHECK(weight->size(-1) == hidden_size);
+      TORCH_CHECK(input.is_contiguous());
+      weight_stride = weight->stride(0);
+      tokens_per_group = num_tokens / input.size(0);
+    } else {
+      TORCH_CHECK(false, "rms_norm weight must be 1D or 2D");
+    }
   }
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_impl", [&] {
     CPU_KERNEL_GUARD_IN(rms_norm_impl)
     rms_norm_impl(out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
                   has_weight ? weight->data_ptr<scalar_t>() : nullptr,
-                  has_weight, epsilon, num_tokens, hidden_size);
+                  has_weight, weight_stride, tokens_per_group, epsilon,
+                  num_tokens, hidden_size);
     CPU_KERNEL_GUARD_OUT(rms_norm_impl)
   });
 }
