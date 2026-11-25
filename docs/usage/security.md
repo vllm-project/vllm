@@ -233,7 +233,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 
 **Inference endpoints:**
 
-- `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
+- `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints), unless `--disable-sagemaker-integration` is passed
 - `/generative_scoring` - Generative scoring API
 - `/pooling` - Pooling API
 - `/classify` - Classification API
@@ -265,7 +265,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/tokenize` - Tokenize text (not gated by `--enable-scale-out`)
 - `/detokenize` - Detokenize tokens
 - `/health` - Health check
-- `/ping` - SageMaker health check
+- `/ping` - SageMaker health check, unless `--disable-sagemaker-integration` is passed
 - `/version` - Version information
 - `/load` - Server load metrics
 
@@ -297,6 +297,8 @@ These endpoints are only available when profiling is enabled and should only be 
 
 **Note:** The `/invocations` endpoint is particularly concerning as it provides unauthenticated access to the same inference capabilities as the protected `/v1` endpoints.
 
+**Note:** The SageMaker routes, including `/invocations`, `/ping` and the `/adapters` aliases for runtime LoRA management, are registered by default so that existing SageMaker deployments keep working. Servers that do not run on SageMaker can leave them out with `--disable-sagemaker-integration`; see [Minimize Exposed Endpoints](#1-minimize-exposed-endpoints).
+
 ### Security Implications
 
 An attacker who can reach the vLLM HTTP server can:
@@ -320,6 +322,8 @@ An attacker who can reach the vLLM HTTP server can:
 Similarly, never enable profiler endpoints in production.
 
 **Be cautious with `--enable-tokenizer-info-endpoint`:** Only enable the `/tokenizer_info` endpoint if you need to expose tokenizer configuration information. This endpoint reveals chat templates and tokenizer settings that may contain sensitive implementation details or prompt engineering strategies.
+
+**Leave out the SageMaker integration when it is unused:** On the Python frontend, the server registers the SageMaker routes and runs the SageMaker bootstrap by default, for compatibility with existing SageMaker deployments. Besides `/ping` and `/invocations`, the bootstrap imports and runs `<SAGEMAKER_MODEL_PATH>/model.py` when that file exists (the directory defaults to `/opt/ml/model/`, the file name is set by `CUSTOM_SCRIPT_FILENAME`), and installs the handlers and middleware named by `CUSTOM_FASTAPI_PING_HANDLER`, `CUSTOM_FASTAPI_INVOCATION_HANDLER`, `CUSTOM_PRE_PROCESS`, `CUSTOM_POST_PROCESS` and `CUSTOM_FASTAPI_MIDDLEWARE_*`. Unless the server runs on SageMaker, pass `--disable-sagemaker-integration` to skip the routes, the bootstrap, and that code loading.
 
 #### 2. Deploy Behind a Reverse Proxy
 

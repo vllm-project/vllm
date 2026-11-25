@@ -413,6 +413,19 @@ pub struct ServerUnsupportedArgs {
     )]
     pub disable_fastapi_docs: Option<Noop>,
 
+    /// Python frontend only. Leave out the SageMaker HTTP integration.
+    ///
+    /// Accepted as a no-op: the Rust frontend has no SageMaker routes and no
+    /// SageMaker bootstrap to leave out.
+    #[arg(
+        long,
+        visible_alias = "no-disable-sagemaker-integration",
+        default_missing_value = "true",
+        num_args = 0..=1,
+        hide = true
+    )]
+    pub disable_sagemaker_integration: Option<Noop>,
+
     /// Maximum size (bytes) of an incomplete HTTP event (header or body) for
     /// h11 parser. Helps mitigate header abuse. Default: 4194304 (4 MB).
     #[arg(long)]

@@ -3107,6 +3107,7 @@ fn noop_args_are_accepted() {
         "Qwen/Qwen3-0.6B",
         "--disable-fastapi-docs",
         "--enable-offline-docs",
+        "--disable-sagemaker-integration",
         "--aggregate-engine-logging",
         "--uvicorn-log-level",
         "debug",
@@ -3123,7 +3124,7 @@ fn noop_args_are_accepted() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","disable_fastapi_docs":true,"enable_offline_docs":true,"aggregate_engine_logging":true,"uvicorn_log_level":"debug"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","disable_fastapi_docs":true,"enable_offline_docs":true,"disable_sagemaker_integration":true,"aggregate_engine_logging":true,"uvicorn_log_level":"debug"}"#,
     ])
     .expect("no-op fields are accepted");
 }

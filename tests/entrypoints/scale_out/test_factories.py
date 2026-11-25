@@ -45,6 +45,7 @@ def registered_paths(
         tokens_only=tokens_only,
         enable_scale_out=enable_scale_out,
         enable_fault_tolerance=False,
+        disable_sagemaker_integration=False,
     )
     app.state.args = args
     register_api_routers(args, app, supported_tasks)

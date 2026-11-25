@@ -8,7 +8,6 @@ from fastapi import FastAPI
 from vllm.config import ModelConfig
 from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
 from vllm.entrypoints.serve.middleware.register import init_entrypoints_middleware
-from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.plugins.endpoint_plugins.interface import attach_endpoint_plugins
 from vllm.tasks import FALLBACK_SUPPORTED_TASKS, SupportedTask
 
@@ -52,5 +51,10 @@ def build_app(
 
     init_exception_handler(app)
     init_entrypoints_middleware(args, app, supported_tasks)
-    app = sagemaker_standards_bootstrap(app)
+    if not args.disable_sagemaker_integration:
+        from vllm.entrypoints.serve.sagemaker.api_router import (
+            sagemaker_standards_bootstrap,
+        )
+
+        app = sagemaker_standards_bootstrap(app)
     return app

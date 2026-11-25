@@ -15,9 +15,11 @@ def register_api_routers(
     supported_tasks: tuple["SupportedTask", ...],
     model_config: ModelConfig | None = None,
 ):
+    sagemaker_enabled = not args.disable_sagemaker_integration
+
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
-    register_vllm_serve_api_routers(app)
+    register_vllm_serve_api_routers(app, sagemaker_enabled=sagemaker_enabled)
 
     from vllm.entrypoints.openai.models.api_router import (
         attach_router as register_models_api_router,
@@ -37,11 +39,12 @@ def register_api_routers(
 
     register_decisions_api_router(app)
 
-    from vllm.entrypoints.serve.sagemaker.api_router import (
-        attach_router as register_sagemaker_api_router,
-    )
+    if sagemaker_enabled:
+        from vllm.entrypoints.serve.sagemaker.api_router import (
+            attach_router as register_sagemaker_api_router,
+        )
 
-    register_sagemaker_api_router(app, supported_tasks, model_config)
+        register_sagemaker_api_router(app, supported_tasks, model_config)
 
     if envs.VLLM_SERVER_DEV_MODE:
         from vllm.entrypoints.serve import register_vllm_dev_api_routers

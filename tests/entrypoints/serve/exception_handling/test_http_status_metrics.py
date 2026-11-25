@@ -41,6 +41,7 @@ def _build_args() -> Namespace:
         api_key=None,
         enable_request_id_headers=False,
         enable_fault_tolerance=False,
+        disable_sagemaker_integration=False,
         middleware=[],
         log_error_stack=False,
     )
