@@ -387,13 +387,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct", trust_remote_code=True
     ),
     "Jais2ForCausalLM": _HfExamplesInfo("inceptionai/Jais-2-8B-Chat"),
-    "JambaForCausalLM": _HfExamplesInfo(
-        "ai21labs/AI21-Jamba-1.5-Mini",
-        extras={
-            "tiny": "ai21labs/Jamba-tiny-dev",
-            "random": "ai21labs/Jamba-tiny-random",
-        },
-    ),
     "K2HorizonForCausalLM": _HfExamplesInfo(
         "IFM/K2-Horizon-36B",
         trust_remote_code=True,
@@ -432,14 +425,14 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         # so the dummy-weight init test fits in CI memory.
         hf_overrides={"ngram_vocab_size_ratio": 1},
     ),
-    "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
     "Mamba2ForCausalLM": _HfExamplesInfo(
         "mistralai/Mamba-Codestral-7B-v0.1",
         extras={
+            "130m": "vllm-project/mamba2-130m-hf",
+            "1.3b": "vllm-project/mamba2-1.3b-hf",
             "random": "vllm-project/mamba2-codestral-v0.1-tiny-random",
         },
     ),
-    "FalconMambaForCausalLM": _HfExamplesInfo("tiiuae/falcon-mamba-7b-instruct"),
     "MiniCPMForCausalLM": _HfExamplesInfo(
         "openbmb/MiniCPM-2B-sft-bf16", trust_remote_code=True
     ),
@@ -784,7 +777,6 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         hf_overrides={"architectures": ["GteNewForSequenceClassification"]},
     ),
-    "JambaForSequenceClassification": _HfExamplesInfo("ai21labs/Jamba-tiny-reward-dev"),
     "LlamaBidirectionalForSequenceClassification": _HfExamplesInfo(
         "nvidia/llama-nemotron-rerank-1b-v2", trust_remote_code=True
     ),
