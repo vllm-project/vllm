@@ -96,6 +96,7 @@ async fn main() -> Result<()> {
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         max_logprobs: None,
         stream_interval: NonZeroU32::MIN,
+        admission_limits: Default::default(),
         api_server_options: ApiServerOptions::default(),
         fingerprint_mode: Default::default(),
         cors: CorsConfig::default(),

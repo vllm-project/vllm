@@ -10,8 +10,10 @@ use llm_multimodal::{AudioClip, Modality, PreprocessedEncoderInputs, PromptRepla
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
 use super::timing::MM_STAGE_TARGET;
-use super::{AudioModalitySupport, MultimodalModelInfo, PreparedItem, PreparedMedia, item};
-use crate::error::{Error, Result, bail_multimodal, multimodal};
+use super::{
+    AudioModalitySupport, MmModality, MultimodalModelInfo, PreparedItem, PreparedMedia, item,
+};
+use crate::error::{Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary audio encoder input.
 pub(super) const AUDIO_PRIMARY_KEY: &str = "input_audio_features";
@@ -32,9 +34,10 @@ impl MultimodalModelInfo {
         clips: Vec<Arc<AudioClip>>,
         uuids: Vec<Option<String>>,
     ) -> Result<PreparedMedia> {
-        let support = self.audio.as_ref().ok_or_else(|| Error::UnsupportedModality {
-            modality: Modality::Audio.to_string(),
-        })?;
+        let support = self
+            .audio
+            .as_ref()
+            .ok_or_else(|| self.unsupported_modality(MmModality::Audio))?;
 
         let sources = izip!(clips, uuids)
             .map(|(clip, uuid)| {
@@ -103,6 +106,7 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{MmField, MmKwargValue};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
+    use super::super::tests::from_context;
     use super::super::{MultimodalModelContext, TokenizerResolver};
     use super::*;
 
@@ -141,7 +145,7 @@ mod tests {
             tokenizer: TokenizerResolver(Arc::new(tokenizer)),
         };
 
-        MultimodalModelInfo::from_loaded(
+        from_context(
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
@@ -162,7 +166,7 @@ mod tests {
             )),
         };
 
-        MultimodalModelInfo::from_loaded(
+        from_context(
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),

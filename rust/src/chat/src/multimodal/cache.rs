@@ -282,7 +282,7 @@ pub(super) mod tests {
         let prepare = async |uuid| {
             let media_part = MediaContentPart::ImageUrl {
                 max_long_side_pixel: None,
-                url: format!("data:image/png;base64,{TEST_PNG_BASE64}"),
+                url: format!("data:image/png;base64,{TEST_PNG_BASE64}").into(),
                 detail: None,
                 uuid,
             };

@@ -13,8 +13,10 @@ use llm_multimodal::{
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
 use super::timing::MM_STAGE_TARGET;
-use super::{MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, item};
-use crate::error::{Error, Result, bail_multimodal, multimodal};
+use super::{
+    MmModality, MultimodalModelInfo, PreparedItem, PreparedMedia, VisionModalitySupport, item,
+};
+use crate::error::{Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary image encoder input.
 pub(super) const IMAGE_PRIMARY_KEY: &str = "pixel_values";
@@ -39,9 +41,10 @@ impl MultimodalModelInfo {
         model_dtype: ModelDtype,
         preprocessing_context: VisionPreprocessingContext,
     ) -> Result<PreparedMedia> {
-        let support = self.image.as_ref().ok_or_else(|| Error::UnsupportedModality {
-            modality: Modality::Image.to_string(),
-        })?;
+        let support = self
+            .image
+            .as_ref()
+            .ok_or_else(|| self.unsupported_modality(MmModality::Image))?;
 
         let sources = izip!(frames, uuids)
             .map(|(frame, uuid)| {
