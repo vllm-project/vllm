@@ -594,10 +594,14 @@ class _AutotuneTuner:
         self._dirty = False
 
     def load_configs(self, path):
-        if self.run.rank in self.run.rejected_load_ranks:
+        configs = json.loads(Path(path).read_text())
+        if (
+            self.run.rank in self.run.rejected_load_ranks
+            or configs.pop("_metadata", None) != self.run.env
+        ):
             return False
-        self.loaded = json.loads(Path(path).read_text())
-        self.cache.update(self.loaded)
+        self.loaded = configs
+        self.cache.update(configs)
         return True
 
     def clear_cache(self):
@@ -605,8 +609,12 @@ class _AutotuneTuner:
         self._dirty = False
 
     def save_configs(self, path):
-        self.run.saves.append((self.run.rank, Path(path), dict(self.cache)))
-        Path(path).write_text(json.dumps(self.cache))
+        # FlashInfer leaves a file saved under another environment untouched.
+        path = Path(path)
+        if path.exists() and json.loads(path.read_text())["_metadata"] != self.run.env:
+            return
+        self.run.saves.append((self.run.rank, path, dict(self.cache)))
+        path.write_text(json.dumps({"_metadata": self.run.env, **self.cache}))
 
     def profile(self, operation):
         if operation in self.cache:
@@ -632,6 +640,7 @@ class _AutotuneRun:
             defaultdict(lambda: defaultdict(list))
         )
         self.gathered = {}
+        self.env = "env-a"
         self.rejected_load_ranks: set[int] = set()
         self.tuners = {}
         self.saves = []
@@ -786,6 +795,19 @@ def test_rejected_cache_retunes_every_rank_in_its_tuning_group(autotune_run, pp,
     rerun.assert_collectives_match()
     assert set(rerun.profile_groups) == set(range(tp))
     assert {rank for rank, _, _ in rerun.saves} == set(range(tp))
+
+
+def test_cache_from_other_library_versions_is_replaced(autotune_run):
+    """Otherwise every later start rejects the old file and retunes."""
+    autotune_run(pp=1, tp=1).execute()
+    upgraded = autotune_run(pp=1, tp=1)
+    upgraded.env = "env-b"
+    upgraded.execute()
+    assert upgraded.profile_groups and upgraded.saves
+    warm = autotune_run(pp=1, tp=1)
+    warm.env = "env-b"
+    warm.execute()
+    assert not warm.profile_groups and warm.tuners[0].loaded is not None
 
 
 def test_autotune_cache_key_normalizes_kv_init_fields():
