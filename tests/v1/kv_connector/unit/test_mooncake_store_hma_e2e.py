@@ -638,7 +638,7 @@ def _pp_stage(
     store: _DictStore | None = None,
     num_blocks: int = 4,
 ):
-    """Worker and KV caches of one PP stage of a `pp_sizes=[1, 2]` instance,
+    """Worker and KV caches of one PP stage of a `store_pp_size=2` instance,
     through the planner's real layout."""
     groups = _pp_groups(model, range(*get_pp_indices(_PP_NUM_LAYERS, rank, pp_size)))
     cfg, kv_caches = _plan_kv_caches(groups, layout, num_blocks, model)
@@ -646,7 +646,7 @@ def _pp_stage(
     vllm_config.parallel_config.pipeline_parallel_size = pp_size
     vllm_config.parallel_config.rank = rank
     vllm_config.model_config.get_total_num_hidden_layers.return_value = _PP_NUM_LAYERS
-    vllm_config.kv_transfer_config.kv_connector_extra_config = {"pp_sizes": [1, 2]}
+    vllm_config.kv_transfer_config.kv_connector_extra_config = {"store_pp_size": 2}
     worker = _build_worker_with_dict_store(vllm_config, cfg, store or _DictStore())
     _register_with_fake_threads(worker, kv_caches)
     return worker, kv_caches
@@ -693,11 +693,11 @@ def _stored_objects(stage, block: int) -> dict[str, list[bytes]]:
     ids=lambda x: x.name,
 )
 @pytest.mark.parametrize("model", _PP_MODELS)
-def test_pp_sizes_objects_hold_the_same_bytes_at_every_pp_size(
+def test_store_pp_size_objects_hold_the_same_bytes_at_every_pp_size(
     model, stage_layout, whole_layout
 ):
     """Through the planner's real layout, a PP=1 instance and the stages of a
-    PP=2 instance that list each other in `pp_sizes` store a block as the same
+    PP=2 instance with the same `store_pp_size` store a block as the same
     objects: the same keys holding the same bytes, also across KV cache
     layouts that order a layer's block the same way."""
     block = 2
@@ -721,7 +721,7 @@ def test_pp_sizes_objects_hold_the_same_bytes_at_every_pp_size(
         assert all(len(segments) == 1 for segments in stages.values())
 
 
-def test_pp_sizes_stage_without_a_group_stores_no_object_for_it():
+def test_store_pp_size_stage_without_a_group_stores_no_object_for_it():
     """A stage can hold no layer of a KV cache group, like a Mamba-only stage of
     Nemotron-H, which holds no attention layer. That stage stores no object for
     the group, and the PP=2 stages together still store the PP=1 objects."""
@@ -737,7 +737,7 @@ def test_pp_sizes_stage_without_a_group_stores_no_object_for_it():
     }
 
 
-def test_pp_sizes_lookup_hits_only_with_every_layer_range():
+def test_store_pp_size_lookup_hits_only_with_every_layer_range():
     """A PP=1 instance stores a block as one object per PP=2 stage, so it
     reuses a block a PP=2 instance wrote only once both stages stored it."""
     store = _DictStore()

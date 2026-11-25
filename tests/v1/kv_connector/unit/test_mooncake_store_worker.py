@@ -3649,11 +3649,11 @@ def _layout_keys(layout) -> list[str]:
 
 
 @pytest.mark.cpu_test
-def test_pp_stage_keys_name_their_layers_only_with_pp_sizes(pp_stage_layouts):
-    """Without pp_sizes, PP stage keys keep the historical rank-local format.
-    With pp_sizes, they name the layers each object holds."""
+def test_pp_stage_keys_name_their_layers_only_with_store_pp_size(pp_stage_layouts):
+    """Without store_pp_size, PP stage keys keep the historical rank-local
+    format. With it, they name the layers each object holds."""
     default = [pp_stage_layouts(2, rank)[0] for rank in (0, 1)]
-    shared = [pp_stage_layouts(2, rank, {"pp_sizes": [2]})[0] for rank in (0, 1)]
+    shared = [pp_stage_layouts(2, rank, {"store_pp_size": 2})[0] for rank in (0, 1)]
 
     assert all(type(layout) is RankLocalStoreLayout for layout in default)
     assert [_layout_keys(layout) for layout in default] == [
@@ -3665,55 +3665,46 @@ def test_pp_stage_keys_name_their_layers_only_with_pp_sizes(pp_stage_layouts):
 
 
 @pytest.mark.cpu_test
-def test_pp_sizes_lists_a_custom_partition(pp_stage_layouts, monkeypatch):
-    """A PP size whose stages are set with VLLM_PP_LAYER_PARTITION is listed by
-    its per-stage layer counts, so other PP sizes cut at its real boundaries.
-    An instance whose partition is not listed refuses to start."""
-
-    def keys(pp_size: int, rank: int, pp_sizes: list) -> list[str]:
-        return _layout_keys(
-            pp_stage_layouts(pp_size, rank, {"pp_sizes": pp_sizes}, num_layers=8)[0]
-        )
-
-    pp1 = keys(1, 0, [1, [3, 5]])
-    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "3,5")
-    stages = [keys(2, rank, [1, [3, 5]]) for rank in (0, 1)]
-
-    assert "@layers:0-3@" in pp1[0]
-    assert pp1 == stages[0] + stages[1]
-    with pytest.raises(ValueError, match="add \\[3, 5\\] to pp_sizes"):
-        keys(2, 0, [1, 2])
-
-
-@pytest.mark.cpu_test
-def test_pp_sizes_shares_keys_between_partitions_of_one_pp_size(
+def test_store_pp_size_shares_keys_between_aligned_partitions(
     pp_stage_layouts, monkeypatch
 ):
-    """Two PP=2 instances with different stage boundaries share objects when
-    pp_sizes lists both partitions: each cuts at the other's boundary."""
+    """Instances whose PP stage boundaries are layer range boundaries of
+    store_pp_size store a block under the same keys, also with stages set by
+    VLLM_PP_LAYER_PARTITION. An instance with another boundary refuses to
+    start."""
 
-    def keys(rank: int) -> list[str]:
-        return _layout_keys(
-            pp_stage_layouts(2, rank, {"pp_sizes": [2, [3, 5]]}, num_layers=8)[0]
-        )
+    def keys(pp_size: int, store_pp_size: object) -> list[str]:
+        config = {"store_pp_size": store_pp_size}
+        return [
+            key
+            for rank in range(pp_size)
+            for key in _layout_keys(
+                pp_stage_layouts(pp_size, rank, config, num_layers=8)[0]
+            )
+        ]
 
-    default = [keys(rank) for rank in (0, 1)]
+    pp1 = keys(1, [3, 1, 4])
+    pp2 = keys(2, [3, 1, 4])
     monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "3,5")
-    custom = [keys(rank) for rank in (0, 1)]
+    pp2_custom = keys(2, [3, 1, 4])
 
-    assert "@layers:3-4@" in default[0][1]
-    assert default[0] + default[1] == custom[0] + custom[1]
+    for layer_range, key in zip(("0-3", "3-4", "4-8"), pp1, strict=True):
+        assert f"@layers:{layer_range}@" in key
+    assert pp2 == pp1
+    assert pp2_custom == pp1
+    with pytest.raises(ValueError, match=r"PP stage boundaries \[3\]"):
+        keys(2, 2)
 
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "pp_sizes", ["2", [], [0], [True], [1, [3, 4]], [[8, 0]], [[4, 4.0]]]
+    "store_pp_size", ["2", 0, True, 9, [], [3, 4], [8, 0], [4, 4.0]]
 )
-def test_pp_sizes_rejects_invalid_entries(pp_sizes):
-    """pp_sizes is a list of PP sizes or of per-stage layer counts that cover
-    the model's layers."""
-    with pytest.raises(ValueError, match="pp_sizes"):
-        worker._pp_partitions(pp_sizes, 8)
+def test_store_pp_size_rejects_invalid_values(store_pp_size):
+    """store_pp_size is a PP size or per-stage layer counts that cover the
+    model's layers."""
+    with pytest.raises(ValueError, match="store_pp_size"):
+        worker._store_pp_partition(store_pp_size, 8)
 
 
 @pytest.mark.cpu_test
@@ -3721,14 +3712,14 @@ def test_pp_sizes_rejects_invalid_entries(pp_sizes):
     ("store_config", "layout_cls"),
     [({}, LayerRangeStoreLayout), ({"store_tp_size": 2}, HeadMajorStoreLayout)],
 )
-def test_pp_sizes_store_draft_model_layers_with_the_last_range(
+def test_store_pp_size_stores_draft_model_layers_with_the_last_range(
     pp_stage_layouts, store_config, layout_cls
 ):
     """A draft model runs whole on the last PP stage and numbers its layers
-    from 0. With pp_sizes its layers belong to the last layer range at every
-    PP size, and with Store TP that range's keys tell instances with and
+    from 0. With store_pp_size its layers belong to the last layer range at
+    every PP size, and with Store TP that range's keys tell instances with and
     without the draft model apart."""
-    config = {"pp_sizes": [1, 2], **store_config}
+    config = {"store_pp_size": 2, **store_config}
     draft = tuple(f"draft_model.model.layers.{i}.self_attn.attn" for i in range(2))
 
     (pp1,) = pp_stage_layouts(1, 0, config, draft_layers=draft)

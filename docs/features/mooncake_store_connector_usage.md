@@ -237,7 +237,7 @@ that pack layers with different layouts. The Store TP and global head-slot count
 must divide one another; MQA and replicated GQA use the smaller head-slot count
 as the physical Store shard count. `MambaSpec` state segments map in complete
 state units; a replicated local unit can serve multiple Store shards. All
-endpoints use the same Store TP, and the same PP size unless `pp_sizes` is set;
+endpoints use the same Store TP, and the same PP size unless `store_pp_size` is set;
 PCP, DCP, and cross-layer blocks remain rank-local. Each group namespace records its Store value format and
 normalized value schema. Incompatible configurations use an isolated rank-local
 namespace.
@@ -255,43 +255,40 @@ layers, keyed by its PP rank. Instances with different PP sizes or layer
 partitions then write different layers under the same key, so they must not
 share a Store.
 
-To share entries, set `pp_sizes` to the PP sizes of all instances that use the
-Store. Keys then name the global layer range each object holds
+To share entries, set `store_pp_size` to split the model's layers into the
+layer ranges that Store objects hold. Every instance then stores one object per
+layer range, and keys name the global layer range each object holds
 (`@layers:<start>-<end>`):
 
 ```json
 {
     "kv_connector_extra_config": {
-        "pp_sizes": [1, 2]
+        "store_pp_size": 4
     }
 }
 ```
 
-Set the same list on every instance. An instance whose own PP partition is not
-in the list fails to start, and instances with different lists may not find
-each other's entries.
+An integer splits the layers like the default partition of that PP size. A
+list gives the layer count of each range, for example `[38, 42]` for an
+80-layer model whose PP = 2 instances run with
+`VLLM_PP_LAYER_PARTITION=38,42`.
 
-With `pp_sizes`, every instance splits its layers at the stage boundaries of
-all listed PP sizes and stores one object per resulting layer range, so
-instances read and write the same objects. For an 80-layer model, the number of
-objects per block is:
+Set the same `store_pp_size` on every instance. Every PP stage boundary of an
+instance must be a layer range boundary; an instance with another boundary
+fails to start. For example, with `"store_pp_size": 4`, PP = 1, 2 and 4
+instances of an 80-layer model share the Store. Default partitions of a model
+whose layer count is not divisible by the PP sizes may not align: for 61
+layers, PP = 2 splits at layer 31 and PP = 4 at layers 15, 30 and 46. Align
+them with `VLLM_PP_LAYER_PARTITION=16,15,15,15` for PP = 4 and
+`"store_pp_size": [16, 15, 15, 15]`.
 
-| `pp_sizes` | PP = 1 instance | Each PP = 2 stage | Each PP = 4 stage |
-| --- | --- | --- | --- |
-| `[1, 2]` | 2 | 1 | — |
-| `[1, 2, 4]` | 4 | 2 | 1 |
+A stage stores one object per layer range it holds: with `"store_pp_size": 4`,
+a PP = 1 instance stores 4 objects per block, a PP = 2 stage 2, and a PP = 4
+stage 1. Each object adds one Store operation per block to saves, loads, and
+lookups, so use the fewest layer ranges that every instance aligns with. The
+connector logs the number of objects it writes per block at startup.
 
-Each additional object adds one Store operation per block to saves, loads, and
-lookups. List only the PP sizes you deploy, and prefer partitions whose
-boundaries nest, as PP = 2 and PP = 4 do above. The connector logs the number
-of objects it writes per block at startup.
-
-An integer entry assumes the default layer partition. For instances that set
-`VLLM_PP_LAYER_PARTITION`, list the layer count of each stage instead. For
-example, if the PP = 2 instances of an 80-layer model run with
-`VLLM_PP_LAYER_PARTITION=38,42`, use `"pp_sizes": [1, [38, 42]]`.
-
-`pp_sizes` supports the following configurations:
+`store_pp_size` supports the following configurations:
 
 - Without Store TP sharing, it works with hybrid models. Each KV cache group
   stores one object per layer range that contains some of its layers.
@@ -300,16 +297,16 @@ example, if the PP = 2 instances of an 80-layer model run with
   and PP size, for example PP = 2, TP = 1 and PP = 1, TP = 2 with
   `"store_tp_size": 2`.
 
-`pp_sizes` does not support Falcon-H1: an instance that stores more than one
-object per block fails to start.
+`store_pp_size` does not support Falcon-H1: an instance that stores more than
+one object per block fails to start.
 
-The connector logs a warning and ignores `pp_sizes` when:
+The connector logs a warning and ignores `store_pp_size` when:
 
 - HiSparse is enabled.
 - Store TP sharing is used with several KV cache groups, Mamba layers, or
   attention layers with different KV cache specs.
 
-An instance that ignores `pp_sizes` uses the default keys.
+An instance that ignores `store_pp_size` uses the default keys.
 
 **Proxy:**
 
@@ -452,8 +449,8 @@ reset waits at most 60 seconds.
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
 - `store_tp_size` (int): Common Store TP for divisible heterogeneous-TP
   sharing. See [Sharing one Store across multiple Prefill TP sizes](#sharing-one-store-across-multiple-prefill-tp-sizes).
-- `pp_sizes` (list[int | list[int]]): PP sizes, or per-stage layer counts, of the
-  instances that share the Store. See
+- `store_pp_size` (int | list[int]): Layer ranges of Store objects for sharing
+  one Store across PP sizes, as a PP size or per-range layer counts. See
   [Sharing one Store across PP sizes](#sharing-one-store-across-pp-sizes). Unset by default.
 
 #### Automatic cache prefix

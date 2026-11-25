@@ -63,7 +63,7 @@ class KeyMetadata:
     # historical keys byte-identical.
     store_namespace: str = ""
     # Global layer range [start, end) of the KV a key holds, named instead of
-    # the PP rank when `pp_sizes` is set. None keeps historical keys
+    # the PP rank when `store_pp_size` is set. None keeps historical keys
     # byte-identical.
     layer_range: tuple[int, int] | None = None
 

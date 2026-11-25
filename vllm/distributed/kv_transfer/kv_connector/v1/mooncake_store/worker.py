@@ -19,7 +19,7 @@ import queue
 import socket
 import threading
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
@@ -171,15 +171,6 @@ def _decoder_layer_index(layer_name: str) -> int:
     return extract_layer_index(layer_name)
 
 
-def _split_layer_range(
-    layer_range: tuple[int, int], cut_points: Iterable[int]
-) -> tuple[tuple[int, int], ...]:
-    """Split `[start, end)` at every cut point inside it."""
-    start, end = layer_range
-    cuts = sorted({start, end, *(cut for cut in cut_points if start < cut < end)})
-    return tuple(zip(cuts[:-1], cuts[1:]))
-
-
 def _layer_range_index(layer_ranges: Sequence[tuple[int, int]], layer: int) -> int:
     """Index of the range holding `layer`."""
     for index, (start, end) in enumerate(layer_ranges):
@@ -237,31 +228,24 @@ def _group_range_objects(
     return LayerRangeObjects(tuple(range_metadata), layers)
 
 
-def _pp_partitions(pp_sizes: object, num_layers: int) -> list[list[int]]:
-    """Layer count of each stage for every `pp_sizes` entry: a PP size uses
-    the default partition, a list gives the count of each stage."""
-
-    def is_count(value: object) -> bool:
-        return type(value) is int and value > 0
-
-    if not isinstance(pp_sizes, list) or not pp_sizes:
-        raise ValueError(f"pp_sizes must be a non-empty list, got {pp_sizes!r}")
-    partitions = []
-    for entry in pp_sizes:
-        if is_count(entry):
-            partitions.append(get_default_pp_partition(num_layers, entry))
-        elif (
-            isinstance(entry, list)
-            and all(is_count(count) for count in entry)
-            and sum(entry) == num_layers
-        ):
-            partitions.append(entry)
-        else:
-            raise ValueError(
-                "Each pp_sizes entry must be a positive PP size or a list of "
-                f"per-stage layer counts summing to {num_layers}, got {entry!r}"
-            )
-    return partitions
+def _store_pp_partition(store_pp_size: object, num_layers: int) -> list[int]:
+    """Layer count of each Store layer range: a PP size uses its default
+    partition, a list gives the count of each range."""
+    partition: list[int] = []
+    if type(store_pp_size) is int and store_pp_size > 0:
+        partition = get_default_pp_partition(num_layers, store_pp_size)
+    elif isinstance(store_pp_size, list):
+        partition = store_pp_size
+    if not (
+        all(type(count) is int and count > 0 for count in partition)
+        and sum(partition) == num_layers
+    ):
+        raise ValueError(
+            f"store_pp_size must be a PP size of at most {num_layers} or a list "
+            f"of per-stage layer counts summing to {num_layers}, got "
+            f"{store_pp_size!r}"
+        )
+    return partition
 
 
 def resolve_store_tp_size(extra_config: dict[str, Any]) -> int | None:
@@ -1919,10 +1903,10 @@ class MooncakeStoreWorker:
             # Every object costs a Store operation per save, load and lookup.
             logger.info(
                 "Mooncake store writes %d objects per block on this rank for "
-                "layer ranges %s (pp_sizes=%s)",
+                "layer ranges %s (store_pp_size=%s)",
                 sum(len(db.store_layout.local_shard_ids) for db in self.token_dbs),
                 store_layer_ranges,
-                extra_config.get("pp_sizes"),
+                extra_config.get("store_pp_size"),
             )
         self._init_lookup_key_prefixes()
         if envs.VLLM_MOONCAKE_STORE_SELECTIVE_LEASE:
@@ -2085,13 +2069,15 @@ class MooncakeStoreWorker:
         num_layers: int,
         plans: tuple[_StoreGroupPlan | None, ...] | None,
     ) -> tuple[tuple[int, int], ...] | None:
-        """Layer ranges this PP stage stores as separate objects: its layers
-        split at every stage boundary of the `pp_sizes` partitions. None when
-        `pp_sizes` is unset or ignored."""
-        pp_sizes = extra_config.get("pp_sizes")
-        if pp_sizes is None:
+        """Layer ranges of `store_pp_size` that this PP stage stores as
+        separate objects. None when `store_pp_size` is unset or ignored."""
+        store_pp_size = extra_config.get("store_pp_size")
+        if store_pp_size is None:
             return None
-        partitions = _pp_partitions(pp_sizes, num_layers)
+        boundaries = [
+            0,
+            *itertools.accumulate(_store_pp_partition(store_pp_size, num_layers)),
+        ]
         plan = plans[0] if plans else None
         fallback_reason: str | None = None
         if self._kv_cache_config.hisparse_host_num_blocks is not None:
@@ -2106,35 +2092,29 @@ class MooncakeStoreWorker:
             fallback_reason = "the Store TP layout has layers with different specs"
         if fallback_reason is not None:
             logger.warning(
-                "Mooncake store ignores pp_sizes=%s because %s",
-                pp_sizes,
+                "Mooncake store ignores store_pp_size=%s because %s",
+                store_pp_size,
                 fallback_reason,
             )
             return None
-        # The instance's own stages honour VLLM_PP_LAYER_PARTITION, so its
-        # partition must be listed for others to cut at its boundaries.
+        # Every stage checks every stage boundary, so all stages fail together.
         stages = [
             get_pp_indices(num_layers, rank, self.pp_size)
             for rank in range(self.pp_size)
         ]
-        partition = [end - start for start, end in stages]
-        if partition not in partitions:
-            listed = (
-                self.pp_size
-                if partition == get_default_pp_partition(num_layers, self.pp_size)
-                else partition
-            )
+        misaligned = [start for start, _ in stages if start not in boundaries]
+        if misaligned:
             raise ValueError(
-                f"This instance's PP partition {partition} is not in pp_sizes="
-                f"{pp_sizes!r}; add {listed!r} to pp_sizes on every instance "
-                "that shares the Store"
+                f"PP stage boundaries {misaligned} are not layer range boundaries "
+                f"{boundaries} of store_pp_size={store_pp_size!r}; align "
+                "VLLM_PP_LAYER_PARTITION or store_pp_size"
             )
-        cut_points = {
-            start
-            for counts in partitions
-            for start in itertools.accumulate(counts, initial=0)
-        }
-        return _split_layer_range(stages[self.pp_rank], cut_points)
+        start, end = stages[self.pp_rank]
+        return tuple(
+            layer_range
+            for layer_range in itertools.pairwise(boundaries)
+            if start <= layer_range[0] < end
+        )
 
     def _build_token_databases(
         self,
