@@ -16,6 +16,7 @@ import os
 import torch
 
 from vllm.model_executor.kernels.linear.mixed_precision.rdna_hybrid_w4a16 import (
+    pack_scale_zp_carrier,
     pack_skinny_int4,
 )
 from vllm.triton_utils import triton
@@ -88,7 +89,7 @@ def prepare_hybrid_weights(K, N, group_size, dtype=torch.float16, device="cuda")
 # ---------------------------------------------------------------------------
 # Benchmark
 # ---------------------------------------------------------------------------
-PROVIDERS = ["torch-fp16", "hybrid-w4a16", "hybrid-w4a16-zp"]
+PROVIDERS = ["torch-fp16", "hybrid-w4a16", "hybrid-w4a16-zp", "hybrid-w4a16-scale-zp"]
 
 
 @triton.testing.perf_report(
@@ -124,7 +125,7 @@ def benchmark(batch_size, provider, N, K, group_size, dtype, weights):
             lambda: torch.nn.functional.linear(a, w_fp16),
             quantiles=quantiles,
         )
-    elif provider in ("hybrid-w4a16", "hybrid-w4a16-zp"):
+    elif provider in ("hybrid-w4a16", "hybrid-w4a16-zp", "hybrid-w4a16-scale-zp"):
         from vllm.model_executor.kernels.linear.mixed_precision import (
             rdna_hybrid_w4a16 as _k,
         )
@@ -134,7 +135,10 @@ def benchmark(batch_size, provider, N, K, group_size, dtype, weights):
 
         w = weights
         cu_count = num_compute_units()
-        use_zp = provider == "hybrid-w4a16-zp"
+        use_zp = provider != "hybrid-w4a16"
+        use_scale_zp_carrier = provider == "hybrid-w4a16-scale-zp"
+        if use_scale_zp_carrier and w["w_scale_zp_carrier"] is None:
+            return 0.0, 0.0, 0.0
 
         def run():
             return _rdna_hybrid_w4a16_apply_impl(
@@ -145,6 +149,7 @@ def benchmark(batch_size, provider, N, K, group_size, dtype, weights):
                 None,  # bias
                 cu_count,
                 group_size,
+                w["w_scale_zp_carrier"] if use_scale_zp_carrier else None,
             )
 
         ms, min_ms, max_ms = triton.testing.do_bench(
@@ -203,6 +208,11 @@ if __name__ == "__main__":
             "w_s_skinny": w_s_skinny,
             "w_fp16": w_fp16,
             "w_zp": w_zp,
+            "w_scale_zp_carrier": (
+                pack_scale_zp_carrier(w_s_skinny, w_zp)
+                if dtype == torch.float16
+                else None
+            ),
         }
 
         save_path = args.save_path or f"bench_int4_res_n{N}_k{K}"

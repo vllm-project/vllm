@@ -17,6 +17,8 @@ shapes and under CUDA-graph capture/replay, agreement with a high-precision
 QDQ fp32 reference, and bit-identical fallbacks for ineligible inputs.
 """
 
+import copy
+
 import pytest
 import torch
 
@@ -902,3 +904,84 @@ def test_aiter_flydsl_mxfp8_row_major_weight(aiter_flydsl_mxfp8_kernel):
     triton_layer.quant_method = SimpleNamespace(kernel=triton)
     triton.process_weights_after_loading(triton_layer)
     assert row_major_weight(triton_layer).data_ptr() == triton_layer.weight.data_ptr()
+
+
+@pytest.fixture
+def flydsl(monkeypatch: pytest.MonkeyPatch):
+    """AITER linear on in a bf16 model; skips unless AITER's FlyDSL GEMMs run."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    prev_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
+    config = Mxfp8LinearLayerConfig(weight_shape=(32, 64))
+    try:
+        if not RocmDotScaledMxfp8LinearKernel(config).flydsl_enabled:
+            pytest.skip("requires AITER on gfx950")
+        yield
+    finally:
+        torch.set_default_dtype(prev_dtype)
+        monkeypatch.undo()
+        rocm_aiter_ops.refresh_env_variables()
+
+
+def _require_tuned(n: int, k: int, batch: int | None = None) -> None:
+    """Skips unless AITER has tuned 32x32 rows here (they are keyed by CU count,
+    so e.g. a partitioned MI355X has none and its layers keep Triton)."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_mxfp8_block32_bpreshuffle_gemm_tuned(n, k, batch):
+        pytest.skip(f"AITER has no tuned 32x32 rows for N={n}, K={k} on this GPU")
+
+
+def _load(layer: torch.nn.Module, flydsl: bool) -> RocmDotScaledMxfp8LinearKernel:
+    kernel = RocmDotScaledMxfp8LinearKernel(
+        Mxfp8LinearLayerConfig(weight_shape=tuple(layer.weight.shape))
+    )
+    kernel.flydsl_enabled &= flydsl
+    kernel.process_weights_after_loading(layer)
+    return kernel
+
+
+@pytest.mark.parametrize(
+    "n,k", [(32768, 1280), (5120, 8192), (1792, 5120)], ids=["wq_b", "wo_b", "wqa"]
+)
+@pytest.mark.parametrize("m", [1, 48, 704, 4096])
+@torch.inference_mode()
+def test_rocm_mxfp8_linear_flydsl_matches_triton(flydsl, n, k, m):
+    """DeepSeek V4.1 linears AITER has tuned rows for are preshuffled in place
+    and run its FlyDSL GEMMs, which agree with the Triton GEMM."""
+    _require_tuned(n, k)
+    torch.manual_seed(m)
+    layer = _make_block32_layer(n, k, "cuda")
+    ref_layer = copy.deepcopy(layer)
+    kernel, ref = _load(layer, True), _load(ref_layer, False)
+    assert layer.weight_preshuffled.data_ptr() == layer.weight.data_ptr()
+    assert ref_layer.weight_preshuffled is None
+
+    x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) * 0.5
+    expected = ref.apply_weights(ref_layer, x).float()
+    assert _rel_err(kernel.apply_weights(layer, x), expected) < 1e-3
+
+
+@pytest.mark.parametrize("m", [1, 72, 4096])
+@torch.inference_mode()
+def test_rocm_mxfp8_wo_a_flydsl_matches_triton(flydsl, m):
+    """wo_a (G=8) on AITER's batched GEMMs agrees with the Triton BMM."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_mxfp8_wo_a_bmm
+
+    n_groups, rank, group_dim = 8, 1024, 4096
+    _require_tuned(rank, group_dim, n_groups)
+    torch.manual_seed(m)
+    wo_a = _make_block32_layer(n_groups * rank, group_dim, "cuda")
+    wo_a.bmm_batch_size = n_groups
+    ref_wo_a = copy.deepcopy(wo_a)
+    _load(wo_a, True), _load(ref_wo_a, False)
+    assert wo_a.weight_preshuffled is not None
+    a, a_scale = mxfp8_e4m3_quantize(
+        torch.randn(m, n_groups * group_dim, device="cuda", dtype=torch.bfloat16)
+    )
+    out = rocm_mxfp8_wo_a_bmm(a, a_scale, wo_a, n_groups, rank)
+    expected = rocm_mxfp8_wo_a_bmm(a, a_scale, ref_wo_a, n_groups, rank).float()
+    assert _rel_err(out, expected) < 1e-3

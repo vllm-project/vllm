@@ -22,7 +22,7 @@ use vllm_engine_core_client::protocol::structured_outputs::{
 use vllm_llm::GenerateRequest;
 use vllm_tokenizer::Tokenizer;
 
-use crate::backend::{SamplingHints, SamplingLimits};
+use crate::backend::{DefaultMaxTokens, SamplingHints, SamplingLimits};
 use crate::error::{Error, Result};
 use crate::request::{SamplingParams, TextRequest};
 
@@ -72,7 +72,13 @@ pub fn lower_text_request(
     tokenizer: &dyn Tokenizer,
 ) -> Result<PreparedTextRequest> {
     let prompt_len = prompt_token_ids.len() as u32;
-    validate_prompt_token_ids(&prompt_token_ids, &sampling_limits)?;
+    validate_prompt_token_ids(
+        &prompt_token_ids,
+        request.mm_features.is_some(),
+        &sampling_limits,
+    )?;
+    let skip_special_tokens = &mut request.decode_options.skip_special_tokens;
+    *skip_special_tokens = skip_special_tokens.or(sampling_hints.default_skip_special_tokens);
 
     let generate_request = GenerateRequest {
         request_id: request.request_id.clone(),
@@ -126,6 +132,8 @@ pub fn lower_sampling_params(
         default_presence_penalty,
         default_frequency_penalty,
         default_max_tokens,
+        // A decode option, resolved by `lower_text_request`.
+        default_skip_special_tokens: _,
     }: SamplingHints,
     sampling_limits: SamplingLimits,
     structured_outputs_backend: StructuredOutputBackend,
@@ -387,11 +395,12 @@ fn tokenize_bad_words(
 /// Resolve the effective `max_tokens` for generation, mirroring vLLM Python's
 /// `get_max_tokens()` in `vllm/entrypoints/utils.py`.
 ///
-/// Takes the minimum of all available limits: user-specified, generation-config
-/// default, and `max_model_len - prompt_len`.
+/// Takes the minimum of the requested (or default) value and
+/// `max_model_len - prompt_len`; a [`DefaultMaxTokens::Cap`] also bounds the
+/// requested value.
 pub fn resolve_max_tokens(
     user_max_tokens: Option<u32>,
-    default_max_tokens: Option<u32>,
+    default_max_tokens: Option<DefaultMaxTokens>,
     max_model_len: u32,
     prompt_len: u32,
 ) -> Result<u32> {
@@ -409,7 +418,11 @@ pub fn resolve_max_tokens(
     }
     let model_max_tokens = max_model_len - prompt_len;
 
-    let request_max_tokens = user_max_tokens.or(default_max_tokens);
+    let request_max_tokens = match default_max_tokens {
+        None => user_max_tokens,
+        Some(DefaultMaxTokens::Fallback(fallback)) => Some(user_max_tokens.unwrap_or(fallback)),
+        Some(DefaultMaxTokens::Cap(cap)) => Some(user_max_tokens.map_or(cap, |n| n.min(cap))),
+    };
     Ok(request_max_tokens.map_or(model_max_tokens, |n| n.min(model_max_tokens)))
 }
 
@@ -471,6 +484,7 @@ mod tests {
             default_presence_penalty: None,
             default_frequency_penalty: None,
             default_max_tokens: None,
+            default_skip_special_tokens: None,
         }
     }
 
@@ -500,6 +514,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                default_skip_special_tokens: None,
             },
             sampling_limits,
             StructuredOutputBackend::Xgrammar,
@@ -949,49 +964,59 @@ mod tests {
     }
 
     #[test]
-    fn lower_text_request_uses_union_vocab_for_prompt_token_ids() {
-        lower_text_request(
-            sample_request(),
-            vec![1500],
-            sample_sampling_hints(),
-            SamplingLimits {
-                model_vocab_size: 2000,
-                tokenizer_vocab_size: 1000,
-                ..sample_sampling_limits()
-            },
-            StructuredOutputBackend::Xgrammar,
-            &stub_tokenizer(),
-        )
-        .expect("model vocab extends prompt token range");
+    fn lower_text_request_bounds_prompt_token_ids_by_model_vocab() {
+        fn lower(
+            prompt_token_ids: Vec<u32>,
+            model_vocab_size: usize,
+            tokenizer_vocab_size: usize,
+            has_multimodal_inputs: bool,
+        ) -> Result<PreparedTextRequest> {
+            let mut request = sample_request();
+            if has_multimodal_inputs {
+                request.mm_features = Some(vec![MmFeatureSpec {
+                    data: None,
+                    modality: MmModality::Image,
+                    identifier: "image-1".to_string(),
+                    mm_position: PlaceholderRange {
+                        offset: 0,
+                        length: 1,
+                        is_embed: None,
+                    },
+                    mm_hash: Some("hash-1".to_string()),
+                }]);
+            }
+            lower_text_request(
+                request,
+                prompt_token_ids,
+                sample_sampling_hints(),
+                SamplingLimits {
+                    model_vocab_size,
+                    tokenizer_vocab_size,
+                    ..sample_sampling_limits()
+                },
+                StructuredOutputBackend::Xgrammar,
+                &stub_tokenizer(),
+            )
+        }
 
-        lower_text_request(
-            sample_request(),
-            vec![1500],
-            sample_sampling_hints(),
-            SamplingLimits {
-                model_vocab_size: 1000,
-                tokenizer_vocab_size: 2000,
-                ..sample_sampling_limits()
-            },
-            StructuredOutputBackend::Xgrammar,
-            &stub_tokenizer(),
-        )
-        .expect("tokenizer vocab extends prompt token range");
+        lower(vec![1500], 2000, 1000, false).expect("ids the model embeds are accepted");
 
-        let error = lower_text_request(
-            sample_request(),
-            vec![2000],
-            sample_sampling_hints(),
-            SamplingLimits {
-                model_vocab_size: 1000,
-                tokenizer_vocab_size: 2000,
-                ..sample_sampling_limits()
-            },
-            StructuredOutputBackend::Xgrammar,
-            &stub_tokenizer(),
-        )
-        .unwrap_err();
+        // A text-only prompt embeds every id, so tokenizer-only ids past the
+        // model vocab are rejected.
+        let error = lower(vec![999, 1000, 1999], 1000, 2000, false).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::OutOfVocab {
+                parameter: "prompt",
+                token_ids,
+                vocab_size: 1000,
+            }) if token_ids == vec![1000, 1999]
+        ));
 
+        // Multimodal placeholders are replaced before the embedding lookup, so
+        // the tokenizer vocab extends the range.
+        lower(vec![1500], 1000, 2000, true).expect("tokenizer vocab extends prompt token range");
+        let error = lower(vec![2000], 1000, 2000, true).unwrap_err();
         assert!(matches!(
             error,
             Error::TokenIds(TokenIdsError::OutOfVocab {
@@ -1012,6 +1037,7 @@ mod tests {
             files,
             model_id.to_string(),
             GenerationConfigMode::Auto,
+            &Default::default(),
         )
         .expect("load qwen tokenizer and generation config");
         let hints = backend.sampling_hints().expect("collect sampling hints");
@@ -1038,6 +1064,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                default_skip_special_tokens: None,
             }
         "#]]
         .assert_debug_eq(&hints);
@@ -1121,6 +1148,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                default_skip_special_tokens: None,
             },
             sample_sampling_limits(),
             StructuredOutputBackend::Xgrammar,
@@ -1201,7 +1229,8 @@ mod tests {
                 default_repetition_penalty: Some(1.2),
                 default_presence_penalty: Some(1.5),
                 default_frequency_penalty: Some(0.5),
-                default_max_tokens: Some(128),
+                default_max_tokens: Some(DefaultMaxTokens::Fallback(128)),
+                default_skip_special_tokens: None,
             },
             sample_sampling_limits(),
             StructuredOutputBackend::Xgrammar,
@@ -1267,6 +1296,7 @@ mod tests {
                 default_presence_penalty: None,
                 default_frequency_penalty: None,
                 default_max_tokens: None,
+                default_skip_special_tokens: None,
             },
             SamplingLimits {
                 max_logprobs: -1,
@@ -1667,7 +1697,8 @@ mod tests {
                 default_repetition_penalty: Some(1.2),
                 default_presence_penalty: Some(1.5),
                 default_frequency_penalty: Some(0.5),
-                default_max_tokens: Some(128),
+                default_max_tokens: Some(DefaultMaxTokens::Fallback(128)),
+                default_skip_special_tokens: None,
             },
             sample_sampling_limits(),
             StructuredOutputBackend::Xgrammar,
@@ -1710,6 +1741,74 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&params);
+    }
+
+    #[test]
+    fn neutral_sampling_params_ignore_generation_defaults() {
+        let lower = |sampling_params: SamplingParams, sampling_hints| {
+            lower_sampling_params(
+                SamplingParams {
+                    max_tokens: Some(1),
+                    ..sampling_params
+                },
+                sampling_hints,
+                sample_sampling_limits(),
+                StructuredOutputBackend::Xgrammar,
+                3,
+                &stub_tokenizer(),
+            )
+            .unwrap()
+        };
+        // Every hint is listed, so a new generation default fails to compile
+        // here until `SamplingParams::neutral` decides on it.
+        let generation_defaults = SamplingHints {
+            primary_eos_token_id: None,
+            extra_eos_token_ids: BTreeSet::new(),
+            default_temperature: Some(0.8),
+            default_top_p: Some(0.9),
+            default_top_k: Some(12),
+            default_min_p: Some(0.1),
+            default_repetition_penalty: Some(1.2),
+            default_presence_penalty: Some(1.5),
+            default_frequency_penalty: Some(0.5),
+            default_max_tokens: Some(DefaultMaxTokens::Fallback(128)),
+            default_skip_special_tokens: Some(false),
+        };
+
+        assert_eq!(
+            lower(SamplingParams::neutral(), generation_defaults),
+            lower(SamplingParams::default(), SamplingHints::default()),
+        );
+    }
+
+    #[test]
+    fn resolve_max_tokens_applies_the_server_cap_to_client_values() {
+        use DefaultMaxTokens::{Cap, Fallback};
+        // A client asking for more than the cap is clamped, like Python's
+        // `override_max_tokens`; a model fallback does not clamp it.
+        assert_eq!(
+            resolve_max_tokens(Some(80), Some(Cap(30)), 200, 100).unwrap(),
+            30
+        );
+        assert_eq!(
+            resolve_max_tokens(Some(80), Some(Fallback(30)), 200, 100).unwrap(),
+            80
+        );
+        // Unset requests take the cap.
+        assert_eq!(
+            resolve_max_tokens(None, Some(Cap(30)), 200, 100).unwrap(),
+            30
+        );
+        // The context window still wins when it is tighter than the cap.
+        assert_eq!(
+            resolve_max_tokens(None, Some(Cap(500)), 200, 100).unwrap(),
+            100
+        );
+        // Smaller client values pass through.
+        assert_eq!(
+            resolve_max_tokens(Some(10), Some(Cap(30)), 200, 100).unwrap(),
+            10
+        );
     }
 
     #[test]
@@ -1845,13 +1944,13 @@ mod tests {
 
     #[test]
     fn resolve_max_tokens_uses_default_when_user_omits() {
-        let result = resolve_max_tokens(None, Some(64), 200, 100);
+        let result = resolve_max_tokens(None, Some(DefaultMaxTokens::Fallback(64)), 200, 100);
         assert_eq!(result.unwrap(), 64);
     }
 
     #[test]
     fn resolve_max_tokens_default_capped_by_model_len() {
-        let result = resolve_max_tokens(None, Some(256), 200, 100);
+        let result = resolve_max_tokens(None, Some(DefaultMaxTokens::Fallback(256)), 200, 100);
         assert_eq!(result.unwrap(), 100);
     }
 

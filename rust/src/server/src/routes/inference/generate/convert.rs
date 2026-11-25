@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::num::NonZeroU32;
+
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_text::{Prompt, TextDecodeOptions, TextRequest};
 
@@ -8,6 +10,7 @@ use super::types::{GenerateOutputMode, GenerateRequest};
 use super::validate;
 use crate::error::ApiError;
 use crate::lora::LoraModelResolution;
+use crate::routes::openai::utils::resolve_n;
 use crate::routes::openai::utils::types::StringOrArray;
 use crate::utils::{ResolvedRequestContext, merge_ec_transfer_params, merge_kv_transfer_params};
 
@@ -18,6 +21,8 @@ pub(super) struct PreparedRequest {
     /// The `model` reported in non-streaming responses.
     pub response_model: String,
     pub text_request: TextRequest,
+    /// Number of parallel samples to generate.
+    pub n: NonZeroU32,
     pub stream: bool,
     /// Public response rendering options for route-layer helpers.
     pub options: ResponseOptions,
@@ -49,6 +54,7 @@ pub(super) fn prepare_generate_request(
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
 
+    let n = resolve_n(request.sampling_params.n)?;
     let stream = request.stream;
     let include_usage = request
         .stream_options
@@ -72,7 +78,7 @@ pub(super) fn prepare_generate_request(
         && (output_mode == GenerateOutputMode::Text
             || stop_strings.as_ref().is_some_and(|stops| !stops.is_empty()));
     let decode_options = TextDecodeOptions {
-        skip_special_tokens: request.sampling_params.skip_special_tokens.unwrap_or(true),
+        skip_special_tokens: request.sampling_params.skip_special_tokens,
         include_stop_str_in_output: request
             .sampling_params
             .include_stop_str_in_output
@@ -99,7 +105,7 @@ pub(super) fn prepare_generate_request(
         decode_options,
         intermediate: stream,
         prompt_truncation: None,
-        priority: request.priority,
+        priority: ctx.priority.unwrap_or(request.priority),
         cache_salt: request.cache_salt,
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
@@ -115,6 +121,7 @@ pub(super) fn prepare_generate_request(
         request_id: ctx.request_id,
         response_model: lora_resolution.response_model(),
         text_request,
+        n,
         stream,
         options: ResponseOptions {
             include_usage,
@@ -129,6 +136,7 @@ pub(super) fn prepare_generate_request(
 
 #[cfg(test)]
 mod tests {
+    use axum::http::HeaderMap;
     use serde_json::json;
     use vllm_text::{Prompt, TextDecodeOptions};
 
@@ -136,7 +144,7 @@ mod tests {
     use crate::lora::LoraModelResolution;
     use crate::model_names::ServedModelNames;
     use crate::routes::inference::generate::types::GenerateRequest;
-    use crate::utils::ResolvedRequestContext;
+    use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
     fn served(names: &[&str]) -> LoraModelResolution {
         LoraModelResolution {
@@ -254,13 +262,34 @@ mod tests {
                 }),
             ),
             TextDecodeOptions {
-                skip_special_tokens: false,
+                skip_special_tokens: Some(false),
                 include_stop_str_in_output: true,
                 stop_strings: Some(vec!["\n".to_string()]),
                 min_tokens: 2,
                 detokenize: false,
             }
         );
+    }
+
+    #[test]
+    fn prepare_generate_request_header_priority_overrides_body() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [11, 22],
+            "sampling_params": {},
+            "priority": 10,
+        }))
+        .expect("parse request");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Vllm-Priority", "-5".parse().unwrap());
+        let prepared = prepare_generate_request(
+            request,
+            &served(&["test-model"]),
+            resolve_request_context(&headers, None).expect("valid headers"),
+            None,
+        )
+        .expect("prepare");
+        assert_eq!(prepared.text_request.priority, -5);
     }
 
     #[test]

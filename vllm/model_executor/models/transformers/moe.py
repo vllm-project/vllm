@@ -36,11 +36,21 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     RoutedScaleMode,
 )
+from vllm.model_executor.layers.fused_moe.utils import (
+    resolve_layer_fused_shared_expert,
+)
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.transformers.fuser import get_fuser
 from vllm.model_executor.models.transformers.fusers.glu import GLUFuser
 from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
-from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
+from vllm.model_executor.models.utils import (
+    WeightsMapper,
+    WeightsTransformFn,
+    extract_layer_index,
+    get_fused_shared_expert_layers,
+    maybe_fuse_shared_experts,
+    maybe_prefix,
+)
 from vllm.transformers_utils.config import CONFIG_FIELD_ALIASES
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, direct_register_custom_op
 
@@ -166,6 +176,28 @@ def _hf_topk_router(
     return topk_weights, topk_ids
 
 
+def _fusable_shared_expert(
+    shared: nn.Module, intermediate_size: int, num_shared_experts: int
+) -> bool:
+    """Can `shared` run as `num_shared_experts` extra routed experts?
+
+    It must be a bias-free SiLU GLU as wide as that many routed experts, with the
+    projection names the routed experts' checkpoint mapping loads."""
+    glu = get_fuser(shared, GLUFuser)
+    if glu is None or glu.down_name is None:
+        return False
+    names = (glu.gate_name, glu.up_name, glu.down_name)
+    if names != ("gate_proj", "up_proj", "down_proj"):
+        return False
+    act = shared.get_submodule(glu.act_name)
+    if not (isinstance(act, nn.SiLU) or type(act).__name__ == "SiLUActivation"):
+        return False
+    gate, up, down = (shared.get_submodule(name) for name in names)
+    if any(getattr(linear, "bias", None) is not None for linear in (gate, up, down)):
+        return False
+    return gate.weight.shape[0] == intermediate_size * num_shared_experts
+
+
 class TransformersRoutedExperts(RoutedExperts):
     _is_mixtral_format: bool | None = None
     """Does the checkpoint use Mixtral style naming. `None` until weights are loaded."""
@@ -234,6 +266,47 @@ class MoEMixin(MixtureOfExperts, Base):
             moe_block.n_physical_experts = num_physical_experts
             moe_block.n_redundant_experts = self.num_redundant_experts
             moe_block.experts.update_expert_map()
+
+    def _fused_shared_expert_kwargs(
+        self,
+        fuser: MoEBlockFuser,
+        moe_block: nn.Module,
+        prefix: str,
+        intermediate_size: int,
+        fused_layers: dict[tuple[str, str], set[int]],
+    ) -> dict[str, Any] | None:
+        """`FusedMoE` kwargs running the block's shared expert as extra routed
+        experts (ROCm AITER), if it can.
+
+        Records the layer index in `fused_layers` under the block's
+        `(shared expert, experts)` names, relative to the layer."""
+        name = fuser.shared_name
+        if name is None or fuser.scoring_func is None:
+            return None
+        shared = getattr(moe_block, name)
+        if not _fusable_shared_expert(
+            shared, intermediate_size, self.num_shared_experts
+        ):
+            return None
+        # Checkpoint weights are matched to layers by their only index
+        parts = prefix.split(".")
+        indices = [i for i, part in enumerate(parts) if part.isdigit()]
+        if len(indices) != 1:
+            return None
+        if not resolve_layer_fused_shared_expert(self.quant_config, prefix, name):
+            return None
+        idx = indices[0]
+        block = ".".join(parts[idx + 1 :])
+        key = (maybe_prefix(block, name), maybe_prefix(block, "experts"))
+        fused_layers.setdefault(key, set()).add(int(parts[idx]))
+        setattr(moe_block, name, None)
+        moe_block.is_fused_shared_expert_enabled = True
+        return dict(
+            n_shared_experts=self.num_shared_experts,
+            fuse_shared_experts=True,
+            shared_expert_prefix=f"{prefix}.{name}",
+            shared_expert_gate=fuser.shared_expert_gate(moe_block, prefix),
+        )
 
     def recursive_replace(self):
         """Initialize the MoE layers."""
@@ -310,6 +383,7 @@ class MoEMixin(MixtureOfExperts, Base):
 
         # Down projections of shared experts consumed by FusedMoE
         shared_down_projs: list[tuple[nn.Module, str]] = []
+        fused_shared_layers: dict[tuple[str, str], set[int]] = {}
 
         # Recursively fuse MoE layers
         def _recursive_replace(module: nn.Module, prefix: str):
@@ -377,21 +451,24 @@ class MoEMixin(MixtureOfExperts, Base):
                         is_fused_checkpoint_transposed=is_transposed,
                         routed_experts_cls=TransformersRoutedExperts,
                     )
-                    # Transformers decoder layers do not compensate for dividing
-                    # the shared output by the scaling factor, which only
-                    # RoutedScaleMode.OUTPUT_FP16_GUARD does (in FP16).
-                    divides_shared_output = (
-                        routed_scaling_factor != 1.0
-                        and routed_scale_mode is RoutedScaleMode.OUTPUT_FP16_GUARD
-                        and self.model_config.dtype == torch.float16
-                    )
                     fuser = MoEBlockFuser.match(
-                        moe_block, experts_name, divides_shared_output
+                        moe_block, experts_name, routed_scaling_factor
                     )
                     if fuser is not None:
                         # MoE block forward is fully replaced.
                         # gate/router and shared expert (if any) runs in MoERunner.
-                        shared_experts = fuser.shared_experts(moe_block, prefix)
+                        shared_experts = None
+                        fse_kwargs = self._fused_shared_expert_kwargs(
+                            fuser,
+                            moe_block,
+                            prefix,
+                            kwargs["intermediate_size"],
+                            fused_shared_layers,
+                        )
+                        if fse_kwargs is not None:
+                            kwargs |= fse_kwargs
+                        else:
+                            shared_experts = fuser.shared_experts(moe_block, prefix)
                         # Store shared experts for later down projection adjustment
                         if shared_experts is not None:
                             hf_shared = shared_experts.shared_experts
@@ -480,6 +557,21 @@ class MoEMixin(MixtureOfExperts, Base):
         # Continue with the replacement of layers in Base
         super().recursive_replace()
         self.num_moe_layers = len(self.moe_layers)
+        # Validates and logs the per-layer shared expert fusion
+        moe_classes = tuple({type(moe_block) for moe_block in self.mlp_layers})
+        get_fused_shared_expert_layers(self.model, moe_classes, enable_eplb)
+        transforms: list[WeightsTransformFn] = [
+            partial(
+                maybe_fuse_shared_experts,
+                n_routed_experts=self.num_logical_experts,
+                n_shared_experts=self.num_shared_experts,
+                fused_shared_expert_layers=frozenset(layers),
+                ckpt_prefix=shared,
+                experts_prefix=experts,
+            )
+            for (shared, experts), layers in fused_shared_layers.items()
+        ]
+        self.hf_to_vllm_mapper |= WeightsMapper(weights_transforms=transforms)
         # GLUFuser likely fused shared_experts. The down projection after the GLU
         # normally immediately reduces but we want FusedMoE to handle the reduction.
         for hf_shared, down_name in shared_down_projs:

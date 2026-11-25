@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, TypeVar
 
+from pydantic import Field
+
+from vllm.config import utils as config_utils
+from vllm.config.diffusion import DiffusionConfig, DiffusionModelOptions
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
@@ -76,6 +80,27 @@ def _set_deepseek_indexer_logits_dtype(vllm_config: "VllmConfig") -> None:
             "bfloat16" if mqa_logits_use_mx_scales() else "float32"
         )
     )
+
+
+_OptionsT = TypeVar("_OptionsT", bound=DiffusionModelOptions)
+
+
+def _parse_diffusion_model_options(
+    vllm_config: "VllmConfig", options_cls: type[_OptionsT]
+) -> _OptionsT:
+    """Validate `--diffusion-config` `model_options` against `options_cls`."""
+    diffusion_config = vllm_config.diffusion_config
+    assert diffusion_config is not None
+    options = diffusion_config.model_options
+    if isinstance(options, dict):
+        options = options_cls(**options)
+    if not isinstance(options, options_cls):
+        raise TypeError(
+            f"Expected {options_cls.__name__} diffusion model_options, "
+            f"got {type(options).__name__}."
+        )
+    diffusion_config.model_options = options
+    return options
 
 
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
@@ -451,10 +476,17 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
     def _configure_v2(vllm_config: "VllmConfig") -> None:
         from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
         from vllm.config.compilation import CompilationMode, CUDAGraphMode
+        from vllm.platforms import current_platform
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         # Generic JIT warmup submits text-only requests, which DASH cannot use.
         vllm_config.kernel_config.enable_jit_warmup = False
+        if vllm_config.cache_config.enable_extensible_kv_cache:
+            logger.warning(
+                "Unlimited-OCR-2 does not support the extensible KV cache; "
+                "turning it off."
+            )
+        vllm_config.cache_config.enable_extensible_kv_cache = False
         compilation = vllm_config.compilation_config
         breakable = is_breakable_cudagraph_enabled()
         if not vllm_config.model_config.enforce_eager:
@@ -497,14 +529,19 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
             if enabled:
                 raise ValueError(f"Unlimited-OCR-2 does not support {feature}")
         vllm_config.cache_config.enable_prefix_caching = False
-        backend = (
-            vllm_config.attention_config.backend or AttentionBackendEnum.FLASH_ATTN
+        backend = vllm_config.attention_config.backend or (
+            AttentionBackendEnum.ROCM_AITER_FA
+            if current_platform.is_rocm()
+            else AttentionBackendEnum.FLASH_ATTN
         )
         if backend not in (
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.FLASHINFER,
+            AttentionBackendEnum.ROCM_AITER_FA,
         ):
-            raise ValueError("Unlimited-OCR-2 supports FLASH_ATTN or FLASHINFER")
+            raise ValueError(
+                "Unlimited-OCR-2 supports FLASH_ATTN, FLASHINFER or ROCM_AITER_FA"
+            )
         text_config = vllm_config.model_config.hf_config.text_config
         text_config.unlimited_ocr2_attention_backend = backend.name
         if backend == AttentionBackendEnum.FLASHINFER:
@@ -512,9 +549,16 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                 1, compilation.cudagraph_num_of_warmups
             )
         # DASH owns sparse selection and compute. Reuse Triton's paged-cache
-        # metadata, including R-SWA reclamation, for both compute backends.
+        # metadata, including R-SWA reclamation, for all compute backends.
         vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
         logger.info("Unlimited-OCR-2 DASH compute backend: %s", backend.name)
+        mm_config = vllm_config.model_config.multimodal_config
+        if (
+            current_platform.is_rocm()
+            and mm_config is not None
+            and mm_config.mm_encoder_attn_backend is None
+        ):
+            mm_config.mm_encoder_attn_backend = AttentionBackendEnum.ROCM_AITER_FA
         UnlimitedOCRForCausalLMConfig._configure_vision(vllm_config)
         logger.info(
             "Unlimited-OCR-2: output KV window=%s; input KV is retained for DASH.",
@@ -636,6 +680,28 @@ class EmbeddingGemma2ModelConfig(Gemma4Config):
             model_config.max_model_len = 8192
 
 
+@config_utils.config
+class DiffusionGemmaDiffusionOptions(DiffusionModelOptions):
+    """DiffusionGemma `DiffusionConfig.model_options`. Unset options are read
+    from the model's generation_config.json."""
+
+    t_min: float | None = None
+    """Temperature at the last denoising step."""
+
+    t_max: float | None = None
+    """Temperature at the first denoising step."""
+
+    entropy_bound: float | None = Field(default=None, gt=0)
+    """Entropy budget for the EntropyBound sampler."""
+
+    confidence_threshold: float | None = None
+    """Confidence above which a position is committed."""
+
+    stability_threshold: int | None = Field(default=None, ge=0)
+    """Number of previous steps a prediction must match before it is
+    committed."""
+
+
 class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -646,19 +712,57 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
         read straight from generation_config.json at sampler-build time
         (see DiffusionGemma's custom_sampler), not injected here.
         """
-        # Inherit Gemma4's attention backend selection (FA4 on Hopper,
-        # TRITON_ATTN fallback for heterogeneous head dims).
-        Gemma4Config.verify_and_update_config(vllm_config)
-
+        from vllm.platforms import current_platform
+        from vllm.utils.flashinfer import has_flashinfer, supports_trtllm_attention
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         attention_config = vllm_config.attention_config
-        if attention_config.backend == AttentionBackendEnum.FLASHINFER:
-            raise ValueError(
-                "FlashInfer does not support DiffusionGemma's mixed "
-                "causal/bidirectional attention. Use --attention-backend "
-                "FLASH_ATTN or TRITON_ATTN instead."
+        mm_config = vllm_config.model_config.multimodal_config
+        if (
+            attention_config.backend is None
+            and attention_config.use_trtllm_attention is not False
+            and (mm_config is None or mm_config.language_model_only)
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+            and has_flashinfer()
+            and supports_trtllm_attention(is_prefill=True)
+        ):
+            attention_config.backend = AttentionBackendEnum.FLASHINFER
+            logger.info(
+                "DiffusionGemma: defaulting to FlashInfer TRTLLM-Gen attention "
+                "for text-only serving on an SM100-family GPU."
             )
+
+        Gemma4Config.verify_and_update_config(vllm_config)
+
+        if attention_config.backend == AttentionBackendEnum.FLASHINFER:
+            from vllm.v1.kv_cache_interface import get_kv_quant_mode
+
+            if attention_config.use_trtllm_attention is False or not (
+                has_flashinfer() and supports_trtllm_attention(is_prefill=True)
+            ):
+                raise ValueError(
+                    "DiffusionGemma on FlashInfer requires the TRTLLM-Gen context "
+                    "kernel. Use --attention-backend TRITON_ATTN (or FLASH_ATTN on "
+                    "Hopper) instead."
+                )
+            if get_kv_quant_mode(vllm_config.cache_config.cache_dtype).is_nvfp4:
+                raise ValueError(
+                    "DiffusionGemma on FlashInfer does not support an NVFP4 KV "
+                    "cache yet."
+                )
+            if vllm_config.compilation_config.pass_config.fuse_attn_quant:
+                raise ValueError(
+                    "DiffusionGemma on FlashInfer does not support quantized "
+                    "attention output (fuse_attn_quant) yet."
+                )
+            if vllm_config.parallel_config.decode_context_parallel_size > 1:
+                raise ValueError(
+                    "DiffusionGemma on FlashInfer does not support decode context "
+                    "parallelism yet."
+                )
+            attention_config.use_trtllm_attention = True
+
         if attention_config.backend is None and not attention_config.use_non_causal:
             # Only the sm_100 default backend order reads this flag (it puts
             # FlashInfer first for causal models). Elsewhere Gemma4Config above
@@ -671,14 +775,14 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
             )
 
         # Auto-create DiffusionConfig from HF config if not provided.
+        canvas_length = getattr(
+            vllm_config.model_config.hf_config, "canvas_length", 256
+        )
         if vllm_config.diffusion_config is None:
-            from vllm.config.diffusion import DiffusionConfig
-
-            hf_config = vllm_config.model_config.hf_config
-            canvas_length = getattr(hf_config, "canvas_length", 256)
-            vllm_config.diffusion_config = DiffusionConfig(
-                canvas_length=canvas_length,
-            )
+            vllm_config.diffusion_config = DiffusionConfig(canvas_length=canvas_length)
+        elif vllm_config.diffusion_config.canvas_length is None:
+            vllm_config.diffusion_config.canvas_length = canvas_length
+        _parse_diffusion_model_options(vllm_config, DiffusionGemmaDiffusionOptions)
 
         # The diffusion sampler materializes [num_seqs, canvas_length, vocab]
         # fp32 transients, so concurrency is memory-bound (>8 OOMs a single H200).
@@ -708,10 +812,7 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
 
 
 def _indexer_sparse_logits_supported(vllm_config: "VllmConfig") -> bool:
-    """Whether the DeepSeek V4.1 sparse-logits indexer can run: a two-level
-    (candidate block) model on SM100 with DeepGEMM's sparse MQA kernels and
-    DeepSelect, no decode/prefill context parallelism, and a DeepSelect top-k
-    backend. Mirrors DeepseekV41SparseIndexerMetadataBuilder's checks."""
+    """Whether to enable candidate-only indexer scoring by default."""
     from vllm.platforms import current_platform
 
     hf_config = vllm_config.model_config.hf_text_config
@@ -722,11 +823,16 @@ def _indexer_sparse_logits_supported(vllm_config: "VllmConfig") -> bool:
         block <= 0
         or topk_blocks <= 0
         or not current_platform.is_cuda()
-        or not current_platform.is_device_capability_family(100)
         or parallel.decode_context_parallel_size > 1
         or parallel.prefill_context_parallel_size > 1
-        or vllm_config.kernel_config.sparse_indexer_topk_backend
-        not in ("auto", "deep_select")
+    ):
+        return False
+    if current_platform.is_device_capability_family(90):
+        return True
+    topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
+    if not current_platform.is_device_capability_family(100) or topk_backend not in (
+        "auto",
+        "deep_select",
     ):
         return False
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
@@ -746,6 +852,112 @@ def _indexer_sparse_logits_supported(vllm_config: "VllmConfig") -> bool:
     except ValueError:
         return False
     return True
+
+
+@config_utils.config
+class NemotronDiffusionOptions(DiffusionModelOptions):
+    """Nemotron Labs Diffusion `DiffusionConfig.model_options`."""
+
+    temperature: float | None = Field(default=None, ge=0)
+    """Default sampling temperature; explicit request temperatures take
+    precedence. 0 means greedy. If unset, the model's generation defaults
+    apply."""
+
+    selection_policy: (
+        Literal["low_confidence", "leftmost", "confidence_threshold"] | None
+    ) = None
+    """Which masked positions to unmask each denoising step.
+    `low_confidence`: the most confident predictions first (LLaDA),
+    top-k per step with k from the even transfer schedule.
+    `leftmost`: strictly left-to-right.
+    `confidence_threshold`: unmask every position whose chosen-token
+    probability exceeds `confidence_threshold` (always at least the single
+    most confident one, so each step makes progress).
+    If not set, read from the model's generation_config.json
+    (`diffusion_selection_policy`), defaulting to `confidence_threshold`."""
+
+    confidence_threshold: float | None = Field(default=None, gt=0, lt=1)
+    """Probability threshold for `selection_policy="confidence_threshold"`.
+    If not set, read from the model's generation_config.json
+    (`diffusion_confidence_threshold`), defaulting to 0.9."""
+
+
+class NemotronLabsDiffusionForBlockDiffusionConfig(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """Set up the diffusion config and defaults for the Nemotron
+        Ministral masked block-diffusion LM.
+
+        Auto-creates DiffusionConfig from the HF config (canvas_length ==
+        block_size) when the user didn't pass `--diffusion-config`.
+        `max_denoising_steps` defaults to `canvas_length` at
+        sampler-build time when generation_config.json doesn't provide it.
+        """
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        model_config = vllm_config.model_config
+        if not model_config.is_diffusion:
+            if vllm_config.diffusion_config is not None:
+                raise ValueError(
+                    "Nemotron AR mode cannot be combined with --diffusion-config."
+                )
+            if "max_new_tokens" not in model_config.override_generation_config:
+                model_config.override_generation_config["max_new_tokens"] = None
+            return
+
+        attention_config = vllm_config.attention_config
+        if attention_config.backend == AttentionBackendEnum.FLASHINFER:
+            raise ValueError(
+                "FlashInfer does not support the Nemotron DLM's mixed "
+                "causal/bidirectional attention. Use --attention-backend "
+                "FLASH_ATTN or TRITON_ATTN instead."
+            )
+        if attention_config.backend is None:
+            attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info("Nemotron Labs Diffusion defaults to TRITON_ATTN.")
+        elif attention_config.backend == AttentionBackendEnum.FLASH_ATTN:
+            if attention_config.flash_attn_version not in (None, 4):
+                raise ValueError(
+                    "Nemotron Labs Diffusion requires FA4 for per-sequence "
+                    "causal attention; use FA4 or TRITON_ATTN."
+                )
+            attention_config.flash_attn_version = 4
+
+        # Auto-create DiffusionConfig from HF config if not provided; a
+        # user config passed just to set e.g. temperature backfills
+        # canvas_length from the HF config.
+        hf_config = vllm_config.model_config.hf_config
+        if vllm_config.diffusion_config is None:
+            vllm_config.diffusion_config = DiffusionConfig(
+                canvas_length=getattr(hf_config, "canvas_length", 32),
+            )
+        elif vllm_config.diffusion_config.canvas_length is None:
+            vllm_config.diffusion_config.canvas_length = getattr(
+                hf_config, "canvas_length", 32
+            )
+        options = _parse_diffusion_model_options(vllm_config, NemotronDiffusionOptions)
+
+        # Use the ordinary generation defaults; explicit request temperatures
+        # always take precedence over this compatibility setting.
+        if options.temperature is not None:
+            model_config.override_generation_config.setdefault(
+                "temperature", options.temperature
+            )
+
+        # The diffusion sampler materializes [num_seqs, canvas_length, vocab]
+        # fp32 transients, so cap concurrency when the user didn't pass
+        # --max-num-seqs (same policy as DiffusionGemma).
+        from vllm.config.scheduler import SchedulerConfig
+
+        sc = vllm_config.scheduler_config
+        if sc is not None and sc.max_num_seqs >= SchedulerConfig.DEFAULT_MAX_NUM_SEQS:
+            sc.max_num_seqs = 8
+
+        # Remove any generation_config.json cap on max_new_tokens so each
+        # request controls its own output length via max_tokens.
+        model_config = vllm_config.model_config
+        if "max_new_tokens" not in model_config.override_generation_config:
+            model_config.override_generation_config["max_new_tokens"] = None
 
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
@@ -934,10 +1146,14 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         config = model_config.hf_config
 
-        assert config.__class__.__name__ == "NewConfig"
+        # `NewConfig` is the remote-code config, `GteConfig` the native one.
+        assert config.__class__.__name__ in ("NewConfig", "GteConfig")
         assert config.hidden_act == "gelu"
 
         config.hidden_act = "geglu"
+
+        if getattr(config, "position_embedding_type", None) is None:
+            config.position_embedding_type = "rope"
 
         head_dim = config.hidden_size // config.num_attention_heads
         rotary_dim = getattr(config, "rotary_emb_dim", head_dim)
@@ -964,15 +1180,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         """
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
-
-
-class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
-    @staticmethod
-    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        pooler_config = model_config.pooler_config
-        assert pooler_config is not None
-        if pooler_config.use_activation is None:
-            pooler_config.use_activation = False
 
 
 class JinaEmbeddingsV5ModelConfig(VerifyAndUpdateConfig):
@@ -1139,30 +1346,13 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
 
         if cache_config.enable_prefix_caching:
-            if cache_config.mamba_cache_mode == "none":
-                cache_config.mamba_cache_mode = "align"
-                logger.info(
-                    "Mamba cache mode is set to '%s' for %s by default "
-                    "when prefix caching is enabled",
-                    cache_config.mamba_cache_mode,
-                    model_config.architecture,
-                )
-            assert vllm_config.scheduler_config.enable_chunked_prefill, (
-                "Chunked prefill is required for Mamba prefix caching."
-            )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.
             if cache_config.mamba_block_size is None:
                 cache_config.mamba_block_size = cache_config.block_size
-        else:
-            if cache_config.mamba_cache_mode != "none":
-                cache_config.mamba_cache_mode = "none"
-                logger.warning(
-                    "Mamba cache mode is set to 'none' when prefix caching is disabled"
-                )
-            if cache_config.mamba_block_size is None:
-                cache_config.mamba_block_size = model_config.max_model_len
+        elif cache_config.mamba_block_size is None:
+            cache_config.mamba_block_size = model_config.max_model_len
 
 
 class MiniMaxM3SparseForConditionalGenerationConfig(MiniMaxM3SparseConfig):
@@ -1231,6 +1421,17 @@ class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):
         if mm_config is not None:
             video_kwargs = mm_config.media_io_kwargs.setdefault("video", {})
             video_kwargs.setdefault("video_backend", "nemotron_vl")
+
+        # Super VL stores its video frame sizing in the image processor config.
+        vision_config = model_config.hf_config.vision_config
+        if (
+            getattr(vision_config, "video_target_num_patches", None) is None
+            and getattr(vision_config, "video_target_img_size", None) is None
+        ):
+            for key in ("video_target_num_patches", "video_maintain_aspect_ratio"):
+                value = model_config.hf_image_processor_config.get(key)
+                if value is not None:
+                    setattr(vision_config, key, value)
 
 
 class Nemotron3_5TranscribeForConditionalGenerationConfig(VerifyAndUpdateConfig):
@@ -1331,6 +1532,22 @@ class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
         text_config = config.get_text_config()
         text_config.method = "from_2_way_softmax"
         text_config.classifier_from_token = tokens
+
+
+class ShieldGemma2ForImageClassificationConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
+        text_config = hf_config.get_text_config()
+        # A logit softcap would make the two-way softmax shortcut inexact.
+        if getattr(text_config, "final_logit_softcapping", None) is not None:
+            raise ValueError("ShieldGemma 2 does not support final_logit_softcapping")
+
+        # Same Yes/No ids as ShieldGemma2ForImageClassification in transformers.
+        text_config.method = "from_2_way_softmax"
+        text_config.classifier_from_token = ["No", "Yes"]
+        hf_config.num_labels = 1
+        text_config.num_labels = 1
 
 
 class Qwen3VLForSequenceClassificationConfig(Qwen3ForSequenceClassificationConfig):
@@ -1543,6 +1760,119 @@ class D3ForSequenceClassificationConfig(Qwen3_5ForConditionalGenerationConfig):
             pooler_config.use_activation = False
 
 
+class Qwen3_5ForSlotDecisionConfig(Qwen3_5ForConditionalGenerationConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
+        overrides = getattr(hf_config, "modeling_overrides", None)
+        served = {
+            "attention": {
+                "full_attention": "block_bidirectional",
+                "linear_attention": "causal",
+            },
+            "readout": "slot_lm",
+        }
+        found = dict(overrides) if isinstance(overrides, dict) else {}
+        # head_dim sizes the learned "head" readout, which vLLM does not serve.
+        found.pop("head_dim", None)
+        n_slots = found.pop("n_slots", 256)
+        if found != served or type(n_slots) is not int or not 1 <= n_slots <= 256:
+            raise ValueError(
+                f"unsupported modeling_overrides {overrides!r}; vLLM serves "
+                f"{served} with 1 to 256 n_slots"
+            )
+        # The slot read needs the fp32 LM head; an explicit head_dtype wins.
+        if getattr(hf_config, "head_dtype", None) is None:
+            hf_config.head_dtype = "float32"
+        # The checkpoints are trained on prompts of up to 16,384 tokens, far
+        # below max_position_embeddings. Each prompt is prefilled in one step,
+        # so the default step budget follows this length.
+        if model_config.original_max_model_len is None:
+            model_config.max_model_len = min(model_config.max_model_len, 16384)
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+        scheduler_config = vllm_config.scheduler_config
+        prefix_lm = "vllm.v1.core.sched.prefix_lm_scheduler.PrefixLM"
+        prefix_lm_schedulers = (f"{prefix_lm}Scheduler", f"{prefix_lm}AsyncScheduler")
+        if cache_config.enable_prefix_caching:
+            from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
+
+            _, gdn = qwen_gdn_linear_attn._resolve_gdn_prefill_backend(vllm_config)
+            if gdn != "flashinfer":
+                logger.info(
+                    "Disabling prefix caching for %s: the %s GDN prefill backend "
+                    "exports no mid-prefill Mamba states, which prefix caching "
+                    "needs when each prompt is prefilled in one step",
+                    model_config.architecture,
+                    gdn,
+                )
+                cache_config.enable_prefix_caching = False
+        unsupported = {
+            "KV transfer connectors": vllm_config.kv_transfer_config,
+            "--kv-offloading-size": cache_config.kv_offloading_size is not None,
+            "speculative decoding": vllm_config.speculative_config,
+            "context parallelism": (
+                vllm_config.parallel_config.prefill_context_parallel_size > 1
+                or vllm_config.parallel_config.decode_context_parallel_size > 1
+            ),
+            "micro-batching": vllm_config.parallel_config.use_ubatching,
+            "--prefix-match-unit": (
+                cache_config.enable_prefix_caching and cache_config.prefix_match_unit
+            ),
+            "--scheduler-cls": (
+                scheduler_config.scheduler_cls not in (None, *prefix_lm_schedulers)
+            ),
+        }
+        if features := [name for name, enabled in unsupported.items() if enabled]:
+            raise ValueError(
+                f"{model_config.architecture} does not support {', '.join(features)}"
+            )
+
+        # Triton attention applies the PrefixLM ranges to every request. A
+        # per-kind backend wins over the global one, as in the selector.
+        attention_config = vllm_config.attention_config
+        if attention_config.backend is None:
+            attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+        backend = attention_config.backend_per_kind.get(
+            "full_attention", attention_config.backend
+        )
+        if backend != AttentionBackendEnum.TRITON_ATTN:
+            raise ValueError(
+                f"{model_config.architecture} needs the TRITON_ATTN attention "
+                f"backend for full attention, not {backend.name}"
+            )
+
+        # Each prompt is prefilled from its cache hit in one step, or waits.
+        # PrefixLMScheduler also reads streamed requests causally.
+        scheduler_config.enable_chunked_prefill = False
+        scheduler_config.scheduler_cls = prefix_lm_schedulers[0]
+        scheduler_config.long_prefill_token_threshold = 0
+        # As EngineArgs does with chunked prefill off, raise the step budget to
+        # --max-model-len so a full prompt fits in one step.
+        if scheduler_config.max_num_batched_tokens < model_config.max_model_len:
+            logger.info(
+                "Raising max_num_batched_tokens from %d to %d: %s prefills each "
+                "prompt in one step",
+                scheduler_config.max_num_batched_tokens,
+                model_config.max_model_len,
+                model_config.architecture,
+            )
+            scheduler_config.max_num_batched_tokens = model_config.max_model_len
+        scheduled = scheduler_config.max_num_scheduled_tokens
+        if scheduled is not None and scheduled < model_config.max_model_len:
+            raise ValueError(
+                f"{model_config.architecture} prefills each prompt in one step, "
+                f"so --max-num-scheduled-tokens ({scheduled}) must be at least "
+                f"--max-model-len ({model_config.max_model_len})"
+            )
+
+
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1599,7 +1929,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
     "EmbeddingGemma2Model": EmbeddingGemma2ModelConfig,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
-    "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
     "Gemma4ForCausalLM": Gemma4Config,
     "Gemma4ForConditionalGeneration": Gemma4Config,
@@ -1611,9 +1940,9 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "HrmTextForCausalLM": HrmTextForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
+    "GteForSequenceClassification": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
-    "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "JinaEmbeddingsV5Model": JinaEmbeddingsV5ModelConfig,
     "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
@@ -1627,7 +1956,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "MiniMaxM3SparseForCausalLM": MiniMaxM3SparseConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
-    "MambaForCausalLM": MambaModelConfig,
     "MiniMaxM3SparseForConditionalGeneration": (
         MiniMaxM3SparseForConditionalGenerationConfig
     ),
@@ -1643,6 +1971,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Nemotron3_5TranscribeForConditionalGeneration": (
         Nemotron3_5TranscribeForConditionalGenerationConfig
     ),
+    "NemotronLabsDiffusionForCausalLM": NemotronLabsDiffusionForBlockDiffusionConfig,
+    "NemotronLabsDiffusionModel": NemotronLabsDiffusionForBlockDiffusionConfig,
     "NomicBertModel": NomicBertModelConfig,
     "PixtralForConditionalGeneration": PixtralForConditionalGenerationConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
@@ -1651,12 +1981,33 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "Qwen3_5ForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "Qwen3_5ForSlotDecision": Qwen3_5ForSlotDecisionConfig,
     "Qwen3_5MoeForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen4ExpForCausalLM": Qwen4ExpForCausalLMConfig,
     "Qwen4ExpForConditionalGeneration": (Qwen4ExpForConditionalGenerationConfig),
     "Qwen4ExpMTP": Qwen4ExpMTPConfig,
+    "ShieldGemma2ForImageClassification": (ShieldGemma2ForImageClassificationConfig),
     "UnlimitedOCRForCausalLM": UnlimitedOCRForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
 }
+
+
+def register_model_config(
+    architecture: str, config_cls: type[VerifyAndUpdateConfig]
+) -> None:
+    """Register the config hook of an architecture (e.g. from a plugin), as
+    `MODELS_CONFIG_MAP` does for in-tree models. Like
+    `ModelRegistry.register_model`, a later registration overwrites an earlier
+    one; replacing a different hook logs a warning."""
+    existing = MODELS_CONFIG_MAP.get(architecture)
+    if existing is not None and existing is not config_cls:
+        logger.warning(
+            "Architecture %s already has the config hook %s, and it will be "
+            "overwritten by %s.",
+            architecture,
+            existing.__name__,
+            config_cls.__name__,
+        )
+    MODELS_CONFIG_MAP[architecture] = config_cls

@@ -32,6 +32,9 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -52,6 +55,7 @@ from vllm.models.deepseek_v4.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 
 from .model import (
     DeepseekV4DecoderLayer,
+    DeepseekV4ForCausalLM,
     DeepseekV4MixtureOfExperts,
     DeepseekV4Model,
     DeepseekV4MoE,
@@ -137,12 +141,29 @@ class DSparkDeepseekV4Model(nn.Module):
                 for i in range(self.num_dspark_layers)
             ]
         )
+        quant_config = vllm_config.quant_config
+        ignored_layers = getattr(quant_config, "ignored_layers", None)
+        wkv_quant_config = (
+            None
+            if quant_config is not None
+            and ignored_layers
+            and hasattr(quant_config, "ignored_layers_match_mode")
+            and is_layer_skipped(
+                prefix=maybe_prefix(
+                    prefix, f"layers.{self.num_hidden_layers}.attn.wkv"
+                ),
+                ignored_layers=ignored_layers,
+                fused_mapping=quant_config.packed_modules_mapping,
+                match_mode=quant_config.ignored_layers_match_mode,
+            )
+            else quant_config
+        )
         self.context_wkv_proj = MergedColumnParallelLinear(
             config.hidden_size,
             [config.head_dim] * self.num_dspark_layers,
             bias=False,
             return_bias=False,
-            quant_config=vllm_config.quant_config,
+            quant_config=wkv_quant_config,
             prefix=maybe_prefix(prefix, "context_wkv_proj"),
             disable_tp=True,
         )
@@ -350,6 +371,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
     has_own_lm_head = False
     # Full-vocab draft: draft ids are target ids, no remapping needed.
     draft_id_to_target_id = None
+
+    packed_modules_mapping = DeepseekV4ForCausalLM.packed_modules_mapping
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

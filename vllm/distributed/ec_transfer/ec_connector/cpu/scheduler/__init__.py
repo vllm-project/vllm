@@ -8,7 +8,7 @@ for the ECCPUConnector.
 """
 
 import time
-from collections.abc import Collection
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -52,6 +52,7 @@ class ECCPUScheduler:
 
     def __init__(self, vllm_config: "VllmConfig") -> None:
         self._vllm_config = vllm_config
+        self._encoder_cache_query: Callable[[Request, int], int | None] | None = None
         ec_config = vllm_config.ec_transfer_config
         assert ec_config is not None
         self._is_producer: bool = ec_config.is_ec_producer
@@ -203,11 +204,35 @@ class ECCPUScheduler:
         entry = self._cache.get(identifier)
         return entry is not None and entry.ready
 
+    def bind_encoder_cache_query(
+        self, query: Callable[["Request", int], int | None]
+    ) -> None:
+        self._encoder_cache_query = query
+
+    @staticmethod
+    def _remote_announcement(
+        request: "Request", identifier: str
+    ) -> dict[str, Any] | None:
+        announced = (request.ec_transfer_params or {}).get(identifier)
+        if isinstance(announced, dict) and "peer_host" in announced:
+            return announced
+        return None
+
+    def requires_encoder_cache_readmission(
+        self, request: "Request", input_id: int
+    ) -> bool:
+        identifier = request.mm_features[input_id].identifier
+        return (
+            self._nixl_enabled
+            and self._is_consumer
+            and self._remote_announcement(request, identifier) is not None
+            and not self.has_cache_item(identifier)
+        )
+
     def ensure_cache_available(
         self,
         request: "Request",
         num_computed_tokens: int,
-        local_cache_hashes: Collection[str] | None = None,
     ) -> bool:
         if not self._nixl_enabled:
             return True  # CPU offload never blocks.
@@ -220,7 +245,9 @@ class ECCPUScheduler:
         return self._nixl_consumer_admit(request, num_computed_tokens)
 
     def _nixl_consumer_admit(
-        self, request: "Request", num_computed_tokens: int
+        self,
+        request: "Request",
+        num_computed_tokens: int,
     ) -> bool:
         """Admit a request once its required remote encodings are ready.
 
@@ -237,9 +264,9 @@ class ECCPUScheduler:
             return True
         now = time.monotonic()
         pending = False
-        for feature in request.mm_features:
+        for input_id, feature in enumerate(request.mm_features):
             try:
-                if not self._admit_item(request, feature, num_computed_tokens, now):
+                if not self._admit_item(request, input_id, num_computed_tokens, now):
                     pending = True
             except _RemoteUnavailable as error:
                 if not self._fail_or_fallback(request, feature, str(error)):
@@ -249,7 +276,7 @@ class ECCPUScheduler:
     def _admit_item(
         self,
         request: "Request",
-        feature: "MultiModalFeatureSpec",
+        input_id: int,
         num_computed_tokens: int,
         now: float,
     ) -> bool:
@@ -264,29 +291,26 @@ class ECCPUScheduler:
                 or the item's total wait budget expired.
 
         """
+        feature = request.mm_features[input_id]
         pos = feature.mm_position
         mm_hash = feature.identifier
         if pos.offset + pos.length <= num_computed_tokens:
             self._deferred_since.pop((request.request_id, mm_hash), None)
             return True
-        announced = (request.ec_transfer_params or {}).get(mm_hash)
-        # Without a producer address there is nothing to fetch: the request
-        # carries what the model needs and the encoder runs locally.
-        # `ec_transfer_params` reaches us from the request, so its shape is
-        # checked rather than assumed.
-        remote: dict[str, Any] | None = (
-            announced
-            if isinstance(announced, dict) and "peer_host" in announced
-            else None
-        )
-
         entry = self._cache.get(mm_hash)
         if entry is not None and entry.ready:
             # Local hit: upstream's update_state_after_alloc pins and
             # loads it through the same path as a natively cached entry.
             self._deferred_since.pop((request.request_id, mm_hash), None)
             return True
+        remote = self._remote_announcement(request, mm_hash)
         if remote is None:
+            return True
+        if (
+            self._encoder_cache_query is not None
+            and self._encoder_cache_query(request, input_id) == pos.get_num_embeds()
+        ):
+            self._deferred_since.pop((request.request_id, mm_hash), None)
             return True
         since = self._deferred_since.setdefault((request.request_id, mm_hash), now)
         if now - since > _ADMIT_DEFER_TIMEOUT_S:
@@ -350,13 +374,7 @@ class ECCPUScheduler:
         """
         mm_hash = feature.identifier
         self._deferred_since.pop((request.request_id, mm_hash), None)
-        data = feature.data
-        metadata = (
-            self._metadata_resolver.fields_for(feature.modality) if data else set()
-        )
-        if data and any(
-            value.data is not None for key, value in data.items() if key not in metadata
-        ):
+        if self._metadata_resolver.has_encoder_input(feature):
             # Passthrough embeddings bypass the processor cache. SHM address
             # items therefore refer to media that the worker can encode.
             request.ec_transfer_params = dict(request.ec_transfer_params or {})

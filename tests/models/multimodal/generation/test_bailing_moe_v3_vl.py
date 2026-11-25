@@ -44,6 +44,7 @@ def test_bailing_yarn_image_order_and_centered_positions(vllm_runner, encoder_mo
     """Use real weights; cover idle encoder ranks and uneven five-image batches."""
     with vllm_runner(
         MODEL,
+        trust_remote_code=True,
         dtype="bfloat16",
         tensor_parallel_size=4,
         mm_encoder_tp_mode=encoder_mode,

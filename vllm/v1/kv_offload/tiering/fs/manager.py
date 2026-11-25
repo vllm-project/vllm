@@ -14,7 +14,6 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
               (hash-based subdirectories to limit directory fan-out)
 """
 
-import functools
 import json
 import os
 from collections.abc import Iterable
@@ -38,13 +37,13 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobResult,
-    RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
     TransferJob,
@@ -117,6 +116,7 @@ class FileSystemTierManager(SecondaryTierManager):
         enable_kv_events: bool = False,
         locality: str | None = None,
         backpressure_detector: BackpressureDetector | None = None,
+        access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
     ):
         """Args:
         offloading_spec: Contains normalized offloading configuration and
@@ -132,10 +132,17 @@ class FileSystemTierManager(SecondaryTierManager):
         locality: Whether this tier's storage is LOCAL or REMOTE relative
             to the publishing vLLM instance.
         backpressure_detector: Optional backpressure detector.
+        access_mode: `read` serves loads but never writes blocks, `write`
+            writes blocks but never serves loads, and `readwrite` (default)
+            does both.
 
         """
         super().__init__(
-            offloading_spec, primary_kv_view, tier_type, backpressure_detector
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+            backpressure_detector,
+            access_mode=access_mode,
         )
         self.locality = Locality(locality) if locality is not None else None
 
@@ -155,8 +162,6 @@ class FileSystemTierManager(SecondaryTierManager):
         # Keys of in-flight load (promotion) jobs, so a failed load can mark
         # its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
-        # Block count per in-flight job, used to report transfer_bytes.
-        self._job_block_counts: dict[JobId, int] = {}
         # Per load job: how many blocks loaded before a failure (partial keep).
         # Written by the pool worker inside the load task before it raises (so
         # before task_done publishes the job); read on the scheduler thread in
@@ -164,6 +169,10 @@ class FileSystemTierManager(SecondaryTierManager):
         # the GIL that read cannot observe the finished job without the prior
         # write, so no extra lock is needed (get_finished is itself lock-free).
         self._load_progress: dict[JobId, int] = {}
+        # Block count per in-flight job, used to report transfer_bytes. Loads
+        # count their keys; stores count the blocks actually written (set by
+        # the pool worker, same ordering as _load_progress).
+        self._job_block_counts: dict[JobId, int] = {}
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, (
@@ -179,18 +188,24 @@ class FileSystemTierManager(SecondaryTierManager):
             parallel_agnostic=True,
         )
 
-        # Write config file
         config_path = self.file_mapper.get_config_file_path()
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        if not os.path.exists(config_path):
-            with open(config_path, "w") as f:
-                json.dump(
-                    self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
-                )
+
+        # Write config file. A read-only tier must not write anything, and may
+        # be backed by a read-only mount (where even mkdir fails), so only a
+        # writable tier touches the directory or creates the file.
+        if self.access_mode.can_write:
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            if not os.path.exists(config_path):
+                with open(config_path, "w") as f:
+                    json.dump(
+                        self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
+                    )
 
         # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
         # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
         # rather than failing every block.
+        # This can result in a write as part of the probe even if we are in
+        # read only mode.
         self._use_o_direct = probe_o_direct(os.path.dirname(config_path))
         if not self._use_o_direct:
             logger.warning(
@@ -209,10 +224,6 @@ class FileSystemTierManager(SecondaryTierManager):
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
 
     @override
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        return RequestOffloadingContext()
-
-    @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         result = self._lookup_manager.lookup(key, req_context)
         if result is None:
@@ -221,18 +232,22 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
+        job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
-        self._store_jobs[job_metadata.job_id] = job_metadata
-        task = functools.partial(
-            batch_store_block,
-            [self.file_mapper.get_file_name(key) for key in keys],
-            self._primary_kv_view,
-            [int(cid) * self._block_size for cid in job_metadata.chunk_ids],
-            self._block_size,
-            self._use_o_direct,
-        )
-        self._job_block_counts[job_metadata.job_id] = len(keys)
-        self._pool.enqueue_store(job_metadata.job_id, 1, [task])
+        self._store_jobs[job_id] = job_metadata
+        paths = [self.file_mapper.get_file_name(key) for key in keys]
+        offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
+
+        def store_task() -> None:
+            self._job_block_counts[job_id] = batch_store_block(
+                paths,
+                self._primary_kv_view,
+                offsets,
+                self._block_size,
+                self._use_o_direct,
+            )
+
+        self._pool.enqueue_store(job_id, 1, [store_task])
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
@@ -280,8 +295,10 @@ class FileSystemTierManager(SecondaryTierManager):
         as a miss here (scheduler thread)."""
         results = []
         for job_id, success, transfer_time in self._pool.get_finished():
-            block_count = self._job_block_counts.pop(job_id, 0)
-            transfer_bytes = block_count * self._block_size if block_count else None
+            block_count = self._job_block_counts.pop(job_id, None)
+            transfer_bytes = (
+                block_count * self._block_size if block_count is not None else None
+            )
             job = self._store_jobs.pop(job_id, None)
             if job is not None and success:
                 # Successful store makes previously absent keys known-present.
