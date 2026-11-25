@@ -80,6 +80,7 @@ def test_sliding_window_spec_unifies_without_padding(primary_block_size):
         is_mla=lambda: False,
         customize_spec=lambda spec: spec,
         get_supported_kernel_block_sizes=lambda kv_cache_spec=None: [16, 32, 64],
+        get_supported_kernel_block_sizes_for_layers=lambda *_: [16, 32, 64],
     )
     layer = SimpleNamespace(
         attn_type=AttentionType.DECODER,
@@ -90,11 +91,14 @@ def test_sliding_window_spec_unifies_without_padding(primary_block_size):
         num_kv_heads=8,
         head_size=128,
         head_size_v=128,
+        layer_name="layer.0",
+        is_draft_layer=True,
     )
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=primary_block_size, skip_page_size_padded=None
-        )
+        ),
+        speculative_config=None,
     )
     sw_config = Attention.get_kv_cache_config(layer, vllm_config)
     assert sw_config is not None
@@ -169,6 +173,23 @@ def test_backend_per_kind_rejects_unknown_kind():
     backend_per_kind: dict[str, str] = {"not_a_kind": "TRITON_MLA"}
     with pytest.raises(ValueError, match="Unknown KV cache group kind"):
         AttentionConfig(backend_per_kind=backend_per_kind)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"backend": "TORCH_SDPA"},
+        {"backend": AttentionBackendEnum.TORCH_SDPA},
+        {"backend_per_kind": {"full_attention": "TORCH_SDPA"}},
+        {"backend_per_kind": {"full_attention": AttentionBackendEnum.TORCH_SDPA}},
+    ],
+)
+def test_decoder_backend_rejects_torch_sdpa(config):
+    with pytest.raises(
+        ValueError,
+        match="only supported for multi-modal encoder attention",
+    ):
+        AttentionConfig(**config)
 
 
 def test_backend_per_kind_defaults_empty():

@@ -8,15 +8,20 @@ from typing import Annotated, Literal, Protocol, TypeAlias, TypedDict
 import torch
 import torch.nn as nn
 from transformers import BatchFeature, LlavaOnevisionConfig, LlavaOnevisionProcessor
+from transformers.image_processing_utils import get_size_dict
+from transformers.image_transforms import get_size_with_aspect_ratio
+from transformers.image_utils import get_image_size_for_max_height_width
 from transformers.models.llava_onevision.modeling_llava_onevision import (
     get_anyres_image_grid_shape,
     unpad_image,
 )
+from transformers.video_utils import make_batched_metadata
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -29,6 +34,11 @@ from vllm.multimodal.parse import (
     VideoProcessorItems,
 )
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.multimodal.processing.context import (
+    estimate_video_pixel_element_size,
+    get_video_frame_dimensions,
+    validate_video_preprocessing_budget,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -125,6 +135,8 @@ class LlavaOnevisionInputsByModality(TypedDict, total=False):
 
 
 class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
+    default_mm_limits = {"video": 32}
+
     def get_hf_config(self) -> LlavaOnevisionLikeConfig:
         return self.ctx.get_hf_config(LlavaOnevisionConfig)
 
@@ -316,6 +328,22 @@ class LlavaOnevisionMultiModalProcessor(
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
+    @staticmethod
+    def _get_video_resize_shape(
+        height: int, width: int, size: Mapping[str, int]
+    ) -> tuple[int, int]:
+        if shortest_edge := size.get("shortest_edge"):
+            return get_size_with_aspect_ratio(
+                (height, width), shortest_edge, size.get("longest_edge")
+            )
+        if size.get("max_height") and size.get("max_width"):
+            return get_image_size_for_max_height_width(
+                (height, width), size["max_height"], size["max_width"]
+            )
+        if size.get("height") and size.get("width"):
+            return size["height"], size["width"]
+        raise ValueError(f"Invalid video resize size: {size}")
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
@@ -369,14 +397,75 @@ class LlavaOnevisionMultiModalProcessor(
             image_outputs = {}
 
         pixel_values_videos = []
+        video_tensor_bytes = 0
+        processor = self.info.get_hf_processor(**hf_kwargs)
+        video_processor = processor.video_processor
+        video_kwargs = self.info.ctx.get_hf_processor_kwargs(
+            processor, hf_kwargs, scope="videos_kwargs"
+        )
+        size = None
+        if video_kwargs.get("do_resize", video_processor.do_resize):
+            size = get_size_dict(
+                size=video_kwargs.get("size", video_processor.size),
+                default_to_square=video_kwargs.get(
+                    "default_to_square", video_processor.default_to_square
+                ),
+            )
+        crop_size = None
+        if video_kwargs.get("do_center_crop", video_processor.do_center_crop):
+            crop_size = get_size_dict(
+                video_kwargs.get("crop_size", video_processor.crop_size),
+                param_name="crop_size",
+            )
+            if "height" not in crop_size or "width" not in crop_size:
+                raise ValueError(f"Invalid video crop size: {crop_size}")
+
         for video in videos:
+            frame_count = len(video)
+            if video_kwargs.get("do_sample_frames", video_processor.do_sample_frames):
+                try:
+                    metadata = make_batched_metadata(
+                        [video], video_kwargs.get("video_metadata")
+                    )[0]
+                    frame_count = len(
+                        video_processor.sample_frames(
+                            metadata,
+                            num_frames=video_kwargs.get(
+                                "num_frames", video_processor.num_frames
+                            ),
+                            fps=video_kwargs.get("fps", video_processor.fps),
+                        )
+                    )
+                except (ArithmeticError, AttributeError, IndexError, TypeError) as exc:
+                    raise ValueError("Invalid video sampling settings.") from exc
+            height, width, channels = get_video_frame_dimensions(video)
+            if size is not None:
+                height, width = self._get_video_resize_shape(height, width, size)
+            if crop_size is not None:
+                height = max(height, crop_size["height"])
+                width = max(width, crop_size["width"])
+            estimated_bytes = (
+                frame_count
+                * height
+                * width
+                * channels
+                * estimate_video_pixel_element_size(
+                    video,
+                    video_processor,
+                    video_kwargs,
+                )
+            )
+            validate_video_preprocessing_budget(video_tensor_bytes + estimated_bytes)
             item_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**hf_kwargs),
+                processor,
                 dict(text=video_token, **{"videos": video}),
                 hf_kwargs,
             )
 
-            pixel_values_videos.append(item_outputs["pixel_values_videos"][0])
+            video_pixels = item_outputs["pixel_values_videos"][0]
+            video_tensor_bytes += video_pixels.untyped_storage().nbytes()
+            validate_video_preprocessing_budget(video_tensor_bytes)
+            pixel_values_videos.append(video_pixels)
 
         video_outputs = {"pixel_values_videos": pixel_values_videos}
 
@@ -462,6 +551,8 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
     dummy_inputs=LlavaOnevisionDummyInputsBuilder,
 )
 class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    supports_mm_device_do_normalize = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -492,6 +583,9 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         self.multimodal_config = multimodal_config
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.input_norm = build_mm_input_norm(
+                vllm_config.model_config, layout="bchw"
+            )
             # Initialize the vision tower only up to the required feature layer
             self.vision_tower = init_vision_tower_for_llava(
                 config,
@@ -599,7 +693,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
         return vision_tower(
-            pixel_values,
+            self.input_norm(pixel_values, vision_tower.dtype),
             feature_select_strategy=self.config.vision_feature_select_strategy,
         )
 
@@ -779,7 +873,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
         video_features = vision_tower(
-            pixel_values,
+            self.input_norm(pixel_values, vision_tower.dtype),
             feature_select_strategy=self.config.vision_feature_select_strategy,
         )
         video_features = self.multi_modal_projector(video_features)
@@ -813,15 +907,15 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             self.vision_tower, video_pixels_flat
         )
 
-        image_newline = self.image_newline[None, None, :]
+        image_newline = self.image_newline[None, :]
 
         return [
             torch.cat(
                 (
-                    embeds.reshape(1, num_frame * embeddings_flat.shape[1], -1),
+                    embeds.reshape(num_frame * embeddings_flat.shape[1], -1),
                     image_newline,
                 ),
-                dim=1,
+                dim=0,
             )
             for num_frame, embeds in zip(
                 frames_per_video,
