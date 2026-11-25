@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Mamba conv-state sub-projection decomposition for NIXL transfer.
+"""Mamba conv-state sub-projection decomposition for KV transfer.
 
 With DS conv state layout (dim, state_len), sub-projections are
 contiguous in memory.  Each D rank reads its slices via separate
 RDMA transfers — no P-side permutation needed.
 
 Supported model types:
-  - Mamba1: conv = [x], temporal = (intermediate_size, state_size)
   - Mamba2: conv = [x, B, C], temporal = (num_heads, head_dim)
   - GDN (Gated Delta Net): conv = [Q, K, V] (dim(Q)==dim(K)),
     temporal = (num_v_heads, v_dim, k_dim)
@@ -23,22 +22,20 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MambaConvSplitInfo:
     """Per-rank byte sizes of the conv sub-projections.
 
-    Used by both P and D sides for NIXL descriptor registration.
+    Used to build TP-aware transfer descriptors.
     All fields are LOCAL to this engine's TP (already divided by TP size).
 
     DS memory layout within one page (contiguous):
-      Mamba1: |---- x ----|  (single sub-projection, no decomposition)
       Mamba2: |-- x --|- B -|- C -|  (B == C)
       GDN:    |- Q -|- K -|-- V --|  (dim(Q)==dim(K), V may differ)
     """
 
     conv_rows: int  # conv_kernel - 1 (typically 3)
-    # Per-rank column counts per sub-projection:
-    # 1 entry for Mamba1, 3 for Mamba2/GDN.
+    # Per-rank column counts per sub-projection (x, B, C or Q, K, V).
     local_proj_dims: tuple[int, ...]
     conv_dtype_size: int  # bytes per element (e.g. 2 for float16)
     ssm_sizes: tuple[int, int]  # (conv_state_bytes, ssm_state_bytes)
@@ -83,6 +80,7 @@ class MambaConvSplitInfo:
                 < 0:   P_TP > D_TP — P pages are smaller, D reads entire
                        P page.  Local dims are scaled down by |tp_ratio|
                        to get P-sized offsets.
+
         """
         offsets: list[tuple[int, int]] = []
         if tp_ratio >= 1:
@@ -106,6 +104,8 @@ class MambaConvSplitInfo:
 def derive_mamba_conv_split(
     mamba_spec: MambaSpec,
     local_tp: int,
+    *,
+    require_dim_first: bool = True,
 ) -> MambaConvSplitInfo:
     """Derive per-rank sub-projection byte sizes from a MambaSpec.
 
@@ -114,33 +114,36 @@ def derive_mamba_conv_split(
 
     Args:
         mamba_spec: MambaSpec whose shapes are:
-            shapes[0] = conv state: (conv_dim_local, conv_rows) in DS layout.
+            shapes[0] = conv state in the configured DS or SD layout.
             shapes[1] = temporal state (model-specific shape).
         local_tp: this engine's tensor-parallel size.
+        require_dim_first: Require the DS layout used by NIXL 3-read transfer.
 
     Returns:
         MambaConvSplitInfo with per-rank sub-projection dims, conv_rows,
         conv_dtype_size, and ssm_sizes (conv_state_bytes, ssm_state_bytes).
+
     """
     _supported = (
-        MambaAttentionBackendEnum.MAMBA1,
         MambaAttentionBackendEnum.MAMBA2,
         MambaAttentionBackendEnum.GDN_ATTN,
     )
     if mamba_spec.mamba_type not in _supported:
         raise NotImplementedError(
-            f"Conv transfer only supports Mamba1, Mamba2 and GDN models, "
+            f"Conv transfer only supports Mamba2 and GDN models, "
             f"got mamba_type={mamba_spec.mamba_type!r}."
         )
 
     conv_shape = mamba_spec.shapes[0]
     assert len(conv_shape) == 2, f"Expected 2D conv state shape, got {conv_shape}"
 
-    # NOTE (ZhanqiuHu): 3-read requires DS layout, which is already asserted
-    # in nixl worker __init__.  Use it directly instead of heuristic detection.
-    assert is_conv_state_dim_first(), "3-read requires DS conv state layout"
-    local_conv_dim = conv_shape[0]  # DS: (conv_dim_local, conv_rows)
-    conv_rows = conv_shape[1]
+    dim_first = is_conv_state_dim_first()
+    if require_dim_first:
+        assert dim_first, "3-read requires DS conv state layout"
+    if dim_first:
+        local_conv_dim, conv_rows = conv_shape
+    else:
+        conv_rows, local_conv_dim = conv_shape
 
     conv_dtype_size = torch.tensor(
         [],
@@ -154,17 +157,7 @@ def derive_mamba_conv_split(
     ssm_state_bytes = torch.Size(mamba_spec.shapes[1]).numel() * ssm_dtype_size
 
     local_proj_dims: tuple[int, ...]
-    if mamba_spec.mamba_type == MambaAttentionBackendEnum.MAMBA1:
-        # Mamba1 conv state holds only x (no B/C), so it's a single
-        # contiguous TP shard with no sub-projection decomposition.
-        temporal_shape = mamba_spec.shapes[1]
-        assert temporal_shape[0] == local_conv_dim, (
-            f"Mamba1 temporal state dim ({temporal_shape[0]}) doesn't match "
-            f"conv dim ({local_conv_dim}); both should be "
-            f"intermediate_size/TP."
-        )
-        local_proj_dims = (local_conv_dim,)
-    elif mamba_spec.mamba_type == MambaAttentionBackendEnum.MAMBA2:
+    if mamba_spec.mamba_type == MambaAttentionBackendEnum.MAMBA2:
         # NOTE (ZhanqiuHu): intermediate_size (= global x dim) is not stored
         # in MambaSpec, so we reconstruct it from the SSM temporal state shape:
         #   shapes[1] = (local_num_heads, head_dim), already divided by TP.
@@ -228,5 +221,6 @@ def compute_physical_blocks_per_logical(
     Args:
         ssm_sizes: (conv_state_bytes, ssm_state_bytes) from NixlAgentMetadata.
         block_len: the engine's block_len in bytes (from block_lens[0]).
+
     """
     return math.ceil((ssm_sizes[0] + ssm_sizes[1]) / block_len)

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-FileSystemTierManager: Pure-Python file system secondary tier for KV cache offloading.
+"""FileSystemTierManager: pure-Python filesystem tier for KV cache offloading.
 
 Store path:
     Data is written to a temp file (<dest_path.tmp>) via os.write,
@@ -15,7 +14,6 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
               (hash-based subdirectories to limit directory fan-out)
 """
 
-import functools
 import json
 import os
 from collections.abc import Iterable
@@ -39,15 +37,16 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
+from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
-    JobMetadata,
     JobResult,
-    RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
+    TransferJob,
 )
 from vllm.v1.kv_offload.tiering.fs.io import (
     batch_load_block,
@@ -84,8 +83,7 @@ class FsAsyncLookupManager(AsyncLookupManager):
 
 
 class FileSystemTierManager(SecondaryTierManager):
-    """
-    Pure-Python disk-backed secondary tier.
+    """Pure-Python disk-backed secondary tier.
 
     Read-priority threads service load jobs preferentially; write-priority
     threads service store jobs preferentially.  Both groups can drain either
@@ -95,13 +93,14 @@ class FileSystemTierManager(SecondaryTierManager):
     get_finished_jobs() polls job completion and returns completed JobResults.
 
     Cross-process sharing:
-        In order to enable KV cache sharing between multiple vLLM instances
-        using the same ``root_dir`` (e.g., via a shared PVC) the environment
-        variable ``PYTHONHASHSEED`` must be set to the same fixed value
-        (e.g., "0") on all instances. Without this, each process initializes
-        ``NONE_HASH`` (the chain-hash seed for block content hashes) with
-        random bytes, producing different block filenames for identical token
-        content.
+        KV cache sharing between multiple vLLM instances using the same
+        `root_dir` (e.g., via a shared PVC) works by default: `NONE_HASH`
+        (the chain-hash seed for block content hashes) is derived from a fixed
+        default seed, so identical token content produces identical block
+        filenames across instances. Setting the `PYTHONHASHSEED` environment
+        variable to the same value on all instances overrides the default seed,
+        and is required to share a cache when using a non-cryptographic
+        prefix-caching hash algorithm, which seeds `NONE_HASH` randomly.
     """
 
     medium: ClassVar[Medium] = Medium.STORAGE
@@ -116,23 +115,35 @@ class FileSystemTierManager(SecondaryTierManager):
         n_write_threads: int = 16,
         enable_kv_events: bool = False,
         locality: str | None = None,
+        backpressure_detector: BackpressureDetector | None = None,
+        access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
     ):
+        """Args:
+        offloading_spec: Contains normalized offloading configuration and
+            blocks_per_chunk.
+        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+        tier_type: Tier type identifier, set by SecondaryTierFactory.
+        root_dir: Root directory for block files.
+        n_read_threads: Number of read-priority I/O threads.
+        n_write_threads: Number of write-priority I/O threads.
+        enable_kv_events: Emit BlockStored KV events for blocks
+            successfully stored to this tier. Effective only when KV
+            cache events are enabled globally (kv_events_config).
+        locality: Whether this tier's storage is LOCAL or REMOTE relative
+            to the publishing vLLM instance.
+        backpressure_detector: Optional backpressure detector.
+        access_mode: `read` serves loads but never writes blocks, `write`
+            writes blocks but never serves loads, and `readwrite` (default)
+            does both.
+
         """
-        Args:
-            offloading_spec: Contains normalized offloading configuration and
-                blocks_per_chunk.
-            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
-            tier_type: Tier type identifier, set by SecondaryTierFactory.
-            root_dir: Root directory for block files.
-            n_read_threads: Number of read-priority I/O threads.
-            n_write_threads: Number of write-priority I/O threads.
-            enable_kv_events: Emit BlockStored KV events for blocks
-                successfully stored to this tier. Effective only when KV
-                cache events are enabled globally (kv_events_config).
-            locality: Whether this tier's storage is LOCAL or REMOTE relative
-                to the publishing vLLM instance.
-        """
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        super().__init__(
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+            backpressure_detector,
+            access_mode=access_mode,
+        )
         self.locality = Locality(locality) if locality is not None else None
 
         self.events: list[OffloadingEvent] | None = None
@@ -146,8 +157,22 @@ class FileSystemTierManager(SecondaryTierManager):
                     "emit events.",
                     tier_type,
                 )
-        # Keys of in-flight store jobs, tracked only when events are enabled.
-        self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        # Track in-flight store jobs for lookup invalidation and KV events.
+        self._store_jobs: dict[JobId, TransferJob] = {}
+        # Keys of in-flight load (promotion) jobs, so a failed load can mark
+        # its own cached lookup verdicts False (see get_finished_jobs).
+        self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
+        # Per load job: how many blocks loaded before a failure (partial keep).
+        # Written by the pool worker inside the load task before it raises (so
+        # before task_done publishes the job); read on the scheduler thread in
+        # get_finished_jobs only for job ids the finished queue returned. Under
+        # the GIL that read cannot observe the finished job without the prior
+        # write, so no extra lock is needed (get_finished is itself lock-free).
+        self._load_progress: dict[JobId, int] = {}
+        # Block count per in-flight job, used to report transfer_bytes. Loads
+        # count their keys; stores count the blocks actually written (set by
+        # the pool worker, same ordering as _load_progress).
+        self._job_block_counts: dict[JobId, int] = {}
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, (
@@ -163,18 +188,24 @@ class FileSystemTierManager(SecondaryTierManager):
             parallel_agnostic=True,
         )
 
-        # Write config file
         config_path = self.file_mapper.get_config_file_path()
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        if not os.path.exists(config_path):
-            with open(config_path, "w") as f:
-                json.dump(
-                    self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
-                )
+
+        # Write config file. A read-only tier must not write anything, and may
+        # be backed by a read-only mount (where even mkdir fails), so only a
+        # writable tier touches the directory or creates the file.
+        if self.access_mode.can_write:
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            if not os.path.exists(config_path):
+                with open(config_path, "w") as f:
+                    json.dump(
+                        self.file_mapper.get_run_config(), f, indent=2, sort_keys=True
+                    )
 
         # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
         # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
         # rather than failing every block.
+        # This can result in a write as part of the probe even if we are in
+        # read only mode.
         self._use_o_direct = probe_o_direct(os.path.dirname(config_path))
         if not self._use_o_direct:
             logger.warning(
@@ -193,10 +224,6 @@ class FileSystemTierManager(SecondaryTierManager):
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
 
     @override
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        return RequestOffloadingContext()
-
-    @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         result = self._lookup_manager.lookup(key, req_context)
         if result is None:
@@ -204,51 +231,116 @@ class FileSystemTierManager(SecondaryTierManager):
         return LookupResult.HIT if result else LookupResult.MISS
 
     @override
-    def submit_store(self, job_metadata: JobMetadata) -> None:
-        if self.events is not None:
-            self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
-        task = functools.partial(
-            batch_store_block,
-            [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
-            self._primary_kv_view,
-            [int(bid) * self._block_size for bid in job_metadata.block_ids],
-            self._block_size,
-            self._use_o_direct,
-        )
-        self._pool.enqueue_store(job_metadata.job_id, 1, [task])
+    def submit_store(self, job_metadata: TransferJob) -> None:
+        job_id = job_metadata.job_id
+        keys = list(job_metadata.keys)
+        self._store_jobs[job_id] = job_metadata
+        paths = [self.file_mapper.get_file_name(key) for key in keys]
+        offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
+
+        def store_task() -> None:
+            self._job_block_counts[job_id] = batch_store_block(
+                paths,
+                self._primary_kv_view,
+                offsets,
+                self._block_size,
+                self._use_o_direct,
+            )
+
+        self._pool.enqueue_store(job_id, 1, [store_task])
 
     @override
-    def submit_load(self, job_metadata: JobMetadata) -> None:
-        task = functools.partial(
-            batch_load_block,
-            [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
-            self._primary_kv_view,
-            [int(bid) * self._block_size for bid in job_metadata.block_ids],
-            self._block_size,
-            self._use_o_direct,
-        )
+    def submit_load(self, job_metadata: TransferJob) -> None:
+        job_id = job_metadata.job_id
+        # Track this load's keys so a failed promotion can mark only its failed
+        # keys as a miss (see get_finished_jobs).
+        keys = list(job_metadata.keys)
+        self._load_job_keys[job_id] = keys
+        self._job_block_counts[job_id] = len(keys)
+        paths = [self.file_mapper.get_file_name(key) for key in keys]
+        offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
 
-        self._pool.enqueue_load(job_metadata.job_id, 1, [task])
+        def load_task() -> None:
+            try:
+                batch_load_block(
+                    paths,
+                    self._primary_kv_view,
+                    offsets,
+                    self._block_size,
+                    self._use_o_direct,
+                )
+            except OSError as exc:
+                # Runs on the pool worker thread. Record how many blocks loaded
+                # before the failure so get_finished_jobs can keep them; this
+                # write precedes task_done, so the scheduler reads it safely
+                # under the GIL once the finished queue hands back this job.
+                num_succeeded = getattr(exc, "num_succeeded", 0)
+                self._load_progress[job_id] = num_succeeded
+                # Surfaces errno (e.g. EMFILE "Too many open files") for both
+                # the C and Python load paths.
+                logger.debug(
+                    "Load of %d blocks for job %s failed at block %d: %s",
+                    len(paths),
+                    job_id,
+                    num_succeeded,
+                    exc,
+                )
+                raise
+
+        self._pool.enqueue_load(job_id, 1, [load_task])
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        """
-        Collect completed jobs from the finished-jobs queue.
-        """
+        """Collect finished jobs; a failed promotion marks only its failed keys
+        as a miss here (scheduler thread)."""
         results = []
-        for job_id, success in self._pool.get_finished():
-            if self.events is not None:
-                keys = self._store_job_keys.pop(job_id, None)
-                if success and keys:
+        for job_id, success, transfer_time in self._pool.get_finished():
+            block_count = self._job_block_counts.pop(job_id, None)
+            transfer_bytes = (
+                block_count * self._block_size if block_count is not None else None
+            )
+            job = self._store_jobs.pop(job_id, None)
+            if job is not None and success:
+                # Successful store makes previously absent keys known-present.
+                self._lookup_manager.mark_present(job.keys)
+                if self.events is not None and job.keys:
                     self.events.append(
                         OffloadingEvent(
-                            keys=keys,
+                            keys=list(job.keys),
                             medium=self.medium,
                             removed=False,
                             locality=self.locality,
+                            req_context=job.req_context,
                         )
                     )
-            results.append(JobResult(job_id=job_id, success=success))
+            load_keys = self._load_job_keys.pop(job_id, None)
+            num_succeeded = self._load_progress.pop(job_id, 0)
+            if load_keys is not None and not success:
+                # A batched load stops at the first bad block and reports how
+                # many loaded before it. Those earlier blocks are kept in the
+                # primary tier (reported via successful_keys); only this block
+                # and the ones after it are marked a miss and recomputed.
+                successful = load_keys[:num_succeeded]
+                failed = load_keys[num_succeeded:]
+                self._lookup_manager.mark_miss(failed)
+                results.append(
+                    JobResult(
+                        job_id=job_id,
+                        success=False,
+                        successful_keys=tuple(successful) if successful else None,
+                        transfer_time=transfer_time,
+                        transfer_bytes=transfer_bytes,
+                    )
+                )
+                continue
+            results.append(
+                JobResult(
+                    job_id=job_id,
+                    success=success,
+                    transfer_time=transfer_time,
+                    transfer_bytes=transfer_bytes,
+                )
+            )
         return results
 
     @override
@@ -271,8 +363,7 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def shutdown(self) -> None:
-        """
-        Release resources held by this tier.
+        """Release resources held by this tier.
 
         Shuts down the lookup manager and the thread pool,
         clearing pending tasks and waiting for active threads to complete.

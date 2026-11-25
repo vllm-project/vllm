@@ -7,7 +7,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["indices_ptr"])
 def _gather_initial_states_kernel(
     state_ptr,
     indices_ptr,
@@ -49,7 +49,7 @@ def gather_initial_states(
 ) -> torch.Tensor:
     """Gather dense state rows, replacing uninitialized rows with zeros."""
     assert state.ndim >= 2
-    assert state.is_cuda
+    assert state.is_cuda or state.is_xpu
     assert indices.ndim == 1 and has_initial_state.ndim == 1
     assert indices.shape == has_initial_state.shape
     assert indices.device == state.device

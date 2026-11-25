@@ -5,9 +5,13 @@ from collections.abc import Sequence
 from typing import Any
 
 import pytest
-from transformers import AutoModelForSpeechSeq2Seq
+import torch
+from transformers import AutoModelForSpeechSeq2Seq, AutoTokenizer
 
+from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
+from vllm.config.speech_to_text import SpeechToTextConfig, SpeechToTextParams
+from vllm.model_executor.models.whisper import WhisperForConditionalGeneration
 from vllm.multimodal.audio import AudioResampler
 from vllm.platforms import current_platform
 
@@ -20,6 +24,7 @@ VLLM_PROMPT = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
 HF_PROMPT = ""
 # Whisper expects 16kHz audio
 WHISPER_SAMPLE_RATE = 16000
+BEAM_WIDTHS = (1, 2)
 
 
 @pytest.fixture(autouse=True)
@@ -125,22 +130,60 @@ def check_model_available(model: str) -> None:
     model_info.check_transformers_version(on_fail="skip")
 
 
+@pytest.mark.core_model
+def test_audio_tensor_inputs(vllm_runner: type[VllmRunner]) -> None:
+    audio, sample_rate = AudioAsset("mary_had_lamb").audio_and_sample_rate
+    if sample_rate != WHISPER_SAMPLE_RATE:
+        audio = AudioResampler(target_sr=WHISPER_SAMPLE_RATE).resample(
+            audio, orig_sr=sample_rate
+        )
+
+    with vllm_runner(
+        "openai/whisper-tiny",
+        dtype="half",
+        max_model_len=448,
+        max_num_batched_tokens=2048,
+        max_num_seqs=1,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        mm_processor_cache_gb=0,
+    ) as vllm_model:
+        reference = vllm_model.generate_greedy_logprobs(
+            [VLLM_PROMPT], 16, num_logprobs=5, audios=[audio]
+        )
+        assert reference[0][0]
+
+        audio_tensor = torch.as_tensor(audio)
+        audio_cases = {
+            "CPU with gradients": audio_tensor.requires_grad_(True),
+            "CUDA": audio_tensor.detach().to("cuda"),
+            "CUDA with gradients": audio_tensor.detach()
+            .to("cuda")
+            .requires_grad_(True),
+        }
+        for name, tensor in audio_cases.items():
+            result = vllm_model.generate_greedy_logprobs(
+                [VLLM_PROMPT], 16, num_logprobs=5, audios=[tensor]
+            )
+            assert result[0][0]
+            check_logprobs_close(
+                outputs_0_lst=reference,
+                outputs_1_lst=result,
+                name_0="NumPy",
+                name_1=name,
+            )
+
+
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [64])
-@pytest.mark.parametrize("beam_width", [1, 2])
 def test_beam_search_encoder_decoder(
-    monkeypatch,
     hf_runner,
     vllm_runner,
     dtype: str,
     max_tokens: int,
-    beam_width: int,
     resampled_assets,
 ) -> None:
     """Test beam search with encoder-decoder models (Whisper)."""
-    if current_platform.is_rocm():
-        monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
-
     model = "openai/whisper-large-v3-turbo"
     check_model_available(model)
 
@@ -150,12 +193,15 @@ def test_beam_search_encoder_decoder(
     ]
 
     with hf_runner(model, dtype=dtype, auto_cls=AutoModelForSpeechSeq2Seq) as hf_model:
-        hf_outputs = hf_model.generate_beam_search(
-            hf_prompts,
-            beam_width=beam_width,
-            max_tokens=max_tokens,
-            audios=resampled_assets,
-        )
+        hf_outputs_by_beam_width = [
+            hf_model.generate_beam_search(
+                hf_prompts,
+                beam_width=beam_width,
+                max_tokens=max_tokens,
+                audios=resampled_assets,
+            )
+            for beam_width in BEAM_WIDTHS
+        ]
 
     # Test both explicit encoder/decoder prompts
     vllm_prompts = [
@@ -183,38 +229,46 @@ def test_beam_search_encoder_decoder(
         limit_mm_per_prompt={"audio": 2},
         enforce_eager=True,
     ) as vllm_model:
-        vllm_outputs = vllm_model.generate_beam_search(
-            vllm_prompts,
-            beam_width=beam_width,
-            max_tokens=max_tokens,
-        )
-
-    for i in range(len(vllm_prompts)):
-        hf_output_ids, hf_output_texts = hf_outputs[i]
-        vllm_output_ids, vllm_output_texts = vllm_outputs[i]
-
-        for j, (hf_text, vllm_text) in enumerate(
-            zip(hf_output_texts, vllm_output_texts)
-        ):
-            print(f">>>{j}-th hf output [NOTE: special tokens are filtered]:")
-            print(hf_text)
-            print(f">>>{j}-th vllm output:")
-            print(vllm_text)
-
-        # Check that we got the same number of beams
-        assert len(hf_output_ids) == len(vllm_output_ids)
-
-        # For encoder-decoder models, we primarily want to verify that:
-        # 1. Beam search completes without errors
-        # 2. We get the expected number of beams
-        # 3. Outputs are reasonable (non-empty, diverse beams)
-        for j in range(len(vllm_output_ids)):
-            # Check that outputs are not empty
-            assert len(vllm_output_ids[j]) > 0, f"Prompt {i}, beam {j}: empty output"
-            # Check that decoded text is not empty
-            assert len(vllm_output_texts[j].strip()) > 0, (
-                f"Prompt {i}, beam {j}: empty text output"
+        vllm_outputs_by_beam_width = [
+            vllm_model.generate_beam_search(
+                vllm_prompts,
+                beam_width=beam_width,
+                max_tokens=max_tokens,
             )
+            for beam_width in BEAM_WIDTHS
+        ]
+
+    for beam_width, hf_outputs, vllm_outputs in zip(
+        BEAM_WIDTHS, hf_outputs_by_beam_width, vllm_outputs_by_beam_width
+    ):
+        for i in range(len(vllm_prompts)):
+            hf_output_ids, hf_output_texts = hf_outputs[i]
+            vllm_output_ids, vllm_output_texts = vllm_outputs[i]
+
+            for j, (hf_text, vllm_text) in enumerate(
+                zip(hf_output_texts, vllm_output_texts)
+            ):
+                print(f">>>{j}-th hf output [NOTE: special tokens are filtered]:")
+                print(hf_text)
+                print(f">>>{j}-th vllm output:")
+                print(vllm_text)
+
+            # Check that we got the same number of beams
+            assert len(hf_output_ids) == len(vllm_output_ids) == beam_width
+
+            # For encoder-decoder models, we primarily want to verify that:
+            # 1. Beam search completes without errors
+            # 2. We get the expected number of beams
+            # 3. Outputs are reasonable (non-empty, diverse beams)
+            for j in range(len(vllm_output_ids)):
+                # Check that outputs are not empty
+                assert len(vllm_output_ids[j]) > 0, (
+                    f"Prompt {i}, beam {j}: empty output"
+                )
+                # Check that decoded text is not empty
+                assert len(vllm_output_texts[j].strip()) > 0, (
+                    f"Prompt {i}, beam {j}: empty text output"
+                )
 
 
 def test_parse_language_detection_output():
@@ -256,6 +310,49 @@ def test_parse_language_detection_output():
     # Empty token_ids
     with pytest.raises((AssertionError, IndexError)):
         cls.parse_language_detection_output([], make_tokenizer("anything"))
+
+
+def test_create_fake_bias_for_k_proj_injects_out_features():
+    """Packed k_proj weights get a zeros bias of length `out_features`."""
+    from vllm.model_executor.models.whisper import _create_fake_bias_for_k_proj
+
+    packed = torch.ones(2, 16)
+    result = dict(
+        _create_fake_bias_for_k_proj(
+            [("model.encoder.layers.0.self_attn.k_proj.weight_packed", packed)],
+            ".k_proj.weight_packed",
+            out_features=8,
+        )
+    )
+    bias_name = "model.encoder.layers.0.self_attn.k_proj.bias"
+    assert bias_name in result
+    assert "model.encoder.layers.0.self_attn.k_proj.bias_packed" not in result
+    assert tuple(result[bias_name].shape) == (8,)
+    assert torch.equal(result[bias_name], torch.zeros(8))
+
+
+def test_create_fake_bias_for_k_proj_forwards_real_bias():
+    """A checkpoint bias is forwarded and no extra fake bias is emitted."""
+    from vllm.model_executor.models.whisper import _create_fake_bias_for_k_proj
+
+    weight = torch.ones(8, 16)
+    real_bias = torch.ones(8)
+    items = list(
+        _create_fake_bias_for_k_proj(
+            [
+                ("layers.0.self_attn.k_proj.weight", weight),
+                ("layers.0.self_attn.k_proj.bias", real_bias),
+            ],
+            ".k_proj.weight",
+            out_features=8,
+        )
+    )
+    names = [n for n, _ in items]
+    assert names == [
+        "layers.0.self_attn.k_proj.weight",
+        "layers.0.self_attn.k_proj.bias",
+    ]
+    assert items[1][1] is real_bias
 
 
 @pytest.mark.core_model
@@ -366,3 +463,56 @@ def test_encoder_cache_cleanup(
             f"but has {cache_size} entries. This indicates encoder cache "
             f"entries are not being properly freed."
         )
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
+def test_decoder_prompt_layout(
+    vllm_runner,
+    model: str,
+    resampled_assets,
+) -> None:
+    """A transcription prompt must reach the decoder in the reference layout,
+    `get_prompt_ids(prompt)` followed by the SOT sequence, with no extra
+    decoder start token in front. Any other decoder prompt still gets
+    `<|startoftranscript|>` prepended when it lacks it."""
+    check_model_available(model)
+    request_prompt = "Hello. See you on Wednesday."
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    sot_sequence = tokenizer.encode(VLLM_PROMPT, add_special_tokens=False)
+    encoder_prompt = {
+        "prompt": "",
+        "multi_modal_data": {"audio": resampled_assets[0]},
+    }
+
+    with vllm_runner(
+        model, dtype="half", max_model_len=448, enforce_eager=True
+    ) as vllm_model:
+        llm = vllm_model.llm
+        prompts = [
+            WhisperForConditionalGeneration.get_generation_prompt(
+                SpeechToTextParams(
+                    audio=resampled_assets[0][0],
+                    stt_config=SpeechToTextConfig(),
+                    model_config=llm.model_config,
+                    language="en",
+                    task_type="transcribe",
+                    request_prompt=request_prompt,
+                )
+            ),
+            {
+                "encoder_prompt": encoder_prompt,
+                "decoder_prompt": {"prompt_token_ids": []},
+            },
+            {
+                "encoder_prompt": encoder_prompt,
+                "decoder_prompt": "<|en|><|transcribe|><|notimestamps|>",
+            },
+        ]
+        outputs = llm.generate(prompts, SamplingParams(temperature=0, max_tokens=1))
+
+    assert [output.prompt_token_ids for output in outputs] == [
+        tokenizer.get_prompt_ids(request_prompt).tolist() + sot_sequence,
+        sot_sequence[:1],
+        sot_sequence,
+    ]

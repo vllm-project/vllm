@@ -19,8 +19,10 @@ educe.workspace = true
 itertools.workspace = true
 mimalloc.workspace = true
 native-tls-vendored = { workspace = true, optional = true }
+rlimit.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_path_to_error.workspace = true
 serde_with.workspace = true
 thiserror-ext.workspace = true
 tokio = { workspace = true, features = ["signal"] }
@@ -28,14 +30,17 @@ tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 vllm-bench.workspace = true
+vllm-build-info.workspace = true
 vllm-chat.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-managed-engine.workspace = true
 vllm-server.workspace = true
+vllm-text.workspace = true
 vllm-tracing.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

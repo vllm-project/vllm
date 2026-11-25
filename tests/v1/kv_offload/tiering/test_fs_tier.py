@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for FileSystemTierManager.
+"""Unit tests for FileSystemTierManager.
 
 These tests use real disk I/O to verify the filesystem tier implementation.
 The tier manager writes KV cache blocks to disk and reads them back, verifying
 data integrity throughout the process.
 """
 
+import errno
 import mmap
 import os
+import signal
 import threading
 import time
 from unittest.mock import MagicMock
@@ -27,6 +28,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
     ScheduleEndContext,
+    StoreTrigger,
     make_offload_key,
 )
 from vllm.v1.kv_offload.config import (
@@ -35,7 +37,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import JobMetadata
+from vllm.v1.kv_offload.tiering.base import TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
@@ -76,11 +78,14 @@ def _make_offloading_spec(
         parallel=OffloadingParallelConfig(
             rank=rank,
             world_size=world_size,
+            local_world_size=world_size,
             tp_size=tp_size,
             pp_size=1,
             pcp_size=1,
             dcp_size=1,
             data_parallel_index=0,
+            data_parallel_size=1,
+            data_parallel_rank_local=None,
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
@@ -103,15 +108,15 @@ def key(n: int) -> OffloadKey:
 def make_job(
     job_id: int,
     keys: list[OffloadKey],
-    block_ids: list[int] | None = None,
+    chunk_ids: list[int] | None = None,
     is_promotion: bool = False,
-) -> JobMetadata:
-    if block_ids is None:
-        block_ids = list(range(len(keys)))
-    return JobMetadata(
+) -> TransferJob:
+    if chunk_ids is None:
+        chunk_ids = list(range(len(keys)))
+    return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids, dtype=np.int64),
+        chunk_ids=np.array(chunk_ids, dtype=np.int64),
         is_promotion=is_promotion,
         req_context=_CTX,
     )
@@ -229,6 +234,66 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
     assert os.path.exists(dest), f"Expected file at {dest}"
 
 
+def test_store_marks_a_cached_miss_present(fs_tier):
+    tier, _ = fs_tier
+    block_key = key(1)
+    assert lookup_and_wait(tier, [block_key]) == [LookupResult.MISS]
+
+    tier.submit_store(make_job(1, [block_key], [0]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert lookup_and_wait(tier, [block_key]) == [LookupResult.HIT]
+
+
+def test_store_accepts_block_published_by_another_writer(fs_tier, monkeypatch):
+    """Losing the race to publish a block must not fail the store job.
+
+    Another engine instance sharing the same root_dir can publish the block
+    between the existence check and the rename, and some shared filesystems
+    report that as EEXIST instead of replacing. Block file names are content
+    hashes, so the file already in place holds the same data and the job has
+    nothing left to do.
+    """
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    # Python path only: EEXIST cannot be injected into the C extension.
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", False)
+    tier, tensor = fs_tier
+    dest = tier.file_mapper.get_file_name(key(1))
+
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    with open(dest, "rb") as f:
+        published = f.read()
+
+    real_exists = os.path.exists
+    real_replace = os.replace
+
+    def racing_replace(src: str, dst: str) -> None:
+        if dst == dest:
+            raise FileExistsError(errno.EEXIST, "File exists", dst)
+        real_replace(src, dst)
+
+    # Hide the published block from the check, then lose the rename to it.
+    monkeypatch.setattr(
+        io_mod.os.path, "exists", lambda p: False if p == dest else real_exists(p)
+    )
+    monkeypatch.setattr(io_mod.os, "replace", racing_replace)
+
+    # Distinct bytes, so the comparison below fails if the loser overwrites.
+    tensor[1] = 1.0
+    tier.submit_store(make_job(2, [key(1)], [1]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    # The bytes were written before the rename lost, so they count.
+    assert results[0].transfer_bytes == tier._block_size
+    assert os.listdir(os.path.dirname(dest)) == [os.path.basename(dest)]
+    with open(dest, "rb") as f:
+        assert f.read() == published
+
+
 def test_store_then_load_roundtrip(fs_tier):
     tier, _ = fs_tier
     job_s = make_job(1, [key(1), key(2)], [0, 1])
@@ -245,6 +310,11 @@ def test_store_then_load_roundtrip(fs_tier):
     tier.submit_load(job_l)
     load_results = drain(tier)
     assert all(r.success for r in load_results)
+    # A successful load must NOT touch the file: the delete path fires only on
+    # a provable short read, so a good block stays on disk (guards against an
+    # over-eager delete regressing to upstream's delete-on-any-error).
+    for k in (key(1), key(2)):
+        assert os.path.exists(tier.file_mapper.get_file_name(k))
     # Blocks stay on disk after load
     assert lookup_and_wait(tier, [key(1), key(2)]) == [
         LookupResult.HIT,
@@ -298,6 +368,137 @@ def test_factory_forwards_locality_to_fs_tier(tmp_path):
         assert tier.locality is Locality.LOCAL
     finally:
         tier.shutdown()
+
+
+@pytest.mark.parametrize(
+    "access_mode, can_read, can_write",
+    [
+        (None, True, True),
+        ("readwrite", True, True),
+        ("read", True, False),
+        ("write", False, True),
+        # The configured value is parsed, so case and padding are accepted.
+        (" READ ", True, False),
+    ],
+)
+def test_access_mode_sets_can_read_and_can_write(
+    tmp_path, access_mode, can_read, can_write
+):
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    kwargs = {} if access_mode is None else {"access_mode": access_mode}
+    tier = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(tensor.numpy()),
+        tier_type="fs",
+        root_dir=str(tmp_path),
+        n_read_threads=1,
+        n_write_threads=1,
+        **kwargs,
+    )
+    try:
+        assert tier.access_mode.can_read is can_read
+        assert tier.access_mode.can_write is can_write
+    finally:
+        tier.shutdown()
+
+
+@pytest.mark.parametrize("access_mode", ["both", "ro", ""])
+def test_invalid_access_mode_raises_at_construction(tmp_path, access_mode):
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+
+    with pytest.raises(ValueError, match="Invalid access_mode"):
+        FileSystemTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=memoryview(tensor.numpy()),
+            tier_type="fs",
+            root_dir=str(tmp_path),
+            access_mode=access_mode,
+        )
+
+
+def test_factory_forwards_access_mode_to_fs_tier(tmp_path):
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    tier = SecondaryTierFactory.create_secondary_tier(
+        {
+            "type": "fs",
+            "root_dir": str(tmp_path),
+            "n_read_threads": 1,
+            "n_write_threads": 1,
+            "access_mode": "read",
+        },
+        memoryview(tensor.numpy()),
+        _MOCK_OFFLOADING_SPEC,
+    )
+    try:
+        assert isinstance(tier, FileSystemTierManager)
+        assert tier.access_mode.can_read
+        assert not tier.access_mode.can_write
+    finally:
+        tier.shutdown()
+
+
+def test_read_access_mode_writes_nothing_and_serves_a_shared_cache(tmp_path):
+    """`read` creates no files but reads blocks written by another instance."""
+    root = str(tmp_path)
+    writer_tensor = _page_aligned_rand_tensor(4, _BLOCK_ELEMENTS)
+    expected = writer_tensor[0].clone()
+    writer = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(writer_tensor.numpy()),
+        tier_type="fs",
+        root_dir=root,
+        n_read_threads=1,
+        n_write_threads=1,
+    )
+    try:
+        writer.submit_store(make_job(1, [key(7)], [0]))
+        assert all(r.success for r in drain(writer))
+    finally:
+        writer.shutdown()
+    stored_path = writer.file_mapper.get_file_name(key(7))
+    config_path = writer.file_mapper.get_config_file_path()
+
+    # The reader gets a fresh directory, so anything present afterwards was
+    # created by the read-only tier itself.
+    read_root = str(tmp_path / "read_only")
+    os.makedirs(read_root)
+    reader_tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    reader = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(reader_tensor.numpy()),
+        tier_type="fs",
+        root_dir=read_root,
+        n_read_threads=1,
+        n_write_threads=1,
+        access_mode="read",
+    )
+    try:
+        assert not os.path.exists(reader.file_mapper.get_config_file_path())
+        assert os.listdir(read_root) == []
+    finally:
+        reader.shutdown()
+
+    # Sharing the writer's root_dir: the block written elsewhere is readable.
+    reader_tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    reader = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(reader_tensor.numpy()),
+        tier_type="fs",
+        root_dir=root,
+        n_read_threads=1,
+        n_write_threads=1,
+        access_mode="read",
+    )
+    try:
+        assert reader.file_mapper.get_file_name(key(7)) == stored_path
+        assert lookup_and_wait(reader, [key(7)]) == [LookupResult.HIT]
+        reader.submit_load(make_job(2, [key(7)], [1], is_promotion=True))
+        assert all(r.success for r in drain(reader))
+        assert torch.allclose(reader_tensor[1], expected)
+        # Reading does not create the config file the writer already made.
+        assert os.path.exists(config_path)
+    finally:
+        reader.shutdown()
 
 
 def test_failed_load_missing_file(fs_tier):
@@ -375,11 +576,11 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
     tensor[:] = _page_aligned_rand_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
 
     keys = [key(i) for i in range(batch_size)]
-    store_block_ids = list(range(batch_size))
-    load_block_ids = list(range(_NUM_BLOCKS - batch_size, _NUM_BLOCKS))
+    store_chunk_ids = list(range(batch_size))
+    load_chunk_ids = list(range(_NUM_BLOCKS - batch_size, _NUM_BLOCKS))
     expected = tensor[:batch_size].clone()
 
-    tier.submit_store(make_job(1, keys, store_block_ids))
+    tier.submit_store(make_job(1, keys, store_chunk_ids))
     store_results = drain(tier)
     assert len(store_results) == 1
     assert store_results[0].success
@@ -389,16 +590,58 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
     tensor[:] = 0.0
 
     # Load into a range disjoint by index from the store ids, to also
-    # exercise loading a block into a different id than it was stored from.
-    tier.submit_load(make_job(2, keys, load_block_ids, is_promotion=True))
+    # exercise loading a chunk into a different id than it was stored from.
+    tier.submit_load(make_job(2, keys, load_chunk_ids, is_promotion=True))
     load_results = drain(tier)
     assert len(load_results) == 1
     assert load_results[0].success
+    assert load_results[0].transfer_bytes == len(keys) * tier._block_size
 
-    for i, bid in enumerate(load_block_ids):
-        assert torch.allclose(tensor[bid], expected[i]), (
-            f"Block {bid} data mismatch after store+load"
+    for i, cid in enumerate(load_chunk_ids):
+        assert torch.allclose(tensor[cid], expected[i]), (
+            f"Chunk {cid} data mismatch after store+load"
         )
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_store_reports_only_newly_written_blocks(fs_tier, monkeypatch, use_c_ext):
+    """transfer_bytes counts the blocks a job wrote, not those already on disk."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, tensor = fs_tier
+    tensor[:] = _page_aligned_rand_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    published = tier.file_mapper.get_file_name(key(2))
+
+    tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert results[0].transfer_bytes == 2 * tier._block_size
+    with open(published, "rb") as f:
+        published_bytes = f.read()
+
+    # Change block 2's source so a rewrite would show on disk.
+    tensor[1] = 1.0
+    tier.submit_store(make_job(2, [key(2), key(3)], [1, 2]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert results[0].transfer_bytes == tier._block_size
+    with open(published, "rb") as f:
+        assert f.read() == published_bytes
+    assert os.path.exists(tier.file_mapper.get_file_name(key(3)))
+
+    # Re-storing a published prefix writes nothing.
+    tier.submit_store(make_job(3, [key(1), key(2)], [0, 1]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert results[0].transfer_bytes == 0
+    assert tier._job_block_counts == {}
 
 
 def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
@@ -438,9 +681,50 @@ def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
         tier.shutdown()
 
 
-def test_wait_idle_blocks_until_tasks_complete():
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_store_short_write_names_likely_cause(tmp_path, monkeypatch, use_c_ext):
+    """A store that runs out of space partway through a block raises an error
+    that says it was a short write and may mean a full filesystem, instead of
+    EIO, which reads as a device error.
+
+    A soft RLIMIT_FSIZE below the block size makes write(2) return a short
+    count, as a nearly full filesystem does. The hard limit is left alone, so
+    the soft limit can be restored afterwards.
+    """
+    resource = pytest.importorskip("resource")
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    block = 192 * 1024
+    dest = tmp_path / "block.bin"
+    buf = memoryview(bytearray(block))
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    old_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024, hard))
+    try:
+        with pytest.raises(OSError) as exc_info:
+            io_mod.batch_store_block([str(dest)], buf, [0], block, use_o_direct=False)
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+        signal.signal(signal.SIGXFSZ, old_handler)
+
+    assert exc_info.value.errno is None
+    assert str(exc_info.value) == (
+        f"Encountered short-write error when writing {dest}. This could be a "
+        "hardware error or the filesystem may be full (ENOSPC)"
+    )
+    # Neither the block nor its temp file is left behind.
+    assert os.listdir(tmp_path) == []
+
+
+def test_wait_idle_blocks_until_tasks_complete(monkeypatch):
     """wait_idle must not return while a task is still in flight."""
     pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
+    worker_notify_all = MagicMock(wraps=pool._condition.notify_all)
+    monkeypatch.setattr(pool._condition, "notify_all", worker_notify_all)
     gate = threading.Event()
     pool.enqueue_store(job_id=1, n_tasks=1, tasks=[lambda: gate.wait(timeout=5.0)])
 
@@ -452,6 +736,7 @@ def test_wait_idle_blocks_until_tasks_complete():
         gate.set()
         waiter.join(timeout=5.0)
         assert not waiter.is_alive(), "wait_idle did not unblock"
+        worker_notify_all.assert_not_called()
     finally:
         gate.set()
         pool.shutdown(wait=True)
@@ -545,6 +830,214 @@ def test_out_of_bounds_block_id_smoke(fs_tier, monkeypatch, use_c_ext):
     assert not load_results[0].success
 
 
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_failed_load_corrects_verdict_and_removes_corrupt_file(
+    fs_tier, monkeypatch, use_c_ext
+):
+    """Failed-load livelock regression, covering the whole contract.
+
+    A successful promotion leaves the cached HIT and the on-disk block intact.
+    A promotion that short-reads a truncated (corrupt) block fails, and in
+    get_finished_jobs() the tier removes the corrupt file (stores are atomic,
+    so a too-short file is genuine corruption) and marks the cached verdict
+    False. The SAME request's next lookup is then a MISS served from cache with
+    NO re-probe, so the scheduler cannot re-issue the doomed promotion.
+    """
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, _ = fs_tier
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    path = tier.file_mapper.get_file_name(key(1))
+
+    ctx = ReqContext(req_id="livelock-req")
+    assert lookup_and_wait(tier, [key(1)], ctx=ctx) == [LookupResult.HIT]
+
+    # A successful promotion must NOT touch the verdict or the file.
+    tier.submit_load(make_job(2, [key(1)], [0], is_promotion=True))
+    results = drain(tier)
+    assert len(results) == 1 and results[0].success
+    assert tier.lookup(key(1), ctx) == LookupResult.HIT
+    assert os.path.exists(path)
+
+    # Truncate below block_size so the next promotion short-reads.
+    with open(path, "wb") as f:
+        f.write(b"x" * 10)
+    tier.submit_load(make_job(3, [key(1)], [0], is_promotion=True))
+    results = drain(tier)  # get_finished_jobs() marks the verdict False here
+    assert len(results) == 1 and not results[0].success
+
+    # Corrupt file removed; the SAME request now misses from cache, no re-probe.
+    assert not os.path.exists(path)
+    lm = tier._lookup_manager
+    assert tier.lookup(key(1), ctx) == LookupResult.MISS
+    assert lm._lookup_batch == []
+
+    # A FRESH request re-probes the tier (no cached verdict) and misses too,
+    # since the corrupt file is gone -- the real batch_lookup re-probe path.
+    fresh = ReqContext(req_id="fresh-after-short-read")
+    assert lookup_and_wait(tier, [key(1)], ctx=fresh) == [LookupResult.MISS]
+
+
+def test_failed_load_after_abort_does_not_break_newer_probe(fs_tier):
+    """A promotion for request A fails after A was aborted and request B
+    re-probed the same key. The failure must not flip B's in-flight probe:
+    B's next lookup drains its own result (MISS: the file is gone) instead of
+    asserting on the scheduler thread."""
+    tier, _ = fs_tier
+    k = key(1)
+    tier.submit_store(make_job(1, [k], [0]))
+    assert all(r.success for r in drain(tier))
+    ctx_a, ctx_b = ReqContext(req_id="A"), ReqContext(req_id="B")
+    assert lookup_and_wait(tier, [k], ctx=ctx_a) == [LookupResult.HIT]
+
+    os.remove(tier.file_mapper.get_file_name(k))
+    tier.submit_load(make_job(2, [k], [1], is_promotion=True))
+    tier.on_request_finished(ctx_a)
+
+    assert tier.lookup(k, ctx_b) == LookupResult.RETRY
+    tier.on_schedule_end(ScheduleEndContext(new_req_ids=[], preempted_req_ids=()))
+    deadline = time.monotonic() + 1.0
+    while tier._lookup_manager._pending_results.empty():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+    assert [r.success for r in drain(tier)] == [False]
+    assert tier.lookup(k, ctx_b) == LookupResult.MISS
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_batched_partial_load_failure_keeps_loaded_blocks(
+    fs_tier, monkeypatch, use_c_ext
+):
+    """A batched promotion stops at the first bad block and reports how many
+    loaded before it (#50321). Corrupt the LAST block: the earlier blocks load
+    fine, so the job reports successful_keys for them and marks only the failed
+    tail a miss. The earlier keys stay HIT — including for the same request —
+    while the corrupt block stays a MISS (its file was removed)."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, _ = fs_tier
+    keys = [key(1), key(2), key(3)]  # last one is the "bad" block
+    tier.submit_store(make_job(1, keys, [0, 1, 2]))
+    assert all(r.success for r in drain(tier))
+    bad_path = tier.file_mapper.get_file_name(key(3))
+
+    ctx = ReqContext(req_id="batch-req")
+    assert lookup_and_wait(tier, keys, ctx=ctx) == [LookupResult.HIT] * 3
+
+    # Corrupt only the last block, then load the whole batch as one job.
+    with open(bad_path, "wb") as f:
+        f.write(b"x" * 10)
+    tier.submit_load(make_job(2, keys, [0, 1, 2], is_promotion=True))
+    results = drain(tier)
+    # (a) the job fails but reports the two blocks that loaded before the bad one.
+    assert len(results) == 1 and not results[0].success
+    assert tuple(results[0].successful_keys) == (key(1), key(2))
+
+    # (b) Only the failed tail is a miss; the loaded blocks stay HIT on the same
+    # request, and nothing was re-probed.
+    lm = tier._lookup_manager
+    assert [tier.lookup(k, ctx) for k in keys] == [
+        LookupResult.HIT,
+        LookupResult.HIT,
+        LookupResult.MISS,
+    ]
+    assert lm._lookup_batch == []
+
+    # (c) A fresh request re-probes: the loaded blocks are still on disk (HIT),
+    # only the corrupt block was removed (MISS).
+    tier.on_request_finished(ctx)
+    fresh = ReqContext(req_id="fresh-batch-req")
+    assert lookup_and_wait(tier, keys, ctx=fresh) == [
+        LookupResult.HIT,
+        LookupResult.HIT,
+        LookupResult.MISS,
+    ]
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_batched_load_first_block_fails_marks_whole_batch(
+    fs_tier, monkeypatch, use_c_ext
+):
+    """When the FIRST block fails, nothing loaded before it: the job reports no
+    successful_keys (None) and the whole batch is marked a miss for the
+    request."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, _ = fs_tier
+    keys = [key(1), key(2), key(3)]  # first one is the "bad" block
+    tier.submit_store(make_job(1, keys, [0, 1, 2]))
+    assert all(r.success for r in drain(tier))
+
+    ctx = ReqContext(req_id="batch-first-fail")
+    assert lookup_and_wait(tier, keys, ctx=ctx) == [LookupResult.HIT] * 3
+
+    with open(tier.file_mapper.get_file_name(key(1)), "wb") as f:
+        f.write(b"x" * 10)
+    tier.submit_load(make_job(2, keys, [0, 1, 2], is_promotion=True))
+    results = drain(tier)
+    assert len(results) == 1 and not results[0].success
+    # Nothing loaded before the failure -> no partial success reported.
+    assert results[0].successful_keys is None
+    # The whole batch is a miss for this request.
+    assert [tier.lookup(k, ctx) for k in keys] == [LookupResult.MISS] * 3
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_transient_load_failure_leaves_file(fs_tier, monkeypatch, use_c_ext):
+    """A transient host error (here ELOOP on open) is NOT a short read: the job
+    fails but the block file must survive untouched, on both the C and Python
+    paths. Deleting on a transient error would turn a passing hiccup into
+    permanent data loss."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, _ = fs_tier
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    path = tier.file_mapper.get_file_name(key(1))
+    with open(path, "rb") as f:
+        original = f.read()
+
+    # Make open() fail with ELOOP (fd < 0) without truncating the block. Not
+    # chmod 000: CI runs as root, which bypasses permission bits, so open()
+    # would succeed and the load would not fail at all.
+    saved = path + ".saved"
+    loop = path + ".loop"
+    os.rename(path, saved)
+    os.symlink(loop, path)
+    os.symlink(path, loop)
+
+    tier.submit_load(make_job(2, [key(1)], [0], is_promotion=True))
+    results = drain(tier)
+    assert len(results) == 1 and not results[0].success
+
+    # The path is left alone: a non-short-read error must not unlink.
+    assert os.path.lexists(path)
+
+    os.unlink(path)
+    os.unlink(loop)
+    os.rename(saved, path)
+    with open(path, "rb") as f:
+        assert f.read() == original
+
+
 # ---------------------------------------------------------------------------
 # KV events
 # ---------------------------------------------------------------------------
@@ -563,6 +1056,7 @@ def test_successful_store_emits_stored_event(fs_tier_with_events):
     assert events[0].medium == Medium.STORAGE
     assert events[0].locality is Locality.LOCAL
     assert not events[0].removed
+    assert events[0].req_context is _CTX
     # take_events drains the buffer.
     assert list(tier.take_events()) == []
 
@@ -659,7 +1153,7 @@ def test_partially_failed_store_emits_no_event(fs_tier_with_events, monkeypatch)
     assert len(results) == 1
     assert not results[0].success
     assert list(tier.take_events()) == []
-    assert tier._store_job_keys == {}
+    assert tier._store_jobs == {}
 
 
 def test_events_disabled_by_default(fs_tier):
@@ -669,7 +1163,7 @@ def test_events_disabled_by_default(fs_tier):
     assert len(results) == 1
     assert results[0].success
     assert tier.events is None
-    assert tier._store_job_keys == {}
+    assert tier._store_jobs == {}
     assert list(tier.take_events()) == []
 
 
@@ -690,14 +1184,14 @@ def test_events_require_global_kv_events_flag(tmp_path):
         assert len(results) == 1
         assert results[0].success
         assert list(tier.take_events()) == []
-        assert tier._store_job_keys == {}
+        assert tier._store_jobs == {}
     finally:
         tier.shutdown()
 
 
 def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
-    """A GPU->CPU->fs cascade surfaces the tier-owned FS stored event via the
-    TieringOffloadingManager's aggregated take_events()."""
+    """A GPU->CPU->fs cascade surfaces the tier-owned FS stored event in the
+    TieringOffloadingManager's aggregated StepResult."""
     from vllm.v1.kv_offload.tiering.manager import (
         CPUPrimaryTierOffloadingManager,
         TieringOffloadingManager,
@@ -707,7 +1201,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
     view = memoryview(tensor.numpy())
     mock_region = MagicMock()
     mock_region.create_kv_memoryview.return_value = view
-    primary = CPUPrimaryTierOffloadingManager(num_blocks=4, mmap_region=mock_region)
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=mock_region)
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
         primary_kv_view=primary.get_kv_memoryview(),
@@ -719,21 +1213,26 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
     try:
         keys = [key(1), key(2)]
         manager.on_new_request(_CTX)
-        assert manager.prepare_store(keys, _CTX) is not None
-        manager.complete_store(keys, _CTX)  # cascades to the fs tier
+        assert (
+            manager.prepare_store(keys, _CTX, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        manager.complete_store(
+            keys, _CTX, trigger=StoreTrigger.ON_COMPUTE
+        )  # cascades to the fs tier
 
         events: list[OffloadingEvent] = []
         ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline and not events:
-            manager.on_schedule_end(ctx)
-            events.extend(manager.take_events())
+            events.extend(manager.on_schedule_end(ctx).events)
             time.sleep(0.01)
 
         fs_events = [e for e in events if e.medium == Medium.STORAGE]
         assert len(fs_events) == 1
         assert set(fs_events[0].keys) == set(keys)
         assert not fs_events[0].removed
+        assert fs_events[0].req_context is _CTX
     finally:
         tier.shutdown()
 

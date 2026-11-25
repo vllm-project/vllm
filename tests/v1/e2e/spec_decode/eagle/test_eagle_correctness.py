@@ -30,8 +30,8 @@ from .utils import _run_eagle_correctness
         (
             (
                 "eagle",
-                "eagle618/deepseek-v3-random",
-                "eagle618/eagle-deepseek-v3-random",
+                "vllm-project/deepseek-v3-random",
+                "vllm-project/eagle-deepseek-v3-random",
                 1,
             ),
             False,
@@ -52,6 +52,7 @@ def test_eagle_correctness_light(
     enable_chunked_prefill: bool,
     model_impl: str,
     attn_backend: str,
+    vllm_runner,
 ):
     _run_eagle_correctness(
         monkeypatch,
@@ -62,6 +63,7 @@ def test_eagle_correctness_light(
         enable_chunked_prefill,
         model_impl,
         attn_backend,
+        vllm_runner,
     )
 
 
@@ -82,18 +84,14 @@ def test_eagle_correctness_light(
             "auto",
             0.8,
         ),
-        pytest.param(
+        (
             ("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1),
             False,
             False,
             "transformers",
             0.8,
-            # TODO(hmellor): figure out why memory usage is so high
-            marks=pytest.mark.skip(
-                reason="Feature is experimental and uses too much memory in CI",
-            ),
         ),
-        pytest.param(
+        (
             (
                 "eagle3",
                 "Qwen/Qwen3-VL-8B-Instruct",
@@ -104,30 +102,30 @@ def test_eagle_correctness_light(
             False,
             "auto",
             0.8,
-            marks=pytest.mark.skip(
-                reason="architecture of its eagle3 is LlamaForCausalLMEagle3"
-            ),
         ),
         pytest.param(
             (
                 "eagle3",
                 "Qwen/Qwen2.5-VL-7B-Instruct",
-                "Rayzl/qwen2.5-vl-7b-eagle3-sgl",
+                "vllm-project/qwen2.5-vl-7b-eagle3-sgl",
                 1,
             ),
             False,
             False,
             "auto",
             0.7,
+            # TODO: Re-measure the reference threshold when re-enabling this case.
+            # Text-only mode starts but loses target correctness with ROCm/TRITON;
+            # full multimodal profiling currently fails during engine startup.
             marks=pytest.mark.skip(
-                reason="Skipping due to its head_dim not being a multiple of 32"
+                reason="Qwen2.5-VL Eagle3 is not yet reliable in this test setup"
             ),
         ),
         (
             (
                 "eagle3",
                 "meta-llama/Llama-3.1-8B-Instruct",
-                "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+                "vllm-project/EAGLE3-LLaMA3.1-Instruct-8B",
                 1,
             ),
             False,
@@ -154,6 +152,7 @@ def test_eagle_correctness_medium(
     enable_chunked_prefill: bool,
     model_impl: str,
     attn_backend: str,
+    vllm_runner,
 ):
     _run_eagle_correctness(
         monkeypatch,
@@ -164,4 +163,5 @@ def test_eagle_correctness_medium(
         enable_chunked_prefill,
         model_impl,
         attn_backend,
+        vllm_runner,
     )

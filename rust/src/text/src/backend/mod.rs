@@ -3,11 +3,56 @@
 
 pub mod hf;
 
+use std::fmt;
+use std::str::FromStr;
 use std::sync::Arc;
 
+use serde_with::{DeserializeFromStr, SerializeDisplay};
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_tokenizer::DynTokenizer;
 
 use crate::error::Result;
+
+/// Select which sampling defaults to inherit from generation config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, DeserializeFromStr, SerializeDisplay)]
+pub enum GenerationConfigMode {
+    /// Inherit sampling defaults from the model's generation config.
+    #[default]
+    Auto,
+    /// Use vLLM's neutral sampling defaults.
+    Vllm,
+}
+
+impl GenerationConfigMode {
+    pub const AUTO_LITERAL: &str = "auto";
+    pub const VLLM_LITERAL: &str = "vllm";
+}
+
+impl FromStr for GenerationConfigMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case(Self::AUTO_LITERAL) {
+            Ok(Self::Auto)
+        } else if value.eq_ignore_ascii_case(Self::VLLM_LITERAL) {
+            Ok(Self::Vllm)
+        } else {
+            Err(format!(
+                "generation config source `{value}` is not implemented yet \
+                 (expected one of: auto, vllm)"
+            ))
+        }
+    }
+}
+
+impl fmt::Display for GenerationConfigMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auto => f.write_str(Self::AUTO_LITERAL),
+            Self::Vllm => f.write_str(Self::VLLM_LITERAL),
+        }
+    }
+}
 
 /// Tokenizer/model-derived defaults used to enrich text-generation requests
 /// before they are lowered into engine-core.
@@ -20,7 +65,21 @@ pub struct SamplingHints {
     pub default_top_k: Option<u32>,
     pub default_min_p: Option<f32>,
     pub default_repetition_penalty: Option<f32>,
-    pub default_max_tokens: Option<u32>,
+    pub default_presence_penalty: Option<f32>,
+    pub default_frequency_penalty: Option<f32>,
+    pub default_max_tokens: Option<DefaultMaxTokens>,
+    /// Applies when a request leaves `skip_special_tokens` unset; see
+    /// [`TextDecodeOptions::skip_special_tokens`](crate::output::TextDecodeOptions::skip_special_tokens).
+    pub default_skip_special_tokens: Option<bool>,
+}
+
+/// Server-side `max_tokens` from the generation config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultMaxTokens {
+    /// Applies only when a request omits `max_tokens` (the model's config).
+    Fallback(u32),
+    /// Also bounds a client-provided `max_tokens` (`--override-generation-config`).
+    Cap(u32),
 }
 
 /// Effective bounds used to validate and lower sampling requests.
@@ -37,7 +96,7 @@ pub struct SamplingLimits {
     /// token IDs and logits-domain sampling controls.
     pub model_vocab_size: usize,
     /// Tokenizer vocabulary size, used to bound `allowed_token_ids` and
-    /// token-ID prompts.
+    /// token-ID prompts that carry multimodal inputs.
     pub tokenizer_vocab_size: usize,
 }
 
@@ -47,18 +106,20 @@ impl SamplingLimits {
     pub const DEFAULT_MAX_LOGPROBS: i32 = 20;
     /// Original Python definition:
     /// <https://github.com/vllm-project/vllm/blob/b5adb027ad03c29b46181752ba3b1cb84eff1dd4/vllm/sampling_params.py#L30-L32>
-    pub const MAX_LOGPROB_TOKEN_IDS: usize = 128;
-
-    /// Return the union bound used to validate token-ID prompts.
-    pub fn prompt_token_vocab_size(&self) -> usize {
-        self.tokenizer_vocab_size.max(self.model_vocab_size)
-    }
+    pub const MAX_LOGPROB_TOKEN_IDS: usize = 256;
 }
 
 /// Minimal text-processing backend needed by `vllm-text`.
 pub trait TextBackend: Send + Sync {
     /// Return the tokenizer used by this backend.
     fn tokenizer(&self) -> DynTokenizer;
+
+    /// Return whether a real tokenizer is loaded. Under
+    /// `--skip-tokenizer-init` it is not: [`Self::tokenizer`] fails every text
+    /// operation, and requests are served token IDs only.
+    fn has_tokenizer(&self) -> bool {
+        true
+    }
 
     /// Return whether the loaded model is a mixture-of-experts model.
     fn is_moe(&self) -> bool {
@@ -80,6 +141,11 @@ pub trait TextBackend: Send + Sync {
     /// backends should override it with the resolved model config value.
     fn model_vocab_size(&self) -> usize {
         usize::MAX
+    }
+
+    /// Return the checkpoint dtype declared by the model config, if any.
+    fn config_dtype(&self) -> Option<ModelDtype> {
+        None
     }
 
     /// Return the full tokenizer vocabulary size (Python `len(tokenizer)`).

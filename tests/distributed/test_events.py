@@ -9,7 +9,9 @@ import pytest
 from vllm.distributed.kv_events import (
     EventBatch,
     EventPublisherFactory,
+    KVEventBatch,
     NullEventPublisher,
+    ZmqEventPublisher,
 )
 
 DP_RANK = 0
@@ -20,27 +22,26 @@ class EventSample(
     tag=True,  # type: ignore
     array_like=True,  # type: ignore
 ):
-    """Test event for publisher testing"""
+    """Test event for publisher testing."""
 
     id: int
     value: str
 
 
 class SampleBatch(EventBatch):
-    """Test event batch for publisher testing"""
+    """Test event batch for publisher testing."""
 
     events: list[EventSample]
 
 
 def create_test_events(count: int) -> SampleBatch:
-    """Create a batch of test events"""
+    """Create a batch of test events."""
     events = [EventSample(id=i, value=f"test-{i}") for i in range(count)]
     return SampleBatch(ts=time.time(), events=events)
 
 
 def test_basic_publishing(publisher, subscriber):
-    """Test basic event publishing works"""
-
+    """Test basic event publishing works."""
     test_batch = create_test_events(5)
     publisher.publish(test_batch)
 
@@ -58,7 +59,7 @@ def test_basic_publishing(publisher, subscriber):
 
 
 def test_multiple_events(publisher, subscriber):
-    """Test publishing and receiving multiple event batches"""
+    """Test publishing and receiving multiple event batches."""
     for _ in range(10):
         batch = create_test_events(2)
         publisher.publish(batch)
@@ -75,7 +76,7 @@ def test_multiple_events(publisher, subscriber):
 
 
 def test_replay_mechanism(publisher, subscriber):
-    """Test the replay mechanism works correctly"""
+    """Test the replay mechanism works correctly."""
     for _ in range(19):
         batch = create_test_events(1)
         publisher.publish(batch)
@@ -96,7 +97,7 @@ def test_replay_mechanism(publisher, subscriber):
 
 
 def test_replay_includes_topic(publisher, subscriber, publisher_config):
-    """Test that replay responses include the topic, matching PUB format"""
+    """Test that replay responses include the topic, matching PUB format."""
     for _ in range(5):
         publisher.publish(create_test_events(1))
 
@@ -114,12 +115,53 @@ def test_replay_includes_topic(publisher, subscriber, publisher_config):
     assert seqs == list(range(5)), "Replayed sequences should be 0-4"
 
 
+def test_full_replay_with_slow_subscriber(publisher_config, subscriber):
+    """Repeated replays exceeding the default HWM must include every batch and
+    marker, even after earlier replays leave ZMQ's read acknowledgements stale."""
+    steps = publisher_config.buffer_steps = 2500
+    publisher_config.hwm = steps + 1
+    pub = EventPublisherFactory.create(publisher_config, DP_RANK)
+    replay = subscriber.replay_sockets[0]
+    batch = create_test_events(1)
+    try:
+        for _ in range(steps):
+            pub.publish(batch)
+        for _ in range(steps):
+            assert subscriber.receive_one(timeout=1000) is not None
+
+        for first_seq in range(4):
+            subscriber.request_replay(0)
+            assert replay.poll(1000), "Replay did not start"
+            # Leave replay unread until the publisher sends another live batch:
+            # the same thread must finish the entire replay burst before doing so.
+            pub.publish(batch)
+            assert subscriber.receive_one(timeout=1000) is not None
+
+            for expected_seq in range(first_seq, first_seq + steps):
+                assert replay.poll(1000), (
+                    f"Replay {first_seq} stalled before seq {expected_seq}"
+                )
+                delimiter, topic, seq, payload = replay.recv_multipart()
+                assert delimiter == b"" and topic == subscriber.topic_bytes
+                assert int.from_bytes(seq, "big") == expected_seq
+                assert payload
+            assert replay.poll(1000), f"Replay {first_seq} missing end marker"
+            assert replay.recv_multipart() == [
+                b"",
+                b"",
+                ZmqEventPublisher.END_SEQ,
+                b"",
+            ]
+    finally:
+        pub.shutdown()
+
+
 def test_buffer_limit(publisher, subscriber, publisher_config):
-    """Test buffer limit behavior"""
+    """Test buffer limit behavior."""
     buffer_size = publisher_config.buffer_steps
 
     # Publish more events than the buffer can hold
-    for i in range(buffer_size + 10):
+    for _ in range(buffer_size + 10):
         batch = create_test_events(1)
         publisher.publish(batch)
 
@@ -139,9 +181,7 @@ def test_buffer_limit(publisher, subscriber, publisher_config):
 
 
 def test_topic_filtering(publisher_config):
-    """
-    Test that a subscriber only receives messages matching its topic filter
-    """
+    """Test that a subscriber only receives messages matching its topic filter."""
     publisher_config.replay_endpoint = None
 
     publisher_config.topic = "foo"
@@ -174,7 +214,7 @@ def test_topic_filtering(publisher_config):
 
 
 def test_high_volume(publisher, subscriber):
-    """Test publishing and receiving a high volume of events"""
+    """Test publishing and receiving a high volume of events."""
     num_batches = 10_000
     events_per_batch = 100
 
@@ -210,7 +250,7 @@ def test_high_volume(publisher, subscriber):
 
 
 def test_null_publisher():
-    """Test that NullEventPublisher can be used without errors"""
+    """Test that NullEventPublisher can be used without errors."""
     publisher = NullEventPublisher(DP_RANK)
 
     # This should not raise any errors
@@ -220,8 +260,7 @@ def test_null_publisher():
 
 
 def test_data_parallel_rank_tagging(publisher_config):
-    """Test that events are properly tagged with their data parallel rank"""
-
+    """Test that events are properly tagged with their data parallel rank."""
     publisher_config.topic = "foo"
     pub_0 = EventPublisherFactory.create(publisher_config, DP_RANK)
     pub_1 = EventPublisherFactory.create(publisher_config, DP_RANK + 1)
@@ -285,7 +324,7 @@ def test_data_parallel_rank_tagging(publisher_config):
 
 
 def test_event_publisher_factory(random_port):
-    """Test event publisher factory creation behavior under different configurations"""
+    """Test event publisher factory creation behavior under different configurations."""
     from vllm.config.kv_events import KVEventsConfig
     from vllm.distributed.kv_events import ZmqEventPublisher
 
@@ -336,3 +375,215 @@ def test_event_publisher_factory(random_port):
     publisher = EventPublisherFactory.create(config, DP_RANK)
     assert isinstance(publisher, ZmqEventPublisher)
     publisher.shutdown()
+
+
+def test_ec_event_publisher_factory(random_port):
+    """EC events use the same publisher plumbing as KV events."""
+    from vllm.config.ec_events import ECEventsConfig
+
+    # Disabled by default, even when a publisher is requested.
+    config = ECEventsConfig(publisher="zmq")
+    publisher = EventPublisherFactory.create(config, DP_RANK)
+    assert isinstance(publisher, NullEventPublisher)
+    publisher.shutdown()
+
+    # A default config also resolves to the null publisher.
+    publisher = EventPublisherFactory.create(ECEventsConfig(), DP_RANK)
+    assert isinstance(publisher, NullEventPublisher)
+    publisher.shutdown()
+
+    config = ECEventsConfig(
+        enable_ec_cache_events=True,
+        endpoint=f"tcp://*:{random_port}",
+        replay_endpoint=f"tcp://*:{random_port + 100}",
+    )
+    publisher = EventPublisherFactory.create(config, DP_RANK + 1)
+    assert isinstance(publisher, ZmqEventPublisher)
+    resolved_config = publisher.get_publisher_config()
+    assert isinstance(resolved_config, ECEventsConfig)
+    assert resolved_config.endpoint == f"tcp://*:{random_port + 1}"
+    assert resolved_config.replay_endpoint == f"tcp://*:{random_port + 101}"
+    assert config.endpoint == f"tcp://*:{random_port}"
+    publisher.shutdown()
+
+
+def test_ec_event_batch_roundtrip():
+    """EC events survive msgpack encode/decode like KV events do."""
+    from vllm.distributed.ec_transfer.ec_events import (
+        AllECCleared,
+        ECEventBatch,
+        ECRemoved,
+        ECStored,
+    )
+
+    events = [
+        ECStored(mm_hashes=["mm-a", "mm-b"], medium="GPU"),
+        ECRemoved(mm_hashes=["mm-c"], medium="CPU"),
+        AllECCleared(),
+    ]
+    batch = ECEventBatch(ts=123.0, events=events)
+
+    decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(batch), type=ECEventBatch)
+
+    assert decoded.ts == 123.0
+    assert decoded.events == events
+
+
+def test_default_endpoints_do_not_collide_across_dp_ranks():
+    """KV ranks shift 5557/5558 up by rank; EC must stay outside that block."""
+    from vllm.config.ec_events import ECEventsConfig
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.distributed.kv_events import ZmqEventPublisher
+
+    kv_config = KVEventsConfig(
+        enable_kv_cache_events=True, replay_endpoint="tcp://*:5558"
+    )
+    ec_config = ECEventsConfig(enable_ec_cache_events=True)
+
+    assert kv_config.publisher == ec_config.publisher == "zmq"
+
+    def bound_ports(config, ranks):
+        ports = set()
+        for rank in ranks:
+            for endpoint in (config.endpoint, config.replay_endpoint):
+                offset = ZmqEventPublisher.offset_endpoint_port(endpoint, rank)
+                if offset is not None:
+                    ports.add(int(offset.rsplit(":", 1)[1]))
+        return ports
+
+    kv_ports = bound_ports(kv_config, range(1000))
+    ec_ports = bound_ports(ec_config, range(1000))
+    assert kv_ports.isdisjoint(ec_ports)
+
+
+def test_kv_and_ec_event_streams_run_together_across_dp_ranks(random_port):
+    """Every DP rank of both streams binds its own port and decodes its own
+    batch type, with no cross-talk between the two streams."""
+    from vllm.config.ec_events import ECEventsConfig
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.distributed.ec_transfer.ec_events import AllECCleared, ECEventBatch
+
+    from .conftest import MockSubscriber
+
+    ranks = list(range(3))
+    # Mirror the defaults: EC sits one 1000-port block above KV.
+    kv_config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        endpoint=f"tcp://*:{random_port}",
+        replay_endpoint=None,
+        topic="kv",
+    )
+    ec_config = ECEventsConfig(
+        enable_ec_cache_events=True,
+        endpoint=f"tcp://*:{random_port + 1000}",
+        replay_endpoint=None,
+        topic="ec",
+    )
+    kv_pubs = [EventPublisherFactory.create(kv_config, rank) for rank in ranks]
+    ec_pubs = [EventPublisherFactory.create(ec_config, rank) for rank in ranks]
+    kv_sub = MockSubscriber(
+        [f"tcp://127.0.0.1:{random_port + rank}" for rank in ranks], None, "kv"
+    )
+    ec_sub = MockSubscriber(
+        [f"tcp://127.0.0.1:{random_port + 1000 + rank}" for rank in ranks],
+        None,
+        "ec",
+        decode_type=ECEventBatch,
+    )
+    try:
+        time.sleep(0.1)
+        kv_ranks: set[int] = set()
+        ec_ranks: set[int] = set()
+        deadline = time.time() + 10
+        while (
+            kv_ranks != set(ranks) or ec_ranks != set(ranks)
+        ) and time.time() < deadline:
+            for rank, kv_pub, ec_pub in zip(ranks, kv_pubs, ec_pubs):
+                kv_pub.publish(KVEventBatch(ts=float(rank), events=[]))
+                ec_pub.publish(ECEventBatch(ts=float(rank), events=[AllECCleared()]))
+            while (result := kv_sub.receive_one(timeout=100)) is not None:
+                kv_ranks.add(result[1].data_parallel_rank)
+            while (result := ec_sub.receive_one(timeout=100)) is not None:
+                ec_ranks.add(result[1].data_parallel_rank)
+
+        assert kv_ranks == set(ranks)
+        assert ec_ranks == set(ranks)
+    finally:
+        for pub in kv_pubs + ec_pubs:
+            pub.shutdown()
+        kv_sub.close()
+        ec_sub.close()
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [("tcp://*:5557", "tcp://*:5558"), ("tcp://*:0", "tcp://*:0")],
+)
+def test_offset_endpoint_port_keeps_port_zero(endpoint, expected):
+    """Port 0 is not offset: every rank asks the OS for its own port."""
+    from vllm.distributed.kv_events import ZmqEventPublisher
+
+    assert ZmqEventPublisher.offset_endpoint_port(endpoint, 1) == expected
+
+
+@pytest.mark.parametrize("node_ip", ["127.0.0.1", "::1"])
+def test_ephemeral_publishers_report_bound_endpoints(monkeypatch, node_ip):
+    """Two ranks binding tcp://*:0 get distinct OS-assigned ports on this
+    node's IP and report endpoints a subscriber can use for events and replay."""
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.distributed import kv_events
+    from vllm.utils.network_utils import split_zmq_path
+
+    from .conftest import MockSubscriber
+
+    monkeypatch.setattr(kv_events, "get_ip", lambda: node_ip)
+    config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint="tcp://*:0",
+        replay_endpoint="tcp://*:0",
+        topic="kv",
+    )
+    pubs = [EventPublisherFactory.create(config, rank) for rank in range(2)]
+    try:
+        resolved = [pub.get_publisher_config() for pub in pubs]
+        endpoints = [e for c in resolved for e in (c.endpoint, c.replay_endpoint)]
+        hosts_ports = {split_zmq_path(e)[1:] for e in endpoints}
+        assert {h for h, _ in hosts_ports} == {node_ip}
+        assert len(hosts_ports) == 4 and "0" not in {p for _, p in hosts_ports}
+        assert config.endpoint == "tcp://*:0"
+
+        sub = MockSubscriber(endpoints[::2], endpoints[1::2], topic="kv")
+        try:
+            # PUB/SUB drops messages sent before the subscription lands, so
+            # keep publishing until both ranks are heard.
+            ranks: set[int] = set()
+            deadline = time.time() + 10
+            while ranks != {0, 1} and time.time() < deadline:
+                for pub in pubs:
+                    pub.publish(create_test_events(1))
+                while (result := sub.receive_one(timeout=100)) is not None:
+                    ranks.add(result[1].data_parallel_rank)
+            assert ranks == {0, 1}
+            sub.request_replay(0, socket_idx=1)
+            assert sub.receive_replay(socket_idx=1)
+        finally:
+            sub.close()
+    finally:
+        for pub in pubs:
+            pub.shutdown()
+
+
+@pytest.mark.parametrize("node_ip", ["0.0.0.0", "::"])
+def test_ephemeral_bind_needs_a_node_ip(monkeypatch, node_ip):
+    """tcp://*:0 is advertised as this node's IP; with no usable IP the
+    publisher refuses instead of reporting a wildcard."""
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.distributed import kv_events
+
+    monkeypatch.setattr(kv_events, "get_ip", lambda: node_ip)
+    config = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="zmq", endpoint="tcp://*:0"
+    )
+    with pytest.raises(ValueError, match="VLLM_HOST_IP"):
+        EventPublisherFactory.create(config, DP_RANK)

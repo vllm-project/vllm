@@ -14,18 +14,21 @@ from vllm.tokenizers import TokenizerLike
 
 class TestLongCatToolParser(ToolParserTests):
     @pytest.fixture
-    def tokenizer(self, default_tokenizer: TokenizerLike) -> TokenizerLike:
+    def tokenizer(
+        self, default_tokenizer: TokenizerLike, monkeypatch: pytest.MonkeyPatch
+    ) -> TokenizerLike:
         """Add some longcat specific tokens to the default vocab."""
         tokenizer = default_tokenizer
         tokenizer_vocab = tokenizer.get_vocab()
-        tokenizer.get_vocab = MagicMock()
         tokenizer_vocab.update(
             {
                 "<longcat_tool_call>": 32000,
                 "</longcat_tool_call>": 32001,
             }
         )
-        tokenizer.get_vocab.return_value = tokenizer_vocab
+        monkeypatch.setattr(
+            tokenizer, "get_vocab", MagicMock(return_value=tokenizer_vocab)
+        )
         return tokenizer
 
     @pytest.fixture

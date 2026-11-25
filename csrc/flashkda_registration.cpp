@@ -8,9 +8,10 @@ STABLE_TORCH_LIBRARY(_flashkda_C, m) {
   m.def(
       "fwd(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, float scale, "
       "Tensor(a!) out, Tensor(c!) workspace, Tensor A_log, Tensor dt_bias, "
-      "float lower_bound, "
+      "float lower_bound, Tensor cu_seqlens, "
       "Tensor? initial_state=None, Tensor(b!)? final_state=None, "
-      "Tensor? cu_seqlens=None) -> ()");
+      "Tensor(d!)? checkpoint_state=None, "
+      "Tensor? checkpoint_offsets=None) -> ()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_flashkda_C, CompositeExplicitAutograd, m) {

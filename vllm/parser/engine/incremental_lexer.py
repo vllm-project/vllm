@@ -5,6 +5,7 @@ tokens, with prefix-match buffering for ambiguous boundaries."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import regex as re
@@ -24,13 +25,14 @@ class TerminalDef:
 class LexToken:
     terminal: str
     value: str
+    token_count: int = 0
 
 
 class LexerShape:
     """Immutable pre-computed data derived from terminal definitions.
 
-    Created once per :class:`ParserEngineConfig` and shared across all
-    :class:`IncrementalLexer` instances that use the same config.
+    Created once per `ParserEngineConfig` and shared across all
+    `IncrementalLexer` instances that use the same config.
     """
 
     __slots__ = (
@@ -82,7 +84,7 @@ class IncrementalLexer:
 
     The key feature is **prefix-match buffering**: when the text in the
     buffer could be the start of a multi-character terminal (e.g.
-    ``"<tool_"`` that could become ``"<tool_call>"``), the lexer holds
+    `"<tool_"` that could become `"<tool_call>"`), the lexer holds
     the text rather than emitting it.  When the next chunk arrives, it
     either completes the terminal or flushes the buffered text as
     content.
@@ -104,6 +106,7 @@ class IncrementalLexer:
         self.terminals = shape.terminals
         self.content_terminal = content_terminal
         self.buffer = ""
+        self._token_counts: list[int] = []
 
         self._literal_strings = shape.literal_strings
         self._max_literal_len = shape.max_literal_len
@@ -114,15 +117,23 @@ class IncrementalLexer:
 
     def reset(self) -> None:
         self.buffer = ""
+        self._token_counts.clear()
 
-    def feed(self, text: str) -> list[LexToken]:
+    def feed(
+        self,
+        text: str,
+        token_texts: tuple[str, ...] = (),
+        token_count: int = 0,
+    ) -> list[LexToken]:
+        char_token_counts = self._char_token_counts(text, token_texts, token_count)
         if not self.buffer and self._has_only_literals and self._literal_first_chars:
             for ch in text:
                 if ch in self._literal_first_chars:
                     break
             else:
-                return [LexToken(self.content_terminal, text)]
+                return [LexToken(self.content_terminal, text, sum(char_token_counts))]
         self.buffer += text
+        self._token_counts.extend(char_token_counts)
         return self._drain()
 
     def flush(self) -> list[LexToken]:
@@ -130,77 +141,117 @@ class IncrementalLexer:
         if self.buffer:
             tokens.extend(self._drain(final=True))
         if self.buffer:
-            tokens.append(LexToken(self.content_terminal, self.buffer))
+            tokens.append(
+                LexToken(self.content_terminal, self.buffer, sum(self._token_counts))
+            )
             self.buffer = ""
+            self._token_counts.clear()
         return tokens
 
+    @staticmethod
+    def _char_token_counts(
+        text: str,
+        token_texts: tuple[str, ...],
+        token_count: int,
+    ) -> list[int]:
+        counts = [0] * len(text)
+        if not text:
+            return counts
+        if token_texts:
+            pos = 0
+            assigned = 0
+            for token_text in token_texts:
+                if not token_text:
+                    continue
+                found = text.find(token_text, pos)
+                if found < 0:
+                    continue
+                counts[found] += 1
+                assigned += 1
+                pos = found + len(token_text)
+            missing = token_count - assigned
+            if missing > 0:
+                counts[0] += missing
+        elif token_count:
+            counts[0] = token_count
+        return counts
+
     def _drain(self, *, final: bool = False) -> list[LexToken]:
+        # Walk an index through the buffer and trim it once at the end, so
+        # draining a long buffer costs time linear in its length.
         tokens: list[LexToken] = []
         first_chars = self._literal_first_chars
         content_terminal = self.content_terminal
         has_only_literals = self._has_only_literals
         literals_by_first = self._literals_by_first
         prefix_set = self._prefix_set
+        max_literal_len = self._max_literal_len
+        buf = self.buffer
+        counts = self._token_counts
+        n = len(buf)
+        pos = 0
 
-        while self.buffer:
+        def emit(terminal: str, end: int, value: str | None = None) -> None:
+            nonlocal pos
+            tokens.append(
+                LexToken(
+                    terminal,
+                    buf[pos:end] if value is None else value,
+                    sum(counts[pos:end]),
+                )
+            )
+            pos = end
+
+        while pos < n:
             if has_only_literals and first_chars:
-                has_potential = False
-                for ch in self.buffer:
-                    if ch in first_chars:
-                        has_potential = True
+                for i in range(pos, n):
+                    if buf[i] in first_chars:
                         break
-                if not has_potential:
-                    tokens.append(LexToken(content_terminal, self.buffer))
-                    self.buffer = ""
+                else:
+                    emit(content_terminal, n)
                     break
 
             best_match: tuple[str, str, int] | None = None
 
-            first = self.buffer[0]
+            first = buf[pos]
             for lit, name in literals_by_first.get(first, ()):
-                if self.buffer.startswith(lit) and (
+                if buf.startswith(lit, pos) and (
                     best_match is None or len(lit) > best_match[2]
                 ):
                     best_match = (name, lit, len(lit))
 
-            # If the current buffer is both a complete literal and the prefix
-            # of a longer literal, wait for the next chunk. For example,
+            # If the rest of the buffer is both a complete literal and the
+            # prefix of a longer literal, wait for the next chunk. For example,
             # "<invoke name=" should not be emitted before the next chunk
             # proves whether this is the quoted form '<invoke name="'.
-            if self.buffer in prefix_set and not final:
+            rest = buf[pos:] if n - pos < max_literal_len else None
+            if rest is not None and rest in prefix_set and not final:
                 if best_match is not None:
                     longer_match = False
                     for lit, _ in literals_by_first.get(first, ()):
-                        if len(lit) > best_match[2] and lit.startswith(self.buffer):
+                        if len(lit) > best_match[2] and lit.startswith(rest):
                             longer_match = True
                             break
                     if not longer_match:
-                        tokens.append(LexToken(best_match[0], best_match[1]))
-                        self.buffer = self.buffer[best_match[2] :]
+                        emit(best_match[0], pos + best_match[2], best_match[1])
                         continue
                     break
                 else:
                     break
 
             if best_match is not None:
-                tokens.append(LexToken(best_match[0], best_match[1]))
-                self.buffer = self.buffer[best_match[2] :]
+                emit(best_match[0], pos + best_match[2], best_match[1])
             else:
-                content_end = self._find_content_boundary()
-                if content_end > 0:
-                    tokens.append(LexToken(content_terminal, self.buffer[:content_end]))
-                    self.buffer = self.buffer[content_end:]
-                else:
-                    tokens.append(LexToken(content_terminal, self.buffer[0]))
-                    self.buffer = self.buffer[1:]
+                emit(content_terminal, self._find_content_boundary(buf, pos))
 
+        self.buffer = buf[pos:]
+        del counts[:pos]
         return tokens
 
-    def _find_content_boundary(self) -> int:
-        buf = self.buffer
+    def _find_content_boundary(self, buf: str, start: int) -> int:
         n = len(buf)
         first_chars = self._literal_first_chars
-        for i in range(1, n):
+        for i in range(start + 1, n):
             if buf[i] not in first_chars:
                 continue
             remaining = n - i
@@ -211,7 +262,9 @@ class IncrementalLexer:
         return n
 
 
-def terminals_from_literals(literals: dict[str, str]) -> list[TerminalDef]:
+def terminals_from_literals(
+    literals: Mapping[str, str | tuple[str, ...]],
+) -> list[TerminalDef]:
     return [
         TerminalDef(
             name=name,
@@ -219,5 +272,6 @@ def terminals_from_literals(literals: dict[str, str]) -> list[TerminalDef]:
             is_literal=True,
             literal=lit,
         )
-        for name, lit in literals.items()
+        for name, value in literals.items()
+        for lit in ((value,) if isinstance(value, str) else value)
     ]

@@ -541,8 +541,7 @@ def lightning_attention(
     block_size: int = 256,
     kv_history: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Apply lightning attention algorithm
+    """Apply lightning attention algorithm
     to compute attention efficiently.
 
     Args:
@@ -556,6 +555,7 @@ def lightning_attention(
     Returns:
         output: Attention output
         kv: Updated key-value history
+
     """
     d = q.shape[-1]
     e = v.shape[-1]
@@ -610,8 +610,7 @@ def _linear_attn_decode_kernel(
     pad_slot_id: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """
-    Kernel for linear attention decoding with KV cache.
+    """Kernel for linear attention decoding with KV cache.
 
     This kernel computes attention for a single token using the KV cache.
     """
@@ -683,8 +682,7 @@ def linear_decode_forward_triton(
     slot_idx: torch.Tensor,
     BLOCK_SIZE: int = 32,
 ) -> torch.Tensor:
-    """
-    Perform linear attention decoding using Triton kernels.
+    """Perform linear attention decoding using Triton kernels.
 
     Args:
         q: Query tensor of shape [B, H, 1, D]
@@ -697,6 +695,7 @@ def linear_decode_forward_triton(
 
     Returns:
         output: Attention output tensor
+
     """
     B, H, _, D = q.shape
     assert k.shape == (B, H, 1, D)

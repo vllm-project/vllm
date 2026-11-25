@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+
 import pytest
-import torch
 
 from tests.utils import single_gpu_only
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 from vllm.config import CompilationConfig
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 
-from ..utils import evaluate_llm_for_gsm8k, get_test_prompts
+from ..utils import (
+    evaluate_llm_for_gsm8k,
+    get_spec_decode_metric_value,
+    get_test_prompts,
+)
 
 
 @pytest.fixture
@@ -28,10 +32,7 @@ def disable_vllm_compile_cache_on_rocm(request: pytest.FixtureRequest) -> None:
             "prompt_lookup_min": 3,
             "num_speculative_tokens": 3,
         },
-        {
-            "method": "suffix",
-            "suffix_decoding_max_spec_factor": 2.0,
-        },
+        {"method": "suffix"},
     ],
 )
 @pytest.mark.usefixtures("disable_vllm_compile_cache_on_rocm")
@@ -43,8 +44,8 @@ def test_ngram_and_suffix_correctness(
 ):
     with vllm_runner(
         model_name,
+        block_size=None,
         # Keep LLM defaults; VllmRunner only provides lifecycle cleanup here.
-        trust_remote_code=False,
         enable_chunked_prefill=None,
         speculative_config=speculative_config,
         max_model_len=4096,
@@ -59,15 +60,16 @@ def test_ngram_and_suffix_correctness(
 @single_gpu_only
 def test_ngram_gpu_default_with_async_scheduling(
     async_scheduling: bool,
+    vllm_runner,
 ):
-    """
-    Test ngram_gpu speculative decoding (k=3) correctness with and without
+    """Test ngram_gpu speculative decoding (k=3) correctness with and without
     async scheduling, validated via GSM8K accuracy.
     Uses Qwen/Qwen3-8B (ref GSM8K accuracy: 87%-92%).
     """
     qwen3_model = "Qwen/Qwen3-8B"
-    spec_llm = LLM(
-        model=qwen3_model,
+    with vllm_runner(
+        qwen3_model,
+        block_size=None,
         speculative_config={
             "method": "ngram_gpu",
             "prompt_lookup_max": 3,
@@ -76,72 +78,128 @@ def test_ngram_gpu_default_with_async_scheduling(
         },
         max_model_len=4096,
         async_scheduling=async_scheduling,
-    )
-    # Assert the resolved async_scheduling config matches what was requested.
-    assert (
-        spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
-        == async_scheduling
-    )
-    evaluate_llm_for_gsm8k(spec_llm, expected_accuracy_threshold=0.8)
-    del spec_llm
-    cleanup_dist_env_and_memory()
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+    ) as spec_runner:
+        # Assert the resolved async_scheduling config matches what was requested.
+        assert (
+            spec_runner.llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+            == async_scheduling
+        )
+        evaluate_llm_for_gsm8k(spec_runner.llm, expected_accuracy_threshold=0.8)
 
 
 @single_gpu_only
-def test_suffix_decoding_acceptance(
-    monkeypatch: pytest.MonkeyPatch,
+def test_suffix_cross_request_acceptance(
     sampling_config: SamplingParams,
     model_name: str,
+    vllm_runner,
 ):
-    """
-    Check that suffix decoding caching takes effect and improves acceptance
-    lengths and acceptance rates over multiple runs of the same prompts.
-    """
+    """Repeating the same prompts should let suffix decoding draft the earlier
+    responses from its corpus of finished requests."""
     test_prompts = get_test_prompts(mm_enabled=False)
+    k = 8
 
-    spec_llm = LLM(
-        model=model_name,
-        speculative_config={
-            "method": "suffix",
-            "suffix_decoding_max_spec_factor": 2.0,
-            "suffix_decoding_max_cached_requests": 1000,
-        },
+    with vllm_runner(
+        model_name,
+        block_size=None,
+        speculative_config={"method": "suffix", "num_speculative_tokens": k},
         max_model_len=1024,
         disable_log_stats=False,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+    ) as spec_runner:
+        num_drafts = []
+        num_accept = []
+        for _ in range(2):
+            spec_runner.llm.chat(test_prompts, sampling_config)
+            metrics = spec_runner.llm.get_metrics()
+            num_drafts.append(
+                get_spec_decode_metric_value(metrics, "vllm:spec_decode_num_drafts")
+            )
+            num_accept.append(
+                get_spec_decode_metric_value(
+                    metrics, "vllm:spec_decode_num_accepted_tokens"
+                )
+            )
+
+    # Stats are cumulative; compare per-draft acceptance of the two runs.
+    first = num_accept[0] / num_drafts[0]
+    second = (num_accept[1] - num_accept[0]) / (num_drafts[1] - num_drafts[0])
+    summary = f"accepted per draft: first={first:.2f}, second={second:.2f}"
+    # Without the corpus, the repeated pass stays close to the first.
+    assert second > 2 * first, summary
+
+
+@single_gpu_only
+def test_ngram_verification_applies_logit_bias_and_min_p(
+    model_name: str,
+    vllm_runner,
+):
+    """logit_bias and min_p apply to the target logits that verify drafts, so
+    they also hold on the tokens that verification produces."""
+    copy_prompt = (
+        "Copy the sentence below many times.\n\n"
+        + "The quick brown fox jumps over the lazy dog. " * 12
+        + "The quick brown"
     )
+    min_p = 0.3
 
-    # Run several times and check that the accepted tokens increase.
-    num_draft = []
-    num_accept = []
-    for i in range(10):  # Run multiple times to warm up the cache.
-        spec_llm.chat(test_prompts, sampling_config)
-        # Collect draft and acceptance stats.
-        metrics = spec_llm.get_metrics()
-        for metric in metrics:
-            if metric.name == "vllm:spec_decode_num_draft_tokens":
-                num_draft.append(metric.value)
-            if metric.name == "vllm:spec_decode_num_accepted_tokens":
-                num_accept.append(metric.value)
+    with vllm_runner(
+        model_name,
+        speculative_config={
+            "method": "ngram",
+            "prompt_lookup_max": 5,
+            "prompt_lookup_min": 2,
+            "num_speculative_tokens": 5,
+        },
+        disable_log_stats=False,
+    ) as runner:
+        llm = runner.llm
 
-    # Calculate the acceptance rates for the first and last runs.
-    first_accept_tokens = num_accept[0]
-    first_draft_tokens = num_draft[0]
-    first_accept_rate = first_accept_tokens / first_draft_tokens
+        def generate(prompts: list[str], params: SamplingParams):
+            def num_accepted() -> float:
+                return get_spec_decode_metric_value(
+                    llm.get_metrics(), "vllm:spec_decode_num_accepted_tokens"
+                )
 
-    # Take the diff since the stats are cumulative.
-    last_accept_tokens = num_accept[-1] - num_accept[-2]
-    last_draft_tokens = num_draft[-1] - num_draft[-2]
-    last_accept_rate = last_accept_tokens / last_draft_tokens
+            before = num_accepted()
+            outputs = llm.generate(prompts, params)
+            return [output.outputs[0] for output in outputs], num_accepted() - before
 
-    # Expect the acceptance length to improve.
-    assert first_accept_tokens < last_accept_tokens
+        [fox] = llm.get_tokenizer().encode(" fox", add_special_tokens=False)
+        greedy = {"temperature": 0, "max_tokens": 64}
+        [unbiased], _ = generate([copy_prompt], SamplingParams(**greedy))
+        assert fox in unbiased.token_ids, unbiased.text
+        [banned], accepted = generate(
+            [copy_prompt], SamplingParams(**greedy, logit_bias={fox: -100})
+        )
+        assert accepted > 0
+        assert fox not in banned.token_ids, banned.text
 
-    # Expect the acceptance rate to improve.
-    assert first_accept_rate < last_accept_rate
+        def num_below_min_p(outputs) -> int:
+            # At temperature 1, min_p keeps x iff lp(x) >= max lp + log(min_p).
+            return sum(
+                lps[token].logprob
+                < max(lp.logprob for lp in lps.values()) + math.log(min_p) - 1e-3
+                for output in outputs
+                for token, lps in zip(output.token_ids, output.logprobs)
+            )
 
-    # Heuristic: expect at least 80.0% acceptance rate at the end.
-    assert last_accept_rate > 0.80
-
-    del spec_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+        prompts = [copy_prompt, "Write a short story about a lighthouse keeper.\n\n"]
+        stochastic = {
+            "temperature": 1.0,
+            "max_tokens": 128,
+            "ignore_eos": True,
+            "seed": 0,
+            "logprobs": 1,
+        }
+        filtered, accepted = generate(
+            prompts, SamplingParams(**stochastic, min_p=min_p)
+        )
+        assert accepted > 0
+        num_filtered_below = num_below_min_p(filtered)
+        assert num_filtered_below == 0
+        unfiltered, _ = generate(prompts, SamplingParams(**stochastic))
+        num_unfiltered_below = num_below_min_p(unfiltered)
+        assert num_unfiltered_below > 0

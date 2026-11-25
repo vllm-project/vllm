@@ -142,9 +142,10 @@ def test_kimi_decoder_layer_keeps_moe_states_sequence_sharded(monkeypatch):
     layer.input_layernorm = _IdentityNorm()
     layer.post_attention_layernorm = _IdentityNorm()
     layer.mlp = _RecordingMoE()
-    layer._run_self_attn = MethodType(
-        lambda self, positions, hidden_states: hidden_states,
+    monkeypatch.setattr(
         layer,
+        "_run_self_attn",
+        MethodType(lambda self, positions, hidden_states: hidden_states, layer),
     )
 
     _mock_sequence_parallel_collectives(monkeypatch)
@@ -188,9 +189,10 @@ def test_kimi_attn_residual_states_stay_sequence_sharded(monkeypatch):
     layer.self_attention_res_proj = _Projection()
     layer.mlp_res_proj = _Projection()
     layer.mlp = _RecordingMoE()
-    layer._run_self_attn = MethodType(
-        lambda self, positions, hidden_states: hidden_states,
+    monkeypatch.setattr(
         layer,
+        "_run_self_attn",
+        MethodType(lambda self, positions, hidden_states: hidden_states, layer),
     )
 
     _mock_sequence_parallel_collectives(monkeypatch)
@@ -267,19 +269,21 @@ def test_kimi_mtp_restores_sequence_parallel_output(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("enabled", "use_sequence_parallel", "tp_size", "expected"),
+    ("enabled", "use_sequence_parallel", "eligible", "tp_size", "expected"),
     [
-        (True, True, 8, True),
-        (False, True, 8, False),  # opt-in only
-        (True, False, 8, False),  # replication only exists under SP
-        (True, True, 1, False),  # nothing to shard
-        (True, True, 5, False),  # 6144 % 5 -- would fail divide()
+        (True, True, True, 8, True),
+        (False, True, True, 8, False),  # opt-in only
+        (True, False, True, 8, False),  # replication only exists under SP
+        (True, True, False, 8, False),  # FusedMoE path owns the reduction
+        (True, True, True, 1, False),  # nothing to shard
+        (True, True, True, 5, False),  # 6144 % 5 -- would fail divide()
     ],
 )
 def test_shard_sequence_parallel_mlp_gating(
     monkeypatch,
     enabled: bool,
     use_sequence_parallel: bool,
+    eligible: bool,
     tp_size: int,
     expected: bool,
 ):
@@ -293,9 +297,31 @@ def test_shard_sequence_parallel_mlp_gating(
             hidden_size=7168,
             intermediate_size=6144,
             use_sequence_parallel=use_sequence_parallel,
+            eligible=eligible,
         )
         is expected
     )
+
+
+@pytest.mark.parametrize(
+    ("moe_backend", "all2all_backend", "expected"),
+    [
+        ("deep_gemm_mega_moe", "naive", True),
+        ("auto", "deepep_v2", True),
+        ("auto", "deepep_low_latency", False),
+    ],
+)
+def test_shared_expert_sharding_backend_gate(
+    moe_backend: str,
+    all2all_backend: str,
+    expected: bool,
+):
+    vllm_config = SimpleNamespace(
+        kernel_config=SimpleNamespace(moe_backend=moe_backend),
+        parallel_config=SimpleNamespace(all2all_backend=all2all_backend),
+    )
+
+    assert kimi_model.can_shard_sequence_parallel_shared_expert(vllm_config) is expected
 
 
 def test_sharded_sequence_parallel_mlp_matches_replicated(default_vllm_config):

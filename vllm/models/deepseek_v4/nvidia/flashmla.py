@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
@@ -12,15 +12,17 @@ from vllm.models.deepseek_v4.common.ops import (
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
 )
-from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
-    compute_fp8_einsum_recipe,
-    deep_gemm_fp8_o_proj,
-)
+from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
 )
 from vllm.utils.math_utils import round_up
+from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backends.mla.sparse_swa import (
+    DeepseekSparseSWABackend,
+    DeepseekSparseSWAMetadataBuilder,
+)
 from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
@@ -31,22 +33,33 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
 
+class DeepseekSparseSWAFlashMLAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
+    """SWA metadata for the FlashMLA decode path, which allows varlen decode."""
+
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
+
+class DeepseekSparseSWAFlashMLABackend(DeepseekSparseSWABackend):
+    @staticmethod
+    def get_builder_cls() -> type[DeepseekSparseSWAFlashMLAMetadataBuilder]:
+        return DeepseekSparseSWAFlashMLAMetadataBuilder
+
+
 class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
     """FlashMLA sparse MLA attention layer for DeepSeek V4 (CUDA)."""
 
     backend_cls = DeepseekV4FlashMLABackend
+    swa_backend_cls = DeepseekSparseSWAFlashMLABackend
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe()
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        return deep_gemm_fp8_o_proj(
+        z = self.wo_a.grouped_forward(
             o,
             positions,
             self.rotary_emb.cos_sin_cache,
-            self.wo_a,
-            self.wo_b,
             n_groups=self.n_local_groups,
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
@@ -55,6 +68,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             einsum_recipe=self._einsum_recipe,
             tma_aligned_scales=self._tma_aligned_scales,
         )
+        return self.wo_b(z.flatten(1))
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
@@ -96,9 +110,14 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 // self.compress_ratio
             )
             M = N + self.window_size + self.max_num_batched_tokens
-            assert self.topk_indices_buffer is not None
-            top_k = 0 if swa_only else self.topk_indices_buffer.shape[-1]
-            combined_topk = round_up(top_k + self.window_size, 128)
+            if swa_only:
+                top_k = 0
+            else:
+                assert self.topk_indices_buffer is not None
+                top_k = self.topk_indices_buffer.shape[-1]
+            combined_topk = round_up(
+                top_k + self.window_size + self.max_image_tokens, 128
+            )
             current_workspace_manager().get_simultaneous(
                 ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
                 ((self.max_num_batched_tokens, combined_topk), torch.int32),
@@ -176,9 +195,6 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     attn_metadata.block_table[:num_decodes],
                     block_size,
                     is_valid,
-                    output_buffers=self._global_topk_output_buffers(
-                        self.topk_indices_buffer[:num_decode_tokens]
-                    ),
                 )
                 topk_indices = global_indices.view(num_decode_tokens, 1, -1)
             else:
@@ -293,7 +309,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         )
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
         workspace_manager = current_workspace_manager()
-        combined_topk = round_up(top_k + self.window_size, 128)
+        combined_topk = round_up(top_k + self.window_size + self.max_image_tokens, 128)
         for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
             chunk_size = chunk_end - chunk_start
             workspace = workspace_manager.get_simultaneous(
@@ -351,6 +367,21 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 chunk_M,
                 chunk_N,
                 out=(combined_indices_out, combined_lens_out),
+                left_visible=(
+                    swa_metadata.prefill_left_visible[
+                        num_decode_tokens + query_start : num_decode_tokens + query_end
+                    ]
+                    if swa_metadata.prefill_left_visible is not None
+                    else None
+                ),
+                right_visible=(
+                    swa_metadata.prefill_right_visible[
+                        num_decode_tokens + query_start : num_decode_tokens + query_end
+                    ]
+                    if swa_metadata.prefill_right_visible is not None
+                    else None
+                ),
+                max_image_tokens=self.max_image_tokens,
             )
             flash_mla_sparse_fwd(
                 q=q[query_start:query_end],

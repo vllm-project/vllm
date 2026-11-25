@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import IntEnum
+from typing import cast
 
 import torch
 
@@ -8,11 +9,18 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
+    get_tp_group,
     tensor_model_parallel_all_reduce,
 )
+from vllm.distributed.device_communicators.nvlink_fabric import (
+    SymmetricMemoryTopology,
+    get_symmetric_memory_topology,
+)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner, _unpack
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
@@ -53,7 +61,7 @@ class LatentMoERunner(MoERunner):
     """MoE runner for latent MoE with a replicated routed up-projection.
 
     The fused path (tp>1, un-reduced combine output, shared expert, no SP)
-    dispatches over ``LatentTailTier`` by token count; see that enum for what
+    dispatches over `LatentTailTier` by token count; see that enum for what
     each tier does and when it applies.
 
     Native path: the replicated up-proj produces the full hidden dim on every
@@ -89,20 +97,43 @@ class LatentMoERunner(MoERunner):
             )
             self.enable_k3_latent_moe_tail_fusion = False
 
+        if (
+            self.enable_k3_latent_moe_tail_fusion
+            and use_fused_path
+            and get_symmetric_memory_topology(get_tp_group().cpu_group)
+            is SymmetricMemoryTopology.UNSUPPORTED
+        ):
+            logger.warning_once(
+                "K3 latent-MoE tail fusion requires TP ranks to share a "
+                "symmetric-memory fabric. Falling back to the default path."
+            )
+            self.enable_k3_latent_moe_tail_fusion = False
+
         if self.enable_k3_latent_moe_tail_fusion and use_fused_path:
             vllm_config = get_current_vllm_config()
             if vllm_config.parallel_config.use_ubatching:
                 raise ValueError(
                     "K3 latent-MoE tail fusion does not support DBO or ubatching."
                 )
-            if vllm_config.model_config.enable_sleep_mode:
-                raise ValueError(
-                    "K3 latent-MoE tail fusion does not support sleep mode."
-                )
             transform = self.routed_output_transform
             assert transform is not None
             norm = transform.norm
             assert norm is not None
+            from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
+                TrtLlmMxfp4ExpertsMonolithic,
+            )
+            from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+                TrtLlmNvFp4ExpertsMonolithic,
+            )
+
+            experts_cls = getattr(self._quant_method, "experts_cls", None)
+            # The kernel instance is built after weight loading, while the tail
+            # must register its CuTeDSL warmup units during runner construction.
+            if (
+                experts_cls is TrtLlmMxfp4ExpertsMonolithic
+                or experts_cls is TrtLlmNvFp4ExpertsMonolithic
+            ) and self.moe_config.hidden_dim == self.moe_config.hidden_dim_unpadded:
+                self.moe_config.defer_moe_finalize()
             from vllm.models.kimi_k3.nvidia.ops.latent_moe_tail import (
                 KimiK3LatentMoETailOp,
             )
@@ -110,18 +141,30 @@ class LatentMoERunner(MoERunner):
             op = KimiK3LatentMoETailOp.initialize(
                 hidden_size=transform.up_proj.weight.shape[0],
                 latent_size=norm.weight.shape[0],
+                experts_per_token=(
+                    self.moe_config.experts_per_token
+                    if self.moe_config.use_deferred_moe_finalize
+                    else 0
+                ),
                 dtype=norm.weight.dtype,
-                device=norm.weight.device,
+                device=current_platform.current_device(),
                 rms_eps=norm.variance_epsilon,
             )
             self._k3_latent_moe_tail_op = op
+            if self.moe_config.use_deferred_moe_finalize:
+                self.moe_config.limit_deferred_moe_finalize(op.contract.max_num_tokens)
+                logger.info_once(
+                    "K3 latent-MoE tail fusion with deferred top-k finalization "
+                    "is enabled for up to %d tokens.",
+                    op.contract.max_num_tokens,
+                )
 
     def _get_zero_residual(
         self,
         hidden_states: torch.Tensor,
         max_token_num: int,
     ) -> torch.Tensor:
-        """Read-only zero ``residual_in`` for the fused AR+RMSNorm kernel.
+        """Read-only zero `residual_in` for the fused AR+RMSNorm kernel.
 
         flashinfer requires a residual buffer even when there is no residual to
         add.
@@ -150,6 +193,12 @@ class LatentMoERunner(MoERunner):
             and self._shared_experts is not None
             and not self._fused_output_is_reduced
             and not self.moe_config.is_sequence_parallel
+            # Tail kernels multiply by the raw up_proj.weight (no scales): BF16 only.
+            and self.routed_output_transform is not None
+            and isinstance(
+                self.routed_output_transform.up_proj.quant_method,
+                UnquantizedLinearMethod,
+            )
         )
 
     def _select_tail_tier(
@@ -177,7 +226,7 @@ class LatentMoERunner(MoERunner):
 
     def _small_batch_tail(
         self,
-        fused_output: torch.Tensor,
+        fused_output: torch.Tensor | UnfinalizedMoEOutput,
         shared_output: torch.Tensor,
         trunc_size: int | None,
     ) -> torch.Tensor:
@@ -240,9 +289,7 @@ class LatentMoERunner(MoERunner):
         shared_output: torch.Tensor,
         trunc_size: int | None,
     ) -> torch.Tensor:
-        """
-        Tier 2: column-parallel up-projection folded into the final reduce.
-        """
+        """Tier 2: column-parallel up-projection folded into the final reduce."""
         transform = self.routed_output_transform
         assert transform is not None
 
@@ -304,6 +351,22 @@ class LatentMoERunner(MoERunner):
             )
         )
 
+        if (
+            og_hidden_dim_pre_xform is None
+            and self.moe_config.should_defer_moe_finalize(hidden_states.shape[0])
+        ):
+            unfinalized = self._forward_impl(
+                hidden_states,
+                router_logits,
+                shared_experts_input,
+                input_ids,
+            )
+            shared_output, fused_output = _unpack(unfinalized)
+            assert shared_output is not None
+            assert isinstance(fused_output, UnfinalizedMoEOutput)
+            result = self._small_batch_tail(fused_output, shared_output, None)
+            return self._maybe_add_zero_expert_output(result)
+
         result = self._forward_entry(
             hidden_states,
             router_logits,
@@ -315,8 +378,7 @@ class LatentMoERunner(MoERunner):
             else 0,
         )
 
-        shared_output, fused_output = _unpack(result)
-        assert shared_output is not None
+        shared_output, fused_output = cast(tuple[torch.Tensor, torch.Tensor], result)
 
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]

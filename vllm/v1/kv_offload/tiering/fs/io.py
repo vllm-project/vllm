@@ -39,11 +39,11 @@ def _get_tmp_suffix() -> str:
 
 
 def probe_o_direct(directory: str) -> bool:
-    """Return whether ``O_DIRECT`` I/O works in *directory*.
+    """Return whether `O_DIRECT` I/O works in *directory*.
 
-    ``O_DIRECT`` is unsupported on some filesystems (e.g. the overlayfs backing
-    a container ``/tmp``, older tmpfs, or some NFS mounts), where opening or
-    writing a file with it fails with ``EINVAL``. Probe once with an aligned
+    `O_DIRECT` is unsupported on some filesystems (e.g. the overlayfs backing
+    a container `/tmp`, older tmpfs, or some NFS mounts), where opening or
+    writing a file with it fails with `EINVAL`. Probe once with an aligned
     single-page write so callers can fall back to buffered I/O instead of
     failing on every block.
     """
@@ -93,13 +93,16 @@ def _store_block(
     offset: int,
     block_size: int,
     use_o_direct: bool = True,
-) -> None:
-    """
-    Store callback: Writes to a temp file then atomically replaces the destination.
+) -> bool:
+    """Write to a temp file then atomically replace the target.
+
+    Returns False, writing nothing, if the target already exists. A block
+    another writer publishes during the rename still returns True: its bytes
+    were written, so it counts for bandwidth accounting.
     """
     # Check if block already exists to avoid redundant writes
     if os.path.exists(dest_path):
-        return
+        return False
 
     tmp_path = dest_path + _get_tmp_suffix()
     # Ensure parent directories exist
@@ -118,12 +121,25 @@ def _store_block(
         try:
             written = os.write(fd, view_slice)
             if written < len(view_slice):
+                # write(2) sets no errno on a short write, so name the likely
+                # cause. Keep in sync with the message in csrc/fs_io.cpp.
                 raise OSError(
-                    f"Short write: expected {len(view_slice)} bytes, wrote {written}"
+                    f"Encountered short-write error when writing {dest_path}. "
+                    "This could be a hardware error or the filesystem may be "
+                    "full (ENOSPC)"
                 )
         finally:
             os.close(fd)
-        os.replace(tmp_path, dest_path)
+        try:
+            os.replace(tmp_path, dest_path)
+        except FileExistsError:
+            # Another writer published this block after the check above; some
+            # shared filesystems fail the rename with EEXIST instead of
+            # replacing. File names are content hashes, so the file already in
+            # place holds this block and the store is done.
+            with contextlib.suppress(OSError):
+                os.remove(tmp_path)
+        return True
     except Exception:
         try:
             os.remove(tmp_path)
@@ -139,9 +155,9 @@ def _load_block(
     block_size: int,
     use_o_direct: bool = True,
 ) -> None:
-    """
-    Load callback: read one KV block from disk. Remove the file on failure.
-    """
+    """Read one KV block from disk; remove the file only on a provable short
+    read (a too-short file is genuine corruption) and leave it untouched on any
+    other error."""
     fd: int | None = None
     view_slice = view.cast("B")[offset : offset + block_size]
     o_direct = O_DIRECT if use_o_direct else 0
@@ -150,15 +166,16 @@ def _load_block(
         fd = os.open(source_path, os.O_RDONLY | o_direct)
         bytes_read = os.readv(fd, [view_slice])
         if bytes_read < block_size:
+            # A failure to remove must not mask the short-read error below.
+            try:
+                os.remove(source_path)
+            except OSError as cleanup_exc:
+                logger.warning(
+                    "Failed to remove short-read file %s: %s",
+                    source_path,
+                    cleanup_exc,
+                )
             raise OSError(f"Short read: expected {block_size} bytes, read {bytes_read}")
-    except Exception:
-        try:
-            os.remove(source_path)
-        except OSError as cleanup_exc:
-            logger.warning(
-                "Failed to remove unreadable file %s: %s", source_path, cleanup_exc
-            )
-        raise
     finally:
         if fd is not None:
             os.close(fd)
@@ -170,12 +187,17 @@ def batch_store_block(
     offsets: list[int],
     block_size: int,
     use_o_direct: bool = True,
-) -> None:
-    """
-    Store a batch of KV blocks from a shared buffer to disk in one call.
+) -> int:
+    """Store a batch of KV blocks from a shared buffer to disk in one call.
 
     Each block buffer[offsets[i] : offsets[i]+block_size] is written atomically
-    to dest_paths[i] via a temp-file rename.  Raises on first error.
+    to paths[i] via a temp-file rename. Blocks whose file already exists are
+    skipped. Raises on first error.
+
+    Returns:
+        The number of blocks transferred, including blocks another writer
+        published during the call (written, then dropped).
+
     """
     _validate_offsets(view, offsets, block_size)
 
@@ -184,9 +206,10 @@ def batch_store_block(
         view_slices = [view_B[x : x + block_size] for x in offsets]
         tmp_paths = [p + _get_tmp_suffix() for p in paths]
         return batch_store_block_C(tmp_paths, paths, view_slices, use_o_direct)
-    else:
-        for path, offset in zip(paths, offsets):
-            _store_block(path, view, offset, block_size, use_o_direct)
+    return sum(
+        _store_block(path, view, offset, block_size, use_o_direct)
+        for path, offset in zip(paths, offsets)
+    )
 
 
 def batch_load_block(
@@ -196,11 +219,12 @@ def batch_load_block(
     block_size: int,
     use_o_direct: bool = True,
 ) -> None:
-    """
-    Load a batch of KV blocks from disk into a shared buffer in one call.
+    """Load a batch of KV blocks from disk into a shared buffer in one call.
 
     Block i is read from source_paths[i] into view[offsets[i] : offsets[i]+block_size].
-    Raises on first error and removes the offending file.
+    Raises on first error (see _load_block for the delete-on-short-read policy).
+    On failure the raised OSError carries `num_succeeded` = the number of
+    blocks loaded before the failing one, so the tier can keep them.
     """
     _validate_offsets(view, offsets, block_size)
 
@@ -209,5 +233,11 @@ def batch_load_block(
         view_slices = [view_B[x : x + block_size] for x in offsets]
         return batch_load_block_C(paths, view_slices, use_o_direct)
     else:
-        for path, offset in zip(paths, offsets):
-            _load_block(path, view, offset, block_size, use_o_direct)
+        for i, (path, offset) in enumerate(zip(paths, offsets)):
+            try:
+                _load_block(path, view, offset, block_size, use_o_direct)
+            except OSError as exc:
+                # Blocks 0..i-1 loaded fine; record the count for partial keep.
+                # The C path sets the same attribute via PyObject_SetAttrString.
+                exc.num_succeeded = i  # type: ignore[attr-defined]
+                raise

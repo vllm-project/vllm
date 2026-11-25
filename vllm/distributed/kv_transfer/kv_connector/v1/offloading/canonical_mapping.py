@@ -17,18 +17,33 @@ import torch
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.base import CanonicalPageMapping, CopyRun
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+# Version of the canonical byte format; bump on any layout change
+CANONICAL_FORMAT_VERSION = 1
 
-@dataclass(frozen=True)
+
+def canonical_format_id(kv_cache_layout: str) -> str:
+    """Identity of the canonical byte format, for namespacing persisted KV.
+    Canonical pages keep the worker's KV layout family, so the id couples the
+    format version with that family; consumers must match it exactly. The family
+    keeps its historical NHD/HND spelling so ids stay stable for KV persisted
+    before the layout enum existed."""
+    layout = KVCacheLayout[kv_cache_layout]
+    legacy = {KVCacheLayout.LBNHC: "nhd", KVCacheLayout.LBHNC: "hnd"}
+    family = legacy.get(layout, layout.name.lower())
+    return f"v{CANONICAL_FORMAT_VERSION}-{family}"
+
+
+@dataclass(frozen=True, slots=True)
 class _RankContext:
     """Sharding parameters of one worker rank within the offload group."""
 
@@ -53,7 +68,7 @@ class _RankContext:
         return pcp_rank * self.dcp_size + self.tp_rank % self.dcp_size
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ByteRegion:
     """A byte region within a page that repeats once per token."""
 
@@ -266,7 +281,7 @@ def _layer_mapping(
     if isinstance(spec, MLAAttentionSpec):
         # TP-replicated latent; CP shards its tokens across the DCP groups
         if (
-            spec.compress_ratio != 1
+            spec.tokens_per_state != 1
             or page % bs
             or ctx.tp_size % ctx.dcp_size
             or spec.kv_quant_mode.is_per_token_head
@@ -416,13 +431,7 @@ def derive_canonical_mappings(
 
     mappings: dict[str, CanonicalPageMapping] = {}
     for kv_cache_group in kv_cache_config.kv_cache_groups:
-        group_kv_cache_spec = kv_cache_group.kv_cache_spec
-        if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs):
-            per_layer_specs = group_kv_cache_spec.kv_cache_specs
-        else:
-            per_layer_specs = {}
-        for layer_name in kv_cache_group.layer_names:
-            spec = per_layer_specs.get(layer_name, group_kv_cache_spec)
+        for layer_name, spec in kv_cache_group.kv_cache_specs.items():
             per_rank: list[CanonicalPageMapping] = []
             for rank in range(group_size):
                 mapping = _layer_mapping(

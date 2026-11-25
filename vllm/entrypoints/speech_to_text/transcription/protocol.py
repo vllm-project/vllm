@@ -4,7 +4,7 @@
 import json
 import time
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import TYPE_CHECKING, ClassVar, Literal, TypeAlias
 
 from fastapi import HTTPException, UploadFile
 from pydantic import (
@@ -13,11 +13,8 @@ from pydantic import (
 )
 
 from vllm.config.speech_to_text import SpeechToTextParams
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    OpenAIBaseModel,
-    UsageInfo,
-)
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import (
@@ -154,6 +151,9 @@ class TranscriptionRequest(OpenAIBaseModel):
     to automatically increase the temperature until certain thresholds are hit.
     """
 
+    watermarking: bool | None = None
+    """Whether to apply the engine's configured watermark to this request."""
+
     top_p: float | None = None
     """Enables nucleus (top-p) sampling, where tokens are selected from the
     smallest possible set whose cumulative probability exceeds `p`.
@@ -184,7 +184,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     # --8<-- [end:transcription-sampling-params]
 
     # Default sampling parameters for transcription requests.
-    _DEFAULT_SAMPLING_PARAMS: dict = {
+    _DEFAULT_SAMPLING_PARAMS: ClassVar[dict] = {
         "repetition_penalty": 1.0,
         "temperature": 1.0,
         "top_p": 1.0,
@@ -208,6 +208,7 @@ class TranscriptionRequest(OpenAIBaseModel):
             request_prompt=self.prompt,
             to_language=self.to_language,
             hotwords=self.hotwords,
+            extra_args=self.vllm_xargs,
         )
 
     def to_beam_search_params(
@@ -229,6 +230,7 @@ class TranscriptionRequest(OpenAIBaseModel):
             beam_width=n,
             max_tokens=max_tokens,
             temperature=temperature,
+            watermarking=self.watermarking,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
         )
@@ -267,6 +269,7 @@ class TranscriptionRequest(OpenAIBaseModel):
 
         return SamplingParams.from_optional(
             temperature=temperature,
+            watermarking=self.watermarking,
             max_tokens=max_tokens,
             seed=self.seed,
             top_p=top_p,
@@ -285,6 +288,8 @@ class TranscriptionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_transcription_request(cls, data):
+        if not isinstance(data, dict):
+            return data
         if isinstance(data.get("file"), str):
             raise HTTPException(
                 status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
@@ -419,6 +424,29 @@ class TranscriptionResponseDiarized(OpenAIBaseModel):
     text: str
     segments: list[TranscriptionDiarizedSegment]
     usage: TranscriptionUsageAudio
+
+
+class TranscriptionUsageTokens(OpenAIBaseModel):
+    type: Literal["tokens"] = "tokens"
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+
+
+class TranscriptionTextDeltaEvent(OpenAIBaseModel):
+    """Text added to a streamed diarized transcription."""
+
+    type: Literal["transcript.text.delta"] = "transcript.text.delta"
+    delta: str
+    segment_id: str
+
+
+class TranscriptionTextDoneEvent(OpenAIBaseModel):
+    """Last event of a streamed `diarized_json` transcription."""
+
+    type: Literal["transcript.text.done"] = "transcript.text.done"
+    text: str
+    usage: TranscriptionUsageTokens
 
 
 TranscriptionResponseVariant: TypeAlias = (

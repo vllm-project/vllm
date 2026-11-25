@@ -8,7 +8,7 @@
 Many recent "hybrid" LLMs combine multiple attention types within one model. For example:
 
 1. Sliding window attention (sw) + full attention (full): gpt-oss, Gemma 2/3, Ministral, cohere, etc.
-2. Mamba + full: Bamba, Jamba, Minimax, etc.
+2. Mamba + full: Bamba, Minimax, etc.
 3. Local chunked attention + full: Llama4
 
 To serve these models efficiently, our [KVCacheManager][vllm.v1.core.kv_cache_manager.KVCacheManager] must:
@@ -115,9 +115,10 @@ Unfortunately, not all models have such a beautiful ratio, and approach in Case 
 - Group 0: 10 full attention layers (full.0 - full.9)
 - Group 1: 10 sliding window attention layers (sw.0 - sw.9)
 - Group 2: 10 sliding window attention layers (sw.10 - sw.19)
-- ...
-- Group 6: 10 sliding window attention layers (sw.40 - sw.49)
-- Group 7: 2 sliding window attention layers (sw.50 - sw.51) and 8 padding layers
+- Group 3: 10 sliding window attention layers (sw.20 - sw.29)
+- Group 4: 10 sliding window attention layers (sw.30 - sw.39)
+- Group 5: 10 sliding window attention layers (sw.40 - sw.49)
+- Group 6: 2 sliding window attention layers (sw.50 - sw.51) and 8 padding layers
 
 We will update this algorithm if this heuristic leads to a bad result when a new model comes out (e.g., 20 full + 30 sw, the group size should be 10 instead of 20).
 
@@ -125,18 +126,22 @@ This case happens in Gemma-3 series models, and models in case 2 but with eagle 
 
 ### Case 4: different `kv_hidden_size` (mainly hybrid mamba models)
 
-Some architectures (e.g., Bamba, Jamba, Minimax) interleave standard attention layers with Mamba layers, where each Mamba layer's state size per token can be much larger than the attention layers' `kv_hidden_size`. Because we only support a single page size across all groups, we must reconcile these differing hidden sizes.
+Some architectures (e.g., Bamba, Minimax) interleave standard attention layers with Mamba layers, where each Mamba layer's state size per token can be much larger than the attention layers' `kv_hidden_size`. Because we only support a single page size across all groups, we must reconcile these differing hidden sizes.
 
 The current algorithm is:
 
 1. Increase the `block_size` of attention layers until
+
     $$
     \text{block_size} \times \text{kv_hidden_size}_{\text{att}} \ge \text{state_size}_{\text{mamba}}
     $$
+
 2. Pad the mamba state per layer to
+
     $$
     \text{block_size} \times \text{kv_hidden_size}_{\text{att}}
     $$
+
 3. Apply the grouping strategy in case 3.
 
 !!! note
@@ -203,7 +208,7 @@ The second question is the cache eviction policy. For now, we use one LRU queue 
 
 ### Case 3: mamba models
 
-The prefix caching support of the mamba model is work in progress. Once implemented, models with mamba layer + full attention layer can be supported via the full attention + X algorithm in case 2.
+Models with mamba layers + full attention layers support prefix caching via the full attention + X algorithm in case 2, with the Mamba state cached at block boundaries. See [Automatic Prefix Caching](../features/automatic_prefix_caching.md).
 
 ## Implementation
 

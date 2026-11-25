@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
 from typing import Any
-
-import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -70,79 +67,11 @@ elif current_platform.is_rocm():
     reshape_and_cache_flash = ops.reshape_and_cache_flash
 
 
-@dataclass(frozen=True)
-class FlashAttentionCuTeDSLCompileSpec:
-    """High-level FA4 compile-only request used by vLLM warmup.
-
-    This is not the CuTeDSL cache key. FA4 owns the selector that maps these
-    serving inputs to the actual compile-static fields: tile sizes, q_stage,
-    Split-KV, scheduler choice, layout-presence booleans, dtype/head dims,
-    arch, and related fields.
-    """
-
-    q_shape: tuple[int, ...]
-    k_shape: tuple[int, ...]
-    v_shape: tuple[int, ...]
-    q_dtype: torch.dtype
-    max_seqlen_q: int
-    max_seqlen_k: int
-    softmax_scale: float
-    causal: bool
-    fa_version: int
-    v_stride: tuple[int, ...] | None = None
-    cu_seqlens_q_shape: tuple[int, ...] | None = None
-    cu_seqlens_k_shape: tuple[int, ...] | None = None
-    window_size: tuple[int, int] | None = None
-    return_softmax_lse: bool = False
-    num_splits: int = 0
-
-    def compile(self) -> None:
-        assert compile_flash_attn_varlen_func_from_specs is not None
-        window_size = list(self.window_size) if self.window_size is not None else None
-        compile_flash_attn_varlen_func_from_specs(
-            q_shape=self.q_shape,
-            k_shape=self.k_shape,
-            v_shape=self.v_shape,
-            q_dtype=self.q_dtype,
-            v_stride=self.v_stride,
-            cu_seqlens_q_shape=self.cu_seqlens_q_shape,
-            cu_seqlens_k_shape=self.cu_seqlens_k_shape,
-            max_seqlen_q=self.max_seqlen_q,
-            max_seqlen_k=self.max_seqlen_k,
-            softmax_scale=self.softmax_scale,
-            causal=self.causal,
-            window_size=window_size,
-            return_softmax_lse=self.return_softmax_lse,
-            fa_version=self.fa_version,
-            num_splits=self.num_splits,
-        )
-
-    def request_key(self) -> tuple[object, ...]:
-        return (
-            self.q_shape,
-            self.k_shape,
-            self.v_shape,
-            self.q_dtype,
-            self.max_seqlen_q,
-            self.max_seqlen_k,
-            self.softmax_scale,
-            self.causal,
-            self.fa_version,
-            self.v_stride,
-            self.cu_seqlens_q_shape,
-            self.cu_seqlens_k_shape,
-            self.window_size,
-            self.return_softmax_lse,
-            self.num_splits,
-        )
-
-
 def get_flash_attn_version(
     requires_alibi: bool = False,
     head_size: int | None = None,
     head_size_v: int | None = None,
     has_sinks: bool = False,
-    requires_local_attention: bool = False,
 ) -> int | None:
     if current_platform.is_xpu():
         return 2
@@ -239,28 +168,16 @@ def get_flash_attn_version(
             )
             fa_version = 2
 
-        if (
-            fa_version == 4
-            and device_capability.major >= 10
-            and head_size == 256
-            and requires_local_attention
-        ):
-            logger.warning_once(
-                "FA4 on Blackwell does not support local attention with "
-                "head_size=256, defaulting to FA version 2."
-            )
-            fa_version = 2
-
-        # FA4 on SM100 (Blackwell) has TMEM capacity limits that restrict
-        # supported head dimensions to ≤128, with exceptions for 256 and 192/128 (MLA
-        # prefill). Development of symmetric 192, 384, and 512 support is being tracked
-        # in https://github.com/Dao-AILab/flash-attention/issues/2456
+        # FA4 head dimensions on Blackwell are limited by TMEM capacity.
         if (
             fa_version == 4
             and device_capability.major >= 10
             and head_size is not None
             and head_size > 128
-            and not (head_size == 256 or (head_size == 192 and head_size_v == 128))
+            and not (
+                (head_size == 256 and head_size_v in (None, 256))
+                or (head_size == 192 and head_size_v == 128)
+            )
         ):
             logger.warning_once(
                 "FA4 on Blackwell does not support head_size=%d due to TMEM "
@@ -270,8 +187,8 @@ def get_flash_attn_version(
             fa_version = 2
 
         if not is_fa_version_supported(fa_version):
-            logger.error(
-                "Cannot use FA version %d is not supported due to %s",
+            logger.warning_once(
+                "FlashAttention %d is not supported (%s); it will not be used.",
                 fa_version,
                 fa_version_unsupported_reason(fa_version),
             )
@@ -311,13 +228,21 @@ def flash_attn_supports_kv_cache_dtype(
         head_size_v=head_size_v,
         has_sinks=has_sinks,
     )
-    return (fa_version == 3 and current_platform.is_device_capability_family(90)) or (
+    is_sm90 = current_platform.is_device_capability_family(90)
+    sm90_fp8_kv_supported = fa_version == 3 or (
+        fa_version == 4 and head_size in (None, 512) and head_size_v in (None, 512)
+    )
+    return (sm90_fp8_kv_supported and is_sm90) or (
         fa_version == 4 and current_platform.is_device_capability_family(100)
     )
 
 
 def flash_attn_supports_quant_query_input() -> bool:
-    return not current_platform.is_xpu()
+    if current_platform.is_xpu():
+        from vllm.platforms.xpu import XPUPlatform
+
+        return XPUPlatform.support_fp8_query()
+    return True
 
 
 def flash_attn_supports_sinks() -> bool:
@@ -344,6 +269,8 @@ def flash_attn_supports_mla():
 
         except (ImportError, AssertionError):
             pass
+    elif current_platform.is_xpu():
+        return True
     return False
 
 
@@ -365,6 +292,7 @@ def is_flash_attn_varlen_func_available() -> bool:
 
     Returns:
         bool: True if a working flash_attn_varlen_func implementation is available.
+
     """
     if current_platform.is_cuda() or current_platform.is_xpu():
         # CUDA and XPU always have flash_attn_varlen_func available

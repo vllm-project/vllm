@@ -16,6 +16,7 @@ def test_aggregate_sums_counts():
     meta1 = OffloadingWorkerMetadata(completed_jobs={42: 1, 7: 1})
     meta2 = OffloadingWorkerMetadata(completed_jobs={42: 1, 7: 1})
     result = meta1.aggregate(meta2)
+    assert isinstance(result, OffloadingWorkerMetadata)
     assert result.completed_jobs == {42: 2, 7: 2}
 
 
@@ -23,6 +24,7 @@ def test_aggregate_disjoint_jobs():
     meta1 = OffloadingWorkerMetadata(completed_jobs={42: 1, 7: 1})
     meta2 = OffloadingWorkerMetadata(completed_jobs={43: 1, 8: 1})
     result = meta1.aggregate(meta2)
+    assert isinstance(result, OffloadingWorkerMetadata)
     assert result.completed_jobs == {42: 1, 7: 1, 43: 1, 8: 1}
 
 
@@ -31,7 +33,19 @@ def test_aggregate_multiple_workers():
     meta2 = OffloadingWorkerMetadata(completed_jobs={42: 1, 7: 1, 8: 1})
     meta3 = OffloadingWorkerMetadata(completed_jobs={42: 1, 43: 1, 8: 1})
     result = meta1.aggregate(meta2).aggregate(meta3)
+    assert isinstance(result, OffloadingWorkerMetadata)
     assert result.completed_jobs == {42: 3, 43: 2, 7: 2, 8: 2}
+
+
+def test_aggregate_keeps_a_failure_reported_by_any_worker():
+    ok = OffloadingWorkerMetadata(completed_jobs={1: 1})
+    failed = OffloadingWorkerMetadata(completed_jobs={1: 1}, failed_jobs={1})
+    ok_then_failed = ok.aggregate(failed)
+    assert isinstance(ok_then_failed, OffloadingWorkerMetadata)
+    assert ok_then_failed.failed_jobs == {1}
+    failed_then_ok = failed.aggregate(ok)
+    assert isinstance(failed_then_ok, OffloadingWorkerMetadata)
+    assert failed_then_ok.failed_jobs == {1}
 
 
 def test_aggregate_transfer_stats():
@@ -48,6 +62,7 @@ def test_aggregate_transfer_stats():
 
     result = meta1.aggregate(meta2)
 
+    assert isinstance(result, OffloadingWorkerMetadata)
     assert result.transfer_stats.load.bytes == 30
     assert result.transfer_stats.load.time == 1.5
     assert result.transfer_stats.load.sizes == [10, 20, 30]

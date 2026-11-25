@@ -11,8 +11,7 @@ layer_ref_sentinel = object()
 
 
 def sanitize_layer_refs(tensor: torch.Tensor, layer: torch.nn.Module) -> torch.Tensor:
-    """
-    Removes references to layer held by tensor attributes. Specifically, removes the
+    """Removes references to layer held by tensor attributes. Specifically, removes the
     `__self__` attribute of weight loader methods attached to the tensor.
 
     Used by `capture_layer_to_meta` to avoid circular references to layers in
@@ -26,6 +25,7 @@ def sanitize_layer_refs(tensor: torch.Tensor, layer: torch.nn.Module) -> torch.T
 
     Returns:
         sanitized tensor
+
     """
     for key, value in tensor.__dict__.items():
         if isinstance(value, MethodType) and value.__self__ is layer:
@@ -35,8 +35,7 @@ def sanitize_layer_refs(tensor: torch.Tensor, layer: torch.nn.Module) -> torch.T
 
 
 def restore_layer_refs(tensor: torch.Tensor, layer: torch.nn.Module) -> torch.Tensor:
-    """
-    Restores references to layer held by tensor attributes.
+    """Restores references to layer held by tensor attributes.
 
     Used by `restore_layer_on_meta` to add back layer references, allowing for proper
     weight loading.
@@ -47,6 +46,7 @@ def restore_layer_refs(tensor: torch.Tensor, layer: torch.nn.Module) -> torch.Te
 
     Returns:
         sanitized tensor
+
     """
     for key, value in tensor.__dict__.items():
         if isinstance(value, MethodType) and value.__self__ is layer_ref_sentinel:

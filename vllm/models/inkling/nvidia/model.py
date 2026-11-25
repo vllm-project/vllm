@@ -10,6 +10,7 @@ from typing import Any, TypeAlias
 import regex as re
 import torch
 from torch import nn
+from transformers import InklingConfig, InklingTextConfig
 
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -46,7 +47,6 @@ from vllm.models.inkling.common.towers import InklingAudio, InklingVision
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
-from ..configs import InklingMMConfig, InklingModelConfig
 from .attention import InklingAttention, compute_log_scaling_tau
 from .layernorm import InklingRMSNorm
 from .logits_processor import InklingLogitsProcessor
@@ -72,7 +72,7 @@ def _sconv_add_norm(
     norm: InklingRMSNorm | None,
     positions: torch.Tensor,
 ) -> tuple[torch.Tensor | None, torch.Tensor]:
-    """``h = hidden + sconv(TP-sum(delta)); y = rmsnorm(h)``.
+    """`h = hidden + sconv(TP-sum(delta)); y = rmsnorm(h)`.
 
     The Lamport path performs reduce-scatter + shard sconv + all-gather +
     residual add + norm. The NCCL path handles unsupported configurations."""
@@ -108,7 +108,7 @@ def _sconv_add_norm(
             m.slot_mapping,
             off_s,
             ws,
-            sconv.owner.block_size,
+            sconv.owner.cache_block_size,
             shared_tensor=shared_delta,
         )
 
@@ -126,7 +126,7 @@ def _sconv_add_norm(
 class InklingDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: InklingModelConfig,
+        config: InklingTextConfig,
         layer_id: int,
         is_local: bool,
         quant_config: QuantizationConfig | None,
@@ -170,10 +170,10 @@ class InklingDecoderLayer(nn.Module):
             conv_owner=self.conv_state,
         )
         self.mlp_norm = InklingRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        if force_dense_mlp or layer_id < config.dense_mlp_idx:
+        if force_dense_mlp or config.mlp_layer_types[layer_id] == "dense":
             self.mlp: nn.Module = InklingDenseMLP(
                 hidden_size=config.hidden_size,
-                intermediate_size=config.dense_intermediate_size,
+                intermediate_size=config.intermediate_size,
                 use_global_scale=config.use_global_scale,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
@@ -265,14 +265,14 @@ class InklingModel(nn.Module):
     def __init__(
         self,
         *,
-        config: InklingModelConfig,
+        config: InklingTextConfig,
         quant_config: QuantizationConfig | None,
         prefix: str,
     ) -> None:
         super().__init__()
         self.config = config
         self.embed_tokens = InklingReplicatedEmbedding(
-            config.padded_vocab_size, config.hidden_size
+            config.vocab_size, config.hidden_size
         )
         self.embed_norm = (
             InklingRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -418,7 +418,7 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
     def _build(
         self,
         vllm_config: VllmConfig,
-        text_config: InklingModelConfig,
+        text_config: InklingTextConfig,
         prefix: str,
     ) -> None:
         quant_config = vllm_config.quant_config
@@ -437,15 +437,15 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
             vllm_config.scheduler_config.max_num_batched_tokens,
         )
         self.lm_head = ParallelLMHead(
-            text_config.padded_vocab_size,
+            text_config.vocab_size,
             text_config.hidden_size,
-            org_num_embeddings=text_config.padded_vocab_size,
+            org_num_embeddings=text_config.vocab_size,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = InklingLogitsProcessor(
-            text_config.padded_vocab_size,
-            org_vocab_size=text_config.vocab_size,
+            text_config.vocab_size,
+            org_vocab_size=text_config.unpadded_vocab_size or text_config.vocab_size,
             soft_cap=text_config.final_logit_softcapping,
             logits_mup_width_multiplier=text_config.logits_mup_width_multiplier,
         )
@@ -479,11 +479,11 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
 
 
 class InklingForCausalLM(_TmlForCausalLMBase):
-    """Text-only entry point (``inkling_model`` checkpoints)."""
+    """Text-only entry point (`inkling_text` checkpoints)."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
-        self._build(vllm_config, vllm_config.model_config.hf_config, prefix)
+        self._build(vllm_config, vllm_config.model_config.hf_text_config, prefix)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -497,7 +497,7 @@ class InklingForConditionalGeneration(_TmlForCausalLMBase, SupportsMultiModal):
     Builds the vision + audio towers on top of the shared text backbone. Inkling has
     NO cross-modal fusion (the vision tower emits one token per patch, the audio
     tower one token per frame), so generation reuses the inherited backbone
-    ``forward`` / ``compute_logits`` (the latter already applies muP) and this
+    `forward` / `compute_logits` (the latter already applies muP) and this
     class only adds multimodal embedding + merge.
     """
 
@@ -518,7 +518,7 @@ class InklingForConditionalGeneration(_TmlForCausalLMBase, SupportsMultiModal):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
-        config: InklingMMConfig = vllm_config.model_config.hf_config
+        config: InklingConfig = vllm_config.model_config.hf_config
 
         self.visual = (
             InklingVision(config.vision_config, prefix=maybe_prefix(prefix, "visual"))
@@ -647,7 +647,7 @@ _MOE_EXPERT_WEIGHT_RE = re.compile(
 def _load_inkling_weights(
     module: nn.Module,
     weights: Iterable[tuple[str, torch.Tensor]],
-    config: InklingModelConfig,
+    config: InklingTextConfig,
 ) -> set[str]:
     moe_modules = {
         name: mod for name, mod in module.named_modules() if isinstance(mod, InklingMoE)
@@ -693,8 +693,9 @@ def _load_inkling_weights(
 
     # The release checkpoint also carries auxiliary prediction-head weights;
     # they are not part of the causal LM served by this implementation.
-    loader = AutoWeightsLoader(module, skip_prefixes=["model.mtp."])
-    loaded |= loader.load_weights(_iter_loadable_weights())
+    mapper = WeightsMapper(orig_to_new_prefix={"model.mtp.": None})
+    loader = AutoWeightsLoader(module)
+    loaded |= loader.load_weights(_iter_loadable_weights(), mapper=mapper)
 
     # Post-load MoE fixups (default input scales, zeroed EP-padding experts).
     for moe_name, moe in moe_modules.items():

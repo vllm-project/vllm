@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Sequence
 
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8StaticChannelSym,
@@ -49,8 +51,10 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
         if c.activation_quant_key not in cls._SUPPORTED_ACT_QUANT_KEYS:
             return (
                 False,
-                "XPUW8A8FP8Linear only support per-tensor and per-token activation "
-                "quantization",
+                (
+                    "XPUW8A8FP8Linear only support per-tensor and per-token activation "
+                    "quantization"
+                ),
             )
         if c.weight_quant_key.dtype not in {torch.float8_e5m2, torch.float8_e4m3fn}:
             return False, "XPUW8A8FP8Linear only support FP8 weight dtype"
@@ -120,6 +124,12 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
 
 class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
+    def executed_activation_key(
+        cls, activation_quant_key: QuantKey | None
+    ) -> QuantKey | None:
+        return None
+
+    @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
@@ -132,8 +142,10 @@ class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
         if c.weight_quant_key not in {kFp8StaticChannelSym, kFp8StaticTensorSym}:
             return (
                 False,
-                "XPUW8A16FP8Linear only support per-channel and per-tensor "
-                "quantization",
+                (
+                    "XPUW8A16FP8Linear only support per-channel and per-tensor "
+                    "quantization"
+                ),
             )
         if c.weight_quant_key.dtype not in {torch.float8_e5m2, torch.float8_e4m3fn}:
             return False, "XPUW8A16FP8Linear only support FP8 weight dtype"
@@ -172,7 +184,10 @@ class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
     ) -> torch.Tensor:
         weight = layer.weight
         weight_scale = layer.weight_scale
-        return torch.ops._xpu_C.fp8_gemm_w8a16(x, weight, weight_scale, bias)
+        orig_shape = x.shape
+        x = x.reshape(-1, orig_shape[-1])  # flatten to [tokens, hidden]
+        out = torch.ops._xpu_C.fp8_gemm_w8a16(x, weight, weight_scale, bias)
+        return out.reshape(*orig_shape[:-1], out.shape[-1])
 
     def apply_scaled_mm(
         self,
@@ -204,7 +219,34 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         )
         scale = getattr(layer, scale_attr)
 
-        # Checkpoint scale is [n_blocks, k_blocks] (one value per 128x128 tile).
+        # Ragged N (N % block_n != 0): oneDNN needs n_blocks to divide N.
+        # Weight untouched; only repeat scale rows to a finer N-group gn that
+        # divides both N and block_n (gn = gcd(N, block_n)):
+        #   scale [ceil(N/block_n), K/block_k] --> [N/gn, K/block_k]
+        # oneDNN only accepts gn that is a multiple of 16, and gcd(N, block_n)
+        # is a power of two (block_n=128), so gn must be >= 16. No-op when
+        # N % block_n == 0.
+        block_n, block_k = self.weight_group_shape
+        N, K = layer.weight.shape
+        if N % block_n != 0:
+            gn = math.gcd(N, block_n)
+            assert gn % 16 == 0, (
+                f"XPU block-scaled FP8: N ({N}) yields group width {gn}, but "
+                f"oneDNN only supports multiples of 16; this weight shape is "
+                f"unsupported."
+            )
+            col_start = torch.arange(N // gn, device=scale.device) * gn
+            src_idx = torch.div(col_start, block_n, rounding_mode="floor")
+            scale = scale.index_select(0, src_idx).contiguous()
+
+        # Ragged K needs the runtime activation scale expanded too, which we
+        # don't handle; DeepSeek/GLM keep K block-aligned, so fail loudly.
+        assert K % block_k == 0, (
+            f"XPU block-scaled FP8 requires K ({K}) to be a multiple of the "
+            f"weight block size ({block_k}); ragged-K weights are unsupported."
+        )
+
+        # Checkpoint scale is [n_blocks, k_blocks] (one value per block tile).
         # oneDNN fp8_gemm requires contiguous [k_blocks, n_blocks] layout.
         # We store the transposed contiguous buffer as a .t() view so that:
         #   - MLA's scaled_dequantize still sees [n_blocks, k_blocks] shape

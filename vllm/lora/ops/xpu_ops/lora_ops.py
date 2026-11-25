@@ -85,57 +85,88 @@ def _bgmv_expand_slice_impl(
     )
 
 
-def _bgmv_shrink_fake(
-    inputs: torch.Tensor,
-    lora_a_weights: torch.Tensor,
+def _lora_linear_impl(
     output_tensor: torch.Tensor,
+    inputs: torch.Tensor,
+    lora_a_weights: list[torch.Tensor],
+    lora_b_weights: list[torch.Tensor],
     lora_indices_tensor: torch.Tensor,
+    single_lora_slot: torch.Tensor,
+    output_slices: list[int],
     scaling: float,
-) -> None:
-    return None
-
-
-def _bgmv_expand_fake(
-    inputs: torch.Tensor,
-    lora_b_weights: torch.Tensor,
-    output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
     add_inputs: bool,
+    allow_gemm: bool,
+    gemm_min_tokens: int,
 ) -> None:
-    return None
+    num_tokens = inputs.size(0)
+    # `single_lora_slot` is a host tensor, so reading it does not synchronize.
+    # The caller keeps `gemm_min_tokens` above the largest captured graph size,
+    # so captured graphs never bake in a slot.
+    slot = -1
+    if allow_gemm and num_tokens >= gemm_min_tokens:
+        slot = int(single_lora_slot[0])
+    if slot >= 0:
+        # Every token uses the same adapter: two dense GEMMs per slice are much
+        # faster than per-token BGMV for prefill-sized batches. Padded rows past
+        # the mapping also get the delta; their outputs are discarded, and BGMV
+        # reads stale indices for them anyway.
+        offset = 0
+        for lora_a, lora_b, slice_size in zip(
+            lora_a_weights, lora_b_weights, output_slices
+        ):
+            hidden = torch.mm(inputs, lora_a[slot, 0].t())
+            if scaling != 1.0:
+                hidden.mul_(scaling)
+            output_tensor[:, offset : offset + slice_size].addmm_(
+                hidden, lora_b[slot, 0].t(), beta=1.0 if add_inputs else 0.0
+            )
+            offset += slice_size
+        return
 
-
-def _bgmv_expand_slice_fake(
-    inputs: torch.Tensor,
-    lora_b_weights: torch.Tensor,
-    output_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    slice_offset: int,
-    slice_size: int,
-    add_inputs: bool,
-) -> None:
-    return None
+    rank = lora_b_weights[0].size(-1)
+    buffer = torch.zeros(
+        (len(lora_a_weights), num_tokens, rank),
+        dtype=inputs.dtype,
+        device=inputs.device,
+    )
+    for i, lora_a in enumerate(lora_a_weights):
+        _bgmv_shrink_impl(inputs, lora_a, buffer[i], lora_indices_tensor, scaling)
+    offset = 0
+    for i, (lora_b, slice_size) in enumerate(zip(lora_b_weights, output_slices)):
+        _bgmv_expand_slice_impl(
+            buffer[i],
+            lora_b,
+            output_tensor,
+            lora_indices_tensor,
+            offset,
+            slice_size,
+            add_inputs,
+        )
+        offset += slice_size
 
 
 direct_register_custom_op(
     op_name="xpu_bgmv_shrink",
     op_func=_bgmv_shrink_impl,
     mutates_args=["output_tensor"],
-    fake_impl=_bgmv_shrink_fake,
 )
 
 direct_register_custom_op(
     op_name="xpu_bgmv_expand",
     op_func=_bgmv_expand_impl,
     mutates_args=["output_tensor"],
-    fake_impl=_bgmv_expand_fake,
 )
 
 direct_register_custom_op(
     op_name="xpu_bgmv_expand_slice",
     op_func=_bgmv_expand_slice_impl,
     mutates_args=["output_tensor"],
-    fake_impl=_bgmv_expand_slice_fake,
+)
+
+direct_register_custom_op(
+    op_name="xpu_lora_linear",
+    op_func=_lora_linear_impl,
+    mutates_args=["output_tensor"],
 )
 
 
@@ -180,4 +211,39 @@ def bgmv_expand_slice(
         slice_offset,
         slice_size,
         add_inputs,
+    )
+
+
+def lora_linear(
+    output_tensor: torch.Tensor,
+    inputs: torch.Tensor,
+    lora_a_weights: list[torch.Tensor],
+    lora_b_weights: list[torch.Tensor],
+    lora_indices_tensor: torch.Tensor,
+    single_lora_slot: torch.Tensor,
+    output_slices: list[int],
+    scaling: float,
+    add_inputs: bool,
+    allow_gemm: bool,
+    gemm_min_tokens: int,
+) -> None:
+    """Apply shrink and expand for all slices of a linear layer.
+
+    If `allow_gemm` is set, `single_lora_slot` (a one-element host tensor) holds
+    a slot index and the batch has at least `gemm_min_tokens` tokens, every
+    token is assumed to use that adapter and dense GEMMs are used; otherwise
+    BGMV is used.
+    """
+    torch.ops.vllm.xpu_lora_linear(
+        output_tensor,
+        inputs,
+        lora_a_weights,
+        lora_b_weights,
+        lora_indices_tensor,
+        single_lora_slot,
+        output_slices,
+        scaling,
+        add_inputs,
+        allow_gemm,
+        gemm_min_tokens,
     )

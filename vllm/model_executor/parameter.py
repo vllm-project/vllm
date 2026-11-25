@@ -14,6 +14,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.utils import copy_weight_
 
 __all__ = [
     "BasevLLMParameter",
@@ -30,8 +31,7 @@ logger = init_logger(__name__)
 
 
 class BasevLLMParameter(Parameter):
-    """
-    Base parameter for vLLM linear layers. Extends the torch.nn.parameter
+    """Base parameter for vLLM linear layers. Extends the torch.nn.parameter
     by taking in a linear weight loader. Will copy the loaded weight
     into the parameter when the provided weight loader is called.
     """
@@ -40,14 +40,13 @@ class BasevLLMParameter(Parameter):
         return super().__new__(cls, data=data, requires_grad=False)
 
     def __init__(self, data: torch.Tensor, weight_loader: Callable):
-        """
-        Initialize the BasevLLMParameter
+        """Initialize the BasevLLMParameter.
 
         Args:
             data: torch tensor with the parameter data
             weight_loader: weight loader callable
-        """
 
+        """
         # During weight loading, we often do something like:
         # narrowed_tensor = param.data.narrow(0, offset, len)
         # narrowed_tensor.copy_(real_weight)
@@ -94,7 +93,7 @@ class BasevLLMParameter(Parameter):
         assert self.data.shape == loaded_weight.shape or self._is_1d_and_scalar(
             loaded_weight
         )
-        self.data.copy_(loaded_weight)
+        copy_weight_(self.data, loaded_weight)
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         self._assert_and_load(loaded_weight)
@@ -119,16 +118,9 @@ class BasevLLMParameter(Parameter):
         assert shard_id in qkv_idxs
         return qkv_idxs[shard_id]
 
-    @classmethod
-    def __torch_function__(cls, func, types, args=(), kwargs=None):
-        if kwargs is None:
-            kwargs = {}
-        return super().__torch_function__(func, types, args, kwargs)
-
 
 class _ColumnvLLMParameter(BasevLLMParameter):
-    """
-    Private class defining weight loading functionality
+    """Private class defining weight loading functionality
     (load_merged_column_weight, load_qkv_weight)
     for parameters being loaded into linear layers with column
     parallelism. This includes QKV and MLP layers which are
@@ -151,7 +143,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
             self.output_dim, self.tp_rank * shard_size, shard_size
         )
         assert self.data.shape == loaded_weight.shape
-        self.data.copy_(loaded_weight)
+        copy_weight_(self.data, loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
         shard_offset: int = kwargs["shard_offset"]
@@ -173,7 +165,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
             self.output_dim, self.tp_rank * shard_size, shard_size
         )
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        copy_weight_(param_data, loaded_weight)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         shard_offset: int = kwargs["shard_offset"]
@@ -198,12 +190,11 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         )
 
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        copy_weight_(param_data, loaded_weight)
 
 
 class RowvLLMParameter(BasevLLMParameter):
-    """
-    Parameter class defining weight_loading functionality
+    """Parameter class defining weight_loading functionality
     (load_row_parallel_weight) for parameters being loaded
     into linear layers with row parallel functionality.
     Requires an input_dim to be defined.
@@ -227,12 +218,11 @@ class RowvLLMParameter(BasevLLMParameter):
             loaded_weight = loaded_weight.reshape(1)
 
         assert self.data.shape == loaded_weight.shape
-        self.data.copy_(loaded_weight)
+        copy_weight_(self.data, loaded_weight)
 
 
 class ModelWeightParameter(_ColumnvLLMParameter, RowvLLMParameter):
-    """
-    Parameter class for linear layer weights. Uses both column and
+    """Parameter class for linear layer weights. Uses both column and
     row parallelism.
     """
 
@@ -240,8 +230,7 @@ class ModelWeightParameter(_ColumnvLLMParameter, RowvLLMParameter):
 
 
 class GroupQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
-    """
-    Parameter class for weight scales loaded for weights with
+    """Parameter class for weight scales loaded for weights with
     grouped quantization. Uses both column and row parallelism.
     """
 
@@ -249,8 +238,7 @@ class GroupQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
 
 
 class ChannelQuantScaleParameter(_ColumnvLLMParameter):
-    """
-    Parameter class for weight scales loaded for weights with
+    """Parameter class for weight scales loaded for weights with
     channel-wise quantization. Equivalent to _ColumnvLLMParameter.
     """
 
@@ -258,8 +246,7 @@ class ChannelQuantScaleParameter(_ColumnvLLMParameter):
 
 
 class PerTensorScaleParameter(BasevLLMParameter):
-    """
-    Parameter class for scales where the number of scales is
+    """Parameter class for scales where the number of scales is
     equivalent to the number of logical matrices in fused linear
     layers (e.g. for QKV, there are 3 scales loaded from disk).
     This is relevant to weights with per-tensor quantization.
@@ -291,11 +278,9 @@ class PerTensorScaleParameter(BasevLLMParameter):
     def _load_into_shard_id(
         self, loaded_weight: torch.Tensor, shard_id: str | int, **kwargs
     ):
-        """
-        Slice the parameter data based on the shard id for
+        """Slice the parameter data based on the shard id for
         loading.
         """
-
         param_data = self.data
         shard_id = self._shard_id_as_int(shard_id)
 
@@ -307,12 +292,11 @@ class PerTensorScaleParameter(BasevLLMParameter):
 
         param_data = param_data[shard_id]
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        copy_weight_(param_data, loaded_weight)
 
 
 class PackedColumnParameter(_ColumnvLLMParameter):
-    """
-    Parameter for model parameters which are packed on disk
+    """Parameter for model parameters which are packed on disk
     and support column parallelism only. See PackedvLLMParameter
     for more details on the packed properties.
     """
@@ -351,8 +335,7 @@ class PackedColumnParameter(_ColumnvLLMParameter):
 
 
 class PackedvLLMParameter(ModelWeightParameter):
-    """
-    Parameter for model weights which are packed on disk.
+    """Parameter for model weights which are packed on disk.
     Example: GPTQ Marlin weights are int4 or int8, packed into int32.
     Extends the ModelWeightParameter to take in the
     packed factor, the packed dimension, and optionally, marlin
@@ -395,8 +378,7 @@ class PackedvLLMParameter(ModelWeightParameter):
 
 
 class BlockQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
-    """
-    Parameter class for weight scales loaded for weights with
+    """Parameter class for weight scales loaded for weights with
     block-wise quantization. Uses both column and row parallelism.
     """
 
@@ -404,8 +386,7 @@ class BlockQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
 
 
 class SharedWeightParameter(BasevLLMParameter):
-    """
-    Parameter for weights with many shared tensors across a model
+    """Parameter for weights with many shared tensors across a model.
 
     For example, when applying transforms to the "gate" and "up" partitions of
     `MergedColumnParallelLinear`, the transform weights must stay separate
@@ -446,8 +427,7 @@ class SharedWeightParameter(BasevLLMParameter):
             )
 
     def add_partition(self, index: int, data_key: Hashable, *args: Any, **kwargs: Any):
-        """
-        Add a partition to the weight parameter. Partitions whose `data_key`
+        """Add a partition to the weight parameter. Partitions whose `data_key`
         is the same will share tensor data
 
         Args:
@@ -455,6 +435,7 @@ class SharedWeightParameter(BasevLLMParameter):
             data_key: hashable key used to key shared tensors
             *args: arguments for `torch.empty`
             **kwargs: keyword arguments for `torch.empty`
+
         """
         # load (shared) tensor using `data_key`
         if data_key not in self.tensors_registry:
@@ -544,8 +525,7 @@ class SharedWeightParameter(BasevLLMParameter):
 def permute_param_layout_(
     param: BasevLLMParameter, input_dim: int, output_dim: int, **kwargs
 ) -> BasevLLMParameter:
-    """
-    Permute a parameter's layout to the specified input and output dimensions,
+    """Permute a parameter's layout to the specified input and output dimensions,
     useful for forcing the parameter into a known layout, for example, if I need
     a packed (quantized) weight matrix to be in the layout
         {input_dim = 0, output_dim = 1, packed_dim = 0}
@@ -554,7 +534,6 @@ def permute_param_layout_(
     to ensure x is in the correct layout (permuting it to the correct layout if
     required, asserting if it cannot get it to the correct layout)
     """
-
     curr_input_dim = getattr(param, "input_dim", None)
     curr_output_dim = getattr(param, "output_dim", None)
 

@@ -62,20 +62,6 @@ vllm serve <model>
 
 The code for the `vllm` CLI can be found in [vllm/entrypoints/cli/main.py](../../vllm/entrypoints/cli/main.py).
 
-Sometimes you may see the API server entrypoint used directly instead of via the
-`vllm` CLI command. For example:
-
-```bash
-python -m vllm.entrypoints.openai.api_server --model <model>
-```
-
-!!! warning
-
-    `python -m vllm.entrypoints.openai.api_server` is deprecated
-    and may become unsupported in a future release.
-
-That code can be found in [vllm/entrypoints/openai/api_server.py](../../vllm/entrypoints/openai/api_server.py).
-
 More details on the API server can be found in the [Online Serving](../serving/online_serving/README.md) document.
 
 ## V1 Process Architecture
@@ -88,7 +74,7 @@ The API server process handles HTTP requests (e.g., the OpenAI-compatible API), 
 
 By default, there is **1 API server process**, but when data parallelism is used, the API server count automatically scales to match the data parallel size. This can also be manually configured with the `--api-server-count` flag. Each API server connects to **all** engine cores via ZMQ in a many-to-many topology, enabling any API server to route requests to any engine core. Each API server process uses multiple CPU threads for media loading (controlled by `VLLM_MEDIA_LOADING_THREAD_COUNT`, default 8).
 
-The code can be found in [vllm/entrypoints/openai/api_server.py](../../vllm/entrypoints/openai/api_server.py) and [vllm/v1/utils.py](../../vllm/v1/utils.py).
+The code can be found in [vllm/entrypoints/launchers/api_server](../../vllm/entrypoints/launchers/api_server) and [vllm/v1/utils.py](../../vllm/v1/utils.py).
 
 ### Engine Core Process
 
@@ -144,6 +130,58 @@ A data parallel deployment with 8 GPUs (`vllm serve -tp=2 -dp=4`) has:
 
 For CPU resource sizing recommendations, see
 [CPU Resources for GPU Deployments](../configuration/optimization.md#cpu-resources-for-gpu-deployments).
+
+## Scheduler
+
+The scheduler runs inside the **Engine Core Process** and decides which
+requests execute each step. The code can be found in
+[vllm/v1/core/sched/scheduler.py](../../vllm/v1/core/sched/scheduler.py).
+
+The scheduler is **token-budget-based**: each step, it fills a budget of
+`max_num_batched_tokens` across both running and waiting requests. There are no
+separate prefill and decode phases. Each request tracks how many of its tokens
+have been computed, and the scheduler assigns it tokens to close the gap. This
+single loop handles chunked prefill, prefix caching and speculative decoding.
+
+### Scheduling Policies
+
+Two policies are supported via `--scheduling-policy`:
+
+- **FCFS** (default): requests are scheduled first-come, first-served. When
+    the KV cache is exhausted, the last-admitted running request is preempted.
+- **Priority**: requests carry an integer `priority` field. When the KV cache
+    is exhausted, the running request with the lowest priority (highest
+    `priority` value, then latest arrival time) is preempted.
+
+### Preemption
+
+When a request cannot be allocated new KV cache blocks, the scheduler
+**preempts** running requests, chosen by the scheduling policy, until enough
+blocks are free:
+
+1. The preempted request's KV cache blocks are freed.
+2. Its progress is reset and it returns to the waiting queue. Under FCFS it
+    goes to the front of the queue; under Priority it is reinserted by
+    `(priority, arrival_time)`.
+3. When re-admitted, it is recomputed rather than swapped back from CPU
+    memory. Prefix caching or a KV connector can restore part of its progress
+    immediately.
+
+For how to reduce preemption, see
+[Preemption](../configuration/optimization.md#preemption).
+
+### Async Scheduling
+
+With async scheduling,
+[vllm/v1/core/sched/async_scheduler.py](../../vllm/v1/core/sched/async_scheduler.py)
+overlaps CPU scheduling with GPU execution: while the GPU executes step *N*,
+the CPU schedules step *N+1*, using placeholders for the tokens that step *N*
+will produce.
+
+If a request is preempted while it still has output in flight, that output is
+normally still delivered when it arrives. It is dropped instead when delivering
+it would be invalid, for example when `reset_prefix_cache` preempts and resumes
+requests within the same step.
 
 ## LLM Engine
 
