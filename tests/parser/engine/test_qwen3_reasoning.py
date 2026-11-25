@@ -56,6 +56,20 @@ def parser(mock_tokenizer):
     return Qwen3Parser(mock_tokenizer)
 
 
+@pytest.mark.parametrize(
+    ("value", "enabled"), [("on", True), ("", False), (["on"], True), ({}, False)]
+)
+def test_equivalent_thinking_modes_reuse_config(mock_tokenizer, value, enabled):
+    expected = Qwen3Parser(
+        mock_tokenizer, chat_template_kwargs={"enable_thinking": enabled}
+    )
+    actual = Qwen3Parser(
+        mock_tokenizer, chat_template_kwargs={"enable_thinking": value}
+    )
+
+    assert actual.parser_engine_config is expected.parser_engine_config
+
+
 class TestNonStreaming:
     def test_reasoning_then_content(self, parser):
         text = "<think>Let me analyze.</think>The answer is 42."

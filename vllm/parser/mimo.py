@@ -27,9 +27,8 @@ def _mimo_arg_converter(raw_args: str, partial: bool) -> str:
 
 class MiMoParser(Qwen3Parser):
     def __init__(self, tokenizer, tools=None, **kwargs):
-        thinking = (kwargs.get("chat_template_kwargs") or {}).get(
-            "enable_thinking", True
-        )
+        chat_kwargs = kwargs.get("chat_template_kwargs") or {}
+        thinking = bool(chat_kwargs.get("enable_thinking", True))
         kwargs.setdefault(
             "parser_engine_config",
             replace(
