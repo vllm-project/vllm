@@ -10,10 +10,8 @@ ARG TRITON_VERSION=3.8.0+git669b31ac
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG FA_BRANCH="4a948e9c"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-# AMD's release wheel for tag v${AITER_VERSION}; AITER_BUILD is its commit and build date.
-ARG AITER_VERSION="0.1.30"
-ARG AITER_BUILD="77ba72b.d20261123"
-ARG AITER_WHEEL_INDEX="https://rocm.frameworks.amd.com/whl-multi-arch/"
+ARG AITER_BRANCH="v0.1.30-post1-rc1"
+ARG AITER_REPO="https://github.com/josh-schell-amd/aiter.git"
 ARG MORI_BRANCH="v1.2.3.post1"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 ARG ROCM_SYSTEMS_REPO="https://github.com/ROCm/rocm-systems.git"
@@ -210,19 +208,21 @@ RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 
 
 ###
-### AITER
+### AITER Build
 ###
 FROM base AS build_aiter
-ARG AITER_VERSION
-ARG AITER_BUILD
-ARG AITER_WHEEL_INDEX
-ARG ROCM_SDK_VERSION
-ARG TORCH_VERSION
-RUN --mount=type=cache,target=/root/.cache/pip \
-    torch_release="$(echo "${TORCH_VERSION}" | cut -d. -f1,2)" \
-    && pip download --no-deps --dest /app/install --index-url "${AITER_WHEEL_INDEX}" \
-        "amd-aiter==${AITER_VERSION}+rocm${ROCM_SDK_VERSION}.torch${torch_release}.${AITER_BUILD}" \
-    && ls /app/install/*.whl
+ARG AITER_BRANCH
+ARG AITER_REPO
+RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
+RUN --mount=type=cache,target=/root/.cache/pip cd aiter \
+    && git submodule update --init --recursive \
+    && pip install -r requirements.txt
+# AITER_USE_SYSTEM_TRITON keeps setup.py from resolving its own triton, which would
+# displace the pinned one already installed in base.
+RUN --mount=type=cache,target=/root/.cache/pip pip install pyyaml && cd aiter \
+    && PREBUILD_KERNELS=1 AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
+    && ls /app/aiter/dist/*.whl
+RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
 
 ###
@@ -384,9 +384,6 @@ RUN --mount=type=bind,from=build_triton,src=/app/install,target=/i/triton \
     --mount=type=bind,from=build_mori,src=/app/install,target=/i/mori \
     --mount=type=cache,target=/root/.cache/pip \
     pip install /i/*/*.whl \
-    # TEMPORARY, do not merge: stands in for AITER v0.1.30.post1 (v0.1.30 + FlyDSL 0.5.3, aiter#8450
-    # and #8467) until its wheel is published. Replaced by the AITER_VERSION/AITER_BUILD bump.
-    && pip install --no-deps flydsl==0.5.3 \
     && ! pip check 2>&1 | grep -iE '^(torch|triton) ' \
     && test "$(pip show triton | awk '/^Version:/ {print $2}')" = "${TRITON_VERSION}" \
     # Create a constraints file to protect the versions we need, especially
@@ -420,7 +417,8 @@ ARG TRITON_BRANCH
 ARG TRITON_REPO
 ARG FA_BRANCH
 ARG FA_REPO
-ARG AITER_WHEEL_INDEX
+ARG AITER_BRANCH
+ARG AITER_REPO
 ARG MORI_BRANCH
 ARG MORI_REPO
 ARG ROCM_SYSTEMS_REPO
@@ -438,8 +436,8 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
     && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
-    && echo "AITER_VERSION: $(pip show amd-aiter | awk '/^Version:/ {print $2}')" >> /app/versions.txt \
-    && echo "AITER_WHEEL_INDEX: ${AITER_WHEEL_INDEX}" >> /app/versions.txt \
+    && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
+    && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt \
     && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
     && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt \
     && echo "ROCM_SYSTEMS_REPO: ${ROCM_SYSTEMS_REPO}" >> /app/versions.txt \
