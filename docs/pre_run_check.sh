@@ -31,7 +31,7 @@ DOCS_PATHS=(
 )
 if git diff --quiet origin/main...HEAD -- "${DOCS_PATHS[@]}"; then
   echo "No docs-affecting files changed vs origin/main; cancelling build."
-  # See https://docs.readthedocs.com/platform/latest/guides/build/skip-build.html for info on exit code
+  # See https://docs.readthedocs.com/platform/latest/guides/build/skip-or-cancel-builds.html for info on exit code
   exit 183
 fi
 echo "Docs-affecting files changed; continuing pre-run-check."
