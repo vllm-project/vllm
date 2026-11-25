@@ -14,6 +14,38 @@ It's a living document, updated as new features and datasets become available.
 For exact-batch model timing, including steady-state pipeline-parallel forwards,
 see [vllm bench forward](../cli/README.md#forward).
 
+For skewed synthetic MoE expert loads, use `--routing zipf`:
+
+```bash
+vllm bench forward --model Qwen/Qwen3-30B-A3B \
+  --routing zipf --case decode=6*1@8192 --case prefill=2048
+```
+
+Each token independently selects distinct experts without replacement, weighted
+by popularity rank to the power of `-1.25`. Expert popularity is randomly
+permuted per layer to avoid systematically assigning hot experts to the lowest
+EP ranks.
+The fixture is seeded by `--seed`, fixed across timing replays, and generated
+outside the timed forward. Sequence-parallel TP ranks use their corresponding
+token rows. When replacing expert IDs, both synthetic modes preserve inactive
+`-1` slots and leave routing weights unchanged, so padded rows remain unrouted.
+The expert-ID hook performs this mask selection inside the timed forward; the
+gate-logits hook relies on the model's downstream padding mask.
+Zipf allows EP load imbalance; `--routing balanced` gives equal
+load per EP rank. Neither synthetic mode supports grouped top-k routing;
+Zipf also does not support prefill context parallelism.
+
+The default `--routing auto` selects Zipf with dummy weights and real routing
+otherwise. When the model or parallel layout does not support the synthetic
+fixture, `auto` warns and falls back to real routing. Use `--routing balanced`
+to explicitly request equal EP load. Zipf is a synthetic workload, not a fit
+to a particular model's routing or speculative-token correlations.
+
+The standard forward benchmark captures an exact-shape, one-shot graph with
+the runner's CUDA graph manager disabled. It does not add serving capture-bucket
+padding; model-level padding, such as sequence-parallel alignment, can still
+occur. Use native serving graphs when evaluating capture-bucket padding costs.
+
 ## Attention Kernel Benchmark
 
 Run the attention kernel smoke benchmark from the repository root using the
@@ -27,6 +59,33 @@ python3 benchmarks/attention_benchmarks/benchmark.py \
 If any configuration fails, the benchmark exits with status `1` after reporting
 results and writing any requested CSV or JSON output. Successful runs exit with
 status `0`. Profiling runs also propagate failures, but do not save timing metrics.
+
+Sparse MLA benchmarks use the metadata builder's prefill route by default.
+The `mha_vs_mqa` comparison mode forces the selected `dense_mha`, `masked_mha`,
+and `mqa` variants. When calling the benchmark runner from Python, set
+`BenchmarkConfig.sparse_mla_route` to `SparseMLAPrefillRoute.DENSE_MHA`,
+`MASKED_MHA`, or `SPARSE_MQA` to force a route, or leave it as `None` to use the
+builder's decision. Import `SparseMLAPrefillRoute` from
+`vllm.v1.attention.backends.mla.sparse_utils`. This replaces
+the benchmark-only `sparse_mla_force_mqa` and `sparse_mla_mha_mode` fields.
+The runner's FP8 options `output_scale` and `fuse_quant_op` are keyword-only;
+old positional route overrides raise `TypeError` instead of being interpreted
+as quantization options. Move route overrides into `BenchmarkConfig`.
+`BenchmarkResult.actual_sparse_mla_route` records the executed prefill route
+(or `SPARSE_MQA` for decode-only sparse batches). The result table shows this
+route below each timing; JSON and CSV include its enum name in
+`actual_sparse_mla_route`. Decodes in mixed batches always use MQA.
+If automatic routing chooses MQA despite an explicit `prefill_backend`, the
+runner warns that the requested prefill backend was not executed. Set the route
+enum explicitly when measuring an MHA kernel.
+
+The YAML `prefill_backends` comparison explicitly measures MHA. For sparse MLA,
+it uses dense MHA when every sequence fits within the benchmark's top-k of 2048,
+and masked MHA otherwise. Masked MHA requires `fa4`.
+Unsupported prefill backends report an error instead
+of falling back to sparse MQA and labeling its timing as the requested backend.
+FP8 output comparisons also require an MHA prefill route; an automatic sparse
+MQA route reports an error instead of silently omitting output quantization.
 
 ## Dataset Overview
 
@@ -57,7 +116,7 @@ th {
 | HuggingFace-Blazedit | ✅ | ✅ | `vdaita/edit_5k_char`, `vdaita/edit_10k_char` |
 | HuggingFace-ASR | ✅ | ✅ | `openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`, `ArtificialAnalysis/Earnings22-Cleaned-AA`, `D4nt3/esb-datasets-earnings22-validation-tiny-filtered` |
 | Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
-| SPEED-Bench | ✅ | ✅ | `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py \| python3 -` |
+| SPEED-Bench | ✅ | ✅ | `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Gym/refs/heads/main/benchmarks/speed-bench/prepare.py \| python3 - --format raw` |
 | Custom | ✅ | ✅ | Local file: `data.jsonl` |
 | Custom Audio | ✅ | ✅ | Local file: `audio_data.jsonl` |
 | Custom Image | ✅ | ✅ | Local file: `image_data.jsonl` |
@@ -468,13 +527,14 @@ vllm bench serve \
 First, download the dataset to a folder, using this one liner:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py | python3 -
+curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Gym/refs/heads/main/benchmarks/speed-bench/prepare.py | python3 - --format raw --config all
 ```
 
 The command supports also the following arguments:
 
-- `--config`: download only a subset of the dataset: `qualitative`, `throughput_1k`, `throughput_2k`, `throughput_8k`, `throughput_16k` and `throughput_32k`. By default, it will download all subsets.
-- `--output_dir`: download to a specified folder. By default, it will download to the current directory.
+- `--config`: download only a subset of the dataset: `qualitative`, `throughput_1k`, `throughput_2k`, `throughput_8k`, `throughput_16k`, `throughput_32k` and `throughput_100k`. By default, it will download all subsets.
+- `--output-dir`: download to a specified folder. By default, it will download to the current working directory under the `data/` folder.
+- `--format`: use the `raw` format for vllm bench support. Other formats are for Gym support and do not work with vllm bench.
 
 Start a server with speculative decoding:
 
@@ -1360,6 +1420,7 @@ Flags specific to `random-mm`:
 - `--random-mm-num-mm-items-range-ratio`: vary item count uniformly in the closed integer range [floor(n·(1−r)), ceil(n·(1+r))]. Set r=0 to keep it fixed; r=1 allows 0 items.
 - `--random-mm-limit-mm-per-prompt`: per-modality hard caps, e.g. '{"image": 3, "video": 0}'.
 - `--random-mm-bucket-config`: dict mapping (H, W, T) → probability. Entries with probability 0 are removed; remaining probabilities are renormalized to sum to 1. Use T=1 for images. Set any T>1 for videos (video sampling not yet supported).
+- `--random-mm-video-encode-fps`: encode rate (fps) for the synthetic video container. Container metadata only -- set to match the target model's native sampling fps so `num_frames` reflects the frame count the model actually processes. Defaults to 30.0.
 
 Behavioral notes:
 
@@ -1541,6 +1602,26 @@ vllm bench serve \
 
 </details>
 
+### Decisions Benchmark
+
+To benchmark [structured decisions](../models/structured_decisions_models.md), set
+`--backend vllm-systemone --endpoint /v1/systemone` or
+`--backend openai-decisions --endpoint /v1/decisions` with a dataset that produces
+one text prompt per request, such as `random` or `custom` JSONL. The matching
+`--endpoint` is required; the default `/v1/completions` is not supported.
+Batched prompts (`--random-batch-size > 1`) are rejected. Concurrent requests
+are supported.
+
+These backends send plain text and let the server apply the chat template.
+Client-side templating is skipped automatically; `--skip-chat-template` is not required.
+
+Each prompt is sent as the state with one choice, one yes/no and one score
+question; pass `--extra-body '{"questions": ...}'` to override these questions
+for every request. Results report latency, throughput and input-token usage,
+with each question counted as one input, as for embeddings. This benchmark
+does not evaluate decision accuracy or load per-item questions and labels from
+decision datasets.
+
 ### Reranker Benchmark
 
 Benchmark the performance of rerank requests in vLLM.
@@ -1585,3 +1666,36 @@ to account for the extra prompt which is the query. The token accounting to repo
 throughput numbers correctly is also adjusted.
 
 </details>
+
+## Startup Benchmark
+
+By default, `vllm bench startup` times engine construction. To measure how
+long a new server takes to answer its first request, pass the full server
+command, including its engine arguments, to `--serve-cmd`.
+
+```bash
+vllm bench startup --serve-cmd 'vllm serve Qwen/Qwen3-0.6B --port 8100' \
+  --num-iters-cold 1 --num-iters-warmup 1 --num-iters-warm 3 \
+  --output-json startup.json
+```
+
+Each iteration launches a fresh server on the specified address, which must
+be idle. Both clocks start at launch. One stops at the first successful
+`/health` poll, the other at the first non-empty text in a streamed completion.
+A start verifies when the completion finishes normally and its text and token
+IDs (when returned) match the first completed start. A healthy server can
+fail verification if it returns only empty text or EOS, lacks the
+`/v1/completions` endpoint, or tunes kernels differently across starts and
+flips a near-tie between tokens. The benchmark then exits with status 1.
+The per-iteration JSON retains the observed timings. Only verified starts
+contribute to the summaries.
+
+Shutdown sends SIGTERM to the root process. If it fails to exit within 30
+seconds, the benchmark marks the iteration failed and skips later starts.
+It sends SIGKILL to the process group to clear any remaining workers.
+
+Cold starts use empty `VLLM_CACHE_ROOT`, TorchInductor and Triton caches.
+Other libraries' caches follow the environment. Warmup and warm starts reuse
+the caller's caches. `--server-ready-timeout` defaults to 1800 seconds to
+allow for a large model's first start. With `--output-json`, each iteration
+records the path to its server log. Otherwise the server writes to the terminal.

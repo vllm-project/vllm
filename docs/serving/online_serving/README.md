@@ -8,7 +8,7 @@ We currently support the following OpenAI APIs:
 
 - [Completions API](./openai_compatible_server.md#completions-api) (`/v1/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md).
-    - *Note: `suffix` parameter is not supported.*
+    - *Note: `suffix` parameter is only supported by models with fill-in-the-middle rendering, such as DeepSeek V4.*
 - [Chat Completions API](./openai_compatible_server.md#chat-api) (`/v1/chat/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md) with a [chat template](#chat-template).
     - *Note: `user` parameter is ignored.*
@@ -28,6 +28,9 @@ We currently support the following OpenAI APIs:
 ## Anthropic APIs
 
 - Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
+    - `max_tokens=0` (Anthropic's prompt-cache pre-warming request) is rejected
+      with a 400. vLLM samples at least one token per request, so warm the cache
+      with `max_tokens=1` instead.
 
 ## Cohere APIs
 
@@ -126,7 +129,7 @@ For further details on profiling vLLM, please refer to [this page](../../contrib
 
 ## Scale-Out APIs
 
-Scale-out APIs are disabled by default on `vllm serve`. Set `--enable-scale-out` to register the endpoints below. The dedicated `vllm launch render` and `vllm serve --tokens-only` modes always register their required endpoints regardless of `--enable-scale-out`.
+Scale-out APIs are disabled by default on `vllm serve`. Set `--enable-scale-out` to register the endpoints below; `VLLM_SERVER_DEV_MODE=1` also turns it on unless `--disable-scale-out` is passed. The dedicated `vllm launch render` and `vllm serve --tokens-only` modes always register their required endpoints regardless of `--enable-scale-out`.
 
 ### Tokens IN <> Tokens OUT APIs
 
@@ -171,6 +174,14 @@ For further details on derenderer APIs, please refer to [this page](derenderer.m
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
 
+## Process Checkpoint APIs
+
+For external checkpoint/restore orchestrators, available with `--enable-sleep-mode`. Preparing drains the engine and releases its KV cache and other external state, any number of times. Until `/checkpoint/restore`, new requests get a retryable error and `/health` still returns 200, as while asleep. `--checkpoint-prepare-on-startup` prepares each engine once it starts.
+
+- `/checkpoint/prepare` - Start preparing, draining with `?mode=wait` (default), `abort` or `keep`; 200 once started or already preparing, 400 if the engine cannot prepare now
+- `/checkpoint/status` - Return the state: 200 once prepared, 503 until then, 500 after a failure
+- `/checkpoint/restore` - Bring back released state and serve; 200 if already restoring or serving, 400 while preparing or after a failure
+
 ## Server in development mode
 
 When using the flag VLLM_SERVER_DEV_MODE=1, you enable development endpoints.
@@ -185,7 +196,7 @@ When using the flag VLLM_SERVER_DEV_MODE=1, you enable development endpoints.
 
 ### Weight Transfer APIs (RL Training)
 
-For further details on Weight Transfer, please refer to [this page](../../training/weight_transfer/README.md).
+For further details on Weight Transfer, please refer to [this page](../../training/weight_updates/README.md).
 
 - `/pause` - Pause generation (causes denial of service)
 - `/resume` - Resume generation

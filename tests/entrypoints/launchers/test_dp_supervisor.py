@@ -82,11 +82,11 @@ def _make_unit_args(**overrides) -> argparse.Namespace:
         "node_rank": 1,
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 1,
+        "prefill_context_parallel_size": 1,
         "uvicorn_log_level": "info",
         "shutdown_timeout": 5.0,
         "disable_uvicorn_access_log": False,
         "disable_access_log_for_endpoints": None,
-        "log_config_file": None,
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -120,11 +120,11 @@ def _make_args(**overrides) -> argparse.Namespace:
         node_rank=0,
         tensor_parallel_size=1,
         pipeline_parallel_size=1,
+        prefill_context_parallel_size=1,
         uvicorn_log_level="warning",
         shutdown_timeout=0.0,
         disable_uvicorn_access_log=False,
         disable_access_log_for_endpoints=None,
-        log_config_file=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)

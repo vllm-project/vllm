@@ -7,7 +7,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import Counter, deque
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from itertools import count
 from queue import Queue
 from typing import Any
@@ -15,7 +15,8 @@ from typing import Any
 import msgspec
 import zmq
 
-from vllm.config.kv_events import KVEventsConfig
+from vllm.config.ec_events import ECEventsConfig
+from vllm.config.kv_events import KVEventsConfig, PublisherConfig
 from vllm.logger import init_logger
 from vllm.utils.network_utils import (
     get_ip,
@@ -92,6 +93,10 @@ class BlockStored(KVCacheEvent):
     ownership of the underlying block, which may be shared across sessions.
     """
     session_id: str | None = None
+    """Tokens beyond each block used in its hash, one list per block_hashes entry.
+    None when lookahead hashing is disabled.
+    """
+    lookahead_token_ids: list[list[int]] | None = None
 
     def __hash__(self) -> int:
         return hash(
@@ -109,6 +114,9 @@ class BlockStored(KVCacheEvent):
                 self.locality,
                 self.ownership,
                 self.session_id,
+                tuple(map(tuple, self.lookahead_token_ids))
+                if self.lookahead_token_ids is not None
+                else None,
             )
         )
 
@@ -273,8 +281,13 @@ class EventPublisher(ABC):
     operates independently of DP topology and shouldn't need DP awareness.
     """
 
-    def __init__(self, data_parallel_rank: int = 0) -> None:
+    def __init__(
+        self,
+        data_parallel_rank: int = 0,
+        config: PublisherConfig | None = None,
+    ) -> None:
         self._data_parallel_rank = data_parallel_rank
+        self._publisher_config = config
 
     @abstractmethod
     def publish(self, events: EventBatch) -> None:
@@ -288,9 +301,9 @@ class EventPublisher(ABC):
     def shutdown(self) -> None:
         """Shutdown the publisher."""
 
-    def get_publisher_config(self) -> KVEventsConfig | None:
+    def get_publisher_config(self) -> PublisherConfig | None:
         """Return the publisher's resolved runtime configuration."""
-        return None
+        return self._publisher_config
 
 
 class NullEventPublisher(EventPublisher):
@@ -308,23 +321,16 @@ class ZmqEventPublisher(EventPublisher):
 
     Spawns a separate thread to handle publishing from a queue.
 
-    Parameters
-    ----------
-    endpoint:
-        PUB address. Use `tcp://*:5557` to bind or `tcp://host:5557` to
-        connect.
-    replay_endpoint:
-        Optional ROUTER address for replay requests. When given, subscribers can
-        request missed batches by sending the starting sequence number as an
-        8-byte big-endian integer.
-    buffer_steps:
-        Number of past batches to keep for replay.
-    hwm:
-        ZeroMQ high-water-mark for PUB socket.
-    max_queue_size:
-        Maximum number of events to buffer in memory.
-    topic:
-        Topic to publish events to.
+    Args:
+        endpoint: PUB address. Use `tcp://*:5557` to bind or `tcp://host:5557` to
+            connect.
+        replay_endpoint: Optional ROUTER address for replay requests. When given,
+            subscribers can request missed batches by sending the starting sequence
+            number as an 8-byte big-endian integer.
+        buffer_steps: Number of past batches to keep for replay.
+        hwm: ZeroMQ high-water-mark for PUB socket.
+        max_queue_size: Maximum number of events to buffer in memory.
+        topic: Topic to publish events to.
 
     """
 
@@ -340,9 +346,10 @@ class ZmqEventPublisher(EventPublisher):
         hwm: int = 100_000,
         max_queue_size: int = 100_000,
         topic: str = "",
+        config: PublisherConfig | None = None,
     ) -> None:
         # Storage
-        super().__init__(data_parallel_rank)
+        super().__init__(data_parallel_rank, config)
         self._event_queue = Queue[EventBatch | None](maxsize=max_queue_size)
         self._buffer = deque[tuple[int, bytes]](maxlen=buffer_steps)
 
@@ -358,16 +365,29 @@ class ZmqEventPublisher(EventPublisher):
         )
         assert self._endpoint is not None
         self._hwm = hwm
+        # ZMQ acks reads only every HWM/2 messages, so the sender can see up to
+        # HWM/2 stale messages; 2x lets a full replay plus marker always fit.
+        self._replay_hwm = 2 * (buffer_steps + 1)
         self._socket_setup()
-        self._publisher_config = KVEventsConfig(
-            enable_kv_cache_events=True,
-            publisher="zmq",
-            endpoint=self._endpoint,
-            replay_endpoint=self._replay_endpoint,
-            buffer_steps=buffer_steps,
-            hwm=hwm,
-            max_queue_size=max_queue_size,
-            topic=topic,
+        # Keep the caller's config type (KVEventsConfig / ECEventsConfig) but
+        # report the DP-offset endpoints consumers actually need to connect to.
+        self._publisher_config = (
+            replace(
+                config,
+                endpoint=self._endpoint,
+                replay_endpoint=self._replay_endpoint,
+            )
+            if config is not None
+            else KVEventsConfig(
+                enable_kv_cache_events=True,
+                publisher="zmq",
+                endpoint=self._endpoint,
+                replay_endpoint=self._replay_endpoint,
+                buffer_steps=buffer_steps,
+                hwm=hwm,
+                max_queue_size=max_queue_size,
+                topic=topic,
+            )
         )
 
         # Payload
@@ -383,7 +403,8 @@ class ZmqEventPublisher(EventPublisher):
         )
         self._thread.start()
 
-    def get_publisher_config(self) -> KVEventsConfig:
+    def get_publisher_config(self) -> PublisherConfig:
+        assert self._publisher_config is not None
         return self._publisher_config
 
     def publish(self, events: EventBatch) -> None:
@@ -443,6 +464,8 @@ class ZmqEventPublisher(EventPublisher):
         # 3) works in our non‑blocking poll loop alongside PUB
         if self._replay_endpoint is not None:
             self._replay = self._ctx.socket(zmq.ROUTER)
+            # Queue a full replay plus its end marker for slow subscribers.
+            self._replay.setsockopt(zmq.SNDHWM, self._replay_hwm)
             self._replay_endpoint = self._bind(self._replay, self._replay_endpoint)
 
     @staticmethod
@@ -569,6 +592,16 @@ class EventPublisherFactory:
         "zmq": ZmqEventPublisher,
     }
 
+    # The built-in publisher only accepts transport settings and the config.
+    _TRANSPORT_FIELDS = (
+        "endpoint",
+        "replay_endpoint",
+        "buffer_steps",
+        "hwm",
+        "max_queue_size",
+        "topic",
+    )
+
     @classmethod
     def register_publisher(cls, name: str, ctor: Callable[..., EventPublisher]) -> None:
         if name in cls._registry:
@@ -577,22 +610,30 @@ class EventPublisherFactory:
 
     @classmethod
     def create(
-        cls, config: KVEventsConfig | None, data_parallel_rank: int = 0
+        cls, config: PublisherConfig | None, data_parallel_rank: int = 0
     ) -> EventPublisher:
         """Create publisher from a config mapping."""
-        if (
-            config is None
-            or not config.enable_kv_cache_events
-            or config.publisher == "null"
-        ):
+        if config is None or not config.enable_events or config.publisher == "null":
             return NullEventPublisher()
 
-        config_dict = asdict(config)
-
-        kind = config_dict.pop("publisher")
-        config_dict.pop("enable_kv_cache_events")
+        kind = config.publisher
         try:
             constructor = cls._registry[kind]
         except KeyError as exc:
             raise ValueError(f"Unknown event publisher '{kind}'") from exc
-        return constructor(data_parallel_rank=data_parallel_rank, **config_dict)
+
+        if kind == "zmq":
+            kwargs = {name: getattr(config, name) for name in cls._TRANSPORT_FIELDS}
+            return constructor(
+                data_parallel_rank=data_parallel_rank, config=config, **kwargs
+            )
+
+        # Registered publishers receive individual fields, including any
+        # fields added by their own config subclass.
+        kwargs = asdict(config)
+        kwargs.pop("publisher")
+        if isinstance(config, KVEventsConfig):
+            kwargs.pop("enable_kv_cache_events")
+        elif isinstance(config, ECEventsConfig):
+            kwargs.pop("enable_ec_cache_events")
+        return constructor(data_parallel_rank=data_parallel_rank, **kwargs)

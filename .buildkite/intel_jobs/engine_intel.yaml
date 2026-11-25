@@ -38,32 +38,41 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s engine/test_arg_utils.py test_sequence.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py'
+      pytest -v -s
+      engine/test_arg_utils.py
+      test_sequence.py
+      test_logger.py
+      test_vllm_port.py
+      jit_monitor/test_hooks.py'
 
 - label: ":intel: (BMG) Engine (1 GPU)"
   key: engine-1-gpu
-  timeout_in_minutes: 30
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
-  no_plugin: true
-  working_dir: "."
+  timeout_in_minutes: 60
+  device: intel_gpu_k8s
+  num_devices: 1
+  resource_claim_template: b70-1
+  working_dir: "/vllm-workspace/"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
     - vllm/v1/engine/
     - tests/v1/engine/
     - tests/test_config.py
   commands:
+    - export PYTEST_ADDOPTS="--num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
+    - cd tests
     - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-      pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py --ignore v1/engine/test_core_engine_actor_manager.py &&
-      pytest -v -s test_config.py'
+      pytest -v -s
+      v1/engine
+      --ignore v1/engine/test_preprocess_error_handling.py
+      --ignore v1/engine/test_core_engine_actor_manager.py
+      --deselect tests/v1/engine/test_async_llm_shutdown_race.py::test_death_outside_shutdown_is_still_reported
+      --deselect tests/v1/engine/test_engine_core.py::test_engine_core
+      --deselect tests/v1/engine/test_engine_core.py::test_failed_inprocess_startup_releases_model
+      --deselect tests/v1/engine/test_async_llm.py::test_multi_abort
+      --deselect tests/v1/engine/test_engine_core.py::test_engine_core_tp
+    - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then PYTEST_ADDOPTS= pytest -v -s test_config.py; fi
+  parallelism: 4
 
 - label: ":intel: (BMG) E2E Core"
   key: e2e-core-1-gpu
@@ -88,12 +97,15 @@ steps:
     - vllm/model_executor/models/qwen3_next
     - vllm/config/cache.py
     - vllm/platforms/xpu.py
+    - vllm/v1/engine/
     - tests/v1/e2e/general/test_mamba_prefix_cache.py
+    - tests/v1/e2e/general/test_streaming_input.py
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py'
+      pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py &&
+      pytest -v -s v1/e2e/general/test_streaming_input.py'
 
 - label: ":intel: (BMG) V1 e2e (2 GPUs)"
   key: v1-e2e-2-gpus

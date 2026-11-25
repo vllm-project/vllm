@@ -9,7 +9,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-from .sparse_indexer import PagedPrefillMetadata
+from ...common.ops.sparse_indexer import PagedPrefillMetadata
 
 
 @triton.jit(do_not_specialize=["REGION_COUNT", "REGION_ROW"])
@@ -82,7 +82,7 @@ def fill_prefill_pages(
     contiguous_query,
     page_stride,
 ):
-    """Emit compact pages and copy ``query`` into ``contiguous_query``."""
+    """Emit compact pages and copy `query` into `contiguous_query`."""
     rows, count = regions.shape
     width = query.shape[1] * query.shape[2]
     tiles = max(triton.cdiv(count, 128), triton.cdiv(width, 256))
@@ -109,7 +109,7 @@ def fill_prefill_pages(
 
 
 def kv_page_stride(cache: torch.Tensor) -> int:
-    """Eight-token pages between consecutive blocks of a ``[B, H, N, C]`` cache.
+    """Eight-token pages between consecutive blocks of a `[B, H, N, C]` cache.
 
     Blocks may be strided (sliced KV groups, block-outer layouts) as long as
     the block stride is a whole number of eight-token pages.
@@ -176,7 +176,7 @@ class CompactPagedPrefill:
         """Plan from host positions, which may be per-row upper bounds.
 
         Runs before the forward (in the metadata builder) and issues no
-        blocking copies; see ``fixup_positions`` for exact device positions.
+        blocking copies; see `fixup_positions` for exact device positions.
         """
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("Step5 prefill planning requires a breakable graph")
@@ -342,7 +342,7 @@ def stage_prefill_pages(
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Copy one KV group's pages into ``[pages, 1, block, 2 * dim]`` ``dtype``.
+    """Copy one KV group's pages into `[pages, 1, block, 2 * dim]` `dtype`.
 
     This lets FP8 and multi-group (strided) caches use the paged prefill
     kernels, which need contiguous model-dtype pages.

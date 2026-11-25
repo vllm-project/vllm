@@ -27,13 +27,13 @@ class SnapshotBarrierError(RuntimeError):
     """The controller supplied an invalid snapshot release marker."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ListenerConfig:
     host: str | None
     port: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ControlArgs:
     ready_file: Path
     release_file: Path
@@ -95,7 +95,7 @@ async def _release_reloadable_state(engine: Any) -> None:
 
 
 async def _restore_reloadable_state(engine: Any) -> None:
-    """Rebuild state discarded by ``_release_reloadable_state``."""
+    """Rebuild state discarded by `_release_reloadable_state`."""
     await engine.wake_up(tags=["weights"])
     await engine.collective_rpc("reload_weights")
     await engine.wake_up(tags=["kv_cache"])

@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     _prepare_expert_assignment,
     _weights_host_resident,
+    get_moe_configs,
     invoke_fused_moe_triton_kernel,
     invoke_fused_moe_wna16_triton_kernel,
     try_get_optimal_moe_config,
@@ -28,11 +29,16 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import route_major_moe_output
+from vllm.model_executor.layers.fused_moe.silu_mul_token_quant import (
+    silu_mul_token_quant,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
+    masked_amax_scale,
     moe_kernel_quantize_input,
     swiglu_limit_func,
 )
@@ -59,8 +65,43 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl
+from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
+
+
+@triton.jit
+def _silu_mul_quant_sorted_kernel(
+    input_ptr,
+    output_ptr,
+    scale_ptr,
+    num_tokens_post_padded_ptr,
+    intermediate: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    GROUP_K: tl.constexpr,
+):
+    row_start = tl.program_id(0) * BLOCK_M
+    if row_start >= tl.load(num_tokens_post_padded_ptr):
+        return
+    rows = row_start + tl.arange(0, BLOCK_M)
+    cols = tl.program_id(1) * GROUP_K + tl.arange(0, GROUP_K)
+    gate = tl.load(input_ptr + rows[:, None] * 2 * intermediate + cols[None, :])
+    up = tl.load(
+        input_ptr + rows[:, None] * 2 * intermediate + intermediate + cols[None, :]
+    )
+    gate = gate.to(tl.float32)
+    up = up.to(tl.float32)
+    # match silu_and_mul: round SiLU before multiplying the other half.
+    silu = tl.div_rn(gate, 1.0 + tl.extra.cuda.libdevice.exp(-gate))
+    silu = silu.to(input_ptr.dtype.element_ty).to(tl.float32)
+    result = (silu * up).to(input_ptr.dtype.element_ty).to(tl.float32)
+    scale_raw = tl.maximum(tl.max(tl.abs(result), 1), 1e-10) * (1.0 / 448.0)
+    scale = tl.math.exp2(tl.ceil(tl.log2(scale_raw)))
+    quantized = tl.minimum(tl.maximum(tl.div_rn(result, scale[:, None]), -448.0), 448.0)
+    tl.store(
+        output_ptr + rows[:, None] * intermediate + cols[None, :],
+        quantized.to(tl.float8e4nv),
+    )
+    tl.store(scale_ptr + rows * (intermediate // GROUP_K) + tl.program_id(1), scale)
 
 
 class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
@@ -81,7 +122,17 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             activation_key,
             activation_format,
         )
-        if not supported or not current_platform.is_cuda_alike():
+        if not supported:
+            return supported, reason
+
+        if activation_key == kInt8StaticTensorSym:
+            if moe_config.is_lora_enabled:
+                return False, "static INT8 activation quantization with LoRA"
+            par = moe_config.moe_parallel_config
+            if par.use_all2all_kernels and not par.use_ag_rs_all2all_kernels:
+                return False, "static INT8 activation quantization with all2all"
+
+        if not current_platform.is_cuda_alike():
             return supported, reason
 
         padded_num_experts = (moe_config.num_experts + 31) // 32 * 32
@@ -95,25 +146,33 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        *,
+        activation_key: QuantKey | None = None,
     ):
         # Whether quantized MOE runs natively, or through
         # higher-precision + activation QDQ.
         self.quantization_emulation = False
+        self._enable_sorted_a_tma = True
+        self.activation_key = activation_key
         super().__init__(moe_config, quant_config)
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        # Defer activation quantization to apply() only when LoRA is active AND
-        # tokens are dispatched across ranks (DP+EP all2all).
-        return (
+        lora_needs_gathered_input = (
             self._lora_context is not None
             and self.quant_dtype is not None
             and self.moe_config.moe_parallel_config.use_all2all_kernels
         )
+        return lora_needs_gathered_input or self.activation_key == kInt8StaticTensorSym
+
+    def router_weight_application(self) -> mk.RouterWeightApplication:
+        if self.activation_key == kInt8StaticTensorSym:
+            return mk.RouterWeightApplication.GEMM1
+        return mk.RouterWeightApplication.PREPARE
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -146,14 +205,13 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
         supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
         if device_supports_int8:
-            # Activations are consumed as float and quantized to int8
-            # dynamically inside the kernel, so only dynamic-activation int8
-            # schemes are supported (static-activation int8 is not).
             supported += [
                 # per-channel weight + dynamic per-token activation
                 (kInt8StaticChannelSym, kInt8DynamicTokenSym),
                 # per-tensor weight + dynamic per-tensor activation
                 (kInt8StaticTensorSym, kInt8DynamicTensorSym),
+                (kInt8StaticChannelSym, kInt8StaticTensorSym),
+                (kInt8StaticTensorSym, kInt8StaticTensorSym),
             ]
         if current_platform.supports_fp8():
             supported += [
@@ -184,10 +242,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return not (
-            moe_parallel_config.use_fi_nvl_two_sided_kernels
-            or moe_parallel_config.use_fi_nvl_one_sided_kernels
-        )
+        return True
 
     @staticmethod
     def _supports_batch_invariance():
@@ -292,12 +347,8 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             torch.int8,
         ]
 
-        # We declared expects_unquantized_inputs (LoRA + DP/EP all2all), so the
-        # prepare step deferred activation quantization to this kernel:
-        # `hidden_states` arrives unquantized. Keep the unquantized tensor for
-        # the LoRA shrink input and quantize a copy here for the base GEMM
-        # (mirrors what the prepare step would have done, but after the
-        # all-gather so the layout matches the gathered topk_ids / token map).
+        # Quantize gathered activations after dispatch when prepare deferred
+        # quantization. LoRA also needs the floating-point gathered input.
         lora_unquantized_hidden_states: torch.Tensor | None = None
         if self.expects_unquantized_inputs:
             assert a1q_scale is None
@@ -327,20 +378,21 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             block_shape=self.block_shape,
         )
 
-        if hidden_states.dtype == torch.bfloat16:
+        compute_dtype = (
+            self.moe_config.in_dtype
+            if self.activation_key == kInt8StaticTensorSym
+            else hidden_states.dtype
+        )
+        if compute_dtype == torch.bfloat16:
             compute_type = tl.bfloat16
-        elif hidden_states.dtype == torch.float16:
+        elif compute_dtype == torch.float16:
             compute_type = tl.float16
-        elif hidden_states.dtype == torch.float32:
+        elif compute_dtype == torch.float32:
             compute_type = tl.float32
-        elif (
-            hidden_states.dtype == torch.float8_e4m3fn
-            or hidden_states.dtype == torch.float8_e4m3fnuz
-            or hidden_states.dtype == torch.int8
-        ):
+        elif compute_dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.int8):
             compute_type = tl.bfloat16
         else:
-            raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
+            raise ValueError(f"Unsupported compute_type: {compute_dtype}")
 
         # Note that the output tensor might be in workspace1
         intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
@@ -349,14 +401,21 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             workspace13, (num_tokens * top_k_num, cache2_dim)
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
+        hooked = self._uses_post_gemm2_hook(num_tokens)
+        if hooked and (apply_router_weight_on_input or self._lora_context is not None):
+            raise NotImplementedError(
+                "post_gemm2_hook needs unweighted GEMM2 rows; it supports neither "
+                "router weights on the input nor LoRA."
+            )
 
         # Under EP, drop the top-k slots routed to remote experts at alignment
         # time instead of launching `off_experts == -1` GEMM blocks that only
         # write zeros; the pad-aware `moe_sum` below skips the same slots.
         # Their rows in the workspace caches are then never written, so every
-        # consumer of those caches must be row-local: a dynamic per-tensor
-        # scale for the second GEMM's activation would take its amax over the
-        # untouched rows, and LoRA aligns the full `topk_ids` itself.
+        # consumer of those caches must be row-local: LoRA aligns the full
+        # `topk_ids` itself, and a dynamic per-tensor scale is masked to the
+        # routed rows below. Keeping every slot in the alignment is what makes
+        # the `off_experts == -1` blocks zero-fill the cache rows they own.
         a2_scale_is_global = (
             self.quant_dtype is not None
             and a2_scale is None
@@ -386,6 +445,56 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 weights_host_resident=_weights_host_resident(w1, w2),
             )
         )
+
+        from vllm.model_executor.layers.fused_moe import get_config
+
+        down_configs = (
+            get_moe_configs(
+                E,
+                cache2_dim,
+                self.quant_config.config_name(hidden_states.dtype),
+                128,
+                128,
+                down_moe=True,
+            )
+            if self.quant_config.use_fp8_w8a8
+            and self.block_shape == [128, 128]
+            and not get_config()
+            else None
+        )
+        tma_down_config = (
+            dict(down_configs[min(down_configs, key=lambda m: abs(m - num_tokens))])
+            if down_configs
+            else None
+        )
+
+        use_sorted_a = bool(
+            tma_down_config
+            and tma_down_config.pop("USE_TMA", False)
+            and self._enable_sorted_a_tma
+            and activation == MoEActivation.SILU
+            and self.activation_config.clamp_limit is None
+            and self._lora_context is None
+            and not hooked
+            and not self.quantization_emulation
+            and is_deep_gemm_e8m0_used()
+            and a2_scale is None
+            and sorted_token_ids is not None
+            and expert_map is None
+            and workspace2.dtype == torch.bfloat16
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability(90)
+            and config["BLOCK_SIZE_M"] % 16 == 0
+            and w2.is_contiguous()
+            and w2.size(1) >= 4096
+            and w2.size(1) % tma_down_config["BLOCK_SIZE_N"] == 0
+            and cache2_dim % 128 == 0
+        )
+        if use_sorted_a:
+            assert sorted_token_ids is not None
+            num_sorted_rows = sorted_token_ids.numel()
+            # GEMM fills padding inside active blocks; quantization skips the tail.
+            intermediate_cache1 = workspace2.new_empty((num_sorted_rows, 1, N))
 
         # LoRA w13: applied to intermediate_cache1 before activation. When
         # the LoRA layer requested a dual-stream schedule, we run base w13
@@ -426,6 +535,12 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             else (a1q_scale if a1q_scale is not None else self.a1_scale)
         )
 
+        # Legacy static INT8 applies routing after GEMM1 bias, before SiLU.
+        weight_in_gemm1 = (
+            apply_router_weight_on_input
+            and self.router_weight_application() == mk.RouterWeightApplication.GEMM1
+        )
+
         def _base_w13_fn():
             invoke_fused_moe_triton_kernel(
                 hidden_states,
@@ -433,11 +548,11 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 intermediate_cache1,
                 input_scale,
                 self.w1_scale,
-                None,  # topk_weights
+                topk_weights if weight_in_gemm1 else None,
                 sorted_token_ids,
                 expert_ids,
                 num_tokens_post_padded,
-                False,  # mul_routed_weights
+                weight_in_gemm1,
                 top_k_num,
                 config,
                 compute_type=compute_type,
@@ -446,8 +561,10 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 use_int8_w8a16=self.quant_config.use_int8_w8a16,
                 use_int4_w4a16=self.quant_config.use_int4_w4a16,
                 per_channel_quant=self.per_act_token_quant,
+                per_out_ch_quant=self.per_out_ch_quant,
                 block_shape=self.block_shape,
                 B_bias=self.w1_bias,
+                C_is_sorted=use_sorted_a,
             )
 
         if lora_context is not None and lora_context.aux_stream is not None:
@@ -515,7 +632,27 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # group_size=128, no LoRA requiring the BF16 intermediate).
         # The fused kernel has no clamp parameter, so a configured
         # SwiGLU clamp limit falls through to the unfused path.
-        if (
+        if use_sorted_a:
+            qintermediate_cache2 = intermediate_cache1.new_empty(
+                (num_sorted_rows, cache2_dim),
+                dtype=current_platform.fp8_dtype(),
+            )
+            a2q_scale = qintermediate_cache2.new_empty(
+                (num_sorted_rows, cache2_dim // 128),
+                dtype=torch.float32,
+            )
+            _silu_mul_quant_sorted_kernel[
+                (triton.cdiv(num_sorted_rows, 16), cache2_dim // 128)
+            ](
+                intermediate_cache1,
+                qintermediate_cache2,
+                a2q_scale,
+                num_tokens_post_padded,
+                cache2_dim,
+                BLOCK_M=16,
+                GROUP_K=128,
+            )
+        elif (
             activation == MoEActivation.SILU
             and self.activation_config.clamp_limit is None
             and self.quant_config.use_fp8_w8a8
@@ -528,14 +665,50 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 group_size=128,
                 quant_dtype=current_platform.fp8_dtype(),
             )
+        elif (
+            # Only benchmarked on ROCm.
+            current_platform.is_rocm()
+            and activation == MoEActivation.SILU
+            and self.activation_config.clamp_limit is None
+            and self.quant_config.use_fp8_w8a8
+            and self.per_act_token_quant
+            and self.block_shape is None
+            and a2_scale is None
+            and not self.quantization_emulation
+            and lora_context is None
+        ):
+            assert cache2_dim * 2 == N, (
+                "silu_mul_token_quant fuses SiLU-and-mul, which halves N "
+                f"(got N={N}, activation output dim={cache2_dim}). An activation "
+                "that does not halve N needs its own kernel or a condition on "
+                "this branch."
+            )
+            # Under EP the first GEMM never writes the rows of remote routes and the
+            # second never reads them, so they are skipped here too.
+            qintermediate_cache2, a2q_scale = silu_mul_token_quant(
+                intermediate_cache1.view(-1, N),
+                topk_ids if skip_invalid else None,
+                expert_map if skip_invalid else None,
+                num_align_experts,
+            )
         else:
             self.activation(
                 activation, intermediate_cache2, intermediate_cache1.view(-1, N)
             )
 
+            # Row-local schemes quantize per row, but a per-tensor dynamic
+            # scale spans the whole activation. Restrict it to routed rows so
+            # the uninitialized `PaddedStandard` padding rows cannot poison it.
+            a2_quant_scale = a2_scale
+            if self.quant_config.act_scale_is_tensor_wide(a2_scale):
+                a2_quant_scale = masked_amax_scale(
+                    intermediate_cache2,
+                    self.quant_dtype,
+                    row_valid=topk_ids.view(-1) >= 0,
+                )
             qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
                 intermediate_cache2,
-                a2_scale,
+                a2_quant_scale,
                 self.quant_dtype,
                 self.per_act_token_quant,
                 self.block_shape,
@@ -548,6 +721,14 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # the w13 pair: base GEMM on default stream, LoRA delta on aux,
         # join via .add_() into intermediate_cache3.
         def _base_w2_fn():
+            if use_sorted_a:
+                assert tma_down_config is not None
+                down_config = {
+                    **tma_down_config,
+                    "BLOCK_SIZE_M": config["BLOCK_SIZE_M"],
+                }
+            else:
+                down_config = config
             invoke_fused_moe_triton_kernel(
                 qintermediate_cache2,
                 w2,
@@ -558,17 +739,20 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 sorted_token_ids,
                 expert_ids,
                 num_tokens_post_padded,
-                self._apply_router_weight_in_gemm2(apply_router_weight_on_input),
+                not hooked
+                and self._apply_router_weight_in_gemm2(apply_router_weight_on_input),
                 1,
-                config,
+                down_config,
                 compute_type=compute_type,
                 use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
                 use_int8_w8a8=self.quant_config.use_int8_w8a8,
                 use_int8_w8a16=self.quant_config.use_int8_w8a16,
                 use_int4_w4a16=self.quant_config.use_int4_w4a16,
                 per_channel_quant=self.per_act_token_quant,
+                per_out_ch_quant=self.per_out_ch_quant,
                 block_shape=self.block_shape,
                 B_bias=self.w2_bias,
+                A_is_sorted=use_sorted_a,
             )
 
         if lora_context is not None and lora_context.aux_stream is not None:
@@ -618,8 +802,17 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                     top_k_num=top_k_num,
                 )
 
-        # separate function is required for MoE + LoRA
-        self._finalize_expert_output(intermediate_cache3, output, topk_ids, expert_map)
+        if hooked:
+            self._run_post_gemm2_hook(
+                route_major_moe_output(
+                    intermediate_cache3, topk_weights, topk_ids, expert_map
+                ),
+                output,
+            )
+        else:
+            self._finalize_expert_output(
+                intermediate_cache3, output, topk_ids, expert_map
+            )
 
     def moe_sum(
         self,
@@ -646,6 +839,13 @@ class TritonWNA16Experts(TritonExperts):
         return True
 
     @staticmethod
+    def executed_activation_key(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> QuantKey | None:
+        return None
+
+    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
@@ -658,7 +858,7 @@ class TritonWNA16Experts(TritonExperts):
             kInt4Static32Asym,
             # other group sizes?
         ]
-        return weight_key in SUPPORTED_W
+        return weight_key in SUPPORTED_W and activation_key is None
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -816,6 +1016,7 @@ class TritonWNA16Experts(TritonExperts):
             use_int8_w8a16=self.quant_config.use_int8_w8a16,
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
             block_shape=self.block_shape,
+            num_input_tokens=num_tokens,
         )
 
         # separate function is required for MoE + LoRA

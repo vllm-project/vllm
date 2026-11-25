@@ -13,6 +13,7 @@ used for classification and routing.
 | `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
 | `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it` |
 | `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
+| `Qwen3_5ForSlotDecision`  | `SlotLMStrategy`    | `generate`       | LM head (fp32)    | `baselabs/mammoth-1`    |
 
 ### Multimodal Models
 
@@ -200,6 +201,11 @@ The response adds a `joint` object, `null` when each question was read on its ow
 | `joint` | optional boolean, default `false`; see [Joint reads](#joint-reads). DiffusionGemma only, other models return 400 |
 | `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; DiffusionGemma, images only, with or without `joint`; [Liquid d1](#liquid-d1), images only; multimodal `NextTokenStrategy` models such as Qwen3.5, images only) |
 
+By default, `/v1/systemone` rejects `chat_template_kwargs.chat_template` with
+HTTP 400. Start the server with `--trust-request-chat-template` to allow
+request-provided chat templates. Other template kwargs, such as
+`enable_thinking`, do not require this flag.
+
 Unknown top-level fields, and question fields other than `type`,
 `instructions` and `criteria`, are rejected with a 400.
 
@@ -253,9 +259,12 @@ Use OpenAI Python SDK 3.26.0 or newer for `client.decisions.create`.
 Scores are probability-weighted averages of zero-based level indices.
 
 The request contract follows the OpenAI OpenAPI schemas retrieved on
-October 7, 2026. This MVP supports 1–64 questions, 2–26 choices, and 2–10 score
-levels. Upstream permits 200 questions and 255 choices; this backend returns
-a 400 when either model limit is exceeded.
+October 7, 2026. This MVP supports 1–64 questions and 2–10 score levels.
+Choice questions require at least 2 options. Labeled read strategies allow up
+to `min(DecisionLimits.max_options, 26)` choices; unlabeled read strategies
+(`DecisionLimits.labeled=False`) allow up to `DecisionLimits.max_options`.
+The request schema caps questions at 200 and choices at 255; requests that
+exceed either the schema or model limits return 400.
 The optional `safety_identifier` is caller metadata, available in request
 body logging with `--enable-log-requests` and DEBUG logging; it does not
 authenticate callers.
@@ -388,3 +397,33 @@ vllm serve LiquidAI/d1-3B
   letters.
 - When each request carries one question over a state that changes from
   request to request, `--disable-prefix-caching` lowers latency.
+
+### Mammoth-1 and Elephant-1
+
+Base Labs [`baselabs/mammoth-1`](https://huggingface.co/baselabs/mammoth-1)
+and [`baselabs/elephant-1`](https://huggingface.co/baselabs/elephant-1) are
+Qwen3.5 checkpoints whose `modeling_overrides` select `Qwen3_5ForSlotDecision`.
+
+```bash
+vllm serve baselabs/mammoth-1
+```
+
+- The full attention layers read the shared prefix and the question as two
+  bidirectional blocks, and each prompt is prefilled in one step. Chunked
+  prefill is therefore off for every request on the server, a
+  `--max-num-batched-tokens` below `--max-model-len` is raised to it, and a
+  smaller `--max-num-scheduled-tokens` is refused. `--max-model-len` defaults
+  to the trained 16,384 tokens.
+- Prefix caching (on by default) prefills the shared prefix once per decision
+  request instead of once per question. It needs FlashInfer's GatedDeltaNet
+  prefill (Hopper, or Blackwell with CUDA 13) and is turned off with other
+  backends.
+- A `choice` can have up to 255 options, labeled `A` to `Z` and then with
+  two-letter labels in the prompt. Media inputs return 400.
+- Only the `TRITON_ATTN` attention backend is supported, and it is selected
+  automatically. KV transfer connectors, `--kv-offloading-size`, speculative
+  decoding, context parallelism, micro-batching, `--prefix-match-unit` and
+  `--scheduler-cls` are refused.
+- `instructions` returns 400, as does any `chat_template_kwargs` other than
+  `{"enable_thinking": false}`. `/v1/decisions` reads every question as a
+  choice and returns 400 for score levels with the same label.

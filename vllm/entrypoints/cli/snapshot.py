@@ -65,6 +65,8 @@ def validate_create_args(args: argparse.Namespace) -> None:
         for name in ("speculative_config", "spec_method", "spec_model", "spec_tokens")
     ):
         raise ValueError("snapshot create does not support speculative decoding")
+    if getattr(args, "work_dir", None) is not None and not args.portable:
+        raise ValueError("--work-dir requires --portable")
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise ValueError("snapshot create requires Linux x86_64")
 
@@ -110,8 +112,13 @@ class SnapshotSubcommand(CLISubcommand):
         )
         actions = parser.add_subparsers(required=True, dest="snapshot_action")
 
+        # No abbreviations: create strips its own options from the raw argv
+        # before handing it to the engine, and a prefix-match rule for that
+        # would have to re-derive which spellings argparse accepts.
         create_parser = actions.add_parser(
-            "create", help="Create a snapshot from an initialized TP1 engine."
+            "create",
+            help="Create a snapshot from an initialized TP1 engine.",
+            allow_abbrev=False,
         )
         if self.create_requested:
             from vllm.entrypoints.common.cli_args import make_arg_parser
@@ -120,6 +127,22 @@ class SnapshotSubcommand(CLISubcommand):
         else:
             create_parser.add_argument("model_tag", nargs="?")
         create_parser.add_argument("--snapshot-dir", required=True)
+        create_parser.add_argument(
+            "--work-dir",
+            default=None,
+            help="Store control files and logs for snapshot creation in "
+            "this directory, outside the artifact. Requires --portable. "
+            "If omitted, a new temporary directory is created and its path "
+            "is recorded in the manifest.",
+        )
+        create_parser.add_argument(
+            "--portable",
+            action="store_true",
+            default=False,
+            help="Include the generated caches the engine depends on, so the "
+            "artifact can be restored in another container or on another "
+            "host. A plain checkpoint stays in place and includes nothing.",
+        )
         create_parser.set_defaults(snapshot_dispatch=run_create)
 
         inspect_parser = actions.add_parser(
@@ -134,6 +157,12 @@ class SnapshotSubcommand(CLISubcommand):
         restore_parser.add_argument("snapshot_dir")
         restore_parser.add_argument("--host", default=None)
         restore_parser.add_argument("--port", type=int, default=8000)
+        restore_parser.add_argument(
+            "--portable",
+            action="store_true",
+            default=False,
+            help="Restore an artifact created with --portable.",
+        )
         restore_parser.set_defaults(snapshot_dispatch=run_restore)
 
         return parser
