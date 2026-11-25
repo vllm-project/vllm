@@ -68,9 +68,16 @@ def test_no_event_recorded_without_pending(fake_events):
     assert fake_events.recorded == [] and dbr.ready() == set()
 
 
-def _host_pinned_d_scheduler(kv_buffer_device: str = "cuda", kv_role="kv_consumer"):
-    """A D-side scheduler with the NIXL connector and a host-pinned KV cache."""
-    vllm_config = create_vllm_config(kv_role=kv_role)
+def _host_pinned_d_scheduler(
+    kv_buffer_device: str = "cuda", kv_role="kv_consumer", bidirectional=False
+):
+    """A scheduler with the NIXL connector and a host-pinned KV cache."""
+    vllm_config = create_vllm_config(
+        kv_role=kv_role,
+        kv_connector_extra_config={"bidirectional_kv_xfer": True}
+        if bidirectional
+        else None,
+    )
     vllm_config.cache_config.kv_cache_host_pinned = True
     assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_buffer_device = kv_buffer_device
@@ -233,11 +240,41 @@ def test_local_request_on_producer_node_is_not_deferred():
     assert request.request_id not in scheduler.requests
 
 
-def test_bidirectional_kv_xfer_is_rejected():
-    """D->P pulls land in a producer's blocks, which the guard does not cover."""
-    vllm_config = create_vllm_config(
-        kv_role="kv_both", kv_connector_extra_config={"bidirectional_kv_xfer": True}
+def test_local_request_on_bidirectional_producer_is_deferred():
+    """With bidirectional transfers a producer receives D->P pulls, so its
+    local requests wait for the guard like a consumer's."""
+    scheduler, connector = _host_pinned_d_scheduler(
+        kv_role="kv_producer", bidirectional=True
     )
-    vllm_config.cache_config.kv_cache_host_pinned = True
-    with pytest.raises(ValueError, match="bidirectional_kv_xfer"):
-        create_scheduler(vllm_config)
+    request = create_request(request_id=9, num_tokens=40, max_tokens=1)
+    _finish_locally(scheduler, request)
+    _release_by_worker(scheduler, connector, request)
+
+
+def test_bidirectional_abort_during_decode_is_deferred():
+    """A bidirectional decoder skips the plain D-side branch: an abort after
+    the pull lands still waits for the guard, and P is still told to stop."""
+    scheduler, connector = _host_pinned_d_scheduler(bidirectional=True)
+    request = create_request(request_id=10, num_tokens=40, do_remote_prefill=True)
+    _received(scheduler, request)
+    scheduler_output = scheduler.schedule()  # a decode step
+    scheduler.update_from_output(
+        scheduler_output, create_model_runner_output([request])
+    )
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert request.request_id in connector._reqs_not_processed
+    _release_by_worker(scheduler, connector, request)
+
+
+def test_bidirectional_producer_abort_is_deferred():
+    """A producer request aborted while its prefill step is in flight frees
+    blocks a later D->P pull may land in, so it waits for the guard."""
+    scheduler, connector = _host_pinned_d_scheduler(
+        kv_role="kv_producer", bidirectional=True
+    )
+    request = create_request(request_id=11, num_tokens=40, do_remote_decode=True)
+    scheduler.add_request(request)
+    scheduler.schedule()  # the prefill step; its output never comes back
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert request.request_id in connector._reqs_not_processed
+    _release_by_worker(scheduler, connector, request)

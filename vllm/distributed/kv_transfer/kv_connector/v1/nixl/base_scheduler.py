@@ -190,15 +190,6 @@ class NixlBaseConnectorScheduler:
                 "bidirectional_kv_xfer", False
             )
         )
-        if (
-            self.is_bidirectional_kv_xfer_enabled
-            and vllm_config.cache_config.kv_cache_host_pinned
-        ):
-            # D->P pulls land in the producer's blocks, which the release guard
-            # (DeferredBlockRelease) does not cover yet.
-            raise ValueError(
-                "kv_cache_host_pinned is not supported with bidirectional_kv_xfer yet."
-            )
         self.decoder_kv_blocks_ttl = (
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "decoder_kv_blocks_ttl", 480

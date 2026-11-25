@@ -197,13 +197,16 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
 
     def _defers_release(self, block_ids: "BlockIds") -> bool:
         """Whether these blocks wait for the worker's release guard: zero-copy
-        pulls into a host-pinned KV cache (see DeferredBlockRelease)."""
+        pulls into a host-pinned KV cache (see DeferredBlockRelease). A producer
+        receives too with bidirectional transfers (D->P pulls)."""
         transfer_config = self.vllm_config.kv_transfer_config
         return (
             self._host_pinned_kv
             and not self.use_host_buffer
             and transfer_config is not None
-            and transfer_config.is_kv_consumer
+            and (
+                transfer_config.is_kv_consumer or self.is_bidirectional_kv_xfer_enabled
+            )
             and any(len(group) > 0 for group in block_ids)
         )
 
@@ -275,6 +278,11 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             self._reqs_not_processed.add(request.request_id)
             # Clear _reqs_need_save if a request is aborted as partial prefill.
             self._reqs_need_save.pop(request.request_id, None)
+            # With bidirectional transfers this node also receives pulls, so an
+            # abort that is no longer receiving waits for the guard too.
+            if not receiving and self._defers_release(block_ids):
+                self._reqs_to_release.append(request.request_id)
+                return True, None
             return False, None
 
         # TODO: check whether block_ids actually ever be 0. If not we could
