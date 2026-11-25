@@ -51,9 +51,9 @@ from vllm.v1.pool.late_interaction import (
 from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
 
-if not current_platform.is_cuda_alike():
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip(
-        reason="V1 currently only supported on CUDA-alike platforms.",
+        reason="V1 currently only supported on CUDA-alike and XPU platforms",
         allow_module_level=True,
     )
 
@@ -233,7 +233,7 @@ def test_dplb_weight_checksums_gather_every_engine():
         assert (method, args) == ("compute_weight_checksums", ())
         return [{f"dp{engine[0]}:tp{tp}:w": "x"} for tp in (0, 1)]
 
-    client._call_utility_async = call_utility
+    client._call_utility_async = call_utility  # type: ignore[method-assign]
     workers = asyncio.run(client.compute_weight_checksums_async())
     assert [key for worker in workers for key in worker] == [
         "dp0:tp0:w",
@@ -320,7 +320,7 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
         pause_started.set()
         await asyncio.Future()
 
-    client._call_utility_async = pause_scheduler
+    client._call_utility_async = pause_scheduler  # type: ignore[method-assign]
 
     with (
         zmq.asyncio.Context() as ctx,
@@ -353,7 +353,9 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
             )
             assert chosen == client.core_engines[0]
         finally:
-            tasks = [client.resources.stats_update_task]
+            stats_update_task = client.resources.stats_update_task
+            assert stats_update_task is not None
+            tasks = [stats_update_task]
             if scale_task is not None:
                 tasks.append(scale_task)
             for task in tasks:
@@ -422,7 +424,7 @@ def test_dplb_streaming_session_abort_goes_to_all_engines(final_sent: bool):
     async def abort_requests(request_ids, engine):
         sent[engine] = request_ids
 
-    client._abort_requests = abort_requests
+    client._abort_requests = abort_requests  # type: ignore[method-assign]
 
     chunk = make_request(SamplingParams(max_tokens=1))
     chunk.resumable = True
@@ -1512,7 +1514,7 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
     mock_executor_class.side_effect = create_mock_executor
 
     with monkeypatch.context() as m:
-        m.setenv("CUDA_VISIBLE_DEVICES", "")  # No CUDA devices
+        m.setenv(current_platform.device_control_env_var, "")  # No CUDA devices
 
         from vllm.v1.engine.utils import EngineZmqAddresses
 

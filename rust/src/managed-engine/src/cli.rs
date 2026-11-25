@@ -411,7 +411,7 @@ fn parse_dotted_value(value: &str) -> Value {
 
 /// Python's `human_readable_int`: `1k` is 1,000, `1K` is 1,024 and `25.6k` is
 /// 25,600; a binary suffix takes no decimals.
-fn parse_human_readable_int(value: &str) -> Option<i64> {
+pub fn parse_human_readable_int(value: &str) -> Option<i64> {
     let value = value.trim();
     let suffixed = value.char_indices().last().and_then(|(index, suffix)| {
         let multiplier = match suffix {

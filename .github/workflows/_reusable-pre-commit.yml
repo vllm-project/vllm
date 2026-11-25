@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   pre-run-check:
-    if: github.repository_owner == 'vllm-project' && github.event_name == 'pull_request'
+    if: github.repository == 'vllm-project/vllm' && github.event_name == 'pull_request'
     runs-on: [self-hosted, linux, x64, vllm-runners]
     outputs:
       result: ${{ steps.record-result.outputs.result }}
@@ -53,7 +53,7 @@ jobs:
     needs: pre-run-check
     if: >-
       ${{ !cancelled() &&
-      github.repository_owner == 'vllm-project' &&
+      github.repository == 'vllm-project/vllm' &&
       (github.event_name == 'pull_request' || github.event_name == 'push') &&
       (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped') }}
     runs-on: [self-hosted, linux, x64, vllm-runners]

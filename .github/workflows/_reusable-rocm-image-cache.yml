@@ -14,7 +14,7 @@ permissions:
 jobs:
   reconcile:
     if: >-
-      github.repository_owner == 'vllm-project' &&
+      github.repository == 'vllm-project/vllm' &&
       (github.event_name == 'push' ||
       (github.event_name == 'status' &&
       github.event.sender.login == 'buildkite-limited-access[bot]' &&
