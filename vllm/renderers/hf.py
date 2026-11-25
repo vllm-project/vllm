@@ -1141,7 +1141,7 @@ class BaseHfRenderer(BaseRenderer[_T]):
 
     def _tokenize_prompt(
         self, prompt: TextPrompt, params: TokenizeParams
-    ) -> HfTokensPrompt:
+    ) -> TokensPrompt:
         return tokenize_prompt(
             self.get_tokenizer(),
             prompt,
