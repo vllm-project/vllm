@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen3.5 compact dense multimodal model (4B) — fits on 16 GB consumer GPUs with full 262K context or one Xeon 6 NUMA node or Intel Arc Pro B60/B70"
   date_added: 2026-04-22
-  date_updated: 2026-10-27
+  date_updated: 2026-11-24
   tasks:
     - multimodal
     - text
@@ -84,10 +84,7 @@ variants:
 compatible_strategies:
   - single_node_tp
 
-hardware_overrides:
-  xpu:
-    extra_args:
-      - "--enforce-eager"
+hardware_overrides: {}
 
 strategy_overrides: {}
 
