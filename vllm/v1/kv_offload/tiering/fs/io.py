@@ -238,7 +238,7 @@ def _load_block(
 
 def _verify_checksum(fd: int, path: str, data: memoryview) -> None:
     """Check a loaded block against its recorded CRC32C: a block with none still
-    loads, and a mismatch removes the file and raises ``EBADMSG``."""
+    loads, and a mismatch removes the file and raises `EBADMSG`."""
     try:
         expected = os.getxattr(fd, _CHECKSUM_XATTR)
     except OSError as exc:
@@ -304,8 +304,8 @@ def batch_load_block(
     Raises on first error (see _load_block for the delete-on-short-read policy).
     On failure the raised OSError carries `num_succeeded` = the number of
     blocks loaded before the failing one, so the tier can keep them.
-    With *checksum*, a block failing verification raises ``EBADMSG`` with
-    ``checksum_failed`` set.
+    With *checksum*, a block failing verification raises `EBADMSG` with
+    `checksum_failed` set.
     """
     _validate_offsets(view, offsets, block_size)
 
