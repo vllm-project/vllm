@@ -9168,11 +9168,14 @@ def _make_eccpu_scheduler(ec_role, cpu_blocks, **scheduler_kwargs):
     )
     config = scheduler.vllm_config
     ec_config = config.ec_transfer_config
+    assert ec_config is not None
+    dtype = config.model_config.dtype
+    assert isinstance(dtype, torch.dtype)
     width = config.model_config.get_inputs_embeds_size()
     ec_config.ec_connector = "ECCPUConnector"
     ec_config.mm_encoder_output_widths = {"image": width}
     ec_config.ec_connector_extra_config = {
-        "ec_cpu_bytes": cpu_blocks * width * config.model_config.dtype.itemsize,
+        "ec_cpu_bytes": cpu_blocks * width * dtype.itemsize,
     }
     connector = ECCPUConnector(config, ECConnectorRole.SCHEDULER)
     scheduler.ec_connector = connector
@@ -9199,7 +9202,7 @@ def test_ec_producer_republishes_runner_hit_after_cpu_eviction(ec_role):
 
     def save_completed(req):
         connector.update_state_after_alloc(req, 0)
-        metadata = connector.build_connector_meta(None)
+        metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
         mm_hash = req.mm_features[0].identifier
         assert mm_hash in metadata.saves
         connector.update_connector_output(
@@ -9262,7 +9265,8 @@ def test_ec_republish_preserves_selected_cpu_load(cpu_blocks):
     try:
         for i in range(cpu_blocks):
             connector.update_state_after_alloc(seed, i)
-        assert connector.build_connector_meta(None).saves.keys() == set(cpu_hashes)
+        metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
+        assert metadata.saves.keys() == set(cpu_hashes)
         connector.update_connector_output(
             ECConnectorOutput(
                 ec_connector_worker_meta=ECCPUWorkerMetadata(completed_saves=cpu_hashes)

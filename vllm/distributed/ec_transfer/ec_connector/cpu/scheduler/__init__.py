@@ -599,13 +599,13 @@ class ECCPUScheduler:
                     self._prepare_save(feature)
 
     def build_connector_meta(
-        self, scheduler_output: "SchedulerOutput | None"
+        self, scheduler_output: "SchedulerOutput"
     ) -> ECCPUConnectorMetadata:
         meta = ECCPUConnectorMetadata()
         if self._is_producer:
             # CPU loads are already pinned, so republishing can only evict
             # entries that aren't needed by those loads.
-            if self._republish_candidates and scheduler_output is not None:
+            if self._republish_candidates:
                 self._prepare_republishes(scheduler_output)
             self._republish_candidates.clear()
             if self._nixl_enabled and self._producer_session is not None:
