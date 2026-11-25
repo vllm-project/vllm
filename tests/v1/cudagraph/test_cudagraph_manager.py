@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from transformers import Qwen2VLConfig
+from transformers import Gemma3Config
 
 from vllm.config import (
     CompilationConfig,
@@ -19,7 +19,6 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.distributed.device_communicators import pynccl_allocator
-from vllm.model_executor.models.interfaces import SupportsMRoPE
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
@@ -442,15 +441,25 @@ def test_capture_inputs_match_execute_model(
 def test_capture_default_model_state_clears_input_ids(monkeypatch, tmp_path):
     """Real DefaultModelState + ModelCudaGraphManager clears input_ids at capture."""
     num_tokens = 4
-    Qwen2VLConfig(
-        architectures=["Qwen2VLForConditionalGeneration"],
+    Gemma3Config(
+        architectures=["Gemma3ForConditionalGeneration"],
         text_config={
+            "model_type": "gemma3_text",
             "hidden_size": 128,
             "num_attention_heads": 4,
             "num_key_value_heads": 1,
             "num_hidden_layers": 1,
             "intermediate_size": 256,
-            "rope_parameters": {"rope_type": "default", "mrope_section": [8, 12, 12]},
+            "head_dim": 32,
+        },
+        vision_config={
+            "model_type": "siglip_vision_model",
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "image_size": 28,
+            "patch_size": 14,
         },
     ).save_pretrained(tmp_path)
 
@@ -497,18 +506,16 @@ def test_capture_default_model_state_clears_input_ids(monkeypatch, tmp_path):
 
     calls = []
 
-    class _MRoPEModel(torch.nn.Module, SupportsMRoPE):
-        def get_mrope_input_positions(self, input_tokens, mm_features):
-            return torch.zeros(3, len(input_tokens), dtype=torch.int64), 0
-
+    class _Model(torch.nn.Module):
         def forward(self, **kwargs):
             calls.append(kwargs)
             return torch.zeros(num_tokens, 128)
 
-    model = _MRoPEModel()
+    model = _Model()
     model_state = DefaultModelState(
         vllm_config, model, EncoderCache(), torch.device("cpu")
     )
+    assert model_state.rope_state is None
     manager = gpu_cudagraph_utils.ModelCudaGraphManager(
         vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, {1: num_tokens}
     )
