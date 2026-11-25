@@ -40,10 +40,6 @@ def init_fused_comm_kernel(
     linear: ColumnParallelLinear | RowParallelLinear,
 ) -> LinearCommKernel | None:
     """Return a fused (symmetric-memory) comm+GEMM kernel, or `None`."""
-    from vllm.platforms import current_platform
-
-    if not (current_platform.is_cuda() or current_platform.is_rocm()):
-        return None
     kernel = _init_base_fused_kernel(linear)
     if kernel is not None:
         return kernel
