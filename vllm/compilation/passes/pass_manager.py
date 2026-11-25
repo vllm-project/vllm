@@ -96,8 +96,7 @@ def with_pattern_match_debug(fn: Callable[P, R]) -> Callable[P, R]:
 class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
     """The pass manager for post-grad passes.
     It handles configuration, adding custom passes, and running passes.
-    It supports uuid for the Inductor code cache. That includes torch<2.6
-    support using pickling (in .inductor_pass.CustomGraphPass).
+    It supports uuid for the Inductor code cache.
 
     The order of the post-grad post-passes is:
     1. passes (constructor parameter)
