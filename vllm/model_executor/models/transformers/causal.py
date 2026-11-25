@@ -299,7 +299,7 @@ class CausalMixin(VllmModelForTextGeneration, Base):
             # The head runs after the projection, so every rank needs all logits
             self.logits_processor.use_all_gather = True
             spec.output_embeddings.project = self._project
-            self.replace_modules(model, prefix="output_head")
+            self.recursive_replace(model, prefix="output_head")
             self.init_parameters(model)
             self.output_head = model
 

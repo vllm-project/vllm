@@ -211,7 +211,7 @@ class MoEMixin(MixtureOfExperts, Base):
     mlp_layers: list[nn.Module]
     """MoE blocks whose experts were replaced, for the `MixtureOfExperts` methods."""
 
-    # Redeclared because `recursive_replace` assigns it below the first read
+    # Redeclared because `replace_modules` assigns it below the first read
     num_local_physical_experts: int
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
@@ -235,7 +235,7 @@ class MoEMixin(MixtureOfExperts, Base):
             moe_block.n_redundant_experts = self.num_redundant_experts
             moe_block.experts.update_expert_map()
 
-    def recursive_replace(self):
+    def replace_modules(self):
         """Initialize the MoE layers."""
         experts_name = "experts"
         text_config = self.text_config
@@ -478,7 +478,7 @@ class MoEMixin(MixtureOfExperts, Base):
         _recursive_replace(self.model, prefix="model")
         self._pre_decoder_layer_replace = _recursive_replace
         # Continue with the replacement of layers in Base
-        super().recursive_replace()
+        super().replace_modules()
         self.num_moe_layers = len(self.moe_layers)
         # GLUFuser likely fused shared_experts. The down projection after the GLU
         # normally immediately reduces but we want FusedMoE to handle the reduction.

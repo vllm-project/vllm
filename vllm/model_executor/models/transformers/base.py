@@ -286,7 +286,7 @@ class Base(
         # Skip the device sync of rope updates where `inv_freq` can be fixed
         maybe_disable_dynamic_rope_update(self.model.get_decoder(), vllm_config)
         # Substitute remaining layers with vLLM's layers as needed
-        self.recursive_replace()
+        self.replace_modules()
         # Create attention instances for KV cache allocation
         self._create_attention_instances(prefix)
 
@@ -656,12 +656,11 @@ class Base(
         )
         return embeddings
 
-    def recursive_replace(self):
-        """Recursively replace modules in `self.model` as needed (see
-        `replace_modules`)."""
-        self.replace_modules(self.model, prefix="model")
+    def replace_modules(self):
+        """Replace modules in `self.model` as needed (see `recursive_replace`)."""
+        self.recursive_replace(self.model, prefix="model")
 
-    def replace_modules(self, root: nn.Module, prefix: str):
+    def recursive_replace(self, root: nn.Module, prefix: str):
         """Recursively replace modules in `root`, at `prefix`, as needed.
 
         Currently, this replaces:
