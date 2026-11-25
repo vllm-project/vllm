@@ -9,13 +9,13 @@ from torch.testing._internal.two_tensor import TwoTensor
 
 from vllm.config import ParallelConfig
 from vllm.model_executor import parameter
+from vllm.model_executor.model_loader import weight_checksum
 from vllm.model_executor.model_loader.weight_checksum import (
+    compute_model_weight_checksums,
     compute_tensor_digests,
     has_weight_data,
     zero_weights,
 )
-from vllm.v1.worker import gpu_worker
-from vllm.v1.worker.gpu_worker import Worker
 
 pytestmark = pytest.mark.cpu_test
 
@@ -111,14 +111,20 @@ def test_empty_parameters_have_no_weight_data():
 
 def test_dense_dp_replicas_get_distinct_key_prefixes(monkeypatch):
     for name in ("get_tp_group", "get_pp_group", "get_pcp_group"):
-        monkeypatch.setattr(gpu_worker, name, lambda: SimpleNamespace(rank_in_group=0))
-    prefixes = []
+        monkeypatch.setattr(
+            weight_checksum, name, lambda: SimpleNamespace(rank_in_group=0)
+        )
+    model = nn.Linear(1, 1, bias=False)
+    keys = []
     for dp_rank in (0, 1):
-        worker = object.__new__(Worker)
-        worker.parallel_config = ParallelConfig(
+        parallel_config = ParallelConfig(
             data_parallel_size=2, data_parallel_rank=dp_rank
         )
         # Dense DP resets data_parallel_rank to 0 in each engine.
-        worker.parallel_config.reconfigure_for_independent_dp_rank()
-        prefixes.append(worker._weight_checksum_prefix())
-    assert prefixes == ["dp0:pp0:pcp0:tp0:", "dp1:pp0:pcp0:tp0:"]
+        parallel_config.reconfigure_for_independent_dp_rank()
+        checksums = compute_model_weight_checksums(
+            "target", parallel_config, None, lambda: model, lambda: None
+        )
+        assert isinstance(checksums, dict)
+        keys.extend(checksums)
+    assert keys == ["dp0:pp0:pcp0:tp0:weight", "dp1:pp0:pcp0:tp0:weight"]

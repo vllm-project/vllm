@@ -12,7 +12,7 @@ from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
 from functools import partial
 from types import NoneType
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -85,8 +85,8 @@ from vllm.model_executor.model_loader.base_loader import (
 )
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
-    compute_tensor_digests,
-    has_weight_data,
+    compute_model_weight_checksums,
+    resolve_weight_reset_draft,
     zero_weights,
 )
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
@@ -433,76 +433,27 @@ class Worker(WorkerBase):
     def checkpoint_restore(self) -> None:
         checkpoint_restore_distributed_state()
 
-    def _weight_checksum_prefix(self) -> str:
-        # data_parallel_rank is 0 in dense workers; only the index is unique.
-        dp = self.parallel_config.data_parallel_index
-        pp = get_pp_group().rank_in_group
-        pcp = get_pcp_group().rank_in_group
-        tp = get_tp_group().rank_in_group
-        return f"dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:"
-
-    def _resolve_weight_checker_draft(
-        self, model: WeightCheckerModel
-    ) -> nn.Module | str | None:
-        if model == "target":
-            return None
-        if model not in get_args(WeightCheckerModel):
-            return f"Invalid Weight Checker model selection: {model!r}"
-        spec = self.speculative_config
-        if (
-            spec is None
-            or spec.draft_model_config is None
-            or spec.prefill_context_kv_only
-        ):
-            return "Weight Checker requires a resident speculative draft model."
-        # The draft runs on the last PP stage, including when its own PP size is 1.
-        draft = self.get_draft_model()
-        if draft is None and get_pp_group().is_last_rank:
-            return f"Missing resident draft model on {self._weight_checksum_prefix()}"
-        if draft is not None and not has_weight_data(draft):
-            return "Weight Checker requires a draft model with nonempty weights."
-        return draft
-
     def compute_weight_checksums(
         self, model: WeightCheckerModel = "target"
     ) -> dict[str, str] | str:
-        draft = self._resolve_weight_checker_draft(model)
-        if isinstance(draft, str):
-            return draft
-
-        models: list[tuple[str, nn.Module]] = []
-        if model != "draft":
-            models.append(("target", self.get_model()))
-        if draft is not None:
-            models.append(("draft", draft))
-
-        prefix = self._weight_checksum_prefix()
-        checksums: dict[str, str] = {}
-        for name, module in models:
-            model_prefix = f"{name}:" if model == "both" else ""
-            checksums.update(
-                (model_prefix + prefix + key, digest)
-                for key, digest in compute_tensor_digests(module).items()
-            )
-        return checksums
+        return compute_model_weight_checksums(
+            model,
+            self.parallel_config,
+            self.speculative_config,
+            self.get_model,
+            self.get_draft_model,
+        )
 
     def reset_weights(self, model: WeightCheckerModel = "target") -> str | None:
-        if (
-            model in ("draft", "both")
-            and self.parallel_config.pipeline_parallel_size > 1
-        ):
-            return "Cannot reset draft weights with pipeline parallelism."
-        draft = self._resolve_weight_checker_draft(model)
+        draft = resolve_weight_reset_draft(
+            model,
+            self.parallel_config,
+            self.speculative_config,
+            self.get_draft_model,
+            self.supports_draft_weight_updates,
+        )
         if isinstance(draft, str):
             return draft
-        # This model-specific hook only runs after target updates.
-        if getattr(draft, "refresh_derived_weights", None) is not None:
-            return (
-                "Cannot reset draft weights with model-specific derived weights "
-                "that require a target update to refresh."
-            )
-        if draft is not None and not self.supports_draft_weight_updates():
-            return "Draft reset requires a backend that supports draft weight updates."
         if model != "draft":
             zero_weights(self.get_model())
         if draft is not None:
