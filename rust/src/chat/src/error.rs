@@ -56,6 +56,8 @@ pub enum Error {
     RustFrontendUnsupportedModality { modality: &'static str },
     #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
     MmLimitExceeded { modality: String, limit: usize },
+    #[error("decoded image bytes exceed the per-request limit of {limit} bytes")]
+    ImageDecodeBudgetExceeded { limit: u64 },
     #[error("invalid inline multimodal features: {message}")]
     InvalidPreprocessedMultimodal { message: String },
     #[error(
@@ -183,7 +185,8 @@ impl Error {
             | Self::UnsupportedModality { .. }
             | Self::RustFrontendUnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
-            | Self::MmLimitExceeded { .. } => true,
+            | Self::MmLimitExceeded { .. }
+            | Self::ImageDecodeBudgetExceeded { .. } => true,
             // A media host that timed out or failed, and a decoder that failed
             // on this side, stay server errors, as in Python.
             Self::Media(error) => error.fault() == llm_multimodal::MediaFault::Client,
