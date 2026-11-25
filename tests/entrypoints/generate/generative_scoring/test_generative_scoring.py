@@ -292,6 +292,38 @@ class TestPromptBuilding:
         for i, exp in enumerate(expected):
             assert engine_inputs[i]["prompt_token_ids"] == exp  # type: ignore[typeddict-item]
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("item_first", [False, True])
+    async def test_oversized_text_is_cut_before_tokenizing(self, item_first):
+        """Text that cannot fit in `max_model_len` must not be tokenized in
+        full: that blocks the API server for seconds on multi-MiB inputs."""
+        serving = _create_serving(_create_mock_engine())
+        tokenizer = get_tokenizer(MODEL_NAME)
+        max_model_len = 16
+        max_chars = (max_model_len - 1) * tokenizer.max_chars_per_token
+        text = "hello world " * (max_chars // 4)
+        request = GenerativeScoringRequest(
+            query=text, items=[text], label_token_ids=[500, 501], item_first=item_first
+        )
+
+        encoded_lengths = []
+        encode = tokenizer.encode
+
+        def recording_encode(text, **kwargs):
+            encoded_lengths.append(len(text))
+            return encode(text, **kwargs)
+
+        tokenizer.encode = recording_encode  # type: ignore[method-assign]
+        engine_inputs, _ = await serving._build_prompts(
+            request, tokenizer, max_model_len=max_model_len
+        )
+
+        assert max(encoded_lengths) <= max_chars
+        query_ids = encode(text, add_special_tokens=request.add_special_tokens)
+        item_ids = encode(text, add_special_tokens=False)
+        full = item_ids + query_ids if item_first else query_ids + item_ids
+        assert engine_inputs[0]["prompt_token_ids"] == full[: max_model_len - 1]  # type: ignore[typeddict-item]
+
 
 class TestGeneration:
     """Tests for the full generation flow with mocked engine."""
