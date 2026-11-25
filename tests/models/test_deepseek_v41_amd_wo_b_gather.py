@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa:
     _mxfp8_e4m3_quantize_torch,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa: E402
+    is_layer_skipped,
     kMxfp8Dynamic,
 )
 
@@ -389,3 +390,30 @@ def test_the_copy_is_not_built(monkeypatch, case):
     elif case == "rccl":
         comm.use_aiter_tp_all_gather = False
     assert build() is None
+
+
+@pytest.mark.parametrize(
+    ("match_mode", "wo_b_name", "other_name"),
+    [
+        ("exact", "layers.0.attn.wo_b", "layers.1.attn.wo_b"),
+        ("suffix", "wo_b", "wo_a"),
+    ],
+)
+def test_a_config_that_leaves_wo_b_out_gets_no_copy(
+    monkeypatch, match_mode, wo_b_name, other_name
+):
+    # ignored_layers resolves by layer name: the copy has to answer to wo_b's
+    # name, or it would be MXFP8 beside an unquantized wo_b, with scales the
+    # checkpoint does not have.
+    build, _, _, _, copy = _copy_builder(monkeypatch)
+    ignored = [wo_b_name]
+
+    def replicated_linear(*args, prefix, **kwargs):
+        if is_layer_skipped(prefix, ignored, match_mode=match_mode):
+            return SimpleNamespace(quant_method=SimpleNamespace())
+        return copy
+
+    monkeypatch.setattr(rocm, "ReplicatedLinear", replicated_linear)
+    assert build() is None
+    ignored[:] = [other_name]
+    assert build() is copy
