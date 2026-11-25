@@ -201,6 +201,7 @@ steps:
       - vllm/transformers_utils/configs/speculators/
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
+      - vllm/v1/worker/extensible_kv_cache.py
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode MTP DeepSeek + MiMo + GLM"
   key: spec-decode-mtp-deepseek-mimo
