@@ -872,11 +872,11 @@ def test_object_evicted_after_lookup_follows_failure_policy(
     worker.shutdown()
 
 
-@pytest.mark.parametrize("evicted", [False, True])
-def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, evicted):
+@pytest.mark.parametrize("failure_policy", [None, "fail", "recompute"])
+def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, failure_policy):
     """New blocks are zeroed on the forward stream, which a transfer is not
     ordered behind. Blocks a synchronous load fills must skip that zeroing, and
-    be zeroed for their next owner when the load failed."""
+    be zeroed in the next step when the load failed."""
     runtime = install_memory_runtime(monkeypatch)
     kv_cache_config = _kv_cache_config()
     (group,) = kv_cache_config.kv_cache_groups
@@ -896,6 +896,7 @@ def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, evicted):
             "lookup_dir": socket_dir,
             "load_async": False,
         },
+        kv_load_failure_policy=failure_policy or "fail",
     )
     scheduler = create_scheduler(
         vllm_config,
@@ -920,7 +921,9 @@ def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, evicted):
     request = same_prompt()
     scheduler.add_request(request)
     output = _engine_step(
-        scheduler, worker, before_load=runtime.evict_all if evicted else lambda: None
+        scheduler,
+        worker,
+        before_load=runtime.evict_all if failure_policy else lambda: None,
     )
     (block_ids,) = output.scheduled_new_reqs[0].block_ids
     loaded = output.kv_connector_metadata.load_requests[request.request_id].block_ids
@@ -928,12 +931,9 @@ def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, evicted):
     # The block the request computes itself is still zeroed.
     assert output.new_block_ids_to_zero == block_ids[3:]
 
-    if evicted:
-        assert request.status == RequestStatus.FINISHED_ERROR
-        _run_to_completion(scheduler, worker)
-        free_blocks = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
-        scheduler.add_request(
-            create_request(num_tokens=free_blocks * scheduler.block_size, max_tokens=1)
-        )
-        assert set(loaded) <= set(_engine_step(scheduler, worker).new_block_ids_to_zero)
+    next_output = _engine_step(scheduler, worker)
+    assert (next_output.new_block_ids_to_zero or []) == (
+        loaded if failure_policy else []
+    )
+    _run_to_completion(scheduler, worker)
     worker.shutdown()
