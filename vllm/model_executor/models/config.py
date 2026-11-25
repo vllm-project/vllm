@@ -1032,15 +1032,13 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """Default the kv-cache dtype when the text backbone carries DSA:
         per-tensor fp8 for FLASHINFER_MLA_SPARSE, the default on SM10x, and
-        "fp8_ds_mla" otherwise. The DSA indexer logits default as DeepSeek's:
-        BF16 on SM100, FP32 elsewhere."""
+        "fp8_ds_mla" otherwise."""
         hf_config = vllm_config.model_config.hf_config
         # Multimodal composite configs carry dsa_config on text_config;
         # text-only models have it at the top level.
         hf_text_config = getattr(hf_config, "text_config", hf_config)
         if getattr(hf_text_config, "dsa_config", None) is None:
             return
-        _set_deepseek_indexer_logits_dtype(vllm_config)
         from vllm.platforms import current_platform
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
