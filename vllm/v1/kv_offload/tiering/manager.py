@@ -1011,8 +1011,9 @@ class TieringOffloadingManager(OffloadingManager):
         # Cascading of these newly-stored chunks to participating tiers
         # happens later in complete_store(), after the GPU→Primary transfer
         # completes.
-        # When the offer does not fit, chunks every secondary tier already
-        # holds would only take primary space from the chunks that are new.
+        # When the offer does not fit, chunks that every secondary tier receiving
+        # the request's stores already holds would only take primary space from
+        # the chunks that are new.
         held_keys = self._keys_held_by_all_secondary_tiers(keys, req_context)
         offered = [k for k in keys if k not in held_keys] if held_keys else keys
         primary_result = self.primary_tier.prepare_store(
