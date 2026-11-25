@@ -216,6 +216,10 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         # potential unfinished byte sequence (step returns None then).
         # The flush only needs to decode when this is set.
         self._last_step_held_back = False
+        # Prompt token ids, kept so the finished-read flush can decode
+        # with prompt context: a leading "▁" renders as a space only
+        # after another token, so decoding the output ids alone drops it.
+        self._prompt_token_ids = list(request.prompt_token_ids or [])
 
         # Use native prefill to prime the decode stream with prompt tokens.
         # Look up DecodeStream on the module so backend patches (e.g. the
@@ -296,19 +300,37 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
         `DecodeStream` buffers a trailing partial UTF-8 sequence and only
         releases it once a later token completes it, so at finish the
-        held-back text is the difference between a decode of the output
-        ids and the text emitted so far. The flag keeps this a no-op
-        when the last step released everything, so a finished read costs
-        no decode in the common case. The prefix check keeps this a
-        no-op when incremental decoding already diverged from a full
-        decode.
+        held-back text is the difference between a decode of the prompt
+        plus output ids and the text emitted so far. The decode needs the
+        prompt context: a leading "▁" renders as a space only after
+        another token, so decoding the output ids alone drops it and the
+        prefix check fails (for example prompt "Hello" streaming
+        " world" while the output ids alone decode to "world�"). The
+        flag keeps this a no-op when the last step released everything,
+        so a finished read costs no decode in the common case. The
+        prefix checks keep this a no-op when incremental decoding already
+        diverged from a full decode.
         """
         if not self._last_step_held_back:
             return ""
         self._last_step_held_back = False
-        expected = self.tokenizer.decode(
-            self.token_ids, skip_special_tokens=self.skip_special_tokens
+        prompt_text = self.tokenizer.decode(
+            self._prompt_token_ids, skip_special_tokens=self.skip_special_tokens
         )
+        expected_full = self.tokenizer.decode(
+            self._prompt_token_ids + self.token_ids,
+            skip_special_tokens=self.skip_special_tokens,
+        )
+        if expected_full.startswith(prompt_text):
+            expected = expected_full[len(prompt_text) :]
+        else:
+            # The prompt and output bytes interact (for example a
+            # prompt-final byte token completing with the first output
+            # token), so the prompt text is not a prefix of the full
+            # decode. Fall back to decoding the output ids alone.
+            expected = self.tokenizer.decode(
+                self.token_ids, skip_special_tokens=self.skip_special_tokens
+            )
         if expected.startswith(self.output_text):
             return expected[len(self.output_text) :]
         return ""

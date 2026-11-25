@@ -339,6 +339,38 @@ def test_decode_trailing_replacement_char_flushed_on_finish(
     assert out_ids == ids
 
 
+@pytest.mark.parametrize(
+    "tokenizer_name", ["hf-internal-testing/llama-tokenizer"]
+)
+@pytest.mark.parametrize("fast", (True, False))
+def test_decode_held_back_text_keeps_prompt_context(tokenizer, fast):
+    """A held-back trailing U+FFFD is flushed with prompt context.
+
+    The fast DecodeStream is primed with the prompt, so a leading "▁"
+    renders as a space in the streamed text. Decoding the output ids
+    alone drops that space ("world�" instead of " world�"), so the
+    flush must decode prompt plus output ids and strip the prompt text.
+    See https://github.com/vllm-project/vllm/pull/68358.
+    """
+    prompt_ids = tokenizer.encode("Hello", add_special_tokens=False)
+    world_id = tokenizer.convert_tokens_to_ids("▁world")
+    byte_id = tokenizer.convert_tokens_to_ids("<0xC3>")
+    ids = prompt_ids + [world_id, byte_id]
+
+    decoded_text, out_ids = _run_incremental_decode(
+        tokenizer,
+        ids,
+        skip_special_tokens=True,
+        starting_index=len(prompt_ids),
+        fast=fast,
+    )
+
+    full_text = tokenizer.decode(ids, skip_special_tokens=True)
+    prompt_text = tokenizer.decode(prompt_ids, skip_special_tokens=True)
+    assert decoded_text == full_text[len(prompt_text) :]
+    assert out_ids == ids[len(prompt_ids):]
+
+
 @pytest.mark.parametrize("tokenizer_name", ["openai-community/gpt2"])
 @pytest.mark.parametrize("fast", (True, False))
 def test_stop_string_not_reappended_on_finish(tokenizer, fast):
