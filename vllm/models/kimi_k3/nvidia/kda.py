@@ -430,11 +430,13 @@ def _flashkda_prefill(
         A_log.contiguous(),
         dt_bias.view(-1, q.shape[-1]).contiguous(),
         lower_bound,
-        initial_state.contiguous(),
-        final_state,
-        cu_seqlens.contiguous(),
-        checkpoint_state,
-        checkpoint_offsets.contiguous() if checkpoint_offsets is not None else None,
+        cu_seqlens=cu_seqlens.contiguous(),
+        initial_state=initial_state.contiguous(),
+        final_state=final_state,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=(
+            checkpoint_offsets.contiguous() if checkpoint_offsets is not None else None
+        ),
     )
     return out, final_state
 
