@@ -7,7 +7,9 @@ import pytest
 import torch
 from PIL import Image
 
+from vllm.config import CacheConfig, SchedulerConfig, VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.processing import ProcessorInputs, TimingContext
 
 from ...utils import build_model_context
@@ -85,6 +87,36 @@ def test_rust_engine_profiles_synthetic_patches(monkeypatch, modality, count):
         assert placeholder.offset + placeholder.length <= len(
             inputs["prompt_token_ids"]
         )
+
+
+@pytest.mark.parametrize("modality", ["image", "video"])
+def test_rust_engine_encoder_profile_builds_dummies(monkeypatch, modality):
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    ctx = build_model_context(
+        "zai-org/GLM-5.3-Flash",
+        model_config_kwargs={"max_model_len": 4096},
+        limit_mm_per_prompt={modality: 1},
+    )
+    scheduler_config = SchedulerConfig(
+        max_model_len=4096,
+        max_num_batched_tokens=2048,
+        enable_chunked_prefill=True,
+        is_encoder_decoder=False,
+    )
+    budget = MultiModalBudget(
+        VllmConfig(
+            model_config=ctx.model_config,
+            scheduler_config=scheduler_config,
+            cache_config=CacheConfig(enable_prefix_caching=False),
+        ),
+        MULTIMODAL_REGISTRY,
+        enable_cache=False,
+    )
+
+    items = budget.get_dummy_encoder_profile_inputs(modality)
+
+    assert len(items) == budget.mm_max_items_per_batch[modality]
+    assert all(item_modality == modality for item_modality, _ in items)
 
 
 def _image_info(**kwargs):

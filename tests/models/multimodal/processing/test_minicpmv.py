@@ -235,7 +235,9 @@ def test_minicpmv4_6_video_profile_covers_largest_scheduled_video(
     assert isinstance(processor.info, MiniCPMV4_6ProcessingInfo)
     profiled = 0
     for _, item in budget.get_dummy_encoder_profile_inputs():
-        num_slices, _, patch, width = item.get_data()["video_pixel_values"].shape
+        pixel_values = item.get_data()["video_pixel_values"]
+        assert isinstance(pixel_values, torch.Tensor)
+        num_slices, _, patch, width = pixel_values.shape
         profiled += num_slices * width // patch
 
     assert budget.mm_max_toks_per_item["video"] == _num_video_embeds(
