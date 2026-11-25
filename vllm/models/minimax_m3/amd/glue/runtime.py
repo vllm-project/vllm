@@ -1,23 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Per-model runtime of the MiniMax-M3.1 decode glue.
+"""Per-model runtime of the MiniMax-M3.1 decode glue and SP prefill paths.
 
 Lifecycle (every phase that can fail on one rank ends in a TP agreement, so all
 ranks keep or drop the path together):
 
 * `create` (model __init__): config checks only; registers on the MoE layers.
 * `after_load_weights` (end of MiniMaxM3Model.load_weights): marks the weights
-  loaded. The setup (derived shared-expert weights, the peer buffer, per-width
-  buffers and compiled kernels) runs at the first eager, uncaptured forward, the
-  profile run, every rank at the same point.
+  loaded. The setup (derived shared-expert weights, with the SP all-gathers, the
+  decode peer buffer, per-width buffers and compiled kernels, the SP combine +
+  reduce-scatter buffers) runs at the first eager, uncaptured forward, the
+  profile run, every rank at the same point. That forward itself takes the
+  stock path.
 * `begin_forward` / `end_forward` (MiniMaxM3Model.forward): one plan a forward,
   from rank-uniform data only (forward context, attention metadata, row count,
   capture state); kept thread-locally for the decoder layers.
 * `moe_half` (MiniMaxM3DecoderLayer.forward, after attention): the layer's MoE
-  half on the glue, or None for the stock path. When the next layer is a MoE
-  layer taking MXFP8 attention input and the installed AITER has the fused
-  all-reduce + RMSNorm + MXFP8 quant, the post-MoE all-reduce hands that layer
-  its quantized input (an Mxfp8Carry).
+  half on the planned path (decode glue or SP prefill), or None for the stock
+  path. When the next layer is a MoE layer taking MXFP8 attention input, the
+  all-reduce after the MoE hands that layer its quantized input (an
+  Mxfp8Carry): SP through the fused reduce-scatter + MXFP8 gather, decode when
+  the installed AITER has the fused all-reduce + RMSNorm + MXFP8 quant.
 * `output_step` (MiniMaxM3ModelState.postprocess_state, every sampled step,
   eager or replayed): the periodic collective epoch reset."""
 
@@ -32,7 +35,14 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-DECODE = "decode"
+DECODE, SP = "decode", "sp"
+# SP: eager steps of SP_MIN_ROWS .. SP_MAX_ROWS tokens. Measured on MI355X (TP4,
+# the MoE half from the o_proj partial to the gemm1 inputs): 1208 rows ~-2%,
+# 2343 -12%, 5857 -24%, 14394 -26%; slower at 500 rows. Larger steps keep the
+# stock path (with DBO they are split anyway: DBO micro-batches run the stock
+# path).
+SP_MIN_ROWS = 1024
+SP_MAX_ROWS = 16384
 # Epoch reset period in counted launches (the kernel's tag limit is
 # EPOCH_LIMIT = 2^17 - 2^12, minus the uncounted startup launches).
 RESET_LAUNCHES = (1 << 17) - (1 << 14)
@@ -54,7 +64,7 @@ class M3Glue:
     def create(cls, model, vllm_config) -> M3Glue | None:
         reasons = cls._refusals(model, vllm_config)
         if reasons:
-            logger.debug("MiniMax-M3 decode glue off: %s", "; ".join(reasons))
+            logger.debug("MiniMax-M3 glue paths off: %s", "; ".join(reasons))
             return None
         return cls(model, vllm_config)
 
@@ -118,6 +128,9 @@ class M3Glue:
         self.meta_key = getattr(self.layers[0].self_attn, "layer_name", None)
         self.widths = WIDTHS
         self.decode: Any = None  # DecodeGlue, once set up
+        self.sp: Any = None  # SpPrefill, once set up
+        # padded M -> True, or None when refused
+        self._sp_ok: dict[int, bool | None] = {}
         self.shared: dict[int, object] = {}  # layer id -> SharedWeights
         self.shared_fused: str | None = None  # "mxfp8" / "bf16": inside the MoE
         self._tls = threading.local()
@@ -183,7 +196,7 @@ class M3Glue:
             ok, err = False, e
         if not _tp_agree(ok, self.group):
             logger.warning(
-                "MiniMax-M3 decode glue off: %s", err or "refused on another rank"
+                "MiniMax-M3 glue paths off: %s", err or "refused on another rank"
             )
             return
         # the shared expert inside the a16w4 MoE launches when the installed AITER
@@ -194,14 +207,17 @@ class M3Glue:
             for layer in self.layers
         }
         self.shared_fused = fmts.pop() if len(fmts) == 1 else None
-        for layer in self.layers:
+        for layer in self.layers:  # SP: all-gathers in layer order on every rank
             self.shared[layer.layer_id] = build_shared_weights(
                 layer.block_sparse_moe.shared_experts,
                 True,
-                False,
+                True,
                 self.group,
                 fused=self.shared_fused,
             )
+        from .sp import SpPrefill
+
+        self.sp = SpPrefill(self.group, SP_MIN_ROWS, SP_MAX_ROWS)
         self._setup_decode()
         torch.accelerator.synchronize()
 
@@ -246,15 +262,26 @@ class M3Glue:
     def begin_forward(
         self, positions: torch.Tensor, intermediate_tensors
     ) -> StepPlan | None:
+        setup_now = not self._ready
         self._maybe_setup()
+        if setup_now and self._ready:
+            # The setup forward is vLLM's profile run (its largest step): leave
+            # it to the stock path, so the MoE workspace is sized (and later
+            # locked) for the largest step the stock path can still see, e.g.
+            # eager steps below SP's minimum. The glue's own buffers were just
+            # allocated, so the profile counts them too.
+            self._tls.plan = None
+            return None
         plan = self._decide(positions.shape[-1], intermediate_tensors)
         self._tls.plan = plan
         return plan
 
     def end_forward(self, plan: StepPlan | None) -> None:
         self._tls.plan = None
-        if plan is not None:
+        if plan is not None and plan.mode == DECODE:
             self.decode.assert_healthy()
+        elif plan is not None:
+            self.sp.assert_healthy()
 
     def _decide(self, rows: int, intermediate_tensors) -> StepPlan | None:
         from vllm.config import CUDAGraphMode
@@ -265,23 +292,35 @@ class M3Glue:
         from vllm.v1.worker.ubatching import dbo_enabled
 
         if (
-            self.decode is None
-            or rows not in self.decode.bufs
-            or intermediate_tensors is not None
+            intermediate_tensors is not None
             or not is_forward_context_available()
             or dbo_enabled()
         ):
             return None
         ctx = get_forward_context()
-        # FULL capture runs the forward with mode NONE; PIECEWISE graphs are
-        # keyed by token count alone and replay mixed steps, so they stay stock
-        if ctx.ubatch_slices is not None or ctx.cudagraph_runtime_mode not in (
-            CUDAGraphMode.NONE,
-            CUDAGraphMode.FULL,
-        ):
+        if ctx.ubatch_slices is not None:
             return None
-        if self._pure_decode(ctx, rows) and self._decode_row(rows) is not None:
+        mode = ctx.cudagraph_runtime_mode
+        # Decode: FULL capture runs the forward with mode NONE; PIECEWISE graphs
+        # are keyed by token count alone and replay mixed steps, so they stay
+        # stock.
+        if (
+            self.decode is not None
+            and rows in self.decode.bufs
+            and mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL)
+            and self._pure_decode(ctx, rows)
+            and self._decode_row(rows) is not None
+        ):
             return StepPlan(DECODE, rows)
+        # SP: eager steps only (its collectives are not captured)
+        if (
+            self.sp is not None
+            and self.sp.min_rows <= rows <= self.sp.max_rows
+            and mode == CUDAGraphMode.NONE
+            and not torch.cuda.is_current_stream_capturing()
+            and self._sp_row(rows) is not None
+        ):
+            return StepPlan(SP, rows)
         return None
 
     def _pure_decode(self, ctx, rows: int) -> bool:
@@ -322,13 +361,30 @@ class M3Glue:
             except Exception as e:  # noqa: BLE001 - a refusal, not a crash
                 why = info = f"{type(e).__name__}: {e}"
             self._decode_ok[rows] = None if why else moe.metadata(rows, exact=True)
-            self._note(rows, ("refused: " if why else "") + info)
+            self._note(DECODE, rows, ("refused: " if why else "") + info)
         return self._decode_ok[rows]
 
-    def _note(self, rows: int, what: str) -> None:
-        if self.group.rank_in_group == 0 and rows not in self._seen:
-            self._seen.add(rows)
-            logger.info("MiniMax-M3 decode glue rows %d (tuned row): %s", rows, what)
+    def _sp_row(self, rows: int):
+        """Whether the tuned row at `rows` (padded M, as the stock call looks
+        it up) takes SP's prequantized input."""
+        from aiter.fused_moe import get_padded_M
+
+        key = get_padded_M(rows)
+        if key not in self._sp_ok:
+            try:
+                moe = [self.aiter_moe(layer) for layer in self.layers][0]
+                why = moe.sp_refusal(rows)
+                info = why or moe.describe(rows)
+            except Exception as e:  # noqa: BLE001 - a refusal, not a crash
+                why = info = f"{type(e).__name__}: {e}"
+            self._sp_ok[key] = None if why else True
+            self._note(SP, key, ("refused: " if why else "") + info)
+        return self._sp_ok[key]
+
+    def _note(self, mode: str, rows: int, what: str) -> None:
+        if self.group.rank_in_group == 0 and (mode, rows) not in self._seen:
+            self._seen.add((mode, rows))
+            logger.info("MiniMax-M3 glue %s rows %d (tuned row): %s", mode, rows, what)
 
     # ------------------------------------------------------------ per layer
     def current(self) -> StepPlan | None:
@@ -340,6 +396,15 @@ class M3Glue:
         plan = self.current()
         if plan is None or plan.rows != hidden_states.shape[0]:
             return None
+        if plan.mode == SP:
+            return self.sp.run(
+                layer,
+                hidden_states,
+                residual,
+                self.shared[layer.layer_id],
+                self.aiter_moe(layer),
+                self._next_norm(layer),
+            )
         md, q = self._decode_row(plan.rows)  # same tuned row for every layer
         # a specialized decode kernel can take the next layer's place (it reads
         # all-reduced rows)
@@ -357,9 +422,11 @@ class M3Glue:
 
     def _next_norm(self, layer):
         """The next layer's input norm when the all-reduce after this MoE can
-        also norm and quantize that layer's attention input: the next layer is a
-        MoE layer taking MXFP8 attention input, and no drafter hidden state is
-        taken between them (those need the all-reduced rows); else None."""
+        also norm and quantize that layer's attention input (SP: reduce-scatter +
+        MXFP8 gather; decode: AITER's fused all-reduce + norm + MXFP8): the next
+        layer is a MoE layer taking MXFP8 attention input, and no drafter hidden
+        state is taken between them (those need the all-reduced rows); else
+        None."""
         nid = layer.layer_id + 1
         layers = self.model.layers
         if nid >= len(layers) or nid in getattr(
