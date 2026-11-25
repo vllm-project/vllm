@@ -2735,19 +2735,22 @@ def in_the_same_node_as(
                     is_in_the_same_node[rank] = 1
     except Exception as e:
         logger.error("Error ignored in is_in_the_same_node: %s", e)
+
+    try:
+        if isinstance(pg, ProcessGroup):
+            torch.distributed.barrier(group=pg)
+        else:
+            pg.barrier()
     finally:
+        # Peers may still be opening the segment when the source rank closes
+        # its handle, and on Windows the named object disappears with the last
+        # open handle. Hold it across the barrier, then close, and let only
+        # the source rank unlink the segment.
         if shm:
             shm.close()
-
-    if isinstance(pg, ProcessGroup):
-        torch.distributed.barrier(group=pg)
-    else:
-        pg.barrier()
-
-    # clean up the shared memory segment
-    with contextlib.suppress(OSError):
-        if rank == source_rank and shm:
-            shm.unlink()
+            with contextlib.suppress(OSError):
+                if rank == source_rank:
+                    shm.unlink()
 
     if isinstance(pg, ProcessGroup):
         torch.distributed.all_reduce(is_in_the_same_node, group=pg)
