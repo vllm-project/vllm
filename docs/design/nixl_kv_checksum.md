@@ -50,7 +50,9 @@ _TODO: add concrete incidents and repro notes, if any._
 5. **Both transfer modes.** Pull (`NixlPullConnector`) and push
    (`NixlPushConnector`).
 6. **Opt-in and cheap.** No cost when disabled. When enabled, the cost is small
-   compared with the KV transfer itself.
+   compared with the KV transfer itself. Benchmarks must verify that the change
+   carries no significant performance penalty before it lands (see
+   [Performance verification](#performance-verification)).
 
 ### Non-goals
 
@@ -91,10 +93,16 @@ _TODO: add concrete incidents and repro notes, if any._
 
 - **R8. No added sync points.** Metadata writes are stream-ordered GPU writes
   on the compute stream. They add no host sync and do not block the scheduler.
-- **R9. Small overhead.** _TODO: budget, for example less than X% of TTFT at Y
-  concurrency on H100/H200 with Llama-3.1-8B._ Memory overhead is
-  `num_blocks × entry_size` per group (for example, 64 B × 100k blocks is
-  6.4 MB).
+- **R9. No significant performance penalty (must be verified).**
+    - **Disabled:** no measurable regression against `main` (within run-to-run
+      noise).
+    - **Enabled:** TTFT, ITL, and throughput stay within an agreed budget of the
+      disabled baseline. _TODO: agree on the budget, for example ≤ 2% throughput
+      and ≤ 5% p50/p99 TTFT._
+    - **Memory:** `num_blocks × entry_size` per group (for example, 64 B × 100k
+      blocks is 6.4 MB).
+    - This is a merge gate: the measurements in
+      [Performance verification](#performance-verification) are part of the PR.
 - **R10. Observability.** Each mismatch is counted and logged with request ID,
   peer engine ID, KV cache group, block index, and the expected and actual
   entry state.
@@ -389,8 +397,43 @@ version.
   Each must be detected under all three policies.
 - **Integration:** `tests/v1/kv_connector/nixl_integration/` with validation
   on: pull and push, homogeneous and heterogeneous TP, hybrid models.
-- **Performance:** TTFT and throughput with validation off and on, and for each
-  metadata-ordering option.
+- **Performance:** see [Performance verification](#performance-verification).
+
+### Performance verification
+
+The design must be shown to add no significant performance penalty (R9) before
+it is enabled or merged. Where the cost comes from, and what to measure:
+
+| Cost source | Where | Risk | How to measure |
+| --- | --- | --- | --- |
+| Invalidate / publish scatter kernels | P and D, every step | Small kernels on the compute stream; launch overhead at high step rates | Step time, decode ITL |
+| Larger connector metadata (hash lists) | Scheduler → worker | Scheduler CPU time and serialization, which grow with blocks per step | Scheduler step time at high concurrency |
+| Metadata transfer, ordered after data | D (pull) / P (push) | An extra NIXL round trip per request with two-phase ordering | TTFT; KV transfer time metrics |
+| Validation gather and compare | D, per finished load | A host sync if done naively; must stay off the critical path | TTFT, `nixl_kv_block_validation_seconds` |
+| Extra NIXL registration / descriptors | Init and handshake | Startup and handshake time | Engine startup, first-request latency |
+
+Benchmark matrix (PD disaggregation, `vllm bench serve`):
+
+- **Baselines:** `main`, this change with validation off, and validation on
+  under each policy (`log` / `recompute` / `fail`).
+- **Workloads:** short and long prompts (block count per request drives the
+  cost); a concurrency sweep up to saturation; unique prompts, so every request
+  does a real P→D transfer.
+- **Topologies:** pull and push; homogeneous and heterogeneous TP.
+- **Models:** a small model (for example, Llama-3.2-1B, where fixed per-block
+  costs are proportionally largest) and a mid-size model (for example,
+  Llama-3.1-8B).
+- **Metrics:** throughput, TTFT p50/p99, ITL p50/p99, scheduler step time, KV
+  transfer time, validation latency.
+- **Ordering options:** compare the metadata-ordering options (two-phase,
+  single transfer, seqlock) and pick the default from the results.
+
+If the enabled cost exceeds the budget, mitigations to evaluate:
+
+- batch the metadata writes into existing connector kernels;
+- validate on the GPU and copy back only a mismatch flag;
+- fold the metadata read into the data transfer;
+- validate a sample of blocks per request.
 
 ### Alternatives considered
 
@@ -417,4 +460,5 @@ version.
 - Default metadata ordering option (two-phase, single transfer, or seqlock).
 - Partial-block tag scheme.
 - Behavior with block-size mismatch and Mamba state groups.
-- Whether validation can stay on by default once overhead is measured.
+- The performance budget (R9) that the change must meet, and whether
+  validation can stay on by default once overhead is measured.
