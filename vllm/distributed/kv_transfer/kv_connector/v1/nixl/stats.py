@@ -44,7 +44,6 @@ class NixlKVConnectorStats(KVConnectorStats):
             "num_notifications_after_expiry": [],
             "num_declined_expired_reads": [],
             "num_registration_expired": [],
-            "num_writer_loop_errors": [],
         }
 
     def record_transfer(self, res: "nixlXferTelemetry | None"):
@@ -85,11 +84,6 @@ class NixlKVConnectorStats(KVConnectorStats):
         passed without a corresponding push completion."""
         self.data["num_registration_expired"].append(1)
 
-    def record_writer_loop_error(self):
-        """Record an exception caught by the push connector's writer
-        thread loop (the loop continues, but the iteration was lost)."""
-        self.data["num_writer_loop_errors"].append(1)
-
     def clone_and_reset(self) -> "NixlKVConnectorStats":
         old = copy.copy(self)
         self.reset()
@@ -106,7 +100,6 @@ class NixlKVConnectorStats(KVConnectorStats):
             and len(self.data["num_notifications_after_expiry"]) == 0
             and len(self.data["num_declined_expired_reads"]) == 0
             and len(self.data.get("num_registration_expired", [])) == 0
-            and len(self.data.get("num_writer_loop_errors", [])) == 0
         )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
@@ -141,7 +134,6 @@ class NixlKVConnectorStats(KVConnectorStats):
             "Num registration expired": len(
                 self.data.get("num_registration_expired", [])
             ),
-            "Num writer loop errors": len(self.data.get("num_writer_loop_errors", [])),
         }
         if self.num_successful_transfers == 0:
             # Timing / throughput stats only cover successful transfers. If
@@ -340,16 +332,6 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             counter_nixl_num_registration_expired, self.per_engine_labelvalues
         )
 
-        counter_nixl_num_writer_loop_errors = self._counter_cls(
-            name="vllm:nixl_num_writer_loop_errors",
-            documentation="Number of exceptions caught by the push "
-            "connector's writer thread loop.",
-            labelnames=labelnames,
-        )
-        self.counter_nixl_num_writer_loop_errors = create_metric_per_engine(
-            counter_nixl_num_writer_loop_errors, self.per_engine_labelvalues
-        )
-
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for prom_obj, list_item_key in zip(
             [
@@ -375,7 +357,6 @@ class NixlPromMetrics(KVConnectorPromMetrics):
                 self.counter_nixl_num_notifications_after_expiry,
                 self.counter_nixl_num_declined_expired_reads,
                 self.counter_nixl_num_registration_expired,
-                self.counter_nixl_num_writer_loop_errors,
             ],
             [
                 # Transfer, handshake and notification failures are grouped:
@@ -392,7 +373,6 @@ class NixlPromMetrics(KVConnectorPromMetrics):
                 ("num_notifications_after_expiry",),
                 ("num_declined_expired_reads",),
                 ("num_registration_expired",),
-                ("num_writer_loop_errors",),
             ],
         ):
             for counter_item_key in counter_item_keys:

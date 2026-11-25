@@ -334,7 +334,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                             self._pending_completion_notifs.put(notif)
             except Exception:
                 logger.exception("nixl-push-writer error; continuing")
-                self.xfer_stats.record_writer_loop_error()
 
             # Self-poll only while there is no other wake source: P-side
             # finished blocks waiting for a D PUSH_REG match. All other

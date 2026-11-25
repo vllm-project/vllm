@@ -430,7 +430,6 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._engine_by_address = {}
         w._inflight_pushes = {}
         w._next_held_lease_check = 0.0
-        w.xfer_stats = NixlKVConnectorStats()
 
         # Track _do_start_push_kv invocations.
         calls: list[tuple[str, tuple[list[int], ...], dict[str, object]]] = []
@@ -826,31 +825,6 @@ def test_writer_loop_drains_deferred_push_inbox():
 
     assert len(w.start_push_calls) == 1
     assert w.start_push_calls[0][0] == "req-retry"
-
-
-def test_writer_loop_records_and_survives_iteration_exception():
-    """An exception raised mid-iteration (W2) is recorded as a stat and the
-    loop keeps running rather than dying silently."""
-    w = _StubWriterWorker.fresh()
-    w.nixl_wrapper = MagicMock()
-    w.nixl_wrapper.get_new_notifs.side_effect = RuntimeError("nixl boom")
-
-    t = threading.Thread(target=w._push_writer_loop, daemon=True)
-    t.start()
-    try:
-        # No event to wait on for "an exception happened"; poll the stat.
-        deadline = time.perf_counter() + 2.0
-        while (
-            not w.xfer_stats.data["num_writer_loop_errors"]
-            and time.perf_counter() < deadline
-        ):
-            time.sleep(0.01)
-        assert w.xfer_stats.data["num_writer_loop_errors"] == [1]
-        assert t.is_alive(), "writer thread must survive a caught exception"
-    finally:
-        w._push_writer_stop.set()
-        w._push_writer_wake.set()
-        t.join(timeout=2)
 
 
 def _eviction_worker(
