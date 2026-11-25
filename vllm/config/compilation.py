@@ -427,6 +427,18 @@ class PassConfig:
             )
             self.fuse_rope_kvcache_cat_mla = False
 
+        if envs.VLLM_BATCH_INVARIANT and self.fuse_allreduce_rms:
+            from vllm.model_executor.determinism.batch_invariant_configs import (
+                supports_hopper_native_dispatch,
+            )
+
+            if supports_hopper_native_dispatch():
+                logger.warning_once(
+                    "Fused all-reduce + RMSNorm is not batch-invariant on "
+                    "Hopper; disabling fuse_allreduce_rms."
+                )
+                self.fuse_allreduce_rms = False
+
     def log_enabled_passes(self) -> None:
         """Log the enabled custom fusion passes.
         This is called at the end of VLLMConfig post_init,

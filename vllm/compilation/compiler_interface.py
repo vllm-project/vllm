@@ -677,7 +677,14 @@ class InductorAdaptor(CompilerInterface):
 
 
 def set_inductor_config(config: dict[str, Any], compile_range: Range) -> None:
-    if compile_range.is_single_size():
+    from vllm.model_executor.determinism.batch_invariant_configs import (
+        HOPPER_DETERMINISTIC_INDUCTOR_CONFIG,
+        supports_hopper_native_dispatch,
+    )
+
+    if envs.VLLM_BATCH_INVARIANT and supports_hopper_native_dispatch():
+        config.update(HOPPER_DETERMINISTIC_INDUCTOR_CONFIG)
+    elif compile_range.is_single_size():
         # for a specific batch size, tuning triton kernel parameters
         # can be beneficial
         config["max_autotune"] = envs.VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE

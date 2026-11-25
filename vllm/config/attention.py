@@ -64,6 +64,10 @@ class AttentionConfig:
     """Force vllm to use a specific flash-attention version (2, 3, or 4).
     Only valid when using the flash-attention backend."""
 
+    deterministic_attention_split_stride: Literal[512, 1024] | None = None
+    """KV tokens per requested FA3 split in batch-invariant Hopper decode.
+    None keeps single-pass attention in batch-invariant mode."""
+
     flash_attn_max_num_splits_for_cuda_graph: int = 32
     """Flash Attention max number splits for cuda graph decode."""
 
