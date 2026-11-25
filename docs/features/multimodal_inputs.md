@@ -298,6 +298,13 @@ print("caption:", caption_out)
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
 instead of using multi-image input.
 
+Nemotron Shortcut resizes video frames independently of still images, using
+`video_target_num_patches` (default 1024) and `video_maintain_aspect_ratio`
+(default `false`) from the checkpoint config. With 14-pixel vision patches,
+the default produces 448×448 frames. Aspect-preserving frames that exceed the
+profiled patch budget are rejected. Still images use the checkpoint's HF image
+processor size, which `mm_processor_kwargs` can override.
+
 Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown in this example using Qwen2.5-VL:
 
 ??? code

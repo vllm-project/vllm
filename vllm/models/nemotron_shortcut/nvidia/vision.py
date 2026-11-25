@@ -11,9 +11,11 @@ import bisect
 import copy
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
+from functools import cached_property, partial
 from typing import Any, cast
 
+import cv2
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -69,6 +71,9 @@ from vllm.multimodal.video_decoders import (
     VideoTargetMetadata,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processors.nano_nemotron_vl import (
+    get_video_target_size_and_feature_size,
+)
 
 from .model import NemotronShortcutForCausalLM, check_sdsa_indexer_loaded
 from .sdsa import SdsaKVCacheGrouping
@@ -97,6 +102,26 @@ NEMOTRON_SHORTCUT_VIDEO_LOADER_BACKEND = "nemotron_shortcut_t2"
 _TRAINING_VIDEO_MAX_FRAMES = 64
 _TRAINING_VIDEO_MIN_FRAMES = 8
 _TRAINING_VIDEO_FPS = 2
+
+
+def resize_video_frame(
+    frame: object, width: int, height: int, image_processor: Any
+) -> torch.Tensor:
+    """Apply the training video transform at the planned frame size."""
+    if isinstance(frame, torch.Tensor):
+        frame = frame.detach().cpu().numpy()
+    array = np.asarray(frame)
+    if array.ndim != 3 or array.shape[-1] != 3:
+        raise ValueError(
+            "Nemotron Shortcut video frames must be RGB (height, width, 3)"
+        )
+    array = array.astype(np.float32) / np.float32(1.0 / image_processor.rescale_factor)
+    if array.shape[:2] != (height, width):
+        array = cv2.resize(array, (width, height), interpolation=cv2.INTER_AREA)
+    pixels = torch.from_numpy(np.ascontiguousarray(array)).permute(2, 0, 1)
+    mean = torch.tensor(image_processor.image_mean, dtype=torch.float32)[:, None, None]
+    std = torch.tensor(image_processor.image_std, dtype=torch.float32)[:, None, None]
+    return (pixels - mean) / std
 
 
 def get_video_temporal_patch_size(config: object) -> int:
@@ -635,6 +660,33 @@ class NemotronShortcutProcessingInfo(BaseProcessingInfo):
         aligned_edge = -(-edge // multiple) * multiple
         return ImageSize(width=aligned_edge, height=aligned_edge)
 
+    def get_video_frame_size(self, width: int = 1, height: int = 1) -> ImageSize:
+        config = self.get_hf_config()
+        target = getattr(config, "video_target_num_patches", None)
+        target = 1024 if target is None else target
+        keep_aspect = getattr(config, "video_maintain_aspect_ratio", False)
+        keep_aspect = False if keep_aspect is None else keep_aspect
+        if type(target) is not int or target <= 0:
+            raise ValueError("video_target_num_patches must be a positive integer")
+        if not isinstance(keep_aspect, bool):
+            raise ValueError("video_maintain_aspect_ratio must be a boolean")
+        if not keep_aspect and math.isqrt(target) ** 2 != target:
+            raise ValueError("video_target_num_patches must be square")
+        get_size = partial(
+            get_video_target_size_and_feature_size,
+            target_patches=target,
+            maintain_aspect_ratio=keep_aspect,
+            patch_size=config.vision_config.patch_size,
+            downsample_ratio=1 / config.spatial_merge_size,
+        )
+        frame_width, frame_height, _ = get_size(width, height)
+        profile_width, profile_height, _ = get_size(1, 1)
+        if frame_width * frame_height > profile_width * profile_height:
+            raise ValueError(
+                "Video aspect ratio exceeds the profiled frame patch budget"
+            )
+        return ImageSize(width=frame_width, height=frame_height)
+
 
 class NemotronShortcutDummyInputsBuilder(Mistral3DummyInputsBuilder):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -650,7 +702,7 @@ class NemotronShortcutDummyInputsBuilder(Mistral3DummyInputsBuilder):
         data = dict(super().get_dummy_mm_data(seq_len, mm_counts, mm_options))
         num_videos = mm_counts.get("video", 0)
         if num_videos:
-            width, height = self.info.get_image_size_with_most_features()
+            width, height = self.info.get_video_frame_size()
             processor = self.info.get_hf_processor()
             multiple = processor.patch_size * processor.spatial_merge_size
             tokens_per_frame = (width // multiple + 1) * (height // multiple)
@@ -791,17 +843,27 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
                     "video max_frames."
                 )
             video_timestamps.append(torch.tensor(timestamps, dtype=torch.float64))
-            processed = image_processor(images=selected_frames, return_tensors="pt")
-            pixel_values_videos.append(
-                [
-                    pixels[:, :height, :width].to(
-                        dtype=self.info.ctx.model_config.dtype
-                    )
-                    for pixels, (height, width) in zip(
-                        processed["pixel_values"], processed["image_sizes"]
-                    )
-                ]
-            )
+            frame_pixels = []
+            for frame in selected_frames:
+                if isinstance(frame, torch.Tensor):
+                    frame = frame.detach().cpu().numpy()
+                array = np.asarray(frame)
+                if (
+                    array.ndim == 3
+                    and array.shape[-1] not in (1, 3, 4)
+                    and array.shape[0] == 3
+                ):
+                    array = np.moveaxis(array, 0, -1)
+                height, width = array.shape[:2]
+                size = cast(
+                    NemotronShortcutProcessingInfo, self.info
+                ).get_video_frame_size(width, height)
+                frame_pixels.append(
+                    resize_video_frame(
+                        array, size.width, size.height, image_processor
+                    ).to(dtype=self.info.ctx.model_config.dtype)
+                )
+            pixel_values_videos.append(frame_pixels)
         output["pixel_values_videos"] = pixel_values_videos
         output["video_timestamps"] = video_timestamps
         return output
