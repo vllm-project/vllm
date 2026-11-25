@@ -387,10 +387,10 @@ class ExtensibleKVCache:
         the cap (None). At the cap it releases cached segments before growing,
         rather than taking memory other allocations need.
 
-        On ROCm, torch allocates from expandable segments while capped, which
-        it can release page by page. Otherwise a small tensor placed in a
-        cached block keeps the rest of the block reserved, and a larger
-        request fails at the cap with that memory free. An
+        On ROCm, torch allocates from expandable segments while capped, whose
+        free memory it can release in 20 MiB chunks. Otherwise a small tensor
+        placed in a cached block keeps the rest of the block reserved, and a
+        larger request fails at the cap with that memory free. An
         `expandable_segments` setting in the environment is left alone.
         """
         self.torch_memory_limit = num_bytes
