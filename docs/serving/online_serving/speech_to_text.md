@@ -249,7 +249,7 @@ the config is ignored -- a warning is logged and the original forward runs, so
 setting the keys is always safe.
 
 | Model | Encoder type |
-|---|---|
+| --- | --- |
 | Qwen2-Audio | fixed-window mel encoder |
 | Canary | batch-max-padded conformer |
 | FireRed-ASR2 | fixed-window conformer |
@@ -271,7 +271,7 @@ llm = LLM(model="<model>", additional_config={"audio_bucket_seconds": [2, 4, 8, 
 ### Configuration
 
 | Key | Type | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `audio_bucket_seconds` | `list[float]` | unset (disabled) | Rung ladder in seconds, converted to frames at the model's frame rate. |
 | `audio_bucket_budget` | `int` | unset (no merging) | Per-call compute bound in items x padded frames (16 x the largest rung is a good start). |
 
@@ -285,7 +285,7 @@ merge into the next rung up so small calls amortize fixed overhead.
 ### Losslessness
 
 | Encoder class | Models | Guarantee |
-|---|---|---|
+| --- | --- | --- |
 | pad + explicit mask | Qwen2-Audio, Canary, FireRed-ASR2, Cohere-ASR | bit-exact: masked padding contributes nothing to softmax/conv |
 | pad + no mask + relative PE | GLM-ASR, Granite-Speech | output-lossless within one frame: output frame counts do not change with the rung |
 | mixed | FunASR/SenseVoice | approx: bit-exact SANM encoder, unmasked trailing adaptor |
@@ -300,7 +300,7 @@ RTX 5090, bf16, 300 prompts, c=32, request rate `inf`; recommended per-model
 config, throughput off -> on:
 
 | Model | Config | Throughput off -> on | Delta |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Qwen2-Audio | bucketing only | 22.0 -> 28.6 | +30% |
 | Fun-ASR / SenseVoice | bucketing + budget | 65.2 -> 114.9 | +76% |
 | FireRed-ASR2 | bucketing + budget | 45.2 -> 56.5 | +25% |

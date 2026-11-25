@@ -65,16 +65,16 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import PIN_MEMORY
 
 from .blip2 import Blip2QFormerModel
-from .mm_encoder_bucketing import (
-    EncoderBucketingSpec,
-    install_encoder_bucketing,
-)
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
     SupportsTranscription,
+)
+from .mm_encoder_bucketing import (
+    EncoderBucketingSpec,
+    install_encoder_bucketing,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -233,6 +233,7 @@ class GraniteSpeechDummyInputsBuilder(
 
 ### QFormer Projector
 
+
 class GraniteSpeechBucketingSpec(EncoderBucketingSpec):
     """Bucketing semantics for Granite-Speech's batch-max padded CTC encoder.
 
@@ -272,9 +273,7 @@ class GraniteSpeechBucketingSpec(EncoderBucketingSpec):
             sizes = [int(s) for s in audio_embed_sizes]
         return [(int(s) // 3) * 15 for s in sizes]
 
-    def item_lengths(
-        self, mm_kwargs_batch: Mapping[str, object]
-    ) -> list[int] | None:
+    def item_lengths(self, mm_kwargs_batch: Mapping[str, object]) -> list[int] | None:
         feats = mm_kwargs_batch.get("input_features")
         if feats is not None:
             if isinstance(feats, list):

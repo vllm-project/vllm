@@ -126,10 +126,10 @@ _FORWARD_SHIMS: dict[str, object] = {}
 def register_forward_shim(class_name: str, shim_fn: object) -> None:
     """Register a variable-length forward recipe for a fixed-window encoder class.
 
-    Called at import time by an adapted model (see ``qwen2_audio.py``) to install
-    the model-specific shim that mirrors its encoder's ``forward`` minus the
+    Called at import time by an adapted model (see `qwen2_audio.py`) to install
+    the model-specific shim that mirrors its encoder's `forward` minus the
     fixed-length assumption. Keyed by the wrapped class's exact name -- no MRO
-    walk (see ``_FORWARD_SHIMS``).
+    walk (see `_FORWARD_SHIMS`).
     """
     _FORWARD_SHIMS[class_name] = shim_fn
 
@@ -143,6 +143,7 @@ class LengthBucketingConfig:
 
     Args:
         buckets: Rung lengths in feature frames, sorted ascending.
+
     """
 
     buckets: tuple[int, ...]
@@ -151,9 +152,7 @@ class LengthBucketingConfig:
         if not self.buckets:
             raise ValueError("LengthBucketingConfig.buckets must be non-empty")
         if tuple(self.buckets) != tuple(sorted(self.buckets)):
-            raise ValueError(
-                "LengthBucketingConfig.buckets must be sorted ascending"
-            )
+            raise ValueError("LengthBucketingConfig.buckets must be sorted ascending")
 
     @property
     def max_length(self) -> int:
@@ -172,6 +171,7 @@ class LengthBucketingConfig:
 
         Returns:
             The rung window this length should compute over, or `None`.
+
         """
         for rung in self.buckets:
             if rung >= length:
@@ -193,6 +193,7 @@ def _ladder_seconds(
 
     Raises:
         ValueError: If the config value is not a list of positive numbers.
+
     """
     raw = (
         additional_config.get(_CONFIG_KEY)
@@ -236,6 +237,7 @@ def _compute_budget(
 
     Raises:
         ValueError: If the budget is not a positive int.
+
     """
     raw = (
         additional_config.get(_CONFIG_KEY_BUDGET)
@@ -245,9 +247,7 @@ def _compute_budget(
     if raw is None:
         return None
     if isinstance(raw, bool) or not isinstance(raw, int):
-        raise ValueError(
-            f"{_CONFIG_PATH_BUDGET} must be a positive int, got {raw!r}"
-        )
+        raise ValueError(f"{_CONFIG_PATH_BUDGET} must be a positive int, got {raw!r}")
     if raw <= 0:
         raise ValueError(f"{_CONFIG_PATH_BUDGET} must be > 0, got {raw!r}")
     return raw
@@ -266,6 +266,7 @@ def _rungs_from_seconds(
 
     Returns:
         Rung lengths in mel frames (at least one frame per bucket).
+
     """
     rungs = [max(1, int(round(s * frames_per_second))) for s in seconds]
     if align_to > 1:
@@ -297,9 +298,7 @@ class EncoderBucketingSpec:
     context_margin: int | None = None
     align_to: int = 1
 
-    def item_lengths(
-        self, mm_kwargs_batch: Mapping[str, object]
-    ) -> list[int] | None:
+    def item_lengths(self, mm_kwargs_batch: Mapping[str, object]) -> list[int] | None:
         """Per-item true lengths in feature frames.
 
         Args:
@@ -307,6 +306,7 @@ class EncoderBucketingSpec:
 
         Returns:
             One length per item, or `None` if not derivable (skip bucketing).
+
         """
         raise NotImplementedError
 
@@ -318,6 +318,7 @@ class EncoderBucketingSpec:
 
         Returns:
             Feature frames each item occupies without bucketing.
+
         """
         raise NotImplementedError
 
@@ -341,6 +342,7 @@ class EncoderBucketingSpec:
 
         Returns:
             Keyword arguments for the rung's fixed-shape sub-batch.
+
         """
         raise NotImplementedError
 
@@ -358,6 +360,7 @@ class EncoderBucketing:
             (items x padded frames). Oversized groups split into balanced
             chunks; groups below `fill_floor` merge up toward it. `None` emits
             one call per rung (plain bucketing).
+
     """
 
     def __init__(
@@ -397,6 +400,7 @@ class EncoderBucketing:
         Returns:
             `(indices, cropped_kwargs)` pairs; `indices` are batch-row positions
             and `cropped_kwargs` is that rung's fixed-shape sub-batch.
+
         """
         full = [(list(range(num_items)), mm_kwargs_batch)]
         if not self.active or num_items == 0:
@@ -465,9 +469,7 @@ class EncoderBucketing:
             j = i + 1
             while j < len(rungs) and compute < floor:
                 next_rung = rungs[j]
-                merged_compute = (
-                    len(indices) + len(groups[next_rung])
-                ) * next_rung
+                merged_compute = (len(indices) + len(groups[next_rung])) * next_rung
                 if merged_compute > budget:
                     break
                 indices.extend(groups[next_rung])
@@ -555,6 +557,7 @@ def install_encoder_bucketing(
         ValueError: If `encoders` is empty or a declared encoder is not a module.
         RuntimeError: If the spec does not set `frames_per_second` or
             `context_margin` when enabled.
+
     """
     if model is None or getattr(model, "_encoder_bucketing", None) is not None:
         return
@@ -603,9 +606,7 @@ def install_encoder_bucketing(
         else:
             frames_per_second = spec.frames_per_second
             if not isinstance(frames_per_second, int):
-                raise RuntimeError(
-                    "EncoderBucketingSpec must set frames_per_second"
-                )
+                raise RuntimeError("EncoderBucketingSpec must set frames_per_second")
             if not isinstance(spec.context_margin, int):
                 raise RuntimeError(
                     "EncoderBucketingSpec must set context_margin "
@@ -660,6 +661,7 @@ def uninstall_encoder_bucketing(model: nn.Module) -> list[str]:
 
     Returns:
         Class names of the encoders whose `forward` was restored.
+
     """
     manifest = getattr(model, "_encoder_bucketing_manifest", None) or []
     restored: list[str] = []

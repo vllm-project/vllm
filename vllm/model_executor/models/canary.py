@@ -103,9 +103,7 @@ class CanaryBucketingSpec(EncoderBucketingSpec):
     # pad_sequence in embed_multimodal zero-fills past the true length, so a
     # rung >= the true length never clips content or the subsampling boundary.
 
-    def item_lengths(
-        self, mm_kwargs_batch: Mapping[str, object]
-    ) -> list[int] | None:
+    def item_lengths(self, mm_kwargs_batch: Mapping[str, object]) -> list[int] | None:
         feature_lengths = mm_kwargs_batch.get("feature_lengths")
         if feature_lengths is None:
             return None

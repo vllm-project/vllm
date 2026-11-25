@@ -91,9 +91,7 @@ class CohereASRBucketingSpec(EncoderBucketingSpec):
     context_margin = 8  # conv subsampling receptive field
     align_to = 8  # subsampling_factor
 
-    def item_lengths(
-        self, mm_kwargs_batch: Mapping[str, object]
-    ) -> list[int] | None:
+    def item_lengths(self, mm_kwargs_batch: Mapping[str, object]) -> list[int] | None:
         length = mm_kwargs_batch.get("length")
         return length.tolist() if length is not None else None
 
@@ -131,8 +129,11 @@ class CohereASRBucketingSpec(EncoderBucketingSpec):
             feats = input_features[rows, :, :rung]
         return {
             "input_features": feats,
-            "length": length[torch.tensor(indices, dtype=torch.long, device=length.device)],
+            "length": length[
+                torch.tensor(indices, dtype=torch.long, device=length.device)
+            ],
         }
+
 
 # From https://platform.openai.com/docs/guides/speech-to-text/supported-languages
 

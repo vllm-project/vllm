@@ -212,6 +212,7 @@ class EncoderRunner:
 
         Returns:
             `(indices, rung_kwargs)` pairs covering every batch row exactly once.
+
         """
         bucketer = getattr(self.model, "_encoder_bucketing", None)
         if bucketer is None:

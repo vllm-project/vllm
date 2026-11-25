@@ -78,9 +78,7 @@ class FireRedASR2BucketingSpec(EncoderBucketingSpec):
     frames_per_second = 100  # frame_shift=10ms -> hop 160 @ 16 kHz
     context_margin = 7  # Conv2dSubsampling context (left+1+right = 3+1+3)
 
-    def item_lengths(
-        self, mm_kwargs_batch: Mapping[str, object]
-    ) -> list[int] | None:
+    def item_lengths(self, mm_kwargs_batch: Mapping[str, object]) -> list[int] | None:
         speech_lengths = mm_kwargs_batch.get("speech_lengths")
         if speech_lengths is None:
             return None

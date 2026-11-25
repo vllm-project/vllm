@@ -88,9 +88,7 @@ class FunASRBucketingSpec(EncoderBucketingSpec):
     frames_per_second = 100  # hop_length=160 @ 16 kHz
     context_margin = 8  # SANM FSMN conv receptive field
 
-    def item_lengths(
-        self, mm_kwargs_batch: Mapping[str, object]
-    ) -> list[int] | None:
+    def item_lengths(self, mm_kwargs_batch: Mapping[str, object]) -> list[int] | None:
         speech_lengths = mm_kwargs_batch.get("speech_lengths")
         if speech_lengths is None:
             return None

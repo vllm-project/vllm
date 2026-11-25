@@ -50,7 +50,6 @@ from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .mm_encoder_bucketing import EncoderBucketingSpec, install_encoder_bucketing
 from .glmasr_utils import (
     DEFAULT_CONV_PARAMS,
     DEFAULT_MAX_AUDIO_LEN_S,
@@ -68,6 +67,7 @@ from .interfaces import (
     SupportsPP,
     SupportsTranscription,
 )
+from .mm_encoder_bucketing import EncoderBucketingSpec, install_encoder_bucketing
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -552,7 +552,6 @@ class GlmAsrEmbeddingInputs(TensorSchema):
 GlmAsrInputs: TypeAlias = GlmAsrFeatureInputs | GlmAsrEmbeddingInputs
 
 
-
 class GlmAsrBucketingSpec(EncoderBucketingSpec):
     """Bucketing semantics for GLM-ASR's chunked fixed-window mel encoder.
 
@@ -592,7 +591,9 @@ class GlmAsrBucketingSpec(EncoderBucketingSpec):
                 groups.append(sums.tolist() if sums.dim() else [int(sums)])
             return groups
         lengths = feature_attention_mask.sum(-1).tolist()
-        counts = _as_list_chunk_counts(chunk_counts) if chunk_counts is not None else None
+        counts = (
+            _as_list_chunk_counts(chunk_counts) if chunk_counts is not None else None
+        )
         if counts is None:
             return [[n] for n in lengths]
         groups = []
@@ -602,15 +603,11 @@ class GlmAsrBucketingSpec(EncoderBucketingSpec):
             i += c
         return groups
 
-    def item_lengths(
-        self, mm_kwargs_batch: Mapping[str, object]
-    ) -> list[int] | None:
+    def item_lengths(self, mm_kwargs_batch: Mapping[str, object]) -> list[int] | None:
         mask = mm_kwargs_batch.get("feature_attention_mask")
         if mask is None:
             return None
-        groups = self._chunk_lengths_by_audio(
-            mask, mm_kwargs_batch.get("chunk_counts")
-        )
+        groups = self._chunk_lengths_by_audio(mask, mm_kwargs_batch.get("chunk_counts"))
         # The rung window covers every chunk of the audio, so the item length
         # is its longest chunk.
         return [max(g) if g else 0 for g in groups]

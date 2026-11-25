@@ -148,9 +148,7 @@ class Qwen2AudioBucketingSpec(EncoderBucketingSpec):
     ) -> dict[str, torch.Tensor]:
         input_features = mm_kwargs_batch["input_features"]
         feature_attention_mask = mm_kwargs_batch["feature_attention_mask"]
-        rows = torch.tensor(
-            indices, dtype=torch.long, device=input_features.device
-        )
+        rows = torch.tensor(indices, dtype=torch.long, device=input_features.device)
         return {
             "input_features": input_features[rows, :, :rung],
             "feature_attention_mask": feature_attention_mask[rows, :rung],
@@ -181,6 +179,7 @@ def _qwen2audio_varlen_shim(
 
     Returns:
         A `BaseModelOutput` whose `last_hidden_state` is the encoder output.
+
     """
     # Mirrors ``Qwen2AudioEncoder.forward`` (transformers
     # models/qwen2_audio/modeling_qwen2_audio.py) minus the fixed-length

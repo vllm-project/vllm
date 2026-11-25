@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for encoder length bucketing (``mm_encoder_bucketing``).
+"""Tests for encoder length bucketing (`mm_encoder_bucketing`).
 
-Bucketing runs at the batch level in ``EncoderRunner.execute_mm_encoder``, before
+Bucketing runs at the batch level in `EncoderRunner.execute_mm_encoder`, before
 the CUDA-graph-or-eager split, so it is exercised here through the bucketer's own
-``bucket`` -- the step that decides the rungs and crops each one. The two
+`bucket` -- the step that decides the rungs and crops each one. The two
 properties the feature lives or dies by:
 
 1. Bucketing crops each row to its own length rung and re-assembles rows in batch
@@ -18,7 +18,6 @@ is covered directly; the variable-length shim is covered for install/uninstall.
 """
 
 import functools
-import math
 from contextlib import contextmanager
 
 import pytest
@@ -26,10 +25,10 @@ import torch
 from torch import nn
 
 from vllm.model_executor.models.mm_encoder_bucketing import (
+    _FORWARD_SHIMS,
     EncoderBucketing,
     EncoderBucketingSpec,
     LengthBucketingConfig,
-    _FORWARD_SHIMS,
     _compute_budget,
     _ladder_seconds,
     _rungs_from_seconds,
@@ -39,7 +38,7 @@ from vllm.model_executor.models.mm_encoder_bucketing import (
 
 
 class _Spec(EncoderBucketingSpec):
-    """Mel-frame bucketing semantics for a ``[B][mel][T]`` + ``[B][T]`` batch.
+    """Mel-frame bucketing semantics for a `[B][mel][T]` + `[B][T]` batch.
 
     Mirrors `Qwen2AudioBucketingSpec`: per-item length is the valid mel-frame
     count, both fields crop on their mel time axis to the rung.
@@ -74,15 +73,14 @@ class _MarginSpec(_Spec):
 class _MaskAwareToy(nn.Module):
     """Toy mask-aware encoder: mean over valid frames, padding excluded.
 
-    The output depends only on the valid frames (``[:length]``), so shrinking
+    The output depends only on the valid frames (`[:length]`), so shrinking
     padding while keeping content cannot change it.
     """
 
     def forward(self, input_features, feature_attention_mask):
         lengths = feature_attention_mask.sum(-1).tolist()
         outs = [
-            input_features[i, :, :length].mean(-1)
-            for i, length in enumerate(lengths)
+            input_features[i, :, :length].mean(-1) for i, length in enumerate(lengths)
         ]
         return torch.stack(outs, dim=0)
 
@@ -340,9 +338,9 @@ def test_rungs_from_seconds_aligns_to_multiple():
 
 def test_whitelist_carries_lossless_level():
     from vllm.model_executor.models.mm_encoder_bucketing import (
+        _VERIFIED_FOR_BUCKETING,
         LOSSLESS_BIT_EXACT,
         LOSSLESS_OUTPUT_LE_1FRAME,
-        _VERIFIED_FOR_BUCKETING,
     )
 
     assert _VERIFIED_FOR_BUCKETING["qwen2_audio"] == LOSSLESS_BIT_EXACT
@@ -625,14 +623,10 @@ def test_bucket_mm_batch_distinguishes_wired_from_silently_dead():
     class _ModelWithoutBucketing(nn.Module):
         pass
 
-    wired = EncoderRunner._bucket_mm_batch(
-        _FakeRunner(_ModelWithBucketing()), batch, 3
-    )
+    wired = EncoderRunner._bucket_mm_batch(_FakeRunner(_ModelWithBucketing()), batch, 3)
     assert len(wired) == 3  # feature engages: three rungs
 
     dead = EncoderRunner._bucket_mm_batch(
         _FakeRunner(_ModelWithoutBucketing()), batch, 3
     )
     assert len(dead) == 1 and dead[0][0] == [0, 1, 2]  # single passthrough
-
-
