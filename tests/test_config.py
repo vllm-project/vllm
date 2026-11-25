@@ -30,6 +30,7 @@ from vllm.config import (
     CacheConfig,
     CompilationConfig,
     DeviceConfig,
+    DiffusionConfig,
     EngramConfig,
     EPLBConfig,
     HiSparseConfig,
@@ -556,6 +557,67 @@ def test_nvfp4_ds_mla_accepts_decode_context_parallelism(dcp_size):
             distributed_executor_backend="mp",
         ),
     )
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        pytest.param(
+            {"device_config": DeviceConfig(device="cuda")}, "CPU backend", id="cuda"
+        ),
+        pytest.param(
+            {
+                "parallel_config": ParallelConfig(
+                    pipeline_parallel_size=2, distributed_executor_backend="mp"
+                )
+            },
+            "pipeline parallelism",
+            id="pp",
+        ),
+        pytest.param(
+            {
+                "kv_transfer_config": KVTransferConfig(
+                    kv_connector="ExampleConnector", kv_role="kv_both"
+                )
+            },
+            "KV connectors",
+            id="kv-connector",
+        ),
+        pytest.param(
+            {"cache_config": CacheConfig(kv_offloading_size=1)},
+            "KV connectors",
+            id="kv-offloading",
+        ),
+    ],
+)
+def test_single_pass_reads_rejects_incompatible_configs(kwargs, match):
+    kwargs = {"device_config": DeviceConfig(device="cpu"), **kwargs}
+    with pytest.raises(ValueError, match=match):
+        VllmConfig(
+            diffusion_config=DiffusionConfig(canvas_length=8, single_pass_reads=True),
+            **kwargs,
+        )
+
+
+def test_single_pass_reads_rejects_other_models():
+    with pytest.raises(ValueError, match="DiffusionGemma"):
+        VllmConfig(
+            model_config=ModelConfig("nvidia/Nemotron-Labs-Diffusion-3B"),
+            device_config=DeviceConfig(device="cpu"),
+            diffusion_config=DiffusionConfig(canvas_length=32, single_pass_reads=True),
+        )
+
+
+@pytest.mark.parametrize(
+    "device, enabled, offloading_size", [("cpu", True, None), ("auto", False, 1)]
+)
+def test_single_pass_reads_accepts_supported_configs(device, enabled, offloading_size):
+    config = VllmConfig(
+        device_config=DeviceConfig(device=device),
+        diffusion_config=DiffusionConfig(canvas_length=8, single_pass_reads=enabled),
+        cache_config=CacheConfig(kv_offloading_size=offloading_size),
+    )
+    assert config.diffusion_config.single_pass_reads is enabled
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():
