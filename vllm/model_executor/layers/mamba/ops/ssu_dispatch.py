@@ -483,8 +483,7 @@ def initialize_mamba_ssu_backend(
     """Initialize the Mamba SSU backend and optional FlashInfer ReplaySSM."""
     if not any(
         isinstance(spec, MambaSpec)
-        and spec.mamba_type
-        in (MambaAttentionBackendEnum.MAMBA1, MambaAttentionBackendEnum.MAMBA2)
+        and spec.mamba_type == MambaAttentionBackendEnum.MAMBA2
         for g in kv_cache_config.kv_cache_groups
         for spec in g.kv_cache_specs.values()
     ):
