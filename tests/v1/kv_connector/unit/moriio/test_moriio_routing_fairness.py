@@ -46,7 +46,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
 MODE_DIMS = {"TP8": (1, 8), "DP8EP": (8, 1)}  # (dp_size, tp_size), 8 GPUs/node
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PDConfig:
     name: str
     p_mode: str
@@ -97,8 +97,8 @@ def make_decode_worker(*, world_size: int, tp_rank: int, dp_rank: int):
 def make_meta(*, p_tp: int, p_dp: int, remote_dp_rank: int, host: str = "phost0"):
     return ReqMeta(
         transfer_id="t",
-        local_block_ids=[1],
-        remote_block_ids=[2],
+        local_block_ids=[[1]],
+        remote_block_ids=[[2]],
         remote_host=host,
         remote_port=1234,
         remote_handshake_port=6301,

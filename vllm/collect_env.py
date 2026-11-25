@@ -301,7 +301,8 @@ def get_xpu_runtime_version():
 
 
 def get_pkg_version(run_lambda, pkg):
-    assert get_platform() == "linux"
+    if get_platform() != "linux":
+        return None
 
     if pkg in ["vllm_xpu_kernels", "oneccl"]:
         rc, out, _ = run_lambda(f"pip show {pkg}")
@@ -404,10 +405,16 @@ def get_intel_gpu_models():
 
 
 def get_oneapi_compiler_version(run_lambda):
-    """Return Intel oneAPI DPC++/C++ Compiler version via icpx."""
-    return run_and_parse_first_match(
-        run_lambda, "icpx --version", r"oneAPI DPC\+\+/C\+\+ Compiler (\S+)"
-    )
+    """Return Intel oneAPI DPC++/C++ Compiler version and build date via icpx."""
+    rc, out, _ = run_lambda("icpx --version")
+    if rc != 0:
+        return None
+    match = re.search(r"oneAPI DPC\+\+/C\+\+ Compiler (\S+) \([^)]*\.(\d{8})\)", out)
+    if match is None:
+        return run_and_parse_first_match(
+            run_lambda, "icpx --version", r"oneAPI DPC\+\+/C\+\+ Compiler (\S+)"
+        )
+    return f"{match.group(1)}({match.group(2)})"
 
 
 def get_sycl_version(run_lambda):

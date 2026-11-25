@@ -8,6 +8,7 @@ from collections.abc import (
     AsyncGenerator,
     Callable,
     Hashable,
+    Iterator,
     Mapping,
     MutableSequence,
     Sequence,
@@ -64,7 +65,7 @@ if TYPE_CHECKING:
     from vllm.tasks import ScoreType
     from vllm.tokenizers import TokenizerLike
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
+    from vllm.v1.kv_cache_interface import KVCacheGroup, KVCacheLayerConfig
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
@@ -102,6 +103,13 @@ MambaStateShapes: TypeAlias = (
         tuple[int, int],
         tuple[int, int, int],
     ]
+    | tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int],
+    ]
 )
 
 
@@ -120,6 +128,40 @@ class StreamingTranscriptionPostProcessor:
 
     def process_delta(self, text_delta: str, finished: bool) -> str:
         return text_delta
+
+
+class StreamingDiarizedTranscriptParser:
+    """Stateful parser for streamed `diarized_json` output.
+
+    This default parses the output once generation has finished.
+    """
+
+    def __init__(
+        self, model_cls: type["SupportsTranscription"], model_config: "ModelConfig"
+    ) -> None:
+        self.model_cls = model_cls
+        self.model_config = model_config
+        self._text_parts: list[str] = []
+
+    def process_delta(
+        self, text_delta: str, finished: bool
+    ) -> Iterator[DiarizedTranscriptionSegment]:
+        """Yield the segments that this raw decoded delta completes.
+
+        Raises:
+            ValueError: If the output is not a valid diarized transcript.
+
+        """
+        if text_delta:
+            self._text_parts.append(text_delta)
+        if not finished:
+            return
+        text = "".join(self._text_parts)
+        self._text_parts.clear()
+        segments = self.model_cls.parse_diarized_transcript(text, self.model_config)
+        if not segments:
+            raise ValueError("Model output did not contain a valid diarized transcript")
+        yield from segments
 
 
 def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
@@ -223,12 +265,12 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
     Set internally by `MultiModalRegistry.register_processor`.
     """
 
-    _language_model_names: list[str] = []
+    _language_model_names: tuple[str, ...] = ()
     """
     Set internally by `_mark_language_model`.
     """
 
-    _tower_model_names: list[str] = []
+    _tower_model_names: tuple[str, ...] = ()
     """
     Set internally by `_mark_tower_model`.
     """
@@ -342,7 +384,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             ):
                 yield
 
-        self._language_model_names = children_names
+        self._language_model_names = tuple(children_names)
 
     @contextmanager
     def _mark_tower_model(
@@ -351,6 +393,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         modalities: set[str] | str,
         *,
         targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+        auto_offload: bool = True,
     ):
         """Mark each child module that was assigned to this model during this context
         as a tower model component.
@@ -359,12 +402,16 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         is set to zero for all of their modalities, and on pipeline stages after the
         first, since encoders run on the first stage only.
 
-        If `targets` is set, instead include descendants that are an instance
-        of `targets`, even if they aren't direct children.
+        Args:
+            vllm_config: The vLLM config, used to read the per-modality limits.
+            modalities: The modalities the marked components encode.
+            targets: If set, mark descendants that are an instance of `targets`,
+                even if they aren't direct children.
+            auto_offload: Route the marked components through the active offloader
+                (when it supports tower offloading) on exit, since `make_layers`
+                only ever sees the decoder layer stack. Set to `False` if the caller
+                offloads them itself, e.g. once they are materialised.
 
-        Marked components are also routed through the active offloader (when
-        it supports tower offloading), since `make_layers` only ever sees the
-        decoder layer stack.
         """
         from vllm.distributed import get_pp_group
         from vllm.model_executor.offloader import get_offloader
@@ -394,13 +441,13 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             ):
                 yield
 
-        self._tower_model_names = children_names
+        self._tower_model_names += tuple(children_names)
 
         # Towers are constructed directly, so `make_layers` never routes them
         # through the offloader. Do it here, at the same construction stage,
         # so offloaded tower weights are never allocated on the device.
         offloader = get_offloader()
-        if offloader.supports_tower_offload:
+        if auto_offload and offloader.supports_tower_offload:
             for name in children_names:
                 modules = (module for module in [attrgetter(name)(self)])
                 offloader.wrap_modules(modules, prefix=name)
@@ -691,8 +738,8 @@ class SupportsKVCacheGrouping(Protocol):
     def get_kv_cache_groups(
         cls,
         vllm_config: "VllmConfig",
-        kv_cache_spec: dict[str, "KVCacheSpec"],
-    ) -> list["KVCacheGroupSpec"]:
+        layer_configs: dict[str, "KVCacheLayerConfig"],
+    ) -> list["KVCacheGroup"]:
         """Split the model's layers into logical KV cache groups."""
         ...
 
@@ -940,7 +987,7 @@ class HasInnerState(Protocol):
     """
         A flag that indicates this model has inner state.
         Models that has inner state usually need access to the scheduler_config
-        for max_num_seqs, etc. True for e.g. both Mamba and Jamba.
+        for max_num_seqs, etc. True for e.g. both Mamba2 and Zamba2.
     """
 
 
@@ -967,7 +1014,7 @@ class IsAttentionFree(Protocol):
     """
         A flag that indicates this model has no attention.
         Used for block manager and attention backend selection.
-        True for Mamba but not Jamba.
+        True for Mamba2 but not Zamba2.
     """
 
 
@@ -987,7 +1034,7 @@ def is_attention_free(
 
 @runtime_checkable
 class IsHybrid(Protocol):
-    """The interface required for all models like Jamba that have both
+    """The interface required for all models like Zamba2 that have both
     attention and mamba blocks, indicates that
     hf_config has 'layers_block_type'"""
 
@@ -1022,7 +1069,7 @@ class IsHybrid(Protocol):
             to the Mamba states produced by the model. Each callable accepts
             (state, block_ids, cur_block_idx, num_accepted_tokens) and returns
             a MambaCopySpec describing the memory-copy parameters for prefix
-            caching in align mode.
+            caching.
 
         """
         ...
@@ -1471,6 +1518,18 @@ class SupportsTranscription(Protocol):
         override this method.
         """
         raise NotImplementedError
+
+    @classmethod
+    def get_streaming_diarized_parser_cls(
+        cls,
+    ) -> type[StreamingDiarizedTranscriptParser]:
+        """Return a stateful parser class for streamed `diarized_json` output.
+
+        The default sends all segments once the output is complete. Models
+        whose output marks where each segment ends can return a parser that
+        sends each segment as soon as it is final.
+        """
+        return StreamingDiarizedTranscriptParser
 
     @classmethod
     def get_streaming_post_processor_cls(
@@ -1923,7 +1982,15 @@ class SupportsEncoderCudaGraph(Protocol):
         `encoder_cudagraph_max_vision_items_per_batch` are not explicitly
         specified by the user.
         """
-        ...
+        # Min: about one small image (224x224, patch_size=14, 2x2 merge ->
+        # 64 tokens).
+        return (
+            64,
+            min(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.model_config.max_model_len,
+            ),
+        )
 
     def get_encoder_cudagraph_item_specs(
         self,
@@ -2030,7 +2097,7 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
         """Run the encoder forward pass with precomputed buffers.

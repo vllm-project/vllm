@@ -18,9 +18,7 @@ def test_cuda_empty_vs_unset_configs(monkeypatch: pytest.MonkeyPatch):
     """
 
     def create_config():
-        engine_args = EngineArgs(
-            model="deepseek-ai/DeepSeek-V2-Lite", trust_remote_code=True
-        )
+        engine_args = EngineArgs(model="deepseek-ai/DeepSeek-V2-Lite")
         return engine_args.create_engine_config()
 
     # Create config with CUDA_VISIBLE_DEVICES set normally
@@ -48,9 +46,7 @@ def test_ray_runtime_env(monkeypatch: pytest.MonkeyPatch):
     # In testing, this method needs to be nested inside as ray does not
     # see the test module.
     def create_config():
-        engine_args = EngineArgs(
-            model="deepseek-ai/DeepSeek-V2-Lite", trust_remote_code=True
-        )
+        engine_args = EngineArgs(model="deepseek-ai/DeepSeek-V2-Lite")
         return engine_args.create_engine_config()
 
     config = create_config()
