@@ -135,6 +135,38 @@ def test_dspark_adaptive_verification_separates_graph_cache():
 
 
 @pytest.mark.parametrize(
+    ("architecture", "field", "value"),
+    [
+        ("MuseSparkDSparkModel", "draft_lm_head_quantization", "nvfp4"),
+        ("Qwen3DSparkModel", "draft_lm_head_quantization", "fp8"),
+        # Per-tensor FP8 is refused for the Muse Spark draft.
+        ("MuseSparkDSparkModel", "quantization", "fp8"),
+        ("MuseSparkDSparkModel", "quantization", "fp8_per_tensor"),
+    ],
+)
+def test_dspark_refuses_unsupported_draft_quantization(architecture, field, value):
+    """Draft quantizations no platform supports for the drafter fail at config
+    time instead of at load."""
+    hf_config = SimpleNamespace(model_type="dspark")
+    spec = SimpleNamespace(
+        draft_model_config=SimpleNamespace(
+            hf_config=hf_config,
+            architectures=[architecture],
+            dtype=torch.bfloat16,
+            head_dtype=torch.bfloat16,
+        ),
+        target_model_config=SimpleNamespace(hf_config=hf_config, architectures=[]),
+        dspark_draft_topk=None,
+        quantization=None,
+        draft_lm_head_quantization=None,
+        num_speculative_tokens=7,
+    )
+    setattr(spec, field, value)
+    with pytest.raises(ValueError, match=field):
+        DSparkSpeculatorConfig.apply_options(spec)
+
+
+@pytest.mark.parametrize(
     ("enable_prefix_caching", "input_dtype", "use_ubatching", "pp_size", "error"),
     [
         (True, torch.bfloat16, False, 1, None),
@@ -1742,6 +1774,10 @@ def test_all2all_backend_has_portable_default():
 
 
 def _pretend_cuda_host(monkeypatch, cpu_arch, capability) -> None:
+    # Import modules with import-time platform probes before faking CUDA, so
+    # they never query CUDA-only `_C` ops missing from non-CUDA builds.
+    import vllm.model_executor.layers.quantization.online.base  # noqa: F401
+
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
     monkeypatch.setattr(current_platform, "get_cpu_architecture", lambda: cpu_arch)
@@ -4390,7 +4426,7 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
             "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
-            "state-spaces/mamba-130m-hf",
+            "vllm-project/mamba2-130m-hf",
             "attention_free",
             True,
             "Generative models support chunked prefill.",  # noqa: E501
@@ -4510,7 +4546,7 @@ def test_is_chunked_prefill_supported(
             "Generative hybrid models support prefix caching.",  # noqa: E501
         ),
         (
-            "state-spaces/mamba-130m-hf",
+            "vllm-project/mamba2-130m-hf",
             "attention_free",
             False,
             "Attention free models do not support prefix caching since the feature is still experimental.",  # noqa: E501

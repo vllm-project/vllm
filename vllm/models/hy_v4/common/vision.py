@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright 2025 The HunYuan team.
 
+import itertools
 from collections.abc import Iterable
 
 import numpy as np
@@ -9,7 +10,11 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
@@ -23,9 +28,11 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.vision import (
+    get_load_balance_assignment,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
 )
+from vllm.transformers_utils.processors.hy_v4 import vision_token_count
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
@@ -493,3 +500,83 @@ class HYV4VisionTransformer(nn.Module):
                 getattr(param, "weight_loader", default_weight_loader)(param, weight)
             loaded.add(name)
         return loaded
+
+
+def run_dp_sharded_hyv4_vision_tower(
+    visual: HYV4VisionTransformer,
+    pixel_values: torch.Tensor,
+    grid_thw: list[list[int]],
+    modality: str,
+) -> tuple[torch.Tensor, ...]:
+    """Run the HYV4 vision tower with whole media items sharded across the
+    TP group (`--mm-encoder-tp-mode data`).
+
+    Every rank holds the full tower weights and receives the full batch.
+    Items are assigned to ranks by patch count, each rank encodes only its
+    share, and per-item embeddings are exchanged with one padded all-gather
+    and returned in the original item order on every rank.
+
+    Unlike `run_dp_sharded_mrope_vision_model`, per-item output rows come
+    from `vision_token_count`: the merger adds newline/extra tokens and
+    pools video frames, so rows differ from `prod(grid) // merge**2`.
+    """
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank = get_tensor_model_parallel_rank()
+
+    patches_per_item = [t * h * w for t, h, w in grid_thw]
+    cum_patches = [0, *itertools.accumulate(patches_per_item)]
+    (item_to_rank, items_per_rank, _) = get_load_balance_assignment(
+        patches_per_item, tp_size
+    )
+    cum_items_per_rank = [0, *itertools.accumulate(items_per_rank)]
+
+    def rank_items(rank: int) -> list[int]:
+        return item_to_rank[cum_items_per_rank[rank] : cum_items_per_rank[rank + 1]]
+
+    # All-gather needs one shape on every rank; pad each rank's packed
+    # output to the largest per-rank row count (computable locally).
+    rows_per_item = [
+        vision_token_count(grid, visual.config, modality) for grid in grid_thw
+    ]
+    max_rows = max(sum(rows_per_item[i] for i in rank_items(r)) for r in range(tp_size))
+
+    local_items = rank_items(tp_rank)
+    if local_items:
+        pixels_local = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in local_items]
+        )
+        embeds_local = torch.cat(
+            visual(pixels_local, [grid_thw[i] for i in local_items]), dim=0
+        )
+    else:
+        # Empty ranks all-gather placeholders in the tower's parameter dtype
+        # (`visual.dtype`, the patch-embedding weight dtype for HYV4). HY4's
+        # tower is homogeneous-dtype, so this is also its output dtype; a
+        # tower with split dtypes would need its merger's weight dtype here
+        # instead (cf. DeepSeek-VL's aligner.w2.weight.dtype).
+        embeds_local = torch.empty(
+            (0, visual.config.out_hidden_size),
+            device=visual.device,
+            dtype=visual.dtype,
+        )
+    if embeds_local.shape[0] < max_rows:
+        embeds_local = torch.cat(
+            (
+                embeds_local,
+                embeds_local.new_empty(
+                    (max_rows - embeds_local.shape[0], embeds_local.shape[1])
+                ),
+            ),
+            dim=0,
+        )
+
+    gathered = tensor_model_parallel_all_gather(embeds_local.contiguous(), dim=0)
+
+    out: list[torch.Tensor | None] = [None] * len(grid_thw)
+    for rank in range(tp_size):
+        offset = rank * max_rows
+        for i in rank_items(rank):
+            out[i] = gathered[offset : offset + rows_per_item[i]]
+            offset += rows_per_item[i]
+    assert all(embed is not None for embed in out), "Found unassigned embeddings"
+    return tuple(out)  # type: ignore[arg-type]

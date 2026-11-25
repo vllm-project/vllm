@@ -159,14 +159,33 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
                 )
             hf_config.dspark_draft_topk = dspark_draft_topk
 
+        if spec.quantization and "MuseSparkDSparkModel" in draft.architectures:
+            # Only the ROCm Muse Spark drafter reads its quantized weights
+            # through the layers' methods. On ROCm, per-tensor FP8 GEMMs fail
+            # at its fc shape.
+            if not current_platform.is_rocm():
+                raise ValueError(
+                    "speculative_config.quantization is only supported by the "
+                    "Muse Spark DSpark drafter on ROCm"
+                )
+            if spec.quantization in ("fp8", "fp8_per_tensor"):
+                raise ValueError(
+                    "The Muse Spark DSpark drafter does not support per-tensor "
+                    f"FP8 (speculative_config.quantization={spec.quantization!r}); "
+                    "use 'fp8_per_channel'"
+                )
+
         if spec.draft_lm_head_quantization is not None:
-            # Other drafters may read lm_head.weight directly (e.g. Muse Spark).
-            if not {"DSparkDraftModel", "DSparkV41DraftModel"} & set(
-                draft.architectures
-            ):
+            # Other drafters may read lm_head.weight directly. The ROCm Muse
+            # Spark drafter builds its own vocabulary heads quantized instead.
+            supported = {"DSparkDraftModel", "DSparkV41DraftModel"}
+            if current_platform.is_rocm() and spec.draft_lm_head_quantization == "fp8":
+                supported.add("MuseSparkDSparkModel")
+            if not supported & set(draft.architectures):
                 raise ValueError(
                     "draft_lm_head_quantization is only supported by the "
-                    "DeepSeek-V4/V4.1 DSpark drafters"
+                    "DeepSeek-V4/V4.1 DSpark drafters, and as 'fp8' by the Muse "
+                    "Spark DSpark drafter on ROCm"
                 )
             check_draft_lm_head_quantization(spec)
 

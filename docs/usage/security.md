@@ -147,10 +147,6 @@ lookup.
   individual tensors are live. EmbeddingGemma2 counts the frames the processor
   will keep when processor-side sampling is enabled.
 
-The Rust frontend defaults to 999 items per modality. Set an explicit video
-count of 32 in `--limit-mm-per-prompt` to match the Python default for the
-models listed above with a 32-video limit.
-
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 
 While vLLM is designed to allow unsafe network services to be isolated to
