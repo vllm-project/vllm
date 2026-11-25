@@ -52,6 +52,7 @@ Example out-of-tree tier configuration:
 }
 """
 
+from collections.abc import Iterable
 from typing import Any
 
 from typing_extensions import override
@@ -336,12 +337,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         super().__init__(config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
-        if self.async_init:
-            logger.warning(
-                "async_init is not supported with TieringOffloadingSpec yet; "
-                "setting the CPU tier up now"
-            )
-            self.async_init = False
 
         # Parse secondary tier configurations
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
@@ -414,7 +409,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
             scheduler_mmap: SharedOffloadRegion | None = None
             primary_tier: CPUPrimaryTierOffloadingManager | None = None
-            secondary_tiers = []
+            secondary_tiers: list[SecondaryTierManager] = []
             try:
                 # Create scheduler-side SharedOffloadRegion (rank=None) so the
                 # primary tier can eagerly create a memoryview over _base.
@@ -441,15 +436,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
                 # Create secondary tiers
                 primary_kv_view = primary_tier.get_kv_memoryview()
-                for i, tier_config in enumerate(self.secondary_tier_configs):
-                    tier = SecondaryTierFactory.create_secondary_tier(
-                        tier_config, primary_kv_view, self
-                    )
-                    secondary_tiers.append(tier)
-                    logger.info(
-                        "Created secondary tier #%d (%s)",
-                        i,
-                        tier.tier_type,
+                if not self.async_init:
+                    secondary_tiers.extend(
+                        self._create_secondary_tiers(primary_kv_view)
                     )
 
                 # Create TieringOffloadingManager. GPU↔CPU transfers use the inherited
@@ -459,6 +448,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     primary_tier=primary_tier,
                     secondary_tiers=secondary_tiers,
                     tier_poll_interval_s=self.tier_poll_interval_s,
+                    secondary_tier_factory=(
+                        lambda: self._create_secondary_tiers(primary_kv_view)
+                    )
+                    if self.async_init and self.secondary_tier_configs
+                    else None,
                 )
                 self._manager = tiering_manager
             except Exception:
@@ -496,7 +490,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 self.num_chunks,
                 len(secondary_tiers),
             )
-            if secondary_tiers and not (
+            if self.secondary_tier_configs and not (
                 self.config.replicated_layout
                 or (
                     self.config.canonical_layout
@@ -527,6 +521,22 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             )
             keys.update(dict.fromkeys(tier_keys))
         return tuple(keys)
+
+    def _create_secondary_tiers(
+        self, primary_kv_view: memoryview
+    ) -> Iterable[SecondaryTierManager]:
+        for i, tier_config in enumerate(self.secondary_tier_configs):
+            try:
+                tier = SecondaryTierFactory.create_secondary_tier(
+                    tier_config, primary_kv_view, self
+                )
+            except Exception:
+                if not self.async_init:
+                    raise
+                logger.exception("Failed to create secondary tier #%d; skipping it", i)
+                continue
+            logger.info("Created secondary tier #%d (%s)", i, tier.tier_type)
+            yield tier
 
     @classmethod
     def _get_secondary_tiers(
@@ -569,6 +579,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             _reject_workers_across_nodes()
         world_size = self.config.parallel.world_size
         worker_index = self.config.parallel.rank
+        prefault_shard = (worker_index, world_size) if self.replicated_layout else None
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
             num_chunks=self.num_chunks,
@@ -578,9 +589,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             num_segments=REGION_SEGMENTS,
             # Every worker maps the same bytes in the replicated layout, so
             # each pre-faults only its share.
-            populate_shard=(
-                (worker_index, world_size) if self.replicated_layout else None
-            ),
+            populate_shard=None if self.async_init else prefault_shard,
+            populate=not self.async_init,
         )
         try:
             if self.config.canonical_layout:
@@ -591,6 +601,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 num_cpu_chunks=self.num_chunks,
                 mmap_region=worker_mmap,
                 canonical_layout=self.config.canonical_layout,
+                defer_host_setup=self.async_init,
+                prefault_shard=prefault_shard,
+                pin_pace=self.async_init_pin_pace,
             )
         except Exception:
             worker_mmap.cleanup()

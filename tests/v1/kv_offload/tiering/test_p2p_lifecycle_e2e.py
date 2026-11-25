@@ -6,6 +6,122 @@ import time
 
 import pytest
 
+from vllm.platforms import current_platform
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Background CPU tier setup requires CUDA."
+)
+@pytest.mark.parametrize(
+    "failure",
+    [None, "fs", "p2p"],
+    ids=["all_succeed", "partial_failure", "bind_failure"],
+)
+def test_inference_continues_during_secondary_memory_registration(
+    vllm_runner, monkeypatch, reserve_ports, tmp_path, failure
+):
+    """Serving continues during setup; healthy tiers survive a sibling's failure."""
+    import threading
+
+    from vllm import SamplingParams, TokensPrompt
+    from vllm.config import KVTransferConfig
+    from vllm.distributed.nixl_utils import NixlWrapper
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    started = threading.Event()
+    release = threading.Event()
+    registered = threading.Event()
+    live_registrations = set()
+    register_memory = NixlWrapper.register_memory
+    deregister_memory = NixlWrapper.deregister_memory
+
+    def delayed_registration(agent, *args, **kwargs):
+        if threading.current_thread().name == "vllm_offload_tier_setup":
+            started.set()
+            assert release.wait(120)
+        result = register_memory(agent, *args, **kwargs)
+        if threading.current_thread().name == "vllm_offload_tier_setup":
+            live_registrations.add(id(agent))
+        registered.set()
+        return result
+
+    def deregister(agent, *args, **kwargs):
+        result = deregister_memory(agent, *args, **kwargs)
+        live_registrations.discard(id(agent))
+        return result
+
+    monkeypatch.setattr(NixlWrapper, "register_memory", delayed_registration)
+    monkeypatch.setattr(NixlWrapper, "deregister_memory", deregister)
+    (port,) = reserve_ports(1)
+    secondary_tiers = [{"type": "p2p", "host": "127.0.0.1", "port": port}]
+    expected_tiers = {"0:primary", "1:p2p"}
+    if failure is not None:
+        invalid_root = tmp_path / "not-a-directory"
+        invalid_root.write_text("A file cannot be used as the FS tier root.")
+        secondary_tiers = [
+            {"type": "example", "custom_param": 1},
+            *secondary_tiers,
+            {"type": "fs", "root_dir": str(invalid_root)}
+            if failure == "fs"
+            else {"type": "p2p", "host": "127.0.0.1", "port": port},
+            {"type": "example", "custom_param": 2},
+        ]
+        expected_tiers = {"0:primary", "1:example", "2:p2p", "3:example"}
+    config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "spec_name": "TieringOffloadingSpec",
+            "cpu_bytes_to_use": 16 * 1024 * 1024,
+            "async_init": True,
+            "secondary_tiers": secondary_tiers,
+        },
+    )
+    with vllm_runner(
+        "HuggingFaceTB/SmolLM2-135M",
+        skip_tokenizer_init=True,
+        dtype="float16",
+        max_model_len=256,
+        enforce_eager=True,
+        gpu_memory_utilization=0.35,
+        max_num_seqs=1,
+        max_num_batched_tokens=256,
+        enable_prefix_caching=True,
+        disable_log_stats=False,
+        kv_transfer_config=config,
+    ) as runner:
+        prompt = TokensPrompt(prompt_token_ids=[3 + i % 100 for i in range(128)])
+        params = SamplingParams(temperature=0, max_tokens=8, ignore_eos=True)
+        try:
+            first = runner.llm.generate([prompt], params, use_tqdm=False)[0]
+            assert started.wait(30), (
+                "secondary setup did not run on its background thread"
+            )
+            assert not registered.is_set()
+            assert len(first.outputs[0].token_ids) == 8
+            assert runner.llm.reset_prefix_cache(reset_connector=True)
+            release.set()
+            assert registered.wait(30)
+            deadline = time.monotonic() + 30
+            while True:
+                result = runner.llm.generate([prompt], params, use_tqdm=False)[0]
+                assert result.outputs[0].token_ids == first.outputs[0].token_ids
+                attached_tiers = {
+                    metric.labels["tier"]
+                    for metric in runner.llm.get_metrics()
+                    if metric.name == "vllm:kv_offload_config_info"
+                }
+                if attached_tiers == expected_tiers:
+                    break
+                assert time.monotonic() < deadline, (
+                    f"Expected tiers {expected_tiers}, got {attached_tiers}"
+                )
+            assert len(live_registrations) == 1
+        finally:
+            release.set()
+    assert not live_registrations
+
 
 @pytest.fixture
 def reserve_ports():

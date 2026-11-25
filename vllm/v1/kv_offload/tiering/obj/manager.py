@@ -221,9 +221,14 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         # NIXL_INIT_AGENT marks this as the local side; make_prepped_xfer requires
         # local_xfer_side tagged with NIXL_INIT_AGENT and remote_xfer_side tagged
         # with the peer agent name ("ObjAgent").
-        self._dram_prepped_handle: nixl_prepped_dlist_handle = (
-            self._agent.prep_xfer_dlist("NIXL_INIT_AGENT", all_blocks, "DRAM")
-        )
+        try:
+            self._dram_prepped_handle: nixl_prepped_dlist_handle = (
+                self._agent.prep_xfer_dlist("NIXL_INIT_AGENT", all_blocks, "DRAM")
+            )
+        except Exception:
+            self._agent.deregister_memory(self._primary_reg)
+            self._primary_reg = None
+            raise
 
         self._lookup_manager = ObjAsyncLookupManager(
             tier=self, tier_type=self.tier_type

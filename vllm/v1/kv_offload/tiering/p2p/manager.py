@@ -384,7 +384,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             backends=backends,
             num_threads=int(num_threads),
         )
-        self._control: ControlTransport = ZmqTransport(self._local_id, host, port)
+        try:
+            self._control: ControlTransport = ZmqTransport(self._local_id, host, port)
+        except Exception:
+            self._data.close()
+            raise
 
         self._sessions: dict[str, P2PSession] = {}
         # peer_id → (backoff, retry_at); see _schedule_reconnect_backoff.

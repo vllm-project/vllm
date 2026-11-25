@@ -77,6 +77,283 @@ def _mock_mmap_region(num_chunks: int, row_bytes: int = 16):
     return mock
 
 
+@pytest.fixture
+def deferred_tiering_manager(tmp_path):
+    page = region_module.mmap.PAGESIZE
+    spec = TieringOffloadingSpec(make_offloading_config())
+    region = region_module.SharedOffloadRegion(
+        engine_id="deferred-tiering-test",
+        num_chunks=2,
+        rank=None,
+        kv_bytes_per_chunk=page,
+        cpu_page_size=page,
+        populate=False,
+        mmap_path=str(tmp_path / "primary.mmap"),
+    )
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=2, mmap_region=region)
+    managers = []
+
+    def create(factory):
+        manager = TieringOffloadingManager(
+            primary_tier=primary, secondary_tier_factory=factory
+        )
+        managers.append(manager)
+        return manager
+
+    try:
+        yield create, primary, spec, region
+    finally:
+        if managers:
+            for manager in managers:
+                manager.shutdown()
+        else:
+            primary.shutdown()
+
+
+def test_deferred_tiers_only_handle_requests_started_after_attach(
+    deferred_tiering_manager,
+):
+    """CPU stores continue during setup; a late tier only receives new requests."""
+    create, primary, spec, _ = deferred_tiering_manager
+    started = threading.Event()
+    release = threading.Event()
+    tier = ExampleSecondaryTierManager(
+        offloading_spec=spec,
+        primary_kv_view=primary.get_kv_memoryview(),
+        tier_type="example",
+    )
+
+    def build():
+        started.set()
+        assert release.wait(5)
+        yield tier
+
+    manager = create(build)
+    old = ReqContext(req_id="before-attach")
+    new = ReqContext(req_id="after-attach")
+    old_keys, new_keys = to_keys([100]), to_keys([200])
+    try:
+        assert not started.is_set()
+        with manager.lock:
+            manager.on_new_request(old)
+            manager.on_workers_ready()
+            manager.on_workers_ready()
+        assert started.wait(5)
+        with manager.lock:
+            output = manager.prepare_store(
+                old_keys, old, trigger=StoreTrigger.ON_COMPUTE
+            )
+            assert output is not None and tuple(output.keys_to_store) == tuple(old_keys)
+            assert manager.secondary_tiers == []
+        release.set()
+        manager._tier_setup_thread.join(5)
+        assert not manager._tier_setup_thread.is_alive()
+        with manager.lock:
+            assert manager.secondary_tiers == [tier]
+            stats = manager.get_stats()
+            assert stats is not None
+            assert [info["tier"] for info in stats.data["info"]] == [
+                "0:primary",
+                "1:example",
+            ]
+            manager.complete_store(old_keys, old, trigger=StoreTrigger.ON_COMPUTE)
+            assert tier.lookup(old_keys[0], old) is LookupResult.MISS
+            manager.on_new_request(new)
+            output = manager.prepare_store(
+                new_keys, new, trigger=StoreTrigger.ON_COMPUTE
+            )
+            assert output is not None and tuple(output.keys_to_store) == tuple(new_keys)
+            manager.complete_store(new_keys, new, trigger=StoreTrigger.ON_COMPUTE)
+            assert tier.lookup(new_keys[0], new) is LookupResult.HIT
+            manager.on_schedule_end(
+                ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+            )
+            evicting_keys = to_keys([300, 400])
+            output = manager.prepare_store(
+                evicting_keys, new, trigger=StoreTrigger.ON_COMPUTE
+            )
+            assert output is not None
+            assert tuple(output.keys_to_store) == tuple(evicting_keys)
+            manager.complete_store(evicting_keys, new, trigger=StoreTrigger.ON_COMPUTE)
+            manager.on_schedule_end(
+                ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+            )
+            assert manager.lookup(new_keys[0], old) is LookupResult.MISS
+            assert manager.lookup(new_keys[0], new) is LookupResult.HIT_PENDING
+            for _ in range(2):
+                manager.on_schedule_end(
+                    ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+                )
+            assert manager.lookup(new_keys[0], new) is LookupResult.HIT
+            manager.on_request_finished(old)
+            manager.on_request_finished(new)
+    finally:
+        release.set()
+
+
+def test_failed_deferred_tier_setup_preserves_cpu_stores(deferred_tiering_manager):
+    create, _, _, _ = deferred_tiering_manager
+
+    def build():
+        raise RuntimeError("secondary setup failed")
+
+    manager = create(build)
+    with manager.lock:
+        manager.on_workers_ready()
+    manager._tier_setup_thread.join(5)
+    assert not manager._tier_setup_thread.is_alive()
+    keys = to_keys([100])
+    with manager.lock:
+        manager.on_new_request(_CTX)
+        output = manager.prepare_store(keys, _CTX, trigger=StoreTrigger.ON_COMPUTE)
+        assert output is not None and tuple(output.keys_to_store) == tuple(keys)
+        manager.complete_store(keys, _CTX, trigger=StoreTrigger.ON_COMPUTE)
+        assert manager.lookup(keys[0], _CTX) is LookupResult.HIT
+        assert manager.secondary_tiers == []
+        manager.on_request_finished(_CTX)
+
+
+@pytest.mark.parametrize("attach_before_reset", [False, True])
+def test_deferred_tier_promotion_waits_for_reset_flush(
+    deferred_tiering_manager, attach_before_reset
+):
+    """A late tier cannot overwrite primary slots while old worker DMA drains."""
+    create, primary, spec, _ = deferred_tiering_manager
+    tier = ExampleSecondaryTierManager(
+        offloading_spec=spec,
+        primary_kv_view=primary.get_kv_memoryview(),
+        tier_type="example",
+    )
+    keys = to_keys([100])
+    tier.submit_store(TransferJob(0, keys, np.array([0]), False, _CTX))
+    assert list(tier.get_finished_jobs())[0].success
+    manager = create(lambda: [tier])
+    with manager.lock:
+        manager.on_new_request(_CTX)
+        output = manager.prepare_store(keys, _CTX, trigger=StoreTrigger.ON_COMPUTE)
+        assert output is not None and list(output.keys_to_store) == keys
+        manager.on_request_finished(_CTX)
+        if not attach_before_reset:
+            manager.reset_cache()
+        manager.on_workers_ready()
+    manager._tier_setup_thread.join(5)
+    assert not manager._tier_setup_thread.is_alive()
+    with manager.lock:
+        if attach_before_reset:
+            manager.reset_cache()
+        assert _CTX.req_id not in manager._req_state
+        new = ReqContext(req_id="after-reset")
+        manager.on_new_request(new)
+        assert manager.lookup(keys[0], new) is LookupResult.MISS
+        assert primary.lookup(keys[0], new) is LookupResult.MISS
+        manager.on_reset_flushed()
+        assert manager.lookup(keys[0], new) is LookupResult.HIT_PENDING
+        for _ in range(2):
+            manager.on_schedule_end(
+                ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+            )
+        assert manager.lookup(keys[0], new) is LookupResult.HIT
+        manager.on_request_finished(new)
+
+
+def test_shutdown_before_workers_ready_does_not_build_tiers(deferred_tiering_manager):
+    create, _, _, region = deferred_tiering_manager
+    started = threading.Event()
+
+    def build():
+        started.set()
+        return ()
+
+    manager = create(build)
+    manager.shutdown()
+    with manager.lock:
+        manager.on_workers_ready()
+    assert not started.is_set()
+    assert manager._tier_setup_thread is None
+    assert region.mmap_obj is None
+
+
+@pytest.mark.parametrize("cancel_setup", [False, True], ids=["failure", "shutdown"])
+def test_unattached_deferred_tier_releases_io_threads(
+    deferred_tiering_manager, tmp_path, monkeypatch, cancel_setup
+):
+    """A built tier must release its I/O resources if setup cannot attach it."""
+    from vllm.v1.kv_offload.tiering import manager as manager_module
+
+    create, primary, spec, region = deferred_tiering_manager
+    tier = FileSystemTierManager(
+        offloading_spec=spec,
+        primary_kv_view=primary.get_kv_memoryview(),
+        tier_type="fs",
+        root_dir=str(tmp_path / "fs"),
+        n_read_threads=1,
+        n_write_threads=1,
+    )
+    threads = tuple(tier._pool._threads)
+    assert threads and all(thread.is_alive() for thread in threads)
+    started = threading.Event()
+    release = threading.Event()
+    continued = threading.Event()
+
+    def build():
+        if not cancel_setup:
+            yield tier
+        started.set()
+        assert release.wait(5)
+        if cancel_setup:
+            yield tier
+            continued.set()
+        raise RuntimeError("factory failed after building a tier")
+
+    manager = create(build)
+    try:
+        with manager.lock:
+            manager.on_workers_ready()
+        assert started.wait(5)
+        if cancel_setup:
+            monkeypatch.setattr(manager_module, "_TIER_SETUP_JOIN_TIMEOUT_S", 0)
+            with pytest.raises(RuntimeError, match="setup.*running"):
+                manager.shutdown()
+    finally:
+        release.set()
+        manager._tier_setup_thread.join(5)
+    assert not manager._tier_setup_thread.is_alive()
+    assert not continued.is_set()
+    assert manager.secondary_tiers == []
+    assert all(not thread.is_alive() for thread in threads)
+    assert region.mmap_obj is not None and not region.mmap_obj.closed
+
+
+def test_shutdown_timeout_preserves_region_used_by_deferred_setup(
+    deferred_tiering_manager, monkeypatch
+):
+    from vllm.v1.kv_offload.tiering import manager as manager_module
+
+    create, _, _, region = deferred_tiering_manager
+    started = threading.Event()
+    release = threading.Event()
+
+    def build():
+        started.set()
+        assert release.wait(5)
+        return ()
+
+    manager = create(build)
+    try:
+        with manager.lock:
+            manager.on_workers_ready()
+        assert started.wait(5)
+        monkeypatch.setattr(manager_module, "_TIER_SETUP_JOIN_TIMEOUT_S", 0)
+        with pytest.raises(RuntimeError, match="setup.*running"):
+            manager.shutdown()
+        assert region.mmap_obj is not None and not region.mmap_obj.closed
+    finally:
+        release.set()
+        manager._tier_setup_thread.join(5)
+    manager.shutdown()
+    assert region.mmap_obj is None
+
+
 def to_keys(int_ids: Iterable[int]) -> list[OffloadKey]:
     return [make_offload_key(str(i).encode(), 0) for i in int_ids]
 

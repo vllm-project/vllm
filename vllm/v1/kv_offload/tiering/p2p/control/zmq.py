@@ -175,10 +175,14 @@ class ZmqTransport(ControlTransport):
         self._monitor_seq = 0
 
         self._zmq_ctx = zmq.Context()
-        self._router: zmq.Socket = self._zmq_ctx.socket(zmq.ROUTER)
-        _apply_heartbeat(self._router)
-        bind_addr = _tcp_addr(host, port)
-        self._router.bind(bind_addr)
+        try:
+            self._router: zmq.Socket = self._zmq_ctx.socket(zmq.ROUTER)
+            _apply_heartbeat(self._router)
+            bind_addr = _tcp_addr(host, port)
+            self._router.bind(bind_addr)
+        except Exception:
+            self._zmq_ctx.destroy(linger=0)
+            raise
         logger.info("ZmqTransport %s: ROUTER bound on %s", self._local_id, bind_addr)
 
     # ------------------------------------------------------------------

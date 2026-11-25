@@ -508,6 +508,10 @@ class OffloadingManager(ABC):
         """
         return
 
+    def on_workers_ready(self) -> None:
+        """Called with `lock` held once all workers can take transfers."""
+        return
+
     def has_pending_work(self) -> bool:
         """Whether this manager needs the engine to keep stepping.
 

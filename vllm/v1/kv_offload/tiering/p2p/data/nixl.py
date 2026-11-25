@@ -172,7 +172,11 @@ class NixlTransport(DataTransport):
         # the generation check and the publish are one atomic step.
         self._peer_lock = threading.Lock()
 
-        self._init(view)
+        try:
+            self._init(view)
+        except Exception:
+            self.close()
+            raise
 
     @property
     def available(self) -> bool:

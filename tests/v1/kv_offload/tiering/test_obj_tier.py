@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 import torch
 
+from tests.v1.kv_offload.conftest import make_offloading_config
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -45,6 +46,7 @@ from vllm.v1.kv_offload.tiering.obj.manager import (
     ObjectStoreSecondaryTierManager,
     _build_primary_dram_descriptors,
 )
+from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 # ---------------------------------------------------------------------------
 # Shared stubs
@@ -313,6 +315,33 @@ def lookup_and_wait(
 def test_invalid_locality_raises_at_construction(locality):
     with pytest.raises(ValueError, match="Locality"):
         _make_tier(locality=locality)
+
+
+def test_failed_descriptor_setup_releases_primary_registration(monkeypatch):
+    from vllm.v1.kv_offload.tiering.obj import manager as obj_module
+
+    agent = MagicMock()
+    registrations = set()
+
+    def register(*args, **kwargs):
+        handle = object()
+        registrations.add(handle)
+        return handle
+
+    agent.query_memory.return_value = [None]
+    agent.register_memory.side_effect = register
+    agent.deregister_memory.side_effect = registrations.remove
+    agent.prep_xfer_dlist.side_effect = RuntimeError("descriptor setup failed")
+    monkeypatch.setattr(obj_module, "nixl_agent", lambda *args: agent)
+    monkeypatch.setattr(obj_module, "nixl_agent_config", lambda **kwargs: None)
+    with pytest.raises(RuntimeError, match="descriptor setup failed"):
+        ObjectStoreSecondaryTierManager(
+            offloading_spec=TieringOffloadingSpec(make_offloading_config()),
+            primary_kv_view=memoryview(np.zeros((2, 1024), dtype=np.uint8)),
+            tier_type="obj",
+            store_config=_STORE_CONFIG,
+        )
+    assert not registrations
 
 
 class TestMockObjTierBasic:
