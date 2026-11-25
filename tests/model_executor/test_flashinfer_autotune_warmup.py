@@ -853,11 +853,17 @@ def test_flashinfer_autotune_cache_hash_covers_flashinfer_and_the_environment(
     """A table tuned by another FlashInfer version or GPU arch, or under another
     value of a variable a kernel reads, is not reused; per-pod variables do not
     change the key."""
-    from vllm.config import VllmConfig
     from vllm.model_executor.warmup import flashinfer_autotune_cache as cache
 
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(mamba_block_size=None, kv_cache_layout=None),
+        compute_hash=lambda include_version=True: "abc123",
+        compile_factors=lambda include_version=True: {"id": "abc123"},
+        model_config=None,
+        parallel_config=SimpleNamespace(data_parallel_size=1),
+    )
     model = SimpleNamespace(modules=lambda: iter([]))
-    runner = SimpleNamespace(vllm_config=VllmConfig(), get_model=lambda: model)
+    runner = SimpleNamespace(vllm_config=config, get_model=lambda: model)
     monkeypatch.setattr(cache, "_flashinfer_identity", lambda: "0.6.1/100a")
     base = cache.flashinfer_autotune_cache_hash(runner)
 
