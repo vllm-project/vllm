@@ -420,13 +420,11 @@ def _get_layer_block_stride(spec: KVCacheSpec) -> int:
 def _get_kv_cache_bytes_per_block(
     kv_cache_groups: list[KVCacheGroup], layout: KVCacheLayout
 ) -> int:
-    """Return the largest cache group's bytes per block."""
+    """Return the bytes per block of the groups' shared KV cache."""
     if not layout.is_block_outermost:
         # Each layer's block stride is its own padded page.
-        return max(
-            sum(_get_layer_block_stride(spec) for spec in group.kv_cache_specs.values())
-            for group in kv_cache_groups
-        )
+        region_strides, _ = _get_layer_regions(kv_cache_groups)
+        return sum(region_strides)
     bytes_per_block = max(group.page_size_bytes for group in kv_cache_groups)
     assert bytes_per_block > 0
     alignments = [
@@ -442,7 +440,7 @@ def _group_layers_by_spec(group: KVCacheGroup) -> dict[KVCacheSpec, list[str]]:
 
     Layers with the same spec are placed together, in order of first appearance.
     `get_kv_cache_config_from_groups` places the regions in this order, and
-    `_overlaid_layers_match` checks the overlaid layers in it.
+    `_get_layer_regions` assigns the layers to regions in it.
     """
     layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
     for layer_name, spec in group.kv_cache_specs.items():
@@ -450,30 +448,50 @@ def _group_layers_by_spec(group: KVCacheGroup) -> dict[KVCacheSpec, list[str]]:
     return layers_by_spec
 
 
-def _overlaid_layers_match(kv_cache_groups: list[KVCacheGroup]) -> bool:
-    """Whether the groups can overlay each other in a layer-compact layout.
+def _get_layer_regions(
+    kv_cache_groups: list[KVCacheGroup],
+) -> tuple[list[int], list[list[int]]]:
+    """Regions of a layer-outer layout, which the groups overlay.
 
-    In a layer-compact layout, each layer of a group gets a region of its own.
-    The regions of every group start at byte 0 and follow one another. So the
-    i-th layer of a group shares its region with the i-th layer of every other
-    group. A block belongs to one group at a time, so this is safe if the layers
-    that share a region have the same block stride.
+    Each layer of a group gets a region of its own. The groups overlay each
+    other from byte 0, so a region is shared by one layer of each group. A
+    block belongs to one group at a time, so this is safe if the layers that
+    share a region have the same block stride. Each layer takes the next
+    region with its block stride, or a new region at the end.
 
     For example, with block strides P and p:
 
-        [P, P, p, p] and [P, P]      match
-        [P, P, p, p] and [P, P, P]   do not match: the third region is p or P
+        [P, P, P, p] and [P, P]   -> regions [P, P, P, p]
+        [P, p] and [P, P]         -> regions [P, p, P]: the second group's
+                                     second layer cannot share the p region
+
+    The second case happens when pipeline parallelism gives a stage fewer
+    layers of one group than of another.
+
+    Returns:
+        The block stride of each region, and for each group, the region of
+        each layer in `_group_layers_by_spec` order.
+
     """
-    strides_per_group = [
-        [
-            _get_layer_block_stride(spec)
-            for spec, layer_names in _group_layers_by_spec(group).items()
-            for _ in layer_names
-        ]
-        for group in kv_cache_groups
-    ]
-    longest = max(strides_per_group, key=len, default=[])
-    return all(strides == longest[: len(strides)] for strides in strides_per_group)
+    region_strides: list[int] = []
+    regions_per_group: list[list[int]] = []
+    for group in kv_cache_groups:
+        regions: list[int] = []
+        region = 0
+        for spec, layer_names in _group_layers_by_spec(group).items():
+            block_stride = _get_layer_block_stride(spec)
+            for _ in layer_names:
+                while (
+                    region < len(region_strides)
+                    and region_strides[region] != block_stride
+                ):
+                    region += 1
+                if region == len(region_strides):
+                    region_strides.append(block_stride)
+                regions.append(region)
+                region += 1
+        regions_per_group.append(regions)
+    return region_strides, regions_per_group
 
 
 def validate_kv_cache_layout(
@@ -497,11 +515,8 @@ def validate_kv_cache_layout(
         return
 
     # Mixed page sizes need each page to be one contiguous chunk inside its block
-    # (a block-compact layout). A layer-compact layout also overlays the groups,
-    # so the layers that it overlays must have the same block stride.
-    if not layout.is_block_compact or (
-        layout.is_layer_compact and not _overlaid_layers_match(kv_cache_groups)
-    ):
+    # (a block-compact layout).
+    if not layout.is_block_compact:
         raise ValueError(
             f"KV cache layout {layout.name} cannot express this model's "
             f"mixed page sizes ({sorted(page_sizes)}); a backend should "
@@ -552,9 +567,16 @@ def get_kv_cache_config_from_groups(
     # group 0: | A [ blk 0 | blk 1 | ... ] | B [ blk 0 | blk 1 | ... ] |
     # group 1: | C [ blk 0 | blk 1 | ... ] | D [ blk 0 | blk 1 | ... ] |
 
+    if not layout.is_block_outermost:
+        region_strides, regions_per_group = _get_layer_regions(kv_cache_groups)
+        region_offsets = [0]
+        for region_stride in region_strides:
+            region_offsets.append(region_offsets[-1] + region_stride * num_blocks)
+
     kv_cache_tensors = []
-    for group in kv_cache_groups:
+    for group_id, group in enumerate(kv_cache_groups):
         byte_offset = 0
+        layer_id = 0
         for spec, layer_names in _group_layers_by_spec(group).items():
             block_stride = interleaved_block_stride
             padded_page = _get_layer_block_stride(spec)
@@ -568,18 +590,31 @@ def get_kv_cache_config_from_groups(
                 layout,
                 fixed_strides=(None, block_stride, None, None, None),
             )
-            kv_cache_tensors.append(
+            if layout.is_block_outermost:
+                # Block-outer layers share each block.
+                runs = [(layer_names, byte_offset)]
+                byte_offset += len(layer_names) * spec.page_size_bytes
+            else:
+                # Layer-outer layers own regions; one tensor per run of
+                # consecutive regions.
+                assert layer_stride == padded_page * num_blocks
+                regions = regions_per_group[group_id]
+                runs = []
+                for i, name in enumerate(layer_names, start=layer_id):
+                    if i > layer_id and regions[i] == regions[i - 1] + 1:
+                        runs[-1][0].append(name)
+                    else:
+                        runs.append(([name], region_offsets[regions[i]]))
+                layer_id += len(layer_names)
+            kv_cache_tensors.extend(
                 KVCacheTensor(
                     size=size,
-                    layers=layer_names,
+                    layers=names,
                     layer_stride=layer_stride,
                     block_stride=block_stride,
-                    offset=byte_offset,
+                    offset=offset,
                 )
-            )
-            # Block-outer layers share each block; layer-outer ones own regions.
-            byte_offset += len(layer_names) * (
-                spec.page_size_bytes if layout.is_block_outermost else layer_stride
+                for names, offset in runs
             )
 
     return KVCacheConfig(

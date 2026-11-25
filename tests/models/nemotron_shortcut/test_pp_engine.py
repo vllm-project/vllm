@@ -23,13 +23,14 @@ rng = random.Random(0)
 PROMPTS = [[rng.randrange(VOCAB - 1) for _ in range(n)] for n in (7, 300)]
 
 
-def run(path, pipeline_parallel_size: int) -> list:
+def run(path, pipeline_parallel_size: int, **kwargs) -> list:
     with VllmRunner(
         str(path),
         trust_remote_code=True,  # the checkpoint's config is remote code
         load_format="dummy",
         skip_tokenizer_init=True,
         pipeline_parallel_size=pipeline_parallel_size,
+        **kwargs,
         dtype="bfloat16",
         max_model_len=1024,
         block_size=None,  # type: ignore[arg-type]  # the hybrid model picks it
@@ -70,6 +71,36 @@ def test_pp_matches_one_stage(tmp_path, monkeypatch) -> None:
     check_logprobs_close(
         outputs_0_lst=run(tmp_path, 1),
         outputs_1_lst=run(tmp_path, 2),
+        name_0="one_stage",
+        name_1="pp2",
+    )
+
+
+def test_pp_with_sdsa_matches_one_stage(tmp_path, monkeypatch) -> None:
+    """With SDSA, the first stage has one SDSA layer to the two GDP layers of
+    a GDP group, so its SDSA indexer cannot share the GDP layers' regions of
+    the KV cache, and two stages still decode as one stage does."""
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    text = make_config(
+        layer_types=["linear_attention", "full_attention"] * 3,
+        vocab_size=VOCAB,
+        hidden_size=1024,
+        num_attention_heads=8,
+        head_dim=256,
+        gdp_num_heads=8,
+        gdp_num_groups=8,
+        gdp_head_dim=64,
+        gdp_key_head_dim=128,
+        max_position_embeddings=1024,
+        tie_word_embeddings=False,
+    )
+    save_checkpoint_config(tmp_path, text, image_token_id=VOCAB - 1)
+
+    sdsa = {"hf_overrides": {"text_config": {"index_topk": 512}}}
+    check_logprobs_close(
+        outputs_0_lst=run(tmp_path, 1, **sdsa),
+        outputs_1_lst=run(tmp_path, 2, **sdsa),
         name_0="one_stage",
         name_1="pp2",
     )
