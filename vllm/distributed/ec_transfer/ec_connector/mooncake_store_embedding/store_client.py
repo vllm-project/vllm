@@ -74,6 +74,23 @@ _SAFE_PUT_REJECTIONS = _SAFE_IO_REJECTIONS | {_MooncakeErrorCode.TENANT_QUOTA_EX
 _MOONCAKE_TENSOR_OBJECT_MAGIC = 0x4D4F4F4E
 # Magic, dtype, token count, hidden dimension. Format versioning is in the key.
 _MOONCAKE_TENSOR_HEADER = struct.Struct("<IIQQ")
+# DirectIO reads require pointer alignment and read padding.
+_DIRECT_IO_ALIGNMENT = 4096
+
+
+def _estimate_disk_staging_bytes(
+    object_bytes: int, *, use_uring: bool | None = False
+) -> int:
+    if use_uring is False:
+        return max(object_bytes, 1)
+    aligned_bytes = (
+        (object_bytes + _DIRECT_IO_ALIGNMENT - 1)
+        // _DIRECT_IO_ALIGNMENT
+        * _DIRECT_IO_ALIGNMENT
+    )
+    return aligned_bytes + 2 * _DIRECT_IO_ALIGNMENT
+
+
 _MOONCAKE_DTYPE_TO_TORCH_DTYPE = {
     0: "torch.float32",
     11: "torch.float16",
@@ -86,6 +103,10 @@ _TORCH_DTYPE_TO_MOONCAKE_DTYPE = {
 
 def create_mooncake_embedding_store_client(
     read_buffer_bytes: int = 128 * 1024**2,
+    *,
+    disk_staging_budget_bytes: int | None = None,
+    disk_use_uring: bool | None = False,
+    preferred_segment: str | None = None,
 ) -> MooncakeEmbeddingStoreClient:
     try:
         from mooncake.store import (  # type: ignore
@@ -101,27 +122,48 @@ def create_mooncake_embedding_store_client(
     from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import rdma_utils
 
     config = MooncakeStoreConfig.load_from_config()
-    if config.enable_offload:
+    if config.enable_offload and config.mode != "standalone-store":
         raise ValueError(
-            "cross_encoder_cache supports a RAM Store; disable enable_offload"
+            "cross_encoder_cache SSD offload requires mode='standalone-store'"
         )
-    store = MooncakeDistributedStore()
+    if config.enable_offload and disk_staging_budget_bytes is None:
+        raise ValueError(
+            "cross_encoder_cache SSD offload requires "
+            "store_disk_staging_budget_bytes sized for the owner staging buffer"
+        )
+    segment = rdma_utils.get_configured_preferred_segment(
+        {"preferred_segment": preferred_segment}
+    )
+    replicate_config = ReplicateConfig()
+    replicate_config.data_type = ObjectDataType.TENSOR
+    if segment is not None:
+        replicate_config.preferred_segment = segment
+    client = MooncakeEmbeddingStoreClient(
+        store=MooncakeDistributedStore(),
+        replicate_config=replicate_config,
+        read_buffer_bytes=read_buffer_bytes,
+        disk_staging_budget_bytes=(
+            disk_staging_budget_bytes if config.enable_offload else None
+        ),
+        disk_use_uring=disk_use_uring if config.enable_offload else None,
+    )
+    store = client.store
     local_ip = get_ip()
     local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
     setup_mooncake_store(store, config, local_hostname)
 
     logger.info(
         "Initialized embedding Mooncake store mode=%s global_segment_size=%d "
-        "local_buffer_size=%d",
+        "local_buffer_size=%d enable_offload=%s disk_staging_budget_bytes=%s "
+        "preferred_segment=%s",
         config.mode,
         config.global_segment_size,
         config.local_buffer_size,
+        config.enable_offload,
+        client._disk_staging_budget_bytes,
+        segment,
     )
-    replicate_config = ReplicateConfig()
-    replicate_config.data_type = ObjectDataType.TENSOR
-    return MooncakeEmbeddingStoreClient(
-        store, replicate_config=replicate_config, read_buffer_bytes=read_buffer_bytes
-    )
+    return client
 
 
 class EmbeddingStoreError(RuntimeError):
@@ -132,13 +174,20 @@ class EmbeddingStoreOperationError(EmbeddingStoreError):
     """A rejected or completed operation that permits normal Encoder fallback."""
 
 
-def _batch_get_completed_safely(results: Any, capacities: list[int]) -> bool:
+def _batch_get_completed_safely(
+    results: Any, capacities: list[int], *, allow_rpc_rejections: bool = True
+) -> bool:
     return (
         isinstance(results, list)
         and len(results) == len(capacities)
         and all(
             type(result) is int
             and (0 <= result <= capacity or result in _SAFE_GET_REJECTIONS)
+            and (
+                allow_rpc_rejections
+                or result
+                not in (_MooncakeErrorCode.RPC_FAIL, _MooncakeErrorCode.RPC_TIMEOUT)
+            )
             for result, capacity in zip(results, capacities, strict=True)
         )
     )
@@ -153,13 +202,27 @@ class MooncakeEmbeddingStoreClient:
         replicate_config: Any | None = None,
         *,
         read_buffer_bytes: int = 128 * 1024**2,
+        disk_staging_budget_bytes: int | None = None,
+        disk_use_uring: bool | None = False,
     ):
+        if disk_use_uring is not None and not isinstance(disk_use_uring, bool):
+            raise ValueError("disk_use_uring must be a boolean or None")
+        if disk_staging_budget_bytes is not None and (
+            isinstance(disk_staging_budget_bytes, bool)
+            or not isinstance(disk_staging_budget_bytes, int)
+            or disk_staging_budget_bytes <= 0
+        ):
+            raise ValueError("disk_staging_budget_bytes must be a positive integer")
         self._lifetime_lock = threading.Lock()
         self._unsafe_owners: list[Any] = []
         self._poisoned = False
         self.store = store
         self.replicate_config = replicate_config
         self._read_buffer_bytes = read_buffer_bytes
+        # A per-call allowance, not a reservation of shared owner capacity.
+        self._disk_staging_budget_bytes = disk_staging_budget_bytes
+        # Keep this in sync with MOONCAKE_OFFLOAD_USE_URING on the SSD owners.
+        self._disk_use_uring = disk_use_uring
         self._read_buffer: torch.Tensor | None = None
         self._put_header: ctypes.Array[ctypes.c_char] | None = None
 
@@ -269,6 +332,8 @@ class MooncakeEmbeddingStoreClient:
         loaded: dict[str, torch.Tensor] = {}
         chunk: dict[str, TensorSpec] = {}
         chunk_bytes = 0
+        chunk_disk_bytes = 0
+        disk_budget = self._disk_staging_budget_bytes
         for key, spec in expected.items():
             size = _MOONCAKE_TENSOR_HEADER.size + spec.nbytes
             if size > self._read_buffer_bytes:
@@ -279,12 +344,33 @@ class MooncakeEmbeddingStoreClient:
                     self._read_buffer_bytes,
                 )
                 continue
-            if chunk_bytes + size > self._read_buffer_bytes:
+            disk_bytes = (
+                _estimate_disk_staging_bytes(size, use_uring=self._disk_use_uring)
+                if disk_budget is not None
+                else 0
+            )
+            if disk_budget is not None and disk_bytes > disk_budget:
+                logger.warning(
+                    "Skipping Store GET for %s: disk staging bytes=%d exceed budget=%d",
+                    key,
+                    disk_bytes,
+                    disk_budget,
+                )
+                continue
+            if chunk and (
+                chunk_bytes + size > self._read_buffer_bytes
+                or (
+                    disk_budget is not None
+                    and chunk_disk_bytes + disk_bytes > disk_budget
+                )
+            ):
                 loaded.update(self._load_chunk(chunk, device))
                 chunk = {}
                 chunk_bytes = 0
+                chunk_disk_bytes = 0
             chunk[key] = spec
             chunk_bytes += size
+            chunk_disk_bytes += disk_bytes
         if chunk:
             loaded.update(self._load_chunk(chunk, device))
         return loaded
@@ -320,7 +406,12 @@ class MooncakeEmbeddingStoreClient:
             results = self.store.batch_get_into(
                 list(expected), [base + offset for offset in offsets], sizes
             )
-            if not _batch_get_completed_safely(results, sizes):
+            if not _batch_get_completed_safely(
+                results,
+                sizes,
+                # SSD reads can fail in an owner RPC after native submission.
+                allow_rpc_rejections=self._disk_staging_budget_bytes is None,
+            ):
                 raise EmbeddingStoreError("Unsafe batch GET results")
         except BaseException as error:
             self._poison([buffer])

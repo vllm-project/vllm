@@ -3,12 +3,15 @@
 
 import ctypes
 import gc
+import json
 import struct
+import sys
 import threading
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -214,6 +217,220 @@ def test_batch_reads_reuse_registration_without_aliasing_outputs(backend, capaci
     client.close()
     assert native.unregister_buffer.call_count == 2
     assert not native.registered
+
+
+@pytest.mark.parametrize(
+    ("read_capacity", "disk_budget", "use_uring", "batch_lengths"),
+    [
+        (120, None, None, [3]),
+        (80, 36864, None, [2, 1]),
+        (120, 24576, None, [2, 1]),
+        (120, 24575, None, [1, 1, 1]),
+        (120, 12287, None, []),
+        (120, 24576, True, [2, 1]),
+        (120, 12287, True, []),
+        (120, 120, "default", [3]),
+        (120, 120, False, [3]),
+        (120, 119, False, [2, 1]),
+        (80, 120, False, [2, 1]),
+        (120, 39, False, []),
+    ],
+)
+def test_reads_obey_local_and_owner_staging_limits(
+    read_capacity, disk_budget, use_uring, batch_lengths, monkeypatch
+):
+    """Only DirectIO owners need padding; plain reads can fill the budget."""
+    monkeypatch.setenv(
+        "MOONCAKE_OFFLOAD_USE_URING",
+        "true" if use_uring in (False, "default") else "false",
+    )
+    native = MemoryStore()
+    mode_config = {} if use_uring == "default" else {"disk_use_uring": use_uring}
+    client = store_client.MooncakeEmbeddingStoreClient(
+        native,
+        read_buffer_bytes=read_capacity,
+        disk_staging_budget_bytes=disk_budget,
+        **mode_config,
+    )
+    tensors = {key: torch.full((2, 2), float(i)) for i, key in enumerate("abc")}
+    try:
+        for key, tensor in tensors.items():
+            client.put_tensor(key, tensor)
+        calls_mock = MagicMock(wraps=native.batch_get_into)
+        monkeypatch.setattr(native, "batch_get_into", calls_mock)
+        loaded = client.load_tensors(dict.fromkeys(tensors, SPEC), "cpu")
+        assert list(loaded) == (list(tensors) if batch_lengths else [])
+        assert all(torch.equal(loaded[key], tensors[key]) for key in loaded)
+        calls = calls_mock.call_args_list
+        assert [len(call.args[0]) for call in calls] == batch_lengths
+        for call in calls:
+            sizes = call.args[2]
+            assert sum(sizes) <= read_capacity
+            if disk_budget is not None:
+                usage = sum(
+                    size
+                    if use_uring in (False, "default")
+                    else ((size + 4095) // 4096 + 2) * 4096
+                    for size in sizes
+                )
+                assert usage <= disk_budget
+        if not batch_lengths:
+            assert client._read_buffer is None
+    finally:
+        client.close()
+    assert not native.registered
+
+
+def test_disk_budget_includes_header_and_preserves_other_hits():
+    """Skip an oversized object without losing neighboring reusable outputs."""
+    native = MemoryStore()
+    client = store_client.MooncakeEmbeddingStoreClient(
+        native,
+        read_buffer_bytes=16384,
+        disk_staging_budget_bytes=12288,
+        disk_use_uring=True,
+    )
+    # The first object, including its header, is exactly one DirectIO page.
+    tensors = {
+        "aligned": torch.ones(1, 1018),
+        "oversized": torch.ones(1, 1024),
+        "small": torch.ones(2, 2),
+    }
+    backend = store_backend.MooncakeEmbeddingStoreBackend(
+        client, KEY, max_pending_items=32, max_pending_bytes=2 * 1024**3
+    )
+    try:
+        for key, tensor in tensors.items():
+            client.put_tensor(make_embedding_key(KEY, key), tensor)
+        expected = {
+            key: TensorSpec(tuple(tensor.shape), str(tensor.dtype), tensor.nbytes)
+            for key, tensor in tensors.items()
+        }
+        encoder_cache: dict[str, torch.Tensor] = {}
+        loaded = backend.resolve_inputs(expected, encoder_cache, "cpu")
+        assert loaded == {"aligned", "small"}
+        assert set(encoder_cache) == loaded
+        assert all(torch.equal(encoder_cache[key], tensors[key]) for key in loaded)
+    finally:
+        backend.shutdown()
+    assert not native.registered
+
+
+@pytest.mark.parametrize("budget", [0, -1, True, 1.5, "12288"])
+def test_disk_staging_budget_requires_positive_integer(budget):
+    with pytest.raises(ValueError, match="disk_staging_budget_bytes"):
+        store_client.MooncakeEmbeddingStoreClient(
+            MemoryStore(), disk_staging_budget_bytes=budget
+        )
+
+
+@pytest.mark.parametrize(
+    ("offload", "mode", "budget", "error"),
+    [
+        (False, "standalone-store", 12288, None),
+        (True, "standalone-store", 12288, None),
+        (True, "standalone-store", None, "store_disk_staging_budget_bytes"),
+        (True, "embedded", 12288, "standalone-store"),
+    ],
+)
+@pytest.mark.parametrize("use_uring", [None, False, True])
+def test_store_factory_connects_configured_ssd_and_preserves_ram(
+    tmp_path, monkeypatch, offload, mode, budget, error, use_uring
+):
+    """Production creation must reach the native Store for SSD configurations."""
+    native = MemoryStore()
+    monkeypatch.setattr(native, "setup", MagicMock(return_value=0), raising=False)
+    replication = MagicMock()
+    module: Any = ModuleType("mooncake.store")
+    module.MooncakeDistributedStore = lambda: native
+    module.ObjectDataType = MagicMock()
+    module.ReplicateConfig = lambda: replication
+    monkeypatch.setitem(sys.modules, "mooncake", ModuleType("mooncake"))
+    monkeypatch.setitem(sys.modules, "mooncake.store", module)
+    monkeypatch.setattr(store_client, "get_ip", lambda: "127.0.0.1")
+    path = tmp_path / "store.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mode": mode,
+                "global_segment_size": 0 if mode == "standalone-store" else 1048576,
+                "protocol": "tcp",
+                "enable_offload": offload,
+            }
+        )
+    )
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(path))
+    monkeypatch.setenv("MOONCAKE_PREFERRED_SEGMENT", "owner:50053")
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            store_client.create_mooncake_embedding_store_client(
+                disk_staging_budget_bytes=budget, disk_use_uring=use_uring
+            )
+        return
+    client = store_client.create_mooncake_embedding_store_client(
+        disk_staging_budget_bytes=budget, disk_use_uring=use_uring
+    )
+    try:
+        tensor = torch.ones(2, 2)
+        client.put_tensor("key", tensor)
+        restored = client.load_tensors({"key": SPEC}, "cpu")
+        assert torch.equal(restored["key"], tensor)
+        assert replication.preferred_segment == "owner:50053"
+        assert client._disk_staging_budget_bytes == (12288 if offload else None)
+        assert client._disk_use_uring is (use_uring if offload else None)
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("budget", [None, 67108864, 0, -1, True])
+def test_ec_config_parses_disk_staging_allowance(budget):
+    config = create_ec_vllm_config(ec_role="ec_producer")
+    config.ec_transfer_config.ec_connector_extra_config[
+        "store_disk_staging_budget_bytes"
+    ] = budget
+    if budget is not None and (isinstance(budget, bool) or budget <= 0):
+        with pytest.raises(ValueError, match="store_disk_staging_budget_bytes"):
+            MooncakeECConfig.from_vllm_config(config)
+    else:
+        parsed = MooncakeECConfig.from_vllm_config(config)
+        assert parsed.store_disk_staging_budget_bytes == budget
+
+
+@pytest.mark.parametrize(
+    "use_uring", ["default", None, False, True, "false", "true", 0, 1]
+)
+def test_disk_io_mode_requires_boolean_or_none(use_uring):
+    config = create_ec_vllm_config(ec_role="ec_producer")
+    if use_uring == "default":
+        assert MooncakeECConfig.from_vllm_config(config).store_disk_use_uring is False
+        return
+    config.ec_transfer_config.ec_connector_extra_config["store_disk_use_uring"] = (
+        use_uring
+    )
+    if use_uring is not None and not isinstance(use_uring, bool):
+        with pytest.raises(ValueError, match="store_disk_use_uring"):
+            MooncakeECConfig.from_vllm_config(config)
+        with pytest.raises(ValueError, match="disk_use_uring"):
+            store_client.MooncakeEmbeddingStoreClient(
+                MemoryStore(), disk_use_uring=use_uring
+            )
+    else:
+        parsed = MooncakeECConfig.from_vllm_config(config)
+        assert parsed.store_disk_use_uring is use_uring
+
+
+@pytest.mark.parametrize("error", [-900, -901, -1102])
+def test_ssd_get_uncertain_failure_retains_receive_buffer(error, monkeypatch):
+    native = MemoryStore()
+    monkeypatch.setattr(native, "batch_get_into", MagicMock(return_value=[error]))
+    client = store_client.MooncakeEmbeddingStoreClient(
+        native, disk_staging_budget_bytes=12288
+    )
+    with pytest.raises(store_client.EmbeddingStoreError, match="unconfirmed"):
+        client.load_tensors({"key": SPEC}, "cpu")
+    assert client._poisoned
+    assert client._read_buffer is client._unsafe_owners[0]
+    assert client._read_buffer.data_ptr() in native.registered
 
 
 @pytest.mark.parametrize("mode", ["miss", "oversized"])
