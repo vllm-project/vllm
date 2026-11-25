@@ -4108,7 +4108,7 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
             "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
-            "mistralai/Mamba-Codestral-7B-v0.1",
+            "vllm-project/mamba2-130m-hf",
             "attention_free",
             True,
             "Generative models support chunked prefill.",  # noqa: E501
@@ -4228,7 +4228,7 @@ def test_is_chunked_prefill_supported(
             "Generative hybrid models support prefix caching.",  # noqa: E501
         ),
         (
-            "mistralai/Mamba-Codestral-7B-v0.1",
+            "vllm-project/mamba2-130m-hf",
             "attention_free",
             False,
             "Attention free models do not support prefix caching since the feature is still experimental.",  # noqa: E501

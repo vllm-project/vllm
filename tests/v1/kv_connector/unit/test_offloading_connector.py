@@ -51,6 +51,8 @@ elif current_platform.is_xpu():
 #
 # - Llama: tested with each attention backend and a custom block_size.
 # - Gemma-3: HMA (sliding window + full attention), default backend.
+# - Mamba2-130m: HMA (attention-free, acts like sliding_window=1),
+#   default backend.  Prefix caching must be force-enabled.
 # - Falcon-H1-0.5B-Instruct: HMA (parallel SSM/attention in every layer).
 #   After page-size unification the mamba and attention groups have
 #   different block sizes.
@@ -61,6 +63,7 @@ MODEL_PARAMS: list[tuple[str, str | None, int | None, bool]] = [
 if current_platform.is_cuda_alike():
     MODEL_PARAMS += [
         ("google/gemma-3-1b-it", None, CPU_BLOCK_SIZES, True),
+        ("vllm-project/mamba2-130m-hf", None, CPU_BLOCK_SIZES, True),
         # Falcon-H1: parallel hybrid (every layer has both attention and SSM).
         # The mamba and attention groups end up with different GPU block sizes
         # after page-size unification, so we leave cpu_block_size=None
@@ -700,7 +703,7 @@ def test_fs_tiering_offloading(tmp_path) -> None:
         # ("Qwen/Qwen3.6-35B-A3B", 1056, 2),
         # The chunk size must be a multiple of the GPU block size, which
         # defaults to 64 tokens.
-        ("mistralai/Mamba-Codestral-7B-v0.1", 64, 1),
+        ("vllm-project/mamba2-1.3b-hf", 64, 1),
     ],
 )
 def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
@@ -714,13 +717,7 @@ def test_mamba_cpu_offload_boundary(model: str, block_size: int, tp_size: int):
     )
     llm = LLM(
         model=model,
-        # The checkpoint also ships Mistral-format weights; load the HF ones.
-        config_format="hf",
-        load_format="safetensors",
-        tokenizer_mode="hf",
         max_model_len=block_size * 10,
-        # fp32 Mamba states take ~260 MiB per sequence on this model.
-        max_num_seqs=16,
         gpu_memory_utilization=0.85,
         tensor_parallel_size=tp_size,
         kv_transfer_config=kv_transfer_config,

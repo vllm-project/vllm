@@ -1,4 +1,21 @@
 {
+    "vllm-project/mamba2-130m-hf": {
+        "architectures": [
+            "Mamba2ForCausalLM"
+        ],
+        "model_type": "mamba2",
+        "text_model_type": "mamba2",
+        "hidden_size": 768,
+        "total_num_hidden_layers": 24,
+        "total_num_attention_heads": 0,
+        "head_size": 64,
+        "vocab_size": 50288,
+        "total_num_kv_heads": 0,
+        "num_experts": 0,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.float32"
+    },
     "mistralai/Mamba-Codestral-7B-v0.1": {
         "architectures": [
             "Mamba2ForCausalLM"

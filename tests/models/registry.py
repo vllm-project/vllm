@@ -397,6 +397,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Mamba2ForCausalLM": _HfExamplesInfo(
         "mistralai/Mamba-Codestral-7B-v0.1",
         extras={
+            "130m": "vllm-project/mamba2-130m-hf",
+            "1.3b": "vllm-project/mamba2-1.3b-hf",
             "random": "vllm-project/mamba2-codestral-v0.1-tiny-random",
         },
     ),
