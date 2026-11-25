@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from enum import IntEnum, StrEnum
+from enum import IntEnum, StrEnum, unique
 from fractions import Fraction
 from functools import cached_property
 from math import prod
@@ -37,6 +37,7 @@ DS_MLA_STATE_CONTENT_BYTES = {"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}
 # ---------------------------------------------------------------------------
 
 
+@unique
 class KVQuantMode(IntEnum):
     """KV cache quantization mode.
 
@@ -66,7 +67,7 @@ class KVQuantMode(IntEnum):
     # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
     # False). Registered handlers return this when they own kernel selection
     # rather than reusing an upstream kernel path. See KVCacheDTypeHandler.
-    CUSTOM = 12
+    CUSTOM = 15
 
     @property
     def is_per_token_head(self) -> bool:
