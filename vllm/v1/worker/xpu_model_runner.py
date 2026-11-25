@@ -6,7 +6,8 @@ from functools import partial
 import torch
 
 from vllm.config import VllmConfig
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
 
@@ -21,6 +22,17 @@ class XPUModelRunner(GPUModelRunner):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
+    def gather_batch_req_state(
+        self, scheduler_output: SchedulerOutput, dummy_run: bool
+    ) -> tuple[BatchReqState | None, int | None]:
+        state, uniform_tokens = super().gather_batch_req_state(
+            scheduler_output, dummy_run
+        )
+        prepare_graph = getattr(self.model_state, "prepare_xpu_graph_batch", None)
+        if prepare_graph is not None:
+            prepare_graph(state)
+        return state, uniform_tokens
+
     def initialize_kv_cache(self, *args, **kwargs) -> None:
         spec = self.speculative_config
         if spec is not None and spec.method == "dspark" and self.speculator is not None:
@@ -33,6 +45,12 @@ class XPUModelRunner(GPUModelRunner):
         configure_graphs = getattr(self.model_state, "configure_xpu_graphs", None)
         if configure_graphs is not None:
             configure_graphs(self.cudagraph_manager, self.speculator)
+
+    def _make_async_output(self, **kwargs):
+        get_failure = getattr(self.model_state, "get_xpu_step_failure", None)
+        if get_failure is not None:
+            kwargs["step_failure"] = get_failure()
+        return super()._make_async_output(**kwargs)
 
 
 class XPUMMEncoderModelRunner(MMEncoderModelRunner):

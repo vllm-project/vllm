@@ -3,16 +3,22 @@
 """MiniCPM5's model-owned runner state."""
 
 from functools import partial
+from typing import TYPE_CHECKING
+from weakref import ref
 
 import torch
 
+from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
-from .specialized_decode.config import configure
+from .specialized_decode.config import MAX_VERIFY_ROWS, configure
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import BatchReqState
 
 
 def _active_xpu_capture_stream(
@@ -28,7 +34,7 @@ def _bind_capture_stream(manager: CudaGraphManager) -> None:
     # Both profiling and serving create fresh graph managers. The XPU stream
     # context does not maintain the CUDA thread-local stream cache.
     ubatches = manager.ubatch_runner
-    manager._capture_stream = partial(
+    manager._capture_stream = partial(  # type: ignore[method-assign]
         _active_xpu_capture_stream,
         ubatches.capture_stream if ubatches is not None else None,
     )
@@ -38,6 +44,7 @@ class MiniCPM5XpuModelState(DefaultModelState):
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
         self.decode = None
+        self._graph_batch_has_prefill = False
         self.short_fa2 = None
         self.candidates = None
         self.dspark_draft = None
@@ -83,10 +90,18 @@ class MiniCPM5XpuModelState(DefaultModelState):
                 self.short_fa2 = ShortFa2Selection()
             from .specialized_decode.sampling import Candidates
 
-            self.candidates = Candidates(vllm_config, self.decode, self.max_num_reqs)
-            head = model.lm_head
-            if head.num_embeddings_padded != head.org_vocab_size:
-                self.candidates.enabled = False
+            self.candidates = Candidates(
+                vllm_config,
+                self.decode,
+                self.max_num_reqs,
+                model.lm_head,
+                model.logits_processor,
+            )
+
+    def get_xpu_step_failure(self) -> tuple[torch.Tensor, str] | None:
+        if self.decode is None or self.decode.failstop is None:
+            return None
+        return self.decode.failstop.step_failure
 
     def prepare_inputs(self, input_batch, req_states):
         if self.candidates is not None:
@@ -147,6 +162,9 @@ class MiniCPM5XpuModelState(DefaultModelState):
         if self.dspark_draft is not None:
             self.dspark_draft.bind_caches()
 
+    def prepare_xpu_graph_batch(self, batch: "BatchReqState | None") -> None:
+        self._graph_batch_has_prefill = batch is not None and batch.has_prefill
+
     def configure_xpu_graphs(self, manager, speculator) -> None:
         spec = self.vllm_config.speculative_config
         dspark = spec is not None and spec.method == "dspark" and speculator is not None
@@ -158,6 +176,8 @@ class MiniCPM5XpuModelState(DefaultModelState):
         ):
             return
         _bind_capture_stream(manager)
+        if self.decode is not None and manager.cudagraph_mode.has_full_cudagraphs():
+            self._guard_mono_graph_dispatch(manager)
         if dspark:
             draft_manager = speculator.query_cudagraph_manager
             if draft_manager is not None:
@@ -166,6 +186,56 @@ class MiniCPM5XpuModelState(DefaultModelState):
             from .specialized_decode.short_fa2_graph import attach_short_fa2_graph
 
             attach_short_fa2_graph(manager, self.decode, self.short_fa2)
+
+    def _guard_mono_graph_dispatch(self, manager: CudaGraphManager) -> None:
+        assert self.decode is not None
+        max_rows = (
+            MAX_VERIFY_ROWS
+            if self.decode.config.speculative_tokens
+            else max(self.decode.rows, default=0)
+        )
+        # This wrapper belongs to the manager. A bound method would keep
+        # the profiling manager and its graph pool alive until GC.
+        dispatch = type(manager).dispatch
+        manager_ref = ref(manager)
+
+        def dispatch_for_mono(
+            num_reqs: int,
+            num_tokens: int,
+            uniform_token_count: int | None,
+            num_active_loras: int,
+            max_query_len: int | None = None,
+            num_ubatches: int = 1,
+        ) -> BatchExecutionDescriptor:
+            active_manager = manager_ref()
+            assert active_manager is not None
+            desc = dispatch(
+                active_manager,
+                num_reqs,
+                num_tokens,
+                uniform_token_count,
+                num_active_loras,
+                max_query_len=max_query_len,
+                num_ubatches=num_ubatches,
+            )
+            if (
+                self._graph_batch_has_prefill
+                and desc.cg_mode == CUDAGraphMode.FULL
+                and desc.num_tokens <= max_rows
+            ):
+                # Upstream allows a one-token prompt extension into a decode
+                # graph. A small token-keyed FULL graph can also contain mono.
+                # Replay would bypass this model's pure decode forward guard.
+                return BatchExecutionDescriptor(
+                    cg_mode=CUDAGraphMode.NONE,
+                    num_tokens=num_tokens,
+                    num_reqs=num_reqs,
+                    num_active_loras=desc.num_active_loras,
+                    num_ubatches=num_ubatches,
+                )
+            return desc
+
+        manager.dispatch = dispatch_for_mono  # type: ignore[method-assign]
 
     def prepare_attn(
         self,

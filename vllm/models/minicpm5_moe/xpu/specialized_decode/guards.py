@@ -12,6 +12,13 @@ class FailStop:
     def __init__(self, health, rank, world, group):
         self.failed = health[0:1]
         self.rank, self.world, self.group = rank, world, group
+        self.step_failure = (
+            self.failed,
+            (
+                f"MiniCPM5 XPU mono decode: TP rank {rank} detected a device "
+                "or peer failure; discarding this step"
+            ),
+        )
         self.host = torch.zeros(1, dtype=torch.int32, pin_memory=True)
         self.copied = None
         self.seen = False

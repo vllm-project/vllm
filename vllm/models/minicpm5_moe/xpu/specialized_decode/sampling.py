@@ -4,6 +4,20 @@
 
 import numpy as np
 import torch
+import torch.distributed as dist
+
+
+def candidate_head_supported(head, processor, rank: int) -> bool:
+    shard_size = 65_280
+    return (
+        head.tp_size == 2
+        and head.num_embeddings_per_partition == shard_size
+        and head.num_embeddings_padded == head.org_vocab_size == 2 * shard_size
+        and head.shard_indices.org_vocab_start_index == rank * shard_size
+        and processor.org_vocab_size == head.org_vocab_size
+        and processor.head_dtype in (None, torch.float16, torch.bfloat16)
+        and not processor.logits_as_input
+    )
 
 
 def request_ok(params):
@@ -44,7 +58,7 @@ def enabled(config):
 
 
 class Candidates:
-    def __init__(self, config, decode, max_requests):
+    def __init__(self, config, decode, max_requests, head, processor):
         from vllm import envs
 
         from .peer import agree, region
@@ -63,6 +77,15 @@ class Candidates:
         self.ops = decode.ops
         self.rank = decode.tp.rank_in_group
         self.region = None
+        if not self.enabled:
+            return
+        compatible = torch.tensor(
+            int(candidate_head_supported(head, processor, self.rank)),
+            dtype=torch.int32,
+            device="cpu",
+        )
+        dist.all_reduce(compatible, op=dist.ReduceOp.MIN, group=decode.tp.cpu_group)
+        self.enabled = bool(compatible.item())
         if not self.enabled:
             return
         agree(
@@ -173,10 +196,11 @@ class CandidateSampler:
         from vllm.v1.worker.gpu.sample.sampler import Sampler
 
         ops = getattr(candidates, "ops", None)
+        greedy_version = getattr(ops, "candidate_greedy_version", None)
         if (
             type(sampler) is Sampler
-            and hasattr(ops, "candidate_greedy_version")
-            and ops.candidate_greedy_version() == 1
+            and greedy_version is not None
+            and greedy_version() == 1
             and not sampler.compute_nans
             and not sampler.return_sampling_mask
             and not sampler.use_fp64_gumbel

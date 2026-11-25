@@ -26,3 +26,20 @@ vllm serve "$MODEL_DIR" --monokernel --tensor-parallel-size 2 \
 Use `--tensor-parallel-size 1` for one device or `--enforce-eager` for eager
 execution. Weight reload, weight transfer, and sleep mode are unsupported while
 the monokernel is active.
+
+## DSpark decode
+
+Set `DSPARK_DIR` to a local DSpark draft checkpoint compatible with the target
+model. The K7 configuration uses FP16 and seven speculative tokens.
+
+```bash
+vllm serve "$MODEL_DIR" --monokernel --tensor-parallel-size 2 \
+  --dtype float16 --quantization fp8_per_tensor \
+  --max-num-seqs 2 --no-enable-prefix-caching \
+  --compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --speculative-config '{"method":"dspark","model":"'"$DSPARK_DIR"'","num_speculative_tokens":7}' \
+  --additional-config '{"minicpm5_dspark_split_kv":true,"minicpm5_dspark_mono_draft":true,"minicpm5_dspark_pruned_markov":true}'
+```
+
+Use standard DSpark as a baseline by omitting `--monokernel` and passing
+`{"minicpm5_dspark_split_kv":true}` as the additional configuration.

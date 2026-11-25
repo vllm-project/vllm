@@ -126,6 +126,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         pending_aux_output: "PendingAuxOutput | None",
         num_drafted_tokens_per_req: torch.Tensor | None = None,
         num_verified_tokens_per_req: torch.Tensor | None = None,
+        step_failure: tuple[torch.Tensor, str] | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -139,6 +140,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         # Blocking (sleep) event to avoid busy-polling the accelerator driver lock.
         self.copy_event = torch.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
+        self._step_failure: tuple[torch.Tensor, str] | None = None
         self._has_fault_gpu: torch.Tensor | None = None
         if check_ep_fault:
             # Computed on the main stream: the copy stream only carries copies.
@@ -187,10 +189,20 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 )
             if self._has_fault_gpu is not None:
                 self._has_fault = self._has_fault_gpu.to("cpu", non_blocking=True)
+            if step_failure is not None:
+                flag, message = step_failure
+                self._step_failure = (
+                    flag.to("cpu", non_blocking=True, copy=True),
+                    message,
+                )
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+        if self._step_failure is not None:
+            flag, message = self._step_failure
+            if flag.item():
+                raise RuntimeError(message)
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.

@@ -73,7 +73,6 @@ class MonoLayer:
         self.control = torch.zeros(
             ops.control_words(), dtype=torch.int32, device=self.weights[0].device
         )
-        self.cache = None
         self.rope_cache = None
         self.verify = None
         self.key = None
@@ -115,7 +114,8 @@ class MonoLayer:
                     "MiniCPM5 mono requires canonical RoPE cache [N,128]"
                 )
             self.rope_cache = rope
-        self.cache = cache
+        # The attention layer owns the cache. Keep only the validated identity
+        # so graph profiling cleanup can release the temporary storage.
         self.key = self.cache_key(cache)
         if getattr(self.config, "speculative_tokens", 0):
             from .metadata import VerifyMetadata
@@ -140,12 +140,18 @@ class MonoLayer:
     def cache_key(cache):
         return cache.data_ptr(), tuple(cache.shape), cache.stride()
 
+    @property
+    def cache(self) -> torch.Tensor | None:
+        if self.key is None:
+            return None
+        return cache_tensor(self.layer)
+
     def launch(self, metadata, positions, hidden, residual):
-        current = cache_tensor(self.layer)
-        if self.cache is None or self.cache_key(current) != self.key:
+        cache = cache_tensor(self.layer)
+        if self.key is None or self.cache_key(cache) != self.key:
             raise RuntimeError("MiniCPM5 mono cache moved without lifecycle rebind")
         if self.tail_rows4_decode is not None and self._supports_split(
-            metadata, positions, hidden, 4
+            metadata, positions, hidden, cache, 4
         ):
             return self._launch_tail(
                 self.tail_rows4_decode, metadata, positions, hidden, residual
@@ -153,14 +159,14 @@ class MonoLayer:
         if any(
             op is not None
             for op in (self.tail_decode, self.pre_o_decode, self.post_o_decode)
-        ) and self._supports_split(metadata, positions, hidden, 8):
+        ) and self._supports_split(metadata, positions, hidden, cache, 8):
             if self.tail_decode is not None:
                 return self._launch_tail(
                     self.tail_decode, metadata, positions, hidden, residual
                 )
             return self._launch_o_split(metadata, positions, hidden, residual)
         out, res = torch.empty_like(hidden), torch.empty_like(hidden)
-        arguments = (
+        arguments: tuple[torch.Tensor | None, ...] = (
             hidden,
             residual,
             positions,
@@ -188,7 +194,7 @@ class MonoLayer:
                 self.scratch,
                 self.control,
                 self.weights,
-                self.cache,
+                cache,
                 self.region,
                 self.index,
                 self.config.tp,
@@ -198,14 +204,14 @@ class MonoLayer:
             self.hits[rows] += 1
         return out, res
 
-    def _supports_split(self, metadata, positions, hidden, rows):
+    def _supports_split(self, metadata, positions, hidden, cache, rows):
         table = metadata.block_table
         slots = metadata.slot_mapping
         return (
             positions.numel() == rows
             and rows in self.padding_rows
-            and self.cache.dtype == hidden.dtype == torch.float16
-            and self.cache.shape[2] == 64
+            and cache.dtype == hidden.dtype == torch.float16
+            and cache.shape[2] == 64
             and getattr(metadata, "max_query_len", 0) == 1
             and not getattr(metadata, "minicpm5_verify_eligible", False)
             and table.ndim == 2
@@ -254,6 +260,7 @@ class MonoLayer:
         if self.post_o_decode is not None:
             attention = rank_local_output_projection(attention_layer.o_proj, attention)
             decode, hits = self.post_o_decode, self.post_o_hits
+        assert decode is not None
         output, new_residual = (
             hidden.new_empty(hidden.shape),
             hidden.new_empty(hidden.shape),

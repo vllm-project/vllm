@@ -18,9 +18,82 @@ from vllm.models.minicpm5_moe.xpu.specialized_decode.config import (
 from vllm.models.minicpm5_moe.xpu.specialized_decode.sampling import (
     Candidates,
     CandidateSampler,
+    candidate_head_supported,
     request_ok,
 )
 from vllm.sampling_params import SamplingParams
+
+
+@pytest.mark.parametrize(
+    ("head_dtype", "width", "start", "supported"),
+    [
+        (torch.float16, 65280, 65280, True),
+        (torch.bfloat16, 65280, 65280, True),
+        (torch.float32, 65280, 65280, False),
+        (torch.float16, 65024, 65024, False),
+        (torch.float16, 65280, 0, False),
+    ],
+)
+def test_candidate_head_matches_native_dtype_and_vocab(
+    head_dtype, width, start, supported
+):
+    head = NS(
+        tp_size=2,
+        num_embeddings_per_partition=width,
+        num_embeddings_padded=2 * width,
+        org_vocab_size=2 * width,
+        shard_indices=NS(org_vocab_start_index=start),
+    )
+    processor = NS(
+        org_vocab_size=head.org_vocab_size,
+        head_dtype=head_dtype,
+        logits_as_input=False,
+    )
+    assert candidate_head_supported(head, processor, 1) is supported
+
+
+def test_async_step_fault_rejects_output_after_copy_event(monkeypatch):
+    from contextlib import nullcontext
+
+    from vllm.v1.outputs import ModelRunnerOutput
+    from vllm.v1.worker.gpu import async_utils
+
+    events = []
+    copy_event = NS(
+        record=lambda stream: events.append("copy recorded"),
+        synchronize=lambda: events.append("copy completed"),
+    )
+    monkeypatch.setattr(torch, "Event", lambda **kwargs: copy_event)
+    monkeypatch.setattr(async_utils, "stream", lambda *_: nullcontext())
+    copy_stream = NS(wait_stream=lambda _stream: None)
+    sampler_output = NS(
+        sampled_token_ids=torch.tensor([[123]]),
+        logprobs_tensors=None,
+        num_nans=None,
+        sampling_mask_tensors=None,
+    )
+    failure_flag = torch.zeros(1, dtype=torch.int32)
+    for failed in (True, False):
+        failure_flag.fill_(failed)
+        output = ModelRunnerOutput(req_ids=["request"], sampled_token_ids=None)
+        async_output = async_utils.AsyncOutput(
+            model_runner_output=output,
+            sampler_output=sampler_output,
+            num_sampled_tokens=torch.tensor([1]),
+            main_stream=object(),
+            copy_stream=copy_stream,
+            check_ep_fault=False,
+            pending_aux_output=None,
+            step_failure=(failure_flag, "native failure"),
+        )
+        failure_flag.zero_()
+        if failed:
+            with pytest.raises(RuntimeError, match="native failure"):
+                async_output.get_output()
+            assert output.sampled_token_ids is None
+        else:
+            assert async_output.get_output().sampled_token_ids == [[123]]
+    assert events == ["copy recorded", "copy completed"] * 2
 
 
 @pytest.mark.parametrize(
@@ -315,11 +388,10 @@ def test_automatic_block_size_waits_for_attention_backend_resolution():
     assert "cache block size must be a multiple of 64" in unsupported(config)
 
 
-@pytest.mark.parametrize("field", ["rope_scaling", "rope_parameters"])
-def test_normalized_default_rope_is_eligible_but_scaled_rope_is_refused(field):
+def test_normalized_default_rope_is_eligible_but_scaled_rope_is_refused():
     config = deployment(1)
     rope = {"rope_type": "default", "rope_theta": 5000000}
-    setattr(config.model_config.hf_text_config, field, rope)
+    config.model_config.hf_text_config.rope_parameters = rope
     assert unsupported(config) == []
     rope["rope_type"] = "linear"
     rope["factor"] = 2.0
@@ -594,7 +666,8 @@ def test_o_split_attaches_same_fa2_wrapper_for_both_variants(
     table = torch.zeros(8, 1, dtype=torch.int32)
     positions = torch.arange(8)
     hidden = torch.ones(8, 2048, dtype=torch.float16)
-    fa2_splits, native_calls, projection_calls = [], [], []
+    fa2_splits, native_calls = [], []
+    projection_calls: list[int] = []
 
     def fa2(**kwargs):
         fa2_splits.append(kwargs["num_splits"])
@@ -792,7 +865,7 @@ def test_rows4_tail_uses_independent_capability_and_preserves_mask(
         assert pos is positions
         return normed + 2
 
-    attention.attn = NS(layer_name="layer.0")
+    attention.attn = NS(layer_name="layer.0")  # type: ignore[attr-defined]
     layer = NS(
         mlp=NS() if dense else NS(experts=object()),
         self_attn=attention,
@@ -816,7 +889,7 @@ def test_rows4_tail_uses_independent_capability_and_preserves_mask(
     monkeypatch.setattr(decode, "cache_tensor", lambda layer: cache)
     config = NS(tp=1, tail_only=True, tail_rows4=enabled)
     native = decode.MonoLayer(layer, 0, config, [], object(), ops)
-    native.cache, native.key = cache, native.cache_key(cache)
+    native.key = native.cache_key(cache)
     visible = NS(
         block_table=torch.zeros(rows, 4, dtype=torch.int32),
         slot_mapping=slots,
@@ -914,7 +987,7 @@ def test_long_context_binds_model_rope_before_capture_and_passes_it_to_native(
     if layout != "valid":
         with pytest.raises(RuntimeError, match="canonical RoPE cache"):
             layer.bind()
-        assert layer.cache is None and not calls
+        assert layer.key is None and not calls
         return
     layer.bind()
     assert layer.rope_cache is rope
@@ -957,7 +1030,7 @@ def test_padding_contract_requires_native_capability_and_verified_tp_rows(
         object(),
         ops,
     )
-    layer.cache, layer.key = cache, layer.cache_key(cache)
+    layer.key = layer.cache_key(cache)
     metadata = NS(
         block_table=torch.zeros(rows, 1, dtype=torch.int32),
         seq_lens=torch.ones(rows, dtype=torch.int32),
@@ -1016,7 +1089,7 @@ def test_tail_only_uses_original_attention_modules_and_residual(case, monkeypatc
         calls.append("attention")
         return value + 10
 
-    attention.attn = NS(layer_name="layer0", kv_cache=cache)
+    attention.attn = NS(layer_name="layer0", kv_cache=cache)  # type: ignore[attr-defined]
 
     def post_norm(value, residual_in):
         assert (value == 13).all() and (residual_in == 5).all()

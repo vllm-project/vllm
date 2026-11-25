@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Resident dense decoder for the TP2 MiniCPM5 DSpark checkpoint."""
 
+from weakref import ReferenceType, ref
+
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -44,10 +46,10 @@ class DraftMono:
         self.layers = tuple(draft.layers)
         self.attentions = tuple(layer.self_attn.attn for layer in self.layers)
         self.weights = tuple(self._weights(layer, tp) for layer in self.layers)
-        self.controls = ()
+        self.controls: tuple[torch.Tensor, ...] = ()
         self.markov_shard = None
         self.markov_peer = None
-        self.caches = ()
+        self.caches: tuple[ReferenceType[torch.Tensor], ...] = ()
 
     def attach(self, draft):
         """Install the optional XPU forward on this draft instance."""
@@ -189,13 +191,18 @@ class DraftMono:
                 for control in self.controls:
                     self.target.add_health_control(control)
         self.ropes = ropes
-        self.caches = caches
+        # The draft attention layers keep the cache tensors alive until
+        # the shared runner drops them after graph memory profiling.
+        self.caches = tuple(ref(cache) for cache in caches)
         logger.info_once(
             "MiniCPM5 draft mono bound %d dense non-causal layers", len(self.layers)
         )
 
     def run(self, positions, hidden):
         if not self.caches or not is_forward_context_available():
+            return None
+        caches = tuple(cache() for cache in self.caches)
+        if any(cache is None for cache in caches):
             return None
         context = get_forward_context()
         metadata = context.attn_metadata
@@ -259,7 +266,7 @@ class DraftMono:
         )
         residual = None
         for index, (weights, cache, control, rope) in enumerate(
-            zip(self.weights, self.caches, self.controls, self.ropes, strict=True)
+            zip(self.weights, caches, self.controls, self.ropes, strict=True)
         ):
             out, res = torch.empty_like(hidden), torch.empty_like(hidden)
             for start in range(0, rows, self.queries):
@@ -314,6 +321,7 @@ class DraftMono:
                 self._configure_peer_sampling()
 
     def _configure_peer_sampling(self):
+        assert self.markov_shard is not None
         device = self.markov_shard.device
         ops = self.target.ops
         self.markov_peer = region(1, self.target.tp, ops)
@@ -328,6 +336,7 @@ class DraftMono:
             self.markov_peer.set_health(self.target.region.health())
 
     def _sample_peer_greedy(self, model, base, prev, output):
+        assert self.markov_peer is not None
         current = torch.xpu.current_stream()
         if current != self.markov_stream:
             current.wait_stream(self.markov_stream)
@@ -387,7 +396,9 @@ class DraftMono:
             return
         for step in range(steps):
             bias = F.linear(model.markov_embed(prev), self.markov_shard)
-            values, ids = (base[:, step] + bias).max(dim=-1)
+            scores = base[:, step] + bias
+            scores.masked_fill_(scores.isnan(), float("-inf"))
+            values, ids = scores.max(dim=-1)
             local = torch.stack((values.float(), (ids + self.vocab_start).float()), -1)
             pairs = tensor_model_parallel_all_gather(local, dim=-1).view(rows, 2, 2)
             winner = pairs[..., 0].argmax(-1, keepdim=True)

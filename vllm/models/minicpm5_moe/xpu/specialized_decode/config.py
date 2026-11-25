@@ -165,7 +165,7 @@ def unsupported(config) -> list[str]:
     for key, default in (("n_group", 1), ("topk_group", 1), ("norm_topk_prob", True)):
         if getattr(text, key, default) != default:
             reasons.append(f"{key} must be {default}")
-    rope = getattr(text, "rope_parameters", None) or getattr(text, "rope_scaling", None)
+    rope = getattr(text, "rope_parameters", None)
     default_rope = not rope or (
         isinstance(rope, dict)
         and rope.get("rope_type", rope.get("type", "default")) == "default"
