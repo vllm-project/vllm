@@ -20,7 +20,8 @@ faulted, after Python's traceback. VLLM_CI_FAULT_TRAP_LIB overrides the library'
 When a test outlives pytest's `faulthandler_timeout`, faulthandler prints only this
 process's Python stacks, while the hang is often in a child (an EngineCore stuck in HIP
 init). So the plugin then also prints, for every descendant process, its native and
-Python stacks (`py-spy dump --native`, else gdb) and each thread's kernel wait channel.
+Python stacks (`py-spy dump --native`, then without `--native`, else gdb) and each
+thread's kernel wait channel.
 This is best-effort and bounded: it never changes the result.
 """
 
@@ -106,6 +107,8 @@ def _native_stacks(pid: int, timeout: float) -> str:
     commands = []
     if py_spy := shutil.which("py-spy"):
         commands.append([py_spy, "dump", "--native", "--pid", str(pid)])
+        # Unwinding native frames can fail (UNW_EINVAL on a hung EngineCore).
+        commands.append([py_spy, "dump", "--pid", str(pid)])
     if gdb := shutil.which("gdb"):
         commands.append(
             [gdb, "-p", str(pid), "-batch", "-nx", "-ex", "thread apply all bt"]
