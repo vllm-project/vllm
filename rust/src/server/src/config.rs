@@ -14,7 +14,7 @@ use educe::Educe;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use vllm_chat::multimodal::MmLimitPerPrompt;
+use vllm_chat::multimodal::{MmLimitPerPrompt, MmProcessorCache};
 use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
     ToolStrictLevel,
@@ -24,7 +24,6 @@ use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBacke
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_llm::AdmissionLimits;
 use vllm_metrics::CustomHistogramBuckets;
-use vllm_mm_cache::MmProcessorShmCache;
 use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 
 use crate::fingerprint::FingerprintMode;
@@ -470,7 +469,7 @@ pub struct Config {
     /// shm cache and media is always sent to the engine inline.
     #[serde(skip_serializing)]
     #[educe(Debug(ignore), PartialEq(ignore))]
-    pub mm_processor_cache: Option<Arc<MmProcessorShmCache>>,
+    pub mm_processor_cache: Option<Arc<MmProcessorCache>>,
 }
 
 impl Config {

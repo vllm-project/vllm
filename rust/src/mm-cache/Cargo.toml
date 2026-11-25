@@ -14,7 +14,6 @@ vllm-engine-core-client.workspace = true
 vllm-shm-object-storage.workspace = true
 
 [dev-dependencies]
-expect-test.workspace = true
 rmpv.workspace = true
 
 [lints]

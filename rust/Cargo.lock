@@ -5685,7 +5685,6 @@ dependencies = [
  "minijinja-contrib",
  "ndarray",
  "oss-harmony",
- "parking_lot",
  "paste",
  "reqwest 0.13.4",
  "rmp-serde",
@@ -5850,7 +5849,6 @@ dependencies = [
 name = "vllm-mm-cache"
 version = "0.1.0"
 dependencies = [
- "expect-test",
  "parking_lot",
  "rmp-serde",
  "rmpv",

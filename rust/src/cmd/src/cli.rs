@@ -346,7 +346,7 @@ pub struct JsonStringList(pub Vec<String>);
 ///
 /// Original Python definition (`MMCacheType`):
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/config/multimodal.py>
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde_with::DeserializeFromStr)]
 pub enum MmProcessorCacheType {
     /// Shared memory FIFO cache: the frontend writes processed items into a
     /// POSIX shm ring buffer and sends only the address to the engine.
@@ -364,16 +364,6 @@ impl FromStr for MmProcessorCacheType {
                  only `shm` is implemented in the Rust frontend"
             )),
         }
-    }
-}
-
-impl<'de> Deserialize<'de> for MmProcessorCacheType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        value.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -1086,21 +1076,36 @@ impl SharedRuntimeArgs {
             && self.mm_processor_cache_gb > 0.0
     }
 
-    /// Resolve the SHM segment shared by the frontend and its managed workers.
-    pub fn mm_shm_cache_config(&self, topology: &DataParallelTopology) -> Option<MmCacheConfig> {
-        if self.mm_processor_cache_type != Some(MmProcessorCacheType::Shm)
-            || self.mm_processor_cache_gb == 0.0
-        {
-            return None;
-        }
-        if topology.frontend_engine_count() != 1 || !topology.frontend_local_only() {
+    /// Configure the managed workers and return the matching frontend segment.
+    pub fn configure_mm_shm_cache(
+        &self,
+        topology: &DataParallelTopology,
+        python_args: &mut Vec<String>,
+    ) -> Option<MmCacheConfig> {
+        let MmProcessorCacheType::Shm = self.mm_processor_cache_type?;
+        let colocated = topology.frontend_engine_count() == 1 && topology.frontend_local_only();
+        if !colocated && self.mm_processor_cache_gb != 0.0 {
             tracing::warn!(
                 "The SHM multimodal cache requires one colocated engine. Sending media inline."
             );
+        }
+        if !colocated || self.mm_processor_cache_gb == 0.0 {
+            python_args.extend(["--mm-processor-cache-gb".into(), "0".into()]);
             return None;
         }
+        let shm_name = MmCacheConfig::unique_shm_name();
+        python_args.extend([
+            "--mm-processor-cache-type".into(),
+            "shm".into(),
+            "--mm-processor-cache-gb".into(),
+            self.mm_processor_cache_gb.to_string(),
+            "--mm-shm-cache-max-object-size-mb".into(),
+            self.mm_shm_cache_max_object_size_mb.to_string(),
+            "--mm-shm-cache-buffer-name".into(),
+            shm_name.clone(),
+        ]);
         Some(MmCacheConfig {
-            shm_name: MmCacheConfig::unique_shm_name(),
+            shm_name,
             data_buffer_size: gib_to_bytes(self.mm_processor_cache_gb),
             max_object_size: (self.mm_shm_cache_max_object_size_mb as usize) << 20,
         })
@@ -1772,7 +1777,6 @@ impl ServeArgs {
         handshake_port: u16,
         topology: &DataParallelTopology,
         client_handshake_address: Option<String>,
-        shm_cache: Option<&MmCacheConfig>,
     ) -> ManagedEngineConfig {
         let reasoning_parser = effective_engine_reasoning_parser(
             &self.runtime.reasoning_parser,
@@ -1810,7 +1814,7 @@ impl ServeArgs {
                 .python_args
                 .extend(["--default-mm-loras".to_string(), default_mm_loras]);
         }
-        let mut config = managed_engine.into_config(
+        managed_engine.into_config(
             self.runtime.model.id.clone(),
             self.runtime.max_logprobs,
             profiler_config,
@@ -1825,22 +1829,7 @@ impl ServeArgs {
             self.runtime.structured_outputs_config_json(),
             topology,
             client_handshake_address,
-        );
-        if let Some(cache) = shm_cache {
-            config.python_args.extend([
-                "--mm-processor-cache-type".into(),
-                "shm".into(),
-                "--mm-processor-cache-gb".into(),
-                self.runtime.mm_processor_cache_gb.to_string(),
-                "--mm-shm-cache-max-object-size-mb".into(),
-                self.runtime.mm_shm_cache_max_object_size_mb.to_string(),
-                "--mm-shm-cache-buffer-name".into(),
-                cache.shm_name.clone(),
-            ]);
-        } else if self.runtime.mm_processor_cache_type == Some(MmProcessorCacheType::Shm) {
-            config.python_args.extend(["--mm-processor-cache-gb".into(), "0".into()]);
-        }
-        config
+        )
     }
 }
 

@@ -18,7 +18,6 @@ minijinja.workspace = true
 minijinja-contrib.workspace = true
 ndarray.workspace = true
 openai-harmony.workspace = true
-parking_lot.workspace = true
 reqwest-0-13.workspace = true
 serde.workspace = true
 serde-json-fmt.workspace = true

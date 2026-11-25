@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 
-use itertools::izip;
 use llm_multimodal::{
     FieldLayout, MediaItemInfo, Modality, PreprocessedEncoderInputs, PromptReplacement,
     RgbFrameRef, VideoClip, VideoClipOptions,
@@ -36,9 +35,6 @@ impl MultimodalModelInfo {
     /// Unlike images, each clip runs through the preprocessor independently
     /// (a batch of one), so its tensors are complete per item and need no
     /// cross-item slicing.
-    ///
-    /// Cache hits after fetch/decode skip preprocessing; misses are
-    /// preprocessed here per clip.
     #[tracing::instrument(
         name = "mm_stage",
         target = MM_STAGE_TARGET,
@@ -56,12 +52,7 @@ impl MultimodalModelInfo {
             .as_ref()
             .ok_or_else(|| self.unsupported_modality(MmModality::Video))?;
 
-        let sources = izip!(clips, uuids)
-            .map(|(clip, uuid)| {
-                let key = super::mm_hash(uuid.as_deref(), &clip.hash);
-                (clip, key)
-            })
-            .collect();
+        let sources = super::keyed_sources(clips, uuids, |clip| &clip.hash);
         let compute = async |misses: Vec<(Arc<VideoClip>, String)>| {
             let mut computed = Vec::with_capacity(misses.len());
             for (clip, mm_hash) in misses {
@@ -70,17 +61,8 @@ impl MultimodalModelInfo {
             }
             Ok(computed.into_iter().unzip())
         };
-        let (replacements, items) = match self.mm_cache_for(Modality::Video) {
-            Some(cache) => cache.prepare_cached(sources, compute).await?,
-            None => compute(sources).await?,
-        };
-
-        Ok(PreparedMedia {
-            modality: Modality::Video,
-            placeholder: support.placeholder.clone(),
-            replacements,
-            items,
-        })
+        self.prepare_media(Modality::Video, &support.placeholder, sources, compute)
+            .await
     }
 
     /// Preprocess one video clip and build its replacement and engine kwargs.

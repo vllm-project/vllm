@@ -11104,6 +11104,8 @@ async fn reset_mm_cache_route_sends_expected_utility_call() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn reset_mm_cache_route_clears_shm_processor_cache() {
+    use llm_multimodal::{Modality, PromptReplacement};
+
     let cache = Arc::new(
         MmProcessorShmCache::create(MmCacheConfig {
             shm_name: MmCacheConfig::unique_shm_name(),
@@ -11126,7 +11128,14 @@ async fn reset_mm_cache_route_clears_shm_processor_cache() {
     )]
     .into_iter()
     .collect();
-    let stored = cache.put_or_inline("mm-hash-0", item);
+    let replacement = Arc::new(PromptReplacement::repeated(
+        Modality::Image,
+        "<image>",
+        1,
+        2,
+    ));
+    let cached_replacement = Arc::downgrade(&replacement);
+    let stored = cache.put_or_inline("mm-hash-0", item, replacement, std::num::NonZeroUsize::MIN);
     assert!(
         stored.contains_key("address"),
         "item should be stored in shm"
@@ -11178,6 +11187,7 @@ async fn reset_mm_cache_route_clears_shm_processor_cache() {
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert!(!cache.is_cached("mm-hash-0"), "shm cache should be cleared");
+    assert!(cached_replacement.upgrade().is_none());
     engine_task.await.expect("mock engine task");
 }
 

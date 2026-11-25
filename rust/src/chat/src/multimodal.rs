@@ -52,11 +52,13 @@ mod tensor;
 mod timing;
 mod video;
 
-use self::cache::MmProcessorCache;
 use self::expand::expand_prompt_token_ids;
 pub use self::input::MultimodalInput;
 use self::timing::MM_STAGE_TARGET;
 pub use self::timing::{mm_request_span, mm_timing_layer};
+
+/// SHM sender with the prompt replacement owned by each cached media entry.
+pub type MmProcessorCache = MmProcessorShmCache<Arc<PromptReplacement>>;
 
 /// Resolved multimodal support for one loaded model.
 #[derive(Clone)]
@@ -75,7 +77,7 @@ pub struct MultimodalModelInfo {
     limit_mm_per_prompt: MmLimitPerPrompt,
     /// SHM multimodal processor cache (P0 sender side), enabled by
     /// `--mm-processor-cache-type shm`.
-    mm_processor_cache: Option<MmProcessorCache>,
+    mm_processor_cache: Option<Arc<MmProcessorCache>>,
 }
 
 /// Per-modality item-count limits configured by `--limit-mm-per-prompt`.
@@ -230,6 +232,29 @@ impl ResolvedMultimodalSpec {
         Ok(self
             .raw
             .prompt_replacements_for(&context.metadata(), preprocessed, self.modality)?)
+    }
+
+    /// Lower a preprocessed image or audio batch into aligned prompt replacements and engine items.
+    fn build_batch(
+        &self,
+        context: &MultimodalModelContext,
+        preprocessed: PreprocessedEncoderInputs,
+        hashes: Vec<String>,
+        float_dtype: ModelDtype,
+    ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)> {
+        let replacements = self.prompt_replacements_for(context, &preprocessed)?;
+        if replacements.len() != hashes.len() {
+            bail_multimodal!(
+                "number of {} prompt replacements {} does not match number of media items {}",
+                self.modality,
+                replacements.len(),
+                hashes.len()
+            );
+        }
+        Ok((
+            replacements,
+            item::build_batched_items(self, preprocessed, hashes, float_dtype)?,
+        ))
     }
 
     /// Prompt replacements given the media items' decoder-side facts (e.g.
@@ -436,25 +461,51 @@ struct PreparedMedia {
     modality: Modality,
     placeholder: ResolvedPlaceholder,
     /// One replacement per media item, in request order.
-    replacements: Vec<PromptReplacement>,
+    replacements: Vec<Arc<PromptReplacement>>,
     /// One entry per media item, aligned with `replacements`.
     items: Vec<PreparedItem>,
 }
 
+impl PreparedMedia {
+    fn from_preprocessed(
+        modality: Modality,
+        placeholder: ResolvedPlaceholder,
+        replacements: Vec<PromptReplacement>,
+        items: Vec<PreparedItem>,
+    ) -> Self {
+        Self {
+            modality,
+            placeholder,
+            replacements: replacements.into_iter().map(Arc::new).collect(),
+            items,
+        }
+    }
+}
+
 /// One media item's complete engine kwargs plus identity metadata.
+#[derive(Clone)]
 struct PreparedItem {
     data: MmKwargsItem,
     mm_hash: String,
 }
 
-fn mm_hash(uuid: Option<&str>, content_hash: &str) -> String {
+fn keyed_sources<Source>(
+    media: Vec<Source>,
+    uuids: Vec<Option<String>>,
+    content_hash: impl Fn(&Source) -> &str,
+) -> Vec<(Source, String)> {
     // Like Python, tag the cache key with its source, so a client
     // `uuid` spelled like another item's content hash cannot hit
     // that item's entries in the engine's caches.
-    match uuid {
-        Some(uuid) => format!("uuid:{uuid}"),
-        None => format!("content:{content_hash}"),
-    }
+    izip!(media, uuids)
+        .map(|(source, uuid)| {
+            let key = match uuid {
+                Some(uuid) => format!("uuid:{uuid}"),
+                None => format!("content:{}", content_hash(&source)),
+            };
+            (source, key)
+        })
+        .collect()
 }
 
 impl MultimodalModelInfo {
@@ -763,31 +814,9 @@ impl MultimodalModelInfo {
     ///
     /// With the cache set, repeated media skips preprocessing and ships its
     /// shm address to the engine instead of the full tensor payload.
-    pub(crate) fn with_mm_processor_cache(
-        mut self,
-        cache: Option<Arc<MmProcessorShmCache>>,
-    ) -> Self {
-        self.mm_processor_cache = cache.map(MmProcessorCache::new);
+    pub(crate) fn with_mm_processor_cache(mut self, cache: Option<Arc<MmProcessorCache>>) -> Self {
+        self.mm_processor_cache = cache;
         self
-    }
-
-    /// The SHM processor cache for one modality, or `None` when the cache is
-    /// disabled or the modality bypasses it.
-    ///
-    /// Budget-sensitive image processors (see
-    /// [`cache::BUDGET_SENSITIVE_PROCESSORS`]) bypass the cache entirely: the
-    /// cache key does not include the per-request token budget, so reusing
-    /// output across budgets would be incorrect. Their items are always
-    /// fetched and preprocessed inline. Video and audio preprocessors take no
-    /// request context and always use the cache when enabled.
-    fn mm_cache_for(&self, modality: Modality) -> Option<&MmProcessorCache> {
-        let cache = self.mm_processor_cache.as_ref()?;
-        if modality == Modality::Image
-            && self.image.as_ref().is_some_and(cache::is_budget_sensitive)
-        {
-            return None;
-        }
-        Some(cache)
     }
 
     /// Return the template-visible placeholder token for one modality, when

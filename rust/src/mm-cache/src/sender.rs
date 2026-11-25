@@ -9,6 +9,7 @@
 //! processes.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use parking_lot::Mutex;
@@ -52,15 +53,15 @@ impl MmCacheConfig {
 /// - If the item is not in the cache, store the data in shared memory.
 ///
 /// Send + Sync, internally locked.
-pub struct MmProcessorShmCache {
+pub struct MmProcessorShmCache<Metadata> {
     shm_name: String,
-    inner: Mutex<SingleWriterShmObjectStorage>,
+    inner: Mutex<SingleWriterShmObjectStorage<Metadata>>,
     /// Per-engine world size (TP*PP); 0 until `set_n_readers` is called.
     n_readers: AtomicU32,
     warned_oversize: AtomicBool,
 }
 
-impl MmProcessorShmCache {
+impl<Metadata> MmProcessorShmCache<Metadata> {
     /// Create the shm segment (fails if the name already exists).
     pub fn create(config: MmCacheConfig) -> Result<Self> {
         let ring_buffer =
@@ -105,24 +106,32 @@ impl MmProcessorShmCache {
         self.inner.lock().is_cached(hash)
     }
 
-    /// Hit path: bump writer_flag and build the signed address item; `None`
-    /// if the hash is (no longer) cached.
-    pub fn address_item_for_cached(&self, hash: &str) -> Option<MmKwargsItem> {
+    /// Bump the writer flag and return the signed address and its writer-local metadata.
+    pub fn get_cached(&self, hash: &str) -> Option<(MmKwargsItem, Metadata)>
+    where
+        Metadata: Clone,
+    {
         if self.n_readers() == 0 {
             return None;
         }
         let mut inner = self.inner.lock();
-        let (address, monotonic_id) = inner.get_cached(hash)?;
-        let signature = inner.get_signature(hash)?;
-        Some(address_as_item(address, monotonic_id, signature))
+        let (address, monotonic_id, metadata) = inner.get_cached(hash)?;
+        let signature = inner.make_signature(hash, address, monotonic_id);
+        Some((address_as_item(address, monotonic_id, signature), metadata))
     }
 
     /// Miss path: put the item into shm and return the signed address item,
     /// or return the input item unchanged for inline sending on oversize /
     /// buffer-full / duplicate-key.
     ///
-    /// `hash` is the cache key the issued handle is signed over.
-    pub fn put_or_inline(&self, hash: &str, item: MmKwargsItem) -> MmKwargsItem {
+    /// Each of the `occurrences` issues one handle signed over `hash`.
+    pub fn put_or_inline(
+        &self,
+        hash: &str,
+        item: MmKwargsItem,
+        metadata: Metadata,
+        occurrences: NonZeroUsize,
+    ) -> MmKwargsItem {
         if self.n_readers() == 0 {
             return item;
         }
@@ -141,9 +150,11 @@ impl MmProcessorShmCache {
         };
 
         let mut inner = self.inner.lock();
-        match inner.put_with(hash, payload_len, |buf| serialize_mm_item_into(&item, buf)) {
+        match inner.put_with(hash, payload_len, metadata, occurrences, |buf| {
+            serialize_mm_item_into(&item, buf)
+        }) {
             Ok(Ok((address, monotonic_id))) => {
-                let signature = inner.get_signature(hash).expect("put just inserted the key");
+                let signature = inner.make_signature(hash, address, monotonic_id);
                 address_as_item(address, monotonic_id, signature)
             }
             Err(error) => {
@@ -184,8 +195,7 @@ impl MmProcessorShmCache {
         self.inner.lock().clear();
     }
 
-    /// Number of cached keys; the frontend shadow map uses this to mirror
-    /// Python's `remove_dangling_items` pruning threshold.
+    /// Number of cached multimodal items.
     pub fn cached_len(&self) -> usize {
         self.inner.lock().cached_len()
     }
@@ -228,12 +238,13 @@ fn address_as_item(address: usize, monotonic_id: u32, signature: [u8; 32]) -> Mm
 
 #[cfg(test)]
 mod tests {
-    use expect_test::expect;
-
     use super::*;
     use vllm_engine_core_client::protocol::tensor::WireTensor;
 
-    fn create_cache(data_buffer_size: usize, max_object_size: usize) -> MmProcessorShmCache {
+    fn create_cache<Metadata>(
+        data_buffer_size: usize,
+        max_object_size: usize,
+    ) -> MmProcessorShmCache<Metadata> {
         MmProcessorShmCache::create(MmCacheConfig {
             shm_name: MmCacheConfig::unique_shm_name(),
             data_buffer_size,
@@ -254,75 +265,8 @@ mod tests {
         )])
     }
 
-    /// Assert the item's handle fields and snapshot its shape; the address,
-    /// id, and (random, per-segment) signature are redacted to placeholders
-    /// before snapshotting and checked separately.
-    fn expect_address_item(item: &MmKwargsItem, address: i64, monotonic_id: i64) {
-        let mut redacted = item.clone();
-        for key in ["address", "monotonic_id"] {
-            redacted.get_mut(key).expect("address item field").data = Some(MmKwargValue::Int(0));
-        }
-        redacted.get_mut("signature").expect("address item must carry a signature").data =
-            Some(MmKwargValue::List(Vec::new()));
-        expect![[r#"
-            {
-                "address": MmFieldElem {
-                    data: Some(
-                        Int(
-                            0,
-                        ),
-                    ),
-                    field: Batched(
-                        MmBatchedField {
-                            keep_on_cpu: false,
-                        },
-                    ),
-                },
-                "monotonic_id": MmFieldElem {
-                    data: Some(
-                        Int(
-                            0,
-                        ),
-                    ),
-                    field: Batched(
-                        MmBatchedField {
-                            keep_on_cpu: false,
-                        },
-                    ),
-                },
-                "signature": MmFieldElem {
-                    data: Some(
-                        List(
-                            [],
-                        ),
-                    ),
-                    field: Batched(
-                        MmBatchedField {
-                            keep_on_cpu: false,
-                        },
-                    ),
-                },
-            }"#]]
-        .assert_eq(&format!("{redacted:#?}"));
-        let Some(MmKwargValue::Int(actual_address)) = item["address"].data.as_ref() else {
-            panic!("address must be an int");
-        };
-        let Some(MmKwargValue::Int(actual_id)) = item["monotonic_id"].data.as_ref() else {
-            panic!("monotonic_id must be an int");
-        };
-        assert_eq!(*actual_address, address);
-        assert_eq!(*actual_id, monotonic_id);
-
-        let Some(MmKwargValue::List(signature)) = item["signature"].data.as_ref() else {
-            panic!("signature must be a list");
-        };
-        assert_eq!(signature.len(), 32, "HMAC-SHA256 signature is 32 bytes");
-        for value in signature {
-            let MmKwargValue::Int(byte) = value else {
-                panic!("signature bytes must be ints");
-            };
-            assert!((0..=255).contains(byte), "signature bytes are 0-255");
-        }
+    fn put(cache: &MmProcessorShmCache<()>, hash: &str, item: MmKwargsItem) -> MmKwargsItem {
+        cache.put_or_inline(hash, item, (), NonZeroUsize::MIN)
     }
 
     /// The 32 signature bytes of an address item.
@@ -345,10 +289,10 @@ mod tests {
         let item = item_with_tensor(8);
 
         assert!(!cache.is_cached("hash-a"));
-        assert_eq!(cache.address_item_for_cached("hash-a"), None);
+        assert!(cache.get_cached("hash-a").is_none());
 
         // The item comes back unchanged for inline sending.
-        let returned = cache.put_or_inline("hash-a", item.clone());
+        let returned = put(&cache, "hash-a", item.clone());
         assert_eq!(returned, item);
         assert!(!cache.is_cached("hash-a"));
         assert_eq!(cache.cached_len(), 0);
@@ -359,16 +303,27 @@ mod tests {
         let cache = create_cache(1 << 20, 1 << 16);
         cache.set_n_readers(2);
 
-        let address_item = cache.put_or_inline("hash-a", item_with_tensor(8));
-        expect_address_item(&address_item, 0, 0);
+        let address_item =
+            cache.put_or_inline("hash-a", item_with_tensor(8), "metadata", NonZeroUsize::MIN);
+        assert_eq!(address_item.len(), 3);
+        assert_eq!(address_item["address"].data, Some(MmKwargValue::Int(0)));
+        assert_eq!(
+            address_item["monotonic_id"].data,
+            Some(MmKwargValue::Int(0))
+        );
+        assert!(
+            address_item
+                .values()
+                .all(|elem| elem.field == MmField::Batched(MmBatchedField { keep_on_cpu: false }))
+        );
         assert!(cache.is_cached("hash-a"));
         assert_eq!(cache.cached_len(), 1);
 
         // Hit path bumps the writer flag and re-uses the address and signature.
-        let hit_item = cache.address_item_for_cached("hash-a").unwrap();
-        expect_address_item(&hit_item, 0, 0);
-        assert_eq!(signature_of(&hit_item), signature_of(&address_item));
-        assert_eq!(cache.address_item_for_cached("hash-b"), None);
+        let (hit_item, metadata) = cache.get_cached("hash-a").unwrap();
+        assert_eq!(metadata, "metadata");
+        assert_eq!(hit_item, address_item);
+        assert!(cache.get_cached("hash-b").is_none());
     }
 
     #[test]
@@ -376,7 +331,7 @@ mod tests {
         let cache = create_cache(1 << 20, 1 << 16);
         cache.set_n_readers(1);
 
-        let item = cache.put_or_inline("hash-a", item_with_tensor(8));
+        let item = put(&cache, "hash-a", item_with_tensor(8));
         let signature = signature_of(&item);
 
         let inner = cache.inner.lock();
@@ -392,8 +347,8 @@ mod tests {
         cache.set_n_readers(1);
 
         let original = item_with_tensor(8);
-        cache.put_or_inline("hash-a", original.clone());
-        let returned = cache.put_or_inline("hash-a", original.clone());
+        put(&cache, "hash-a", original.clone());
+        let returned = put(&cache, "hash-a", original.clone());
         assert_eq!(returned, original);
     }
 
@@ -403,7 +358,7 @@ mod tests {
         cache.set_n_readers(1);
 
         let original = item_with_tensor(1024); // 4 KiB tensor > 256 byte cap
-        let returned = cache.put_or_inline("hash-a", original.clone());
+        let returned = put(&cache, "hash-a", original.clone());
         assert_eq!(returned, original);
         assert!(!cache.is_cached("hash-a"));
     }
@@ -414,12 +369,12 @@ mod tests {
         let cache = create_cache(160, 1 << 16);
         cache.set_n_readers(1);
 
-        let first = cache.put_or_inline("hash-a", item_with_tensor(8));
+        let first = put(&cache, "hash-a", item_with_tensor(8));
         assert!(first.contains_key("address"));
 
         // Unread first chunk cannot be evicted, so the second item is inline.
         let original = item_with_tensor(8);
-        let returned = cache.put_or_inline("hash-b", original.clone());
+        let returned = put(&cache, "hash-b", original.clone());
         assert_eq!(returned, original);
         assert!(!cache.is_cached("hash-b"));
     }

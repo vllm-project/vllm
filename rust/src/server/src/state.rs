@@ -11,11 +11,11 @@ use tokio::runtime::Runtime;
 use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
+use vllm_chat::multimodal::MmProcessorCache;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 use vllm_llm::{EngineCoreLlm, Llm};
-use vllm_mm_cache::MmProcessorShmCache;
 
 use crate::config::{AccessLogConfig, ApiServerOptions, CorsConfig, LoraModulePath};
 use crate::lora::{
@@ -66,7 +66,7 @@ pub struct AppState {
     pub profiler: Option<String>,
     /// Frontend-side (P0 writer) shm multi-modal processor cache, cleared by
     /// `/reset_mm_cache` alongside the engine-side cache.
-    mm_processor_cache: Option<Arc<MmProcessorShmCache>>,
+    mm_processor_cache: Option<Arc<MmProcessorCache>>,
 }
 
 impl AppState {
@@ -145,13 +145,13 @@ impl AppState {
     }
 
     /// Attach the shm multi-modal processor cache (P0 writer), when enabled.
-    pub fn with_mm_processor_cache(mut self, cache: Option<Arc<MmProcessorShmCache>>) -> Self {
+    pub fn with_mm_processor_cache(mut self, cache: Option<Arc<MmProcessorCache>>) -> Self {
         self.mm_processor_cache = cache;
         self
     }
 
     /// The shm multi-modal processor cache, when enabled.
-    pub(crate) fn mm_processor_cache(&self) -> Option<&Arc<MmProcessorShmCache>> {
+    pub(crate) fn mm_processor_cache(&self) -> Option<&Arc<MmProcessorCache>> {
         self.mm_processor_cache.as_ref()
     }
 

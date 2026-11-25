@@ -8,6 +8,7 @@
 //! half lives in the Python engine's worker processes.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 
 use hmac::{Hmac, Mac as _};
 use sha2::{Digest as _, Sha256};
@@ -36,11 +37,11 @@ pub enum PutFailure {
     BufferFull,
 }
 
-/// One cached entry: the shm handle (address plus monotonic id).
-#[derive(Debug, Clone)]
-struct CachedEntry {
+/// A shm handle and its writer-local metadata, evicted together.
+struct CachedEntry<Metadata> {
     address: usize,
     monotonic_id: u32,
+    metadata: Metadata,
 }
 
 /// Writer-side key-value store of serialized objects in the shm ring buffer.
@@ -55,12 +56,12 @@ struct CachedEntry {
 /// Handles are `(address, monotonic_id)` signed with an HMAC over
 /// `(key, address, monotonic_id)`, keyed by the secret at the start of the
 /// segment; readers verify the signature before reading.
-pub struct SingleWriterShmObjectStorage {
+pub struct SingleWriterShmObjectStorage<Metadata> {
     ring_buffer: SingleWriterShmRingBuffer,
     max_object_size: usize,
     n_readers: u32,
     /// Key-value mapping: key -> cached entry
-    key_index: HashMap<String, CachedEntry>,
+    key_index: HashMap<String, CachedEntry<Metadata>>,
     /// Reverse mapping: monotonic_id -> key
     id_index: HashMap<u32, String>,
     /// Writer flag to track in-use status: monotonic_id -> count
@@ -70,7 +71,7 @@ pub struct SingleWriterShmObjectStorage {
     touched: HashMap<u32, usize>,
 }
 
-impl SingleWriterShmObjectStorage {
+impl<Metadata> SingleWriterShmObjectStorage<Metadata> {
     pub fn new(ring_buffer: SingleWriterShmRingBuffer, max_object_size: usize) -> Result<Self> {
         // Readers decode the chunk size header as a signed 32-bit integer.
         let limit = i32::MAX as usize - MD_SIZE;
@@ -118,17 +119,20 @@ impl SingleWriterShmObjectStorage {
         self.key_index.contains_key(key)
     }
 
-    /// Number of cached keys, for the sender cache's shadow-map pruning.
+    /// Number of cached keys.
     pub fn cached_len(&self) -> usize {
         self.key_index.len()
     }
 
-    /// Get the cached object by key if it exists, bumping its writer flag.
-    pub fn get_cached(&mut self, key: &str) -> Option<(usize, u32)> {
+    /// Get the cached handle and metadata together, bumping its writer flag.
+    pub fn get_cached(&mut self, key: &str) -> Option<(usize, u32, Metadata)>
+    where
+        Metadata: Clone,
+    {
         let entry = self.key_index.get(key)?;
-        let (address, monotonic_id) = (entry.address, entry.monotonic_id);
-        self.increment_writer_flag(monotonic_id);
-        Some((address, monotonic_id))
+        let hit = (entry.address, entry.monotonic_id, entry.metadata.clone());
+        self.increment_writer_flag(entry.monotonic_id);
+        Some(hit)
     }
 
     /// Number of items currently protected by `touch`, for tests.
@@ -182,17 +186,29 @@ impl SingleWriterShmObjectStorage {
     ///
     /// Attempts to free `2 * max_object_size` bytes using FIFO order when the
     /// ring buffer runs out of space during a put() operation.
-    pub fn put(&mut self, key: &str, body: &[u8]) -> std::result::Result<(usize, u32), PutFailure> {
-        match self.put_with::<std::convert::Infallible>(key, body.len(), |buf| {
-            buf.copy_from_slice(body);
-            Ok(())
-        }) {
+    pub fn put(
+        &mut self,
+        key: &str,
+        body: &[u8],
+        metadata: Metadata,
+    ) -> std::result::Result<(usize, u32), PutFailure> {
+        match self.put_with::<std::convert::Infallible>(
+            key,
+            body.len(),
+            metadata,
+            NonZeroUsize::MIN,
+            |buf| {
+                buf.copy_from_slice(body);
+                Ok(())
+            },
+        ) {
             Ok(result) => result,
         }
     }
 
     /// Store a key-value pair, serializing the payload into the chunk in
-    /// place through `write` instead of copying a pre-built buffer.
+    /// place through `write` instead of copying a pre-built buffer. Each
+    /// handout accounts for one handle issued for the resulting chunk.
     ///
     /// On a `write` error the chunk is left unrecorded — it has no
     /// writer-flag entry, so the next eviction pass reclaims it immediately.
@@ -200,6 +216,8 @@ impl SingleWriterShmObjectStorage {
         &mut self,
         key: &str,
         payload_len: usize,
+        metadata: Metadata,
+        handouts: NonZeroUsize,
         write: impl FnOnce(&mut [u8]) -> std::result::Result<(), E>,
     ) -> std::result::Result<std::result::Result<(usize, u32), PutFailure>, E> {
         if self.key_index.contains_key(key) {
@@ -228,7 +246,7 @@ impl SingleWriterShmObjectStorage {
         // Write data to buffer: `[reader_count = 0][payload]`.
         self.ring_buffer.write_payload(address, 0, &0_i32.to_le_bytes());
         self.ring_buffer.write_payload_with(address, FLAG_BYTES, payload_len, write)?;
-        self.increment_writer_flag(monotonic_id);
+        self.writer_flag.insert(monotonic_id, handouts.get() as u64);
 
         // Update key index
         self.key_index.insert(
@@ -236,6 +254,7 @@ impl SingleWriterShmObjectStorage {
             CachedEntry {
                 address,
                 monotonic_id,
+                metadata,
             },
         );
         self.id_index.insert(monotonic_id, key.to_string());
@@ -299,10 +318,10 @@ mod tests {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn create_storage(
+    fn create_storage<Metadata>(
         data_buffer_size: usize,
         max_object_size: usize,
-    ) -> SingleWriterShmObjectStorage {
+    ) -> SingleWriterShmObjectStorage<Metadata> {
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         let name = format!("vllm-mm-shm-test-storage-{}-{id}", std::process::id());
         let ring_buffer = SingleWriterShmRingBuffer::create(data_buffer_size, &name).unwrap();
@@ -319,13 +338,13 @@ mod tests {
     fn put_get_cached_and_touch_track_protection() {
         let mut storage = create_storage(4096, 1024);
 
-        let (address, id) = storage.put("hash-a", &body(100)).unwrap();
+        let (address, id) = storage.put("hash-a", &body(100), ()).unwrap();
         assert!(storage.is_cached("hash-a"));
         assert!(!storage.is_cached("hash-b"));
         assert_eq!(storage.writer_flag[&id], 1);
 
         // Hit path bumps the writer flag and returns the same address.
-        assert_eq!(storage.get_cached("hash-a"), Some((address, id)));
+        assert_eq!(storage.get_cached("hash-a"), Some((address, id, ())));
         assert_eq!(storage.writer_flag[&id], 2);
         assert_eq!(storage.get_cached("hash-b"), None);
 
@@ -343,7 +362,7 @@ mod tests {
     #[test]
     fn get_signature_signs_over_the_key() {
         let mut storage = create_storage(4096, 1024);
-        storage.put("hash-a", &body(10)).unwrap();
+        storage.put("hash-a", &body(10), ()).unwrap();
 
         let signature = storage.get_signature("hash-a").unwrap();
         let expected = storage.make_signature("hash-a", 0, 0);
@@ -355,18 +374,18 @@ mod tests {
 
         // Another segment has a different secret, hence a different signature.
         let mut other = create_storage(4096, 1024);
-        other.put("hash-a", &body(10)).unwrap();
+        other.put("hash-a", &body(10), ()).unwrap();
         assert_ne!(other.get_signature("hash-a").unwrap(), signature);
     }
 
     #[test]
     fn put_rejects_duplicate_key_without_touching_flags() {
         let mut storage = create_storage(4096, 1024);
-        let (_, id) = storage.put("hash-a", &body(10)).unwrap();
+        let (_, id) = storage.put("hash-a", &body(10), ()).unwrap();
         let flags_before = storage.writer_flag[&id];
 
         assert_eq!(
-            storage.put("hash-a", &body(10)),
+            storage.put("hash-a", &body(10), ()),
             Err(PutFailure::DuplicateKey)
         );
         assert_eq!(storage.writer_flag[&id], flags_before);
@@ -376,33 +395,41 @@ mod tests {
     fn new_rejects_max_object_size_beyond_the_chunk_size_header() {
         let name = format!("vllm-mm-shm-test-storage-max-{}", std::process::id());
         let ring_buffer = SingleWriterShmRingBuffer::create(4096, &name).unwrap();
-        let result = SingleWriterShmObjectStorage::new(ring_buffer, i32::MAX as usize);
+        let result = SingleWriterShmObjectStorage::<()>::new(ring_buffer, i32::MAX as usize);
         assert!(matches!(result, Err(Error::MaxObjectSizeTooLarge { .. })));
     }
 
     #[test]
     fn put_rejects_oversize_object() {
         let mut storage = create_storage(4096, 64);
-        assert_eq!(storage.put("hash-a", &body(100)), Err(PutFailure::Oversize));
+        assert_eq!(
+            storage.put("hash-a", &body(100), ()),
+            Err(PutFailure::Oversize)
+        );
         assert!(!storage.is_cached("hash-a"));
     }
 
     #[test]
     fn put_evicts_fully_read_chunks_when_full() {
+        use std::sync::Arc;
+
         // Two 108-byte bodies fit; the third needs eviction.
         let mut storage = create_storage(320, 256);
-        let (address_a, id_a) = storage.put("hash-a", &body(108)).unwrap();
-        storage.put("hash-b", &body(108)).unwrap();
+        let metadata = Arc::new(());
+        let cached_metadata = Arc::downgrade(&metadata);
+        let (address_a, id_a) = storage.put("hash-a", &body(108), metadata).unwrap();
+        storage.put("hash-b", &body(108), Arc::new(())).unwrap();
 
         // Both chunks are unread: eviction is blocked and the put fails.
         assert_eq!(
-            storage.put("hash-c", &body(108)),
+            storage.put("hash-c", &body(108), Arc::new(())),
             Err(PutFailure::BufferFull)
         );
 
         // hash-a is fully read (reader_count = writer_flag * n_readers = 1).
         storage.set_reader_count(address_a, 1);
-        storage.put("hash-c", &body(108)).unwrap();
+        storage.put("hash-c", &body(108), Arc::new(())).unwrap();
+        assert!(cached_metadata.upgrade().is_none());
         assert!(!storage.is_cached("hash-a"));
         assert!(storage.is_cached("hash-b"));
         assert!(storage.is_cached("hash-c"));
@@ -413,8 +440,8 @@ mod tests {
     #[test]
     fn touch_blocks_eviction_until_every_touch_is_released() {
         let mut storage = create_storage(320, 256);
-        let (address_a, id_a) = storage.put("hash-a", &body(108)).unwrap();
-        storage.put("hash-b", &body(108)).unwrap();
+        let (address_a, id_a) = storage.put("hash-a", &body(108), ()).unwrap();
+        storage.put("hash-b", &body(108), ()).unwrap();
 
         // Two concurrent requests touch hash-a, and one looks it up. The
         // lookup is read as well, so only the touches block eviction.
@@ -423,46 +450,52 @@ mod tests {
         storage.get_cached("hash-a");
         storage.set_reader_count(address_a, 2);
         assert_eq!(
-            storage.put("hash-c", &body(108)),
+            storage.put("hash-c", &body(108), ()),
             Err(PutFailure::BufferFull)
         );
 
         // One request finishing keeps the other's protection.
         storage.untouch(id_a);
         assert_eq!(
-            storage.put("hash-c", &body(108)),
+            storage.put("hash-c", &body(108), ()),
             Err(PutFailure::BufferFull)
         );
 
         storage.untouch(id_a);
-        storage.put("hash-c", &body(108)).unwrap();
+        storage.put("hash-c", &body(108), ()).unwrap();
         assert!(!storage.is_cached("hash-a"));
     }
 
     #[test]
     fn eviction_respects_writer_flag_threshold() {
         let mut storage = create_storage(320, 256);
-        let (address_a, _) = storage.put("hash-a", &body(108)).unwrap();
-        storage.put("hash-b", &body(108)).unwrap();
+        storage.set_n_readers(2);
+        let (address_a, _) = storage
+            .put_with("hash-a", 108, (), NonZeroUsize::new(3).unwrap(), |buf| {
+                buf.fill(0xAB);
+                Ok::<_, std::convert::Infallible>(())
+            })
+            .unwrap()
+            .unwrap();
+        storage.put("hash-b", &body(108), ()).unwrap();
 
-        // One read is not enough: writer_flag is 2 after the hit.
+        // Three initial handouts plus one later hit require eight worker reads.
         storage.get_cached("hash-a");
-        storage.set_reader_count(address_a, 1);
+        storage.set_reader_count(address_a, 7);
         assert_eq!(
-            storage.put("hash-c", &body(108)),
+            storage.put("hash-c", &body(108), ()),
             Err(PutFailure::BufferFull)
         );
 
-        // A second read releases the chunk.
-        storage.set_reader_count(address_a, 2);
-        storage.put("hash-c", &body(108)).unwrap();
+        storage.set_reader_count(address_a, 8);
+        storage.put("hash-c", &body(108), ()).unwrap();
         assert!(!storage.is_cached("hash-a"));
     }
 
     #[test]
     fn clear_empties_all_indices() {
         let mut storage = create_storage(4096, 1024);
-        let (_, id) = storage.put("hash-a", &body(10)).unwrap();
+        let (_, id) = storage.put("hash-a", &body(10), ()).unwrap();
         storage.touch("hash-a");
         storage.clear();
 

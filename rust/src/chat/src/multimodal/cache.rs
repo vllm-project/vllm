@@ -1,178 +1,113 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! Frontend-side wrapper over the SHM multimodal processor cache.
-//!
-//! Mirrors Python's `ShmObjectStoreSenderCache`
-//! (`vllm/multimodal/cache/shm.py`): the shm cache stores preprocessed items;
-//! this wrapper additionally shadows each cached hash's `PromptReplacement`
-//! (Python's `_p0_cache`) so cache hits skip re-preprocessing entirely.
+//! Prepare multimodal items using the SHM processor cache.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use itertools::izip;
-use llm_multimodal::PromptReplacement;
-use parking_lot::Mutex;
+use llm_multimodal::{Modality, PromptReplacement};
+#[cfg(test)]
 use vllm_engine_core_client::protocol::multimodal::MmKwargsItem;
-use vllm_mm_cache::MmProcessorShmCache;
 
-use super::{PreparedItem, VisionModalitySupport};
+use super::{
+    MmProcessorCache, MultimodalModelInfo, PreparedItem, PreparedMedia, ResolvedPlaceholder,
+};
 use crate::error::Result;
 
-/// Vision processors whose preprocessing output depends on the per-request
-/// `VisionPreprocessingContext` (today: only Nemotron-H Omni's
-/// `token_budget`-driven dynamic resolution). The cache key does not include
-/// the request budget, so reusing output across budgets would be incorrect:
-/// such processors bypass the processor cache entirely and preprocess inline.
-///
-/// TODO: drop this name list once `llm-multimodal` exposes a capability flag
-/// on `VisionPreProcessor` for request-context sensitivity.
-const BUDGET_SENSITIVE_PROCESSORS: &[&str] = &["nemotron_omni"];
-
-/// Whether a vision processor's output depends on the per-request
-/// preprocessing context, in which case its items bypass the SHM cache.
-pub(super) fn is_budget_sensitive(support: &VisionModalitySupport) -> bool {
-    BUDGET_SENSITIVE_PROCESSORS.contains(&support.processor.model_name())
-}
-
-/// The P0 (frontend) side of the SHM multimodal processor cache.
-///
-/// How to update each item:
-///
-/// - If the item is already in the cache, send its shm address instead of the
-///   data to avoid unnecessary IPC, and reuse the shadowed prompt replacement
-///   to skip re-preprocessing.
-///
-/// - If the item is not in the cache, preprocess it, store the data in shared
-///   memory, and shadow its prompt replacement.
-#[derive(Clone)]
-pub(super) struct MmProcessorCache {
-    shm: Arc<MmProcessorShmCache>,
-    /// Prompt replacements of cached items, mirroring Python's `_p0_cache`.
-    ///
-    /// Entries whose shm data was evicted (or cleared by `/reset_mm_cache`,
-    /// which only clears the shm side) dangle harmlessly: `lookup` verifies
-    /// the shm entry still exists and degrades to a miss otherwise, and
-    /// dangling entries are pruned on later puts (Python's
-    /// `remove_dangling_items`).
-    shadow: Arc<Mutex<HashMap<String, PromptReplacement>>>,
-}
-
-impl MmProcessorCache {
-    pub(super) fn new(shm: Arc<MmProcessorShmCache>) -> Self {
-        Self {
-            shm,
-            shadow: Arc::new(Mutex::new(HashMap::new())),
+impl MultimodalModelInfo {
+    /// Nemotron-H Omni's image resolution depends on the request token budget,
+    /// which the cache key does not include.
+    // TODO: use a processor capability flag once llm-multimodal exposes one.
+    fn mm_cache_for(&self, modality: Modality) -> Option<&MmProcessorCache> {
+        let cache = self.mm_processor_cache.as_deref()?;
+        if modality == Modality::Image
+            && self
+                .image
+                .as_ref()
+                .is_some_and(|image| image.processor.model_name() == "nemotron_omni")
+        {
+            return None;
         }
+        Some(cache)
     }
 
-    /// Look up one fetched media item by its engine-facing `mm_hash`.
-    ///
-    /// On a hit, bumps writer_flag and returns the address item plus the
-    /// shadowed prompt replacement. On a miss — including a shadowed entry
-    /// whose shm data vanished under a concurrent eviction — returns `None`.
-    pub(super) fn lookup(&self, key: &str) -> Option<(PreparedItem, PromptReplacement)> {
-        let replacement = self.shadow.lock().get(key).cloned()?;
-        let data = self.shm.address_item_for_cached(key)?;
-        Some((
-            PreparedItem {
-                data,
-                mm_hash: key.to_owned(),
-            },
-            replacement,
-        ))
-    }
-
-    /// Put a freshly preprocessed item into shm and shadow its prompt
-    /// replacement.
-    ///
-    /// `key` is the cache key, equal to the feature-facing `mm_hash` the
-    /// issued handle is signed over.
-    ///
-    /// Oversize, buffer-full, or duplicate-key puts return the item unchanged
-    /// for inline sending and shadow nothing (Python's `get_and_update_item`
-    /// fallback).
-    pub(super) fn put_or_inline_and_track(
+    /// Prepare one modality in request order, computing only cache misses.
+    pub(super) async fn prepare_media<Source>(
         &self,
-        key: &str,
-        replacement: &PromptReplacement,
-        data: MmKwargsItem,
-    ) -> MmKwargsItem {
-        let data = self.shm.put_or_inline(key, data);
-        if !self.shm.is_cached(key) {
-            return data;
-        }
-
-        let mut shadow = self.shadow.lock();
-        // Try to remove dangling items if the shadow is too large (Python:
-        // `len(self._p0_cache) >= 2 * len(self._shm_cache.key_index)`, pruned
-        // by `remove_dangling_items`).
-        if shadow.len() >= 2 * self.shm.cached_len() {
-            shadow.retain(|key, _| self.shm.is_cached(key));
-        }
-        shadow.insert(key.to_owned(), replacement.clone());
-        data
-    }
-
-    /// Look up fetched items by their final `mm_hash` so only misses reach
-    /// `compute`; computed misses are put into shm and shadowed.
-    pub(super) async fn prepare_cached<M, F>(
-        &self,
-        sources: Vec<(M, String)>,
-        compute: F,
-    ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>
-    where
-        F: AsyncFnOnce(Vec<(M, String)>) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>,
-    {
-        let mut slots: Vec<Option<(PreparedItem, PromptReplacement)>> =
-            Vec::with_capacity(sources.len());
+        modality: Modality,
+        placeholder: &ResolvedPlaceholder,
+        sources: Vec<(Source, String)>,
+        compute: impl AsyncFnOnce(
+            Vec<(Source, String)>,
+        ) -> Result<(Vec<PromptReplacement>, Vec<PreparedItem>)>,
+    ) -> Result<PreparedMedia> {
+        let Some(cache) = self.mm_cache_for(modality) else {
+            let (replacements, items) = compute(sources).await?;
+            return Ok(PreparedMedia::from_preprocessed(
+                modality,
+                placeholder.clone(),
+                replacements,
+                items,
+            ));
+        };
+        let count = sources.len();
+        let mut slots = vec![None; count];
         let mut pending = Vec::new();
-        for (media, key) in sources {
-            match self.lookup(&key) {
-                Some(hit) => slots.push(Some(hit)),
-                None => {
-                    slots.push(None);
-                    pending.push((media, key));
+        let mut positions: Vec<(usize, Vec<usize>)> = Vec::new();
+        let mut content_misses = HashMap::<String, usize>::new();
+        for (index, (media, key)) in sources.into_iter().enumerate() {
+            if let Some((data, replacement)) = cache.get_cached(&key) {
+                slots[index] = Some((replacement, PreparedItem { data, mm_hash: key }));
+                continue;
+            }
+            // A client UUID can name different media within the same cold batch.
+            if count > 1 && key.starts_with("content:") {
+                match content_misses.entry(key.clone()) {
+                    Entry::Occupied(entry) => {
+                        let (_, duplicates) = &mut positions[*entry.get()];
+                        duplicates.push(index);
+                        continue;
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(pending.len());
+                    }
                 }
             }
+            pending.push((media, key));
+            positions.push((index, Vec::new()));
         }
 
-        let mut misses = Vec::with_capacity(pending.len());
         if !pending.is_empty() {
             let (replacements, items) = compute(pending).await?;
-            for (mut item, replacement) in izip!(items, replacements) {
-                item.data = self.put_or_inline_and_track(&item.mm_hash, &replacement, item.data);
-                misses.push((item, replacement));
+            for ((first, duplicates), replacement, mut item) in
+                izip!(positions, replacements, items)
+            {
+                let replacement = Arc::new(replacement);
+                let occurrences = NonZeroUsize::MIN.saturating_add(duplicates.len());
+                item.data = cache.put_or_inline(
+                    &item.mm_hash,
+                    item.data,
+                    Arc::clone(&replacement),
+                    occurrences,
+                );
+                for index in duplicates {
+                    slots[index] = Some((Arc::clone(&replacement), item.clone()));
+                }
+                slots[first] = Some((replacement, item));
             }
         }
-        Ok(merge_slots(slots, misses))
+        let (replacements, items) =
+            slots.into_iter().map(|slot| slot.expect("one result per media item")).unzip();
+        Ok(PreparedMedia {
+            modality,
+            placeholder: placeholder.clone(),
+            replacements,
+            items,
+        })
     }
-}
-
-/// Reassemble per-modality replacements and items in request order from
-/// cache-hit slots and freshly preprocessed misses.
-///
-/// `slots` has one entry per media item: `Some` for hits, `None` for misses.
-/// `misses` carries one prepared item + replacement per `None` slot, in slot
-/// order, so the result stays index-aligned for placeholder expansion.
-fn merge_slots(
-    slots: Vec<Option<(PreparedItem, PromptReplacement)>>,
-    misses: Vec<(PreparedItem, PromptReplacement)>,
-) -> (Vec<PromptReplacement>, Vec<PreparedItem>) {
-    let mut misses = misses.into_iter();
-    let mut replacements = Vec::with_capacity(slots.len());
-    let mut items = Vec::with_capacity(slots.len());
-    for slot in slots {
-        let (item, replacement) = match slot {
-            Some(hit) => hit,
-            None => misses.next().expect("one prepared item per cache-miss slot"),
-        };
-        items.push(item);
-        replacements.push(replacement);
-    }
-    debug_assert!(misses.next().is_none());
-    (replacements, items)
 }
 
 /// 64x64 solid-color PNG.
@@ -180,8 +115,8 @@ fn merge_slots(
 pub(super) const TEST_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeklEQVR4nO3PUQkAIBTAwBfNaEYzmiH8OITBAtxm7fN1wwUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWPHYBHsYBafyS08sAAAAASUVORK5CYII=";
 
 #[cfg(test)]
-pub(super) fn test_shm_cache() -> Arc<MmProcessorShmCache> {
-    let cache = MmProcessorShmCache::create(vllm_mm_cache::MmCacheConfig {
+pub(super) fn test_shm_cache() -> Arc<MmProcessorCache> {
+    let cache = MmProcessorCache::create(vllm_mm_cache::MmCacheConfig {
         shm_name: vllm_mm_cache::MmCacheConfig::unique_shm_name(),
         data_buffer_size: 16 * 1024 * 1024,
         max_object_size: 4 * 1024 * 1024,
@@ -232,43 +167,125 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn hit_reuses_shadowed_replacement_and_address() {
-        let cache = MmProcessorCache::new(test_shm_cache());
-        let sent = cache.put_or_inline_and_track("uuid:uuid-1", &test_replacement(), test_item(11));
+    fn duplicate_put_preserves_cached_replacement_and_address() {
+        let cache = test_shm_cache();
+        let sent = cache.put_or_inline(
+            "uuid:uuid-1",
+            test_item(11),
+            Arc::new(test_replacement()),
+            NonZeroUsize::MIN,
+        );
         assert!(is_address_item(&sent));
 
-        let Some((hit, replacement)) = cache.lookup("uuid:uuid-1") else {
+        let mut other_replacement = test_replacement();
+        other_replacement.tokens.push(151_655);
+        let inline = cache.put_or_inline(
+            "uuid:uuid-1",
+            test_item(22),
+            Arc::new(other_replacement),
+            NonZeroUsize::MIN,
+        );
+        assert_eq!(inline, test_item(22));
+
+        let Some((hit, replacement)) = cache.get_cached("uuid:uuid-1") else {
             panic!("uuid-1 should be cached");
         };
         assert_eq!(replacement.tokens, test_replacement().tokens);
-        assert_eq!(hit.mm_hash, "uuid:uuid-1");
-        assert!(is_address_item(&hit.data));
-        assert_eq!(address_of(&hit.data), address_of(&sent));
+        assert_eq!(hit, sent);
     }
 
-    #[test]
-    fn merge_slots_restores_request_order() {
-        let item = |value: i64| PreparedItem {
-            data: test_item(value),
-            mm_hash: format!("hash-{value}"),
+    #[tokio::test]
+    async fn cold_content_duplicates_share_one_result_in_request_order() {
+        let cache = test_shm_cache();
+        let hot = cache.put_or_inline(
+            "content:hot",
+            test_item(0),
+            Arc::new(test_replacement()),
+            NonZeroUsize::MIN,
+        );
+        let info = super::super::tests::qwen3_vl_info().with_mm_processor_cache(Some(cache));
+        let placeholder = &info.image.as_ref().unwrap().placeholder;
+        let keys = ["content:a", "uuid:b", "content:hot", "content:a", "uuid:b"];
+        let sources = keys.iter().enumerate().map(|(i, key)| (i, key.to_string())).collect();
+        let PreparedMedia {
+            replacements,
+            items,
+            ..
+        } = info
+            .prepare_media(Modality::Image, placeholder, sources, async |misses| {
+                assert_eq!(
+                    misses.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+                    [0, 1, 4]
+                );
+                Ok(misses
+                    .into_iter()
+                    .map(|(i, mm_hash)| {
+                        (
+                            test_replacement(),
+                            PreparedItem {
+                                data: test_item(i as i64),
+                                mm_hash,
+                            },
+                        )
+                    })
+                    .unzip())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            items.iter().map(|item| item.mm_hash.as_str()).collect::<Vec<_>>(),
+            keys
+        );
+        assert_eq!(items[2].data, hot);
+        assert!(is_address_item(&items[0].data));
+        assert_eq!(items[0].data, items[3].data);
+        assert!(Arc::ptr_eq(&replacements[0], &replacements[3]));
+        assert!(is_address_item(&items[1].data));
+        assert_eq!(items[4].data, test_item(4));
+    }
+
+    #[tokio::test]
+    async fn oversize_repeated_images_match_uncached_features_and_prompt() {
+        use llm_multimodal::MediaContentPart;
+        use vllm_engine_core_client::protocol::dtype::ModelDtype;
+
+        use super::super::tests::{QWEN3_IMAGE_PAD_ID, qwen3_vl_info};
+
+        let shm = Arc::new(
+            MmProcessorCache::create(vllm_mm_cache::MmCacheConfig {
+                shm_name: vllm_mm_cache::MmCacheConfig::unique_shm_name(),
+                data_buffer_size: 4096,
+                max_object_size: 1,
+            })
+            .unwrap(),
+        );
+        shm.set_n_readers(1);
+        let prepare = async |cache| {
+            let media = MediaContentPart::ImageUrl {
+                max_long_side_pixel: None,
+                url: format!("data:image/png;base64,{TEST_PNG_BASE64}").into(),
+                detail: None,
+                uuid: None,
+            };
+            let mut tokens = vec![1, QWEN3_IMAGE_PAD_ID, 2, QWEN3_IMAGE_PAD_ID, 3];
+            let features = qwen3_vl_info()
+                .with_mm_processor_cache(cache)
+                .prepare_multimodal(
+                    vec![media.clone(), media],
+                    &mut tokens,
+                    ModelDtype::Float32,
+                    None,
+                )
+                .await
+                .unwrap();
+            (tokens, features)
         };
-        let slots = vec![
-            Some((item(1), test_replacement())),
-            None,
-            Some((item(3), test_replacement())),
-            None,
-        ];
-        let misses = vec![(item(2), test_replacement()), (item(4), test_replacement())];
-
-        let (replacements, items) = merge_slots(slots, misses);
-
-        let hashes: Vec<&str> = items.iter().map(|item| item.mm_hash.as_str()).collect();
-        assert_eq!(hashes, ["hash-1", "hash-2", "hash-3", "hash-4"]);
-        assert_eq!(replacements.len(), 4);
+        assert_eq!(prepare(Some(shm)).await, prepare(None).await);
     }
 
-    /// Both prepares fetch and decode the image. The second one reuses the
-    /// cached address and shadowed replacement instead of re-preprocessing or
+    /// Both prepares fetch the image. The second one reuses the
+    /// cached address and replacement instead of re-preprocessing or
     /// re-putting it, which would produce inline data for the duplicate key.
     #[tokio::test]
     async fn image_cache_hit_reuses_address_and_replacement_after_fetch() {

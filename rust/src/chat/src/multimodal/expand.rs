@@ -34,7 +34,7 @@ impl<'a> ExpansionLane<'a> {
             marker_token_ids: &media.placeholder.marker_token_ids,
             embed_token_id: media.placeholder.embed_token_id,
             placeholder_token: &media.placeholder.token,
-            replacements: media.replacements.iter().collect(),
+            replacements: media.replacements.iter().map(AsRef::as_ref).collect(),
         })
     }
 }
@@ -168,16 +168,16 @@ mod tests {
         embed_token_id: u32,
         replacements: Vec<PromptReplacement>,
     ) -> PreparedMedia {
-        PreparedMedia {
+        PreparedMedia::from_preprocessed(
             modality,
-            placeholder: ResolvedPlaceholder {
+            ResolvedPlaceholder {
                 token: placeholder_token.to_string(),
                 marker_token_ids: vec![marker_token_id],
                 embed_token_id,
             },
             replacements,
-            items: Vec::new(),
-        }
+            Vec::new(),
+        )
     }
 
     #[test]
@@ -196,7 +196,7 @@ mod tests {
                 marker_token_ids: marker_token_ids.clone(),
                 embed_token_id: QWEN3_IMAGE_PAD_ID,
             },
-            replacements: vec![replacement],
+            replacements: vec![replacement.into()],
             items: Vec::new(),
         }];
         let mut prompt_token_ids = vec![1, 40, 41, 42, 2];
@@ -658,16 +658,16 @@ mod tests {
         [start, embed, end]: [u32; 3],
         replacements: Vec<PromptReplacement>,
     ) -> PreparedMedia {
-        PreparedMedia {
+        PreparedMedia::from_preprocessed(
             modality,
-            placeholder: ResolvedPlaceholder {
+            ResolvedPlaceholder {
                 token: placeholder_token.to_string(),
                 marker_token_ids: vec![start, embed, end],
                 embed_token_id: embed,
             },
             replacements,
-            items: Vec::new(),
-        }
+            Vec::new(),
+        )
     }
 
     fn hy4_vl_image_prepared(replacements: Vec<PromptReplacement>) -> PreparedMedia {

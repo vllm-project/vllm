@@ -5,12 +5,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
-use vllm_mm_cache::MmProcessorShmCache;
 use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 use vllm_text::{DynTextBackend, GenerationConfigMode, TextBackend};
 
 use crate::error::Result;
-use crate::multimodal::{MmLimitPerPrompt, MultimodalModelInfo};
+use crate::multimodal::{MmLimitPerPrompt, MmProcessorCache, MultimodalModelInfo};
 use crate::output::DynChatOutputProcessor;
 use crate::renderer::DynChatRenderer;
 use crate::request::ChatRequest;
@@ -108,7 +107,7 @@ pub struct LoadModelBackendsOptions {
     pub limit_mm_per_prompt: MmLimitPerPrompt,
     /// Frontend-side (P0 writer) shm multi-modal processor cache shared with
     /// the engine workers, from `--mm-processor-cache-type shm`.
-    pub mm_processor_cache: Option<Arc<MmProcessorShmCache>>,
+    pub mm_processor_cache: Option<Arc<MmProcessorCache>>,
     /// Default overrides for multimodal processor options.
     pub mm_processor_kwargs: HashMap<String, Value>,
 }

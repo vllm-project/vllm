@@ -111,37 +111,11 @@ mod tests {
 
         // Both tensors stay inline as raw-view exts regardless of size.
         let body = vllm_engine_core_client::protocol::decode_value(&payload[1..]).unwrap();
-        let map = body.as_map().expect("item body is a map");
-        let field_value = |key: &str| {
-            map.iter()
-                .find(|(k, _)| k.as_str() == Some(key))
-                .unwrap_or_else(|| panic!("missing key {key}"))
-                .1
-                .clone()
-        };
-        let tensor_data = |key: &str| {
-            let elem = field_value(key);
-            let data = elem
-                .as_map()
-                .unwrap()
-                .iter()
-                .find(|(k, _)| k.as_str() == Some("data"))
-                .map(|(_, v)| v.clone())
-                .expect("data field");
-            let tensor_tuple = data.as_array().expect("tensor tuple");
-            tensor_tuple[2].clone()
-        };
-        assert_eq!(tensor_data("pixel_values"), rmpv::Value::Ext(3, big_bytes));
-        assert_eq!(tensor_data("small"), rmpv::Value::Ext(3, small_bytes));
-
-        let offset = field_value("offset");
-        let offset_data = offset
-            .as_map()
-            .unwrap()
-            .iter()
-            .find(|(k, _)| k.as_str() == Some("data"))
-            .map(|(_, v)| v)
-            .expect("data field");
-        assert_eq!(offset_data.as_i64(), Some(7));
+        assert_eq!(
+            body["pixel_values"]["data"][2],
+            rmpv::Value::Ext(3, big_bytes)
+        );
+        assert_eq!(body["small"]["data"][2], rmpv::Value::Ext(3, small_bytes));
+        assert_eq!(body["offset"]["data"].as_i64(), Some(7));
     }
 }
