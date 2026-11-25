@@ -1420,11 +1420,14 @@ flashinfer_gemm_fp8_nt_groupwise = _lazy_import_wrapper(
 @functools.cache
 def has_flashinfer_trtllm_fp8_groupwise_gemm() -> bool:
     """Return `True` if FlashInfer's TRT-LLM groupwise FP8 GEMM
-    (`gemm_fp8_nt_groupwise(backend="trtllm")`) can be used. Enabled on SM100,
-    where it was measured against the CUTLASS block-FP8 GEMM."""
+    (`gemm_fp8_nt_groupwise(backend="trtllm")`) can be used. Enabled on SM100
+    and SM103, where it was measured against the CUTLASS block-FP8 GEMM."""
     return (
         has_flashinfer()
-        and current_platform.is_device_capability(100)
+        and (
+            current_platform.is_device_capability(100)
+            or current_platform.is_device_capability(103)
+        )
         and hasattr(_get_submodule("flashinfer.gemm"), "gemm_fp8_nt_groupwise")
     )
 

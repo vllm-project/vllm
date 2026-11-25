@@ -510,7 +510,7 @@ def test_w8a8_block_fp8_b12x_matmul(M, N, K):
 
 @pytest.mark.skipif(
     not has_flashinfer_trtllm_fp8_groupwise_gemm(),
-    reason="FlashInfer TRT-LLM groupwise FP8 GEMM is enabled on SM100 only.",
+    reason="FlashInfer TRT-LLM groupwise FP8 GEMM is enabled on SM100 and SM103 only.",
 )
 @pytest.mark.parametrize("M", [1, 7, 32, 33, 64, 512])
 @pytest.mark.parametrize(

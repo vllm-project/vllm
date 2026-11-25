@@ -336,10 +336,11 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
 def _use_flashinfer_trtllm_fp8_block_gemm(m: int, n: int, k: int) -> bool:
     """Whether FlashInfer's TRT-LLM groupwise FP8 GEMM beats the CUTLASS block
-    kernel for an (m, n, k) problem on SM100. Both give bit-identical output;
-    the TRT-LLM kernel is 1.03-1.54x faster when m * n <= 2^18 (decode batch
-    sizes) and slower for larger m. It is 1-4% slower at k = 7168 with
-    6144 <= n <= 8192, and it needs k >= 256."""
+    kernel for an (m, n, k) problem on SM100 and SM103. Both give bit-identical
+    output; on SM100 the TRT-LLM kernel is 1.03-1.54x faster when
+    m * n <= 2^18 (decode batch sizes) and slower for larger m. It is 1-4%
+    slower at k = 7168 with 6144 <= n <= 8192, and it needs k >= 256. The
+    same rule was checked on SM103, where it is never slower."""
     if k < 256 or m * n > 1 << 18:
         return False
     return not (k >= 7168 and 6144 <= n <= 8192)
