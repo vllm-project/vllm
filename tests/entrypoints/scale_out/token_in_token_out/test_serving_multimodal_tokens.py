@@ -226,6 +226,7 @@ async def test_content_parts_generates_tokens(client, test_image):
     assert len(choice["token_ids"]) > 0
     assert gen_data["prompt_token_ids"] == expanded
     assert gen_data["mm_placeholders"] == mm_placeholders
+    assert gen_data["mm_hashes"] == render_data["features"]["mm_hashes"]
 
 
 @pytest.mark.asyncio
@@ -233,8 +234,9 @@ async def test_content_parts_generates_tokens(client, test_image):
 async def test_features_with_content_parts(client, test_image, cached):
     """Earlier items as features plus a new raw item must match /render.
 
-    With `cached`, features carry only `mm_hashes` (as in the docs), so
-    the earlier item resolves from the cache filled by a previous request.
+    With `cached`, features carry only the `mm_hashes` and `mm_placeholders`
+    returned by turn 1 (as in the docs), so the earlier item resolves from the
+    cache that request filled.
     """
     old_url = encode_image_url(test_image, format="PNG")
     new_url = encode_image_url(Image.new("RGB", (224, 224)), format="PNG")
@@ -250,14 +252,15 @@ async def test_features_with_content_parts(client, test_image, cached):
                 "token_ids": _collapse_placeholders(
                     expanded[: new["offset"]], {"image": [old]}
                 ),
-                "content_parts": [{"type": "image_url", "url": old_url, "uuid": "old"}],
+                "content_parts": [{"type": "image_url", "url": old_url}],
                 "sampling_params": {"max_tokens": 1},
+                "return_token_ids": True,
             },
         )
         turn1.raise_for_status()
         old_features = {
-            "mm_hashes": {"image": ["uuid:old"]},
-            "mm_placeholders": {"image": [old]},
+            "mm_hashes": turn1.json()["mm_hashes"],
+            "mm_placeholders": turn1.json()["mm_placeholders"],
         }
     else:
         old_features = {k: {"image": v["image"][:1]} for k, v in features.items() if v}
@@ -275,6 +278,7 @@ async def test_features_with_content_parts(client, test_image, cached):
     gen_resp.raise_for_status()
     assert gen_resp.json()["prompt_token_ids"] == expanded
     assert gen_resp.json()["mm_placeholders"] == features["mm_placeholders"]
+    assert gen_resp.json()["mm_hashes"] == features["mm_hashes"]
 
 
 @pytest.mark.asyncio
@@ -335,3 +339,6 @@ async def test_content_parts_streaming(client, test_image):
     assert len(prompt_metadata_chunks) == 1
     assert prompt_metadata_chunks[0]["prompt_token_ids"] == expanded
     assert prompt_metadata_chunks[0]["mm_placeholders"] == mm_placeholders
+    first = prompt_metadata_chunks[0]
+    assert first["mm_hashes"] == render_data["features"]["mm_hashes"]
+    assert all("mm_hashes" not in c for c in chunks if c is not first)

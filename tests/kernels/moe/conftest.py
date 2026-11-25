@@ -24,7 +24,6 @@ NEEDS_CLEAN_ENTRY = frozenset(
         "test_deepgemm.py",
         "test_grouped_topk.py",
         "test_mxfp4_moe.py",
-        "test_shared_fused_moe_routed_transform.py",
         "test_silu_mul_per_token_group_quant_fp8_colmajor.py",
         "test_situ_mul_fp8_quant.py",
     }
@@ -70,6 +69,7 @@ def pytest_runtest_setup(item):
         new_file
         or item.path.name in NEEDS_CLEAN_ENTRY
         or "dist_init" in item.fixturenames
+        or getattr(item.obj, "_uses_single_rank_groups", False)
     ):
         reset_workspace_manager()
         cleanup_dist_env_and_memory()
