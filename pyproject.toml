@@ -108,6 +108,7 @@ docstring-code-format = true
 
 # Not run in CI, mirrors the ty config below for contributors who use mypy
 [tool.mypy]
+files = ["vllm", "tests"]
 ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
