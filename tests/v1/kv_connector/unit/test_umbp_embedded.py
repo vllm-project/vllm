@@ -937,6 +937,10 @@ def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, load_fail
         assert request.status == RequestStatus.FINISHED_ERROR
         scheduler.add_request(create_request(num_tokens=num_tokens, max_tokens=1))
         reused = _engine_step(scheduler, worker)
-        assert set(loaded) <= set(reused.new_block_ids_to_zero)
+        (reused_ids,) = reused.scheduled_new_reqs[0].block_ids
+        assert set(loaded) <= set(reused_ids)
+        # Only the step that reallocates them zeroes them: a zeroing queued in
+        # any other step is not ordered against a later load into them.
+        assert reused.new_block_ids_to_zero == reused_ids
     _run_to_completion(scheduler, worker)
     worker.shutdown()
