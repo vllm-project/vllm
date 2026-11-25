@@ -3559,6 +3559,13 @@ class MoRIIOConnectorWorker:
         self.transfer_id_to_request_id = metadata.transfer_id_to_request_id
         if self.is_producer:
             if self.mode == MoRIIOMode.WRITE:
+                self._writer.ack_refused_transfers(
+                    meta.transfer_id
+                    for meta in (
+                        *metadata.reqs_to_save.values(),
+                        *metadata.reqs_to_abort.values(),
+                    )
+                )
                 for request_id, meta in metadata.reqs_to_abort.items():
                     self._writer.abort_before_write(request_id, meta)
             live_transfer_ids = set(self.transfer_id_to_request_id)
@@ -3653,9 +3660,6 @@ class MoRIIOConnectorWorker:
         if self.mode == MoRIIOMode.WRITE and self.is_producer:
             for layer_name, kv_layer in self.kv_caches.items():
                 self.save_kv_layer(metadata, layer_name, kv_layer, None)
-            self._writer.ack_refused_transfers(
-                meta.transfer_id for meta in metadata.reqs_to_save.values()
-            )
             self._writer.seal_pending_transfers()
 
     def _next_flex_tp_rank(self, remote_tp_size: int) -> int:

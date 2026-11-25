@@ -238,17 +238,18 @@ class MoRIIOWriter:
             return layer_name in self._scheduled_layers.get(transfer_id, set())
 
     def ack_refused_transfers(self, transfer_ids: Iterable[TransferId]) -> None:
-        """Ack each transfer that is terminal and has no write scheduled.
+        """Ack each transfer that ended before this step.
 
-        No completion, failure or timeout acks a request whose writes were all
-        refused. `resolve_moriio_transfer_ack` drops a duplicate of a release.
+        Every write of such a transfer is refused, so no completion, failure or
+        timeout acks its request. `resolve_moriio_transfer_ack` drops a
+        duplicate of a release. Re-marking it keeps the refusal from being
+        evicted while the request can still schedule writes.
         """
         wrapper = self.worker.moriio_wrapper
-        with self._write_state_lock, wrapper.lock:
+        with wrapper.lock:
             for transfer_id in set(transfer_ids):
-                if transfer_id not in self._scheduled_writes and (
-                    wrapper._is_transfer_terminal_locked(transfer_id)
-                ):
+                if wrapper._is_transfer_terminal_locked(transfer_id):
+                    wrapper._mark_transfer_terminal_locked(transfer_id)
                     wrapper.done_req_ids.append(MoRIIOTransferAck(transfer_id))
 
     def seal_pending_transfers(self) -> None:
@@ -292,7 +293,7 @@ class MoRIIOWriter:
             if task.transfer_state is not None and task.transfer_state.cancelled:
                 continue
             if self._is_transfer_terminal(task.transfer_id):
-                self._clear_transfer_state(task.transfer_id)
+                self._clear_transfer_state(task.transfer_id, task.transfer_state)
                 continue
 
             # Check if remote blocks are ready
@@ -328,7 +329,7 @@ class MoRIIOWriter:
             if task.transfer_state is not None and task.transfer_state.cancelled:
                 continue
             if self._is_transfer_terminal(task.transfer_id):
-                self._clear_transfer_state(task.transfer_id)
+                self._clear_transfer_state(task.transfer_id, task.transfer_state)
                 continue
             if self._is_remote_ready(task):
                 try:
@@ -377,8 +378,16 @@ class MoRIIOWriter:
                         task.transfer_id,
                     )
 
-    def _clear_transfer_state(self, transfer_id: TransferId) -> None:
+    def _clear_transfer_state(
+        self, transfer_id: TransferId, owner: WriteTransferState | None = None
+    ) -> None:
+        """Drop a transfer's write state, unless `owner` no longer holds it."""
         with self._write_state_lock:
+            if owner is not None and self._transfer_states.get(transfer_id) not in (
+                None,
+                owner,
+            ):
+                return
             self._scheduled_writes.pop(transfer_id, None)
             self._scheduled_layers.pop(transfer_id, None)
             self._sealed_writes.pop(transfer_id, None)
@@ -401,14 +410,15 @@ class MoRIIOWriter:
         with self._write_state_lock:
             state = self._transfer_states.get(transfer_id)
             with wrapper.lock:
-                if wrapper._is_transfer_terminal_locked(transfer_id):
-                    return
-                if state is not None:
-                    state.cancelled = True
-                wrapper.done_req_ids.append(MoRIIOTransferAck(transfer_id))
-                wrapper.done_remote_allocate_req_dict.pop(transfer_id, None)
-                wrapper._mark_transfer_terminal_locked(transfer_id)
-        self._clear_transfer_state(transfer_id)
+                terminal = wrapper._is_transfer_terminal_locked(transfer_id)
+                if not terminal:
+                    if state is not None:
+                        state.cancelled = True
+                    wrapper.done_req_ids.append(MoRIIOTransferAck(transfer_id))
+                    wrapper.done_remote_allocate_req_dict.pop(transfer_id, None)
+                    wrapper._mark_transfer_terminal_locked(transfer_id)
+        # An ended transfer was acked already, but its write state still goes.
+        self._clear_transfer_state(transfer_id, state)
 
     def _is_remote_ready(self, task: WriteTask) -> bool:
         """Check if remote blocks are allocated for this task.
