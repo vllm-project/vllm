@@ -1702,6 +1702,7 @@ def test_triton_convert_rejects_req_id_longer_than_token_indices():
 @pytest.mark.parametrize("actual_num_heads", [4, 8, 16, 32, 64, 128])
 @pytest.mark.parametrize("head_size", [512, 576])
 @pytest.mark.parametrize("padded_query", [False, True])
+@pytest.mark.parametrize("with_sinks", [False, True])
 def test_flashmla_bf16_preserves_unused_output_heads(
     default_vllm_config,
     dist_init,
@@ -1710,8 +1711,9 @@ def test_flashmla_bf16_preserves_unused_output_heads(
     head_size,
     padded_query,
     query_waves,
+    with_sinks,
 ):
-    """Only larger batches use native heads, including gathered queries."""
+    """Native heads preserve attention, sinks, and unused output lanes."""
     supported, reason = flashmla.is_flashmla_sparse_supported()
     if not supported:
         pytest.skip(reason)
@@ -1719,8 +1721,20 @@ def test_flashmla_bf16_preserves_unused_output_heads(
     num_tokens = query_waves * num_compute_units(
         torch.accelerator.current_device_index()
     )
-    impl = FlashMLASparseImpl(
-        num_heads=8,
+    impl_cls = FlashMLASparseImpl
+    local_heads = 8
+    sinks = None
+    impl_kwargs = {}
+    if with_sinks:
+        from vllm.models.hy_v4.nvidia.flashmla_sparse import HYV4FlashMLASparseImpl
+
+        impl_cls = HYV4FlashMLASparseImpl
+        local_heads = actual_num_heads
+        sinks = torch.linspace(-4, 12, actual_num_heads, device=device)
+        sinks[0], sinks[-1] = -float("inf"), float("inf")
+        impl_kwargs["sinks"] = sinks
+    impl = impl_cls(
+        num_heads=local_heads,
         head_size=head_size,
         scale=256**-0.5,
         num_kv_heads=1,
@@ -1736,10 +1750,15 @@ def test_flashmla_bf16_preserves_unused_output_heads(
         qk_rope_head_dim=head_size - 512,
         qk_head_dim=head_size - 256,
         v_head_dim=256,
-        kv_b_proj=ColumnParallelLinear(512, 8 * 512, bias=False),
+        kv_b_proj=ColumnParallelLinear(512, local_heads * 512, bias=False),
+        **impl_kwargs,
     )
     gen = torch.Generator(device=device).manual_seed(0)
     padded_heads = max(64, actual_num_heads)
+    padded_sinks = None
+    if sinks is not None:
+        padded_sinks = sinks.new_full((padded_heads,), -float("inf"))
+        padded_sinks[:actual_num_heads] = sinks
     q = torch.randn(
         num_tokens, padded_heads, head_size, generator=gen, device=device
     ).bfloat16()
@@ -1751,7 +1770,12 @@ def test_flashmla_bf16_preserves_unused_output_heads(
         torch.arange(num_tokens, device=device) % 3
     ]
     reference, _, reference_lse = flashmla.flash_mla_sparse_fwd(
-        q, kv, indices, impl.softmax_scale, topk_length=lengths
+        q,
+        kv,
+        indices,
+        impl.softmax_scale,
+        attn_sink=padded_sinks,
+        topk_length=lengths,
     )
     if not padded_query:
         q = q[:, :actual_num_heads].contiguous()
@@ -2356,7 +2380,7 @@ def test_sparse_backend_prefill_correctness(
 
 
 @pytest.mark.parametrize(
-    "seq_lens,query_lens,workspace_size,max_logits_bytes,expected",
+    "seq_lens,query_lens,workspace_size,max_logits_bytes,expected,fused_mqa_topk_eligible",
     [
         (
             torch.tensor([0]),
@@ -2364,6 +2388,7 @@ def test_sparse_backend_prefill_correctness(
             100,
             1000,
             [],
+            False,
         ),
         # Logits constraint triggers split (M*N exceeds budget)
         # req0: M=10, N=100 -> 1000 elems (4000 bytes) - fits in 5000
@@ -2378,6 +2403,7 @@ def test_sparse_backend_prefill_correctness(
                 (slice(1, 2), slice(0, 10)),
                 (slice(2, 3), slice(0, 10)),
             ],
+            False,
         ),
         # Both constraints satisfied - all fit in one chunk
         (
@@ -2386,6 +2412,7 @@ def test_sparse_backend_prefill_correctness(
             100,
             10000,  # 2500 elems, M*N = 15*30 = 450 < 2500
             [(slice(0, 3), slice(0, 15))],
+            False,
         ),
         # Workspace constraint triggers first
         (
@@ -2398,6 +2425,7 @@ def test_sparse_backend_prefill_correctness(
                 (slice(1, 2), slice(0, 1)),
                 (slice(2, 3), slice(0, 1)),
             ],
+            False,
         ),
         # Greedy filling: first two fit, third doesn't
         # req0: M=5, N=10 -> 50 elems
@@ -2409,17 +2437,49 @@ def test_sparse_backend_prefill_correctness(
             100,
             1000,  # 250 elems
             [(slice(0, 2), slice(0, 10)), (slice(2, 3), slice(0, 5))],
+            False,
+        ),
+        # Fused planning bypasses the dense budget while retaining kernel limits.
+        (
+            torch.tensor([1_024_000]),
+            torch.tensor([4096]),
+            40 * 2**20,
+            512 * 2**20,
+            [(slice(0, 1), slice(0, 4096))],
+            True,
+        ),
+        (
+            torch.tensor([1_024_000]),
+            torch.tensor([20_000]),
+            40 * 2**20,
+            512 * 2**20,
+            [(slice(0, 1), slice(0, 16384)), (slice(0, 1), slice(16384, 20000))],
+            True,
+        ),
+        (
+            torch.tensor([2**20 + 4]),
+            torch.tensor([4096]),
+            40 * 2**20,
+            512 * 2**20,
+            [(slice(0, 1), slice(i, min(i + 127, 4096))) for i in range(0, 4096, 127)],
+            True,
         ),
     ],
 )
 def test_split_indexer_prefill_chunks(
-    seq_lens, query_lens, workspace_size, max_logits_bytes, expected
+    seq_lens,
+    query_lens,
+    workspace_size,
+    max_logits_bytes,
+    expected,
+    fused_mqa_topk_eligible,
 ):
     out = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
         seq_lens,
         query_lens,
         workspace_size,
         max_logits_bytes,
+        fused_mqa_topk_eligible=fused_mqa_topk_eligible,
     )
     assert out == expected
 

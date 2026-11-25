@@ -73,6 +73,7 @@ The remaining crates are tooling and infrastructure (`vllm-metrics`, `vllm-traci
 - Although you might be asked to only implement or migrate minimal functionality at the beginning, you should still leave necessary `TODO` comments in the code for the future improvements of the lacked features, so that it's easier for the next iteration to build upon the existing codebase.
 - Reuse the vocabulary already in the codebase and the protocol. Names state roles and effects, and a rename propagates through locals, tests, comments, and docs.
 - Derive serialization with Serde attributes instead of hand-writing it; absorb schema variants with `#[serde(alias)]` instead of parallel fields. Choose `Display` or `Debug` by meaning.
+- Parse JSON files from a model checkpoint (`config.json`, `tokenizer_config.json`, processor configs, `chat_template.json`) with `parse_checkpoint_json`, which, like Python's `json`, accepts the bare `NaN` and `Infinity` some of them contain. JSON that is not a checkpoint file (request bodies, model output, CLI values) stays on `serde_json`.
 - Rust error handling:
     - Error types describe the categories their layer actually produces. Use `#[from]` and `?` for one-to-one conversions between typed errors, and an explicit `map_err` where a general type carries several meanings.
     - Never call `to_string()` directly on an error value.
