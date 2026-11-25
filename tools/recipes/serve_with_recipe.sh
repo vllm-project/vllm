@@ -26,25 +26,21 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     esac
 done
 
-has_detect_hardware=false
-for arg in "${args[@]}"; do
-    if [[ "$arg" == "--detect-hardware" ]]; then
-        has_detect_hardware=true
-        break
+# The registry owns backend-specific defaults; no accelerator checks here.
+backend_flags="$(python3 "${SCRIPT_DIR}/hardware/registry.py" "${hardware,,}")"
+while IFS= read -r flag; do
+    [[ -n "$flag" ]] || continue
+    present=false
+    for arg in "${args[@]}"; do
+        if [[ "$arg" == "$flag" ]]; then
+            present=true
+            break
+        fi
+    done
+    if [[ "$present" == false ]]; then
+        args+=("$flag")
     fi
-done
-
-if [[ "$has_detect_hardware" == false && \
-      ( "${hardware,,}" == "xeon6" || "${hardware,,}" == "arc_pro_b70" ) ]]; then
-    args+=(--detect-hardware)
-fi
-
-# Explicit opt-in for XPU TP/DP fallback; no behavior change for other hardware.
-if [[ "${hardware,,}" == "arc_pro_b70" &&
-      ( "${RECIPE_AUTO_FIT_XPU_PARALLELISM:-false}" == "true" ||
-        "${RECIPE_AUTO_FIT_XPU_PARALLELISM:-false}" == "1" ) ]]; then
-    args+=(--auto-fit-xpu-parallelism)
-fi
+done <<< "$backend_flags"
 
 # Opt-in protocol for validation harnesses; normal CLI use is unchanged.
 if [[ -n "${RECIPE_VALIDATION_RESULT_OUT:-}" ]]; then
@@ -56,7 +52,7 @@ python3 "${CONVERTER}" "${args[@]}"
 
 echo
 echo "==> Preparing recipe assets"
-python3 "${SCRIPT_DIR}/recipe_assets.py" \
+python3 "${SCRIPT_DIR}/core/assets.py" \
     --config "${CONFIG_PATH}" \
     --cache-dir "${RECIPE_ASSET_CACHE_DIR:-${OUTPUT_DIR}/.recipe-assets}"
 

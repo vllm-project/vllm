@@ -692,7 +692,10 @@ vllm serve --config /output/sweep/recommended-config.yml
 ## Select sweep stages
 
 Sweep implementation and reporting helpers live in `tools/recipes/sweep/`.
+The shared GPU layout planner (`gpu_layouts.py`) takes backend-supplied TP
+limits and DP policy. CPU NUMA layouts retain their existing constraints.
 The converter remains `tools/recipes/recipe_json_to_vllm_config.py`.
+Hardware-specific discovery and runtime policies live in `tools/recipes/hardware/`.
 
 Use `--sweep-stage concurrency` to generate only a concurrency sweep against
 the supplied recipe's fixed TP/DP layout, for example:

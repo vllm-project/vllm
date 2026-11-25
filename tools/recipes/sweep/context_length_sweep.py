@@ -45,7 +45,7 @@ def metric(data: dict, name: str) -> float | None:
     value = data.get(name)
     return (
         float(value)
-        if isinstance(value, (int, float)) and not isinstance(value, bool)
+        if isinstance(value, int | float) and not isinstance(value, bool)
         else None
     )
 

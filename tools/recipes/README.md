@@ -21,6 +21,12 @@ flowchart LR
 The recipe is the baseline. Hardware and workload information can optionally
 refine the initial configuration. Sweep tuning is optional.
 
+The converter and sweep orchestration are shared across hardware platforms.
+Hardware detection and tuning policies are selected from the recipe hardware
+ID through `hardware/registry.py`. CPU and Intel XPU backends are implemented;
+CUDA and ROCm backends can be added without changing the public entry points.
+See [RUNTIME_TUNING.md](docs/RUNTIME_TUNING.md#implementation) for the layout.
+
 ## Getting Started
 
 Use `serve_with_recipe.sh` to fetch the selected deployment from
@@ -108,7 +114,7 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
   --hardware xeon6
 ```
 
-See [REFERENCE.md](REFERENCE.md) for recipe discovery, strategy selection,
+See [REFERENCE.md](docs/REFERENCE.md) for recipe discovery, strategy selection,
 custom output files, and deployment scope.
 
 ### 2. Hardware Information (Optional)
@@ -131,6 +137,8 @@ It does not prove that the model and KV cache fit.
 
 On a B70 system with fewer cards than the recipe requests, opt into conservative
 TP/DP fallback with `--auto-fit-xpu-parallelism` (requires `--detect-hardware`).
+`--auto-fit-parallelism` is an equivalent, backend-neutral spelling; B70 is
+currently the only backend with automatic TP/DP fallback.
 The selector reduces DP first, then supported power-of-two TP layouts after
 model-head, actual safetensors size and KV/VRAM estimates. Unsupported or
 unverifiable candidates are skipped; estimates are never a startup guarantee.
@@ -147,7 +155,7 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
 ```
 
 `serve_with_recipe.sh` enables detection automatically for both `xeon6` and
-`arc_pro_b70`. See [RUNTIME_TUNING.md](RUNTIME_TUNING.md#hardware-information)
+`arc_pro_b70`. See [RUNTIME_TUNING.md](docs/RUNTIME_TUNING.md#hardware-information)
 for details.
 
 ### 3. Workload Information (Optional)
@@ -167,7 +175,7 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
   --tpot-sla-ms 100
 ```
 
-See [RUNTIME_TUNING.md](RUNTIME_TUNING.md#workload-information) for supported
+See [RUNTIME_TUNING.md](docs/RUNTIME_TUNING.md#workload-information) for supported
 inputs and runtime calculations.
 
 ### 4. Sweep Tuning (Optional)
@@ -186,9 +194,9 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
   --generate-full-sweep
 ```
 
-See [SWEEP_TUNING.md](SWEEP_TUNING.md) for targeted sweep modes, NUMA binding,
+See [SWEEP_TUNING.md](docs/SWEEP_TUNING.md) for targeted sweep modes, NUMA binding,
 failure handling, recommendations, reporting, and visualization.
-For Arc Pro B70, see the [XPU hardware-validation workflow](SWEEP_TUNING.md#b70-hardware-validation-workflow),
+For Arc Pro B70, see the [XPU hardware-validation workflow](docs/SWEEP_TUNING.md#b70-hardware-validation-workflow),
 including the sweep validation helper under `sweep/`.
 
 ### 5. Start vLLM

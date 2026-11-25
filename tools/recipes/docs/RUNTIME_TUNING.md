@@ -358,11 +358,23 @@ with [SWEEP_TUNING.md](SWEEP_TUNING.md).
 
 ## Implementation
 
-- `hardware_detection.py` collects effective CPU/NUMA/memory information.
-- `sweep/runtime_tuning.py` owns hardware-policy selection and independent parameter
-  tuning functions.
+- `hardware/registry.py` selects a backend from the resolved recipe hardware ID.
+- `hardware/cpu.py` owns CPU/NUMA detection and CPU runtime policies.
+- `hardware/xpu.py` owns XPU detection and XPU runtime policies.
+- `hardware/gpu.py` defines shared GPU discovery and layout data structures.
+- `core/` contains shared model constraints, memory estimates, validation,
+  recipe assets, tuning data structures, and GPU fallback logic.
+- `sweep/runtime_tuning.py` applies the selected backend policies and shared
+  scheduler tuning functions.
+- `sweep/gpu_layouts.py` enumerates GPU layouts using backend-supplied policy.
 - `recipe_json_to_vllm_config.py` resolves the recipe, collects optional inputs,
   applies the selected policy, and generates `config.yml` and `env.sh`.
+
+A future GPU backend supplies detection, runtime policies, sweep resources and
+an optional parallelism fallback. Register its hardware IDs in the registry;
+do not add vendor checks to the converter or shared scheduler policies. The
+existing B70 fallback remains opt-in and its memory estimates are not a
+startup guarantee.
 
 For benchmark-backed validation of the explicit scheduler seed, see
 [SWEEP_TUNING.md](SWEEP_TUNING.md).

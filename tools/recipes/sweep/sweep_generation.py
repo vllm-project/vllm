@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
-from .runtime_tuning import WorkloadHints
+from core.tuning import WorkloadHints
+from hardware.gpu import GPULayoutPolicy
 
 SUPPORTED_TENSOR_PARALLEL_SIZES = frozenset({1, 2, 4, 8})
 
@@ -817,11 +817,12 @@ def _write_post_benchmark_analysis_files(
         ("requirements.txt", "requirements.txt", False),
         ("VISUALIZATION.md", "VISUALIZATION.md", False),
     ):
-        source = (
-            source_dir / source_name
-            if source_name.endswith(".py")
-            else source_dir.parent / source_name
-        )
+        if source_name.endswith(".py"):
+            source = source_dir / source_name
+        elif source_name.endswith(".md"):
+            source = source_dir.parent / "docs" / source_name
+        else:
+            source = source_dir.parent / source_name
         target = directory / target_name
         target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
         if executable:
@@ -899,9 +900,10 @@ def write_parallel_layout_sweep_files(
     workload: WorkloadHints,
     numa_node_count: int | None = None,
     gpu_count: int | None = None,
+    gpu_layout_policy: GPULayoutPolicy | None = None,
     tune_scheduler: bool = False,
 ) -> list[Path]:
-    """Write a standalone CPU NUMA or XPU TP/DP sweep package."""
+    """Write a standalone CPU NUMA or GPU TP/DP sweep package."""
     if (gpu_count is None) == (numa_node_count is None):
         raise ValueError("Specify exactly one of gpu_count or numa_node_count")
     validate_sweep_workload(workload)
@@ -926,13 +928,15 @@ def write_parallel_layout_sweep_files(
     benchmark_config_rel = initial_config_rel if tune_scheduler else parallel_config_rel
 
     if gpu_count is not None:
-        from .xpu_layouts import build_xpu_parallel_layout_plan
+        from .gpu_layouts import build_gpu_parallel_layout_plan
 
-        parallel_candidates, skipped_candidates = build_xpu_parallel_layout_plan(
+        layout_policy = gpu_layout_policy or GPULayoutPolicy()
+        parallel_candidates, skipped_candidates = build_gpu_parallel_layout_plan(
             config,
             workload,
             gpu_count,
             tune_scheduler=tune_scheduler,
+            policy=layout_policy,
         )
     else:
         try:
@@ -980,17 +984,18 @@ def write_parallel_layout_sweep_files(
 
     guide.write_text(
         (
-            f"""# Parallel-Layout Sweep (Intel XPU)
+            f"""# Parallel-Layout Sweep ({layout_policy.title})
 
 This package evaluates bounded GPU TP/DP layouts with {gpu_count} visible GPUs.
 Model attention/KV head compatibility is checked before candidate generation;
 weight/KV memory fit is validated only when a candidate server starts.
 Review skipped candidates in `parallel_layout_skips.json`.
 Pass `--max-model-len` to the converter when needed, as large model context
-defaults may exceed available B70 KV-cache memory.
+defaults may exceed available {layout_policy.memory_label} KV-cache memory.
 
 Run `./run_parallel_layout_sweep.sh --dry-run`, then run the sweep and
-`./recommend_parallel_layout.py`. XPU layouts do not assume host CPU NUMA.
+`./recommend_parallel_layout.py`.
+{layout_policy.device_label} layouts do not assume host CPU NUMA.
 """
             if gpu_count is not None
             else f"""# Parallel-Layout Sweep
@@ -1496,6 +1501,7 @@ def write_full_sweep_files(
     workload: WorkloadHints,
     numa_node_count: int | None = None,
     gpu_count: int | None = None,
+    gpu_layout_policy: GPULayoutPolicy | None = None,
     tune_scheduler: bool = False,
 ) -> list[Path]:
     """Write TP/DP -> concurrency -> scheduler end-to-end tuning artifacts."""
@@ -1507,6 +1513,7 @@ def write_full_sweep_files(
         workload=workload,
         numa_node_count=numa_node_count,
         gpu_count=gpu_count,
+        gpu_layout_policy=gpu_layout_policy,
         tune_scheduler=tune_scheduler,
     )
 

@@ -52,7 +52,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from recipe_validation_status import RecipeSkipError, write_validation_result
+from core.validation import RecipeSkipError, write_validation_result
 
 try:
     import yaml
@@ -160,21 +160,23 @@ def parse_args() -> argparse.Namespace:
         (
             "Refine the recipe baseline only when additional information is supplied. "
             "Runtime tuning is enabled only for recipe hardware with a registered "
-            "policy (currently: xeon6)."
+            "policy (currently: xeon6 and arc_pro_b70)."
         ),
     )
     tuning.add_argument(
         "--detect-hardware",
         action="store_true",
         help=(
-            "Detect CPU/NUMA or Intel XPU resources and allow the selected "
+            "Detect resources through the selected hardware backend and allow the "
             "recipe-hardware policy to override recipe runtime arguments."
         ),
     )
     tuning.add_argument(
+        "--auto-fit-parallelism",
         "--auto-fit-xpu-parallelism",
+        dest="auto_fit_parallelism",
         action="store_true",
-        help="Opt in to conservative B70 TP/DP fallback using model, VRAM checks.",
+        help="Opt in to conservative GPU TP/DP fallback (currently B70 only).",
     )
     tuning.add_argument(
         "--input-tokens",
@@ -918,8 +920,8 @@ def main() -> int:
                 raise ValueError("--max-model-len must be positive")
             config["max-model-len"] = args.max_model_len
 
-        if args.auto_fit_xpu_parallelism and not args.detect_hardware:
-            raise ValueError("--auto-fit-xpu-parallelism requires --detect-hardware")
+        if args.auto_fit_parallelism and not args.detect_hardware:
+            raise ValueError("--auto-fit-parallelism requires --detect-hardware")
         tuning_requested = (
             args.detect_hardware
             or args.tune_scheduler
@@ -943,10 +945,12 @@ def main() -> int:
         workload = None
         sweep_writer = None
         hardware = None
+        backend = None
         env_overrides: dict[str, object] = {}
         if tuning_requested:
             # Keep plain Recipes conversion lightweight. vLLM-specific modules
             # are imported only for optional runtime tuning or sweep generation.
+            from hardware.registry import get_hardware_backend
             from sweep.runtime_tuning import (
                 WorkloadHints,
                 finetune_runtime_config,
@@ -973,6 +977,7 @@ def main() -> int:
                 sweep_writer = write_sweep_files
 
             recipe_hardware = recipe.get("hardware")
+            backend = get_hardware_backend(recipe_hardware)
             scheduler_tuning_requested = bool(
                 args.tune_scheduler
                 or args.generate_sweep
@@ -984,25 +989,14 @@ def main() -> int:
             )
 
             if args.detect_hardware:
-                if recipe_hardware == "xeon6":
-                    from hardware_detection import detect_hardware
+                hardware = backend.detect()
 
-                    hardware = detect_hardware()
-                elif recipe_hardware == "arc_pro_b70":
-                    from xpu_hardware_detection import detect_xpu_hardware
-
-                    hardware = detect_xpu_hardware()
-                else:
-                    raise ValueError(f"No detector registered for {recipe_hardware!r}")
-
-            if args.auto_fit_xpu_parallelism:
-                if recipe_hardware != "arc_pro_b70" or hardware is None:
+            if args.auto_fit_parallelism:
+                if hardware is None:
                     raise ValueError(
-                        "Automatic XPU TP/DP fallback requires B70 hardware detection"
+                        "Automatic parallelism fallback requires detection"
                     )
-                from xpu_parallel_fallback import select_xpu_fallback
-
-                parallelism_adjustment = select_xpu_fallback(config, hardware)
+                parallelism_adjustment = backend.fit_parallelism(config, hardware)
                 if parallelism_adjustment["changed"]:
                     config["tensor-parallel-size"] = parallelism_adjustment[
                         "effective"
@@ -1011,7 +1005,8 @@ def main() -> int:
                         "dp"
                     ]
                     print(
-                        "B70 parallelism downgrade (estimated, startup not verified):"
+                        f"{backend.label} parallelism downgrade "
+                        "(estimated, startup not verified):"
                     )
                     print(f"  recipe: {parallelism_adjustment['recipe']}")
                     print(f"  effective: {parallelism_adjustment['effective']}")
@@ -1041,6 +1036,7 @@ def main() -> int:
             if not args.detect_hardware or hardware is None:
                 raise ValueError("--generate-full-sweep requires --detect-hardware.")
             assert workload is not None
+            assert backend is not None
             from sweep.sweep_generation import write_full_sweep_files
 
             sweep_files = write_full_sweep_files(
@@ -1049,11 +1045,7 @@ def main() -> int:
                 env_path=args.env_out,
                 config=config,
                 workload=workload,
-                **(
-                    {"gpu_count": hardware.gpu_count}
-                    if recipe_hardware == "arc_pro_b70"
-                    else {"numa_node_count": hardware.numa_node_count}
-                ),
+                **backend.sweep_kwargs(hardware),
                 tune_scheduler=args.tune_scheduler,
             )
         elif args.generate_parallel_layout_sweep:
@@ -1062,6 +1054,7 @@ def main() -> int:
                     "--generate-parallel-layout-sweep requires --detect-hardware."
                 )
             assert workload is not None
+            assert backend is not None
             from sweep.sweep_generation import write_parallel_layout_sweep_files
 
             sweep_files = write_parallel_layout_sweep_files(
@@ -1070,11 +1063,7 @@ def main() -> int:
                 env_path=args.env_out,
                 config=config,
                 workload=workload,
-                **(
-                    {"gpu_count": hardware.gpu_count}
-                    if recipe_hardware == "arc_pro_b70"
-                    else {"numa_node_count": hardware.numa_node_count}
-                ),
+                **backend.sweep_kwargs(hardware),
                 tune_scheduler=args.tune_scheduler,
             )
         elif args.generate_concurrency_sweep:

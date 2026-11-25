@@ -13,79 +13,11 @@ proven universal optima.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass, field
 from math import ceil
 from typing import Any
 
-from hardware_detection import HardwareInfo
-from model_constraints import load_head_constraints, suggest_tensor_parallel_size
-from recipe_validation_status import RecipeSkipError
-from xpu_hardware_detection import XPUHardwareInfo
-
-from vllm.config.scheduler import SchedulerConfig
-
-
-@dataclass(frozen=True, slots=True)
-class WorkloadHints:
-    input_tokens: int | None = None
-    output_tokens: int | None = None
-    concurrency: int | None = None
-    ttft_sla_ms: float | None = None
-    tpot_sla_ms: float | None = None
-    target_qps: float | None = None
-
-    def validate(self) -> None:
-        for name in ("input_tokens", "output_tokens", "concurrency"):
-            value = getattr(self, name)
-            if value is not None and value <= 0:
-                raise ValueError(f"{name} must be greater than zero")
-
-        for name in ("ttft_sla_ms", "tpot_sla_ms", "target_qps"):
-            value = getattr(self, name)
-            if value is not None and value <= 0:
-                raise ValueError(f"{name} must be greater than zero")
-
-
-@dataclass(slots=True)
-class TuningResult:
-    """Runtime overrides and benchmark-only seeds produced by tuning policies."""
-
-    overrides: dict[str, Any] = field(default_factory=dict)
-    sweep_overrides: dict[str, Any] = field(default_factory=dict)
-    notes: list[str] = field(default_factory=list)
-
-
-Policy = Callable[
-    [
-        dict[str, Any],
-        HardwareInfo | XPUHardwareInfo | None,
-        WorkloadHints,
-        TuningResult,
-    ],
-    None,
-]
-
-
-def _record_override(
-    result: TuningResult,
-    key: str,
-    value: Any,
-    reason: str,
-) -> None:
-    result.overrides[key] = value
-    result.notes.append(f"{key}={value!r}: {reason}")
-
-
-def _record_sweep_override(
-    result: TuningResult,
-    key: str,
-    value: Any,
-    reason: str,
-) -> None:
-    """Record an explicit benchmark seed without changing deployment config."""
-    result.sweep_overrides[key] = value
-    result.notes.append(f"sweep {key}={value!r}: {reason}")
+from core.tuning import Policy, TuningResult, WorkloadHints, record_sweep_override
+from hardware.registry import get_default_hardware_backend, get_hardware_backend
 
 
 def _get_active_sequence_count(
@@ -103,6 +35,8 @@ def _get_active_sequence_count(
         and configured > 0
     ):
         return configured
+
+    from vllm.config.scheduler import SchedulerConfig
 
     return SchedulerConfig.DEFAULT_MAX_NUM_SEQS
 
@@ -149,102 +83,9 @@ def _estimate_prefills_per_step(
     return min(float(active_sequences), prefills_per_step)
 
 
-def _resolve_tensor_parallel_size(
-    config: dict[str, Any],
-    hardware: HardwareInfo | None,
-    workload: WorkloadHints,
-    result: TuningResult,
-) -> None:
-    del workload
-    if hardware is None or hardware.numa_node_count < 1:
-        return
-
-    if any(
-        config.get(key, 1) != 1
-        for key in ("data-parallel-size", "pipeline-parallel-size")
-    ):
-        result.notes.append(
-            "tensor-parallel-size: kept recipe value; automatic TP selection "
-            "currently requires DP=1 and PP=1"
-        )
-        return
-
-    # Draft policy: use the largest power-of-two TP that does not exceed the
-    # effective NUMA-node count. This deliberately avoids hard-coding unusual
-    # non-power-of-two topologies into the converter.
-    candidate = 1 << (hardware.numa_node_count.bit_length() - 1)
-    try:
-        constraints = load_head_constraints(config)
-    except Exception as exc:
-        result.notes.append(
-            "tensor-parallel-size: kept recipe value (vLLM default TP=1 if absent); "
-            f"model head detection failed: {exc}"
-        )
-        return
-
-    for constraint in constraints:
-        result.notes.append(
-            f"detected {constraint.name}: "
-            f"attention_heads={constraint.attention_heads}, "
-            f"kv_heads={constraint.kv_heads}"
-        )
-    selected = suggest_tensor_parallel_size(candidate, constraints)
-    if selected != candidate:
-        result.notes.append(
-            f"tensor-parallel-size: reduced NUMA-derived TP={candidate} to "
-            f"TP={selected} for model head partitioning/replication"
-        )
-    _record_override(
-        result,
-        "tensor-parallel-size",
-        selected,
-        "derived from effective NUMA nodes and detected model head constraints",
-    )
-
-
-def _resolve_gpu_memory_utilization(
-    config: dict[str, Any],
-    hardware: HardwareInfo | None,
-    workload: WorkloadHints,
-    result: TuningResult,
-) -> None:
-    del workload
-    if hardware is None or not hardware.numa_nodes:
-        return
-
-    reserve_fraction = 0.10
-    safe_fractions = [
-        max(
-            0.0,
-            node.available_memory_bytes / node.total_memory_bytes - reserve_fraction,
-        )
-        for node in hardware.numa_nodes
-        if node.total_memory_bytes > 0
-    ]
-    if not safe_fractions:
-        return
-
-    safe_fraction = round(min(0.90, min(safe_fractions)), 2)
-    if safe_fraction <= 0:
-        return
-
-    recipe_value = config.get("gpu-memory-utilization")
-    if isinstance(recipe_value, (int, float)):
-        candidate = min(float(recipe_value), safe_fraction)
-    else:
-        candidate = min(0.80, safe_fraction)
-
-    _record_override(
-        result,
-        "gpu-memory-utilization",
-        round(candidate, 2),
-        "constrained by effective per-NUMA available memory",
-    )
-
-
 def _resolve_max_num_seqs(
     config: dict[str, Any],
-    hardware: HardwareInfo | None,
+    hardware: Any,
     workload: WorkloadHints,
     result: TuningResult,
 ) -> None:
@@ -255,7 +96,7 @@ def _resolve_max_num_seqs(
     data_parallel_size = _get_data_parallel_size(config)
     per_replica_concurrency = ceil(workload.concurrency / data_parallel_size)
 
-    _record_sweep_override(
+    record_sweep_override(
         result,
         "max-num-seqs",
         per_replica_concurrency,
@@ -269,7 +110,7 @@ def _resolve_max_num_seqs(
 
 def _resolve_max_num_batched_tokens(
     config: dict[str, Any],
-    hardware: HardwareInfo | None,
+    hardware: Any,
     workload: WorkloadHints,
     result: TuningResult,
 ) -> None:
@@ -292,6 +133,8 @@ def _resolve_max_num_batched_tokens(
 
     # Use vLLM's scheduler defaults/constraints as floors rather than local
     # recipe-specific magic constants.
+    from vllm.config.scheduler import SchedulerConfig
+
     candidate = max(
         SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
         active_sequences,
@@ -310,7 +153,7 @@ def _resolve_max_num_batched_tokens(
         ):
             candidate = max(candidate, max_model_len)
 
-    _record_sweep_override(
+    record_sweep_override(
         result,
         "max-num-batched-tokens",
         candidate,
@@ -326,121 +169,10 @@ def _resolve_max_num_batched_tokens(
     )
 
 
-def _resolve_data_parallel_size(
-    config: dict[str, Any],
-    hardware: HardwareInfo | None,
-    workload: WorkloadHints,
-    result: TuningResult,
-) -> None:
-    del config, hardware
-    if workload.target_qps is None:
-        return
-
-    result.notes.append(
-        "data-parallel-size: automatic DP tuning is disabled; kept recipe value "
-        "because CPU DP auto-binding and per-replica capacity need validation"
-    )
-
-
-def _validate_xpu_tensor_parallel_size(
-    config: dict[str, Any],
-    hardware: XPUHardwareInfo | None,
-    workload: WorkloadHints,
-    result: TuningResult,
-) -> None:
-    del workload
-    if hardware is None:
-        return
-    tp = config.get("tensor-parallel-size", 1)
-    pp = config.get("pipeline-parallel-size", 1)
-    dp = config.get("data-parallel-size", 1)
-    for name, value in (("TP", tp), ("PP", pp), ("DP", dp)):
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise ValueError(f"Invalid {name} value in recipe: {value!r}")
-    required_devices = tp * pp * dp
-    if required_devices > hardware.gpu_count:
-        raise RecipeSkipError(
-            "INSUFFICIENT_XPU_DEVICES",
-            f"B70 recipe requires at least {required_devices} visible XPU "
-            f"devices (TP={tp}, PP={pp}, DP={dp}); detected "
-            f"{hardware.gpu_count}. Refusing to change TP without a model "
-            "memory-fit estimate.",
-            required_devices=required_devices,
-            available_devices=hardware.gpu_count,
-            parallelism={"tp": tp, "pp": pp, "dp": dp},
-        )
-    result.notes.append(
-        f"XPU devices={hardware.gpu_count}; retained recipe TP={tp}, PP={pp}, "
-        f"DP={dp}. Device count alone does not establish memory fit or optimum TP"
-    )
-
-
-def _resolve_xpu_gpu_memory_utilization(
-    config: dict[str, Any],
-    hardware: XPUHardwareInfo | None,
-    workload: WorkloadHints,
-    result: TuningResult,
-) -> None:
-    del workload
-    if hardware is None:
-        return
-    # A conservative initial capacity guard, not a model-fit guarantee.
-    reserve_fraction = 0.05
-    min_free_fraction = min(
-        device.free_memory_bytes / device.total_memory_bytes
-        for device in hardware.devices
-    )
-    limit = int((min_free_fraction - reserve_fraction) * 100) / 100
-    if limit <= 0:
-        raise ValueError("Insufficient free XPU memory after 5% reserve")
-
-    recipe_value = config.get("gpu-memory-utilization", 0.90)
-    if (
-        isinstance(recipe_value, bool)
-        or not isinstance(recipe_value, (int, float))
-        or not 0 < recipe_value <= 1
-    ):
-        raise ValueError(f"Invalid gpu-memory-utilization: {recipe_value!r}")
-    candidate = min(float(recipe_value), limit)
-    if candidate < float(recipe_value):
-        _record_override(
-            result,
-            "gpu-memory-utilization",
-            round(candidate, 2),
-            "reduced using minimum free/total VRAM across visible XPUs "
-            "and a 5% reserve; model/KV-cache fit remains unverified",
-        )
-    else:
-        result.notes.append(
-            f"gpu-memory-utilization: retained recipe/default {recipe_value}; "
-            "XPU free-memory check did not require a reduction"
-        )
-
-
-DEFAULT_POLICIES: tuple[Policy, ...] = (
-    _resolve_tensor_parallel_size,
-    _resolve_gpu_memory_utilization,
-    _resolve_data_parallel_size,
-)
-
 SCHEDULER_TUNING_POLICIES: tuple[Policy, ...] = (
     _resolve_max_num_seqs,
     _resolve_max_num_batched_tokens,
 )
-
-XPU_DEFAULT_POLICIES: tuple[Policy, ...] = (
-    _validate_xpu_tensor_parallel_size,
-    _resolve_xpu_gpu_memory_utilization,
-)
-
-# Select tuning behavior from the hardware requested by the Recipes rendering,
-# not from devices physically present in the host. A GPU server still exposes
-# its host CPU topology, so host inspection alone cannot determine deployment
-# intent.
-HARDWARE_TUNING_POLICIES: dict[str, tuple[Policy, ...]] = {
-    "xeon6": DEFAULT_POLICIES,
-    "arc_pro_b70": XPU_DEFAULT_POLICIES,
-}
 
 
 def get_runtime_tuning_policies(
@@ -448,19 +180,7 @@ def get_runtime_tuning_policies(
     *,
     tune_scheduler: bool = False,
 ) -> tuple[Policy, ...]:
-    if not isinstance(recipe_hardware, str) or not recipe_hardware:
-        raise ValueError(
-            "Runtime tuning requires the resolved Recipes JSON to declare "
-            "a non-empty `hardware` field."
-        )
-
-    policies = HARDWARE_TUNING_POLICIES.get(recipe_hardware)
-    if policies is None:
-        supported = ", ".join(sorted(HARDWARE_TUNING_POLICIES))
-        raise ValueError(
-            "Runtime tuning is not supported for recipe hardware "
-            f"{recipe_hardware!r}. Currently supported: {supported}."
-        )
+    policies = get_hardware_backend(recipe_hardware).tuning_policies()
     if tune_scheduler:
         policies = (*policies, *SCHEDULER_TUNING_POLICIES)
     return policies
@@ -469,13 +189,17 @@ def get_runtime_tuning_policies(
 def finetune_runtime_config(
     config: dict[str, Any],
     *,
-    hardware: HardwareInfo | XPUHardwareInfo | None = None,
+    hardware: Any = None,
     workload: WorkloadHints | None = None,
-    policies: tuple[Policy, ...] = DEFAULT_POLICIES,
+    policies: tuple[Policy, ...] | None = None,
 ) -> TuningResult:
     """Return deployment overrides and sweep seeds without mutating config."""
     hints = workload or WorkloadHints()
     hints.validate()
+
+    if policies is None:
+        # Preserve the historical CPU default for callers without a recipe ID.
+        policies = get_default_hardware_backend().tuning_policies()
 
     result = TuningResult()
     for policy in policies:

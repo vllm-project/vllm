@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Bounded GPU-aware parallel layouts for Intel Arc Pro B70 recipe sweeps.
+"""Bounded GPU-aware parallel layouts for recipe sweeps.
 
 The planner verifies visibility and attention-head partitioning. It cannot
 prove weight/KV-cache fit; startup failures remain isolated by the sweep runner.
@@ -11,19 +11,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from model_constraints import load_head_constraints
-
-from .runtime_tuning import WorkloadHints
-
-SUPPORTED_XPU_TP = (1, 2, 4, 8)
+from core.model_constraints import load_head_constraints
+from core.tuning import WorkloadHints
+from hardware.gpu import GPULayoutPolicy
 
 
-def build_xpu_parallel_layout_plan(
+def build_gpu_parallel_layout_plan(
     config: dict[str, Any],
     workload: WorkloadHints,
     gpu_count: int,
     *,
     tune_scheduler: bool = False,
+    policy: GPULayoutPolicy | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     # Import lazily to keep normal recipe conversion and CPU sweeps independent.
     from .sweep_generation import (
@@ -31,19 +30,23 @@ def build_xpu_parallel_layout_plan(
         validate_sweep_workload,
     )
 
+    policy = policy or GPULayoutPolicy()
     validate_sweep_workload(workload)
     if gpu_count < 1:
-        raise ValueError("XPU parallel sweep requires at least one visible GPU")
+        raise ValueError(
+            f"{policy.device_label} parallel sweep requires at least one visible GPU"
+        )
     for key in (
         "pipeline-parallel-size",
         "prefill-context-parallel-size",
         "decode-context-parallel-size",
     ):
         if config.get(key, 1) != 1:
-            raise ValueError(f"XPU sweep currently requires {key}=1")
+            raise ValueError(f"{policy.device_label} sweep currently requires {key}=1")
     if config.get("enable-expert-parallel") is True:
         raise ValueError(
-            "XPU parallel sweep does not yet support expert parallel layouts"
+            f"{policy.device_label} parallel sweep does not yet support "
+            "expert parallel layouts"
         )
 
     recipe_tp = config.get("tensor-parallel-size", 1)
@@ -55,7 +58,7 @@ def build_xpu_parallel_layout_plan(
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"Invalid {name}: {value!r}")
     if recipe_tp * recipe_dp > gpu_count:
-        raise ValueError("Recipe TP*DP exceeds visible XPU count")
+        raise ValueError(f"Recipe TP*DP exceeds visible {policy.device_label} count")
 
     constraints = None
     failure = None
@@ -64,7 +67,7 @@ def build_xpu_parallel_layout_plan(
     except Exception as exc:
         failure = str(exc)
 
-    # Treat XPU DP as experimental. Offer DP>1 only when model metadata
+    # Offer DP>1 only when the backend permits it and model metadata
     # positively identifies a non-MoE model, avoiding unsupported MoE layouts.
     from .sweep_generation import inspect_model_parallel_metadata
 
@@ -75,7 +78,7 @@ def build_xpu_parallel_layout_plan(
 
     skipped: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
-    tps = sorted(set(SUPPORTED_XPU_TP) | {recipe_tp}, reverse=True)
+    tps = sorted(set(policy.supported_tp) | {recipe_tp}, reverse=True)
     for tp in tps:
         if tp > gpu_count:
             continue
@@ -99,9 +102,14 @@ def build_xpu_parallel_layout_plan(
             continue
 
         # Sweep TP-only layouts, plus full-card DP on known non-MoE models.
-        # XPU DP support and memory fit are verified by benchmark startups.
+        # DP support and memory fit are verified by benchmark startups.
         dps = {1}
-        if is_moe is False and gpu_count % tp == 0 and gpu_count // tp > 1:
+        if (
+            policy.allow_dense_dp
+            and is_moe is False
+            and gpu_count % tp == 0
+            and gpu_count // tp > 1
+        ):
             dps.add(gpu_count // tp)
         for dp in sorted(dps):
             name = f"tp{tp}_dp{dp}"
@@ -117,5 +125,7 @@ def build_xpu_parallel_layout_plan(
             candidates.append(candidate)
 
     if not candidates:
-        raise ValueError("No XPU TP/DP candidates passed head/device checks")
+        raise ValueError(
+            f"No {policy.device_label} TP/DP candidates passed head/device checks"
+        )
     return candidates, skipped
