@@ -46,6 +46,7 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_load_policy import StaticThresholdWindowPolicy
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -200,6 +201,16 @@ class Scheduler(SchedulerInterface):
             )
             if self.collect_stats:
                 self.connector_prefix_cache_stats = PrefixCacheStats()
+            policy_cfg = (
+                self.vllm_config.kv_transfer_config.kv_load_policy
+                if self.vllm_config.kv_transfer_config is not None
+                else None
+            )
+            self.kv_load_policy = (
+                StaticThresholdWindowPolicy(policy_cfg) if policy_cfg else None
+            )
+            if self.kv_load_policy is not None:
+                logger.debug("kv_load_policy: %s", self.kv_load_policy.describe())
             kv_load_failure_policy = kv_transfer_config.kv_load_failure_policy
             self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
 
@@ -1187,6 +1198,23 @@ class Scheduler(SchedulerInterface):
                             )
                         )
                         if request.skip_reading_external_kv:
+                            ext_tokens, load_kv_async = 0, False
+                        elif (
+                            self.kv_load_policy is not None
+                            and ext_tokens
+                            and not self.kv_load_policy.should_load(
+                                matched_tokens=ext_tokens
+                            )
+                        ):
+                            # Policy-level load suppression: recompute the
+                            # matched prefix instead of relying on external KV.
+                            # ``ext_tokens`` here is the incremental external
+                            # token count (beyond local prefix-cache hits).
+                            # Semantics identical to the request-level override
+                            # above, generalized from a fixed switch to a
+                            # configurable policy. ``elif`` keeps precedence
+                            # honest: requests already forced to skip are never
+                            # attributed to the policy.
                             ext_tokens, load_kv_async = 0, False
 
                         if ext_tokens is None:
