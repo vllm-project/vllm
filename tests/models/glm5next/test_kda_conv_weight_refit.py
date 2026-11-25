@@ -133,6 +133,7 @@ def _decode_layer(conv1d: nn.Module) -> kda.Glm5NextLinearAttention:
     layer.kv_cache = (torch.zeros(1, 3 * CHANNELS, KERNEL - 1), None)
     layer._use_aiter_conv1d = False
     layer._register_aiter_conv1d_weight()
+    layer._batch_gate_b = False
     return layer
 
 
@@ -195,8 +196,8 @@ def _aiter_layout(weights: list[torch.Tensor]) -> torch.Tensor:
 
 
 def test_aiter_decode_reads_refitted_fused_conv(conv1d, monkeypatch):
-    """AITER's decode reads ``decode_conv1d_weight``, a ``[3, K, C]`` copy of
-    ``conv1d.weight``. Refits through load_weights and through the layerwise
+    """AITER's decode reads `decode_conv1d_weight`, a `[3, K, C]` copy of
+    `conv1d.weight`. Refits through load_weights and through the layerwise
     reload must refresh it in place, at the address FULL cudagraphs capture."""
     layer = _decode_layer(conv1d)
     layer.conv_size = KERNEL
@@ -241,3 +242,38 @@ def test_aiter_decode_reads_refitted_fused_conv(conv1d, monkeypatch):
     weight = decode()
     assert weight.data_ptr() == data_ptr
     assert torch.equal(weight, _aiter_layout(reload))
+
+
+def test_aiter_prefill_conv_weight_follows_refits(conv1d):
+    """AITER's prefill conv reads `aiter_conv1d_weight`, a bf16 copy of
+    `conv1d.weight`. Refits through load_weights and through the layerwise
+    reload must refresh it in place, and the layer may take that conv only
+    while the copy holds the fp32 weight exactly."""
+    layer = _decode_layer(conv1d)
+    layer._register_decode_conv1d_weight()
+    layer._use_aiter_conv1d = True
+    layer._register_aiter_conv1d_weight()
+    data_ptr = layer.aiter_conv1d_weight.data_ptr()
+
+    def bf16_values(seed: int) -> list[torch.Tensor]:
+        """Checkpoint weights that a bf16 checkpoint can hold."""
+        return [weight.bfloat16().float() for weight in _checkpoint_weights(seed)]
+
+    def check(weights: list[torch.Tensor], exact: bool) -> None:
+        assert layer._aiter_conv1d_exact == exact
+        assert layer.aiter_conv1d_weight.data_ptr() == data_ptr
+        expected = torch.cat(weights).squeeze(1).bfloat16()
+        assert torch.equal(layer.aiter_conv1d_weight, expected)
+
+    for seed in (0, 1):
+        _load(conv1d, bf16_values(seed))
+        check(bf16_values(seed), exact=True)
+    _load(conv1d, _checkpoint_weights(seed=2))
+    check(_checkpoint_weights(seed=2), exact=False)
+
+    model = nn.Sequential(layer)
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    _load(conv1d, bf16_values(seed=3))
+    finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+    check(bf16_values(seed=3), exact=True)

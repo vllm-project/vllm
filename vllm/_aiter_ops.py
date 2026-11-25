@@ -6261,13 +6261,13 @@ class rocm_aiter_ops:
     ) -> torch.Tensor:
         """Run AITER FlashKDA chunked prefill over a paged recurrent state.
 
-        ``q``, ``k`` and ``v`` are ``[1, T, H, 128]`` bf16, ``g`` is the raw
-        gate of the same shape and ``beta`` the raw ``[1, T, H]`` logits; the
-        gate activation and the sigmoid run in the kernel. ``A_log`` is
-        ``[H]`` and ``dt_bias`` ``[H * 128]``, both fp32. ``state_cache`` is the
-        fp32 V-first ``[slots, H, V, K]`` pool: sequence ``n`` reads and writes
-        row ``state_indices[n]`` in place. ``out`` must be contiguous with
-        ``v``'s shape. Returns ``out``.
+        `q`, `k` and `v` are `[1, T, H, 128]` bf16, `g` is the raw
+        gate of the same shape and `beta` the raw `[1, T, H]` logits; the
+        gate activation and the sigmoid run in the kernel. `A_log` is
+        `[H]` and `dt_bias` `[H * 128]`, both fp32. `state_cache` is the
+        fp32 V-first `[slots, H, V, K]` pool: sequence `n` reads and writes
+        row `state_indices[n]` in place. `out` must be contiguous with
+        `v`'s shape. Returns `out`.
         """
         from aiter.ops.triton.kimi_delta_attn import chunk_kimi_delta_attn
 
@@ -6314,12 +6314,12 @@ class rocm_aiter_ops:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run AITER's HIP prefill causal conv1d (width 4, SiLU) on q|k|v.
 
-        Takes what ``causal_conv1d_fn`` takes, with bf16 weights: ``x`` is bf16
-        ``[dim, tokens]`` with the channels contiguous and ordered q|k|v,
-        ``weight`` bf16 ``[dim, 4]``, and ``conv_states`` the bf16
-        ``[lines, dim, 3]`` cache, updated in place. ``metadata`` is the step's
-        GDN attention metadata. Returns contiguous ``q``, ``k`` and ``v``,
-        ``[tokens, k_dim]``, ``[tokens, k_dim]`` and ``[tokens, v_dim]``.
+        Takes what `causal_conv1d_fn` takes, with bf16 weights: `x` is bf16
+        `[dim, tokens]` with the channels contiguous and ordered q|k|v,
+        `weight` bf16 `[dim, 4]`, and `conv_states` the bf16
+        `[lines, dim, 3]` cache, updated in place. `metadata` is the step's
+        GDN attention metadata. Returns contiguous `q`, `k` and `v`,
+        `[tokens, k_dim]`, `[tokens, k_dim]` and `[tokens, v_dim]`.
         """
         from aiter.ops.causal_conv1d_fwd_split_qkv import (
             causal_conv1d_split_qkv_hip_fn,
@@ -6328,10 +6328,8 @@ class rocm_aiter_ops:
         block_m = 32
         nums_dict = metadata.nums_dict
         if block_m not in nums_dict:
-            # The metadata builder makes the 8-token chunk schedule on the host.
-            # The 32-token one follows from its chunk counts, as
-            # ceil(ceil(n / 8) / 4) = ceil(n / 32), so AITER need not copy
-            # query_start_loc back. Built once per step, for all its layers.
+            # The 32-token schedule follows from the builder's 8-token chunk counts,
+            # ceil(ceil(n / 8) / 4) = ceil(n / 32), so AITER need not read back.
             nums = (-(-nums_dict[8]["nums"] // (block_m // 8))).numpy()
             tot = int(nums.sum())
             chunk_ids = np.arange(tot) - np.repeat(np.cumsum(nums) - nums, nums)

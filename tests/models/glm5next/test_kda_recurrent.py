@@ -283,10 +283,10 @@ def _aiter_kda_decode_runnable() -> bool:
 def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_first):
     """AITER's single-launch decode kernel runs on plain decode steps only.
 
-    Breakable PIECEWISE graphs replay ``_forward`` against each step's metadata,
+    Breakable PIECEWISE graphs replay `_forward` against each step's metadata,
     so the route is chosen there. Capture on an all-decode batch, then replay a
     mixed step (stock chain) and a decode step (one fused launch); a route fixed
-    in ``forward`` fails one of the two. The reference is a layer built without
+    in `forward` fails one of the two. The reference is a layer built without
     AITER, with the same weights and caches, in the same conv-state layout.
     """
     from transformers import Glm5NextTextConfig
@@ -351,13 +351,12 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
     layers["fused"].load_state_dict(stock.state_dict())
     # load_state_dict skips the weight loaders and the non-persistent decode
     # conv weight; vLLM's loaders end with this hook.
+    # The AITER layer runs f_b and g_b as one batched GEMM, which can round an
+    # element one bf16 ulp from the two calls. The reference runs them the same
+    # way, so the steps below differ only in the decode kernels.
+    stock._batch_gate_b = layers["fused"]._batch_gate_b
     for layer in layers.values():
         layer.process_weights_after_loading()
-    # The AITER layer runs f_b and g_b as one batched GEMM over the weights loading
-    # filled; the stock layer, the reference below, runs them one at a time.
-    fused_gate_b = layers["fused"]._gate_b_weight
-    assert stock._gate_b_weight is None and fused_gate_b is not None
-    assert layers["fused"].g_b_proj.weight.data_ptr() == fused_gate_b[1].data_ptr()
     # get_state_shape orients the conv state by the process-wide layout: (dim,
     # state_len) per slot when dim-first (DS), else (state_len, dim) (SD).
     conv_shape, state_shape = stock.get_state_shape()
@@ -438,7 +437,7 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
         graphs[name] = (capture, static_hidden, output)
 
     def replay(name: str, step_metadata: GDNAttentionMetadata, hidden: torch.Tensor):
-        """The outputs, caches and fused launches of one replay of graph ``name``
+        """The outputs, caches and fused launches of one replay of graph `name`
         from the saved caches."""
         capture, static_hidden, output = graphs[name]
         launches.clear()
@@ -487,6 +486,170 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
         )
         torch.testing.assert_close(fused_state, stock_state, **state_tol)
         torch.testing.assert_close(fused_conv, stock_conv, rtol=0, atol=0)
+
+
+@torch.inference_mode()
+def test_batched_gate_gemm_reads_installed_and_refitted_weights(dist_init, monkeypatch):
+    """The batched f_b/g_b GEMM reads the weights that the weight cache IPC
+    loader installs on a model built on meta, and a refit's weights at the
+    address cudagraphs captured."""
+    from transformers import Glm5NextTextConfig
+
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.model_loader.utils import _register_processed_tensors
+    from vllm.model_executor.model_loader.weight_cache.utils import collect_tensors
+    from vllm.model_executor.model_loader.weight_utils import (
+        default_weight_loader,
+        finalize_model_weights,
+    )
+    from vllm.model_executor.utils import weights_already_processed
+    from vllm.models.glm5next.common.kda import Glm5NextLinearAttention
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    heads, num_tokens = 16, 5
+    config = Glm5NextTextConfig(
+        hidden_size=heads * D,
+        linear_num_heads=heads,
+        linear_head_dim=D,
+        linear_lower_bound=LOWER_BOUND,
+    )
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B", dtype=torch.bfloat16
+    )
+    layers = {}
+    try:
+        with monkeypatch.context() as env:
+            env.setenv("VLLM_ROCM_USE_AITER", "1")
+            rocm_aiter_ops.refresh_env_variables()
+            if not rocm_aiter_ops.is_tgemm_enabled():
+                pytest.skip("requires AITER's GEMM (VLLM_ROCM_USE_AITER=1, gfx950)")
+            # The IPC loader builds the model on meta.
+            for index, target in enumerate((device, torch.device("meta"))):
+                with (
+                    set_current_vllm_config(vllm_config),
+                    set_default_torch_dtype(torch.bfloat16),
+                    torch.device(target),
+                ):
+                    layers[target.type] = Glm5NextLinearAttention(
+                        config, vllm_config, prefix=f"model.layers.{index}.linear_attn"
+                    )
+    finally:
+        rocm_aiter_ops.refresh_env_variables()
+    loaded, mapped = layers["cuda"], layers["meta"]
+
+    def load(seed: int) -> None:
+        """New weights through the weight loaders, then every module's post-load
+        hook, as each load and reload path ends."""
+        generator = torch.Generator(device=device).manual_seed(seed)
+        for param in loaded.parameters():
+            weight = torch.randn(param.shape, device=device, generator=generator)
+            default_weight_loader(param, weight * param.shape[-1] ** -0.5)
+        finalize_model_weights(loaded)
+
+    hidden = torch.randn(num_tokens, heads * D, device=device).bfloat16()
+    positions = torch.zeros(num_tokens, dtype=torch.int64, device=device)
+
+    def gates(layer: Glm5NextLinearAttention) -> tuple[torch.Tensor, torch.Tensor]:
+        """The f_b and g_b outputs that `forward` hands to `_forward`."""
+        seen: dict[str, torch.Tensor] = {}
+        monkeypatch.setattr(layer, "_forward", lambda **kwargs: seen.update(kwargs))
+        layer(hidden, positions)
+        return seen["g1"], seen["g2"]
+
+    load(seed=1)
+    tensors, kinds, aliases = collect_tensors(loaded)
+    manifest = {
+        "tensors": {name: {"is_param": kind == "param"} for name, kind in kinds.items()}
+    }
+    _register_processed_tensors(mapped, tensors, manifest, aliases)
+    with weights_already_processed():
+        finalize_model_weights(mapped)
+    for actual, expected in zip(gates(mapped), gates(loaded), strict=True):
+        assert torch.equal(actual, expected)
+
+    assert loaded._gate_b_weight is not None
+    address, before = loaded._gate_b_weight.data_ptr(), gates(loaded)
+    load(seed=2)
+    assert loaded._gate_b_weight.data_ptr() == address
+    f_a, g_a = loaded.in_proj_qkvbfg_a(hidden)[0][:, -2 * D :].split(D, dim=-1)
+    refitted = (loaded.f_b_proj(f_a)[0], loaded.g_b_proj(g_a)[0])
+    one_ulp = torch.finfo(torch.bfloat16).eps
+    for actual, stale, expected in zip(gates(loaded), before, refitted, strict=True):
+        assert not torch.equal(actual, stale)
+        # The batched GEMM can round an element one bf16 ulp from the two calls.
+        torch.testing.assert_close(
+            actual.reshape(num_tokens, -1).float(),
+            expected.float(),
+            rtol=one_ulp,
+            atol=1e-5,
+        )
+
+
+@torch.inference_mode()
+def test_batched_gate_gemm_keeps_two_calls_with_lora(dist_init, monkeypatch):
+    """LoRA wraps f_b_proj and g_b_proj, so the layer calls both instead of
+    batching them into one GEMM that would drop the LoRA delta."""
+    from transformers import Glm5NextTextConfig
+
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import LoRAConfig, set_current_vllm_config
+    from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
+    from vllm.models.glm5next.common.kda import Glm5NextLinearAttention
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    device = torch.device("cuda")
+    heads, num_tokens = 16, 5
+    config = Glm5NextTextConfig(
+        hidden_size=heads * D,
+        linear_num_heads=heads,
+        linear_head_dim=D,
+        linear_lower_bound=LOWER_BOUND,
+    )
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B", dtype=torch.bfloat16
+    )
+    vllm_config.lora_config = LoRAConfig(max_lora_rank=8)
+    try:
+        with monkeypatch.context() as env:
+            env.setenv("VLLM_ROCM_USE_AITER", "1")
+            rocm_aiter_ops.refresh_env_variables()
+            if not rocm_aiter_ops.is_tgemm_enabled():
+                pytest.skip("requires AITER's GEMM (VLLM_ROCM_USE_AITER=1, gfx950)")
+            with (
+                set_current_vllm_config(vllm_config),
+                set_default_torch_dtype(torch.bfloat16),
+                torch.device(device),
+            ):
+                layer = Glm5NextLinearAttention(
+                    config, vllm_config, prefix="model.layers.0.linear_attn"
+                )
+    finally:
+        rocm_aiter_ops.refresh_env_variables()
+    finalize_model_weights(layer)
+
+    calls: list[str] = []
+    for name in ("f_b_proj", "g_b_proj"):
+        proj = getattr(layer, name)
+        monkeypatch.setattr(
+            proj,
+            "forward",
+            lambda *args, _forward=proj.forward, _name=name, **kwargs: (
+                calls.append(_name),
+                _forward(*args, **kwargs),
+            )[1],
+        )
+    monkeypatch.setattr(layer, "_forward", lambda **kwargs: None)
+    hidden = torch.randn(num_tokens, heads * D, device=device).bfloat16()
+    positions = torch.zeros(num_tokens, dtype=torch.int64, device=device)
+    layer(hidden, positions)
+
+    assert layer._gate_b_weight is None
+    assert sorted(calls) == ["f_b_proj", "g_b_proj"]
 
 
 @pytest.mark.parametrize(
@@ -683,16 +846,16 @@ def test_prefill_checkpoint_resumes_suffix(
     torch.testing.assert_close(recurrent[3], expected_state, atol=0.003, rtol=0.03)
 
 
-@pytest.mark.parametrize("conv", ["vllm", "aiter", "fp32 weights"])
+@pytest.mark.parametrize("conv", ["vllm", "aiter", "fp32 weights", "short step"])
 @pytest.mark.parametrize("num_decodes", [0, 3])
 @torch.inference_mode()
 def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, conv):
-    """With ``flashkda`` on ROCm the layer's prefill runs AITER FlashKDA on
+    """With `flashkda` on ROCm the layer's prefill runs AITER FlashKDA on
     the paged state and output in place, and matches the Triton chunk path
     to bf16 precision (chunk size 32 vs 64). Decodes in the same step take
     the recurrent kernel, so FlashKDA sees the prefills only. Both paths run
     with either prefill conv; AITER's takes only conv weights with bf16
-    values."""
+    values, in a step of its minimum size or more."""
     from types import SimpleNamespace
 
     from vllm._aiter_ops import rocm_aiter_ops
@@ -700,8 +863,10 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, conv):
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
     from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
 
+    # VLLM_ROCM_USE_AITER is read at import, and CI does not set it.
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
     if not rocm_aiter_ops.is_kda_flashkda_prefill_available():
-        pytest.skip("requires AITER FlashKDA (VLLM_ROCM_USE_AITER=1, gfx950)")
+        pytest.skip("requires gfx950 and AITER FlashKDA with paged state")
     if conv != "vllm" and not rocm_aiter_ops.is_causal_conv1d_prefill_available():
         pytest.skip("requires AITER's HIP prefill conv")
 
@@ -803,8 +968,10 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, conv):
     monkeypatch.setattr(
         rocm_aiter_ops, "causal_conv1d_prefill_split_qkv", staticmethod(conv_spy)
     )
-    # The step here is far below the size from which the layer takes AITER's conv.
-    monkeypatch.setattr(kda, "_AITER_CONV1D_MIN_TOKENS", 0)
+    # The step here is far below the size from which the layer takes AITER's
+    # conv, so that size moves to this step's, or to one token more.
+    min_tokens = num_tokens + (conv == "short step")
+    monkeypatch.setattr(kda, "_AITER_CONV1D_MIN_TOKENS", min_tokens)
 
     def run(backend: str):
         conv_pool, recurrent_pool = conv_storage.clone(), recurrent_storage.clone()
@@ -824,7 +991,8 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, conv):
     assert len(prefill_calls) == 1
     assert prefill_calls[0]["q"].shape[1] == sum(prefill_lengths)
     assert prefill_calls[0]["cu_seqlens"].tolist() == [0, 37, 137]
-    # Both runs' convs, or none: fp32 weight values keep vLLM's kernel.
+    # Both runs' convs, or none: fp32 weight values and a step below the
+    # minimum size keep vLLM's kernel.
     expected_convs = [torch.bfloat16] * 2 if conv == "aiter" else []
     assert conv_weight_dtypes == expected_convs
 
@@ -843,10 +1011,11 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, conv):
 @pytest.mark.parametrize("prefill_len", [700, 5000])
 @pytest.mark.parametrize("dim_first", [False, True])
 @torch.inference_mode()
-def test_aiter_conv1d_prefill_matches_vllm(dim_first, prefill_len):
+def test_aiter_conv1d_prefill_matches_vllm(monkeypatch, dim_first, prefill_len):
     """AITER's HIP prefill conv, called as the layer calls it, matches
-    ``causal_conv1d_fn`` on the layer's fp32 weights holding bf16 values:
-    q|k|v to bf16 rounding and the conv state exactly. Its 32-token tiles are
+    `causal_conv1d_fn` on the layer's fp32 weights holding bf16 values: the
+    conv state exactly and q|k|v to one bf16 ulp, as it truncates to bf16
+    where `causal_conv1d_fn` rounds to nearest. Its 32-token tiles are
     scheduled from vLLM's 8-token schedule."""
     from types import SimpleNamespace
 
@@ -854,8 +1023,10 @@ def test_aiter_conv1d_prefill_matches_vllm(dim_first, prefill_len):
     from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn
     from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
 
+    # VLLM_ROCM_USE_AITER is read at import, and CI does not set it.
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
     if not rocm_aiter_ops.is_causal_conv1d_prefill_available():
-        pytest.skip("requires AITER's HIP prefill conv (VLLM_ROCM_USE_AITER=1, gfx950)")
+        pytest.skip("requires gfx950 and AITER's HIP prefill conv")
 
     torch.manual_seed(3)
     device = torch.device("cuda")
@@ -913,7 +1084,10 @@ def test_aiter_conv1d_prefill_matches_vllm(dim_first, prefill_len):
     )
     assert all(t.is_contiguous() for t in (q, k, v))
     torch.testing.assert_close(
-        torch.cat([q, k, v], dim=-1), expected, atol=2e-2, rtol=2e-2
+        torch.cat([q, k, v], dim=-1).float(),
+        expected.float(),
+        rtol=torch.finfo(torch.bfloat16).eps,
+        atol=1e-5,
     )
     assert torch.equal(pool, expected_pool)
 

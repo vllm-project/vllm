@@ -12,7 +12,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 
 def test_rocm_flashkda_resolves_to_aiter(monkeypatch):
-    """``--kda-prefill-backend flashkda`` selects AITER FlashKDA on ROCm
+    """`--kda-prefill-backend flashkda` selects AITER FlashKDA on ROCm
     instead of being rejected."""
     monkeypatch.setattr(kda.current_platform, "is_rocm", lambda: True)
     monkeypatch.setattr(

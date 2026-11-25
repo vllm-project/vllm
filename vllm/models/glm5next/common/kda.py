@@ -81,7 +81,8 @@ else:
         fused_recurrent_kda,
     )
 
-# Below this many tokens vLLM's prefill conv is as fast as AITER's HIP conv.
+# Smallest step, in tokens, that takes AITER's HIP prefill conv. Shorter steps
+# keep vLLM's kernel.
 _AITER_CONV1D_MIN_TOKENS = 4096
 
 
@@ -537,18 +538,18 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.g_b_proj",
         )
-        # Where AITER's tuned GEMM would run f_b and g_b one at a time, their weights
-        # share one [2, N, K] buffer, which loading fills in place, and forward runs
-        # both as one batched GEMM over the adjacent f_a and g_a columns.
+        # On gfx950 with AITER's GEMM, forward runs f_b and g_b as one batched GEMM
+        # over their [2, N, K] weights, stacked in process_weights_after_loading.
+        # LoRA wraps f_b_proj and g_b_proj, so it keeps the two calls.
+        self._batch_gate_b = (
+            rocm_aiter_ops.is_tgemm_enabled()
+            and vllm_config.lora_config is None
+            and all(
+                isinstance(proj.quant_method, UnquantizedLinearMethod)
+                for proj in (self.f_b_proj, self.g_b_proj)
+            )
+        )
         self._gate_b_weight: torch.Tensor | None = None
-        if rocm_aiter_ops.is_tgemm_enabled() and all(
-            isinstance(proj.quant_method, UnquantizedLinearMethod)
-            for proj in (self.f_b_proj, self.g_b_proj)
-        ):
-            weight = self.f_b_proj.weight
-            self._gate_b_weight = weight.new_empty((2, *weight.shape))
-            self.f_b_proj.weight.data = self._gate_b_weight[0]
-            self.g_b_proj.weight.data = self._gate_b_weight[1]
         self.o_norm = FusedRMSNormGated(
             self.head_dim,
             activation="sigmoid",
@@ -663,14 +664,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             )
 
     def _register_decode_conv1d_weight(self) -> None:
-        """Register ``decode_conv1d_weight``, the q|k|v conv weight in the
-        ``[3, conv_size, dim]`` layout AITER's decode kernel reads (None when
+        """Register `decode_conv1d_weight`, the q|k|v conv weight in the
+        `[3, conv_size, dim]` layout AITER's decode kernel reads (None when
         that kernel is not used).
 
         It is allocated once, so cudagraphs keep its address, and refreshed
-        from ``conv1d.weight`` after every load and layerwise reload
-        (``process_weights_after_loading``) and after every ``conv1d.weight``
-        shard load, which covers refits through ``load_weights`` outside the
+        from `conv1d.weight` after every load and layerwise reload
+        (`process_weights_after_loading`) and after every `conv1d.weight`
+        shard load, which covers refits through `load_weights` outside the
         reload lifecycle.
         """
         decode_conv1d_weight = None
@@ -712,11 +713,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
 
     def _register_aiter_conv1d_weight(self) -> None:
-        """Register ``aiter_conv1d_weight``, a bf16 copy of the q|k|v conv weight
+        """Register `aiter_conv1d_weight`, a bf16 copy of the q|k|v conv weight
         for AITER's HIP prefill conv (None when that conv is not used).
 
-        Like ``decode_conv1d_weight``, it is allocated once and refreshed after
-        every load, layerwise reload and ``conv1d.weight`` shard load. The conv
+        Like `decode_conv1d_weight`, it is allocated once and refreshed after
+        every load, layerwise reload and `conv1d.weight` shard load. The conv
         parameter is fp32, so the layer takes AITER's conv only while the copy
         is exact, as it is when the checkpoint stores bf16.
         """
@@ -748,7 +749,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
     @torch.no_grad()
     def _copy_aiter_conv1d_weight(self, copy: bool = True) -> None:
-        """Refresh ``aiter_conv1d_weight`` (unless ``copy`` is False, for a
+        """Refresh `aiter_conv1d_weight` (unless `copy` is False, for a
         buffer that is already filled) and whether it holds the conv weight
         exactly."""
         aiter_weight, weight = self.aiter_conv1d_weight, self.conv1d.weight
@@ -897,13 +898,20 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         return self.kda_decode_backend == "flashinfer" or self._use_aiter_decode
 
     def process_weights_after_loading(self) -> None:
-        """Refill AITER's decode and prefill conv weights and build FlashInfer's
-        conv and norm weights from the loaded weights; reloads refill them in place."""
+        """Refill AITER's decode and prefill conv weights, stack the f_b and g_b
+        weights and build FlashInfer's conv and norm weights from the loaded
+        weights; reloads refill them in place."""
         # The weight cache IPC loader maps the buffer the daemon already filled.
         pre_processed = is_weights_pre_processed()
         if not pre_processed:
             self._copy_decode_conv1d_weight()
         self._copy_aiter_conv1d_weight(copy=not pre_processed)
+        if self._batch_gate_b:
+            refill_derived(
+                self,
+                "_gate_b_weight",
+                torch.stack((self.f_b_proj.weight, self.g_b_proj.weight)),
+            )
         if self.kda_decode_backend != "flashinfer":
             return
         conv_weight = self.conv1d.weight.view(
@@ -1393,9 +1401,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     compute_gate=True,
                     lower_bound=lower_bound,
                 )
-            # AITER reads and updates the paged recurrent state in place, so
-            # there is no gather or scatter, and writes straight into the layer
-            # output: without spec tokens the prefill tokens follow the decodes.
+            # AITER updates the paged state in place and writes straight into the
+            # layer output; without spec tokens the prefill tokens follow the decodes.
             ns_out = core_attn_out[:, :num_actual_tokens]
             core_attn_out_non_spec = ns_out
             rocm_aiter_ops.kda_flashkda_prefill(
