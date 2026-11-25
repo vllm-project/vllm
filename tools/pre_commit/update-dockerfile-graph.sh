@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Update Dockerfile dependency graph when docker/Dockerfile changes.
 # This script is designed to be used as a pre-commit hook.
 
