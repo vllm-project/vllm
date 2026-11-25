@@ -112,8 +112,7 @@ class TestCmplPath:
         tok_params = object()  # never inspected: all stages are stubbed
         if is_async:
             asyncio.run(
-                renderer.render_cmpl_async(prompts, tok_params,
-                                           prompt_extras=extras)
+                renderer.render_cmpl_async(prompts, tok_params, prompt_extras=extras)
             )
         else:
             renderer.render_cmpl(prompts, tok_params, prompt_extras=extras)
@@ -121,16 +120,12 @@ class TestCmplPath:
 
     @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
     def test_multi_modal_data_merged(self, is_async):
-        r = self._run(
-            [{"multi_modal_data": {"image": "<img>"}}], REQ_KW, is_async
-        )
+        r = self._run([{"multi_modal_data": {"image": "<img>"}}], REQ_KW, is_async)
         assert r._eng_prompts[0]["media_io_kwargs"] == REQ_KW
 
     @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
     def test_multi_modal_uuids_merged(self, is_async):
-        r = self._run(
-            [{"multi_modal_uuids": {"image": ["uuid-0"]}}], REQ_KW, is_async
-        )
+        r = self._run([{"multi_modal_uuids": {"image": ["uuid-0"]}}], REQ_KW, is_async)
         assert r._eng_prompts[0]["media_io_kwargs"] == REQ_KW
 
     @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
@@ -199,9 +194,7 @@ class TestCmplPath:
 
     @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
     def test_media_io_kwargs_not_forwarded_to_extras(self, is_async):
-        r = self._run(
-            [{"multi_modal_data": {"image": "<img>"}}], REQ_KW, is_async
-        )
+        r = self._run([{"multi_modal_data": {"image": "<img>"}}], REQ_KW, is_async)
         assert "media_io_kwargs" not in r._applied_extras[-1]
 
     def test_empty_prompts_raises(self):
@@ -244,7 +237,9 @@ class TestChatPath:
         if is_async:
             asyncio.run(
                 renderer.render_chat_async(
-                    conversations, chat_params, tok_params,
+                    conversations,
+                    chat_params,
+                    tok_params,
                     prompt_extras=extras,
                 )
             )
@@ -269,9 +264,7 @@ class TestChatPath:
 
     @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
     def test_unset_request_keeps_chat_defaults(self, is_async):
-        r = self._run(
-            _UNSET, chat_media_io_kwargs=DEFAULT_KW, is_async=is_async
-        )
+        r = self._run(_UNSET, chat_media_io_kwargs=DEFAULT_KW, is_async=is_async)
         assert r._chat_params_seen[-1].media_io_kwargs == DEFAULT_KW
 
     @pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
