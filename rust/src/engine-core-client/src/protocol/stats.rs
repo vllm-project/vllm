@@ -56,6 +56,9 @@ pub struct SchedulerStats {
     /// Number of waiting requests deferred by transient constraints or a blocked status.
     #[serde(default)]
     pub num_skipped_waiting_reqs: u64,
+    /// Requests preempted since the previous stats, counted at preemption time.
+    #[serde(default)]
+    pub num_preempted_reqs: u64,
     /// Waiting requests with an async KV load, by load stage.
     #[serde(default)]
     pub num_kv_fetch_reqs_by_stage: KvFetchReqsByStage,
