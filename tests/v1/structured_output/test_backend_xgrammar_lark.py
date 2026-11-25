@@ -196,7 +196,7 @@ def test_compile_grammar_uses_lark_semantics(backend: XgrammarBackend):
 def test_validation_rejects_oversized_lark_grammar():
     grammar = 'start: "a"\n' + ("#" + "x" * 1024 + "\n") * 65
     params = SamplingParams(structured_outputs=StructuredOutputsParams(grammar=grammar))
-    with pytest.raises(VLLMValidationError, match=r"^Invalid grammar specification\.$"):
+    with pytest.raises(VLLMValidationError, match="maximum size of 65536 bytes"):
         validate_xgrammar_grammar(params)
 
 
@@ -205,10 +205,13 @@ def test_validation_rejects_lark_grammar_over_configured_byte_limit(
     backend: StructuredOutputsBackend, monkeypatch: pytest.MonkeyPatch
 ):
     grammar = 'start: "é"'
-    size = len(grammar.encode("utf-8"))
-    monkeypatch.setenv("VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES", str(size - 1))
-    with pytest.raises(VLLMValidationError, match=r"^Invalid grammar specification\.$"):
+    max_bytes = len(grammar.encode("utf-8")) - 1
+    monkeypatch.setenv("VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES", str(max_bytes))
+    with pytest.raises(VLLMValidationError) as exc_info:
         _validate(grammar, backend)
+    message = str(exc_info.value)
+    assert f"maximum size of {max_bytes} bytes" in message
+    assert "VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES" in message
 
 
 def test_compile_lark_honors_configured_byte_limit(

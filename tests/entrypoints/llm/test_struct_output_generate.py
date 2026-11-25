@@ -876,7 +876,9 @@ def test_auto_backend_rejects_lark_over_configured_limit(
             max_model_len=128,
             structured_outputs_config=StructuredOutputsConfig(backend="auto"),
         ) as runner,
-        pytest.raises(VLLMValidationError, match=r"^Invalid grammar specification\.$"),
+        pytest.raises(
+            VLLMValidationError, match="VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES"
+        ),
     ):
         runner.llm.generate("Answer:", sampling_params=params)
 

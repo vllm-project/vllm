@@ -42,7 +42,8 @@ def _validate_lark_grammar_size(grammar: str) -> None:
     max_bytes = vllm.envs.VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES
     if len(grammar) > max_bytes or len(grammar.encode("utf-8")) > max_bytes:
         raise LarkGrammarSizeError(
-            f"Lark grammar exceeds the maximum size of {max_bytes} bytes"
+            f"Lark grammar exceeds the maximum size of {max_bytes} bytes. "
+            "Set VLLM_XGRAMMAR_MAX_LARK_GRAMMAR_BYTES to adjust this limit."
         )
 
 
@@ -557,6 +558,8 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                 compile_regex_with_timeout(xgr.Grammar.from_lark, so_params.grammar)
             else:
                 xgr.Grammar.from_ebnf(so_params.grammar)
+        except LarkGrammarSizeError as e:
+            raise VLLMValidationError(str(e)) from e
         except Exception as e:
             raise VLLMValidationError("Invalid grammar specification.") from e
         return
