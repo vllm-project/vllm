@@ -16,8 +16,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
-    fp8_fp4_paged_mqa_logits,
-    get_paged_mqa_logits_metadata,
     has_deep_gemm,
     mqa_logits_mx_inputs,
     mqa_logits_use_mx_scales,
@@ -26,6 +24,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 
 from ..common.indexpool_cache import POOL_PAGE_SIZE, IndexPoolCache, IndexPoolMetadata
+from .indexpool_mqa import score_indexpool_groups
 from .indexpool_ops import pool_quantize_write, quantize_query, select_expand_groups
 from .indexpool_prepare import prepare_groups, write_tails
 
@@ -33,7 +32,10 @@ from .indexpool_prepare import prepare_groups, write_tails
 class FlashCompressedIndexer(nn.Module):
     def __init__(self, vllm_config, config, topk_indices_buffer, prefix):
         super().__init__()
-        if not has_deep_gemm():
+        self.use_triton = (
+            current_platform.is_cuda() and current_platform.is_device_capability(89)
+        )
+        if not self.use_triton and not has_deep_gemm():
             raise RuntimeError("Flash IndexPool requires DeepGEMM paged MQA")
         self.ratio = config.compressed_indexer_compress_ratio
         self.group_budget = config.compressed_indexer_group_topk - 1
@@ -90,7 +92,7 @@ class FlashCompressedIndexer(nn.Module):
             self.ratio,
             tail=True,
         )
-        self.num_sms = num_compute_units()
+        self.num_sms = 0 if self.use_triton else num_compute_units()
         self.varlen = current_platform.is_device_capability_family(100)
 
     def forward(self, hidden_states, q_c, positions, rope=None):
@@ -183,22 +185,17 @@ class FlashCompressedIndexer(nn.Module):
             bounds = upper[begin:end]
             lengths = score_lengths[begin:end]
             indices = owner[begin:end] if self.varlen else None
-            schedule = get_paged_mqa_logits_metadata(
-                lengths, POOL_PAGE_SIZE, self.num_sms, indices=indices
-            )
-            table = token_table[begin:end]
-            logits = fp8_fp4_paged_mqa_logits(
-                (
-                    quant_q[begin:end],
-                    mx_scales[begin:end] if mx_scales is not None else None,
-                ),
-                cache.unsqueeze(2),
+            logits = score_indexpool_groups(
+                quant_q[begin:end],
+                mx_scales[begin:end] if mx_scales is not None else None,
+                cache,
                 weights[begin:end],
                 lengths,
-                table,
-                schedule,
-                max_model_len=width,
-                indices=indices,
+                token_table[begin:end],
+                width,
+                self.num_sms,
+                indices,
+                use_triton=self.use_triton,
             )
             select_expand_groups(
                 logits,
