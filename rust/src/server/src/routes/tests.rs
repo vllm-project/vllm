@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -51,7 +52,9 @@ use vllm_engine_core_client::test_utils::{
 use vllm_engine_core_client::{
     ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
 };
-use vllm_llm::EngineCoreLlm;
+use vllm_llm::{
+    BoxGenerateOutputStream, EngineCoreLlm, GenerateRequest, Llm, LlmFingerprint, LlmInfo,
+};
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
@@ -965,12 +968,11 @@ async fn dev_routes_follow_api_server_options() {
     for (server_dev_mode, expected) in [(false, StatusCode::NOT_FOUND), (true, StatusCode::OK)] {
         let (chat, engine_task) = test_chat_with_engine_handle().await;
         let app = build_router(Arc::new(
-            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
-                ApiServerOptions {
+            (AppState::new(vec!["model".to_string()], chat).with_engine_core_client())
+                .with_api_server_options(ApiServerOptions {
                     server_dev_mode,
                     ..Default::default()
-                },
-            ),
+                }),
         ));
 
         let response = app
@@ -1004,12 +1006,11 @@ async fn lora_routes_follow_api_server_options() {
     ] {
         let (chat, engine_task) = test_chat_with_engine_handle().await;
         let app = build_router(Arc::new(
-            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
-                ApiServerOptions {
+            (AppState::new(vec!["model".to_string()], chat).with_engine_core_client())
+                .with_api_server_options(ApiServerOptions {
                     allow_runtime_lora_updating,
                     ..Default::default()
-                },
-            ),
+                }),
         ));
 
         for uri in ["/v1/load_lora_adapter", "/v1/unload_lora_adapter"] {
@@ -1689,10 +1690,10 @@ async fn test_dev_mode_app_with_ready(
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     let app = build_router_with_gates(
-        Arc::new(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        )),
+        Arc::new(
+            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                .with_engine_core_client(),
+        ),
         RouteGates {
             dev_mode: true,
             ..RouteGates::default()
@@ -1878,10 +1879,10 @@ where
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), backend);
     (
-        Arc::new(configure(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        ))),
+        Arc::new(configure(
+            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                .with_engine_core_client(),
+        )),
         engine_task,
     )
 }
@@ -12332,6 +12333,195 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
     }
+
+    engine_task.abort_and_join().await;
+}
+
+/// An `Llm` without an engine-core client, standing in for a remote engine
+/// that cannot take requests right now.
+struct UnavailableLlm {
+    info: LlmInfo,
+    health: Arc<tokio::sync::watch::Sender<bool>>,
+    readiness: tokio::sync::watch::Sender<bool>,
+}
+
+impl UnavailableLlm {
+    fn new() -> Self {
+        Self {
+            info: LlmInfo {
+                max_model_len: 4096,
+                model_dtype: None,
+                supports_lora: true,
+                allow_missing_mm_embeddings: false,
+                vllm_version: "test".to_string(),
+                fingerprint: LlmFingerprint {
+                    vllm_version: "test".to_string(),
+                    config_hash: None,
+                    tensor_parallel_size: 1,
+                    pipeline_parallel_size: 1,
+                    data_parallel_size: 1,
+                    enable_expert_parallel: false,
+                },
+            },
+            health: Arc::new(tokio::sync::watch::channel(true).0),
+            readiness: tokio::sync::watch::channel(false).0,
+        }
+    }
+
+    /// The sender of the health this `Llm` reports.
+    fn health(&self) -> Arc<tokio::sync::watch::Sender<bool>> {
+        self.health.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Llm for UnavailableLlm {
+    fn info(&self) -> &LlmInfo {
+        &self.info
+    }
+
+    fn subscribe_health(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.health.subscribe()
+    }
+
+    fn subscribe_readiness(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.readiness.subscribe()
+    }
+
+    async fn generate_n(
+        &self,
+        _request: GenerateRequest,
+        _n: NonZeroU32,
+    ) -> vllm_llm::Result<Vec<BoxGenerateOutputStream>> {
+        Err(vllm_llm::Error::Unavailable {
+            message: "no engine can take the request".to_string(),
+        })
+    }
+
+    async fn abort(&self, _external_ids: &[String]) -> vllm_llm::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(self: Box<Self>) -> vllm_llm::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn llm_without_engine_core_serves_generation_routes_only() {
+    let llm = UnavailableLlm::new();
+    let health = llm.health();
+    let chat = ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new()));
+    let mut app = build_router_with_gates(
+        Arc::new(AppState::new(vec!["test-model".to_string()], chat)),
+        RouteGates {
+            dev_mode: true,
+            runtime_lora_updating: true,
+            ..RouteGates::default()
+        },
+    );
+
+    // Routes that drive the engine-core client are not registered, even with
+    // dev mode and runtime LoRA updating enabled.
+    for (method, uri) in [
+        ("POST", "/sleep"),
+        ("POST", "/reset_prefix_cache"),
+        ("POST", "/v1/load_lora_adapter"),
+        ("GET", "/kv_event_sources"),
+    ] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+    }
+
+    let response = app
+        .clone()
+        .call(Request::builder().uri("/health").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Generation goes through the `Llm`, and its unavailability maps to 503.
+    let (status, body) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({ "model": "test-model", "prompt": "hello" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let (status, body) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "test-model",
+            "messages": [{ "role": "user", "content": "hello" }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+    // `/health` follows the `Llm`.
+    health.send_replace(false);
+    let response = app
+        .clone()
+        .call(Request::builder().uri("/health").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn provided_engine_core_llm_is_opaque() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-provided",
+        |_dealer, _push| boxed_test_future(async {}),
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+
+    // Only an `EngineCoreLlm` the server connected itself drives the
+    // engine-core routes; one passed in as `LlmSource::Provided` does not.
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let app = build_router_with_gates(
+        Arc::new(AppState::new(vec!["test-model".to_string()], chat)),
+        RouteGates {
+            dev_mode: true,
+            ..RouteGates::default()
+        },
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/reset_prefix_cache")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     engine_task.abort_and_join().await;
 }
