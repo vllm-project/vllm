@@ -27,10 +27,6 @@ from vllm.utils.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)
 
-_LATENT_ATTENTION_WITHOUT_MLA = {"minicpm3"}
-"""Model types whose configs set `kv_lora_rank` but whose vLLM implementations use
-regular attention over the decompressed heads."""
-
 
 class ModelArchConfigConvertorBase:
     def __init__(
@@ -87,7 +83,11 @@ class ModelArchConfigConvertorBase:
         return getattr(self.hf_text_config, "num_attention_heads", 0)
 
     def get_vocab_size(self) -> int:
-        return getattr(self.hf_text_config, "vocab_size", 0)
+        # Some configs (e.g. Inkling) give the padded embedding size as `vocab_size`
+        text_config = self.hf_text_config
+        if unpadded := getattr(text_config, "unpadded_vocab_size", None):
+            return unpadded
+        return getattr(text_config, "vocab_size", 0)
 
     def get_hidden_size(self) -> int:
         return getattr(self.hf_text_config, "hidden_size", 0)
@@ -302,9 +302,20 @@ class ModelArchConfigConvertorBase:
         # DeepSeek-V4 compresses its KV cache without `kv_lora_rank`
         if get_compress_ratios(config):
             return getattr(config, "head_dim", None) is not None
-        if getattr(config, "model_type", None) in _LATENT_ATTENTION_WITHOUT_MLA:
+        if (kv_lora_rank := getattr(config, "kv_lora_rank", None)) is None:
             return False
-        return getattr(config, "kv_lora_rank", None) is not None
+        from vllm.model_executor.layers.attention.mla_attention import (
+            MLACommonBackend,
+        )
+
+        head_size = kv_lora_rank + self._get_qk_rope_head_dim()
+        if not MLACommonBackend.supports_head_size(head_size):
+            logger.info_once(
+                "MLA does not support latent size %d, using full attention.",
+                head_size,
+            )
+            return False
+        return True
 
     def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
         """Whether to use bidirectional attention for mm positions.
@@ -631,7 +642,7 @@ class Qwen3OmniMoeModelArchConfigConvertor(ModelArchConfigConvertorBase):
         # Mutate hf_config (like the deepseek_v4/mimo_v2 rewrites above)
         # because model-class resolution reads hf_config.architectures.
         if getattr(hf_config, "architectures", None) == [
-            "Qwen3OmniMoeForConditionalGeneration"
+            "Qwen3OmniMoeThinkerForConditionalGeneration"
         ]:
             model_path = hf_config.name_or_path
             if model_path and file_or_path_exists(
@@ -833,7 +844,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "qwen3_5": Qwen3_5ModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
-    "qwen3_omni_moe": Qwen3OmniMoeModelArchConfigConvertor,
+    "qwen3_omni_moe_thinker": Qwen3OmniMoeModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "qwen4_exp_mtp": Qwen4ExpMTPModelArchConfigConvertor,
     "step3p5_mtp": Step3p5MTPModelArchConfigConvertor,
