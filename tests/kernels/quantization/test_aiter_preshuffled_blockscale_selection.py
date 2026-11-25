@@ -31,15 +31,16 @@ pytestmark = [
 
 
 @pytest.mark.parametrize(
-    ("plain", "shuffled", "triton", "picks_bpreshuffle"),
+    ("plain", "shuffled", "triton", "gfx950", "picks_bpreshuffle"),
     [
-        (0, 15, False, True),  # plain table empty: bpreshuffle covers the shape
-        (6, 15, False, True),  # plain tuned at a few M only
-        (15, 15, False, False),  # tie: keep the checkpoint layout
-        (15, 6, False, False),
-        (15, 0, False, False),  # bpreshuffle untuned
-        (0, 0, False, False),
-        (0, 15, True, False),  # the plain Triton GEMM is tuned
+        (0, 15, False, True, True),  # plain table empty: bpreshuffle covers it
+        (6, 15, False, True, True),  # plain tuned at a few M only
+        (15, 15, False, True, False),  # tie: keep the checkpoint layout
+        (15, 6, False, True, False),
+        (15, 0, False, True, False),  # bpreshuffle untuned
+        (0, 0, False, True, False),
+        (0, 15, True, True, False),  # the plain Triton GEMM is tuned
+        (0, 15, False, False, False),  # gfx942 / gfx1250: never taken
     ],
 )
 def test_plain_blockscale_gemm_has_priority(
@@ -47,6 +48,7 @@ def test_plain_blockscale_gemm_has_priority(
     plain: int,
     shuffled: int,
     triton: bool,
+    gfx950: bool,
     picks_bpreshuffle: bool,
 ) -> None:
     def tuned_m_count(n: int, k: int, preshuffled: bool) -> int:
@@ -60,7 +62,7 @@ def test_plain_blockscale_gemm_has_priority(
     )
     monkeypatch.setattr(rocm_aiter_ops, "is_linear_fp8_enabled", lambda: True)
     # The kernel is gated to gfx950; CI may run on another arch.
-    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: gfx950)
     config = FP8ScaledMMLinearLayerConfig(
         weight_quant_key=kFp8Static128BlockSym,
         activation_quant_key=kFp8Dynamic128Sym,
