@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.models.hy_v4.nvidia import dfly_speculator
+from vllm.models.hy_v4.common import dfly_speculator
 from vllm.v1.worker.gpu.spec_decode.dfly.config import DFlySpeculatorConfig
 
 
