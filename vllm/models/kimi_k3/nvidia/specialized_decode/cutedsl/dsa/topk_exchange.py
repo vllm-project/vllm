@@ -324,7 +324,7 @@ def build_merge(
         return w0, w1
 
     @cute.jit
-    def settle_all(base: Int64, plane_address: Int64, lane, pv, epoch: Uint32):
+    def settle_lane_pairs(base: Int64, plane_address: Int64, lane, pv, epoch: Uint32):
         """`settle` of a lane's B' pairs (rows 0 .. groups - 1 of `pv`, at base +
         (lane + 32 m) * 16) and its bit-plane pair (row groups, at plane_address),
         every pass reloading all of them."""
@@ -846,7 +846,7 @@ def build_merge(
                     pv[m, k] = raw[m][k]
             for k in cutlass.range_constexpr(4):
                 pv[groups, k] = praw[k]
-            settle_all(base, plane_address, lane, pv, tag)
+            settle_lane_pairs(base, plane_address, lane, pv, tag)
             pw0, pw1 = pv[groups, 0], pv[groups, 2]
         else:
             pw0, pw1 = settle(plane_address, praw[0], praw[1], praw[2], praw[3], tag)

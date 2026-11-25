@@ -110,8 +110,10 @@ def test_merge_settle_all_matches_pairwise(rank0, monkeypatch):
         ws = DCPTopkRescueWorkspace.__new__(DCPTopkRescueWorkspace)
         recv = torch.zeros(ROWS, rescue_slots(TOPK, N), packed_row_words(TOPK), **i32)
         flags = torch.zeros(WORLD, ROWS, **i32)
-        ptrs = [torch.tensor([t.data_ptr()] * WORLD, device=dev) for t in (recv, flags)]
-        ws._init(recv, flags, *ptrs, ROWS, TOPK, N)
+        peer_recv, peer_flags = (
+            torch.tensor([t.data_ptr()] * WORLD, device=dev) for t in (recv, flags)
+        )
+        ws._init(recv, flags, peer_recv, peer_flags, ROWS, TOPK, N)
         ws.world_size, ws.rank, ws.device_group = WORLD, rank0, None
         return ws
 
@@ -165,6 +167,7 @@ def test_merge_settle_all_matches_pairwise(rank0, monkeypatch):
                         else:
                             push(ex, rank)
                 torch.accelerator.synchronize()
+                assert own is not None
                 got = {}
                 for settle, (ex, ws, merge) in arms.items():
                     rows_out = torch.full((ROWS, TOPK), -9, **i32)
