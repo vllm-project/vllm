@@ -114,10 +114,15 @@ class MultiModalHasher:
 
             return cls.iter_item_to_bytes("image", data)
 
-        if isinstance(obj, MediaWithBytes) and isinstance(obj.media, Image.Image):
-            image_id = _get_image_id_bytes(obj.media)
-            if image_id is not None:
-                return _framed(image_id)
+        # A 3D tensor is a CHW image decoded by torchcodec; video frames are 4D.
+        if isinstance(obj, MediaWithBytes) and (
+            isinstance(obj.media, Image.Image)
+            or (isinstance(obj.media, torch.Tensor) and obj.media.ndim == 3)
+        ):
+            if isinstance(obj.media, Image.Image):
+                image_id = _get_image_id_bytes(obj.media)
+                if image_id is not None:
+                    return _framed(image_id)
 
             if obj.io_config:
                 return cls.iter_item_to_bytes(
@@ -188,7 +193,7 @@ class MultiModalHasher:
         key: str,
         obj: object,
     ) -> Iterable[bytes | memoryview]:
-        """Yield the digest input for a single ``key``/``obj`` pair."""
+        """Yield the digest input for a single `key`/`obj` pair."""
         yield from _framed(key.encode("utf-8"))
         yield from cls.iter_value_to_bytes(obj)
 

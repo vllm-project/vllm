@@ -13,6 +13,23 @@ This page teaches you how to pass multi-modal inputs to [multi-modal models](../
 
     This restriction is especially important if you run vLLM in a containerized environment where the vLLM pods may have unrestricted access to internal networks.
 
+## GLM-5.3-Flash
+
+`zai-org/GLM-5.3-Flash` (`Glm5NextForConditionalGeneration`) requires the
+Rust frontend for image and video inputs. Its Python multimodal preprocessor
+has been removed. Enable the Rust frontend explicitly:
+
+```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3-Flash
+```
+
+You can also use `vllm-rs serve zai-org/GLM-5.3-Flash`. Selecting
+`--tokenizer-mode glm5_next` alone does not enable the Rust frontend.
+Python `LLM` and the Python API server reject multimodal initialization for
+this checkpoint. For Python text-only inference, set
+`limit_mm_per_prompt={"image": 0, "video": 0}` in `LLM`, or pass
+`--limit-mm-per-prompt '{"image": 0, "video": 0}'` to `vllm serve`.
+
 ## Offline Inference
 
 To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
@@ -295,7 +312,6 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
 
     llm = LLM(
         model=model_path,
-        gpu_memory_utilization=0.8,
         enforce_eager=True,
         limit_mm_per_prompt={"video": 1},
     )
@@ -606,7 +622,7 @@ When using multi-modal inputs, vLLM normally hashes each media item by content t
         print(o.outputs[0].text)
     ```
 
-Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache.
+Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache. If several skipped items miss the cache, the error names all of them by modality and index.
 
 ??? code
 
@@ -648,6 +664,13 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
 
     For certain models, we provide alternative chat templates inside [examples](../../examples).
     For example, VLM2Vec uses [examples/pooling/embed/template/vlm2vec_phi3v.jinja](../../examples/pooling/embed/template/vlm2vec_phi3v.jinja) which is different from the default one for Phi-3-Vision.
+
+### Media Download Cache
+
+Set `VLLM_MEDIA_CACHE` to a directory to cache media downloaded from URLs on disk.
+This cache is disabled by default. If another request evicts an entry while it
+is being read, vLLM downloads the media again. The source URL must still be
+accessible when this happens.
 
 ### Image Inputs
 
@@ -784,6 +807,14 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
     export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
     ```
 
+    For synchronous media fetching, vLLM limits response-body streaming and
+    retries to twice the configured per-read timeout. This prevents a server
+    that continuously sends a few response-body bytes from occupying a
+    renderer worker indefinitely. The same limit applies to audio and video
+    URLs using `VLLM_AUDIO_FETCH_TIMEOUT` and `VLLM_VIDEO_FETCH_TIMEOUT`.
+    When a fetch exceeds this limit, the API returns HTTP 422 with `error.param`
+    set to the request field that supplied the URL.
+
 ### Video Inputs
 
 Instead of `image_url`, you can pass a video file via `video_url`. Here is a simple example using [LLaVA-OneVision](https://huggingface.co/llava-hf/llava-onevision-qwen2-0.5b-ov-hf).
@@ -896,11 +927,23 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   Because vLLM reserves GPU memory for these slots at startup, this value cannot
   be overridden per request. Benchmark before increasing it because each
   additional slot increases the GPU memory reservation.
+- `keyframe_sampling`: Unset by default, which keeps uniform sampling. Set it
+  to `"nearest"` to replace each uniform frame position with the closest
+  keyframe, keeping distinct frames in chronological order; if a video has too
+  few keyframes, it falls back to uniform positions for that video.
 
 ```bash
 # Example: explicitly use the recommended 2 hardware decoders
 vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   --media-io-kwargs '{"video": {"backend": "pynvvideocodec", "hw_decoders": 2}}'
+```
+
+To sample the keyframes nearest to the uniform frame positions:
+
+```bash
+vllm serve Qwen/Qwen3-VL-8B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "pynvvideocodec", "keyframe_sampling": "nearest"}}' \
+  --mm-ipc-gpu-memory-gb 1
 ```
 
 #### Video Frame Recovery
@@ -1106,6 +1149,32 @@ vllm serve llava-hf/llava-1.5-7b-hf \
   --media-io-kwargs '{"image": {"rgba_background_color": [128, 128, 128]}}'
 ```
 
+#### Image Decoding Backend
+
+vLLM decodes image bytes with one of these backends:
+
+| Backend | Description |
+| --- | --- |
+| `pil` (default) | Pillow, returns PIL images |
+| `torchcodec` | TorchCodec for JPEG, PNG, WebP and AVIF, returning CHW `uint8` tensors; Pillow for everything else |
+
+```bash
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
+  --media-io-kwargs '{"image": {"image_backend": "torchcodec"}}'
+```
+
+The `torchcodec` backend decodes faster than Pillow, and the HF image
+processor receives a tensor directly, skipping its PIL-to-tensor conversion.
+The pixel values are identical to the `pil` backend.
+Images with transparency, CMYK or 16-bit images, animated images and
+`image_mode` values other than `RGB` are decoded with Pillow.
+
+!!! note
+    The `torchcodec` backend requires torchcodec >= 0.16 and falls back to
+    Pillow when it is unavailable. Some processors only accept PIL images
+    (e.g. InternVL, DeepSeek-VL2, DeepSeek-OCR, Step3-VL and Kimi-VL) and do
+    not support this backend yet.
+
 ### Audio Inputs
 
 Audio input is supported according to [OpenAI Audio API](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in).
@@ -1261,10 +1330,18 @@ pass a tensor of shape `(..., hidden_size of LM)` for each item to the correspon
     in order for placeholder tokens to be applied correctly by the chat template.
 
 You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
+To reject embeddings of a single modality, set `"allow_embeds": false` for it in `--limit-mm-per-prompt`,
+e.g. `--limit-mm-per-prompt '{"video": {"count": 0, "allow_embeds": false}}'`.
 
 !!! warning
     The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!
+
+Embedding payloads that cannot be decoded in a supported format are rejected
+as client input errors with HTTP status 400. Memory exhaustion while loading an
+otherwise valid payload remains a server error.
+
+NumPy image and video embeddings serialized as `.npy` data are accepted in either native or non-native byte order. The embedding readers convert non-native arrays to native byte order while preserving their numeric values and element precision. For example, `numpy2base64` from `vllm.utils.serial_utils` can encode a big-endian floating-point NumPy array for the image or video embedding fields. The array must still have the shape required by the model; object arrays are not supported.
 
 #### Image Embedding Inputs
 

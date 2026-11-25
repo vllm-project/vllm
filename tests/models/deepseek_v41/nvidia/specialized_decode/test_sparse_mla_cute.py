@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``sparse_mla_decode`` (``sparse_mla_cute.py``) against an FP32 reference.
+"""`sparse_mla_decode` (`sparse_mla_cute.py`) against an FP32 reference.
 
 Each token attends to its own columns: the first 128 index the sliding-window
 pool and the rest the compressed pool, as storage offsets. The cases cover the
@@ -34,14 +34,14 @@ SWA_ROWS, COMP_ROWS, PAGE = 1024, 8192, 64
 
 
 def fp8(shape: tuple[int, ...], std: float, g: torch.Generator) -> torch.Tensor:
-    """Normal values of standard deviation ``std`` as FP8 E4M3."""
+    """Normal values of standard deviation `std` as FP8 E4M3."""
     return (torch.randn(shape, device=DEVICE, generator=g) * std).to(
         torch.float8_e4m3fn
     )
 
 
 def make_case(tokens: int, width: int, seed: int) -> dict:
-    """Pools, indices with masked columns, and lengths for ``tokens`` tokens."""
+    """Pools, indices with masked columns, and lengths for `tokens` tokens."""
     g = torch.Generator(device=DEVICE).manual_seed(seed)
     swa_pool = fp8((SWA_ROWS // PAGE, PAGE, D), 1.0, g)
     comp_pool = fp8((COMP_ROWS // PAGE, PAGE, D), 1.0, g)
@@ -147,7 +147,7 @@ def test_cuda_graph_replay_matches_eager() -> None:
 def test_declines_unsupported() -> None:
     c = make_case(4, 640, seed=3)
     out = torch.empty((4, H, D), dtype=torch.bfloat16, device=DEVICE)
-    base = [c["q"], c["swa_pool"], c["comp_pool"], c["indices"], c["lens"], out]
+    base = (c["q"], c["swa_pool"], c["comp_pool"], c["indices"], c["lens"], out)
     assert supports_sparse_mla_cute(*base, 0.1, 1.0, c["sinks"])
     # Tensor scales, BF16 sinks, a 768-wide set, a BF16 query.
     assert not supports_sparse_mla_cute(*base, torch.tensor(0.1), 1.0, c["sinks"])

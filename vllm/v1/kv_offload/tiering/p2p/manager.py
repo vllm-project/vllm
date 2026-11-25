@@ -24,13 +24,14 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     OffloadPolicy,
     ReqContext,
-    RequestOffloadingContext,
     ScheduleEndContext,
 )
+from vllm.v1.kv_offload.config import OffloadAccessMode
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
+    SecondaryTierRequestContext,
     TransferJob,
 )
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
@@ -93,45 +94,56 @@ _RECONNECT_MAX_BACKOFF_S = 60.0
 
 
 def _remote_prefiller_params(kv_params: dict | None) -> dict | None:
-    """Return the ``remote_prefiller`` sub-dict, or None if absent.
+    """Return the `remote_prefiller` sub-dict, or None if absent.
 
     Set on decoder requests to name the remote prefiller they pull from;
     carries kv_request_id, remote_host, remote_port.
     """
-    if not kv_params:
+    if not isinstance(kv_params, dict):
         return None
-    return kv_params.get("remote_prefiller")
+    val = kv_params.get("remote_prefiller")
+    return val if isinstance(val, dict) else None
 
 
 def _remote_decoder_params(kv_params: dict | None) -> dict | None:
-    """Return the ``remote_decoder`` sub-dict, or None if absent.
+    """Return the `remote_decoder` sub-dict, or None if absent or null.
 
     Set on prefiller requests to name the remote decoder they serve;
-    carries kv_request_id.
+    carries kv_request_id. A present but non-dict value is treated as an
+    empty dict so submit_store fails closed instead of storing locally.
     """
-    if not kv_params:
+    if not isinstance(kv_params, dict):
         return None
-    return kv_params.get("remote_decoder")
+    val = kv_params.get("remote_decoder")
+    if val is None:
+        return None
+    return val if isinstance(val, dict) else {}
 
 
 def _remote_kv_source_params(kv_params: dict | None) -> dict | None:
-    """Return the ``remote_kv_source`` sub-dict, or None if absent.
+    """Return the `remote_kv_source` sub-dict, or None if absent.
 
     Set on symmetric-P2P consumer requests to name the remote source they
     pull from; carries kv_request_id, remote_host, remote_port.
     """
-    if not kv_params:
+    if not isinstance(kv_params, dict):
         return None
-    return kv_params.get("remote_kv_source")
+    val = kv_params.get("remote_kv_source")
+    return val if isinstance(val, dict) else None
 
 
 def _peer_id_from_params(role_params: dict) -> str | None:
-    """Build ``host:port`` peer_id from a role-scoped sub-dict, or None."""
+    """Build `host:port` peer_id from a role-scoped sub-dict, or None."""
     host = role_params.get("remote_host")
     port = role_params.get("remote_port")
     if host and port:
         return f"{host}:{port}"
     return None
+
+
+def _request_id_from_params(role_params: dict) -> str | None:
+    request_id = role_params.get("kv_request_id")
+    return request_id if isinstance(request_id, str) and request_id else None
 
 
 @dataclass(slots=True)
@@ -141,13 +153,15 @@ class P2PSourceInfo:
     kv_request_id: str
     peer_id: str
     do_probe: bool  # False for remote_prefiller (PD), True for remote_kv_source
+    # Mutable per-request state; retained across decoder preemptions.
+    pd_fetch_submitted: bool = False
 
 
 @dataclass(slots=True)
 class P2PDestInfo:
     """Producer side: a remote fetches this request's blocks from us.
 
-    ``kv_request_id`` is None when the ``remote_decoder`` block is present
+    `kv_request_id` is None when the `remote_decoder` block is present
     but malformed (no id); the block's presence still marks the request as
     remote-decode, so submit_store must fail rather than store locally.
     """
@@ -156,8 +170,8 @@ class P2PDestInfo:
 
 
 def _parse_source(kv_params: dict | None) -> P2PSourceInfo | None:
-    """Parse the consumer sub-dict (PD ``remote_prefiller`` or symmetric
-    ``remote_kv_source``) into a ``P2PSourceInfo``, or None if absent/incomplete."""
+    """Parse the consumer sub-dict (PD `remote_prefiller` or symmetric
+    `remote_kv_source`) into a `P2PSourceInfo`, or None if absent/incomplete."""
     role = _remote_prefiller_params(kv_params)
     do_probe = False
     if role is None:
@@ -166,8 +180,8 @@ def _parse_source(kv_params: dict | None) -> P2PSourceInfo | None:
     if not role:
         return None
     peer_id = _peer_id_from_params(role)
-    kv_request_id = role.get("kv_request_id")
-    if peer_id is None or not kv_request_id:
+    kv_request_id = _request_id_from_params(role)
+    if peer_id is None or kv_request_id is None:
         return None
     return P2PSourceInfo(
         kv_request_id=kv_request_id,
@@ -177,19 +191,19 @@ def _parse_source(kv_params: dict | None) -> P2PSourceInfo | None:
 
 
 def _parse_dest(kv_params: dict | None) -> P2PDestInfo | None:
-    """Parse the producer ``remote_decoder`` sub-dict into a ``P2PDestInfo``,
+    """Parse the producer `remote_decoder` sub-dict into a `P2PDestInfo`,
     or None if the block is absent (not a remote-decode request)."""
     role = _remote_decoder_params(kv_params)
     if role is None:
         return None
-    return P2PDestInfo(kv_request_id=role.get("kv_request_id") or None)
+    return P2PDestInfo(kv_request_id=_request_id_from_params(role))
 
 
 def _annotate_req_context(req_context: ReqContext) -> None:
     """Parse kv_transfer_params once and cache the P2P routing state.
 
-    Called from ``on_new_request``; later calls for the same request read
-    the cached ``P2PSourceInfo``/``P2PDestInfo`` via ``get_state`` instead
+    Called from `on_new_request`; later calls for the same request read
+    the cached `P2PSourceInfo`/`P2PDestInfo` via `get_state` instead
     of re-parsing.
     """
     source = _parse_source(req_context.kv_transfer_params)
@@ -200,7 +214,7 @@ def _annotate_req_context(req_context: ReqContext) -> None:
         req_context.set_state(dest)
 
 
-@dataclass
+@dataclass(slots=True)
 class _UnboundStoreBatch:
     """A submit_store batch parked at the manager before any peer has fetched.
 
@@ -224,13 +238,13 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     over the same control connection.
 
     Never entered concurrently: every public method runs under the tiering
-    manager's ``lock``, held either by the scheduler thread for the length of
+    manager's `lock`, held either by the scheduler thread for the length of
     a step or by the tier-poll thread for the length of one round. Peers are
-    not driven by the engine, so this tier sets ``tolerates_off_thread_polling``
+    not driven by the engine, so this tier sets `tolerates_off_thread_polling`
     to be serviced from that thread too; without it a peer's lookup or fetch
     waits for a step boundary, which on a saturated rank can be seconds.
 
-    ``has_pending_work()`` reports peer-originated work, not idle polling,
+    `has_pending_work()` reports peer-originated work, not idle polling,
     so a peer-only engine can pause and shut down. The tiering manager keeps
     the engine ticking when the tier-poll thread is off or another secondary
     tier exists.
@@ -249,52 +263,58 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         backends: list[str] | None = None,
         num_threads: int = 4,
         unbound_store_timeout_s: float = _UNBOUND_STORE_TIMEOUT_S,
+        access_mode: OffloadAccessMode | str = OffloadAccessMode.READWRITE,
         **kwargs: Any,
     ) -> None:
         """Initialize the P2P secondary tier manager.
 
-        All keyword arguments after ``primary_kv_view`` come from the
-        ``secondary_tiers`` entry in ``kv_connector_extra_config``. See
-        ``docs/features/kv_offloading_usage.md`` for the user-facing
+        All keyword arguments after `primary_kv_view` come from the
+        `secondary_tiers` entry in `kv_connector_extra_config`. See
+        `docs/features/kv_offloading_usage.md` for the user-facing
         configuration reference.
 
         Args:
-            offloading_spec: Owning ``OffloadingSpec`` (provides normalized
+            offloading_spec: Owning `OffloadingSpec` (provides normalized
                 model, parallel, and cache layout configuration).
             primary_kv_view: Memoryview over the CPU primary tier; the
                 NIXL agent registers this region for RDMA transfers.
-            tier_type: Tier identifier (defaults to ``"p2p"``).
+            tier_type: Tier identifier (defaults to `"p2p"`).
             host: Address the ZMQ control socket binds to, used verbatim
                 as both the bind address and the identity peers dial back
-                (mirrors the NIXL connector's ``VLLM_NIXL_SIDE_CHANNEL_HOST``;
+                (mirrors the NIXL connector's `VLLM_NIXL_SIDE_CHANNEL_HOST`;
                 no auto-detection). Defaults to
-                ``VLLM_P2P_SIDE_CHANNEL_HOST`` (``localhost``) when not set;
+                `VLLM_P2P_SIDE_CHANNEL_HOST` (`localhost`) when not set;
                 must be set to the node's routable IP for cross-host P2P so
                 remote peers can reach the socket.
             port: Base port for the ZMQ control socket. Must be
                 reachable from peers. Defaults to
-                ``VLLM_P2P_SIDE_CHANNEL_PORT`` (``5710``) when not set.
-                The bound port is ``base + data_parallel_index`` so each
+                `VLLM_P2P_SIDE_CHANNEL_PORT` (`5710`) when not set.
+                The bound port is `base + data_parallel_index` so each
                 DP replica gets a distinct port (one socket per replica,
                 like NIXL); for DP=1 the offset is 0.
-            backends: NIXL transport backends (e.g. ``["UCX"]``,
-                ``["MOONCAKE"]``, ``["LIBFABRIC"]``). Defaults to
-                ``["UCX"]``. When any non-UCX backend is requested, the
-                NIXL agent is initialized with ``backends=...``;
+            backends: NIXL transport backends (e.g. `["UCX"]`,
+                `["MOONCAKE"]`, `["LIBFABRIC"]`). Defaults to
+                `["UCX"]`. When any non-UCX backend is requested, the
+                NIXL agent is initialized with `backends=...`;
                 otherwise it falls back to a UCX-only agent with
-                ``num_threads`` threads.
+                `num_threads` threads.
             num_threads: NIXL agent worker threads for the UCX-only
-                branch. Ignored when ``backends`` contains a non-UCX
+                branch. Ignored when `backends` contains a non-UCX
                 entry.
             unbound_store_timeout_s: Seconds a producer holds stored blocks
                 for a consumer that has not fetched them yet, before
-                ``_reap_unbound_stores`` drops them. Raise it for
+                `_reap_unbound_stores` drops them. Raise it for
                 deployments whose prefills outlast the default; the blocks
                 keep primary-tier slots pinned for the whole window.
+            access_mode: Direction(s) in which this tier may transfer data.
+                `read` fetches blocks from peers but never stages local
+                blocks for them; `write` stages blocks for peers but never
+                fetches. The tiering manager skips the directions the mode
+                disables.
             **kwargs: Reserved for future tier-specific options.
 
         Raises:
-            ValueError: If ``unbound_store_timeout_s`` is not a positive
+            ValueError: If `unbound_store_timeout_s` is not a positive
                 number, or anything convertible to one.
 
         """
@@ -316,6 +336,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             offloading_spec,
             primary_kv_view,
             tier_type,
+            access_mode=access_mode,
         )
         try:
             timeout_s = float(unbound_store_timeout_s)
@@ -432,7 +453,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # key) entry and returns RETRY; flush_pending_lookups()
         # in on_schedule_end batches the LookupMsg; a later step's
         # lookup() returns HIT/MISS once LookupRespMsg has arrived.
-        # PD path (``remote_prefiller`` sub-dict only) keeps the eager HIT.
         # Until the peer acks the handshake, prefill locally rather than wait
         # up to VLLM_P2P_HANDSHAKE_TIMEOUT_S on a peer that may be gone.
         if source.do_probe:
@@ -446,26 +466,31 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 return LookupResult.MISS
             return LookupResult.RETRY
 
-        # PD consumer (we are the decoder): all kv blocks should be on the
-        # prefiller side. Return HIT immediately.
+        # PD stores bind to round 0. A later fetch after preemption or partial
+        # promotion cannot be supplied and would wait out the PD load timeout.
+        if source.pd_fetch_submitted:
+            return LookupResult.MISS
         return LookupResult.HIT
 
     @override
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+    def on_new_request(self, req_context: ReqContext) -> SecondaryTierRequestContext:
         """Parse kv_transfer_params once and open the outbound session.
 
-        Parses the P2P routing state onto ``req_context`` (cached for the
+        Parses the P2P routing state onto `req_context` (cached for the
         later lookup/submit/finish calls). On the consumer side
-        (``remote_prefiller`` for PD or ``remote_kv_source`` for symmetric
+        (`remote_prefiller` for PD or `remote_kv_source` for symmetric
         P2P), open a session toward the producer at remote_host:remote_port
         so submit_load can issue FetchMsg as soon as it fires. On the
         prefiller side, sessions are created when the consumer's inbound
         connection arrives in _accept_new_peers — submit_store no longer
         pre-creates anything.
 
-        Producer-leg requests (``remote_decoder`` present) ask for
+        Producer-leg requests (`remote_decoder` present) ask for
         REQUEST_LEVEL: the peer needs every block of the request, not just
         the ones this request computed.
+
+        Requests without a `remote_decoder` opt out of cascades of newly
+        stored primary chunks, since there is no destination to receive them.
         """
         _annotate_req_context(req_context)
         source = req_context.get_state(P2PSourceInfo)
@@ -475,27 +500,27 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._failed_req_ids.add(source.kv_request_id)
         dest = req_context.get_state(P2PDestInfo)
         if dest is not None and dest.kv_request_id:
-            return RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
-        return RequestOffloadingContext()
+            return SecondaryTierRequestContext(policy=OffloadPolicy.REQUEST_LEVEL)
+        return SecondaryTierRequestContext(receives_stores=dest is not None)
 
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:
         """Cancels pending loads and prunes session-scoped state.
 
-        Consumer side (``remote_prefiller`` for PD or ``remote_kv_source``
+        Consumer side (`remote_prefiller` for PD or `remote_kv_source`
         for symmetric-P2P): looks up the session by peer_id because the
         producer's address is what addresses the client-role load to
         cancel; also drops any pending symmetric-P2P lookup state via
-        ``session.finish_request``.
-        Prefiller side (``remote_decoder`` set): looks up via kv_request_id
+        `session.finish_request`.
+        Prefiller side (`remote_decoder` set): looks up via kv_request_id
         because peer_id is no longer carried on store-time
         kv_transfer_params; if a session has bound the id, finish it. If
         no session has bound the id yet, this is a no-op: parked batches
         in `_unbound_stores` are left in place and cleaned up only by
         `_reap_unbound_stores` after `_unbound_store_timeout_s`.
 
-        A PD prefiller request may carry both roles: ``remote_kv_source``
-        (pull cached blocks from a P2P source) and ``remote_decoder`` (serve
+        A PD prefiller request may carry both roles: `remote_kv_source`
+        (pull cached blocks from a P2P source) and `remote_decoder` (serve
         the decoder). Each role is finished independently, on its own
         session. Both roles may share one session when the source and the
         decoder are the same node; that session is then finished once per
@@ -663,6 +688,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             session.ready,
         )
         session.request_blocks(job_id, kv_request_id, keys, block_ids)
+        if not source.do_probe:
+            source.pd_fetch_submitted = True
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
@@ -694,20 +721,24 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         outstanding inbound loads or in-flight outbound stores, and no reaped session's
         transfer is still retained (bounded by its hold cap). Mid-flight
         transfers are NOT cancelled — the caller
-        (``TieringOffloadingManager.reset_cache``) needs the primary
+        (`TieringOffloadingManager.reset_cache`) needs the primary
         memoryview to be quiescent, not aborted. Results
-        accumulate in ``_finished_jobs`` and are surfaced by the next
-        ``get_finished_jobs()`` call.
+        accumulate in `_finished_jobs` and are surfaced by the next
+        `get_finished_jobs()` call.
 
-        A load already failed with a deferred release stays pending until
-        its AbortAck, or until a missed AbortAck disconnects the session and
-        the reap's close() sets the event, so every event is set on return.
+        Inbound loads are aborted up front rather than waited out: a peer
+        that never writes would otherwise block the reset for the full load
+        timeout. Each is failed at once with a deferred release and stays
+        pending until its AbortAck, or until a missed AbortAck disconnects
+        the session and the reap's close() sets the event, so every event
+        is set on return.
         """
         start = time.monotonic()
         self._reap_unbound_stores(force=True)
         self._kv_to_session.clear()
         for session in self._sessions.values():
             self._drain_session_stores(session)
+            session.abort_loads()
 
         warned = False
         while True:
@@ -742,7 +773,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         """Serve inbound peer lookups against the tiering manager.
 
         Called once per scheduler step (before this tier's
-        ``on_schedule_end``) with a ``parent`` handle valid only for the
+        `on_schedule_end`) with a `parent` handle valid only for the
         duration of the call — the sole window in which the P2P server
         role may query the tiering manager. First release bookkeeping for
         the failed serves left by a reaped session, then let every live
@@ -776,8 +807,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def _get_or_create_session(self, peer_id: str) -> P2PSession | None:
         """Return the existing session for peer_id, or open one outbound.
 
-        Consumer-side helper for on_new_request: when ``remote_prefiller``
-        (PD) or ``remote_kv_source`` (symmetric P2P) is set, the consumer
+        Consumer-side helper for on_new_request: when `remote_prefiller`
+        (PD) or `remote_kv_source` (symmetric P2P) is set, the consumer
         must reach the producer at peer_id. If we already have a session
         toward that peer (from a prior load or a peer-initiated inbound),
         reuse it; otherwise open an outbound ControlConnection and build a
@@ -1091,10 +1122,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         """Evict idle sessions when remaining peer slots are scarce.
 
         A session is idle when it has no pending work and its last activity
-        timestamp exceeds ``VLLM_P2P_IDLE_TIMEOUT_S``. Eviction runs only
-        when ``len(_sessions) >= VLLM_P2P_MAX_PEERS - _IDLE_REAP_HEADROOM``
+        timestamp exceeds `VLLM_P2P_IDLE_TIMEOUT_S`. Eviction runs only
+        when `len(_sessions) >= VLLM_P2P_MAX_PEERS - _IDLE_REAP_HEADROOM`
         so a quiet but healthy mesh is not torn down. Uses the same
-        teardown path as ``_reap_dead_sessions``.
+        teardown path as `_reap_dead_sessions`.
         """
         idle_timeout = envs.VLLM_P2P_IDLE_TIMEOUT_S
         if idle_timeout <= 0:
@@ -1143,7 +1174,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         """One sweep of the polling work.
 
         Drains the control transport, polls every session, accumulates
-        their results into ``_finished_jobs``, and reaps any dead sessions.
+        their results into `_finished_jobs`, and reaps any dead sessions.
         Runs under the tiering manager's lock, on the scheduler thread or on
         the tier-poll thread.
         """
@@ -1184,6 +1215,13 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             # inline in dispatch, so the replayed add_stored_blocks calls
             # match that demand and submit transfers immediately.
             for kv_request_id in result.new_fetch_ids:
+                if kv_request_id in result.terminal_fetch_ids:
+                    self._kv_to_session.pop(kv_request_id, None)
+                    for batch in self._unbound_stores.pop(kv_request_id, ()):
+                        self._finished_jobs.append(
+                            JobResult(job_id=batch.job_id, success=False)
+                        )
+                    continue
                 if kv_request_id in self._reaped_stores:
                     # This id's blocks were already reaped, so no
                     # submit_store will ever satisfy the demand on_fetch

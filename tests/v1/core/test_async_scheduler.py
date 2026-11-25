@@ -8,6 +8,7 @@ import pytest
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.pp_utils import PPMicrobatchCap
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
@@ -24,7 +25,6 @@ def _make_model_runner_output(
     req_ids = list(scheduler_output.num_scheduled_tokens.keys())
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
         sampled_token_ids=[[i] for i in range(len(req_ids))],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -271,9 +271,9 @@ def test_prefix_caching_for_multi_turn():
         block_size=BLOCK_SIZE,
     )
     for i, req in enumerate(next_turn_requests):
-        req.prompt_token_ids = requests[i].prompt_token_ids + list(
-            requests[i].output_token_ids
-        )
+        prompt_token_ids = requests[i].prompt_token_ids
+        assert prompt_token_ids is not None
+        req.prompt_token_ids = prompt_token_ids + list(requests[i].output_token_ids)
         req._all_token_ids = req.prompt_token_ids.copy()
         req.all_token_ids = ConstantList(req._all_token_ids)
         req.block_hashes = []
@@ -318,13 +318,14 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids_dict = None
     scheduler.grammar_compile_error_reqs = {}
     scheduler.encoder_cache_mismatch_reqs = set()
+    scheduler.dropped_streaming_updates = []
     scheduler.vllm_config = Mock()
     scheduler.aux_output_connector = None
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
     scheduler.num_spec_tokens = 0
-    scheduler.make_stats = Mock(return_value=None)
+    scheduler.make_stats = Mock(return_value=None)  # type: ignore[method-assign]
     scheduler.max_model_len = 128
 
     def free_request(req, delay_free_blocks=False):
@@ -332,7 +333,9 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
         scheduler.requests.pop(req.request_id, None)
         return None, None
 
-    scheduler._free_request = Mock(side_effect=free_request)
+    scheduler._free_request = Mock(  # type: ignore[method-assign]
+        side_effect=free_request
+    )
 
     output = SchedulerOutput(
         scheduled_new_reqs=[],
@@ -346,7 +349,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     )
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id],
-        req_id_to_index={request.request_id: 0},
         sampled_token_ids=[[123]],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -463,7 +465,6 @@ class PipelinedEngine:
                 self.emitted_position[token] = view[0] - len(tokens) + offset
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
-            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
             sampled_token_ids=sampled_token_ids,
             logprobs=None,
             prompt_logprobs_dict={},
@@ -495,23 +496,32 @@ class PipelinedEngine:
 
 
 def _create_async_pp_scheduler(
-    num_spec: int, pp_size: int = 3, num_blocks: int = 5
+    num_spec: int, pp_size: int = 3, num_blocks: int = 5, **kwargs
 ) -> AsyncScheduler:
     scheduler = create_scheduler(
         async_scheduling=True,
         num_speculative_tokens=num_spec or None,
         speculative_method="ngram_gpu" if num_spec else None,
-        use_v2_model_runner=True,
         num_blocks=num_blocks,
         block_size=16,
         max_num_batched_tokens=512,
+        **kwargs,
     )
+    assert isinstance(scheduler, AsyncScheduler)
     # Emulate PP at the scheduler level; constructing with
     # pipeline_parallel_size>1 requires that many visible GPUs. Drive with
     # queue_size=pp_size+1 (V2 async PP runs pp_size+1 concurrent batches).
     scheduler.decode_stagger = pp_size
-    scheduler.use_pp = pp_size > 1
+    scheduler.use_pp = scheduler.skip_idle_steps = pp_size > 1
+    scheduler.pp_microbatch_cap = PPMicrobatchCap.create(scheduler, pp_size)
     return scheduler
+
+
+def _pp_cap(scheduler: AsyncScheduler, min_tokens: int) -> PPMicrobatchCap:
+    cap = scheduler.pp_microbatch_cap
+    assert cap is not None
+    cap.min_tokens = min_tokens
+    return cap
 
 
 def _assert_ordered_subset(delivered: list[int], emitted: list[int]) -> None:
@@ -536,6 +546,37 @@ def _assert_positions_consistent(req, engine: PipelinedEngine) -> None:
         )
 
 
+@pytest.mark.parametrize("max_tokens", [1, 2, 5])
+@pytest.mark.parametrize("queue_size", [2, 3, 4])
+@pytest.mark.parametrize("num_spec", [0, 3])
+def test_no_steps_past_max_tokens_with_deep_batch_queue(
+    num_spec: int, queue_size: int, max_tokens: int
+):
+    """No step is scheduled past max_tokens with several steps in flight, even
+    when every draft is rejected."""
+    scheduler = _create_async_pp_scheduler(num_spec, pp_size=1, num_blocks=10)
+    (request,) = create_requests(num_requests=1, max_tokens=max_tokens)
+    scheduler.add_request(request)
+
+    num_steps = 0
+    schedule = scheduler.schedule
+
+    def counting_schedule(*args, **kwargs) -> SchedulerOutput:
+        nonlocal num_steps
+        output = schedule(*args, **kwargs)
+        num_steps += request.request_id in output.num_scheduled_tokens
+        return output
+
+    scheduler.schedule = counting_schedule  # type: ignore[method-assign]
+    # The fake runner rejects every draft (no accept_drafts).
+    PipelinedEngine(scheduler, queue_size=queue_size).run()
+
+    assert request.num_output_tokens == max_tokens
+    assert request.num_output_placeholder_steps == 0
+    # One prefill step, then one decode step per remaining output token.
+    assert num_steps == max_tokens
+
+
 @pytest.mark.parametrize("num_spec", [0, 3])
 def test_kv_pressure_preemption_with_inflight_output(num_spec: int):
     """KV-pressure preemption of requests with in-flight async output.
@@ -549,7 +590,7 @@ def test_kv_pressure_preemption_with_inflight_output(num_spec: int):
 
     Regression for the num_output_placeholders underflow EngineCore crash:
     with the fix reverted, the num_spec=3 variant fails with exactly
-    ``assert request.num_output_placeholders >= 0`` when a stale spec output
+    `assert request.num_output_placeholders >= 0` when a stale spec output
     returns after the preempted request was resumed and sampled.
     """
     max_tokens = 24
@@ -571,7 +612,7 @@ def test_kv_pressure_preemption_with_inflight_output(num_spec: int):
             preempts_with_inflight_output += 1
         return orig_preempt(request, timestamp, **kwargs)
 
-    scheduler._preempt_request = counting_preempt
+    scheduler._preempt_request = counting_preempt  # type: ignore[method-assign]
 
     def add_requests(step: int, engine: PipelinedEngine):
         if pending:
@@ -632,7 +673,7 @@ def test_reset_prefix_cache_with_inflight_output_under_kv_pressure(pp_size: int)
             repreempts_with_stale += 1
         return orig_preempt(request, timestamp, **kwargs)
 
-    scheduler._preempt_request = counting_preempt
+    scheduler._preempt_request = counting_preempt  # type: ignore[method-assign]
 
     resets = 0
     reset_steps = {6, 14} if pp_size == 1 else {6, 7, 18, 19}
@@ -772,10 +813,7 @@ def test_resumable_request_handoff():
     """New streaming input resumes with the correct context and stale results
     are ignored.
     """
-    scheduler = create_scheduler(
-        async_scheduling=True,
-        use_v2_model_runner=True,
-    )
+    scheduler = create_scheduler(async_scheduling=True)
     engine = PipelinedEngine(scheduler, queue_size=3)
     engine._next_token = EOS_TOKEN_ID
 
@@ -811,3 +849,157 @@ def test_resumable_request_handoff():
 
     engine._process_oldest_step()
     assert len(request.output_token_ids) == 1
+
+
+@pytest.mark.parametrize("max_tokens", [1, 4])
+def test_should_schedule_skips_idle_steps(max_tokens: int):
+    """PP: after an empty step that no request needs, no more are scheduled until
+    a request arrives or that step completes. A request that will decode needs
+    them, to advance the PP cadence."""
+    scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4)
+    (request,) = create_requests(
+        num_requests=1, num_tokens=8, max_tokens=max_tokens, ignore_eos=True
+    )
+    scheduler.add_request(request)
+    prefill = scheduler.schedule()
+    assert prefill.num_scheduled_tokens[request.request_id] == 8
+    assert scheduler.should_schedule()
+
+    # Nothing is schedulable until the cadence elapses or the step returns.
+    idle = scheduler.schedule()
+    assert idle.total_num_scheduled_tokens == 0
+    assert scheduler.should_schedule() == (max_tokens > 1)
+
+    if max_tokens == 1:
+        (other,) = create_requests(1, 8, max_tokens=1, req_ids=["other"])
+        scheduler.add_request(other)
+        assert scheduler.should_schedule()
+        assert scheduler.schedule().num_scheduled_tokens == {"other": 8}
+        assert not scheduler.schedule().total_num_scheduled_tokens
+        assert not scheduler.should_schedule()
+        scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
+        assert scheduler.should_schedule()
+
+
+@pytest.mark.parametrize(
+    "arrivals,expected",
+    [
+        ([[400]], [100, 75, 64]),  # 400-token backlog: split over the 4 stages
+        ([[400, 400]], [200, 150, 113]),  # 800: larger chunks
+        ([[400] * 8], [512]),  # backlog >= 4 x budget: full budget
+        ([[40]], [40]),  # below the 64 floor: one step
+        ([[40], [400]], [40, 100]),  # 1st's last chunk in flight adds nothing
+    ],
+)
+def test_pp_microbatch_cap(arrivals: list[list[int]], expected: list[int]):
+    """Each inner list is a group of prompts arriving before one schedule()."""
+    scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4, num_blocks=1000)
+    _pp_cap(scheduler, 64)
+    steps = []
+    for i, lens in enumerate(arrivals):
+        for j, n in enumerate(lens):
+            (request,) = create_requests(1, n, max_tokens=1, req_ids=[f"{i}-{j}"])
+            scheduler.add_request(request)
+        steps.append(scheduler.schedule().total_num_scheduled_tokens)
+    while len(steps) < len(expected):
+        steps.append(scheduler.schedule().total_num_scheduled_tokens)
+    assert steps == expected
+
+
+def test_pp_microbatch_cap_cached_backlog(monkeypatch: pytest.MonkeyPatch):
+    """Waiting requests count their uncached tokens (never below 0), each looked
+    up in the prefix cache again only if its num_tokens changes or more of its
+    prefix has been cached."""
+    scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4, num_blocks=1000)
+    cap = _pp_cap(scheduler, 16)
+    ids = [f"r{i}" for i in range(6)]
+    for request in create_requests(6, 400, max_tokens=1, req_ids=ids):
+        scheduler.add_request(request)
+    # r1's hit exceeds its tokens, as for a preempted request with cached output.
+    hits = {"r0": 384, "r1": 1000, "r2": 384, "r3": 384, "r4": 384, "r5": 0}
+    looked_up: list[str] = []
+
+    def hit(request):
+        looked_up.append(request.request_id)
+        return hits[request.request_id]
+
+    monkeypatch.setattr(scheduler.kv_cache_manager, "get_num_cached_tokens", hit)
+    # 16 + 0 + 16 + 16 + 16 + 400 = 464 tokens -> ceil(464 / 4).
+    assert cap.apply(512) == 116
+    assert looked_up == ids
+
+    # Hits are remembered while requests wait, until num_tokens changes.
+    assert cap.apply(512) == 116
+    assert looked_up == ids
+    scheduler.requests["r2"].append_output_token_ids(0)
+    cap.apply(512)
+    assert looked_up == ids + ["r2"]
+
+    # More of r3's prefix is cached since its lookup.
+    kv_cache_manager = scheduler.kv_cache_manager
+    extend = kv_cache_manager.extend_cached_prefix
+    monkeypatch.setattr(
+        kv_cache_manager,
+        "extend_cached_prefix",
+        lambda request, n: extend(request, n) + 16 * (request.request_id == "r3"),
+    )
+    cap.apply(512)
+    assert looked_up == ids + ["r2", "r3"]
+
+
+def test_pp_microbatch_cap_skips_decode_only_steps():
+    """Without a prefill to split the cap is the full budget, so steps with only
+    decodes don't scan the running requests."""
+    scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=4, num_blocks=1000)
+    cap = _pp_cap(scheduler, 128)
+    for request in create_requests(3, 40, max_tokens=8):
+        scheduler.add_request(request)
+    assert scheduler.schedule().total_num_scheduled_tokens == 120
+    assert not scheduler._inflight_prefills
+    scheduler.running = _NoIter(scheduler.running)
+    assert cap.apply(512) == 512
+
+
+class _NoIter(list):
+    def __iter__(self):
+        raise AssertionError("running requests scanned")
+
+
+def test_pp_microbatch_cap_default_on(monkeypatch: pytest.MonkeyPatch):
+    """On by default (4096 floor): a lone 18k prefill at budget 16k. The cap is
+    recomputed from the remaining prompt each step, hence the 1212-token tail."""
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        num_blocks=2000,
+        max_num_batched_tokens=16384,
+        max_model_len=32768,
+    )
+    scheduler.use_pp = True
+    scheduler.pp_microbatch_cap = PPMicrobatchCap.create(scheduler, 4)
+    scheduler.add_request(create_requests(1, 18000, max_tokens=1)[0])
+    steps = [scheduler.schedule().total_num_scheduled_tokens for _ in range(5)]
+    assert steps == [4500, 4096, 4096, 4096, 1212]
+
+
+@pytest.mark.parametrize(
+    "unchunked", [None, "enable_chunked_prefill", "disable_chunked_mm_input"]
+)
+def test_pp_microbatch_cap_progress(unchunked: str | None):
+    """No zero-token steps; the cap is skipped when prompts or media can't be
+    chunked."""
+    kwargs = {unchunked: unchunked == "disable_chunked_mm_input"} if unchunked else {}
+    scheduler = _create_async_pp_scheduler(
+        num_spec=0, pp_size=4, num_blocks=1000, **kwargs
+    )
+    if unchunked:
+        assert scheduler.pp_microbatch_cap is None
+    else:
+        _pp_cap(scheduler, 1)
+    scheduler.num_prefill_lookahead = 4
+    scheduler.add_request(create_requests(1, 400, max_tokens=1)[0])
+    steps: list[int] = []
+    while sum(steps) < 400 and 0 not in steps:
+        steps.append(scheduler.schedule().total_num_scheduled_tokens)
+    assert sum(steps) == 400 and 0 not in steps
+    assert not unchunked or steps == [400]

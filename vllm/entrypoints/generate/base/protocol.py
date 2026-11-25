@@ -27,13 +27,26 @@ StopParam: TypeAlias = (
     str | Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
 )
 
+StopTokenIdsParam: TypeAlias = (
+    Annotated[list[int], Field(max_length=envs.VLLM_MAX_STOP_TOKEN_IDS)] | None
+)
+
+BadWordsParam: TypeAlias = (
+    Annotated[list[str], Field(max_length=envs.VLLM_MAX_NUM_BAD_WORDS)] | None
+)
+
 # `top_logprobs` is nullable in the OpenAI spec; null means the same as omitted.
 TopLogprobsParam: TypeAlias = Annotated[
     int,
     BeforeValidator(lambda v: 0 if v is None else v, json_schema_input_type=int | None),
 ]
 
-MMPayload: TypeAlias = Literal["tensors", "none"]
+MMPayload: TypeAlias = Literal["tensors", "metadata", "none"]
+
+# Range of a request priority, in the body or the `X-Vllm-Priority` header:
+# int32, the type of `priority` in the Rust frontend.
+PRIORITY_MIN = -(2**31)
+PRIORITY_MAX = 2**31 - 1
 
 _CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
 _MAX_CACHE_SALT_LENGTH = 128
@@ -114,9 +127,11 @@ class SpeculativeDecodingMetrics(OpenAIBaseModel):
     num_accepted_draft_tokens: int
     num_draft_tokens: int
     num_spec_tokens: int
+    num_verified_draft_tokens: int
     # Ordered per-verify-step arrays; populated only at the `detailed` level.
     per_step_accepted: list[int] | None = None
     per_step_drafted: list[int] | None = None
+    per_step_verified: list[int] | None = None
 
 
 class PerRequestMetrics(OpenAIBaseModel):
@@ -182,7 +197,7 @@ def structured_outputs_from_response_format(
     structured_outputs: StructuredOutputsParams | None,
     response_format: AnyResponseFormat | None,
 ) -> StructuredOutputsParams | None:
-    """Apply ``response_format`` overrides to ``structured_outputs``."""
+    """Apply `response_format` overrides to `structured_outputs`."""
     if response_format is None or response_format.type == "text":
         return structured_outputs
 

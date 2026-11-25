@@ -6,6 +6,7 @@ import threading
 import time
 from contextlib import ExitStack
 from http import HTTPStatus
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
@@ -69,7 +70,7 @@ VISION_PROMPT = {
 
 async def _generate(engine: AsyncLLM, request_id: str, n: int = 1) -> RequestOutput:
     async def run() -> RequestOutput:
-        async for out in engine.generate(
+        async for out in engine.generate(  # noqa: B007
             request_id=request_id,
             prompt=TEXT_PROMPT,
             sampling_params=SamplingParams(max_tokens=5, n=n),
@@ -113,6 +114,26 @@ def _mock_vllm_config() -> MagicMock:
     vllm_config.observability_config.otlp_traces_endpoint = None
     vllm_config.scheduler_config.stream_interval = 1
     return vllm_config
+
+
+def test_tracing_collects_stats_without_stat_loggers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Tracing needs request stats, but disabled stat logging keeps the console
+    and Prometheus stat loggers off."""
+    vllm_config = _mock_vllm_config()
+    vllm_config.observability_config.otlp_traces_endpoint = "localhost:4317"
+    vllm_config.profiler_config.should_profile_frontend = False
+    _mock_async_llm_dependencies(monkeypatch)
+    monkeypatch.setattr(async_llm_module, "init_tracer", MagicMock())
+
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+
+    assert engine.logger_manager is None
+    output_processor = cast(MagicMock, async_llm_module.OutputProcessor)
+    assert output_processor.call_args.kwargs["collect_stats"]
+    make_client = async_llm_module.EngineCoreClient.make_async_mp_client
+    assert make_client.call_args.kwargs["collect_stats"]
 
 
 @pytest.mark.parametrize("method", ["generate", "encode"])
@@ -790,13 +811,13 @@ async def test_mid_stream_cancellation(
 class MockLoggingStatLogger(LoggingStatLogger):
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         super().__init__(vllm_config, engine_index)
-        self.log = MagicMock()
+        self.log: MagicMock = MagicMock()
 
 
 class MockAggregatedStatLogger(AggregatedLoggingStatLogger):
     def __init__(self, vllm_config: VllmConfig, engine_indexes: list[int]):
         super().__init__(vllm_config, engine_indexes)
-        self.log = MagicMock()
+        self.log: MagicMock = MagicMock()
 
 
 @pytest.mark.asyncio
@@ -815,7 +836,9 @@ async def test_customize_loggers(monkeypatch):
 
         await engine.do_log_stats()
 
-        stat_loggers = engine.logger_manager.stat_loggers
+        logger_manager = engine.logger_manager
+        assert logger_manager is not None
+        stat_loggers: Any = logger_manager.stat_loggers
         assert (
             len(stat_loggers) == 3
         )  # MockLoggingStatLogger + LoggingStatLogger +  Promethus Logger
@@ -842,7 +865,9 @@ async def test_customize_aggregated_loggers():
 
         await engine.do_log_stats()
 
-        stat_loggers = engine.logger_manager.stat_loggers
+        logger_manager = engine.logger_manager
+        assert logger_manager is not None
+        stat_loggers: Any = logger_manager.stat_loggers
         assert len(stat_loggers) == 4
         #  MockLoggingStatLogger + MockAggregatedStatLogger
         # + LoggingStatLogger + PrometheusStatLogger
@@ -1029,6 +1054,7 @@ async def test_abort_final_output(output_kind: RequestOutputKind):
 
         # Verify num_cached_tokens is set correctly
         assert hasattr(final_output, "num_cached_tokens")
+        assert final_output.num_cached_tokens is not None
         assert final_output.num_cached_tokens >= 0
 
         # If we got intermediate outputs, verify they are consistent
@@ -1127,7 +1153,7 @@ async def test_pause_resume_basic():
 
         # Engine should still work after all cycles
         sampling_params = SamplingParams(max_tokens=5)
-        async for out in engine.generate(
+        async for out in engine.generate(  # noqa: B007
             request_id="post-cycles",
             prompt=TEXT_PROMPT,
             sampling_params=sampling_params,
@@ -1238,7 +1264,7 @@ async def test_pause_wait():
 
         async def gen():
             nonlocal request_completed
-            async for out in engine.generate(
+            async for out in engine.generate(  # noqa: B007
                 request_id="test-wait",
                 prompt=TEXT_PROMPT,
                 sampling_params=sampling_params,
@@ -1341,7 +1367,7 @@ async def test_pause_keep_multi_request():
         any_token_generated = asyncio.Event()
 
         async def gen_multi(request_id: str):
-            async for out in engine.generate(
+            async for out in engine.generate(  # noqa: B007
                 request_id=request_id,
                 prompt=TEXT_PROMPT,
                 sampling_params=sampling_params,

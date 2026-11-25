@@ -158,8 +158,16 @@ class GuidanceBackend(StructuredOutputBackend):
     @staticmethod
     def _build_ll_tokenizer(tokenizer: TokenizerLike, vocab_size: int) -> Any:
         if is_mistral_tokenizer(tokenizer):
-            return tokenizer.llg_tokenizer
-        return llguidance_hf.from_tokenizer(tokenizer, max(vocab_size, len(tokenizer)))
+            ll_tokenizer = tokenizer.llg_tokenizer
+            if ll_tokenizer.vocab_size != vocab_size:
+                raise VLLMValidationError(
+                    "Mistral tokenizer vocabulary size "
+                    f"({ll_tokenizer.vocab_size}) does not match the model "
+                    f"vocabulary size ({vocab_size}) for guidance."
+                )
+            return ll_tokenizer
+
+        return llguidance_hf.from_tokenizer(tokenizer, vocab_size)
 
     def __post_init__(self):
         self.disable_any_whitespace = (
@@ -205,11 +213,6 @@ class GuidanceBackend(StructuredOutputBackend):
             vocab_size=self.vocab_size,
         )
 
-    def allocate_token_bitmask(self, max_num_seqs: int):
-        return llguidance_torch.allocate_token_bitmask(
-            max_num_seqs, self.ll_tokenizer.vocab_size
-        )
-
     def destroy(self):
         pass
 
@@ -241,8 +244,8 @@ class GuidanceGrammar(StructuredOutputGrammar):
             (index for index, token in enumerate(tokens) if token == eos_token),
             None,
         )
-        if eos_index is not None and eos_index != len(tokens) - 1:
-            return False
+        if eos_index is not None:
+            tokens = tokens[: eos_index + 1]
 
         if self.terminated:
             return True

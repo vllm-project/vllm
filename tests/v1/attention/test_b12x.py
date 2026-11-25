@@ -24,7 +24,7 @@ from vllm.v1.attention.backends.b12x import (
     _max_page_table_width,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 
 def _require_b12x_paged_attention() -> None:
@@ -87,7 +87,7 @@ def _causal_sliding_window_mask(
             torch.bfloat16,
             "auto",
             None,
-            "Install the b12x backend with `pip install vllm[b12x]`",
+            "The b12x backend requires flashinfer-python>=0.7.2",
             id="package-not-installed",
         ),
         pytest.param(
@@ -134,9 +134,18 @@ def test_b12x_attention_config_support(
     assert reason == expected_reason
 
 
+@pytest.mark.parametrize(
+    ("head_size", "supported"),
+    [(64, False), (128, True), (192, True), (256, True)],
+)
+def test_b12x_attention_head_size_support(head_size: int, supported: bool) -> None:
+    """head_dim 64 cannot be planned by the b12x paged decode kernel."""
+    assert B12xPagedAttentionBackend.supports_head_size(head_size) is supported
+
+
 def test_b12x_attention_uses_two_plane_nhd_cache() -> None:
     spec = B12xPagedAttentionBackend.customize_spec(
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=128,
             num_kv_heads=4,
             head_size=128,
@@ -172,7 +181,7 @@ def test_b12x_attention_impl_accepts_default_block_size(workspace_init) -> None:
     """The impl is constructed with the model, before the platform applies
     get_preferred_block_size(); it must not reject the default block size.
 
-    Regression test: ``--attention-backend b12x`` without ``--block-size``
+    Regression test: `--attention-backend b12x` without `--block-size`
     used to fail with "b12x requires --block-size in (64, 128), got 16".
     """
     _require_b12x_paged_attention()

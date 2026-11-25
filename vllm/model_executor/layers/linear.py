@@ -3,6 +3,7 @@
 
 from abc import abstractmethod
 from collections.abc import Callable, Iterable
+from functools import partial
 from typing import Any
 
 import torch
@@ -23,6 +24,7 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.determinism.batch_invariant import (
     linear_batch_invariant,
 )
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization import resolve_quant_method
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -216,17 +218,6 @@ class UnquantizedLinearMethod(LinearMethodBase):
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
-        elif current_platform.is_xpu():
-            # Opt-in: F.linear on XPU is faster with an N-contiguous (N, K) weight
-            # when K > N, but oneDNN's ab-weights matmul is not run-to-run bitwise
-            # bitwise reproducible. Off by default.
-            weight = layer.weight.data
-            if (
-                envs.VLLM_XPU_FORCE_N_CONTIG_WEIGHT
-                and weight.ndim == 2
-                and weight.stride(0) != 1
-            ):
-                layer.weight.data = weight.t().contiguous().t()
         elif current_platform.is_rocm():
             layer.weight.data = maybe_pad_weight_avoid_cache_aliasing(layer.weight.data)
         elif self._gemm_impl is cuda_unquantized_gemm:
@@ -243,6 +234,23 @@ class UnquantizedLinearMethod(LinearMethodBase):
         ):
             return linear_batch_invariant(x, layer.weight, bias)
         return self._gemm_impl(layer, x, layer.weight, bias)
+
+
+def apply_flattened(
+    fn: Callable[[Any], torch.Tensor], x: torch.Tensor | QuantizedActivation
+) -> torch.Tensor:
+    """Call `fn` on `x` flattened to 2D, if that can be done without a copy.
+
+    Linear methods and kernels may assume 2D activations, but callers such as
+    the Transformers modeling backend pass `[batch, seq, hidden]` activations.
+    """
+    if isinstance(x, QuantizedActivation):
+        if len(x.orig_shape) <= 2:
+            return fn(x)
+        return fn(x.flatten()).view(*x.orig_shape[:-1], -1)
+    if x.ndim <= 2 or not x.is_contiguous():
+        return fn(x)
+    return fn(x.view(-1, x.shape[-1])).view(*x.shape[:-1], -1)
 
 
 class LinearBase(PluggableLayer):
@@ -420,7 +428,7 @@ class ReplicatedLinear(LinearBase):
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
 
-        output = self.quant_method.apply(self, x, bias)
+        output = apply_flattened(partial(self.quant_method.apply, self, bias=bias), x)
 
         if not self.return_bias:
             return output
@@ -460,7 +468,7 @@ class ColumnParallelLinear(LinearBase):
         disable_tp: If true, weights matrix won't be sharded through tp rank.
         tp_rank: Override the tensor-parallel rank used for sharding. Defaults to
             the global TP rank. Used to shard at a coarser granularity than one
-            shard per rank (see ``DCPGroupColumnParallelLinear``).
+            shard per rank (see `DCPGroupColumnParallelLinear`).
         tp_size: Override the tensor-parallel world size used for sharding.
             Defaults to the global TP world size.
 
@@ -623,7 +631,8 @@ class ColumnParallelLinear(LinearBase):
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
-        output_parallel = self.quant_method.apply(self, input_, bias)
+        apply = partial(self.quant_method.apply, self, bias=bias)
+        output_parallel = apply_flattened(apply, input_)
 
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
@@ -650,11 +659,11 @@ class DCPGroupColumnParallelLinear(ColumnParallelLinear):
 
     With Decode Context Parallelism (DCP) the KV cache is sharded across a DCP
     group, so MLA decode must attend the group's full head set. This layer shards
-    its output across DCP *groups* (effective tp size ``tp_size //
-    dcp_world_size``) rather than across every rank, so each rank in a group
+    its output across DCP *groups* (effective tp size `tp_size //
+    dcp_world_size`) rather than across every rank, so each rank in a group
     holds the whole group's heads, letting decode skip the query all-gather.
 
-    :meth:`forward` returns the group's full head set. :meth:`_local_view`
+    `forward` returns the group's full head set. `_local_view`
     extracts this rank's TP shard for prefill.
     """
 
@@ -677,7 +686,7 @@ class DCPGroupColumnParallelLinear(ColumnParallelLinear):
     def _local_view(self, out: torch.Tensor) -> torch.Tensor:
         """Slice this rank's tp head shard from a group-heads output.
 
-        ``out`` is head-shaped, i.e. ``(..., group_heads, head_dim)``.
+        `out` is head-shaped, i.e. `(..., group_heads, head_dim)`.
         """
         if self.group_size == 1:
             return out
@@ -766,6 +775,8 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: If true, all weights matrix won't be sharded, this layer
                     will be treated as a "Replicated" MergedLinear.
+        padding_size: Extra output rows on each TP rank, appended after the
+            real output_sizes. These rows are zeroed and are not checkpoint shards.
 
     """
 
@@ -782,16 +793,20 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        padding_size: int = 0,
     ):
-        self.output_sizes = output_sizes
-        self.shard_ids = tuple(range(len(output_sizes)))
+        self.padding_size = padding_size
         self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
         self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
+        self.output_sizes = output_sizes
+        if padding_size:
+            self.output_sizes = output_sizes + [padding_size * self.tp_size]
+        self.shard_ids = tuple(range(len(output_sizes)))
 
-        assert all(output_size % self.tp_size == 0 for output_size in output_sizes)
+        assert all(output_size % self.tp_size == 0 for output_size in self.output_sizes)
         super().__init__(
             input_size=input_size,
-            output_size=sum(output_sizes),
+            output_size=sum(self.output_sizes),
             bias=bias,
             gather_output=gather_output,
             skip_bias_add=skip_bias_add,
@@ -801,6 +816,25 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
+        if padding_size:
+            for param in (self.weight, self.bias):
+                if param is None:
+                    continue
+                self._zero_output_padding(param)
+                set_weight_attrs(
+                    param, {"weight_loader_numel": param[:-padding_size].numel()}
+                )
+                # The loader zeroes the padding too, but a load plan skips loader
+                # fills: direct reload zero-fills it at begin instead.
+                param.fill_on_reload = True
+
+    def _zero_output_padding(self, param: torch.Tensor) -> None:
+        if self.padding_size and (param is self.weight or param is self.bias):
+            param.data[-self.padding_size :].zero_()
+
+    @property
+    def _checkpoint_output_sizes(self) -> list[int]:
+        return self.output_sizes[:-1] if self.padding_size else self.output_sizes
 
     def _get_shard_size_mapping(self, loaded_shard_id: int) -> int:
         return self.output_sizes[loaded_shard_id] // self.tp_size
@@ -822,6 +856,7 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
         loaded_shard_id: tuple[int, ...] | int | None = None,
     ):
         self.validate_shard_id(loaded_shard_id, param)
+        self._zero_output_padding(param)
 
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
@@ -844,7 +879,7 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
             output_sizes = (
                 self.output_sizes[loaded_shard_id[0] : loaded_shard_id[-1] + 1]
                 if loaded_shard_id is not None
-                else self.output_sizes
+                else self._checkpoint_output_sizes
             )
             current_shard_offset = 0
             shard_offsets: list[tuple[int, int, int]] = []
@@ -941,7 +976,7 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
         """
         current_shard_offset = 0
         shard_offsets: list[tuple[int, int, int]] = []
-        output_sizes = output_sizes or self.output_sizes
+        output_sizes = output_sizes or self._checkpoint_output_sizes
         for i, output_size in enumerate(output_sizes):
             shard_offsets.append((i, current_shard_offset, output_size))
             current_shard_offset += output_size
@@ -970,6 +1005,7 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
         loaded_shard_id: tuple[int, ...] | int | None = None,
     ):
         self.validate_shard_id(loaded_shard_id, param)
+        self._zero_output_padding(param)
         if loaded_shard_id is None or isinstance(loaded_shard_id, tuple):
             if isinstance(param, PerTensorScaleParameter):
                 if isinstance(loaded_shard_id, tuple):
@@ -1000,7 +1036,7 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
                 weight_block_size = getattr(self, "weight_block_size", None)
                 output_sizes = [
                     adjust_block_scale_shard(weight_block_size, size, 0)[0]
-                    for size in (output_sizes or self.output_sizes)
+                    for size in (output_sizes or self._checkpoint_output_sizes)
                 ]
             # TODO: @dsikka - move to parameter.py
             self._load_fused_module_from_checkpoint(
@@ -1415,14 +1451,14 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
 
         [q | k | v | index_q | index_k]
 
-    ``index_q`` must have the same head count as the KV heads
-    (``total_num_index_heads == total_num_kv_heads``) and ``index_head_size ==
-    head_size``, so it shards exactly like K/V -- including the KV-head
-    *replication* path when ``tp_size > total_num_kv_heads`` (this is what makes
-    a TP size greater than the KV-head count work). ``index_k`` is a single
+    `index_q` must have the same head count as the KV heads
+    (`total_num_index_heads == total_num_kv_heads`) and `index_head_size ==
+    head_size`, so it shards exactly like K/V -- including the KV-head
+    *replication* path when `tp_size > total_num_kv_heads` (this is what makes
+    a TP size greater than the KV-head count work). `index_k` is a single
     shared head, replicated to every rank.
 
-    ``replicate_index_q`` moves ``index_q`` onto that replicated path too, so
+    `replicate_index_q` moves `index_q` onto that replicated path too, so
     every rank projects all the index heads rather than its own. That is what
     indexer context parallelism needs: it inverts the split, scoring every head
     against a shard of the blocks instead of one head against all of them.
@@ -1488,7 +1524,7 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
 
         # Skip QKVParallelLinear.__init__ (3-group layout); build the 5-group
         # column-parallel weight directly.
-        ColumnParallelLinear.__init__(
+        StackedColumnParallelLinear.__init__(
             self,
             input_size=self.hidden_size,
             output_size=sum(self.output_sizes),
@@ -1597,10 +1633,10 @@ class KimiK3MergedQKVGateLinear(MergedColumnParallelLinear):
 
     NOTE: Kimi-K3-specific. This is tailored to its replicated Q/KV latent
     projections and tensor-parallel output gate; it is not a general-purpose
-    linear layer. It lives here alongside ``MergedColumnParallelLinear``, whose
+    linear layer. It lives here alongside `MergedColumnParallelLinear`, whose
     sharding and weight-loading machinery it reuses.
 
-    The per-rank shard layout is ``[q_a | kv_a | gate]``. The latent shards
+    The per-rank shard layout is `[q_a | kv_a | gate]`. The latent shards
     stay replicated across tensor-parallel ranks while the gate shard is
     tensor-parallel, matching the standalone projections they replace.
     """
@@ -1845,7 +1881,8 @@ class RowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+        apply = partial(self.quant_method.apply, self, bias=bias_)
+        output_parallel = apply_flattened(apply, input_parallel)
 
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
