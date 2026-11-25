@@ -80,6 +80,9 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
     def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int32
 
+    def supports_quantized_input(self) -> bool:
+        return True
+
     def allocate_fused_expert_output(
         self,
         shape: tuple[int, ...],
@@ -109,6 +112,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
+        quantized_input: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.PrepareResultType:
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -126,6 +130,8 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
 
         if defer_input_quant:
             dispatch_x, dispatch_x_sf = a1, None
+        elif quantized_input is not None:
+            dispatch_x, dispatch_x_sf = quantized_input
         else:
             dispatch_x, dispatch_x_sf = moe_kernel_quantize_input(
                 a1,

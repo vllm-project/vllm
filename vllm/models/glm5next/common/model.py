@@ -425,10 +425,17 @@ class Glm5NextMoE(nn.Module):
         if self.use_mega_moe and self.experts.weight_block_size is not None:
             self.experts.finalize_block_fp8_weights()
 
+    def nvfp4_input_global_scale(self) -> torch.Tensor | None:
+        """See `MoERunner.nvfp4_input_global_scale`."""
+        if self.use_mega_moe or self.is_sequence_parallel:
+            return None
+        return self.experts.nvfp4_input_global_scale()
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         already_sequence_parallel: bool = False,
+        quantized_input: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         if self.use_mega_moe:
             router_logits, _ = self.gate(hidden_states)
@@ -456,7 +463,9 @@ class Glm5NextMoE(nn.Module):
         # the router logits itself, so nothing is precomputed here (matches
         # DeepseekV2MoE; `router_logits` is a placeholder).
         final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=hidden_states
+            hidden_states=hidden_states,
+            router_logits=hidden_states,
+            quantized_input=quantized_input,
         )
 
         if self.is_sequence_parallel and not already_sequence_parallel:
@@ -576,6 +585,7 @@ class Glm5NextDecoderLayer(nn.Module):
         # GPU; made after loading, refreshed in place.
         self.use_mega_mhc = False
         self.mega_mhc_min_tokens = 0
+        self.mega_mhc_nvfp4 = False
         self.hc_attn_fn_split: torch.Tensor | None = None
         self.hc_ffn_fn_split: torch.Tensor | None = None
         if self.mhc and not is_mtp_layer:
@@ -621,11 +631,19 @@ class Glm5NextDecoderLayer(nn.Module):
                 # which rewrite the BF16 pieces in place too.
                 self.hc_attn_fn.weight_loader = self._load_hc_attn_fn
                 self.hc_ffn_fn.weight_loader = self._load_hc_ffn_fn
+                # The FFN-side call can also write an NVFP4 MoE's input.
+                self.mega_mhc_nvfp4 = (
+                    self._mlp_is_moe
+                    and quant_config is not None
+                    and quant_config.get_name() == "modelopt_fp4"
+                    and mega_mhc_supported(self.hidden_size, n, "nvfp4")
+                )
                 if vllm_config.kernel_config.enable_jit_warmup:
                     MEGA_MHC_KERNEL.register_warmup(
                         max_num_batched_tokens=(
                             vllm_config.scheduler_config.max_num_batched_tokens
-                        )
+                        ),
+                        nvfp4=self.mega_mhc_nvfp4,
                     )
 
             self.mhc_pre_op = MHCPreOp()
@@ -773,7 +791,18 @@ class Glm5NextDecoderLayer(nn.Module):
         if self.is_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        # Fuse post-attn hc_post + pre-FFN hc_pre (+ RMSNorm) into one kernel.
+        # Fuse post-attn hc_post + pre-FFN hc_pre (+ RMSNorm) into one kernel,
+        # which can also quantize its output for an NVFP4 MoE.
+        nvfp4_out = x_quantized = None
+        if self.mega_mhc_nvfp4 and residual.shape[0] >= self.mega_mhc_min_tokens:
+            scale = self.mlp.nvfp4_input_global_scale()
+            if scale is not None:
+                num_tokens, hidden = residual.shape[0], self.hidden_size
+                x_quantized = (
+                    x.new_empty(num_tokens, hidden // 2, dtype=torch.uint8),
+                    x.new_empty(num_tokens, hidden // 16, dtype=torch.float8_e4m3fn),
+                )
+                nvfp4_out = (scale, *x_quantized)
         residual, post, comb, x = self.hc_fused_post_pre(
             x,
             residual,
@@ -785,11 +814,16 @@ class Glm5NextDecoderLayer(nn.Module):
             norm_weight=self.post_attention_layernorm.weight.data,
             norm_eps=self.post_attention_layernorm.variance_epsilon,
             fn_split=self.hc_ffn_fn_split,
+            nvfp4_out=nvfp4_out,
         )
 
         # Fully Connected
         if self._mlp_is_moe:
-            x = self.mlp(x, already_sequence_parallel=self.is_sequence_parallel)
+            x = self.mlp(
+                x,
+                already_sequence_parallel=self.is_sequence_parallel,
+                quantized_input=x_quantized,
+            )
         else:
             x = self.mlp(x)
 
@@ -848,6 +882,7 @@ class Glm5NextDecoderLayer(nn.Module):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
         fn_split: torch.Tensor | None = None,
+        nvfp4_out: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ):
         # The model runs eagerly under CUDA graphs, so the token count is a
         # concrete int and each captured size keeps its branch.
@@ -869,7 +904,9 @@ class Glm5NextDecoderLayer(nn.Module):
                 self.mhc_sinkhorn_iterations,
                 norm_weight,
                 norm_eps,
+                *(nvfp4_out or ()),
             )
+        assert nvfp4_out is None, "only the fused kernel writes the NVFP4 output"
         return self.mhc_fused_post_pre_op(
             x=x,
             residual=residual,
