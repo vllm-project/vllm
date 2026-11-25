@@ -174,17 +174,10 @@ def test_epilogue_cache_with_and_without_startup_warmup(
     with registry.activate():
         kernel.register_warmup(**key)
 
-    compiled: list[warmup.CompositeHadamardEpilogueKernel.CompileKey] = []
-    compile_kernel = kernel.compile
-
-    def record_compile(compile_key):
-        compiled.append(compile_key)
-        compile_kernel(compile_key)
-
-    monkeypatch.setattr(kernel, "compile", record_compile)
     if startup_warmup:
         registry.warmup()
-    assert len(compiled) == int(startup_warmup)
+    assert len(kernel._compiled_cache) == int(startup_warmup)
+    compiled = kernel(**key) if startup_warmup else None
     sign = torch.ones(6144, device="cuda", dtype=torch.int8)
     hk = torch.eye(12, device="cuda", dtype=torch.float32) * math.sqrt(12)
     for rows in (1, 32):
@@ -198,4 +191,7 @@ def test_epilogue_cache_with_and_without_startup_warmup(
             captured = rotation_api(x, sign, hk, inverse=True, k=12, p=512)
         graph.replay()
         torch.testing.assert_close(captured, actual, rtol=0, atol=0)
-        assert compiled == [kernel.CompileKey(**key)]
+        if compiled is None:
+            compiled = kernel(**key)
+        assert list(kernel._compiled_cache) == [kernel.CompileKey(**key)]
+        assert kernel(**key) is compiled

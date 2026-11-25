@@ -78,7 +78,10 @@ def prepare_rotation_transforms(
 
     speculative_config = getattr(vllm_config, "speculative_config", None)
     draft_model_config = getattr(speculative_config, "draft_model_config", None)
-    owns_registry = model_config is not draft_model_config
+    owns_registry = (
+        speculative_config is None
+        or model_config is speculative_config.target_model_config
+    )
     if owns_registry:
         _install_registry(model, config)
 
