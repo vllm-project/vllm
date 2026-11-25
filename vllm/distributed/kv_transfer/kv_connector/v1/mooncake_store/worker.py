@@ -2402,7 +2402,7 @@ class MooncakeStoreWorker:
             self.kv_send_thread.add_request(request)
 
     def get_finished(
-        self, finished_req_ids: set[str], meta: MooncakeStoreConnectorMetadata
+        self, finished_req_ids: set[str], meta: MooncakeStoreConnectorMetadata | None
     ) -> tuple[set[str], set[str]]:
         """Get completed send/recv request IDs.
 
@@ -2411,7 +2411,7 @@ class MooncakeStoreWorker:
         if self._capacity_only:
             return set(), set()
 
-        if self.can_put:
+        if self.can_put and meta is not None:
             self._close_ended_store_requests(finished_req_ids, meta)
 
         # Blocks read by a store job are released by the scheduler when the job
@@ -2423,12 +2423,10 @@ class MooncakeStoreWorker:
             for recv_thread in self.kv_recv_threads:
                 done_recving |= recv_thread.get_and_clear_finished_requests()
 
-        logger.debug(
-            "Completed send: %d, recv: %d, tp_rank: %d",
-            len(done_sending),
-            len(done_recving),
-            self.tp_rank,
-        )
+        if done_recving:
+            logger.debug(
+                "Completed recv: %d, tp_rank: %d", len(done_recving), self.tp_rank
+            )
         return done_sending, done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -2438,9 +2436,12 @@ class MooncakeStoreWorker:
         return block_ids
 
     def get_transfer_results(
-        self, finished_req_ids: set[str], meta: MooncakeStoreConnectorMetadata
+        self, finished_req_ids: set[str], meta: MooncakeStoreConnectorMetadata | None
     ) -> KVConnectorTransferResults:
-        """Get completed sends/recvs plus requests whose remote KV load failed."""
+        """Get completed sends/recvs plus requests whose remote KV load failed.
+
+        `meta` is None when polling between steps.
+        """
         done_sending, done_recving = self.get_finished(finished_req_ids, meta)
 
         if self._capacity_only:

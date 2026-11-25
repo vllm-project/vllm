@@ -135,6 +135,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # Registers the device KV cache with an RDMA engine.
         return KVCacheAccess.REGISTERS
 
+    @property
+    def supports_transfer_polling(self) -> bool:
+        return True
+
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
         extra_config = kv_transfer_config.kv_connector_extra_config
@@ -427,8 +431,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self, finished_req_ids: set[str]
     ) -> KVConnectorTransferResults:
         assert self.connector_worker is not None
-        metadata = self._get_connector_metadata()
-        assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+        # Polls between steps have no metadata.
+        metadata = self._connector_metadata
+        assert metadata is None or isinstance(metadata, MooncakeStoreConnectorMetadata)
         return self.connector_worker.get_transfer_results(finished_req_ids, metadata)
 
     def get_block_ids_with_load_errors(self) -> set[int]:

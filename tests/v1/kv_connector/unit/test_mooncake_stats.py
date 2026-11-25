@@ -329,7 +329,7 @@ def test_expired_request_bumps_counter():
     }
     worker.finished_sending_reqs = set()
 
-    asyncio.run(worker.fetch_finished_sending_reqs())
+    worker._expire_sends()
 
     assert worker.xfer_stats.data["num_kv_expired_reqs"] == [1]
     # Expired transfer also cleaned out of reqs_need_send.
