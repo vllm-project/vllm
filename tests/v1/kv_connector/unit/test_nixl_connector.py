@@ -2767,6 +2767,55 @@ def test_mixed_memory_remote_descriptors_split_by_memory_type():
     ]
 
 
+def test_shared_host_pool_dram_descriptors_target_owner_rank():
+    """A TP rank sharing its host pool reads it through the rank that
+    registered it, and its device regions through itself."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker.use_mla = True
+    worker._has_mamba = False
+    worker.nixl_memory_type = "VRAM"
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.prep_xfer_dlist.side_effect = [11, 22]
+    blocks = np.array([[100, 10, 3, 10, 2], [200, 10, 3, 10, 2]], dtype=np.uint64)
+    owner_blocks = np.array([[500, 10, 1, 10, 2], [600, 10, 1, 10, 2]], dtype=np.uint64)
+
+    worker._prep_remote_xfer_dlists(
+        "decoder1", blocks, ["DRAM", "VRAM"], [2, 2], ("decoder0", owner_blocks)
+    )
+
+    dlist_calls = worker.nixl_wrapper.prep_xfer_dlist.call_args_list
+    assert [call.args[0] for call in dlist_calls] == ["decoder0", "decoder1"]
+    assert [call.args[1].tolist() for call in dlist_calls] == [
+        [[500, 10, 0, 10, 2]],
+        [[200, 10, 3, 10, 2]],
+    ]
+
+
+def test_handshake_fetches_shared_host_pool_owner_metadata():
+    """Handshaking with a rank whose host pool another rank registered also
+    fetches that rank's metadata for the DRAM descriptors."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker._is_csa_linear = False
+    worker.use_host_buffer = True
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.handshake_target_ranks.return_value = [1]
+    rank1 = SimpleNamespace(dcp_size=1, dram_tp_rank=0)
+    rank0 = SimpleNamespace(dcp_size=1, dram_tp_rank=None)
+    query = MagicMock(side_effect=[(rank1, 0.1, 0.0), (rank0, 0.1, 0.0)])
+    add_agent = MagicMock(return_value="decoder1")
+
+    with (
+        patch.object(nixl.base_worker, "zmq_ctx"),
+        patch.object(worker, "_query_remote_metadata", query),
+        patch.object(worker, "add_remote_agent", add_agent),
+    ):
+        agents, _ = worker._nixl_handshake("localhost", 1234, 2, "decoder")
+
+    assert agents == {(0, 1): "decoder1"}
+    assert [c.args[3] for c in query.call_args_list] == [1, 0]
+    assert add_agent.call_args.kwargs["dram_owner_meta"] is rank0
+
+
 def test_read_from_mixed_memory_remote_splits_by_remote_memory(recv_worker):
     """A device-only reader pulls a mixed remote's DRAM and device blocks
     through the matching remote lists."""
