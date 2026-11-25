@@ -10,8 +10,8 @@ import torch
 
 from vllm.platforms import current_platform
 
-if not (current_platform.is_cuda() or current_platform.is_xpu()):
-    pytest.skip("requires CUDA or XPU", allow_module_level=True)
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+    pytest.skip("requires CUDA, ROCm or XPU", allow_module_level=True)
 
 from vllm.v1.worker.gpu.spec_decode.suffix.speculator import (  # noqa: E402
     SuffixSpeculator,

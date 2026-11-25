@@ -13,7 +13,7 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.gpu.spec_decode.xpress import kernels
 
 V, H, B, R = 61, 32, 8, 16
-DEVICE = current_platform.device_type
+DEVICE = torch.device(current_platform.device_type)
 
 
 # Serving stores L*tril + I and drops the residual; training stores raw L and adds it.
@@ -82,8 +82,8 @@ def test_fused_buffers_refilled_in_place():
 # must be the logits the draft was picked from. The fused kernels are the only
 # implementation, so this runs where they do: on a GPU, at the serving dtype.
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_xpu()),
-    reason="needs CUDA or XPU",
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="needs CUDA, ROCm or XPU",
 )
 @pytest.mark.parametrize("topc", [0, 16])
 def test_jacobi_is_deterministic(topc: int):
@@ -119,9 +119,12 @@ _RANK, _MLP_HIDDEN, _BLOCK = 256, 512, 16
 
 
 def _fused_mlp_tiles() -> list[tuple[int, int]]:
-    if not torch.cuda.is_available():
+    if current_platform.is_xpu() and torch.xpu.is_available():
+        smem = torch.xpu.get_device_properties(0).local_mem_size
+    elif current_platform.is_cuda_alike() and torch.cuda.is_available():
+        smem = get_max_shared_memory_bytes()
+    else:
         return []
-    smem = get_max_shared_memory_bytes()
     tiles = []
     for stages in (1, 2, 3):
         fit = [ht for ht in (64, 32, 16) if (3 * stages + 1) * _RANK * ht * 2 <= smem]
@@ -130,8 +133,8 @@ def _fused_mlp_tiles() -> list[tuple[int, int]]:
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_xpu()),
-    reason="needs CUDA or XPU",
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="needs CUDA, ROCm or XPU",
 )
 @pytest.mark.parametrize("kc", [None, _RANK // 2, _RANK // 4])
 @pytest.mark.parametrize(
@@ -199,7 +202,9 @@ def test_latent_pass_matches_reference(
 
 
 def _head(
-    seed: int = 0, device: str = "cpu", dtype: torch.dtype = torch.float64
+    seed: int = 0,
+    device: str | torch.device = "cpu",
+    dtype: torch.dtype = torch.float64,
 ) -> XPressRefinerHead:
     torch.manual_seed(seed)
     head = XPressRefinerHead(

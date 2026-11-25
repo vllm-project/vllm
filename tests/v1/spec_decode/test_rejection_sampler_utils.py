@@ -28,9 +28,10 @@ VOCAB_SIZE = 4096
 
 # Triton kernel requires a GPU.
 pytest.importorskip("triton")
-if not (current_platform.is_cuda() or current_platform.is_xpu()):
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip(
-        "CUDA or XPU required for rejection sampler tests", allow_module_level=True
+        "CUDA, ROCm or XPU required for rejection sampler tests",
+        allow_module_level=True,
     )
 
 DEVICE = torch.device(current_platform.device_type)
