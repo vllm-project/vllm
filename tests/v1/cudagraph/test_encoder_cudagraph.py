@@ -2411,11 +2411,18 @@ class TestQwen3OmniAudioEncoderCudaGraphReplay:
         assert result is not None
         torch.testing.assert_close(result[0], self._eager(small)[0])
 
-    def test_oversized_batch_falls_back_to_eager(self):
-        # 10000 frames -> 1300 tokens, above the largest budget (1024).
-        mm_kwargs = _make_audio_mm_kwargs([10000], self.device, self.dtype)
+    @pytest.mark.parametrize(
+        "feature_lens", [[10000], [100, 10000, 250], [100, 250] * 5]
+    )
+    def test_oversized_batch_falls_back_to_eager(self, feature_lens):
+        """Overflow preserves clip order, independent storage, and output lifetime."""
+        mm_kwargs = _make_audio_mm_kwargs(feature_lens, self.device, self.dtype)
+        expected = self._eager(mm_kwargs)
         misses = self.mgr.graph_misses
         result = self.mgr.execute(mm_kwargs)
-        assert self.mgr.graph_misses == misses + 1
-        assert result is not None
-        torch.testing.assert_close(result[0], self._eager(mm_kwargs)[0], rtol=0, atol=0)
+        assert self.mgr.graph_misses == misses + len(feature_lens)
+        assert result is not None and len(result) == len(expected)
+        self.mgr.execute(_make_audio_mm_kwargs([100], self.device, self.dtype))
+        for out, ref in zip(result, expected):
+            torch.testing.assert_close(out, ref, rtol=0, atol=0)
+            assert out.untyped_storage().nbytes() == out.numel() * out.element_size()
