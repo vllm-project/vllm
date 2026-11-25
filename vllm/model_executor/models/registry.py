@@ -1641,14 +1641,6 @@ class _ModelRegistry:
         model_info, _ = self.inspect_model_cls(architectures, model_config)
         return model_info.supports_hc_sp
 
-    def is_transcription_only_model(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_info, _ = self.inspect_model_cls(architectures, model_config)
-        return model_info.supports_transcription_only
-
 
 def _resolve_module_name(mod_relname: str) -> str:
     # Allow registry entries to point at fully-qualified module paths (e.g.
