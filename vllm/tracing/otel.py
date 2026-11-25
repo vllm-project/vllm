@@ -184,12 +184,28 @@ def manual_instrument_otel(
     attributes: dict[str, Any] | None = None,
     context: Context | None = None,
     kind: Any = None,  # SpanKind, but typed as Any for when OTEL unavailable
+    tracer: Tracer | None = None,
 ):
-    """Manually create and end a span with explicit timestamps."""
+    """Manually create and end a span with explicit timestamps.
+
+    Args:
+        span_name: Name of the span to create.
+        start_time: Start time in nanoseconds since epoch.
+        end_time: Optional end time in nanoseconds. If None, ends immediately.
+        attributes: Optional dict of span attributes.
+        context: Optional trace context (e.g., from extract_trace_context).
+        kind: Optional SpanKind (e.g., SpanKind.SERVER).
+        tracer: Explicit tracer to create the span with. When omitted, the
+            tracer is resolved from the global tracer provider. Passing a
+            tracer explicitly keeps the span on the provider the caller
+            configured, even if another integration owns the global provider.
+
+    """
     if not _IS_OTEL_AVAILABLE:
         return
 
-    tracer = trace.get_tracer(__name__)
+    if tracer is None:
+        tracer = trace.get_tracer(__name__)
     # Use provided context, or fall back to smart context detection
     ctx = context if context is not None else _get_smart_context()
 

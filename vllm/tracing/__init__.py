@@ -123,6 +123,7 @@ def instrument_manual(
     attributes: dict[str, Any] | None = None,
     context: Any = None,
     kind: Any = None,
+    tracer: Any = None,
 ):
     """Manually create a span with explicit timestamps.
 
@@ -133,12 +134,17 @@ def instrument_manual(
         attributes: Optional dict of span attributes.
         context: Optional trace context (e.g., from extract_trace_context).
         kind: Optional SpanKind (e.g., SpanKind.SERVER).
+        tracer: Optional tracer to create the span with. When omitted, the
+            tracer is resolved from the global tracer provider. Callers that
+            built a tracer via init_tracer() should pass it here so spans go
+            to the provider they configured even if another integration owns
+            the global provider.
 
     """
     is_available, _, _, _, manual_instrument_fn = _REGISTERED_TRACING_BACKENDS["otel"]
     if is_available():
         return manual_instrument_fn(
-            span_name, start_time, end_time, attributes, context, kind
+            span_name, start_time, end_time, attributes, context, kind, tracer
         )
     else:
         return None
