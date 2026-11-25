@@ -110,6 +110,35 @@ vllm serve <model> \
 
 Secondary tiers are not supported yet on engines whose workers span several nodes; such an engine fails at startup.
 
+### Background initialization
+
+On CUDA, set `"async_init": true` in `kv_connector_extra_config` to prepare the
+CPU tier in the background. This is supported by both `CPUOffloadingSpec` and
+`TieringOffloadingSpec`, and defaults to `false`. Other platforms initialize
+synchronously and log a warning.
+
+The engine can serve requests before CPU offloading is ready. Until every worker
+finishes pre-faulting and pinning, external lookups miss and no CPU stores are
+submitted. With Tiering, secondary tiers are built in a separate background
+thread only after every worker is ready, then attached to the manager. If one
+secondary tier fails to initialize, its error is logged and setup continues for
+the remaining tiers. Successfully initialized tiers are attached together in
+their configured order; if all fail, the engine continues with CPU offloading
+alone. Requests already running at attach time continue without the new secondary
+tiers; subsequent requests can use them. Synchronous initialization still fails
+startup if any configured secondary tier fails to initialize.
+
+`async_init_pin_pace` controls the pause between background pin calls (default
+`2.0`, as a multiple of each call's duration). Preparing memory later does not
+reduce its eventual RAM requirement: an insufficient container memory limit can
+cause an OOM kill after the server becomes healthy.
+
+`/health` does not indicate that secondary tiers are attached. In particular,
+readiness gating for the P2P tier's prefill/decode handoff mode is separate from
+background initialization. Shutdown waits up to 120 seconds for secondary-tier
+setup; if it is still running, shutdown raises instead of unmapping memory that
+setup may still access.
+
 ## Direct Storage Setup
 
 Set `spec_name` to `"FSOffloadingSpec"` to transfer blocks directly between GPU memory and files under `root_dir`. The worker backend is selected by `fs_backend`; the only backend is `gds`, which uses NVIDIA GPUDirect Storage (cuFile) and requires an NVIDIA GPU, `libcufile`, and a GDS-capable filesystem.
@@ -147,8 +176,8 @@ Files are named by block content hash, so blocks written by an earlier run or by
 | `cache_policy_module_path` | no | — | both | Python import path for a custom `CachePolicy` not in the built-in registry. Required only when `eviction_policy` is not built-in and wasn't pre-registered via `CachePolicyFactory` (advanced). |
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
-| `async_init` | no | `false` | single-tier | Pre-fault and pin the CPU buffer in the background; the engine serves without offloading until every worker is ready. CUDA only. |
-| `async_init_pin_pace` | no | `2.0` | single-tier | Pause after each background pin call, as a multiple of its duration. |
+| `async_init` | no | `false` | both | Prepare the CPU tier in the background; with Tiering, build secondary tiers after every worker is ready. See [Background initialization](#background-initialization). CUDA only. |
+| `async_init_pin_pace` | no | `2.0` | both | Pause after each background pin call, as a multiple of its duration. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
 | `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
@@ -200,6 +229,9 @@ Requirements and limitations:
 The connector publishes one Prometheus gauge, `vllm:kv_offload_config_info`, and always sets it to 1. The labels hold static facts of the offloading configuration, so a user reads the resolved numbers instead of the launch flags. The gauge appears from the first scheduler step, so an idle engine exposes no series. Each engine reports its own configuration, and not the instance total.
 
 The gauge holds one series for each configuration that the manager reports. A manager that holds one configuration gives one series. A manager that holds several adds a label of its own, which tells the series apart.
+
+With background initialization, newly attached secondary tiers publish their
+configuration facts with the next connector stats payload.
 
 | Label | Declared by | Meaning | Notes |
 | --- | --- | --- | --- |

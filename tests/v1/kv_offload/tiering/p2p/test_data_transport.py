@@ -53,6 +53,28 @@ def registration_transport():
 
 
 class TestNixlRegistrationRollback:
+    @pytest.mark.parametrize("stage", ["get_xfer_descs", "prep_xfer_dlist"])
+    def test_failed_local_initialization_releases_registered_memory(
+        self, monkeypatch, stage
+    ):
+        """A failed constructor must not leave the primary region registered."""
+        agent = MagicMock()
+        registrations = set()
+
+        def register(*args, **kwargs):
+            handle = object()
+            registrations.add(handle)
+            return handle
+
+        agent.register_memory.side_effect = register
+        agent.deregister_memory.side_effect = registrations.remove
+        getattr(agent, stage).side_effect = RuntimeError("descriptor setup failed")
+        monkeypatch.setattr(nixl_module, "_NixlAgent", lambda *args: agent)
+        monkeypatch.setattr(nixl_module, "_NixlAgentConfig", lambda **kwargs: None)
+        with pytest.raises(RuntimeError, match="descriptor setup failed"):
+            NixlTransport("test:1", memoryview(np.zeros((2, 1024), dtype=np.uint8)))
+        assert not registrations
+
     def test_failed_registration_keeps_newer_sync_agent(self, registration_transport):
         """An older rollback must not remove a newer sync registration's agent."""
         transport, agent, registered = registration_transport

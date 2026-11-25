@@ -8,7 +8,7 @@ hierarchical KV cache offloading.
 
 Key Design Principles:
 1. When a chunk is stored to the primary tier, cascade it to secondary tiers
-   that accept stores for the request
+   that knew the request at its start and accept stores for it
 2. Primary tier is the gateway — Secondary tiers cannot access GPU memory
    directly; all data flows through the CPU primary tier
 3. Staged promotion — Chunks in secondary tiers must be promoted to the
@@ -21,8 +21,9 @@ Key Design Principles:
 
 import threading
 import time
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
+from itertools import islice
 from typing import NamedTuple
 
 import numpy as np
@@ -69,6 +70,7 @@ logger = init_logger(__name__)
 # magnitude below the model step it hides, and matches the pause the p2p tier's
 # own drain loops and EngineCoreProc's GIL-yield sleep already use.
 DEFAULT_TIER_POLL_INTERVAL_S = 0.001
+_TIER_SETUP_JOIN_TIMEOUT_S = 120.0
 # How long a round waits for the manager lock before giving up and retrying.
 # Bounded so the thread stays responsive to shutdown even if a caller holds the
 # lock for a long time, or leaked it.
@@ -99,6 +101,7 @@ class PendingPromotion:
 @dataclass(slots=True)
 class RequestState:
     req_context: ReqContext
+    num_secondary_tiers: int = 0
     pending_primary_stores: int = 0
     is_finished: bool = False
     request_level_tiers: set[int] | None = None
@@ -295,6 +298,8 @@ class TieringOffloadingManager(OffloadingManager):
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
         tier_poll_interval_s: float = DEFAULT_TIER_POLL_INTERVAL_S,
+        secondary_tier_factory: Callable[[], Iterable[SecondaryTierManager]]
+        | None = None,
     ):
         """Initialize the TieringOffloadingManager.
 
@@ -306,6 +311,7 @@ class TieringOffloadingManager(OffloadingManager):
                 tiers that set tolerates_off_thread_polling. Zero or negative
                 disables the thread, leaving those tiers serviced once per
                 engine step as before.
+            secondary_tier_factory: Builds additional tiers after workers are ready.
 
         """
         # Guards this manager and every tier it composes, the primary tier
@@ -313,7 +319,7 @@ class TieringOffloadingManager(OffloadingManager):
         # manager too; the primary tier has none of its own.
         self._lock = threading.Lock()
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
-        self.secondary_tiers = secondary_tiers or []
+        self.secondary_tiers: list[SecondaryTierManager] = []
 
         self._job_id_counter: int = 0
         # Job tracking: maps job_id to metadata for all in-flight transfers.
@@ -329,7 +335,7 @@ class TieringOffloadingManager(OffloadingManager):
         primary_view = self.primary_tier.get_kv_memoryview()
         assert primary_view.strides is not None
         self._metrics = TieringMetricsTracker(
-            tier_types=[tier.tier_type for tier in self.secondary_tiers],
+            tier_types=[],
             num_primary_chunks=self.primary_tier._num_chunks,
             primary_chunk_size=primary_view.strides[0],
         )
@@ -355,29 +361,93 @@ class TieringOffloadingManager(OffloadingManager):
         self._request_load_sources: dict[str, dict[OffloadKey, CacheHitSource]] = {}
 
         # Cached ParentManager wrappers for each secondary tier.
-        self._tier_parents: dict[SecondaryTierManager, _SecondaryTierFacingParent] = {
-            tier: _SecondaryTierFacingParent(self, tier_idx)
-            for tier_idx, tier in enumerate(self.secondary_tiers)
-        }
-
-        self._tier_index: dict[SecondaryTierManager, int] = {
-            tier: i for i, tier in enumerate(self.secondary_tiers)
-        }
+        self._tier_parents: dict[SecondaryTierManager, _SecondaryTierFacingParent] = {}
+        self._tier_index: dict[SecondaryTierManager, int] = {}
 
         # Tiers that serve external requests, and so must also be serviced
         # between engine steps.
-        self._polled_tiers: list[SecondaryTierManager] = [
-            tier for tier in self.secondary_tiers if tier.tolerates_off_thread_polling
-        ]
+        self._polled_tiers: list[SecondaryTierManager] = []
         self._tier_poll_interval_s = tier_poll_interval_s
         self._tier_poll_stop = threading.Event()
         self._tier_poll_thread: threading.Thread | None = None
-        self._start_tier_poll_thread()
+        self._secondary_tier_factory = secondary_tier_factory
+        self._tier_setup_thread: threading.Thread | None = None
+        self._tier_setup_stop = threading.Event()
+        self._unattached_tiers: list[SecondaryTierManager] = []
+        self._tier_info_pending = False
+        self.attach_secondary_tiers(secondary_tiers or [])
+        self._tier_info_pending = False
 
     @property
     @override
     def lock(self) -> threading.Lock:
         return self._lock
+
+    def attach_secondary_tiers(self, tiers: Sequence[SecondaryTierManager]) -> None:
+        """Attach fully built tiers while the caller holds `lock`."""
+        for tier in tiers:
+            tier_idx = len(self.secondary_tiers)
+            self._tier_parents[tier] = _SecondaryTierFacingParent(self, tier_idx)
+            self._tier_index[tier] = tier_idx
+            self._metrics.add_tier(tier.tier_type)
+            self.secondary_tiers.append(tier)
+            if tier.tolerates_off_thread_polling:
+                self._polled_tiers.append(tier)
+        self._tier_info_pending |= bool(tiers)
+        self._start_tier_poll_thread()
+        if tiers:
+            logger.info("Attached %d secondary tier(s)", len(tiers))
+
+    @override
+    def on_workers_ready(self) -> None:
+        factory = self._secondary_tier_factory
+        if factory is None or self._tier_setup_stop.is_set():
+            return
+        self._secondary_tier_factory = None
+        self._tier_setup_thread = threading.Thread(
+            target=self._setup_secondary_tiers,
+            args=(factory,),
+            name="vllm_offload_tier_setup",
+            daemon=True,
+        )
+        try:
+            self._tier_setup_thread.start()
+        except Exception:
+            self._tier_setup_thread = None
+            logger.exception("Failed to start secondary-tier background setup")
+
+    def _setup_secondary_tiers(
+        self, factory: Callable[[], Iterable[SecondaryTierManager]]
+    ) -> None:
+        tiers: list[SecondaryTierManager] = []
+        try:
+            if self._tier_setup_stop.is_set():
+                return
+            for tier in factory():
+                tiers.append(tier)
+                if self._tier_setup_stop.is_set():
+                    return
+            with self.lock:
+                if not self._tier_setup_stop.is_set():
+                    self.attach_secondary_tiers(tiers)
+        except Exception:
+            logger.exception("Failed to set up secondary tiers in the background")
+        finally:
+            for tier in reversed(tiers):
+                if tier in self.secondary_tiers:
+                    continue
+                try:
+                    tier.shutdown()
+                except Exception:
+                    self._unattached_tiers.append(tier)
+                    logger.exception("Failed to shut down an unattached secondary tier")
+
+    def _request_tiers(self, req_context: ReqContext) -> Iterable[SecondaryTierManager]:
+        state = self._req_state.get(req_context.req_id)
+        count = (
+            len(self.secondary_tiers) if state is None else state.num_secondary_tiers
+        )
+        return islice(self.secondary_tiers, count)
 
     # ------------------------------------------------------------------
     # Tier polling
@@ -385,14 +455,19 @@ class TieringOffloadingManager(OffloadingManager):
 
     def _start_tier_poll_thread(self) -> None:
         """Start the tier-poll thread, if any tier asked for one."""
-        if not self._polled_tiers or self._tier_poll_interval_s <= 0:
+        if (
+            self._tier_poll_thread is not None
+            or not self._polled_tiers
+            or self._tier_poll_interval_s <= 0
+        ):
             return
-        self._tier_poll_thread = threading.Thread(
+        thread = threading.Thread(
             target=self._tier_poll_loop,
             name="vllm_offload_tier_poll",
             daemon=True,
         )
-        self._tier_poll_thread.start()
+        thread.start()
+        self._tier_poll_thread = thread
         logger.info(
             "KV offload tier-poll thread started for tier(s) %s, interval %.3fs",
             [tier.tier_type for tier in self._polled_tiers],
@@ -770,7 +845,7 @@ class TieringOffloadingManager(OffloadingManager):
             return LookupResult.MISS
 
         any_retry = False
-        for i, tier in enumerate(self.secondary_tiers):
+        for i, tier in enumerate(self._request_tiers(req_context)):
             if i == exclude_tier_idx:
                 continue
             if not tier.access_mode.can_read:
@@ -1074,7 +1149,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         This is where secondary tier cascading happens — after chunks are
         confirmed to be in the primary tier, they are cascaded to secondary
-        tiers that accept stores for this request.
+        tiers that knew this request at its start and accept stores for it.
 
         For each secondary tier:
         1. Call primary.prepare_read() to get LoadStoreSpec AND increment
@@ -1099,7 +1174,7 @@ class TieringOffloadingManager(OffloadingManager):
         if success:
             # Each participating tier gets its own pin for the async transfer.
             skip_tiers = state.skip_cascade_tiers
-            for tier_idx, tier in enumerate(self.secondary_tiers):
+            for tier_idx, tier in enumerate(self._request_tiers(req_context)):
                 if skip_tiers is not None and tier_idx in skip_tiers:
                     continue
                 if not self._should_store_to_tier(tier, len(keys)):
@@ -1153,7 +1228,9 @@ class TieringOffloadingManager(OffloadingManager):
         Returns REQUEST_LEVEL if ANY secondary tier wants request-level.
         Record request-level and cascade opt-out decisions separately.
         """
-        state = RequestState(req_context=req_context)
+        state = RequestState(
+            req_context=req_context, num_secondary_tiers=len(self.secondary_tiers)
+        )
         self._metrics.on_new_request(req_context)
         for tier_idx, tier in enumerate(self.secondary_tiers):
             if tier_idx == exclude_tier_idx:
@@ -1206,7 +1283,7 @@ class TieringOffloadingManager(OffloadingManager):
         if state.pending_cascade_keys:
             return
 
-        for tier_idx, tier in enumerate(self.secondary_tiers):
+        for tier_idx, tier in enumerate(self._request_tiers(state.req_context)):
             if tier_idx == exclude_tier_idx:
                 continue
             tier.on_request_finished(state.req_context)
@@ -1329,7 +1406,7 @@ class TieringOffloadingManager(OffloadingManager):
             state.pending_cascade_keys.clear()
             if not state.is_finished:
                 continue
-            for tier in self.secondary_tiers:
+            for tier in self._request_tiers(state.req_context):
                 tier.on_request_finished(state.req_context)
             self._metrics.on_request_finished(state.req_context)
             finished_req_ids.append(req_id)
@@ -1343,7 +1420,7 @@ class TieringOffloadingManager(OffloadingManager):
         for tier in self.secondary_tiers:
             if tier.bp_detector is not None:
                 tier.bp_detector.reset()
-        self._promotions_held = bool(self.secondary_tiers)
+        self._promotions_held = True
 
     @override
     def on_reset_flushed(self) -> None:
@@ -1373,6 +1450,11 @@ class TieringOffloadingManager(OffloadingManager):
             else:
                 stats.aggregate(tier_stats)
 
+        if self._tier_info_pending:
+            if stats is None:
+                stats = OffloadingConnectorStats()
+            stats.set_info(self.config_info())
+            self._tier_info_pending = False
         return stats
 
     @override
@@ -1415,7 +1497,29 @@ class TieringOffloadingManager(OffloadingManager):
 
         Every secondary tier is given a shutdown attempt. If any shutdown
         fails, preserve the primary mmap because a failed tier may still use it.
+        Background setup must also exit before any tier releases primary memory.
         """
+        self._tier_setup_stop.set()
+        setup_thread = None
+        if (
+            self._secondary_tier_factory is not None
+            or self._tier_setup_thread is not None
+        ):
+            if not self._lock.acquire(timeout=_TIER_POLL_JOIN_TIMEOUT_S):
+                raise RuntimeError(
+                    "shutdown() must be called without holding manager.lock"
+                )
+            try:
+                self._secondary_tier_factory = None
+                setup_thread = self._tier_setup_thread
+            finally:
+                self._lock.release()
+        if setup_thread is not None:
+            setup_thread.join(timeout=_TIER_SETUP_JOIN_TIMEOUT_S)
+            if setup_thread.is_alive():
+                raise RuntimeError(
+                    "Secondary-tier setup is still running; preserving primary memory"
+                )
         self._stop_tier_poll_thread()
         if self._tier_poll_thread is not None:
             if not self._lock.acquire(timeout=_TIER_POLL_JOIN_TIMEOUT_S):
@@ -1434,7 +1538,9 @@ class TieringOffloadingManager(OffloadingManager):
 
     def _shutdown_tiers(self) -> None:
         shutdown_error: Exception | None = None
-        for tier_idx, tier in enumerate(self.secondary_tiers):
+        for tier_idx, tier in enumerate(
+            [*self.secondary_tiers, *self._unattached_tiers]
+        ):
             try:
                 tier.shutdown()
             except Exception as exc:
