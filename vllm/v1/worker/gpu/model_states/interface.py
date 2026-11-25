@@ -123,6 +123,10 @@ class ModelState(ABC):
             supported_tasks.append("realtime")
         return tuple(supported_tasks)
 
+    def update_max_model_len(self, max_model_len: int) -> None:
+        """Resize state sized from `max_model_len` after auto-fit changes it."""
+        return None
+
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         return None
 

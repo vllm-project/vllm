@@ -22,6 +22,7 @@ from vllm.v1.core.kv_cache_utils import (
     _kv_cache_device_name,
     update_kv_cache_capacity,
 )
+from vllm.v1.core.sched.prompt_embeds_budget import prompt_embeds_row_bytes
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CircularBufferManager,
@@ -1236,9 +1237,11 @@ def _estimate_max_model_len_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroup],
     available_memory: int,
+    extra_bytes_per_token: int = 0,
 ) -> int:
-    """Binary search for the maximum model length that fits in available memory.
-    Returns 0 if even 1 token doesn't fit.
+    """Binary search for the maximum model length that fits in available memory,
+    alongside `extra_bytes_per_token` for each token of it. Returns 0 if even 1
+    token doesn't fit.
     """
     original_max = vllm_config.model_config.max_model_len
     hisparse_enabled = (
@@ -1260,6 +1263,7 @@ def _estimate_max_model_len_from_groups(
                 return False
         return (
             _max_memory_usage_bytes_from_groups(builder, vllm_config, kv_cache_groups)
+            + model_len * extra_bytes_per_token
             <= available_memory
         )
 
@@ -1286,6 +1290,7 @@ def _auto_fit_max_model_len(
     projected_groups_per_worker: list[list[KVCacheGroup]],
     available_memory: list[int],
     after_warmup: bool = False,
+    extra_bytes_per_token: int = 0,
 ) -> None:
     """When max_model_len is set to -1, this function estimates the largest
     context length that can be supported with the available GPU memory.
@@ -1300,6 +1305,8 @@ def _auto_fit_max_model_len(
             worker.
         after_warmup: Whether this re-fits a length fitted before CUDA graph
             capture and warmup to the memory measured after them.
+        extra_bytes_per_token: Memory needed besides the KV cache for each
+            token of `max_model_len`.
 
     """
     original_max = vllm_config.model_config.max_model_len
@@ -1320,7 +1327,7 @@ def _auto_fit_max_model_len(
         if not groups:
             continue
         worker_max = _estimate_max_model_len_from_groups(
-            builder, vllm_config, groups, avail_mem
+            builder, vllm_config, groups, avail_mem, extra_bytes_per_token
         )
         if worker_max < auto_fit_max:
             auto_fit_max = worker_max
@@ -1544,6 +1551,27 @@ def get_kv_cache_configs(
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
 
+    def set_aside(memory: list[int], num_bytes: int) -> list[int]:
+        """Take `num_bytes` from each worker's memory, if it has a KV cache."""
+        return [
+            avail_mem - num_bytes if groups else avail_mem
+            for groups, avail_mem in zip(projected_groups_per_worker, memory)
+        ]
+
+    # Workers hold up to max_model_len + max_num_batched_tokens prompt_embeds
+    # rows, set aside in two parts:
+    # 1. Before auto-fit, the max_num_batched_tokens rows, which do not depend
+    #    on max_model_len, so auto-fit plans against what is left.
+    # 2. After auto-fit, the max_model_len rows, once max_model_len is known.
+    prompt_embeds_bytes_per_token = 0
+    if override is None and vllm_config.cache_config.kv_cache_memory_bytes is None:
+        prompt_embeds_bytes_per_token = prompt_embeds_row_bytes(vllm_config)
+        available_memory = set_aside(
+            available_memory,
+            prompt_embeds_bytes_per_token
+            * vllm_config.scheduler_config.max_num_batched_tokens,
+        )
+
     # Reserve the null block BlockPool permanently holds back, so auto-fit and
     # the capacity check both plan against usable blocks. Allocation below
     # still uses the full memory.
@@ -1558,8 +1586,19 @@ def get_kv_cache_configs(
 
     if vllm_config.model_config.original_max_model_len == -1:
         _auto_fit_max_model_len(
-            builder, vllm_config, projected_groups_per_worker, check_memory
+            builder,
+            vllm_config,
+            projected_groups_per_worker,
+            check_memory,
+            extra_bytes_per_token=prompt_embeds_bytes_per_token,
         )
+
+    # set aside the max_model_len prompt_embeds rows, now that max_model_len is final.
+    prompt_embeds_rows_bytes = (
+        vllm_config.model_config.max_model_len * prompt_embeds_bytes_per_token
+    )
+    available_memory = set_aside(available_memory, prompt_embeds_rows_bytes)
+    check_memory = set_aside(check_memory, prompt_embeds_rows_bytes)
 
     # Check if the available memory is enough per worker.
     for groups, avail_mem in zip(projected_groups_per_worker, check_memory):
@@ -1818,6 +1857,11 @@ def finalize_extensible_kv_cache(
         # graphs and warmup took their share; fit it again to the measured one.
         builder = get_kv_cache_config_builder(vllm_config)
         groups_per_worker = [config.kv_cache_groups for config in kv_cache_configs]
+        # Workers measured after keeping the prompt_embeds rows of the
+        # provisional max_model_len free, so the measured blocks are KV cache
+        # only. A shorter context leaves the rows it no longer needs unused:
+        # handing them to the KV cache would need each worker's own block
+        # sizing (see prompt_embeds_budget_rows).
         available_memory = [
             (num_blocks - 1)
             * _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
