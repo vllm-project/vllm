@@ -1,78 +1,3 @@
-include(FetchContent)
-
-# If DEEPGEMM_SRC_DIR is set, DeepGEMM is built from that directory
-# instead of downloading.
-# It can be set as an environment variable or passed as a cmake argument.
-# The environment variable takes precedence.
-if (DEFINED ENV{DEEPGEMM_SRC_DIR})
-  set(DEEPGEMM_SRC_DIR $ENV{DEEPGEMM_SRC_DIR})
-endif()
-
-# Local tree: set deepgemm_SOURCE_DIR directly (no FetchContent download).
-# Upstream git: use FetchContent_Populate with explicit options (CMP0169 NEW
-# disallows one-argument Populate(dep) after Declare; MakeAvailable would run
-# DeepGEMM's top-level CMakeLists.txt, which vLLM must not load).
-if(DEEPGEMM_SRC_DIR)
-  # cmake_path(ABSOLUTE_PATH <var> ...) reads the path from <var>; NORMALIZE is a
-  # flag (no trailing path argument). Resolve relative paths against vLLM root.
-  set(_deepgemm_user_src "${DEEPGEMM_SRC_DIR}")
-  cmake_path(ABSOLUTE_PATH _deepgemm_user_src
-    BASE_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    NORMALIZE)
-  set(DEEPGEMM_SRC_DIR "${_deepgemm_user_src}")
-  if(NOT IS_DIRECTORY "${DEEPGEMM_SRC_DIR}")
-    message(FATAL_ERROR
-      "DEEPGEMM_SRC_DIR is not an existing directory: '${DEEPGEMM_SRC_DIR}'")
-  endif()
-  set(deepgemm_SOURCE_DIR "${DEEPGEMM_SRC_DIR}")
-  message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
-else()
-  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
-  # Pinned to the fork's dev branch: upstream's 26/09/30 release (2.8.1)
-  # plus the SM120 port, the SM90 paged-MQA kv_block=32/next_n=4 port,
-  # configurable SwiGLU alpha/beta, SiTU for FP8/FP4 Mega MoE, and NVFP4
-  # Mega MoE, plus swiglustep for BF16/FP8/NVFP4 Mega MoE and F8_128x4
-  # SFs for the FP8 einsum output (vllm-project/DeepGEMM#40), plus
-  # fp4_fp4_mega_moe and fused post-expert RMSNorm for Muse Spark Open
-  # (vllm-project/DeepGEMM#39), and the MX MegaMoE alignment fix
-  # (vllm-project/DeepGEMM#43), plus the restored FP32 MQA logits and their
-  # `logits_dtype` switch (vllm-project/DeepGEMM#46) and the mega_mhc
-  # CUDA-graph replay barrier fix (vllm-project/DeepGEMM#48), plus the SM90
-  # FP8 x FP4 Mega MoE kernel (vllm-project/DeepGEMM#44) and the MegaMoE
-  # combine-readiness fix under CUDA graph replay (vllm-project/DeepGEMM#59),
-  # plus the SM90 paged-MQA metadata kernel compiled once for every batch size
-  # (vllm-project/DeepGEMM#63), the SM90 mHC prenorm GEMM WGMMA register
-  # reuse fix (vllm-project/DeepGEMM#64), and the SM90 FP8 Mega MoE kernel
-  # with 128x128 block scales (vllm-project/DeepGEMM#57).
-  # Targets the PyTorch 2.11 stable ABI (requires PyTorch 2.14+ headers at build time) and CPython 3.10 limited API.
-  set(_DEEPGEMM_UPSTREAM_TAG "44cba7d28066182852005c59052f035ebc18e211")
-
-  set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
-  if(NOT _deepgemm_fc_root)
-    set(_deepgemm_fc_root "${CMAKE_BINARY_DIR}/_deps")
-  endif()
-  set(_deepgemm_src "${_deepgemm_fc_root}/deepgemm-src")
-  set(_deepgemm_bin "${_deepgemm_fc_root}/deepgemm-build")
-  set(_deepgemm_sub "${_deepgemm_fc_root}/deepgemm-subbuild")
-
-  if(EXISTS "${_deepgemm_src}/deep_gemm/_C.py")
-    set(deepgemm_SOURCE_DIR "${_deepgemm_src}")
-    set(deepgemm_BINARY_DIR "${_deepgemm_bin}")
-  else()
-    FetchContent_Populate(
-      deepgemm
-      SUBBUILD_DIR "${_deepgemm_sub}"
-      SOURCE_DIR "${_deepgemm_src}"
-      BINARY_DIR "${_deepgemm_bin}"
-      GIT_REPOSITORY "${_DEEPGEMM_UPSTREAM_REPO}"
-      GIT_TAG "${_DEEPGEMM_UPSTREAM_TAG}"
-      GIT_SUBMODULES "third-party/cutlass" "third-party/deep_jit"
-      GIT_PROGRESS TRUE
-    )
-  endif()
-  message(STATUS "DeepGEMM is available at ${deepgemm_SOURCE_DIR}")
-endif()
-
 # DeepGEMM requires CUDA 12.3+ for SM90, 12.9+ for SM100 (official upstream),
 # and 12.8+ for SM120 / SM12x. CUDA 13+ can use the family-specific SM12x
 # arch; CUDA 12.x builds the arch-specific SM120/SM121 variants.
@@ -100,6 +25,81 @@ cuda_archs_loose_intersection(DEEPGEMM_ARCHS
   "${DEEPGEMM_SUPPORT_ARCHS}" "${CUDA_ARCHS}")
 
 if(DEEPGEMM_ARCHS)
+  include(FetchContent)
+
+  # If DEEPGEMM_SRC_DIR is set, DeepGEMM is built from that directory
+  # instead of downloading.
+  # It can be set as an environment variable or passed as a cmake argument.
+  # The environment variable takes precedence.
+  if (DEFINED ENV{DEEPGEMM_SRC_DIR})
+    set(DEEPGEMM_SRC_DIR $ENV{DEEPGEMM_SRC_DIR})
+  endif()
+
+  # Local tree: set deepgemm_SOURCE_DIR directly (no FetchContent download).
+  # Upstream git: use FetchContent_Populate with explicit options (CMP0169 NEW
+  # disallows one-argument Populate(dep) after Declare; MakeAvailable would run
+  # DeepGEMM's top-level CMakeLists.txt, which vLLM must not load).
+  if(DEEPGEMM_SRC_DIR)
+    # cmake_path(ABSOLUTE_PATH <var> ...) reads the path from <var>; NORMALIZE is a
+    # flag (no trailing path argument). Resolve relative paths against vLLM root.
+    set(_deepgemm_user_src "${DEEPGEMM_SRC_DIR}")
+    cmake_path(ABSOLUTE_PATH _deepgemm_user_src
+      BASE_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      NORMALIZE)
+    set(DEEPGEMM_SRC_DIR "${_deepgemm_user_src}")
+    if(NOT IS_DIRECTORY "${DEEPGEMM_SRC_DIR}")
+      message(FATAL_ERROR
+        "DEEPGEMM_SRC_DIR is not an existing directory: '${DEEPGEMM_SRC_DIR}'")
+    endif()
+    set(deepgemm_SOURCE_DIR "${DEEPGEMM_SRC_DIR}")
+    message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
+  else()
+    set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
+    # Pinned to the fork's dev branch: upstream's 26/09/30 release (2.8.1)
+    # plus the SM120 port, the SM90 paged-MQA kv_block=32/next_n=4 port,
+    # configurable SwiGLU alpha/beta, SiTU for FP8/FP4 Mega MoE, and NVFP4
+    # Mega MoE, plus swiglustep for BF16/FP8/NVFP4 Mega MoE and F8_128x4
+    # SFs for the FP8 einsum output (vllm-project/DeepGEMM#40), plus
+    # fp4_fp4_mega_moe and fused post-expert RMSNorm for Muse Spark Open
+    # (vllm-project/DeepGEMM#39), and the MX MegaMoE alignment fix
+    # (vllm-project/DeepGEMM#43), plus the restored FP32 MQA logits and their
+    # `logits_dtype` switch (vllm-project/DeepGEMM#46) and the mega_mhc
+    # CUDA-graph replay barrier fix (vllm-project/DeepGEMM#48), plus the SM90
+    # FP8 x FP4 Mega MoE kernel (vllm-project/DeepGEMM#44) and the MegaMoE
+    # combine-readiness fix under CUDA graph replay (vllm-project/DeepGEMM#59),
+    # plus the SM90 paged-MQA metadata kernel compiled once for every batch size
+    # (vllm-project/DeepGEMM#63), the SM90 mHC prenorm GEMM WGMMA register
+    # reuse fix (vllm-project/DeepGEMM#64), and the SM90 FP8 Mega MoE kernel
+    # with 128x128 block scales (vllm-project/DeepGEMM#57).
+    # Targets the PyTorch 2.11 stable ABI (requires PyTorch 2.14+ headers at build time) and CPython 3.10 limited API.
+    set(_DEEPGEMM_UPSTREAM_TAG "44cba7d28066182852005c59052f035ebc18e211")
+
+    set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
+    if(NOT _deepgemm_fc_root)
+      set(_deepgemm_fc_root "${CMAKE_BINARY_DIR}/_deps")
+    endif()
+    set(_deepgemm_src "${_deepgemm_fc_root}/deepgemm-src")
+    set(_deepgemm_bin "${_deepgemm_fc_root}/deepgemm-build")
+    set(_deepgemm_sub "${_deepgemm_fc_root}/deepgemm-subbuild")
+
+    if(EXISTS "${_deepgemm_src}/deep_gemm/_C.py")
+      set(deepgemm_SOURCE_DIR "${_deepgemm_src}")
+      set(deepgemm_BINARY_DIR "${_deepgemm_bin}")
+    else()
+      FetchContent_Populate(
+        deepgemm
+        SUBBUILD_DIR "${_deepgemm_sub}"
+        SOURCE_DIR "${_deepgemm_src}"
+        BINARY_DIR "${_deepgemm_bin}"
+        GIT_REPOSITORY "${_DEEPGEMM_UPSTREAM_REPO}"
+        GIT_TAG "${_DEEPGEMM_UPSTREAM_TAG}"
+        GIT_SUBMODULES "third-party/cutlass" "third-party/deep_jit"
+        GIT_PROGRESS TRUE
+      )
+    endif()
+    message(STATUS "DeepGEMM is available at ${deepgemm_SOURCE_DIR}")
+  endif()
+
   message(STATUS "DeepGEMM CUDA architectures: ${DEEPGEMM_ARCHS}")
 
   #

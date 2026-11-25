@@ -1,27 +1,3 @@
-include(FetchContent)
-
-if(DEFINED ENV{FLASH_KDA_SRC_DIR})
-  set(FLASH_KDA_SRC_DIR $ENV{FLASH_KDA_SRC_DIR})
-endif()
-
-if(FLASH_KDA_SRC_DIR)
-  FetchContent_Declare(
-    flashkda
-    SOURCE_DIR ${FLASH_KDA_SRC_DIR}
-  )
-else()
-  FetchContent_Declare(
-    flashkda
-    GIT_REPOSITORY https://github.com/vllm-project/FlashKDA.git
-    GIT_TAG 9d9e928edc42475a67a523dd37814540d105f51c
-    GIT_PROGRESS TRUE
-    GIT_SUBMODULES cutlass
-  )
-endif()
-
-FetchContent_MakeAvailable(flashkda)
-message(STATUS "FlashKDA is available at ${flashkda_SOURCE_DIR}")
-
 set(FLASH_KDA_SUPPORT_ARCHS)
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0)
   list(APPEND FLASH_KDA_SUPPORT_ARCHS "9.0a")
@@ -36,6 +12,30 @@ cuda_archs_loose_intersection(
   FLASH_KDA_ARCHS "${FLASH_KDA_SUPPORT_ARCHS}" "${CUDA_ARCHS}")
 
 if(FLASH_KDA_ARCHS)
+  include(FetchContent)
+
+  if(DEFINED ENV{FLASH_KDA_SRC_DIR})
+    set(FLASH_KDA_SRC_DIR $ENV{FLASH_KDA_SRC_DIR})
+  endif()
+
+  if(FLASH_KDA_SRC_DIR)
+    FetchContent_Declare(
+      flashkda
+      SOURCE_DIR ${FLASH_KDA_SRC_DIR}
+    )
+  else()
+    FetchContent_Declare(
+      flashkda
+      GIT_REPOSITORY https://github.com/vllm-project/FlashKDA.git
+      GIT_TAG 9d9e928edc42475a67a523dd37814540d105f51c
+      GIT_PROGRESS TRUE
+      GIT_SUBMODULES cutlass
+    )
+  endif()
+
+  FetchContent_MakeAvailable(flashkda)
+  message(STATUS "FlashKDA is available at ${flashkda_SOURCE_DIR}")
+
   message(STATUS "FlashKDA CUDA architectures: ${FLASH_KDA_ARCHS}")
 
   set(FLASH_KDA_SOURCES

@@ -157,3 +157,48 @@ def test_hipify_records_original_sources_and_headers_without_modifying_them(tmp_
     assert provenance[str(output / "cuda_shared.h")] == str(header)
     assert provenance[str(output / "hip_shared.h")] == str(header)
     assert '#include "hip_shared.h"' in (output / "probe.hip").read_text()
+
+
+@pytest.mark.parametrize(
+    ("module", "target", "source_variable"),
+    [
+        ("deepgemm", "_deep_gemm_C", "DEEPGEMM_SRC_DIR"),
+        ("deepselect", "_deepselect_C", "DEEPSELECT_SRC_DIR"),
+        ("flashkda", "_flashkda_C", "FLASH_KDA_SRC_DIR"),
+    ],
+)
+def test_unsupported_cuda_project_does_not_require_sources(
+    tmp_path: Path, monkeypatch, module: str, target: str, source_variable: str
+):
+    """An unsupported extension must remain buildable without fetching sources."""
+    repo = Path(__file__).parents[1]
+    source = tmp_path / "source"
+    build = tmp_path / "build"
+    source.mkdir()
+    monkeypatch.setenv(source_variable, str(tmp_path / "absent-dependency"))
+    (source / "CMakeLists.txt").write_text(
+        f"""
+cmake_minimum_required(VERSION 3.26)
+project(unsupported_extension LANGUAGES NONE)
+include("{repo / "cmake/utils.cmake"}")
+set(CMAKE_CUDA_COMPILER_VERSION 13.0)
+set(CUDA_ARCHS "8.6")
+include("{repo / f"cmake/external_projects/{module}.cmake"}")
+"""
+    )
+    cmake = _get_cmake_bin()
+    subprocess.run([cmake, "-S", str(source), "-B", str(build)], check=True)
+    subprocess.run([cmake, "--build", str(build), "--target", target], check=True)
+    subprocess.run(
+        [
+            cmake,
+            "--install",
+            str(build),
+            "--component",
+            target,
+            "--prefix",
+            str(tmp_path / "install"),
+        ],
+        check=True,
+    )
+    assert not (build / "_deps").exists()

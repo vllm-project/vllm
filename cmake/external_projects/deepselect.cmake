@@ -1,34 +1,3 @@
-include(FetchContent)
-
-# If DEEPSELECT_SRC_DIR is set, DeepSelect is built from that directory
-# instead of downloading.
-# It can be set as an environment variable or passed as a cmake argument.
-# The environment variable takes precedence.
-if (DEFINED ENV{DEEPSELECT_SRC_DIR})
-  set(DEEPSELECT_SRC_DIR $ENV{DEEPSELECT_SRC_DIR})
-endif()
-
-if(DEEPSELECT_SRC_DIR)
-  FetchContent_Declare(
-        deepselect
-        SOURCE_DIR ${DEEPSELECT_SRC_DIR}
-        CONFIGURE_COMMAND ""
-        BUILD_COMMAND ""
-  )
-else()
-  FetchContent_Declare(
-        deepselect
-        GIT_REPOSITORY https://github.com/vllm-project/DeepSelect.git
-        GIT_TAG d96d33afe1fab0d6066da49cdc91e64c2bee65ea
-        GIT_PROGRESS TRUE
-        CONFIGURE_COMMAND ""
-        BUILD_COMMAND ""
-  )
-endif()
-
-FetchContent_MakeAvailable(deepselect)
-message(STATUS "DeepSelect is available at ${deepselect_SOURCE_DIR}")
-
 # DeepSelect kernels require CUDA 12.9+; 10.0f (family) covers SM100 and SM103.
 set(DEEPSELECT_SUPPORT_ARCHS)
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
@@ -37,6 +6,37 @@ endif()
 
 cuda_archs_loose_intersection(DEEPSELECT_ARCHS "${DEEPSELECT_SUPPORT_ARCHS}" "${CUDA_ARCHS}")
 if(DEEPSELECT_ARCHS)
+    include(FetchContent)
+
+    # If DEEPSELECT_SRC_DIR is set, DeepSelect is built from that directory
+    # instead of downloading.
+    # It can be set as an environment variable or passed as a cmake argument.
+    # The environment variable takes precedence.
+    if (DEFINED ENV{DEEPSELECT_SRC_DIR})
+      set(DEEPSELECT_SRC_DIR $ENV{DEEPSELECT_SRC_DIR})
+    endif()
+
+    if(DEEPSELECT_SRC_DIR)
+      FetchContent_Declare(
+            deepselect
+            SOURCE_DIR ${DEEPSELECT_SRC_DIR}
+            CONFIGURE_COMMAND ""
+            BUILD_COMMAND ""
+      )
+    else()
+      FetchContent_Declare(
+            deepselect
+            GIT_REPOSITORY https://github.com/vllm-project/DeepSelect.git
+            GIT_TAG d96d33afe1fab0d6066da49cdc91e64c2bee65ea
+            GIT_PROGRESS TRUE
+            CONFIGURE_COMMAND ""
+            BUILD_COMMAND ""
+      )
+    endif()
+
+    FetchContent_MakeAvailable(deepselect)
+    message(STATUS "DeepSelect is available at ${deepselect_SOURCE_DIR}")
+
     message(STATUS "DeepSelect CUDA architectures: ${DEEPSELECT_ARCHS}")
 
     # All explicit template instantiations must be compiled: api.cpp

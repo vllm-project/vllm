@@ -22,6 +22,8 @@ Before setting up the incremental build:
     uv pip install -r requirements/build/cuda.txt --torch-backend=auto
     ```
 
+Set `TORCH_CUDA_ARCH_LIST` to the architectures you intend to build for. DeepGEMM, DeepSelect, and FlashKDA sources are only fetched when that list contains an architecture supported by the respective project and CUDA toolkit. For example, an SM86-only build does not need any of these source trees; a mixed SM86/SM100 build still fetches them with a compatible CUDA toolkit.
+
 ## Setting up the CMake Build Environment
 
 The incremental build process is managed through CMake. You can configure your build settings using a `CMakeUserPresets.json` file at the root of the vLLM repository.
