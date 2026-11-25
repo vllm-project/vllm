@@ -13,6 +13,7 @@ from types import MethodType, SimpleNamespace
 from typing import Any, Literal
 
 import pytest
+import regex as re
 import torch
 
 from tests.v1.attention.utils import (
@@ -274,6 +275,48 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     if cache_dtype == "fp8_ds_mla":
         assert spec.state_content_bytes == row_bytes
         assert spec.page_size_bytes == 64 * row_bytes
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "message"),
+    [
+        ("fp8", "kv_cache_dtype=fp8 (served as fp8_ds_mla)."),
+        ("fp8_e4m3", "kv_cache_dtype=fp8_e4m3 (served as fp8_ds_mla)."),
+        ("fp8_ds_mla", "kv_cache_dtype=fp8_ds_mla."),
+        ("nvfp4_ds_mla", "kv_cache_dtype=nvfp4_ds_mla."),
+    ],
+)
+def test_sliding_window_mla_rejects_ds_mla_kv_cache(
+    dist_init, default_vllm_config, kv_cache_dtype: str, message: str
+):
+    """Sliding-window layers that have not opted in must not run a DS-MLA cache,
+    including fp8 aliases a sparse backend would serve as fp8_ds_mla; the shared
+    cache config must stay as the user set it."""
+    from vllm.config import CacheConfig
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
+
+    num_heads, nope, rope, v_dim, kv_lora_rank = 8, 128, 64, 128, 512
+    cache_config = CacheConfig(cache_dtype=kv_cache_dtype)
+    kv_b_proj = ColumnParallelLinear(
+        kv_lora_rank, num_heads * (nope + v_dim), bias=False
+    )
+    with pytest.raises(ValueError, match=re.escape(message)):
+        MLAAttention(
+            num_heads=num_heads,
+            scale=1.0,
+            qk_nope_head_dim=nope,
+            qk_rope_head_dim=rope,
+            v_head_dim=v_dim,
+            q_lora_rank=512,
+            kv_lora_rank=kv_lora_rank,
+            kv_b_proj=kv_b_proj,
+            cache_config=cache_config,
+            attn_backend=FlashMLASparseBackend,
+            use_sparse=True,
+            sliding_window=512,
+        )
+    assert cache_config.cache_dtype == kv_cache_dtype
 
 
 @pytest.mark.cpu_test
