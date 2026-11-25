@@ -125,8 +125,8 @@ class SiluAndMul(CustomOp):
 
     # --8<-- [end:silu_and_mul]
 
-    def __init__(self, *, compile_native: bool = True):
-        super().__init__(compile_native=compile_native)
+    def __init__(self, *, compile_native: bool = True, enforce_enable: bool = False):
+        super().__init__(enforce_enable=enforce_enable, compile_native=compile_native)
         if (
             current_platform.is_cuda_alike()
             or current_platform.is_xpu()
