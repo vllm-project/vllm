@@ -174,12 +174,11 @@ def test_every_kv_cache_layout_restores_blocks_exactly(
     planner_config = SimpleNamespace(
         cache_config=SimpleNamespace(
             get_resolved_kv_cache_layout=lambda: layout,
-            num_gpu_blocks_override=4,
             prefix_cache_retention_interval=None,
         ),
         attention_config=SimpleNamespace(hisparse_config=None),
     )
-    config = get_kv_cache_config_from_groups(planner_config, groups, 1 << 30)
+    config = get_kv_cache_config_from_groups(planner_config, groups, num_blocks=4)
     config.kv_cache_layout = layout.name
     kv_caches = allocate_kv_cache(config, torch.device("cpu"), layout)
 

@@ -164,32 +164,43 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
     # layer KV Cache. See https://github.com/vllm-project/vllm/pull/45947
     if current_platform.is_rocm():
         return
-    sampling_params = SamplingParams(max_tokens=1)
+    sampling_params = SamplingParams(max_tokens=1, temperature=0)
 
     num_times_cpu_better_than_cold = 0
     num_tests = 10
     total_cold_time = 0.0
     total_gpu_hit_time = 0.0
     total_cpu_hit_time = 0.0
-    max_model_len = llm.llm_engine.vllm_config.model_config.max_model_len
-    # Use a long prompt that fits within the model's context window.
-    prompt_len = min(10001, max_model_len - 1)
-    prompt_token_ids = [0] * prompt_len
+    vllm_config = llm.llm_engine.vllm_config
+    max_model_len = vllm_config.model_config.max_model_len
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    cpu_block_size = extra_config.get(
+        "block_size",
+        vllm_config.cache_config.block_size * extra_config.get("blocks_per_chunk", 1),
+    )
+    # Leave only the final token to recompute so partial-tail prefill cannot
+    # dominate the cache-hit timings.
+    prefix_len = min(10000, max_model_len - 2)
+    prefix_len -= prefix_len % cpu_block_size
+    assert prefix_len > 0
+    prompt_token_ids = [0] * (prefix_len + 1)
     for i in tqdm(range(num_tests), desc="Running tests"):
         prompt_token_ids[0] = i
         prompts = [TokensPrompt(prompt_token_ids=prompt_token_ids)]
 
         # run generation - this should trigger saving KV cache
-        start_time = time.time()
-        llm.generate(prompts, sampling_params, use_tqdm=False)
-        cold_time = time.time() - start_time
+        start_time = time.perf_counter()
+        [cold] = llm.generate(prompts, sampling_params, use_tqdm=False)
+        cold_time = time.perf_counter() - start_time
         total_cold_time += cold_time
+        assert cold.num_cached_tokens == 0
 
         # run generation again - should hit the GPU prefix cache
-        start_time = time.time()
-        llm.generate(prompts, sampling_params, use_tqdm=False)
-        gpu_hit_time = time.time() - start_time
+        start_time = time.perf_counter()
+        [gpu_hit] = llm.generate(prompts, sampling_params, use_tqdm=False)
+        gpu_hit_time = time.perf_counter() - start_time
         total_gpu_hit_time += gpu_hit_time
+        assert gpu_hit.num_cached_tokens == prefix_len
 
         # Wait for the async CPU offload to finish, then reset prefix cache
         # so the next generate() must reload from CPU rather than GPU.
@@ -204,14 +215,16 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
             )
 
         # run generation again - this should trigger loading from CPU
-        start_time = time.time()
-        llm.generate(prompts, sampling_params, use_tqdm=False)
-        cpu_hit_time = time.time() - start_time
+        start_time = time.perf_counter()
+        [cpu_hit] = llm.generate(prompts, sampling_params, use_tqdm=False)
+        cpu_hit_time = time.perf_counter() - start_time
         total_cpu_hit_time += cpu_hit_time
+        assert cpu_hit.num_cached_tokens == prefix_len
 
         if cpu_hit_time < cold_time:
             num_times_cpu_better_than_cold += 1
 
+    print(f"Reusable prefix length: {prefix_len}")
     print("Average times:")
     print(f"    Cold: {total_cold_time * 1000 / num_tests:.2f}ms")
     print(f"    GPU hit: {total_gpu_hit_time * 1000 / num_tests:.2f}ms")

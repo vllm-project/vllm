@@ -309,8 +309,6 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
-        # The checkpoint's stale `auto_map` points at remote code that no longer exists
-        vllm_runner_kwargs={"trust_remote_code": False},
         hf_processor=AutoProcessor.from_pretrained,
         single_image_prompts=IMAGE_ASSETS.prompts(
             {
@@ -828,6 +826,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         dtype="bfloat16",
+        hf_runner_kwargs={"trust_remote_code": True},
         hf_processor=model_utils.moondream3_processor,
         patch_hf_runner=model_utils.moondream3_patch_hf_runner,
         # Single size factor to avoid GPU OOM when running multiple test
@@ -894,7 +893,6 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
-        hf_runner_kwargs={"trust_remote_code": False},
         patch_hf_runner=model_utils.paddleocr_vl_patch_hf_runner,
         image_size_factors=[(0.25,)],
     ),

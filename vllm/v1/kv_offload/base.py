@@ -3,7 +3,7 @@
 """Core abstractions for KV cache offloading in vLLM v1."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, fields
 from enum import Enum, auto
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     )
 
 from vllm.v1.kv_hints import KvHintsEnvelope
-from vllm.v1.kv_offload.config import OffloadingConfig
+from vllm.v1.kv_offload.config import OffloadAccessMode, OffloadingConfig
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
@@ -205,6 +205,11 @@ class PrepareStoreOutput:
     keys_to_store: list[OffloadKey]
     store_spec: LoadStoreSpec
     evicted_keys: list[OffloadKey]
+    # Offered keys to offer again because the manager had no room. Within a
+    # group (get_offload_group_idx), they are the offered keys from the first
+    # one that did not fit on, by token position, including keys that are
+    # already stored. Disjoint from keys_to_store.
+    keys_to_retry: list[OffloadKey] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -221,6 +226,19 @@ class OffloadingEvent:
     metadata_only: bool = False
     # Originating request context for a stored event.
     req_context: ReqContext | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class StepResult:
+    """What the manager reports to the connector once per step."""
+
+    # Whether the engine must keep stepping with no requests scheduled. Read
+    # only here, so a manager cannot raise it between steps.
+    pending: bool = False
+    # Events collected since the previous step, in emission order.
+    events: list[OffloadingEvent] = field(default_factory=list)
+    # Metrics collected since the previous step, or None if disabled.
+    stats: "OffloadingConnectorStats | None" = None
 
 
 """
@@ -422,7 +440,9 @@ class OffloadingManager(ABC):
         Returns:
             A PrepareStoreOutput indicating which blocks need storing,
             where to store them (LoadStoreSpec), and list of blocks that
-            were evicted as a result.
+            were evicted as a result. A manager short on room may store
+            only some of the keys and report the rest in keys_to_retry,
+            under the constraints documented on that field.
             None is returned if the blocks cannot be stored.
 
         """
@@ -483,20 +503,7 @@ class OffloadingManager(ABC):
         """
         return
 
-    def take_events(self) -> Iterable[OffloadingEvent]:
-        """Take the offloading events from the manager.
-
-        A tier manager emits only events for storage state it owns. A
-        composing manager may aggregate child event streams, but should not
-        synthesize events on behalf of a child tier.
-
-        Yields:
-            New OffloadingEvents collected since the last call.
-
-        """
-        return ()
-
-    def on_schedule_end(self, context: ScheduleEndContext) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> StepResult:
         """Called once at the end of each scheduler step.
 
         This is the last manager call of a step: every lookup(), prepare_load(),
@@ -505,16 +512,16 @@ class OffloadingManager(ABC):
 
         Managers may override this to flush deferred work accumulated
         during the step (e.g., batched promotions).
-        """
-        return
 
-    def has_pending_work(self) -> bool:
-        """Whether this manager needs the engine to keep stepping.
+        A tier manager reports only events for storage state it owns. A
+        composing manager may aggregate child event streams, but should not
+        synthesize events on behalf of a child tier.
 
-        While True, on_schedule_end() and get_finished_jobs() continue
-        to be called even when no requests are scheduled.
+        Returns:
+            Everything the connector reads from the manager for this step.
+
         """
-        return False
+        return StepResult()
 
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""
@@ -524,10 +531,6 @@ class OffloadingManager(ABC):
         """Called once workers have reported every job in flight at the last
         reset_cache(); blocks it freed are no longer written by them."""
         return
-
-    def get_stats(self) -> "OffloadingConnectorStats | None":
-        """Return collected metrics since last call, or None if disabled."""
-        return None
 
     def config_info(self) -> Sequence[ConfigInfoMapping]:
         """Return the info metric labels, one mapping for each series.
@@ -762,6 +765,17 @@ class OffloadingWorker(ABC):
     @abstractmethod
     def wait(self, job_ids: set[int]) -> None: ...
 
+    def start_deferred_setup(self) -> None:
+        """Start setup deferred by async_init.
+
+        No transfers are submitted until is_ready().
+        """
+        return
+
+    def is_ready(self) -> bool:
+        """Whether this worker can take transfers."""
+        return True
+
     def shutdown(self) -> None:
         return
 
@@ -792,6 +806,9 @@ class OffloadingSpec(ABC):
         self.config = config
         self.extra_config = config.extra_config
         self.replicated_layout: bool = False
+        # When True, the worker finishes its setup in the background and the
+        # engine serves without offloading until every worker is ready.
+        self.async_init: bool = False
         self.kv_events_config = OffloadingKVEventsConfig(
             enable_kv_cache_events=config.enable_kv_cache_events,
             self_describing_kv_events=bool(
@@ -805,6 +822,13 @@ class OffloadingSpec(ABC):
         # reasoning models that strip thinking).
         self.offload_prompt_only: bool = bool(
             self.extra_config.get("offload_prompt_only", True)
+        )
+
+        # Direction(s) in which this connector's managers may transfer data.
+        # A read-only manager never accepts stores; a write-only manager never
+        # serves loads.
+        self.access_mode: OffloadAccessMode = OffloadAccessMode.from_config(
+            self.extra_config.get("access_mode")
         )
 
         self.tokens_per_block = tuple(group.tokens_per_block for group in config.groups)
