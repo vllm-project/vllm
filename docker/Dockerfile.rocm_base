@@ -384,6 +384,9 @@ RUN --mount=type=bind,from=build_triton,src=/app/install,target=/i/triton \
     --mount=type=bind,from=build_mori,src=/app/install,target=/i/mori \
     --mount=type=cache,target=/root/.cache/pip \
     pip install /i/*/*.whl \
+    # TEMPORARY, do not merge: stands in for AITER v0.1.30.post1 (v0.1.30 + FlyDSL 0.5.3, aiter#8450
+    # and #8467) until its wheel is published. Replaced by the AITER_VERSION/AITER_BUILD bump.
+    && pip install --no-deps flydsl==0.5.3 \
     && ! pip check 2>&1 | grep -iE '^(torch|triton) ' \
     && test "$(pip show triton | awk '/^Version:/ {print $2}')" = "${TRITON_VERSION}" \
     # Create a constraints file to protect the versions we need, especially
