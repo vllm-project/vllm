@@ -44,6 +44,7 @@ from vllm.parser.abstract_parser import structured_outputs_to_format
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
+    ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     Transition,
@@ -118,6 +119,54 @@ def _inkling_arg_converter(raw_args: str, partial: bool) -> str:
         # No args value yet (streaming) or none at all (treat as empty).
         return "" if partial else "{}"
     return span
+
+
+def _inkling_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
+    """Stream verbatim deltas while the last top-level string value is open."""
+    args = extract_json_member_object(raw_args, "args")
+    if args is None:
+        return None
+
+    depth = 0
+    previous = ""
+    in_string = False
+    escaped = False
+    streamable = False
+    for char in args:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+                previous = char
+            continue
+        if char == '"':
+            in_string = True
+            streamable = depth == 1 and previous == ":"
+        elif char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+        if char not in " \t\r\n":
+            previous = char
+
+    if not in_string or not streamable:
+        return None
+
+    def extend(delta: str) -> str | None:
+        nonlocal escaped
+        for char in delta:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                return None
+        return delta
+
+    return extend
 
 
 @functools.cache
@@ -246,6 +295,8 @@ def inkling_config() -> ParserEngineConfig:
         arg_converter=_inkling_arg_converter,
         stream_arg_deltas=True,
         tool_args_json=True,
+        arg_structural_chars=frozenset('{}[]":,'),
+        arg_value_extender=_inkling_arg_value_extender,
         strip_trailing_reasoning_whitespace=True,
         drop_whitespace_only_content_before_tools=True,
         strip_content_whitespace_with_tools=False,
