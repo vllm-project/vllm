@@ -222,6 +222,13 @@ ARCHS: dict[str, ArchCase] = {
         env={"VLLM_ROCM_USE_AITER": "0"},
         hybrid=False,
     ),
+    "qwen3_dense_aiter": ArchCase(
+        model="Qwen/Qwen3-32B",
+        overrides=_qwen3_dense_overrides,
+        corrupt_overrides={"rms_norm_eps": 1.0},
+        env={"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": "0"},
+        hybrid=False,
+    ),
     "deepseek_v3": ArchCase(
         model="deepseek-ai/DeepSeek-V3",
         overrides=_deepseek_v3_overrides,
@@ -320,6 +327,14 @@ CASES = [
     # Attention-only: prefill transfers the whole prompt.
     Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT),
     Case("qwen3_dense", "ROCM_AITER_UNIFIED_ATTN", _DEFAULT, _DEFAULT),
+    # AITER FA exposes two 32-token kernel pages per 64-token manager block.
+    Case(
+        "qwen3_dense_aiter",
+        "ROCM_AITER_FA",
+        "NONE",
+        "NONE",
+        server_args=("--block-size", "64"),
+    ),
     # Without the hybrid KV cache manager: one cache group per model.
     Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, hma_off=True),
     Case("deepseek_v3", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, hma_off=True),
@@ -353,6 +368,14 @@ HETEROGENEOUS_TP_CASES = [
 # READ mode, equal TP: one case per cache-group kind (KDA + MLA, Gated DeltaNet
 # + full attention, full attention, and single-group MLA and sliding window).
 READ_CASES = [
+    Case(
+        "qwen3_dense_aiter",
+        "ROCM_AITER_FA",
+        "NONE",
+        "NONE",
+        server_args=("--block-size", "64"),
+        read_mode=True,
+    ),
     Case("kimi_linear", "ROCM_AITER_MLA", _DEFAULT, _DEFAULT, read_mode=True),
     Case("qwen3_5_moe", "TRITON_ATTN", _DEFAULT, _DEFAULT, read_mode=True),
     Case("qwen3_dense", "TRITON_ATTN", _DEFAULT, _DEFAULT, read_mode=True),

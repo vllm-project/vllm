@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    group_kernel_blocks,
 )
 
 
@@ -272,21 +273,51 @@ def get_layer_transfer_geometry(
     if (
         isinstance(spec, AttentionSpec)
         and len(shape) == 4
+        and shape[0] > 0
         and shape[1] == spec.num_heads
-        and shape[2] == spec.num_states
+        and 0 < shape[2] <= spec.num_states
+        and spec.num_states % shape[2] == 0
         and shape[3] * element_size == spec.state_content_size_bytes
     ):
         # Standardized per-layer [B, H, N, C] view (MLA is just H == 1).
-        num_blocks, num_heads, num_states, content_dim = shape
-        slot_size_bytes = num_heads * content_dim * element_size
-        block_len = 1 + sum((s - 1) * st for s, st in zip(shape[1:], stride[1:]))
+        kernel_blocks_per_block = spec.num_states // shape[2]
+        if shape[0] % kernel_blocks_per_block:
+            raise ValueError(
+                f"Unsupported MoRIIO cache shape for layer {layer_name}: "
+                f"{tuple(shape)} does not form complete groups of "
+                f"{kernel_blocks_per_block} kernel blocks"
+            )
+        num_blocks = shape[0] // kernel_blocks_per_block
+        grouped = group_kernel_blocks(kv_cache, num_blocks)
+        block_stride = grouped.stride(0)
+        slot_size_bytes = shape[1] * shape[3] * element_size
+        # Include padding between kernel pages, but not after the last page.
+        block_len = 1 + sum(
+            (s - 1) * st for s, st in zip(grouped.shape[1:], grouped.stride()[1:])
+        )
         block_len *= element_size
+        if kernel_blocks_per_block > 1:
+            stride_bytes = block_stride * element_size
+            last_block_end = (num_blocks - 1) * stride_bytes + block_len
+            available_bytes = (
+                kv_cache.untyped_storage().nbytes()
+                - kv_cache.storage_offset() * element_size
+            )
+            if (
+                stride_bytes != spec.page_size_bytes
+                or block_len > stride_bytes
+                or last_block_end > available_bytes
+            ):
+                raise ValueError(
+                    f"MoRIIO kernel blocks for layer {layer_name} must form "
+                    "non-overlapping manager pages within the registered storage"
+                )
         return LayerTransferGeometry(
             num_blocks=num_blocks,
             block_size=spec.block_size,
             block_len=block_len,
             slot_size_bytes=slot_size_bytes,
-            block_stride=stride[0],
+            block_stride=block_stride,
             local_kv_stride=None,
             remote_kv_stride=None,
             transfers_per_block=1,
