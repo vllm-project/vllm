@@ -1390,12 +1390,13 @@ class _ModelRegistry:
         architecture: str,
         model_config: ModelConfig,
     ) -> str | None:
-        if architecture in _TRANSFORMERS_BACKEND_MODELS:
+        if (
+            architecture in _TRANSFORMERS_BACKEND_MODELS
+            or architecture in _TRANSFORMERS_SUPPORTED_MODELS
+        ):
             return architecture
 
         if not model_config.trust_remote_code:
-            if architecture in _TRANSFORMERS_SUPPORTED_MODELS:
-                return architecture
             # `architectures` may name a class that Transformers doesn't have, so use
             # the class `AutoModel` builds for the config instead.
             model_type = model_config.hf_config.model_type
