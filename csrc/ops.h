@@ -620,25 +620,6 @@ void cooperative_topk(const torch::stable::Tensor& logits,
                       int64_t max_seq_len);
 #endif
 
-void selective_scan_fwd(
-    const torch::stable::Tensor& u, const torch::stable::Tensor& delta,
-    const torch::stable::Tensor& A, const torch::stable::Tensor& B,
-    const torch::stable::Tensor& C,
-    const std::optional<torch::stable::Tensor>& D_,
-    const std::optional<torch::stable::Tensor>& z_,
-    const std::optional<torch::stable::Tensor>& delta_bias_,
-    bool delta_softplus,
-    const std::optional<torch::stable::Tensor>& query_start_loc,
-    const std::optional<torch::stable::Tensor>& cache_indices,
-    const std::optional<torch::stable::Tensor>& has_initial_state,
-    const torch::stable::Tensor& ssm_states, int64_t null_block_id,
-    int64_t block_size,
-    const std::optional<torch::stable::Tensor>& block_idx_first_scheduled_token,
-    const std::optional<torch::stable::Tensor>& block_idx_last_scheduled_token,
-    const std::optional<torch::stable::Tensor>& initial_state_idx,
-    const std::optional<torch::stable::Tensor>& cu_chunk_seqlen,
-    const std::optional<torch::stable::Tensor>& last_chunk_indices);
-
 void gdn_prefill_conv(
     const torch::stable::Tensor& x, const torch::stable::Tensor& weight,
     const torch::stable::Tensor& conv_states,
