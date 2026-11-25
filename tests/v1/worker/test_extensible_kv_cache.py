@@ -494,15 +494,14 @@ def test_capped_torch_serves_a_tensor_whose_cached_block_was_split(vmm):
     expandable = expandable_segments_enabled()
     torch.accelerator.empty_cache()
     try:
-        kv_cache.set_torch_memory_limit(
-            torch.accelerator.memory_reserved(device) + 700 * mib
-        )
+        limit = torch.accelerator.memory_reserved(device) + 700 * mib
+        kv_cache.set_torch_memory_limit(limit)
         logits = transient(300)
         del logits
         hidden_states = transient(20)
         logits = transient(300)
         soft_capped = transient(300)
-        assert hidden_states.nbytes + logits.nbytes + soft_capped.nbytes == 620 * mib
+        assert torch.accelerator.memory_reserved(device) <= limit
         del hidden_states, logits, soft_capped
     finally:
         kv_cache.free()
