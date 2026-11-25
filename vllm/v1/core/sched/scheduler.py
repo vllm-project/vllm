@@ -2498,6 +2498,7 @@ class Scheduler(SchedulerInterface):
                 if (
                     not output_is_stale
                     and status_before_stop == RequestStatus.RUNNING
+                    and request.status != RequestStatus.FINISHED_ERROR
                     and (
                         has_output_placeholders
                         or self.num_spec_tokens > 0
@@ -2932,6 +2933,22 @@ class Scheduler(SchedulerInterface):
         self, request: Request, new_token_ids: list[int], is_stale: bool = False
     ) -> tuple[list[int], bool]:
         num_new_tokens = len(new_token_ids)
+        if (
+            not is_stale
+            and request.num_output_placeholders > 0
+            and num_new_tokens > request.num_output_placeholders
+        ):
+            logger.error(
+                "Request %s returned %d tokens with only %d output placeholders",
+                request.request_id,
+                num_new_tokens,
+                request.num_output_placeholders,
+            )
+            request.num_output_placeholders = 0
+            request.status = RequestStatus.FINISHED_ERROR
+            request.resumable = False
+            return [], True
+
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
         # to return empty token ids for the request.

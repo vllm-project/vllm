@@ -8,6 +8,7 @@ import pytest
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.engine import FinishReason
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
@@ -839,3 +840,22 @@ def test_resumable_request_handoff():
 
     engine._process_oldest_step()
     assert len(request.output_token_ids) == 1
+
+
+def test_placeholder_underflow_graceful_stop():
+    """Retire a request whose worker returns more tokens than were scheduled."""
+    scheduler = create_scheduler(async_scheduling=True)
+    (request,) = create_requests(num_requests=1, num_tokens=4, max_tokens=8)
+    scheduler.add_request(request)
+    scheduled = scheduler.schedule()
+    assert request.num_output_placeholders == 1
+    output = _make_model_runner_output(scheduled)
+    output.sampled_token_ids = [[100, 101, 102]]
+
+    outputs = scheduler.update_from_output(scheduled, output)
+    (result,) = outputs[request.client_index].outputs
+
+    assert result.finish_reason == FinishReason.ERROR
+    assert result.new_token_ids == []
+    assert request.num_output_placeholders == 0
+    assert scheduler.get_num_unfinished_requests() == 0
