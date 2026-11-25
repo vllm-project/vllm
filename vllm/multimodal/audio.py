@@ -182,6 +182,7 @@ def normalize_audio(
 # ============================================================
 
 _MAX_TORCHAUDIO_KERNEL_ELEMS = 1 << 24
+_MAX_SCIPY_RESAMPLE_FACTOR = 4096
 
 
 def _polyphase_kernel_elems(orig_sr: int, target_sr: int) -> int:
@@ -282,12 +283,14 @@ def resample_audio_scipy(
         return audio
 
     gcd = math.gcd(orig_sr_int, target_sr_int)
-    return scipy_signal.resample_poly(
-        audio,
-        target_sr_int // gcd,
-        orig_sr_int // gcd,
-        axis=-1,
-    )
+    up, down = target_sr_int // gcd, orig_sr_int // gcd
+    # SciPy's FIR filter size grows with the larger reduced factor.
+    if max(up, down) > _MAX_SCIPY_RESAMPLE_FACTOR:
+        raise ValueError(
+            f"Conversion from {orig_sr_int} Hz to {target_sr_int} Hz "
+            "exceeds the SciPy resampling limit."
+        )
+    return scipy_signal.resample_poly(audio, up, down, axis=-1)
 
 
 def resample_audio_soxr(

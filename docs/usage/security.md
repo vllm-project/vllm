@@ -110,6 +110,10 @@ Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
 protection against resource-exhaustion attacks.
 
+Models that use SciPy for audio resampling, including Phi-4-MM, reject sample
+rate conversions whose reduced upsampling or downsampling factor exceeds 4096.
+This limits filter allocation before resampling, regardless of audio format.
+
 ### 6. Media preprocessing limit
 
 The supported Python processors account for their allocations as follows.
