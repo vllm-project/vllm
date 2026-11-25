@@ -256,6 +256,8 @@ def probe_output_head(
 
 class CausalMixin(VllmModelForTextGeneration, Base):
     embedding_modules = {"lm_head": "output_embeddings"}
+    # A kept head runs on one row per sampled token, not per token as LoRA expects
+    lora_unsupported_prefixes = ["output_head."]
     lm_head: nn.Module
     logits_processor: LogitsProcessor
 

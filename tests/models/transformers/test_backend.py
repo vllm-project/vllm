@@ -35,6 +35,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.config.compilation import CompilationMode
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import model_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers import causal
@@ -72,6 +73,10 @@ def get_model(arch: str) -> str:
 
 def count_modules(model, cls: type) -> int:
     return sum(isinstance(m, cls) for m in model.modules())
+
+
+def unsupported_lora_modules(model) -> set[str]:
+    return model.lora_manager.unsupported_lora_modules
 
 
 def count_fusers(model) -> dict[str, int]:
@@ -192,12 +197,50 @@ OUTPUT_HEAD_KWARGS = dict(
 
 
 @multi_gpu_test(num_gpus=2)
-def test_output_head_lora(vllm_runner: type[VllmRunner]) -> None:
-    """The kept head projects `[1, n, h]` hidden states, which LoRA's `lm_head`
-    must see as `[n, h]` to reorder the TP-sharded vocab."""
-    kwargs = OUTPUT_HEAD_KWARGS | dict(enable_lora=True, tensor_parallel_size=2)
-    with vllm_runner("jhu-clsp/ettin-decoder-17m", **kwargs) as model_test:
-        model_test.generate_greedy(["Hello"], max_tokens=4)
+@create_new_process_for_each_test("spawn")
+def test_output_head_lora(
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    example_prompts: list[str],
+    tmp_path,
+) -> None:
+    """An adapter on the output embeddings, by their checkpoint name (Ettin's
+    `decoder`), applies as in PEFT, also under TP. Layers of the kept head run per
+    sampled token rather than per token, so adapters on them are refused."""
+    from peft import LoraConfig, PeftModel, get_peft_model
+
+    model = "jhu-clsp/ettin-decoder-17m"
+    torch.manual_seed(0)
+    # Random rather than zero `lora_B`, so that the adapter changes the logits
+    config = LoraConfig(target_modules=["decoder"], init_lora_weights=False)
+    base_model = AutoModelForCausalLM.from_pretrained(model)
+    get_peft_model(base_model, config).save_pretrained(tmp_path)
+    args = (example_prompts, 8, 5)  # prompts, max tokens, logprobs
+    # The head's logits, as `HfRunner`'s logprobs skip what it applies before `decoder`
+    greedy = dict(do_sample=False, output_logits=True, return_dict_in_generate=True)
+    hf_outputs = []
+    with hf_runner(model) as hf_model:
+        peft_model = PeftModel.from_pretrained(hf_model.model, tmp_path)
+        tokenizer = hf_model.tokenizer
+        for prompt in example_prompts:
+            inputs = hf_model.wrap_device(tokenizer(prompt, return_tensors="pt"))
+            output = peft_model.generate(**inputs, **greedy, max_new_tokens=8)
+            token_ids = output.sequences[0, inputs["input_ids"].shape[1] :].tolist()
+            steps = [x[0].float().log_softmax(-1).topk(5) for x in output.logits]
+            top5 = [dict(zip(i.tolist(), v.tolist())) for v, i in steps]
+            hf_outputs.append((token_ids, tokenizer.decode(token_ids), top5))
+    # LoRA's kernels need half precision
+    kwargs = dict(model_impl="transformers", dtype="bfloat16", enable_lora=True)
+    lora = LoRARequest("decoder", 1, str(tmp_path))
+    with vllm_runner(model, tensor_parallel_size=2, **kwargs) as vllm_model:
+        base_outputs = vllm_model.generate_greedy_logprobs(*args)
+        vllm_outputs = vllm_model.generate_greedy_logprobs(*args, lora_request=lora)
+        unsupported = vllm_model.apply_model(unsupported_lora_modules)
+    assert all("output_head.lm_head.dense" in modules for modules in unsupported)
+    assert [o[0] for o in vllm_outputs] != [o[0] for o in base_outputs]
+    check_logprobs_close(
+        outputs_0_lst=hf_outputs, outputs_1_lst=vllm_outputs, name_0="hf", name_1="vllm"
+    )
 
 
 @create_new_process_for_each_test("spawn")

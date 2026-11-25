@@ -41,9 +41,6 @@ from vllm.lora.utils import (
 )
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.pooler.tokwise import TokenPooler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding,
-)
 from vllm.model_executor.models import (
     SupportsLoRA,
     is_pooling_model,
@@ -495,8 +492,12 @@ class LoRAModelManager:
         # which is what adapters target, is the one tracked in `self.modules`.
         named_modules.sort(key=lambda item: item[0].startswith(tuple(runners)))
 
+        unsupported = tuple(getattr(self.model, "lora_unsupported_prefixes", ()))
         for module_name, module in named_modules:
             if isinstance(module, PPMissingLayer):
+                continue
+            if module_name.startswith(unsupported):
+                self.unsupported_lora_modules.add(module_name)
                 continue
 
             is_classifier_head = module_name in self.supported_modules_to_save
@@ -593,8 +594,7 @@ class LoRAModelManager:
                 wrapped_by_id[id(new_module)] = new_module
 
             # (yard1): TODO make this more robust
-            # Layers inside heads named `lm_head` (e.g. a dense) are not the LM head
-            if "lm_head" in module_name and isinstance(module, VocabParallelEmbedding):
+            if "lm_head" in module_name:
                 logits_processor_module_name = "logits_processor"
                 parent_module = _parent_module(module_name)
                 if parent_module:
