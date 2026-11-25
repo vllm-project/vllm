@@ -243,6 +243,7 @@ class NixlBaseConnectorWorker:
         """The layout of the blocks that transfer: the host buffer's, if any."""
         if self.use_host_buffer:
             return self.host_buffer_kv_cache_layout
+        # TODO this method should be kv_cache_layout
         return self.kv_cache_layout
 
     def _transfer_block(
@@ -1489,6 +1490,10 @@ class NixlBaseConnectorWorker:
         )
         for layer_name in layer_names:
             cache = xfer_buffers[layer_name]
+            # NOTE (NickLucche) Hybrid SSM mamba/FA physical page_size may differ when
+            # kernel requires a specific block size. This leads to SSM and FA layers
+            # having different num_blocks.
+            # `_physical_blocks_per_group` ratio is used to adjust for this.
             layer_spec = self._layer_specs.get(layer_name)
             if layer_spec is None:
                 logger.debug(
@@ -2845,42 +2850,79 @@ class NixlBaseConnectorWorker:
         the one holding the same layers on that side (`_pair_regions`); the
         same group by default. The returned lists are indexed by decode group.
         """
-        ratios_match = decode_physical_per_logical == prefill_physical_per_logical
-        # Allocation rounding legitimately leaves up to ppl - 1 trailing dead
-        # kernel blocks per side (plus one extra decode block for the
-        # recomputed final token), so the counts may differ by up to the sum
-        # of the two ratios; anything larger indicates mismatched lists.
-        max_padding = decode_physical_per_logical + prefill_physical_per_logical
         if prefill_group_ids is None:
             prefill_block_ids = list(prefill_block_ids)
         else:
             prefill_block_ids = [prefill_block_ids[g] for g in prefill_group_ids]
-        decode_block_ids = list(decode_block_ids)
-        for i, (decode, prefill) in enumerate(zip(decode_block_ids, prefill_block_ids)):
-            num_blocks = min(len(decode), len(prefill))
-            num_extra = len(decode) - len(prefill)
-            if not self._has_mamba:
-                assert num_extra <= 0
-                end_trim = True
-            elif _is_ssm_spec(self._group_spec_types[i]):
-                # A longer prefill list carries earlier positions the decode
-                # side already has (prefix hit); a longer decode list holds the
-                # position D recomputes itself, which gets no prefill state.
-                assert num_extra <= 1, (
-                    f"Group {i}: unpairable SSM state slots, "
-                    f"decode={len(decode)} prefill={len(prefill)}"
-                )
-                end_trim = True
-            else:
-                # TODO Handle prefix caching with different block_sizes
-                end_trim = ratios_match and num_extra < 0
-                assert end_trim or abs(num_extra) <= max_padding, (
-                    f"Group {i}: |{len(decode)} - {len(prefill)}| > {max_padding}"
-                )
-            decode_block_ids[i] = decode[:num_blocks]
-            prefill_block_ids[i] = (
-                prefill[-num_blocks:] if end_trim else prefill[:num_blocks]
-            )
+        # Partial prefix cache hit: just transfer uncomputed blocks.
+        # Skip mamba groups — their blocks represent full state (conv+ssm),
+        # not per-token data, so trimming would corrupt the transfer.
+        if not self._has_mamba:
+            for i, prefill_group in enumerate(prefill_block_ids):
+                num_decode_blocks = len(decode_block_ids[i])
+                assert num_decode_blocks <= len(prefill_group)
+                if num_decode_blocks < len(prefill_group):
+                    prefill_block_ids[i] = prefill_group[-num_decode_blocks:]
+        else:
+            # (NOTE: ZhanqiuHu) HeteroTP can cause different kernel block counts
+            # due to logical block rounding.
+            # Example: 640 prompt tokens, kernel_block_size=64
+            #   prefill physical_per_logical=10, decode physical_per_logical=6
+            #   prefill logical ids from kv_transfer_params = [0]
+            #   decode logical ids allocated = [0, 1]
+            #   prefill kernel blocks: [0..9]  (1*10=10)
+            #   decode kernel blocks:  [0..11] (2*6=12)
+            #   actual data blocks = ceil(640/64) = 10, trim both to 10
+            # Vice versa (prefill physical_per_logical=6, decode=10):
+            #   prefill logical ids = [0, 1], decode logical ids = [0]
+            #   prefill kernel blocks: [0..11] (2*6=12)
+            #   decode kernel blocks:  [0..9]  (1*10=10)
+            #   actual data blocks = ceil(640/64) = 10, trim both to 10
+            decode_block_ids = list(decode_block_ids)
+            for i, prefill_group in enumerate(prefill_block_ids):
+                num_decode_blocks = len(decode_block_ids[i])
+                num_prefill_blocks = len(prefill_group)
+                if _is_ssm_spec(self._group_spec_types[i]):
+                    if num_decode_blocks == num_prefill_blocks:
+                        continue
+                    # Only state-bearing slots reach here, normally just one
+                    # (see get_exchange_clipped_blocks). A longer prefill list
+                    # carries earlier positions the decode side already has
+                    # (prefix hit) -> take its tail; a longer decode list holds
+                    # the position D recomputes itself, which gets no prefill
+                    # state.
+                    assert num_decode_blocks - num_prefill_blocks <= 1, (
+                        f"Group {i}: unpairable SSM state slots, "
+                        f"decode={num_decode_blocks} prefill={num_prefill_blocks}"
+                    )
+                    num_blocks = min(num_decode_blocks, num_prefill_blocks)
+                    if num_decode_blocks < num_prefill_blocks:
+                        prefill_block_ids[i] = prefill_group[-num_blocks:]
+                    else:
+                        decode_block_ids[i] = decode_block_ids[i][:num_blocks]
+                elif (
+                    decode_physical_per_logical == prefill_physical_per_logical
+                    and num_decode_blocks < num_prefill_blocks
+                ):
+                    # Partial prefix cache hit for FA group.
+                    prefill_block_ids[i] = prefill_group[-num_decode_blocks:]
+                else:
+                    # TODO Handle prefix caching with different block_sizes
+                    # Allocation rounding legitimately leaves up to
+                    # ppl - 1 trailing dead kernel blocks per side (plus one
+                    # extra decode block for the recomputed final token), so
+                    # the counts may differ by up to the sum of the two
+                    # ratios; anything larger indicates mismatched lists.
+                    max_padding = (
+                        decode_physical_per_logical + prefill_physical_per_logical
+                    )
+                    assert abs(num_decode_blocks - num_prefill_blocks) <= max_padding, (
+                        f"Group {i}: |{num_decode_blocks} - "
+                        f"{num_prefill_blocks}| > {max_padding}"
+                    )
+                    num_blocks = min(num_decode_blocks, num_prefill_blocks)
+                    decode_block_ids[i] = decode_block_ids[i][:num_blocks]
+                    prefill_block_ids[i] = prefill_group[:num_blocks]
         return decode_block_ids, prefill_block_ids
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
