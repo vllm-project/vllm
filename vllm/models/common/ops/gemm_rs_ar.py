@@ -300,7 +300,7 @@ class Sm100GemmRsArBF16:
                 sdesc = _tcgen05.make_sdesc_128B_swizzle(0)
                 multicast_mask = Uint16((1 << self.cta_group) - 1)
 
-                for bid in range(raw_bid, total_tiles, num_bids):
+                for _ in range(raw_bid, total_tiles, num_bids):
                     cute.arch.mbarrier_wait(
                         tmem_empty_mbar + tmem_stage, tmem_empty_parity
                     )
@@ -539,7 +539,7 @@ class Sm100GemmRsArBF16:
             partial_vecs = cute.zipped_divide(partial_uc, (1, WIDTH))
 
             bf16x16_atom = cute.make_copy_atom(
-                cute.nvgpu.CopyUniversalOp(),
+                cute.nvgpu.CopyR2GOp(),
                 BFloat16,
                 num_bits_per_copy=256,
                 l1c_evict_priority=cute.nvgpu.CacheEvictionPriority.NO_ALLOCATE,

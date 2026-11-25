@@ -27,38 +27,38 @@
 """Fused MoE front of the DeepSeek-V4.1 low-batch routed experts in CuTe DSL.
 
 Between the router GEMM and the first routed-expert GEMM, the stock path runs
-three kernels; :class:`RoutedExpertFront` replaces them with one launch:
+three kernels; `RoutedExpertFront` replaces them with one launch:
 
-1. the DSv4 top-k (vLLM's Triton ``_dsv4_topk_kernel``, ``dsv4_topk.py``):
-   per row, ``score = sqrt(softplus(logit))`` (softplus(x) = x above 20, else
-   log(1 + exp(x))), ``biased = score + bias`` (``bias_vl`` for image sentinel
+1. the DSv4 top-k (vLLM's Triton `_dsv4_topk_kernel`, `dsv4_topk.py`):
+   per row, `score = sqrt(softplus(logit))` (softplus(x) = x above 20, else
+   log(1 + exp(x))), `biased = score + bias` (`bias_vl` for image sentinel
    tokens), the six largest biased scores (lowest expert id on exact ties, NaN
-   ranked as -1e30), and ``weights`` = the unbiased scores times scale / sum
+   ranked as -1e30), and `weights` = the unbiased scores times scale / sum
    (sum replaced by 1 unless positive); a CUDA graph padding row
-   (``VLLM_MOE_SKIP_PADDING``'s mask) gets ids -1 and weights 0, so no expert
+   (`VLLM_MOE_SKIP_PADDING`'s mask) gets ids -1 and weights 0, so no expert
    computes it;
 2. the routed input's MXFP8 quantization (FlashInfer's linear-layout
-   ``mxfp8_quantize``): per 32-value block, a UE8M0 scale rounded up from
+   `mxfp8_quantize`): per 32-value block, a UE8M0 scale rounded up from
    amax / 448 and E4M3 values rounded to nearest with saturation;
-3. the routing record (``routed_expert_route_cute.py``).
+3. the routing record (`routed_expert_route_cute.py`).
 
 Bitwise contract. Every output equals that of the three kernels it replaces,
 so the arithmetic is spelled out instruction by instruction in inline PTX:
-the Triton kernel's exp is ``ex2.approx.f32`` of x * log2(e), its sqrt
-``sqrt.approx.ftz.f32``, its division ``div.full.f32``, its weight sum the
+the Triton kernel's exp is `ex2.approx.f32` of x * log2(e), its sqrt
+`sqrt.approx.ftz.f32`, its division `div.full.f32`, its weight sum the
 butterfly order of a one-warp eight-lane reduction; the quantization is
 FlashInfer's instruction sequence. The one exception is the log: like the
-Triton kernel, the kernel calls the toolchain's ``logf`` (libdevice, through
-``cute.math.log``), whose argument 1 + exp(x) is at least 1. No other
+Triton kernel, the kernel calls the toolchain's `logf` (libdevice, through
+`cute.math.log`), whose argument 1 + exp(x) is at least 1. No other
 floating-point operation is left to the compiler, which could contract or
 flush it.
 
 Work split (1024 threads a CTA). The kernel is built for calls of up to 8,
-16, 32, 64, 128 or 192 rows (``max_rows``); the first ``S = 8`` CTAs select
+16, 32, 64, 128 or 192 rows (`max_rows`); the first `S = 8` CTAs select
 and form one thread block cluster, the rest quantize:
 
-* Selecting CTA ``s`` takes rows ``s``, ``s + S``, ``s + 2 S``, ... (at most
-  ``max_rows / S`` rows: 1, 2, 4 or 8 up to 64 rows, 16 at 128, 24 at 192).
+* Selecting CTA `s` takes rows `s`, `s + S`, `s + 2 S`, ... (at most
+  `max_rows / S` rows: 1, 2, 4 or 8 up to 64 rows, 16 at 128, 24 at 192).
   Four warps per row (two at 16 rows a CTA, one at 24) each take the top-6 of
   their share of the experts (3, 6 or 12 per lane); one warp per row merges
   the candidates and normalizes. The top-k is bound by instruction issue,
@@ -70,7 +70,7 @@ and form one thread block cluster, the rest quantize:
   them with the cluster barrier, then CTA 0 builds the routing record from
   them. The ids and weights go to global memory only after that release,
   which would otherwise wait for those stores to reach L2.
-* Quantizing CTA ``S + c``: rows ``3c .. 3c + 2`` of the BF16 input, two
+* Quantizing CTA `S + c`: rows `3c .. 3c + 2` of the BF16 input, two
   threads per 32-value block. The grid is rounded up to whole clusters.
 
 PDL: every CTA triggers its dependents on entry (GEMM1's set-up overlaps this
@@ -175,7 +175,7 @@ mov.f32 $0, s;
 
 @dsl_user_op
 def score_and_key(logit, bias, *, loc=None, ip=None):
-    """The unbiased score of ``logit`` and the selection key of score + bias."""
+    """The unbiased score of `logit` and the selection key of score + bias."""
     argument = Float32(
         _asm(T.f32(), [_f32(logit, loc, ip)], _SOFTPLUS_ARGUMENT, "=f,f", loc, ip)
     )
@@ -197,14 +197,14 @@ def score_and_key(logit, bias, *, loc=None, ip=None):
 
 @dsl_user_op
 def add_f32(a, b, *, loc=None, ip=None) -> Float32:
-    """``a + b``, round to nearest, no contraction."""
+    """`a + b`, round to nearest, no contraction."""
     operands = [_f32(a, loc, ip), _f32(b, loc, ip)]
     return Float32(_asm(T.f32(), operands, "add.f32 $0, $1, $2;", "=f,f,f", loc, ip))
 
 
 @dsl_user_op
 def normalized_weight(scale, total, weight, *, loc=None, ip=None) -> Float32:
-    """``scale / (total if total > 0 else 1) * weight``, as Triton divides."""
+    """`scale / (total if total > 0 else 1) * weight`, as Triton divides."""
     return Float32(
         _asm(
             T.f32(),
@@ -234,11 +234,11 @@ def lane_best(key: cute.Tensor):
 @cute.jit
 def part_top_k(logit: cute.Tensor, bias: cute.Tensor, base: Int32, lane: Int32):
     """One warp's top-6 of its share of the experts (expert = base + lane +
-    32 j, ``j`` below the size of ``logit``), in
+    32 j, `j` below the size of `logit`), in
     selection order: each round takes the warp's largest key with one
-    ``redux.sync`` max, then the lowest expert id holding it with one min
-    (Triton's ``tl.max``, then the lowest index equal to it); only the winning
-    lane rescans. Lane ``s < 6`` gets slot ``s``: its key, id and unbiased
+    `redux.sync` max, then the lowest expert id holding it with one min
+    (Triton's `tl.max`, then the lowest index equal to it); only the winning
+    lane rescans. Lane `s < 6` gets slot `s`: its key, id and unbiased
     score."""
     per_lane = cute.size(logit)
     score = cute.make_rmem_tensor((per_lane,), Float32)
@@ -279,9 +279,9 @@ def merge_row(
     lane: Int32,
     padding: Int32,
 ):
-    """Merge a row's candidates (lane ``c`` holds candidate ``c``) into
-    its top-6 and normalize as Triton does; lane ``s < 6`` returns slot
-    ``s``'s expert id and weight. A padding row (``padding`` nonzero) gets
+    """Merge a row's candidates (lane `c` holds candidate `c`) into
+    its top-6 and normalize as Triton does; lane `s < 6` returns slot
+    `s`'s expert id and weight. A padding row (`padding` nonzero) gets
     id -1 and weight 0, as the Triton kernel's padding mask does."""
     slot_weight = Float32(0.0)  # lane s < 8 keeps slot s (Triton's 8-wide vector)
     slot_id = Int32(0)
@@ -315,7 +315,7 @@ def merge_row(
 
 @dsl_user_op
 def store_cta0_shared(pointer: cute.Pointer, value, *, loc=None, ip=None):
-    """Store the 32-bit ``value`` at ``pointer``'s shared-memory offset in CTA 0
+    """Store the 32-bit `value` at `pointer`'s shared-memory offset in CTA 0
     of the cluster (distributed shared memory)."""
     llvm.inline_asm(
         None,
@@ -339,7 +339,7 @@ def store_cta0_shared(pointer: cute.Pointer, value, *, loc=None, ip=None):
 
 @dsl_user_op
 def abs_max_bf16x2(a, b, *, loc=None, ip=None) -> Uint32:
-    """Lane-wise ``max(|a|, |b|)`` of two BF16 pairs."""
+    """Lane-wise `max(|a|, |b|)` of two BF16 pairs."""
     return Uint32(
         _asm(
             T.i32(),
@@ -407,7 +407,7 @@ def bf16x2_max_to_f32(x, *, loc=None, ip=None) -> Float32:
 
 @dsl_user_op
 def max_f32(a, b, *, loc=None, ip=None) -> Float32:
-    """``max(a, b)`` (no flush)."""
+    """`max(a, b)` (no flush)."""
     operands = [_f32(a, loc, ip), _f32(b, loc, ip)]
     return Float32(_asm(T.f32(), operands, "max.f32 $0, $1, $2;", "=f,f,f", loc, ip))
 
@@ -433,7 +433,7 @@ def inverse_scale(code, *, loc=None, ip=None) -> Float32:
 @dsl_user_op
 def bf16x4_to_e4m3x4(a, b, inverse, *, loc=None, ip=None) -> Uint32:
     """Two BF16 pairs times the inverse scale as four saturating E4M3 bytes
-    (``a``'s pair first)."""
+    (`a`'s pair first)."""
     convert = (
         "and.b32 lo, {0}, 0xFFFF;\nshr.b32 hi, {0}, 16;\nshl.b32 lo, lo, 16;\n"
         "shl.b32 hi, hi, 16;\nmov.b32 f0, lo;\nmov.b32 f1, hi;\n"
@@ -482,9 +482,9 @@ def quantize_row(
     x_quant: cute.Tensor,
     x_scale: cute.Tensor,
 ):
-    """Thread ``thread`` of a row's 320 quantizes half of block
-    ``thread / 2``: the block amax over both halves, its UE8M0 scale and 16
-    E4M3 values. ``x``: the BF16 input as words."""
+    """Thread `thread` of a row's 320 quantizes half of block
+    `thread / 2`: the block amax over both halves, its UE8M0 scale and 16
+    E4M3 values. `x`: the BF16 input as words."""
     block = thread >> 1
     half = thread & 1
     first = row * HIDDEN + block * 32 + half * 16  # element index
@@ -508,8 +508,8 @@ def quantize_row(
 
 
 class RoutedExpertFront:
-    """The fused front (module docstring); ``image``: whether the router
-    routes image sentinel tokens with ``bias_vl``; ``max_rows``: 8, 16, 32,
+    """The fused front (module docstring); `image`: whether the router
+    routes image sentinel tokens with `bias_vl`; `max_rows`: 8, 16, 32,
     64, 128 or 192, the most rows of a call."""
 
     def __init__(self, image: bool, max_rows: int = 8) -> None:
@@ -547,14 +547,14 @@ class RoutedExpertFront:
         rows: Int32,
         stream: cuda.CUstream,
     ):
-        """``logits``: FP32 [rows, 384]; ``bias``, ``bias_vl``: FP32 [384];
-        ``input_ids``: [rows] int32, or int64 if ``ids_are_64bit``, as Int32
-        words (``bias_vl`` and ``input_ids`` are read only with image routing;
-        pass any pointers otherwise); ``is_padding``: bool [rows], read only
-        if ``has_padding``; ``x``: BF16 [rows, 5120] as Uint32
-        words; outputs: ``topk_ids`` int32 / ``topk_weights`` FP32 [rows, 6],
-        ``x_quant`` [rows, 5120] E4M3 bytes, ``x_scale`` [rows, 160] UE8M0,
-        ``permuted`` [rows, 6] and the routing record. rows in [1, max_rows]."""
+        """`logits`: FP32 [rows, 384]; `bias`, `bias_vl`: FP32 [384];
+        `input_ids`: [rows] int32, or int64 if `ids_are_64bit`, as Int32
+        words (`bias_vl` and `input_ids` are read only with image routing;
+        pass any pointers otherwise); `is_padding`: bool [rows], read only
+        if `has_padding`; `x`: BF16 [rows, 5120] as Uint32
+        words; outputs: `topk_ids` int32 / `topk_weights` FP32 [rows, 6],
+        `x_quant` [rows, 5120] E4M3 bytes, `x_scale` [rows, 160] UE8M0,
+        `permuted` [rows, 6] and the routing record. rows in [1, max_rows]."""
         slots = cute.make_layout(rows * TOP_K)
         selecting = self.selecting
         quantizing = (rows + QUANT_ROWS - 1) // QUANT_ROWS
@@ -609,7 +609,7 @@ class RoutedExpertFront:
         record: cute.Tensor,
         rows: Int32,
     ):
-        """The first ``selecting`` CTAs select (CTA 0 also routes); the others
+        """The first `selecting` CTAs select (CTA 0 also routes); the others
         quantize (module docstring)."""
         cute.arch.griddepcontrol_launch_dependents()
         thread, _, _ = cute.arch.thread_idx()
@@ -659,7 +659,7 @@ class RoutedExpertFront:
         rank: Int32,
         thread: Int32,
     ):
-        """Selecting CTA ``rank``: top-k of its rows; then CTA 0 builds the
+        """Selecting CTA `rank`: top-k of its rows; then CTA 0 builds the
         routing record from every row's ids."""
         selecting, levels = self.selecting, self.levels
         bitmap_words = present_words(levels)

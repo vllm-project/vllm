@@ -28,15 +28,21 @@
   #define __HIP__GFX115X__
 #endif
 
+#if defined(__gfx1151__)
+  #define __HIP__GFX1151__
+#endif
+
 #define LDS_SIZE 64 * 1024
 
 static constexpr int get_lds_size_int4() { return 64 * 1024; }
 
 // K must be a multiple of this; checked host-side in wvSplitK_int4_g_impl.
 static constexpr int kInt4KAlign = 16;
+// Wider N_in (6..8) take WVSPLIT_INT4G_WIDE and are gfx1151-only.
+static constexpr int kInt4NarrowMaxN = 5;
 
 // Host-side twin of __HIP__GFX115X__, for the tuple choices the dispatch makes.
-// inline, not static: the five N_in units then share one cached answer, as they
+// inline, not static: the per-N_in units then share one cached answer, as they
 // did when this was a single translation unit.
 inline bool on_gfx115x_int4() {
   static const bool result = [] {
@@ -63,6 +69,17 @@ inline bool on_gfx1151_int4() {
   #define NDEBUG
 #else
   #define UNREACHABLE_CODE assert(false);
+#endif
+
+// The host rejects wide N_in off gfx1151, so skip compiling those bodies.
+#if defined(__HIP__GFX1151__)
+  #define INT4_SKIP_WIDE_N_OFF_GFX1151
+#else
+  #define INT4_SKIP_WIDE_N_OFF_GFX1151   \
+    if constexpr (N > kInt4NarrowMaxN) { \
+      UNREACHABLE_CODE                   \
+      return;                            \
+    }
 #endif
 
 template <typename T>
@@ -119,7 +136,7 @@ struct scalar<c10::BFloat16> {
                                          *((bf16x2_t*)(&(V3))), V0, false); \
   }
 
-// DPP-based wave32 reduction for GFX1X (matches skinny_gemms.cu).
+// DPP-based wave32 reduction for GFX1X (matches skinny_gemms.cuh).
 // row_shr within 16-lane rows, then cross-row __shfl_xor.
 // Result accumulates in lane (THRDS - 1).
 #if defined(__HIP__GFX1X__)
@@ -230,6 +247,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                           const int _WvPrGrp, const int CuCount,
                           const int group_stride,
                           const int B_row_stride_bytes) {
+  INT4_SKIP_WIDE_N_OFF_GFX1151
   constexpr int max_lds_len = LDS_LEN;
 
   union bigTypeA {
@@ -617,6 +635,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                       const scalar_t* __restrict__ BIAS, scalar_t* C,
                       const int _WvPrGrp, const int CuCount,
                       const int group_stride, const int B_row_stride_bytes) {
+  INT4_SKIP_WIDE_N_OFF_GFX1151
   constexpr int max_lds_len = LDS_SIZE / 2;
 
   union bigTypeA {
@@ -996,6 +1015,8 @@ torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
+  TORCH_CHECK(N_in <= kInt4NarrowMaxN || on_gfx1151_int4(), "N_in=", N_in,
+              " is only supported on gfx1151");
   // gfx115x walks K in LDS-sized chunks, so K * N is unbounded there. Elsewhere
   // only the medium kernel serves shapes past LDS, and within 1.2x of it.
   TORCH_CHECK(on_gfx115x_int4() || K_in * N_in <= (int64_t)(max_lds_len * 1.2),
@@ -1225,12 +1246,24 @@ torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
     }                                                                          \
   }
 
+// One tile for every wide shape: within 7% of the best on 14 of 15 swept
+// gfx1151 shapes.
+#define WVSPLIT_INT4G_WIDE(__N, _HAS_ZP)         \
+  if (K_in * N_in > max_lds_len) {               \
+    WVSPLIT_INT4G_GS_CHUNKED(4, 1, __N, _HAS_ZP) \
+  } else {                                       \
+    WVSPLIT_INT4G_GS(4, 1, __N, _HAS_ZP)         \
+  }
 // Inner dispatch: shared by both symmetric and asymmetric paths. N is the
 // template parameter of this unit, so the tower instantiates one width only.
-#define WVSPLIT_INT4G_DISPATCH(_HAS_ZP)                 \
-  {                                                     \
-    int sYT = (M_in + CuCount * 4 - 1) / (CuCount * 4); \
-    WVSPLIT_INT4G_TILE(sYT, N, _HAS_ZP)                 \
+#define WVSPLIT_INT4G_DISPATCH(_HAS_ZP)                   \
+  {                                                       \
+    if constexpr (N > kInt4NarrowMaxN) {                  \
+      WVSPLIT_INT4G_WIDE(N, _HAS_ZP)                      \
+    } else {                                              \
+      int sYT = (M_in + CuCount * 4 - 1) / (CuCount * 4); \
+      WVSPLIT_INT4G_TILE(sYT, N, _HAS_ZP)                 \
+    }                                                     \
   }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(
@@ -1268,6 +1301,7 @@ torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
 #undef WVSPLIT_INT4G_GFX1151
 #undef WVSPLIT_INT4G_GFX115X
 #undef WVSPLIT_INT4G_TILE
+#undef WVSPLIT_INT4G_WIDE
 #undef WVSPLIT_INT4G_DISPATCH
 
   return out_c;

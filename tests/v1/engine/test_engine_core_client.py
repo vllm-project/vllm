@@ -51,9 +51,9 @@ from vllm.v1.pool.late_interaction import (
 from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
 
-if not current_platform.is_cuda_alike():
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip(
-        reason="V1 currently only supported on CUDA-alike platforms.",
+        reason="V1 currently only supported on CUDA-alike and XPU platforms",
         allow_module_level=True,
     )
 
@@ -170,7 +170,7 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         asyncio_mode=False,
         vllm_config=vllm_config,
         executor_class=object,
-        log_stats=False,
+        collect_stats=False,
         client_addresses={
             "input_address": "inproc://input",
             "output_address": "inproc://output",
@@ -220,7 +220,6 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     client.eng_start_index = 0
     client._kv_event_sources = {}
     client.vllm_config = SimpleNamespace(
-        use_v2_model_runner=True,
         parallel_config=SimpleNamespace(all2all_backend="allgather_reducescatter"),
     )
     return client
@@ -234,7 +233,7 @@ def test_dplb_weight_checksums_gather_every_engine():
         assert (method, args) == ("compute_weight_checksums", ())
         return [{f"dp{engine[0]}:tp{tp}:w": "x"} for tp in (0, 1)]
 
-    client._call_utility_async = call_utility
+    client._call_utility_async = call_utility  # type: ignore[method-assign]
     workers = asyncio.run(client.compute_weight_checksums_async())
     assert [key for worker in workers for key in worker] == [
         "dp0:tp0:w",
@@ -321,7 +320,7 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
         pause_started.set()
         await asyncio.Future()
 
-    client._call_utility_async = pause_scheduler
+    client._call_utility_async = pause_scheduler  # type: ignore[method-assign]
 
     with (
         zmq.asyncio.Context() as ctx,
@@ -354,7 +353,9 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
             )
             assert chosen == client.core_engines[0]
         finally:
-            tasks = [client.resources.stats_update_task]
+            stats_update_task = client.resources.stats_update_task
+            assert stats_update_task is not None
+            tasks = [stats_update_task]
             if scale_task is not None:
                 tasks.append(scale_task)
             for task in tasks:
@@ -423,7 +424,7 @@ def test_dplb_streaming_session_abort_goes_to_all_engines(final_sent: bool):
     async def abort_requests(request_ids, engine):
         sent[engine] = request_ids
 
-    client._abort_requests = abort_requests
+    client._abort_requests = abort_requests  # type: ignore[method-assign]
 
     chunk = make_request(SamplingParams(max_tokens=1))
     chunk.resumable = True
@@ -612,7 +613,7 @@ def echo(self, msg: str, err_msg: str | None = None, sleep: float | None = None)
     return msg
 
 
-@dataclass
+@dataclass(slots=True)
 class TestMessage:
     """Test dataclass for verifying custom type serialization."""
 
@@ -826,7 +827,7 @@ def test_engine_core_client(
                 asyncio_mode=False,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
-                log_stats=False,
+                collect_stats=False,
             )
 
         MAX_TOKENS = 20
@@ -917,7 +918,7 @@ async def test_engine_core_client_asyncio(
                 asyncio_mode=True,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
-                log_stats=True,
+                collect_stats=True,
             )
 
         try:
@@ -1017,7 +1018,7 @@ async def test_engine_core_client_util_method_custom_return(
                 asyncio_mode=True,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
-                log_stats=True,
+                collect_stats=True,
             )
 
         try:
@@ -1065,7 +1066,7 @@ async def test_engine_core_client_util_method_custom_dict_return(
                 asyncio_mode=True,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
-                log_stats=True,
+                collect_stats=True,
             )
 
         try:
@@ -1122,7 +1123,7 @@ async def test_engine_core_client_util_method_nested_structures(
                 asyncio_mode=True,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
-                log_stats=True,
+                collect_stats=True,
             )
 
         try:
@@ -1162,7 +1163,7 @@ async def test_engine_core_client_util_method_nested_structures(
             )
             assert isinstance(result, dict) and len(result) == 2
             assert "list1" in result and "list2" in result
-            for key, lst in result.items():
+            for lst in result.values():
                 assert isinstance(lst, list) and len(lst) == 2
                 for item in lst:
                     assert isinstance(item, TestMessage) and item.message == "nested2"
@@ -1231,7 +1232,7 @@ async def test_engine_core_client_future_utility_async(
                 asyncio_mode=True,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
-                log_stats=True,
+                collect_stats=True,
             )
 
         try:
@@ -1289,7 +1290,7 @@ def test_kv_cache_events(
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=False,
+            collect_stats=False,
         )
     endpoint = publisher_config.endpoint.replace("*", "127.0.0.1")
     subscriber = MockSubscriber(
@@ -1372,7 +1373,7 @@ async def test_kv_cache_events_dp(
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=False,
+            collect_stats=False,
         )
     await asyncio.sleep(1)
 
@@ -1394,7 +1395,7 @@ async def test_kv_cache_events_dp(
 
         # Create and add 25 requests
         # NOTE: attempts to force routing to both dp groups but can be flaky
-        for i in range(25):
+        for _ in range(25):
             await asyncio.sleep(0.01)
             request = make_request(sampling_params, custom_tokens)
             await client.add_request_async(request)
@@ -1470,7 +1471,7 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=True,
+            collect_stats=True,
         )
 
     assert "Engine core initialization failed" in str(e_info.value)
@@ -1491,13 +1492,18 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         mock_executor = MagicMock()
 
         # Only implement the methods that are actually called during init
-        from vllm.v1.kv_cache_interface import FullAttentionSpec
+        from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+        from vllm.v1.kv_cache_interface import AttentionSpec
 
-        mock_spec = FullAttentionSpec(
-            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
+        mock_layer = FullAttentionManager.layer_config(
+            AttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
+            )
         )
 
-        mock_executor.get_kv_cache_specs.return_value = [{"default": mock_spec}]
+        mock_executor.get_kv_cache_layer_configs.return_value = [
+            {"default": mock_layer}
+        ]
         mock_executor.get_supported_kv_cache_layouts.return_value = [["LBNHC"]]
         mock_executor.determine_available_memory.return_value = [1024 * 1024 * 1024]
         mock_executor.initialize_from_config.return_value = None
@@ -1508,7 +1514,7 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
     mock_executor_class.side_effect = create_mock_executor
 
     with monkeypatch.context() as m:
-        m.setenv("CUDA_VISIBLE_DEVICES", "")  # No CUDA devices
+        m.setenv(current_platform.device_control_env_var, "")  # No CUDA devices
 
         from vllm.v1.engine.utils import EngineZmqAddresses
 
@@ -1526,14 +1532,14 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         m.setattr(EngineCoreProc, "startup_handshake", mock_startup_handshake)
 
         vllm_config = EngineArgs(
-            model="deepseek-ai/DeepSeek-V2-Lite", trust_remote_code=True
+            model="deepseek-ai/DeepSeek-V2-Lite"
         ).create_engine_config()
         engine_core_proc = EngineCoreProc(
             vllm_config=vllm_config,
             local_client=True,
             handshake_address="tcp://127.0.0.1:12345",
             executor_class=mock_executor_class,
-            log_stats=False,
+            collect_stats=False,
             engine_index=0,
         )
 

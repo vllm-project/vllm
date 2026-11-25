@@ -176,24 +176,34 @@ Priority is **1 = highest** (tried first).
 > **†** FlashInfer Native is the regular FlashInfer path. XQA is the SM90 decode path exposed through FlashInfer's TRTLLM decode API. trtllm-gen is used on SM100 and supports sinks. Disable XQA/trtllm-gen via `--attention-config.use_trtllm_attention=0`.
 >
 > **\*** Specify the FlashAttention version via `--attention-config.flash_attn_version=2`, `3`, or `4`. Default is FA4 on SM100+ (Blackwell), FA3 on SM90 (Hopper), FA2 otherwise.
->
-> On Blackwell, when the FlashAttention backend is selected, `head_size=256` is served
-> by a dedicated FA4 kernel that requires a KV cache block size of 128 (advertised
-> automatically, so it is picked as long as `--block-size` is not pinned) and does not
-> support logit soft capping, attention sinks, mm_prefix/R-SWA masking, DCP, or windowed
-> encoder attention. Those configurations transparently fall back to FA2. A pinned
-> `--block-size` that is not a multiple of 128 instead makes FlashAttention ineligible
-> for such models, which is an error if the backend was requested explicitly.
 
 ### b12x
 
-The optional [b12x](https://pypi.org/project/b12x/) backend supports causal
-decoder attention on NVIDIA SM120 and SM121 GPUs. Install and select it with:
+The b12x backend supports causal decoder attention on NVIDIA SM120 and SM121
+GPUs. b12x ships with FlashInfer (`flashinfer-python>=0.7.2`). Select it with:
 
 ```bash
-uv pip install "vllm[b12x]"
 vllm serve <model> --attention-backend b12x
 ```
+
+### ROCM_AITER_FA GQA decode kernel
+
+On ROCm gfx950 (MI355X), `ROCM_AITER_FA` runs decode and speculative-decode verify
+with a dedicated FlyDSL kernel (full-attention and sliding-window layers) instead of
+AITER paged or unified attention when all of these hold:
+
+- FP8 KV cache (`--kv-cache-dtype fp8`) in the default (unshuffled) layout;
+- an attention layer with head size 64, 8 query heads per KV head, at most 16 KV
+  heads on each rank and no attention sinks, logit soft cap or ALiBi;
+- a decode batch in which every request has the same number of query tokens, 1 to 8
+  (plain decode, or 1 to 7 draft tokens; for full-attention layers, fewer than two
+  requests per compute unit).
+
+The kernel is enabled automatically and needs FlyDSL (`flydsl`, installed with
+recent `aiter`). It reads the KV cache in the backend's 16- or 32-token kernel
+blocks. Other layers and
+batches use the AITER kernels. Muse Spark (128 / 16 heads of 64) is one model with
+this shape. The entry point is `vllm/v1/attention/ops/rocm_gqa_verify.py`.
 
 ## MiniMax M3 Sparse Attention Backends
 

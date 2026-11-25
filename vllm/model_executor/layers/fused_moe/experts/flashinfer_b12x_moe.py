@@ -31,14 +31,14 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
     """FlashInfer CuteDSL fused MoE expert for SM12x (SM120/SM121,
     RTX Pro 6000 / DGX Spark).
 
-    Uses ``b12x_fused_moe`` from FlashInfer PR #3080 which fuses token
+    Uses `b12x_fused_moe` from FlashInfer PR #3080 which fuses token
     dispatch, two GEMMs, SwiGLU activation, and topk-weight reduction into a
     single kernel call.  Input quantization (BF16→FP4) is performed inside the
     kernel so BF16 hidden states are passed directly.
 
     Weight scale factors are converted to the MMA layout produced by
-    ``convert_sf_to_mma_layout`` once during ``process_weights_after_loading``
-    and cached as ``w1_sf_mma`` / ``w2_sf_mma``.
+    `convert_sf_to_mma_layout` once during `process_weights_after_loading`
+    and cached as `w1_sf_mma` / `w2_sf_mma`.
 
     Only NVFP4 (kNvfp4Static/kNvfp4Dynamic) quantization is supported.
     """

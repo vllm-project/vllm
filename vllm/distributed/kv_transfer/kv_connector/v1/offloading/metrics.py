@@ -192,7 +192,7 @@ class _StatsKey:
 class OffloadingConnectorStats(KVConnectorStats):
     """Offloading connector stats use flat metric names as keys.
 
-    The ``data`` dict is structured using ``_StatsKey`` / ``_MetricType``::
+    The `data` dict is structured using `_StatsKey` / `_MetricType`::
 
         {
             _StatsKey.TYPES: {name: _MetricType.*, ...},
@@ -201,19 +201,19 @@ class OffloadingConnectorStats(KVConnectorStats):
         }
 
     This structure is self-describing: it survives IPC serialization
-    without needing the full ``OffloadingMetricMetadata`` objects on the
+    without needing the full `OffloadingMetricMetadata` objects on the
     receiving side.
 
     Counter values are aggregated by summing per-label-tuple, gauge values
     use the latest snapshot per-label-tuple, and histogram values are lists of
-    observed samples per-label-tuple. Unlabeled metrics use ``()`` as their
+    observed samples per-label-tuple. Unlabeled metrics use `()` as their
     labelvalues tuple.
 
-    ``INFO`` holds the static config facts of one series each, which the
-    scheduler sends once per process. It stays out of ``DATA``, because its
+    `INFO` holds the static config facts of one series each, which the
+    scheduler sends once per process. It stays out of `DATA`, because its
     label names are known only when the payload arrives. It holds label names,
     not metric names, so a manager that accesses its own metrics walks
-    ``metric_sections()``.
+    `metric_sections()`.
     """
 
     def __post_init__(self):
@@ -351,10 +351,15 @@ class OffloadingConnectorStats(KVConnectorStats):
             info: One mapping of info metric label name to label value for each
                 series, as OffloadingManager.config_info() returns it. An empty
                 mapping still gives one series, with an empty value on every
-                label the spec declared.
+                label the spec declared. Values are stringified here, as the
+                Prometheus label values they become, so every frontend reads the
+                same strings.
 
         """
-        self.data[_StatsKey.INFO] = [dict(series_info) for series_info in info]
+        self.data[_StatsKey.INFO] = [
+            {key: str(value) for key, value in series_info.items()}
+            for series_info in info
+        ]
 
     def observe_histogram(
         self,

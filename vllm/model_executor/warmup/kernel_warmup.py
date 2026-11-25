@@ -5,9 +5,12 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import gc
 import json
 import sys
 import time
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,6 +25,7 @@ from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    get_flashinfer_mm_encoder_autotune_config,
     resolve_flashinfer_autotune_v2_root,
     resolve_rank_flashinfer_autotune_file,
     use_flashinfer_autotune_v2,
@@ -34,7 +38,6 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
-from vllm.model_executor.warmup.mamba_triton_warmup import mamba_triton_warmup
 from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
     qwen4_exp_qsa_triton_warmup,
 )
@@ -50,14 +53,41 @@ from vllm.model_executor.warmup.watermark_sample_warmup import (
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.config import MultiModalConfig
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
 
 _LL_BF16_WARMUP_M_RANGE = range(1, 17)
+
+
+@contextmanager
+def _outside_kv_cache_transient_window(worker: "Worker") -> Generator[None]:
+    """Keep a one-off tuning step out of the extensible KV cache's reserve.
+
+    An extensible KV cache keeps free the allocator peak its warmup steps reach
+    (`reserved_headroom_bytes`). Autotuning profiles every candidate tactic
+    over all token buckets on scratch buffers that serving never allocates
+    again, so its peak is not a serving transient. Record the transient reached
+    before tuning, then restart peak tracking afterwards; the warmup steps that
+    follow run with the tuned tactics and measure their own transients.
+    """
+    kv_cache = worker.model_runner.extensible_kv_cache
+    if kv_cache is None:
+        yield
+        return
+    kv_cache.record_transient_peak()
+    try:
+        yield
+    finally:
+        gc.collect()
+        torch.accelerator.synchronize()
+        torch.accelerator.reset_peak_memory_stats(worker.device)
 
 
 def _warmup_flashinfer_attention(worker: "Worker") -> None:
@@ -71,11 +101,10 @@ def _warmup_flashinfer_attention(worker: "Worker") -> None:
         except NotImplementedError:
             return False
 
-    check = any if worker.use_v2_model_runner else all
     local_flashinfer_warmup = (
         not worker.model_runner.is_pooling_model
         and bool(worker.model_runner.attn_groups)
-        and check(
+        and any(
             _is_flashinfer_backend(group.backend)
             for groups in worker.model_runner.attn_groups
             for group in groups
@@ -90,12 +119,7 @@ def _warmup_flashinfer_attention(worker: "Worker") -> None:
         pp_group.cpu_all_reduce_(eligibility)
         eligible_pp_ranks = int(eligibility.item())
 
-    if worker.use_v2_model_runner:
-        should_warmup = eligible_pp_ranks > 0
-    else:
-        should_warmup = eligible_pp_ranks == pp_group.world_size
-
-    if should_warmup:
+    if eligible_pp_ranks > 0:
         logger.info_once("Warming up FlashInfer attention.")
         mixed_batch_attention_warmup(worker)
 
@@ -224,7 +248,7 @@ def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
 
 
 def _aiter_gemm_m_buckets(max_m: int) -> list[int]:
-    """One token count per AITER tuned-GEMM bucket up to ``max_m``.
+    """One token count per AITER tuned-GEMM bucket up to `max_m`.
 
     AITER pads M to 1, 2, 4 or 8 below 16, then to multiples of 16 / 32 / 64 /
     128 up to 256 / 1024 / 4096 / beyond, and builds each bucket's kernel on
@@ -269,22 +293,12 @@ def _rocm_aiter_gemm_warmup(worker: "Worker") -> None:
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.step5_dsa_warmup import step5_dsa_warmup
 
-    if not worker.use_v2_model_runner:
-        # The KV-block zeroing kernel is driven by the scheduler's
-        # `new_block_ids_to_zero`, so no dummy run ever reaches it.
-        zeroer = getattr(worker.model_runner, "_kv_block_zeroer", None)
-        if zeroer is not None:
-            zeroer.warmup(worker.model_runner.kv_cache_config.num_blocks)
-
     enable_jit_warmup = worker.vllm_config.kernel_config.enable_jit_warmup
     if enable_jit_warmup:
         logger.info("JIT kernel warmup starting.")
         jit_warmup_start = time.perf_counter()
         try:
-            registry = (
-                worker.model_runner.jit_warmup_registry  # type: ignore[attr-defined]
-            )
-            registry.warmup()
+            worker.model_runner.jit_warmup_registry.warmup()
         except Exception:
             logger.exception(
                 "JIT kernel warmup failed after %.2fs.",
@@ -298,8 +312,11 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
     qwen_vl_triton_warmup(worker.model_runner)
-    mamba_triton_warmup(worker.model_runner)
     replayssm_lifecycle_warmup(worker.model_runner)
+    if enable_jit_warmup and worker.vllm_config.cache_config.enable_prefix_caching:
+        # Copy-on-write first copies blocks mid-serving.
+        blocks = torch.zeros(2, 1, dtype=torch.int64, device=worker.device)
+        copy_kv_cache_blocks_inplace([blocks], 2, [KVCacheBlockCopy(0, 1)])
 
     compilation_config = worker.vllm_config.compilation_config
     cudagraph_capture_sizes = list(compilation_config.cudagraph_capture_sizes or [])
@@ -348,14 +365,18 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         is_deep_gemm_supported() and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
     )
     if do_deep_gemm_warmup:
-        model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
-        deep_gemm_warmup(model, max_tokens)
+        # The drafter is outside the target's module tree and its o_proj can
+        # land on a different einsum kernel than the target's.
+        for model in (worker.get_model(), worker.get_draft_model()):
+            if model is not None:
+                deep_gemm_warmup(model, max_tokens)
 
     b12x_warmup(worker, cudagraph_capture_sizes)
 
-    if current_platform.is_cuda():
-        # The MSA kernels, and the CuTe DSL their modules import, are CUDA-only.
+    # The MSA kernels, and the CuTe DSL their modules import, are CUDA-only.
+    # Only MiniMax-M3 has MSA layers, and its package is loaded iff it is served.
+    if current_platform.is_cuda() and "vllm.models.minimax_m3" in sys.modules:
         from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
             minimax_m3_msa_warmup,
         )
@@ -380,7 +401,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if enable_flashinfer_autotune is False:
         logger.info_once("Skipping FlashInfer autotune because it is disabled.")
     elif has_flashinfer() and current_platform.has_device_capability(90):
-        flashinfer_autotune(worker.model_runner)
+        with _outside_kv_cache_transient_window(worker):
+            flashinfer_autotune(worker.model_runner)
 
     _warmup_flashinfer_attention(worker)
 
@@ -437,6 +459,66 @@ def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ..
     return tuple(dict.fromkeys(token_counts))
 
 
+def _flashinfer_mm_encoder_autotune_num_items(
+    num_items: int, mm_config: "MultiModalConfig", tp_size: int
+) -> int:
+    # Identical dummy items must split evenly for matching rank caches.
+    if mm_config.mm_encoder_tp_mode == "data":
+        return num_items // tp_size * tp_size
+    return num_items
+
+
+def _run_flashinfer_autotune_mm_encoder(runner: "GPUModelRunner") -> None:
+    mm_config = get_flashinfer_mm_encoder_autotune_config(runner.vllm_config)
+    if mm_config is None:
+        return
+
+    from vllm.distributed.parallel_state import get_pp_group
+    from vllm.multimodal.encoder_budget import MultiModalBudget
+
+    if not get_pp_group().is_first_rank:
+        return
+    budget = MultiModalBudget(
+        runner.vllm_config, runner.mm_registry, enable_cache=False
+    )
+
+    if budget.get_encoder_budget() <= 0 or not budget.mm_max_toks_per_item:
+        return
+
+    encoder_runner = runner.model_state.encoder_runner
+    tp_size = runner.vllm_config.parallel_config.tensor_parallel_size
+
+    for modality in budget.mm_max_toks_per_item:
+        num_profile_items = budget.mm_max_items_per_batch[modality]
+        num_items = _flashinfer_mm_encoder_autotune_num_items(
+            num_profile_items,
+            mm_config,
+            tp_size,
+        )
+        if num_items == 0:
+            logger.warning_once(
+                "Skipping FlashInfer autotuning for the %s encoder: the "
+                "profiling budget of %d items is smaller than TP size %d "
+                "and cannot give every rank nonempty work in data mode.",
+                modality,
+                num_profile_items,
+                tp_size,
+            )
+            continue
+        dummy_inputs = budget.get_dummy_encoder_profile_inputs(
+            modality, max_items_per_batch=num_items
+        )
+        logger.info(
+            "Running FlashInfer autotune for the %s encoder with %d items.",
+            modality,
+            len(dummy_inputs),
+        )
+        # Keep FlashInfer's per-op buckets: raw vision token counts can
+        # exceed the budget for projected multimodal embeddings.
+        outputs = encoder_runner.execute_mm_encoder(dummy_inputs)
+        del outputs
+
+
 def _run_flashinfer_autotune_dummy_runs(
     runner: "GPUModelRunner", *, skip_attn: bool = False
 ) -> None:
@@ -448,7 +530,7 @@ def _run_flashinfer_autotune_dummy_runs(
         # The drafter may use more tokens than this pass in the same dummy run.
         # Include its max M when building the autotune buckets.
         max_tuning_tokens = num_tokens
-        speculator = getattr(runner, "speculator", None)
+        speculator = runner.speculator
         if speculator is not None:
             num_query_per_req = speculator.num_query_per_req
             num_draft_reqs = min(
@@ -492,7 +574,7 @@ def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
 
 
 def _all_ranks_have_matching_cache(path: Path, group) -> bool:
-    """True iff every rank in ``group`` has its own, mutually consistent file."""
+    """True iff every rank in `group` has its own, mutually consistent file."""
     fingerprint = _autotune_cache_fingerprint(path)
     if group.world_size == 1:
         return fingerprint is not None
@@ -541,7 +623,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
     averaged over the tuning group so all its ranks select the same tactic.
 
     Legacy results are persisted per rank: FlashInfer keys MoE entries by tp/ep rank
-    (``MoERunner.get_cache_key_extras``), so one rank's file only hits on that
+    (`MoERunner.get_cache_key_extras`), so one rank's file only hits on that
     rank. A rank with a cache hit skips the per-tactic reduce the others block
     in, so ranks keep loaded configs only if every rank in the tuning group
     has a matching file and successfully loads it.
@@ -612,6 +694,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 autotune_hisparse_flashinfer_attention(runner)
             if not cache_hit:
                 _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
+                _run_flashinfer_autotune_mm_encoder(runner)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
     finally:

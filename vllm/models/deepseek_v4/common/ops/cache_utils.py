@@ -70,8 +70,8 @@ def quantize_and_insert_k_kernel(
 
     One program per token.
 
-    ``use_fnuz=True`` selects FNUZ (``tl.float8e4b8``); default OCP
-    (``tl.float8e4nv``) matches every production caller.
+    `use_fnuz=True` selects FNUZ (`tl.float8e4b8`); default OCP
+    (`tl.float8e4nv`) matches every production caller.
     """
     pid = tl.program_id(0)
 
@@ -182,8 +182,8 @@ def quantize_and_insert_k_cache(
       - Each token: 8 bytes (uint8 scales, 7 real + 1 padding)
     - Padded to multiple of 576
 
-    ``use_fnuz=True`` selects FNUZ E4M3 cache encoding and is only valid on
-    platforms whose FP8 format is FNUZ. ``use_fnuz=False`` selects OCP E4M3,
+    `use_fnuz=True` selects FNUZ E4M3 cache encoding and is only valid on
+    platforms whose FP8 format is FNUZ. `use_fnuz=False` selects OCP E4M3,
     which is used by OCP-encoded caches even on gfx942.
     """
     assert k.dim() == 2 and k.shape[1] == 512, (
@@ -235,7 +235,7 @@ class DequantizeAndGatherKCacheKernel(
 ):
     NUM_WORKERS = 128
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         max_blocks_per_seq: int
         cache_block_size: int
@@ -364,7 +364,7 @@ class DequantizeAndGatherKCacheKernel(
                 bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
                 tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         max_model_len: int,
@@ -513,9 +513,9 @@ def dequantize_and_gather_k_cache(
 ) -> None:
     """Dequantize and gather a paged DSv4 K cache.
 
-    ``use_fnuz`` MUST match the encoder of the specific cache being read:
-    ``False`` for ``compressed_k_cache`` (Triton encoder is OCP everywhere),
-    ``current_platform.is_fp8_fnuz()`` for ``swa_k_cache`` (C++ encoder
+    `use_fnuz` MUST match the encoder of the specific cache being read:
+    `False` for `compressed_k_cache` (Triton encoder is OCP everywhere),
+    `current_platform.is_fp8_fnuz()` for `swa_k_cache` (C++ encoder
     writes FNUZ on gfx942 and OCP on gfx950).
     """
     if has_cutedsl():
@@ -581,7 +581,7 @@ class ComputeGlobalTopkIndicesAndLensKernel(
 ):
     TRITON_BLOCK_SIZE = 1024
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         global_topk_indices_stride: int
         topk_indices_stride: int
@@ -642,7 +642,7 @@ class ComputeGlobalTopkIndicesAndLensKernel(
         # Zero out length for padding tokens.
         tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         topk_width: int,
@@ -811,7 +811,7 @@ class CombineTopkSwaIndicesKernel(
 ):
     NUM_WORKERS = 256
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         TOP_K: int
         COMPRESS_RATIO: int
@@ -916,7 +916,7 @@ class CombineTopkSwaIndicesKernel(
             combined_len = topk_len + swa_len
             tl.store(combined_lens_ptr + token_idx, combined_len)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         topk_width: int,
@@ -1092,18 +1092,18 @@ def build_flashinfer_mixed_sparse_indices(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build the FlashInfer DSV4 sparse-index matrix for decode-first batches.
 
-    Produces ``sparse_indices`` of shape ``[num_tokens, swa_total_width +
-    padded_topk]`` (the first ``swa_total_width`` columns are SWA slot ids, the
-    rest are compressed/top-k slot ids) and ``sparse_topk_lens`` (active length
+    Produces `sparse_indices` of shape `[num_tokens, swa_total_width +
+    padded_topk]` (the first `swa_total_width` columns are SWA slot ids, the
+    rest are compressed/top-k slot ids) and `sparse_topk_lens` (active length
     per token). Decode tokens read precomputed SWA/compressed indices; prefill
     tokens derive their SWA window from the position and translate local
     compressed indices to global slots via the block tables.
 
-    ``num_rows`` (>= ``num_tokens``) sizes both outputs for a kernel call that
-    spans a CUDA-graph-padded batch; the rows past ``num_tokens`` stay unset.
+    `num_rows` (>= `num_tokens`) sizes both outputs for a kernel call that
+    spans a CUDA-graph-padded batch; the rows past `num_tokens` stay unset.
 
-    When ``prefill_left_visible``/``prefill_right_visible`` are given (vision
-    variant), the SWA column region widens by ``max_image_tokens`` and prefill
+    When `prefill_left_visible`/`prefill_right_visible` are given (vision
+    variant), the SWA column region widens by `max_image_tokens` and prefill
     tokens inside an image span get a bidirectionally widened window; decode
     rows are padded with -1 across the extra columns.
     """
@@ -1241,7 +1241,7 @@ def remap_flashinfer_index(values, block_size, block_span):
 class BuildFlashinferMixedSparseIndicesKernel(
     VllmTritonJitKernel["BuildFlashinferMixedSparseIndicesKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         window_size: int
         swa_index_width: int
@@ -1520,7 +1520,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
 
         tl.store(sparse_topk_lens_ptr + token_idx, SWA_TOTAL_WIDTH + topk_len)
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         swa_index_width: int,

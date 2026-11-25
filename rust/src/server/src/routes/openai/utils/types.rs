@@ -7,7 +7,8 @@ use indexmap::IndexMap;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use vllm_chat::ChatTool;
+use vllm_chat::{AllowedToolsMode, ChatTool};
+use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_llm::{PromptCacheUsage, TokenUsage};
 
 // ============================================================================
@@ -246,6 +247,22 @@ pub enum ContentPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         uuid: Option<String>,
     },
+    /// A vLLM extension naming a tool, as tool search returns it in a tool
+    /// result (Anthropic's `tool_reference` block).
+    #[serde(rename = "tool_reference")]
+    ToolReference { name: String },
+}
+
+impl ContentPart {
+    /// The media modality this part carries, if any.
+    pub fn modality(&self) -> Option<MmModality> {
+        match self {
+            Self::ImageUrl { .. } => Some(MmModality::Image),
+            Self::VideoUrl { .. } => Some(MmModality::Video),
+            Self::AudioUrl { .. } | Self::InputAudio { .. } => Some(MmModality::Audio),
+            Self::Text { .. } | Self::Refusal { .. } | Self::ToolReference { .. } => None,
+        }
+    }
 }
 
 #[serde_with::skip_serializing_none]
@@ -420,17 +437,15 @@ pub enum ToolChoiceValue {
 #[serde(untagged)]
 pub enum ToolChoice {
     Value(ToolChoiceValue),
-    Function {
-        #[serde(rename = "type")]
-        tool_type: String,
-        function: FunctionChoice,
-    },
-    AllowedTools {
-        #[serde(rename = "type")]
-        tool_type: String,
-        mode: String,
-        tools: Vec<ToolReference>,
-    },
+    Object(ToolChoiceObject),
+}
+
+/// Object form of [`ToolChoice`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolChoiceObject {
+    Function { function: FunctionChoice },
+    AllowedTools { allowed_tools: AllowedTools },
 }
 
 impl Default for ToolChoice {
@@ -439,13 +454,29 @@ impl Default for ToolChoice {
     }
 }
 
-/// Function choice specification for `ToolChoice::Function`.
+/// Function choice specification for `ToolChoiceObject::Function`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct FunctionChoice {
     pub name: String,
 }
 
-/// Tool reference for `ToolChoice::AllowedTools`.
+/// The allowed set of `ToolChoiceObject::AllowedTools`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AllowedTools {
+    pub mode: AllowedToolsMode,
+    pub tools: Vec<AllowedTool>,
+}
+
+/// One tool of [`AllowedTools`], named like a function tool choice:
+/// `{"type": "function", "function": {"name": ...}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AllowedTool {
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    pub function: FunctionChoice,
+}
+
+/// Tool reference of the Responses API `allowed_tools` tool choice.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -628,6 +659,25 @@ impl<'de> Deserialize<'de> for ChatMessage {
     }
 }
 
+impl ChatMessage {
+    /// The message's content parts; empty for string or absent content.
+    pub fn content_parts(&self) -> &[ContentPart] {
+        let content = match self {
+            Self::System { content, .. }
+            | Self::User { content, .. }
+            | Self::Tool { content, .. }
+            | Self::Developer { content, .. }
+            | Self::Custom { content, .. } => Some(content),
+            Self::Assistant { content, .. } => content.as_ref(),
+            Self::Function { .. } => None,
+        };
+        match content {
+            Some(MessageContent::Parts(parts)) => parts,
+            Some(MessageContent::Text(_)) | None => &[],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum MessageContent {
@@ -695,7 +745,7 @@ impl Usage {
         }
     }
 
-    /// Fold in the usage of another choice of the same request. Like Python
+    /// Fold in the usage of another choice of the same prompt. Like Python
     /// for `n > 1`, the prompt counts once, while completion and reasoning
     /// tokens add up over the choices.
     pub(crate) fn add_choice(&mut self, other: &Usage) {
@@ -711,6 +761,21 @@ impl Usage {
             details.reasoning_tokens += other.reasoning_tokens;
         }
         self.total_tokens = self.prompt_tokens + self.completion_tokens.unwrap_or_default();
+    }
+
+    /// Fold in the usage of the first choice of another prompt of the same
+    /// request. Like Python for a batch of prompts, prompt tokens add up over
+    /// the prompts, on top of [`Self::add_choice`].
+    pub(crate) fn add_prompt(&mut self, other: &Usage) {
+        self.prompt_tokens += other.prompt_tokens;
+        if let (Some(details), Some(other)) = (
+            &mut self.prompt_tokens_details,
+            &other.prompt_tokens_details,
+        ) {
+            details.cached_tokens += other.cached_tokens;
+            details.created_cache_tokens += other.created_cache_tokens;
+        }
+        self.add_choice(other);
     }
 }
 
@@ -798,7 +863,7 @@ mod usage_tests {
 }
 
 /// OpenAI completions-style logprobs.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct LogProbs {
     pub tokens: Vec<String>,
     pub token_logprobs: Vec<Option<f32>>,

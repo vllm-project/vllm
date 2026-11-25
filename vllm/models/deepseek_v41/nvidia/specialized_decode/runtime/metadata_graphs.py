@@ -5,14 +5,19 @@
 A FULL CUDA graph replays the forward only: before every replay the runner
 still builds the attention metadata on the host, which refreshes the persistent
 buffers the graph reads. For small decode batches that build costs about as
-much as the replay. ``AttnMetadataCudaGraphs`` records, during CUDA graph
+much as the replay. `AttnMetadataCudaGraphs` records, during CUDA graph
 capture, the build of every uniform decode batch shape that a FULL decode graph
 serves, and replays it on the steps of that shape, returning the metadata
 objects captured with it. A step of a shape without a recording builds its
 metadata eagerly.
+
+The specialized decode records the builds of its FlashInfer backends; SM80 and
+SM90 record those of their own SWA and indexer backends and of the stock
+FlashMLA and indexer builders they keep (`DeepseekV41MetadataGraphModelState`).
 """
 
 from collections.abc import Callable, Sequence
+from functools import cache
 from typing import Any
 
 import torch
@@ -29,8 +34,10 @@ from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
     DeepseekSparseSWAFlashInferMetadataBuilder,
     DeepseekV4FlashInferSparseMLAMetadataBuilder,
 )
+from vllm.models.deepseek_v41.sparse_mla import DeepseekV4FlashMLAMetadataBuilder
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import current_stream
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
 from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerMetadataBuilder,
 )
@@ -39,17 +46,36 @@ from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
 
-# Builders whose build() of a uniform decode batch launches only capture-safe
-# work (no device-to-host reads, no pageable host-to-device copies) into
-# persistent buffers, with host arguments set by the batch shape.
-_RECORDABLE_BUILDERS = frozenset(
-    {
-        CompressorMetadataBuilder,
-        DeepseekSparseSWAFlashInferMetadataBuilder,
-        DeepseekV41SparseIndexerMetadataBuilder,
-        DeepseekV4FlashInferSparseMLAMetadataBuilder,
-    }
-)
+
+@cache
+def _recordable_builders() -> frozenset[type]:
+    """Builders whose build() of a uniform decode batch launches only
+    capture-safe work (no device-to-host reads, no pageable host-to-device
+    copies) into persistent buffers, with host arguments set by the batch shape.
+
+    The SM80 and SM90 builders are imported here, not at module load: their
+    modules load CuTe DSL kernels, which need `cuda.bindings` and `cutlass`.
+    """
+    from ..ampere.attention import AmpereSWAMetadataBuilder
+    from ..ampere.indexer_metadata import AmpereIndexerMetadataBuilder
+    from ..hopper.attention import HopperSWAMetadataBuilder
+    from ..hopper.indexer_metadata import HopperIndexerMetadataBuilder
+
+    return frozenset(
+        {
+            AmpereIndexerMetadataBuilder,
+            AmpereSWAMetadataBuilder,
+            CompressorMetadataBuilder,
+            DeepseekSparseSWAFlashInferMetadataBuilder,
+            DeepseekV32IndexerMetadataBuilder,
+            DeepseekV41SparseIndexerMetadataBuilder,
+            DeepseekV4FlashInferSparseMLAMetadataBuilder,
+            DeepseekV4FlashMLAMetadataBuilder,
+            HopperIndexerMetadataBuilder,
+            HopperSWAMetadataBuilder,
+        }
+    )
+
 
 # Recordable builders that only read their block table: on a table that other
 # builders clamp in place, they build on branches of their own once those have.
@@ -84,7 +110,7 @@ class AttnMetadataCudaGraphs:
         """The graph key of a step whose metadata build can be recorded, or None.
 
         Only FULL steps of uniform decodes qualify; their key fixes every host
-        value the build reads. Under adaptive verification (``max_query_len``
+        value the build reads. Under adaptive verification (`max_query_len`
         set) the device splits the drafts, so the host query lengths are only
         bounds.
         """
@@ -108,7 +134,7 @@ class AttnMetadataCudaGraphs:
         """The keys of the decode steps the FULL decode graphs serve, largest
         first.
 
-        The graphs are the ones ``CudaGraphManager`` captures, and a step runs
+        The graphs are the ones `CudaGraphManager` captures, and a step runs
         the smallest graph that holds its requests. Under dynamic speculative
         decoding only the widest query length is recorded; steps of the
         narrower tiers build their metadata eagerly.
@@ -137,10 +163,10 @@ class AttnMetadataCudaGraphs:
         return keys[::-1]
 
     def can_record(self, attn_groups: list[list[AttentionGroup]]) -> bool:
-        """Whether every metadata builder of ``attn_groups`` is recordable."""
+        """Whether every metadata builder of `attn_groups` is recordable."""
         if self._recordable is None:
             self._recordable = all(
-                type(group.get_metadata_builder()) in _RECORDABLE_BUILDERS
+                type(group.get_metadata_builder()) in _recordable_builders()
                 for groups in attn_groups
                 for group in groups
             )
@@ -153,7 +179,7 @@ class AttnMetadataCudaGraphs:
         block_tables: Sequence[torch.Tensor],
         build_fn: BuildFn,
     ) -> dict[str, Any]:
-        """Record the build of ``key`` in the global CUDA graph pool, which the
+        """Record the build of `key` in the global CUDA graph pool, which the
         FULL forward graphs and memory profiling use; returns its metadata."""
         self._forked_build(attn_groups, block_tables, build_fn)
         graph = torch.cuda.CUDAGraph()
@@ -168,13 +194,13 @@ class AttnMetadataCudaGraphs:
         return attn_metadata
 
     def replay(self, key: GraphKey) -> dict[str, Any] | None:
-        """Replay the build of ``key`` and return its metadata, or None if the
+        """Replay the build of `key` and return its metadata, or None if the
         key was not recorded."""
         entry = self._graphs.get(key)
         if entry is None:
             logger.warning_once(
-                "DeepSeek-V4.1 specialized decode: a FULL decode step has no "
-                "recorded attention-metadata build; building it eagerly."
+                "DeepSeek-V4.1: a FULL decode step has no recorded "
+                "attention-metadata build; building it eagerly."
             )
             return None
         graph, attn_metadata = entry
@@ -192,7 +218,7 @@ class AttnMetadataCudaGraphs:
         The groups share only read-only inputs, with two exceptions. The sparse
         MLA and compressor builders clamp their block table in place, so the
         groups of one block table storage build on one branch, in serial order;
-        the groups that only read the table (``_BLOCK_TABLE_READERS``) then
+        the groups that only read the table (`_BLOCK_TABLE_READERS`) then
         build on branches of their own, each started after that branch. And
         the first group that needs the token-to-request map builds it into its
         own buffer, which later groups reuse. Each branch builds its own map;

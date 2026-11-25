@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import functools
 import os
+from contextlib import nullcontext
 
 import pytest
 import torch
@@ -15,6 +17,7 @@ from vllm.compilation.wrapper import (
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
+    CUDAGraphMode,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -121,6 +124,40 @@ def test_torch_compile_wrapper(use_bytecode_hook, monkeypatch):
         raise AssertionError("expected an exception to be raised")
 
 
+def _args_only_decorator(fn):
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        return fn(*args, **kwargs)
+
+    return wrapped
+
+
+class ArgsOnlyDecoratedWrapper(MyWrapper):
+    @_args_only_decorator
+    def forward(self, x: torch.Tensor):  # type: ignore[override]
+        return self.model(x)
+
+
+def test_bytecode_hook_with_args_only_decorated_forward(monkeypatch):
+    """A `forward` wrapped in a `(*args, **kwargs)` decorator, like Transformers'
+    `deprecate_kwarg`, has no `self` local in its frame. The bytecode hook must
+    still find the instance and keep the compiled bytecode."""
+    monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1")
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config = CompilationConfig()
+    vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
+    vllm_config.compilation_config.backend = "inductor"
+
+    with set_current_vllm_config(vllm_config):
+        torch._dynamo.reset()
+        wrapper = ArgsOnlyDecoratedWrapper(MyMod())
+        x = torch.tensor([1, 2, 3, 4])
+        torch._dynamo.mark_dynamic(x, 0)
+        assert torch.equal(wrapper(x), x * 2)
+        assert wrapper._compiled_bytecode is not None
+        assert torch.equal(wrapper(torch.tensor([1, 2, 3])), torch.tensor([2, 4, 6]))
+
+
 def test_compile_model_with_stock_torch(monkeypatch):
     """The whole model is compiled in place with the configured backend."""
     graphs: list[torch.fx.GraphModule] = []
@@ -157,6 +194,42 @@ def test_compile_model_with_stock_torch(monkeypatch):
     assert not graphs  # compilation is deferred to the first call
     torch.testing.assert_close(model(x), expected)
     assert len(graphs) == 1
+
+
+class BufferAssignWrapper(MyWrapper):
+    def forward(self, x: torch.Tensor):  # type: ignore[override]
+        self.model.buffer = self.model.buffer * 2
+        return x
+
+
+class KwargsUpdateWrapper(MyWrapper):
+    def forward(self, x: torch.Tensor, **kwargs):  # type: ignore[override]
+        kwargs["scale"] = 2
+        return x * kwargs["scale"]
+
+
+@pytest.mark.parametrize(
+    "wrapper_cls, raises",
+    [(BufferAssignWrapper, True), (KwargsUpdateWrapper, False)],
+)
+def test_cudagraph_buffer_assignment_check(wrapper_cls, raises, monkeypatch):
+    """Buffer assignment is rejected under cudagraphs, other `update`s are not."""
+    monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1")
+    monkeypatch.setattr("depyf.decompile", lambda code: "")
+    vllm_config = VllmConfig()
+    # After construction, which disables cudagraphs without a GPU
+    vllm_config.compilation_config = CompilationConfig(
+        mode=CompilationMode.DYNAMO_TRACE_ONCE,
+        backend="eager",
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+    )
+    model = torch.nn.Module()
+    model.register_buffer("buffer", torch.ones(2))
+    rejected = pytest.raises(RuntimeError, match="modifying buffers")
+    expectation = rejected if raises else nullcontext()
+    torch._dynamo.reset()
+    with set_current_vllm_config(vllm_config), expectation:
+        wrapper_cls(model)(torch.ones(2))
 
 
 if __name__ == "__main__":

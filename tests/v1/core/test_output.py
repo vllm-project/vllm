@@ -26,6 +26,7 @@ def _create_new_requests_data(prompt_embeds: torch.Tensor | None) -> NewRequestD
         block_ids=([],),
         num_computed_tokens=0,
         lora_request=None,
+        prefill_token_ids=[],
         prompt_embeds=prompt_embeds,
     )
 
@@ -123,6 +124,7 @@ def test_strip_covered_mm_data_mrope() -> None:
     assert stripped[1].data is not None
     assert set(stripped[1].data.keys()) == {"pixel_values", "image_grid_thw"}
     # original list is not mutated
+    assert covered.data is not None
     assert set(covered.data.keys()) == {"pixel_values", "image_grid_thw"}
 
 
