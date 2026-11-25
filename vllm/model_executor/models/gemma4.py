@@ -21,10 +21,12 @@
 from collections.abc import Iterable
 from dataclasses import replace
 from itertools import islice
+from typing import ClassVar
 
 import torch
 from torch import nn
 
+from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.utils import getattr_iter
@@ -234,6 +236,37 @@ def gemma4_fused_routing_kernel_triton(
     return weights, ids
 
 
+def gemma4_routing_function_topk_softmax(
+    gating_output: torch.Tensor,
+    topk: int,
+    per_expert_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gemma4 routing with the `topk_softmax` MoE custom op.
+
+    `topk_softmax(renormalize=True)` is the Gemma4 routing (softmax over all
+    experts, top-k, renormalize over the selected k); the per-expert scale is
+    then folded into the weights. Returns float32 weights and int32 expert ids
+    of shape `[num_tokens, topk]`, like the Triton and torch paths.
+    """
+    num_tokens = gating_output.shape[0]
+    topk_weights = torch.empty(
+        num_tokens, topk, dtype=torch.float32, device=gating_output.device
+    )
+    topk_ids = torch.empty(
+        num_tokens, topk, dtype=torch.int32, device=gating_output.device
+    )
+    token_expert_indices = torch.empty_like(topk_ids)
+    ops.topk_softmax(
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output.contiguous(),
+        True,
+    )
+    topk_weights.mul_(per_expert_scale[topk_ids].to(torch.float32))
+    return topk_weights, topk_ids
+
+
 def gemma4_routing_function_torch(
     gating_output: torch.Tensor,
     topk: int,
@@ -362,7 +395,12 @@ class Gemma4Router(nn.Module):
         local) so that torch.func.functional_call parameter substitution
         reaches the routing function correctly.
         """
-        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        # tl.sort in the Triton kernel is slow on XPU; topk_softmax is not.
+        if current_platform.is_xpu():
+            return gemma4_routing_function_topk_softmax(
+                gating_output, topk, self.per_expert_scale
+            )
+        if current_platform.is_cuda_alike():
             return gemma4_fused_routing_kernel_triton(
                 gating_output,
                 topk,
@@ -1009,6 +1047,8 @@ class Gemma4CrossDecoderLayers(nn.Module):
     enable_if=lambda vllm_config: not vllm_config.cache_config.kv_sharing_fast_prefill
 )
 class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
+    supports_aux_hidden_states_over_pp = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = _get_text_config(vllm_config.model_config.hf_config)
@@ -1373,18 +1413,18 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            if per_layer_inputs is not None:
+            if "per_layer_inputs" in intermediate_tensors.tensors:
                 per_layer_inputs = intermediate_tensors["per_layer_inputs"]
         residual = None
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer)
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
         ):
             # Extract the per-layer embedding for this specific layer
             if per_layer_inputs is not None:
-                actual_layer_idx = self.start_layer + layer_idx
                 layer_per_input = per_layer_inputs[
-                    :, actual_layer_idx, :
+                    :, layer_idx, :
                 ]  # (num_tokens, per_layer_dim)
             else:
                 layer_per_input = None
@@ -1401,6 +1441,7 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
         if not get_pp_group().is_last_rank:
             tensors: dict[str, torch.Tensor] = {
                 "hidden_states": hidden_states,
+                **self.pack_local_aux_hidden_states(aux_hidden_states),
             }
             if per_layer_inputs is not None:
                 tensors["per_layer_inputs"] = per_layer_inputs
@@ -1424,6 +1465,8 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
 class Gemma4ForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
 ):
+    is_3d_moe_weight: ClassVar[bool] = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             # Multimodal weights are handled by the multimodal wrapper.
@@ -1456,6 +1499,10 @@ class Gemma4ForCausalLM(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = _get_text_config(vllm_config.model_config.hf_config)
+        # Nested Gemma4 checkpoints only declare architectures at the top level;
+        # the 3D MoE LoRA wrapper reads them from this config.
+        if not config.architectures:
+            config.architectures = ["Gemma4ForCausalLM"]
         quant_config = vllm_config.quant_config
 
         super().__init__()

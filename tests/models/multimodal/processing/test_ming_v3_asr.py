@@ -215,6 +215,6 @@ def test_streaming_envelope_matches_final_text(chunks, expected):
     deltas.append(processor.process_delta("", True))
     assert "".join(deltas) == expected
     assert (
-        MingV3ASRForConditionalGeneration.post_process_output("".join(chunks))
+        MingV3ASRForConditionalGeneration.post_process_output("".join(chunks), None)
         == expected
     )

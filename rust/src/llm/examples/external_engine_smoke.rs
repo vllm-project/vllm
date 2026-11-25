@@ -10,7 +10,7 @@ use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
-use vllm_llm::{FinishReason, GenerateOutputStream, GenerateRequest, Llm};
+use vllm_llm::{EngineCoreLlm, FinishReason, GenerateOutputStream, GenerateRequest};
 
 const PROMPT_TOKEN_IDS: &[u32] = &[20841, 448, 6896, 25, 23811];
 
@@ -136,7 +136,7 @@ async fn main() -> Result<()> {
     println!("output_address={}", client.output_address());
     println!("engine_identities={:x?}", client.engine_identities());
 
-    let llm = Llm::new(client);
+    let llm = EngineCoreLlm::new(client);
     let request = build_request(request_id.clone(), args.max_tokens);
     println!("request_id={request_id}");
     println!("prompt_token_ids={PROMPT_TOKEN_IDS:?}");
