@@ -128,13 +128,11 @@ def _qkv_bmm_kernel(
     BN: tl.constexpr,
     BK: tl.constexpr,
     MP: tl.constexpr,
-    ENABLE_PDL: tl.constexpr,
 ):
     """Columns `[0, S1)` of `Y` are `XQ @ W.T`, `[S1, S2)` `XK` and `[S2, N)`
     `XV`. A tile spanning a boundary runs both inputs' dots and picks per
     column (the second input's loads hit L2)."""
-    if ENABLE_PDL:
-        tl.extra.cuda.gdc_wait()
+    tl.extra.cuda.gdc_wait()
     n0 = tl.program_id(0) * BN
     n1 = tl.minimum(n0 + BN, N) - 1
     b_lo = (n0 >= S1).to(tl.int32) + (n0 >= S2).to(tl.int32)
@@ -165,8 +163,7 @@ def _qkv_bmm_kernel(
         acc.to(Y.dtype.element_ty),
         (rows[:, None] < M) & (cols[None, :] < N),
     )
-    if ENABLE_PDL:
-        tl.extra.cuda.gdc_launch_dependents()
+    tl.extra.cuda.gdc_launch_dependents()
 
 
 class _Config(NamedTuple):
@@ -298,7 +295,6 @@ def qkv_bmm(
     assert w.stride(1) == 1 and s1 > 0 and s1 + bn <= s2 <= n  # one boundary per tile
     assert max(n * w.stride(0), *(m * x.stride(0) for x in xs)) < 2**31
     out = torch.empty((m, n), dtype=x_q.dtype, device=x_q.device)
-    enable_pdl = current_platform.has_device_capability(90, device_id=x_q.get_device())
     # About 1.6 waves of 32-column tiles at Inkling's 8608 columns; wider
     # tiles or split-K measured no faster.
     _qkv_bmm_kernel[(triton.cdiv(n, bn),)](
@@ -320,10 +316,9 @@ def qkv_bmm(
         BN=bn,
         BK=128,
         MP=_MP,
-        ENABLE_PDL=enable_pdl,
         num_warps=4,
         num_stages=4,
-        launch_pdl=enable_pdl,
+        launch_pdl=True,
     )
     return out
 
