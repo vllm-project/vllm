@@ -94,27 +94,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
             self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
-    def add_lora_grouped_linear(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        shrink_weights: torch.Tensor,
-        expand_weights: torch.Tensor,
-    ) -> None:
-        if not (
-            HAS_TRITON
-            and current_platform.is_cuda()
-            and x.dtype in (torch.bfloat16, torch.float16)
-            and x.dtype == shrink_weights.dtype == expand_weights.dtype == y.dtype
-        ):
-            return super().add_lora_grouped_linear(y, x, shrink_weights, expand_weights)
-
-        # Group offsets refer to the full batch even when x is just a prefix.
-        _, *routing = self.token_mapping_meta.meta_args(
-            None, self.lora_config.specialize_active_lora
-        )
-        lora_grouped_linear(y, x, shrink_weights, expand_weights, *routing)
-
     def add_shrink(
         self,
         y: torch.Tensor,
@@ -294,6 +273,28 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             add_inputs=add_inputs,
             **kwargs,
         )
+
+    def add_lora_grouped_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+    ) -> None:
+        if not (
+            HAS_TRITON
+            and current_platform.is_cuda()
+            and x.dtype in (torch.bfloat16, torch.float16)
+            and x.dtype == lora_a_stacked.dtype == lora_b_stacked.dtype == y.dtype
+        ):
+            return super().add_lora_grouped_linear(y, x, lora_a_stacked, lora_b_stacked)
+
+        # Adapter offsets index the full sorted token buffer.
+        _, *kernel_meta = self.token_mapping_meta.meta_args(
+            token_nums=None,
+            specialize_active_lora=self.lora_config.specialize_active_lora,
+        )
+        lora_grouped_linear(y, x, lora_a_stacked, lora_b_stacked, *kernel_meta)
 
     def add_lora_logits(
         self,

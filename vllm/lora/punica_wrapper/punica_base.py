@@ -290,28 +290,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
         else:
             self.is_prefill = False
 
-    def add_lora_grouped_linear(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        shrink_weights: torch.Tensor,
-        expand_weights: torch.Tensor,
-    ) -> None:
-        """Add LoRA to independent projection groups with shared token routing.
-
-        `x` and `y` are `[token, group, features]`. The token axis selects the
-        leading rows of the batch mapping and `y` is updated in place.
-        Weights use `[slot, group, out_features, in_features]` for each stage.
-        Weights shared across groups can use a zero-stride group dimension.
-        """
-        indices = self.token_lora_indices[: x.shape[0]]
-        x_by_group = x.transpose(0, 1)
-        y_by_group = y.transpose(0, 1)
-        for slot in range(shrink_weights.shape[0]):
-            shrunk = x_by_group @ shrink_weights[slot].transpose(-2, -1)
-            delta = shrunk @ expand_weights[slot].transpose(-2, -1)
-            y_by_group.add_(torch.where((indices == slot)[None, :, None], delta, 0))
-
     @abstractmethod
     def add_shrink(
         self,
@@ -429,6 +407,37 @@ class PunicaWrapperBase(PunicaWrapperABC):
         """
         # TODO: implement it based on torch ops
         raise NotImplementedError
+
+    def add_lora_grouped_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+    ) -> None:
+        """Add LoRA to independent projection groups with shared token routing.
+
+        A and B name the factors in application order. Weights shared across
+        groups can use a zero-stride group axis.
+
+        Args:
+            y: Output of shape `[token, group, out_features]`, updated in place.
+            x: Input of shape `[token, group, in_features]`, corresponding to
+                the first `x.shape[0]` tokens in the batch mapping.
+            lora_a_stacked: Shrink weights of shape
+                `[slot, group, rank, in_features]`.
+            lora_b_stacked: Expand weights of shape
+                `[slot, group, out_features, rank]`.
+
+        """
+        token_lora_indices = self.token_lora_indices[: x.shape[0]]
+        x_by_group = x.transpose(0, 1)
+        y_by_group = y.transpose(0, 1)
+        for slot in range(lora_a_stacked.shape[0]):
+            buffer = x_by_group @ lora_a_stacked[slot].transpose(-2, -1)
+            delta = buffer @ lora_b_stacked[slot].transpose(-2, -1)
+            mask = (token_lora_indices == slot)[None, :, None]
+            y_by_group.add_(torch.where(mask, delta, 0))
 
     @abstractmethod
     def add_lora_logits(

@@ -184,8 +184,8 @@ class LoRAKernelMeta:
 
         Args:
             token_nums (int | None): Number of input tokens in the current forward
-                pass. Pass None when the kernel bounds original token IDs after
-                reading groups from the full sorted index buffer.
+                pass. Use `None` to return the full token buffers for kernels
+                that check token bounds themselves.
             specialize_active_lora (bool): If True, report the actual active
                 LoRA count; otherwise report the padded default, which keeps
                 the kernel launch shape stable.

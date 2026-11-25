@@ -274,17 +274,18 @@ class MLAKVBProjWithLoRA(ColumnParallelLinearWithLoRA):
         if gather_dcp:
             lora_b = get_dcp_group().all_gather(lora_b, dim=2)
 
-        heads = x.shape[0]
-        a = lora_a.expand(-1, heads, -1, -1)
-        b = lora_b[:, 0].unflatten(1, (heads, -1))
+        num_heads = x.shape[0]
+        lora_a_by_head = lora_a.expand(-1, num_heads, -1, -1)
+        lora_b_by_head = lora_b[:, 0].unflatten(1, (num_heads, -1))
         if is_query:
-            shrink_weights = b[:, :, :qk_nope_head_dim].transpose(-2, -1)
-            expand_weights = a.transpose(-2, -1)
+            # The transposed key projection applies the adapter's B_K before A.
+            lora_a_stacked = lora_b_by_head[:, :, :qk_nope_head_dim].transpose(-2, -1)
+            lora_b_stacked = lora_a_by_head.transpose(-2, -1)
         else:
-            shrink_weights = a
-            expand_weights = b[:, :, qk_nope_head_dim:]
+            lora_a_stacked = lora_a_by_head
+            lora_b_stacked = lora_b_by_head[:, :, qk_nope_head_dim:]
         self.punica_wrapper.add_lora_grouped_linear(
-            out, x.transpose(0, 1), shrink_weights, expand_weights
+            out, x.transpose(0, 1), lora_a_stacked, lora_b_stacked
         )
 
     @classmethod
