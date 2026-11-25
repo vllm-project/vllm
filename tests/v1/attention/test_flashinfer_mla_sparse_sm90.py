@@ -380,6 +380,7 @@ def test_plan_uses_state_params(monkeypatch, kv_dtype):
     )
     state = sm90_mod._SM90State.__new__(sm90_mod._SM90State)
     state.device = torch.device("cpu")
+    state.reset_kv_indices_on_plan = False
     state.wrapper = wrapper
     state.num_heads = 4
     state.kv_dtype = kv_dtype
