@@ -295,3 +295,100 @@ def test_unallocated_abort_without_peer_can_finish_locally():
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
     assert request.request_id not in scheduler.requests
     assert not scheduler.schedule().kv_connector_metadata.reqs_to_abort
+
+
+@pytest.mark.parametrize("remote_tp_size", [1, 2])
+def test_preemption_cancels_deferred_writes_and_allows_rescheduled_writes(
+    remote_tp_size: int,
+):
+    """When a producer request is preempted, deferred write tasks naming the
+    old blocks must be dropped so stale blocks are never submitted (even for
+    unequal TP sizes where supports_zero_submit_abort is False), and
+    scheduled layer tracking must reset so the resumed request can schedule
+    new writes."""
+    h = _setup()
+    submitted_blocks = []
+    orig_prepare = h.writer._prepare_transfer_plan
+
+    def tracking_prepare(task, *args, **kwargs):
+        submitted_blocks.append(task.local_block_ids)
+        return orig_prepare(task, *args, **kwargs)
+
+    h.writer._prepare_transfer_plan = tracking_prepare
+
+    old_task = replace(
+        h.task, local_block_ids=[[3, 4]], remote_tp_size=remote_tp_size
+    )
+    assert h.writer.schedule_write(old_task)
+    h.writer._deferred_tasks.append(h.writer._write_task_q.get_nowait())
+
+    # Preemption clears writer's state and purges deferred tasks for transfer_id
+    h.writer.handle_preemption(h.task.transfer_id)
+    if old_task.transfer_state is not None:
+        assert old_task.transfer_state.cancelled
+    assert h.task.transfer_id not in h.writer._scheduled_layers
+
+    # Resumed write task with newly allocated blocks is accepted
+    new_task = replace(
+        h.task,
+        local_block_ids=[[4, 2]],
+        remote_tp_size=remote_tp_size,
+        transfer_state=None,
+    )
+    assert h.writer.schedule_write(new_task)
+    h.writer._deferred_tasks.append(h.writer._write_task_q.get_nowait())
+
+    # Processing deferred tasks only executes the resumed task, not the old one
+    h.writer._process_deferred_tasks()
+    assert len(h.attempts) == 1
+    assert submitted_blocks == [[[4, 2]]]
+
+
+def test_preemption_stale_completion_ignored_after_resume():
+    """A write completion in flight from before preemption must not increment
+    writes_done for the resumed attempt."""
+    h = _setup()
+    task_att1 = replace(h.task, local_block_ids=[[3, 4]])
+    assert h.writer.schedule_write(task_att1)
+    queued_att1 = h.writer._write_task_q.get_nowait()
+    assert queued_att1.attempt == 0
+
+    # Preempt the transfer
+    h.writer.handle_preemption(h.task.transfer_id)
+
+    # Resumed attempt schedules new writes (2 layers expected)
+    task_att2_l1 = replace(
+        h.task, layer_name="l1", local_block_ids=[[4, 2]], transfer_state=None
+    )
+    task_att2_l2 = replace(
+        h.task, layer_name="l2", local_block_ids=[[4, 2]], transfer_state=None
+    )
+    assert h.writer.schedule_write(task_att2_l1)
+    assert h.writer.schedule_write(task_att2_l2)
+    queued_att2_l1 = h.writer._write_task_q.get_nowait()
+    queued_att2_l2 = h.writer._write_task_q.get_nowait()
+    assert queued_att2_l1.attempt == 1
+    assert queued_att2_l2.attempt == 1
+
+    h.allocation.writes_expected = 2
+
+    # Old attempt completion arrives late: must be ignored
+    h.writer._mark_write_done(
+        h.task.transfer_id, h.allocation, queued_att1.attempt
+    )
+    assert h.allocation.writes_done == 0
+    assert not h.allocation.completion_notified
+
+    # First resumed write completes
+    h.writer._mark_write_done(
+        h.task.transfer_id, h.allocation, queued_att2_l1.attempt
+    )
+    assert h.allocation.writes_done == 1
+    assert not h.allocation.completion_notified
+
+    # Second resumed write completes; now sealed transfer finalizes
+    h.writer._mark_write_done(
+        h.task.transfer_id, h.allocation, queued_att2_l2.attempt
+    )
+    assert h.allocation.writes_done == 2
+    assert h.allocation.completion_notified

@@ -115,6 +115,7 @@ class MoRIIOWriter:
         self._scheduled_layers: dict[TransferId, set[str]] = defaultdict(set)
         self._sealed_writes: dict[TransferId, int] = {}
         self._transfer_states: dict[TransferId, WriteTransferState] = {}
+        self._transfer_attempts: dict[TransferId, int] = defaultdict(int)
         self._defer_timeout = worker.moriio_config.defer_timeout
 
     @property
@@ -159,6 +160,7 @@ class MoRIIOWriter:
             return False
 
         with self._write_state_lock:
+            task.attempt = self._transfer_attempts[task.transfer_id]
             if self._is_transfer_terminal(task.transfer_id):
                 return False
             if task.layer_name in self._scheduled_layers[task.transfer_id]:
@@ -275,8 +277,13 @@ class MoRIIOWriter:
                 continue
 
             if (
-                task.transfer_state is not None and task.transfer_state.cancelled
-            ) or self._is_transfer_terminal(task.transfer_id):
+                task.attempt != self._transfer_attempts.get(task.transfer_id, 0)
+                or (
+                    task.transfer_state is not None
+                    and task.transfer_state.cancelled
+                )
+                or self._is_transfer_terminal(task.transfer_id)
+            ):
                 continue
 
             # Check if remote blocks are ready
@@ -310,8 +317,13 @@ class MoRIIOWriter:
 
         for task in self._deferred_tasks:
             if (
-                task.transfer_state is not None and task.transfer_state.cancelled
-            ) or self._is_transfer_terminal(task.transfer_id):
+                task.attempt != self._transfer_attempts.get(task.transfer_id, 0)
+                or (
+                    task.transfer_state is not None
+                    and task.transfer_state.cancelled
+                )
+                or self._is_transfer_terminal(task.transfer_id)
+            ):
                 continue
             if self._is_remote_ready(task):
                 try:
@@ -368,6 +380,22 @@ class MoRIIOWriter:
             state = self._transfer_states.pop(transfer_id, None)
             if state is not None:
                 state.cancelled = True
+
+    def handle_preemption(self, transfer_id: TransferId) -> None:
+        """Cancel pending and deferred write tasks when a request is preempted,
+        so stale block IDs are never submitted and new writes can be scheduled
+        with newly allocated blocks upon resume."""
+        with self._write_state_lock:
+            self._transfer_attempts[transfer_id] += 1
+            self._deferred_tasks = [
+                t for t in self._deferred_tasks if t.transfer_id != transfer_id
+            ]
+            wrapper = self.worker.moriio_wrapper
+            info = wrapper.done_remote_allocate_req_dict.get(transfer_id)
+            if info is not None:
+                info.writes_done = 0
+                info.transfer_statuses.clear()
+        self._clear_transfer_state(transfer_id)
 
     def _is_transfer_terminal(self, transfer_id: TransferId) -> bool:
         wrapper = self.worker.moriio_wrapper
@@ -435,6 +463,8 @@ class MoRIIOWriter:
 
         """
         with self._write_state_lock:
+            if task.attempt != self._transfer_attempts.get(task.transfer_id, 0):
+                return
             if task.transfer_state is not None and task.transfer_state.cancelled:
                 return
             request_info = self._get_remote_alloc_info(task.transfer_id)
@@ -519,7 +549,7 @@ class MoRIIOWriter:
                     request_info.transfer_statuses.extend(statuses)
 
         # Finalize if all layers complete
-        self._mark_write_done(task.transfer_id, request_info)
+        self._mark_write_done(task.transfer_id, request_info, task.attempt)
 
     def _prepare_transfer_plan(
         self,
@@ -723,10 +753,23 @@ class MoRIIOWriter:
         return transfer_statuses
 
     def _mark_write_done(
-        self, transfer_id: TransferId, request_info: RemoteAllocInfo
+        self,
+        transfer_id: TransferId,
+        request_info: RemoteAllocInfo,
+        attempt: int | None = None,
     ) -> None:
         """Record one completed WRITE task and finalize if sealed."""
         with self._write_state_lock:
+            current_attempt = self._transfer_attempts.get(transfer_id, 0)
+            if attempt is not None and attempt != current_attempt:
+                logger.debug(
+                    "Ignoring stale write completion for transfer %s "
+                    "(attempt %d vs %d)",
+                    transfer_id,
+                    attempt,
+                    current_attempt,
+                )
+                return
             request_info.writes_done += 1
         self._finalize_if_complete(transfer_id, request_info)
 
