@@ -59,10 +59,6 @@ pub(super) fn validate_request(request: &CompletionRequest) -> Result<(), ApiErr
 /// Reject request fields that are accepted for deserialization but not yet
 /// implemented in the Rust frontend.
 fn reject_unsupported_fields(request: &CompletionRequest) -> Result<(), ApiError> {
-    if request.suffix.is_some() {
-        bail_invalid_request!(param = "suffix", "suffix is not supported.");
-    }
-
     // Python's prompt-presence validator treats an empty `prompt_embeds` list
     // like an absent one; lowering ignores it.
     if (request.prompt_embeds.as_ref())

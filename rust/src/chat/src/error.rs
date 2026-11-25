@@ -51,6 +51,12 @@ pub enum Error {
     UnsupportedInputAudioFormat { format: String },
     #[error("`{modality}` input is not supported by this model")]
     UnsupportedModality { modality: String },
+    #[error(
+        "`{modality}` input is not supported by the Rust frontend for this model; set \
+         VLLM_USE_RUST_FRONTEND=0 to serve it with the Python frontend, or pass \
+         --limit-mm-per-prompt '{{\"{modality}\": 0}}' to disable it"
+    )]
+    RustFrontendUnsupportedModality { modality: &'static str },
     #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
     MmLimitExceeded { modality: String, limit: usize },
     #[error("invalid inline multimodal features: {message}")]
@@ -62,6 +68,15 @@ pub enum Error {
         offset: usize,
         #[source]
         source: Box<Error>,
+    },
+    #[error(
+        "the Rust frontend cannot serve multimodal input for model `{model_id}` \
+         (model_type `{model_type}`); pass --language-model-only to serve it as a text-only \
+         model, or set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend"
+    )]
+    MultimodalModelUnsupported {
+        model_id: String,
+        model_type: String,
     },
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
@@ -171,6 +186,7 @@ impl Error {
             | Self::UnsupportedContentPart(_)
             | Self::UnsupportedInputAudioFormat { .. }
             | Self::UnsupportedModality { .. }
+            | Self::RustFrontendUnsupportedModality { .. }
             | Self::MmLimitExceeded { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
             | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => {
@@ -194,6 +210,7 @@ impl Error {
             Self::MissingChatTemplate
             | Self::ChatTemplate(_)
             | Self::UnsupportedChatTemplateOption { .. }
+            | Self::MultimodalModelUnsupported { .. }
             | Self::Multimodal(_)
             | Self::IncompatibleParserSelections { .. }
             | Self::ParserUnavailableByName { .. }

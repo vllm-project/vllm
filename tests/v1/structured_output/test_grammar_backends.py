@@ -9,9 +9,6 @@ from transformers import AutoTokenizer
 
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
-from vllm.v1.structured_output.backend_lm_format_enforcer import (
-    LMFormatEnforcerBackend,
-)
 from vllm.v1.structured_output.backend_outlines import OutlinesBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
@@ -26,23 +23,11 @@ BACKENDS = (
     pytest.param("xgrammar", id="xgrammar"),
     pytest.param("guidance", id="guidance"),
     pytest.param("outlines", id="outlines"),
-    pytest.param(
-        "lm-format-enforcer",
-        marks=pytest.mark.xfail(
-            reason=(
-                "lm-format-enforcer 0.11.3 imports the removed "
-                "vllm.transformers_utils.tokenizer path"
-            ),
-            strict=True,
-        ),
-        id="lm-format-enforcer",
-    ),
 )
 BACKEND_CLASSES: dict[str, Callable[..., StructuredOutputBackend]] = {
     "xgrammar": XgrammarBackend,
     "guidance": GuidanceBackend,
     "outlines": OutlinesBackend,
-    "lm-format-enforcer": LMFormatEnforcerBackend,
 }
 
 
