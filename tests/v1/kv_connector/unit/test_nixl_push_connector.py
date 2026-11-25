@@ -1942,6 +1942,9 @@ class TestPushPrefixCaching:
     def test_heterogeneous_logical_pages_use_token_window(self, monkeypatch):
         w, _ = self._worker_driving_xfer(monkeypatch=monkeypatch)
         w._has_mamba = False
+        from tests.v1.kv_connector.unit.utils import make_kv_cache_config
+
+        w.kv_cache_config = make_kv_cache_config(160)
         w._physical_blocks_per_logical_kv_block = 10
         remote_info = w.transfer_topo.get_engine_info.return_value
         remote_info.remote_physical_blocks_per_logical = 6
@@ -1953,7 +1956,7 @@ class TestPushPrefixCaching:
             load_end_token=160,
         )
 
-        NixlPushConnectorWorker._do_start_push_kv(
+        NixlPushConnectorWorker._start_push_kv(
             w,
             "req-hetero",
             (list(range(10)),),

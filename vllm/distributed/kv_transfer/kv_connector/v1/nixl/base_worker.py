@@ -57,7 +57,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     TPMapping,
     _is_attention_spec,
-    _is_full_attention_spec,
     _is_ssm_spec,
     compute_tp_mapping,
 )
@@ -3976,6 +3975,8 @@ class NixlBaseConnectorWorker:
         num_tokens: int,
         block_size_ratio: int,
         remote_physical_per_logical: int,
+        load_start_token: int = 0,
+        load_end_token: int = 0,
     ) -> tuple[BlockIds, BlockIds, list[range]]:
         """Pair kernel blocks holding the same tokens across P/D block sizes.
 
@@ -4005,6 +4006,17 @@ class NixlBaseConnectorWorker:
             block_size = self.kv_cache_config.transfer_groups[g].block_size
             num_sub_blocks = cdiv(num_tokens, block_size // local_per_logical)
             local = self.get_mapped_blocks(np.asarray(local), block_size_ratio).tolist()
+            if load_end_token > load_start_token and issubclass(
+                self.kv_cache_config.transfer_groups[g].manager_cls, FullAttentionManager
+            ):
+                start, count = self._kernel_block_window(
+                    load_start_token, load_end_token, block_size_ratio
+                )
+                assert len(local) >= count and start + count <= len(remote)
+                paired_local.append(local[:count])
+                paired_remote.append(list(remote[start : start + count]))
+                covered.append(range(count))
+                continue
             local_padding = -num_sub_blocks % local_per_logical
             remote_padding = -num_sub_blocks % remote_physical_per_logical
             local = local[: len(local) - local_padding]
@@ -4219,7 +4231,7 @@ class NixlBaseConnectorWorker:
                 if (
                     num_decode_blocks
                     and has_window
-                    and _is_full_attention_spec(self._group_spec_types[i])
+                    and issubclass(self.kv_cache_config.transfer_groups[i].manager_cls, FullAttentionManager)
                 ):
                     start, count = self._kernel_block_window(
                         load_start_token, load_end_token, block_size_ratio

@@ -12,12 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     TransferTopology,
 )
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    FullAttentionSpec,
-    KVCacheSpec,
-    MambaSpec,
-)
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
 
 # ======================================================================
 # Data structures
@@ -36,10 +31,6 @@ class ReadSpec:
 
 def _is_attention_spec(spec_type: type[KVCacheSpec]) -> bool:
     return issubclass(spec_type, AttentionSpec)
-
-
-def _is_full_attention_spec(spec_type: type[KVCacheSpec]) -> bool:
-    return issubclass(spec_type, FullAttentionSpec)
 
 
 def _is_ssm_spec(spec_type: type[KVCacheSpec]) -> bool:

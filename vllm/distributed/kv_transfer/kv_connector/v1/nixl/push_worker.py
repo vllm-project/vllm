@@ -774,7 +774,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             prefill_physical_per_logical=self._physical_blocks_per_logical_kv_block,
             load_start_token=load_start_token,
             load_end_token=load_end_token,
-            block_size_ratio=block_size_ratio,
         )
 
         local_block_ids = list(local_block_ids)

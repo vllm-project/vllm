@@ -363,6 +363,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     meta.remote.num_tokens,
                     block_size_ratio,
                     remote_info.remote_physical_blocks_per_logical,
+                    meta.load_start_token,
+                    meta.load_end_token,
                 )
             )
             read_specs = [
@@ -500,8 +502,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_xfer_side_handle=stage.xfer_side_handles[spec.remote_rank],
                     expected_consumers=plan.local_consumers,
                     awaiting_kvs=meta.awaiting_kvs,
-                    load_start_token=meta.load_start_token,
-                    load_end_token=meta.load_end_token,
+                    load_start_token=meta.load_start_token if not different_block_sizes else 0,
+                    load_end_token=meta.load_end_token if not different_block_sizes else 0,
                     region_pairs=stage.pairs,
                     remote_region_num_blocks=stage.region_num_blocks,
                     remote_agent=self._remote_agents[engine_id][

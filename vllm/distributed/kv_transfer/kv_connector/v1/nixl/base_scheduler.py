@@ -45,6 +45,8 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
 
+from vllm.v1.kv_cache_interface import AttentionSpec
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -115,11 +117,11 @@ class NixlBaseConnectorScheduler:
         )
         dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self._range_group_block_sizes = tuple(
-            resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_size)
+            resolve_dcp_kv_block_size(group, dcp_size)
             for group in kv_cache_config.kv_cache_groups
         )
         self._range_transfer_group_block_sizes = tuple(
-            resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_size)
+            resolve_dcp_kv_block_size(group, dcp_size)
             for group in kv_cache_config.transfer_groups
         )
 
@@ -328,7 +330,8 @@ class NixlBaseConnectorScheduler:
             and parallel.prefill_context_parallel_size == 1
             and parallel.pipeline_parallel_size == 1
             and all(
-                type(g.kv_cache_spec) in (FullAttentionSpec, SlidingWindowSpec)
+                g.manager_cls in (FullAttentionManager, SlidingWindowManager)
+                and all(type(s) is AttentionSpec for s in g.kv_cache_specs.values())
                 for g in self.kv_cache_config.kv_cache_groups
             )
         )
@@ -346,10 +349,7 @@ class NixlBaseConnectorScheduler:
         return tuple(
             i
             for i in self.kv_cache_config.transfer_group_ids
-            if isinstance(
-                self.kv_cache_config.kv_cache_groups[i].kv_cache_spec,
-                SlidingWindowSpec,
-            )
+            if self.kv_cache_config.kv_cache_groups[i].manager_cls is SlidingWindowManager
         )
 
     @property
@@ -375,7 +375,7 @@ class NixlBaseConnectorScheduler:
                 strict=True,
             )
         ):
-            if not is_full_attention_spec(cache_group.kv_cache_spec):
+            if not issubclass(cache_group.manager_cls, FullAttentionManager):
                 if group_id in load_range.window_group_ids:
                     assert load_range.window_end_token is not None
                     end_block = cdiv(load_range.window_end_token, block_size)
