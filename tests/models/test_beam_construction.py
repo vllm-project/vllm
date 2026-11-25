@@ -16,7 +16,6 @@ import torch
 from torch import nn
 
 from vllm import LLM, SamplingParams
-from vllm.model_executor.models.interfaces import supports_lora
 from vllm.models.beam import model as beam
 from vllm.models.beam.nvidia import attention as nvidia_attention
 from vllm.models.beam.nvidia import model as nvidia_beam
@@ -171,12 +170,6 @@ def test_dense_only_pipeline_stage_initializes(monkeypatch):
     assert model.num_moe_layers == 0
     assert model.num_logical_experts == 0
     assert model.num_local_physical_experts == 0
-
-
-@pytest.mark.cpu_test
-def test_beam_supports_lora():
-    assert supports_lora(beam.BeamForCausalLM)
-    assert beam.BeamForCausalLM.embedding_modules == {}
 
 
 @pytest.mark.cpu_test

@@ -509,6 +509,9 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 !!! note
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
+!!! note
+    LoRA on `BeamForCausalLM` has been validated with BF16 checkpoints only.
+
 ## List of Multimodal Language Models
 
 The following modalities are supported depending on the model:

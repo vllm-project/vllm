@@ -359,11 +359,10 @@ class BeamForCausalLM(
     def process_weights_after_loading(self) -> None:
         # The low-latency GEMM reads `qkv_gate_proj.weight` directly, which
         # skips the LoRA wrapper installed after loading.
-        if self.lora_config is not None:
-            return
-        for module in self.model.modules():
-            if isinstance(module, BeamAttention):
-                module.warmup_projection()
+        if self.lora_config is None:
+            for module in self.model.modules():
+                if isinstance(module, BeamAttention):
+                    module.warmup_projection()
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
