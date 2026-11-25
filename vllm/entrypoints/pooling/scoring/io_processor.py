@@ -625,24 +625,23 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         else:
             target_params = ctx.pooling_params
 
+        # Priority for `chat_template_kwargs`:
+        # explicit `prompt_extras` > `target_params.extra_kwargs` fallback.
         prompt_extras = dict(
             ctx.build_prompt_extras(
                 target_params, self.model_config.multimodal_config
             )
         )
-        pooling_extra_kwargs = (
-            ctx.pooling_params.extra_kwargs
-            if ctx.pooling_params and ctx.pooling_params.extra_kwargs
+        fallback_chat_template_kwargs = (
+            target_params.extra_kwargs.get("chat_template_kwargs")
+            if target_params and target_params.extra_kwargs
             else None
         )
         if (
-            pooling_extra_kwargs
-            and pooling_extra_kwargs.get("chat_template_kwargs") is not None
-            and "chat_template_kwargs" not in prompt_extras
+            fallback_chat_template_kwargs is not None
+            and prompt_extras.get("chat_template_kwargs") is None
         ):
-            prompt_extras["chat_template_kwargs"] = pooling_extra_kwargs[
-                "chat_template_kwargs"
-            ]
+            prompt_extras["chat_template_kwargs"] = fallback_chat_template_kwargs
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
