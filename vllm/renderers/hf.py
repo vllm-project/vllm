@@ -10,7 +10,7 @@ import weakref
 from collections import defaultdict, deque
 from collections.abc import Sequence
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Final, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast, overload
 
 import jinja2
 import jinja2.ext
@@ -52,6 +52,7 @@ from vllm.tokenizers.hf import (
     HfTokenizer,
     encode_with_special_tokens_mask,
 )
+from vllm.tokenizers.protocol import TokenizerLike
 from vllm.transformers_utils.chat_templates import (
     get_chat_template_fallback_path,
     get_chat_template_override_path,
@@ -83,7 +84,6 @@ if TYPE_CHECKING:
         ChatTemplateContentFormatOption,
         ConversationMessage,
     )
-    from vllm.tokenizers import TokenizerLike
 
     from .inputs import DictPrompt
     from .params import ChatParams, TokenizeParams
@@ -1057,7 +1057,7 @@ class HfTokensPrompt(TokensPrompt, total=False):
     """Tokenized HF prompt with metadata for rebuilding echoed text."""
 
     prompt_special_tokens_mask: list[int]
-    """Mask for tokens retained by truncation, before any padding."""
+    """Encoding mask, sliced alongside prompt tokens before any padding."""
 
 
 def tokenize_prompt(
@@ -1097,10 +1097,8 @@ def tokenize_prompt(
         want_special_tokens_mask
         and (mask := encoding.get("special_tokens_mask")) is not None
         and len(mask) == len(token_ids)
-        and (truncation := params._truncation_slice(tokenizer, len(token_ids)))
-        is not None
     ):
-        tokenized["prompt_special_tokens_mask"] = mask[truncation]
+        tokenized["prompt_special_tokens_mask"] = mask
     return tokenized
 
 
@@ -1135,7 +1133,30 @@ async def detokenize_prompt_async(
     return prompt
 
 
-class HfRenderer(BaseRenderer[HfTokenizer]):
+_T = TypeVar("_T", bound=TokenizerLike)
+
+
+class HfRendererMixin(BaseRenderer[_T]):
+    """Shared tokenization and echo reconstruction for HF-family renderers."""
+
+    def _tokenize_prompt(
+        self, prompt: TextPrompt, params: TokenizeParams
+    ) -> HfTokensPrompt:
+        return tokenize_prompt(
+            self.get_tokenizer(),
+            prompt,
+            params,
+            want_offsets=self._wants_offsets(prompt, params),
+        )
+
+    def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
+        return detokenize_prompt(self.get_tokenizer(), prompt)
+
+    async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
+        return await detokenize_prompt_async(self._async_tokenizer_decode, prompt)
+
+
+class HfRenderer(HfRendererMixin[HfTokenizer]):
     def __init__(
         self,
         config: VllmConfig,
@@ -1197,22 +1218,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     def _can_produce_offsets(self) -> bool:
         # Only fast tokenizers expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
-
-    def _tokenize_prompt(
-        self, prompt: TextPrompt, params: TokenizeParams
-    ) -> HfTokensPrompt:
-        return tokenize_prompt(
-            self.get_tokenizer(),
-            prompt,
-            params,
-            want_offsets=self._wants_offsets(prompt, params),
-        )
-
-    def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
-        return detokenize_prompt(self.get_tokenizer(), prompt)
-
-    async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
-        return await detokenize_prompt_async(self._async_tokenizer_decode, prompt)
 
     def _resolve_content_format(self, params: ChatParams) -> ChatTemplateContentFormat:
         return resolve_chat_template_content_format(

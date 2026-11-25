@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.config import VllmConfig
-from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
@@ -12,19 +11,13 @@ from vllm.renderers.chat_utils import (
 from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
 from vllm.utils.async_utils import make_async
 
-from .base import BaseRenderer
-from .hf import (
-    HfTokensPrompt,
-    detokenize_prompt,
-    detokenize_prompt_async,
-    tokenize_prompt,
-)
+from .hf import HfRendererMixin
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
-from .params import ChatParams, TokenizeParams
+from .params import ChatParams
 
 
-class DeepseekV32Renderer(BaseRenderer[DeepseekV32Tokenizer]):
+class DeepseekV32Renderer(HfRendererMixin[DeepseekV32Tokenizer]):
     def __init__(
         self,
         config: VllmConfig,
@@ -35,22 +28,6 @@ class DeepseekV32Renderer(BaseRenderer[DeepseekV32Tokenizer]):
         self._apply_chat_template_async = make_async(
             self._apply_chat_template, executor=self._executor
         )
-
-    def _tokenize_prompt(
-        self, prompt: TextPrompt, params: TokenizeParams
-    ) -> HfTokensPrompt:
-        return tokenize_prompt(
-            self.get_tokenizer(),
-            prompt,
-            params,
-            want_offsets=self._wants_offsets(prompt, params),
-        )
-
-    def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
-        return detokenize_prompt(self.get_tokenizer(), prompt)
-
-    async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
-        return await detokenize_prompt_async(self._async_tokenizer_decode, prompt)
 
     def _apply_chat_template(self, *args, **kwargs):
         return self.get_tokenizer().apply_chat_template(*args, **kwargs)

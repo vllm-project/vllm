@@ -6,7 +6,7 @@ from typing import Any
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
 from vllm.config import VllmConfig
-from vllm.inputs import TextPrompt, TokensPrompt
+from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -17,17 +17,15 @@ from vllm.renderers.chat_utils import (
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async
 
-from .base import BaseRenderer
 from .hf import (
-    HfTokensPrompt,
+    HfRendererMixin,
     _get_detokenization_tokens,
     detokenize_prompt,
     detokenize_prompt_async,
-    tokenize_prompt,
 )
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
-from .params import ChatParams, TokenizeParams
+from .params import ChatParams
 
 logger = init_logger(__name__)
 
@@ -71,7 +69,7 @@ def _get_chat_template_kwargs(params: ChatParams) -> dict[str, Any]:
     return kwargs
 
 
-class MistralRenderer(BaseRenderer[MistralTokenizer]):
+class MistralRenderer(HfRendererMixin[MistralTokenizer]):
     def __init__(
         self,
         config: VllmConfig,
@@ -81,16 +79,6 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
 
         self._apply_chat_template_async = make_async(
             safe_apply_chat_template, executor=self._executor
-        )
-
-    def _tokenize_prompt(
-        self, prompt: TextPrompt, params: TokenizeParams
-    ) -> HfTokensPrompt:
-        return tokenize_prompt(
-            self.get_tokenizer(),
-            prompt,
-            params,
-            want_offsets=self._wants_offsets(prompt, params),
         )
 
     def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:

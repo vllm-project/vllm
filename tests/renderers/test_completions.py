@@ -133,25 +133,15 @@ def _preprocess_prompt(
     ]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "renderer_mode",
-    ["deepseek_v32", "deepseek_v4", "deepseek_v41", "kimi_k3", "inkling"],
-)
-@pytest.mark.parametrize(
-    ("truncation_side", "expected"),
-    [("left", "<bos> Hello world"), ("right", "<bos> Hello")],
-)
-async def test_native_hf_renderer_truncated_echo(
-    tmp_path, renderer_mode, truncation_side, expected
-):
+@pytest.fixture
+def hf_renderer_config(tmp_path):
     from tokenizers import Tokenizer, models, pre_tokenizers
     from transformers import OPTConfig, TokenizersBackend
 
     from vllm.renderers.inkling_encoding import SPECIAL_TOKEN_SPELLINGS
     from vllm.tokenizers.hf import get_cached_tokenizer
 
-    tokens = ["<unk>", "<bos>", "Hello", "world"]
+    tokens = ["<unk>", "<bos>", "Hello", "world", "<pad>"]
     tokens.extend(s[0] for s in SPECIAL_TOKEN_SPELLINGS.values())
     vocab = {token: i for i, token in enumerate(tokens)}
     backend = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
@@ -161,6 +151,7 @@ async def test_native_hf_renderer_truncated_echo(
             tokenizer_object=backend,
             unk_token="<unk>",
             bos_token="<bos>",
+            pad_token="<pad>",
             add_bos_token=True,
         )
     )
@@ -168,6 +159,22 @@ async def test_native_hf_renderer_truncated_echo(
     config = VllmConfig(
         model_config=ModelConfig(model=str(tmp_path), dtype="float32", max_model_len=32)
     )
+    return config, tokenizer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "renderer_mode",
+    ["hf", "deepseek_v32", "deepseek_v4", "deepseek_v41", "kimi_k3", "inkling"],
+)
+@pytest.mark.parametrize(
+    ("truncation_side", "expected"),
+    [("left", "<bos> Hello world"), ("right", "<bos> Hello")],
+)
+async def test_native_hf_renderer_truncated_echo(
+    hf_renderer_config, renderer_mode, truncation_side, expected
+):
+    config, tokenizer = hf_renderer_config
     renderer = RENDERER_REGISTRY.load_renderer(renderer_mode, config, tokenizer)
     prompt = "<bos> Hello world"
     params = TokenizeParams(
@@ -183,6 +190,33 @@ async def test_native_hf_renderer_truncated_echo(
         for result in (sync, asynchronous):
             assert result["prompt"] == expected
             assert result["prompt_token_ids"] == tokenizer.encode(prompt)[section]
+    finally:
+        renderer.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("truncate_limit", [None, 8])
+async def test_hf_renderer_padding_keeps_cached_text(
+    hf_renderer_config, truncate_limit
+):
+    config, tokenizer = hf_renderer_config
+    renderer = HfRenderer(config, tokenizer)
+    prompt = "<bos>  Hello world"
+    params = TokenizeParams(
+        max_total_tokens=32,
+        pad_prompt_tokens=8,
+        truncate_prompt_tokens=truncate_limit,
+        truncation_side="right",
+        needs_detokenization=True,
+    )
+    token_ids = tokenizer.encode(prompt)
+    expected_ids = token_ids + [tokenizer.pad_token_id] * (8 - len(token_ids))
+    try:
+        (sync,) = renderer.render_cmpl([{"prompt": prompt}], params)
+        (asynchronous,) = await renderer.render_cmpl_async([{"prompt": prompt}], params)
+        for result in (sync, asynchronous):
+            assert result["prompt_token_ids"] == expected_ids
+            assert result["prompt"] == prompt
     finally:
         renderer.shutdown()
 

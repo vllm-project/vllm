@@ -11,7 +11,7 @@ from contextlib import ExitStack
 from dataclasses import replace
 from functools import cached_property
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Generic, overload
+from typing import TYPE_CHECKING, Any, Generic, cast, overload
 
 from typing_extensions import TypeVar
 
@@ -751,13 +751,17 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt = self._tokenize_prompt(prompt, params)
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
-        original_token_ids = prompt.get("prompt_token_ids")
+        token_ids = cast(TokensPrompt, prompt).get("prompt_token_ids")
+        truncation = (
+            params._truncation_slice(self.tokenizer, len(token_ids))
+            if token_ids is not None
+            else None
+        )
         prompt = params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
-        # Rebuild cached text if validation changed the token IDs.
+        # Rebuild cached text only for truncation, not padding alone.
         if params.needs_detokenization and (
-            "prompt" not in prompt
-            or prompt.get("prompt_token_ids") is not original_token_ids
+            "prompt" not in prompt or truncation is not None
         ):
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
@@ -798,13 +802,17 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt = await self._tokenize_prompt_async(prompt, params)
             prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
-        original_token_ids = prompt.get("prompt_token_ids")
+        token_ids = cast(TokensPrompt, prompt).get("prompt_token_ids")
+        truncation = (
+            params._truncation_slice(self.tokenizer, len(token_ids))
+            if token_ids is not None
+            else None
+        )
         prompt = params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
-        # Rebuild cached text if validation changed the token IDs.
+        # Rebuild cached text only for truncation, not padding alone.
         if params.needs_detokenization and (
-            "prompt" not in prompt
-            or prompt.get("prompt_token_ids") is not original_token_ids
+            "prompt" not in prompt or truncation is not None
         ):
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")

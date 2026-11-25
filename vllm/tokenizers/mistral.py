@@ -36,7 +36,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
-from vllm.tokenizers.hf import HfTokenizerBase
 from vllm.tokenizers.protocol import TokenizerLike
 
 if TYPE_CHECKING:
@@ -193,7 +192,7 @@ def tekken_convert_tokens_to_string(
 _TEMPLATE_ONLY_KWARGS = ("cohere_format", "enable_thinking")
 
 
-class MistralTokenizer(HfTokenizerBase, TokenizerLike):
+class MistralTokenizer(TokenizerLike):
     IS_MISTRAL_TOKENIZER = True  # used by vllm.utils.mistral
 
     @classmethod

@@ -11,7 +11,6 @@ from transformers import AutoTokenizer, TokenizersBackend
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.hf import (
     CachedHfTokenizer,
-    HfTokenizerBase,
     ThreadSafeHFTokenizerMixin,
     encode_with_special_tokens_mask,
     get_cached_tokenizer,
@@ -57,9 +56,7 @@ def test_special_tokens_mask_survives_wrapping_and_pickle(local_tokenizer_dir, w
 
     expected_ids = tokenizer.encode("prompt")
     for candidate in (tokenizer, pickle.loads(pickle.dumps(tokenizer))):
-        assert isinstance(candidate, HfTokenizerBase)
         encoding = encode_with_special_tokens_mask(candidate, "prompt")
-        assert encoding == candidate.encode_with_special_tokens_mask("prompt")
         assert encoding["input_ids"] == expected_ids
         assert encoding["special_tokens_mask"] == [1, 0]
 

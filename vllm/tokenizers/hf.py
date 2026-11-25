@@ -4,7 +4,7 @@ import contextlib
 import copy
 import queue
 from pathlib import Path
-from typing import TypeAlias, TypeVar, cast
+from typing import TypeAlias, TypeVar
 
 from transformers import AutoTokenizer, BatchEncoding, PythonBackend, TokenizersBackend
 
@@ -18,9 +18,10 @@ _T = TypeVar("_T", bound=TokenizerLike)
 logger = init_logger(__name__)
 
 
-def _encode_with_special_tokens_mask(
+def encode_with_special_tokens_mask(
     tokenizer: TokenizerLike, text: str, **kwargs
 ) -> BatchEncoding:
+    """Encode text with a best-effort mask of tokenizer-added special tokens."""
     kwargs["return_special_tokens_mask"] = True
     try:
         return tokenizer(text, **kwargs)
@@ -29,26 +30,6 @@ def _encode_with_special_tokens_mask(
         encoding = copy.copy(tokenizer(text, **kwargs))
         encoding.pop("special_tokens_mask", None)
         return encoding
-
-
-class HfTokenizerBase:
-    """Shared encoding operations for HF-compatible tokenizer objects."""
-
-    def encode_with_special_tokens_mask(self, text: str, **kwargs) -> BatchEncoding:
-        """Encode text with an optional mask of tokenizer-added special tokens."""
-        return _encode_with_special_tokens_mask(
-            cast(TokenizerLike, self), text, **kwargs
-        )
-
-
-def encode_with_special_tokens_mask(
-    tokenizer: TokenizerLike, text: str, **kwargs
-) -> BatchEncoding:
-    """Request a mask without bypassing a tokenizer proxy's encoding."""
-    encode = getattr(type(tokenizer), "encode_with_special_tokens_mask", None)
-    if encode is None:
-        return _encode_with_special_tokens_mask(tokenizer, text, **kwargs)
-    return encode(tokenizer, text, **kwargs)
 
 
 class ThreadSafeHFTokenizerMixin:
@@ -165,7 +146,7 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         with contextlib.suppress(NotImplementedError):
             max_token_id = max(max_token_id, tokenizer.vocab_size - 1)
 
-    class CachedTokenizer(tokenizer.__class__, HfTokenizerBase):  # type: ignore
+    class CachedTokenizer(tokenizer.__class__):  # type: ignore
         @property
         def all_special_ids(self) -> list[int]:
             return tokenizer_all_special_ids
