@@ -1289,12 +1289,12 @@ def test_asm_kv_scale_tables_shared_across_builders():
 
 
 @pytest.mark.parametrize("sliding_window", [None, 16])
-@pytest.mark.parametrize("spec_decode", [False, True])
-def test_aiter_fa_metadata_build_does_not_sync(sliding_window, spec_decode):
+@pytest.mark.parametrize("num_speculative_tokens", [0, 3])
+def test_aiter_fa_metadata_build_does_not_sync(sliding_window, num_speculative_tokens):
     """Building the metadata for prefill and extend rows must not wait for
     queued GPU work: the builder runs while the previous step executes.
 
-    With spec_decode, the decode row is a verification row of
+    With speculative decoding, the decode row is a verification row of
     1 + num_speculative_tokens tokens. It must stay a decode, and its
     overstated CPU bound must not reach the extend or prefill rows."""
     from tests.v1.attention.utils import (
@@ -1316,8 +1316,7 @@ def test_aiter_fa_metadata_build_does_not_sync(sliding_window, spec_decode):
         dtype="bfloat16",
         max_num_batched_tokens=1024,
     )
-    num_speculative_tokens = 3 if spec_decode else 0
-    if spec_decode:
+    if num_speculative_tokens > 0:
         # ngram needs no draft model; the reorder threshold becomes
         # 1 + num_speculative_tokens.
         config.speculative_config = SpeculativeConfig(
@@ -1346,8 +1345,8 @@ def test_aiter_fa_metadata_build_does_not_sync(sliding_window, spec_decode):
             torch.device("cuda"),
         )
     assert builder.reorder_batch_threshold == decode_len
-    # One decode (a verification row with spec_decode), one extend over cached
-    # context and one prefill.
+    # One decode (a verification row when speculative decoding is on), one
+    # extend over cached context and one prefill.
     batch_spec = BatchSpec(seq_lens=[48, 80, 24], query_lens=[decode_len, 32, 24])
     common = create_common_attn_metadata(
         batch_spec, BLOCK_SIZE, torch.device("cuda"), max_block_idx=32
