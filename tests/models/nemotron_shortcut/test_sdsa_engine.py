@@ -32,8 +32,9 @@ def refit_weight_buckets(model: torch.nn.Module) -> None:
     """A validated sparse model accepts later buckets without indexer weights."""
     parameters = dict(model.named_parameters())
     indexer = next(name for name in parameters if ".indexer." in name)
-    other = next(name for name in parameters if ".qkv_proj." in name)
-    for name in (indexer, other):
+    # A replicated norm's local tensor also has the full checkpoint shape at TP2.
+    norm = next(name for name in parameters if name.endswith(".input_layernorm.weight"))
+    for name in (indexer, norm):
         value = parameters[name].detach().clone()
         assert name in model.load_weights([(name, value)])
         torch.testing.assert_close(parameters[name], value, atol=0, rtol=0)
