@@ -28,11 +28,11 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.model_executor.kernels.linear import (
-    CutlassFP8ScaledMMLinearKernel,
-    FlashInferFP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearKernel,
-    PerTensorTorchFP8ScaledMMLinearKernel,
-    ROCmFP8ScaledMMLinearKernel,
+    CutlassFp8LinearKernel,
+    FlashInferFp8LinearKernel,
+    Fp8LinearKernel,
+    PerTensorTorchFp8LinearKernel,
+    ROCmFp8LinearKernel,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
@@ -60,7 +60,7 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
     def __init__(
         self,
         hidden_size: int,
-        force_kernel: type[FP8ScaledMMLinearKernel],
+        force_kernel: type[Fp8LinearKernel],
         dtype: torch.dtype,
         **kwargs,
     ):
@@ -217,11 +217,11 @@ class TestSiluMulBlockQuantModel(torch.nn.Module):
         return [FUSED_OPS[self.quant_key]]
 
 
-ROCM_KERNELS = [ROCmFP8ScaledMMLinearKernel, PerTensorTorchFP8ScaledMMLinearKernel]
+ROCM_KERNELS = [ROCmFp8LinearKernel, PerTensorTorchFp8LinearKernel]
 CUDA_KERNELS = [
-    FlashInferFP8ScaledMMLinearKernel,
-    CutlassFP8ScaledMMLinearKernel,
-    PerTensorTorchFP8ScaledMMLinearKernel,
+    FlashInferFp8LinearKernel,
+    CutlassFp8LinearKernel,
+    PerTensorTorchFp8LinearKernel,
 ]
 TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
 
@@ -282,7 +282,7 @@ def test_fusion_silu_and_mul_quant(
     ],
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
-    force_kernel: type[FP8ScaledMMLinearKernel] | None,
+    force_kernel: type[Fp8LinearKernel] | None,
     monkeypatch: pytest.MonkeyPatch,
 ):
     if model_class is TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():

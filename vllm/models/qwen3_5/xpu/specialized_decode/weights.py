@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from vllm.model_executor.kernels.linear.scaled_mm.xpu import XPUW8A16FP8LinearKernel
+from vllm.model_executor.kernels.linear.fp8.xpu import XPUW8A16Fp8LinearKernel
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsFp8
@@ -94,11 +94,11 @@ def get_weights(
     if not all(
         isinstance(
             getattr(layer.quant_method, "fp8_linear", None),
-            XPUW8A16FP8LinearKernel,
+            XPUW8A16Fp8LinearKernel,
         )
         for layer in (gu, down)
     ):
-        return "shared projections require XPUW8A16FP8LinearKernel"
+        return "shared projections require XPUW8A16Fp8LinearKernel"
     tensors = (
         runner.routed_experts.w13_weight,
         runner.routed_experts.w2_weight,

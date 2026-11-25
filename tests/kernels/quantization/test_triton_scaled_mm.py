@@ -189,18 +189,18 @@ def test_triton_int8_linear_asymmetric_matches_exact(M, static):
     # An outlier channel gives a large zero point whose term nearly cancels
     # A_q @ B_q; subtracting it after rounding to bf16 loses the result.
     from vllm import _custom_ops as ops
-    from vllm.model_executor.kernels.linear.scaled_mm import (
-        Int8ScaledMMLinearLayerConfig,
-        TritonInt8ScaledMMLinearKernel,
+    from vllm.model_executor.kernels.linear.int8 import (
+        Int8LinearLayerConfig,
+        TritonInt8LinearKernel,
     )
 
     set_random_seed(0)
     N, K = 1024, 4096
     names = ["weight", "weight_scale", "input_scale", "input_zero_point", "azp_adj"]
-    config = Int8ScaledMMLinearLayerConfig(
+    config = Int8LinearLayerConfig(
         is_static_input_scheme=static, is_channelwise=True, input_symmetric=False
     )
-    kernel = TritonInt8ScaledMMLinearKernel(config, names)
+    kernel = TritonInt8LinearKernel(config, names)
     layer = torch.nn.Module()
     layer.logical_widths = [N]
     w = torch.randint(-128, 128, (N, K), dtype=torch.int8, device=device)

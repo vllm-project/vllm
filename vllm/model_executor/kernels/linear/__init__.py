@@ -1,15 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""This module re-exports linear kernel implementations to provide a
-stable import interface during an ongoing reorganization. Upcoming
-PRs will remove the scaled_mm and mixed_precision subdirectories
-and reorganize kernels by provider (aiter, cutlass, flashinfer, etc.)
-rather than by precision type. By centralizing exports here, we
-minimize the need to update imports across other modules when the
-internal structure changes. If you are adding a new kernel selector
-or kernel implementation, add it to this __init__.py to maintain
-import stability.
+"""Linear kernels, grouped by quantization scheme (`fp8`, `int8`, `mxfp4`, ...),
+and their selectors. Import kernels from here rather than from the scheme
+subpackages; add new kernels and selectors here too.
 """
 
 from collections.abc import Callable
@@ -22,8 +16,87 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.base import (
     LinearKernel,
     LinearKernelOracle,
-    MMLinearKernel,
     MMLinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.fp8 import (
+    Fp8BlockLinearKernel,
+    Fp8LinearKernel,
+    Fp8LinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.fp8.aiter import (
+    AiterFp8BlockLinearKernel,
+    AiterHipbMMPerTokenFp8LinearKernel,
+    AiterPerTokenFp8LinearKernel,
+    AiterPreshuffledPerTokenFp8LinearKernel,
+    AiterTritonPerTensorFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.b12x import (
+    B12xFp8BlockLinearKernel,
+    B12xTensorFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.cpu import (
+    CPUFp8BlockLinearKernel,
+    CPUFp8ChannelWiseLinearKernel,
+    CPUFp8PerTensorLinearKernel,
+    CPUFp8W8A8BlockLinearKernel,
+    CPUFp8W8A8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.cutlass import (
+    CutlassFp8BlockLinearKernel,
+    CutlassFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.deep_gemm import (
+    DeepGemmFp8BlockLinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.flashinfer import (
+    FlashInferFp8DeepGemmDynamicBlockLinearKernel,
+    FlashInferFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.humming import (
+    HummingFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.marlin import (
+    MarlinFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.pytorch import (
+    BlockWiseTorchFp8LinearKernel,
+    ChannelWiseTorchFp8LinearKernel,
+    PerTensorTorchFp8LinearKernel,
+    RowWiseTorchFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.rocm import (
+    ROCmFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.triton import (
+    TritonFp8BlockLinearKernel,
+    TritonFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.fp8.xpu import (
+    XPUFp8BlockLinearKernel,
+    XPUW8A8Fp8LinearKernel,
+    XPUW8A16Fp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.int8 import (
+    Int8LinearKernel,
+    Int8LinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.int8.aiter import (
+    AiterInt8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.int8.cpu import (
+    CPUInt8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.int8.cutlass import (
+    CutlassInt8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.int8.humming import (
+    HummingInt8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.int8.triton import (
+    TritonInt8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.int8.zentorch import (
+    ZentorchInt8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
@@ -187,75 +260,6 @@ from vllm.model_executor.kernels.linear.requantization_source import (
     FakeMxFp8LinearKernel,
     FakeNvFp4LinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm import (
-    Fp8BlockScaledMMLinearKernel,
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-    Int8ScaledMMLinearKernel,
-    Int8ScaledMMLinearLayerConfig,
-    ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
-    AiterFp8BlockScaledMMKernel,
-    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
-    AiterInt8ScaledMMLinearKernel,
-    AiterPerTokenFp8ScaledMMLinearKernel,
-    AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
-    AiterTritonPerTensorFp8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
-    B12xFp8BlockScaledMMKernel,
-    B12xTensorFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
-    CPUFp8BlockScaledMMKernel,
-    CPUFp8ChannelWiseScaledMMLinearKernel,
-    CPUFp8PerTensorScaledMMLinearKernel,
-    CPUFp8W8A8BlockScaledMMKernel,
-    CPUFP8W8A8ScaledMMLinearKernel,
-    CPUInt8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
-    CutlassFp8BlockScaledMMKernel,
-    CutlassFP8ScaledMMLinearKernel,
-    CutlassInt8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
-    DeepGemmFp8BlockScaledMMKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
-    FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
-    FlashInferFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.humming import (
-    HummingFP8ScaledMMLinearKernel,
-    HummingInt8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.marlin import (
-    MarlinFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
-    BlockWiseTorchFP8ScaledMMLinearKernel,
-    ChannelWiseTorchFP8ScaledMMLinearKernel,
-    PerTensorTorchFP8ScaledMMLinearKernel,
-    RowWiseTorchFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
-    ROCmFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.triton import (
-    TritonFp8BlockScaledMMKernel,
-    TritonFP8ScaledMMLinearKernel,
-    TritonInt8ScaledMMLinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
-    XPUFp8BlockScaledMMKernel,
-    XPUW8A8FP8LinearKernel,
-    XPUW8A16FP8LinearKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
-    ZentorchInt8ScaledMMLinearKernel,
-)
 from vllm.model_executor.layers.quantization.utils.humming import (
     prefers_humming,
     prioritize_humming,
@@ -309,23 +313,23 @@ def _batch_invariant_fp8_kernel(kernel, config, quantization: str):
 # Kernel classes covered by each --linear-backend value.
 _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type[LinearKernel]]] = {
     "b12x": {
-        B12xFp8BlockScaledMMKernel,
+        B12xFp8BlockLinearKernel,
         B12xMxFp4LinearKernel,
         B12xMxfp8LinearKernel,
         B12xNvFp4LinearKernel,
         B12xNvFp4W4A16LinearKernel,
-        B12xTensorFP8ScaledMMLinearKernel,
+        B12xTensorFp8LinearKernel,
     },
     "cutlass": {
-        CutlassInt8ScaledMMLinearKernel,
-        CutlassFP8ScaledMMLinearKernel,
-        CutlassFp8BlockScaledMMKernel,
+        CutlassInt8LinearKernel,
+        CutlassFp8LinearKernel,
+        CutlassFp8BlockLinearKernel,
         CutlassW4A8LinearKernel,
         CutlassNvFp4LinearKernel,
     },
     "flashinfer_cutlass": {
-        FlashInferFP8ScaledMMLinearKernel,
-        FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+        FlashInferFp8LinearKernel,
+        FlashInferFp8DeepGemmDynamicBlockLinearKernel,
         FlashInferCutlassMxfp8LinearKernel,
         FlashInferCutlassNvFp4LinearKernel,
         FlashInferMxFp4LinearKernel,
@@ -346,8 +350,8 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type[LinearKernel]]] = {
         FlashInferB12xNvFp4LinearKernel,
     },
     "humming": {
-        HummingFP8ScaledMMLinearKernel,
-        HummingInt8ScaledMMLinearKernel,
+        HummingFp8LinearKernel,
+        HummingInt8LinearKernel,
         HummingLinearKernel,
         HummingMxfp8LinearKernel,
         HummingMxFp4LinearKernel,
@@ -355,36 +359,36 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type[LinearKernel]]] = {
         HummingNvFp4LinearKernel,
     },
     "marlin": {
-        MarlinFP8ScaledMMLinearKernel,
+        MarlinFp8LinearKernel,
         MarlinLinearKernel,
         MarlinMxfp8LinearKernel,
         MarlinNvFp4LinearKernel,
         MarlinMxFp4LinearKernel,
     },
     "triton": {
-        TritonInt8ScaledMMLinearKernel,
-        TritonFp8BlockScaledMMKernel,
+        TritonInt8LinearKernel,
+        TritonFp8BlockLinearKernel,
         TritonW4A16LinearKernel,
     },
     "deep_gemm": {
-        DeepGemmFp8BlockScaledMMKernel,
+        DeepGemmFp8BlockLinearKernel,
         DeepGemmMxfp8BmmLinearKernel,
     },
     "torch": {
-        PerTensorTorchFP8ScaledMMLinearKernel,
-        ChannelWiseTorchFP8ScaledMMLinearKernel,
-        RowWiseTorchFP8ScaledMMLinearKernel,
-        BlockWiseTorchFP8ScaledMMLinearKernel,
+        PerTensorTorchFp8LinearKernel,
+        ChannelWiseTorchFp8LinearKernel,
+        RowWiseTorchFp8LinearKernel,
+        BlockWiseTorchFp8LinearKernel,
         TorchMxFp4LinearKernel,
         TorchMxFp8LinearKernel,
         TorchNvFp4LinearKernel,
     },
     "aiter": {
-        AiterInt8ScaledMMLinearKernel,
-        AiterFp8BlockScaledMMKernel,
-        AiterPerTokenFp8ScaledMMLinearKernel,
-        AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
-        AiterTritonPerTensorFp8ScaledMMLinearKernel,
+        AiterInt8LinearKernel,
+        AiterFp8BlockLinearKernel,
+        AiterPerTokenFp8LinearKernel,
+        AiterPreshuffledPerTokenFp8LinearKernel,
+        AiterTritonPerTensorFp8LinearKernel,
         AiterMxfp4LinearKernel,
     },
     "machete": {
@@ -406,11 +410,11 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type[LinearKernel]]] = {
         EmulationMxfp4LinearKernel,
     },
     "xpu": {
-        XPUW8A8FP8LinearKernel,
-        XPUFp8BlockScaledMMKernel,
+        XPUW8A8Fp8LinearKernel,
+        XPUFp8BlockLinearKernel,
     },
     "xpu_woq": {
-        XPUW8A16FP8LinearKernel,
+        XPUW8A16Fp8LinearKernel,
     },
 }
 
@@ -468,87 +472,87 @@ def _resolve_backend_kernels(
 
 
 # in priority/performance order (when available)
-_POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]] = {
-    PlatformEnum.CPU: [ZentorchInt8ScaledMMLinearKernel, CPUInt8ScaledMMLinearKernel],
+_POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8LinearKernel]]] = {
+    PlatformEnum.CPU: [ZentorchInt8LinearKernel, CPUInt8LinearKernel],
     PlatformEnum.CUDA: [
-        CutlassInt8ScaledMMLinearKernel,
-        TritonInt8ScaledMMLinearKernel,
-        HummingInt8ScaledMMLinearKernel,
+        CutlassInt8LinearKernel,
+        TritonInt8LinearKernel,
+        HummingInt8LinearKernel,
     ],
-    PlatformEnum.ROCM: [AiterInt8ScaledMMLinearKernel, TritonInt8ScaledMMLinearKernel],
-    PlatformEnum.XPU: [TritonInt8ScaledMMLinearKernel],
+    PlatformEnum.ROCM: [AiterInt8LinearKernel, TritonInt8LinearKernel],
+    PlatformEnum.XPU: [TritonInt8LinearKernel],
 }
 
 # in priority/performance order (when available)
-_POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] = {
+_POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[Fp8LinearKernel]]] = {
     PlatformEnum.CUDA: [
-        FlashInferFP8ScaledMMLinearKernel,
-        CutlassFP8ScaledMMLinearKernel,
-        B12xTensorFP8ScaledMMLinearKernel,
-        PerTensorTorchFP8ScaledMMLinearKernel,
-        ChannelWiseTorchFP8ScaledMMLinearKernel,
-        MarlinFP8ScaledMMLinearKernel,
-        HummingFP8ScaledMMLinearKernel,
+        FlashInferFp8LinearKernel,
+        CutlassFp8LinearKernel,
+        B12xTensorFp8LinearKernel,
+        PerTensorTorchFp8LinearKernel,
+        ChannelWiseTorchFp8LinearKernel,
+        MarlinFp8LinearKernel,
+        HummingFp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
-        AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
-        AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
-        AiterPerTokenFp8ScaledMMLinearKernel,
-        AiterTritonPerTensorFp8ScaledMMLinearKernel,
-        ROCmFP8ScaledMMLinearKernel,
-        PerTensorTorchFP8ScaledMMLinearKernel,
-        RowWiseTorchFP8ScaledMMLinearKernel,
-        ChannelWiseTorchFP8ScaledMMLinearKernel,
+        AiterHipbMMPerTokenFp8LinearKernel,
+        AiterPreshuffledPerTokenFp8LinearKernel,
+        AiterPerTokenFp8LinearKernel,
+        AiterTritonPerTensorFp8LinearKernel,
+        ROCmFp8LinearKernel,
+        PerTensorTorchFp8LinearKernel,
+        RowWiseTorchFp8LinearKernel,
+        ChannelWiseTorchFp8LinearKernel,
     ],
     PlatformEnum.CPU: [
-        CPUFP8W8A8ScaledMMLinearKernel,
-        CPUFp8PerTensorScaledMMLinearKernel,
-        CPUFp8ChannelWiseScaledMMLinearKernel,
-        PerTensorTorchFP8ScaledMMLinearKernel,
-        ChannelWiseTorchFP8ScaledMMLinearKernel,
+        CPUFp8W8A8LinearKernel,
+        CPUFp8PerTensorLinearKernel,
+        CPUFp8ChannelWiseLinearKernel,
+        PerTensorTorchFp8LinearKernel,
+        ChannelWiseTorchFp8LinearKernel,
     ],
     PlatformEnum.XPU: [
-        XPUW8A16FP8LinearKernel,
-        XPUW8A8FP8LinearKernel,
-        PerTensorTorchFP8ScaledMMLinearKernel,
-        ChannelWiseTorchFP8ScaledMMLinearKernel,
+        XPUW8A16Fp8LinearKernel,
+        XPUW8A8Fp8LinearKernel,
+        PerTensorTorchFp8LinearKernel,
+        ChannelWiseTorchFp8LinearKernel,
     ],
 }
 
 
 # in priority/performance order (when available)
 _POSSIBLE_FP8_BLOCK_KERNELS: dict[
-    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel | FP8ScaledMMLinearKernel]]
+    PlatformEnum, list[type[Fp8BlockLinearKernel | Fp8LinearKernel]]
 ] = {
     PlatformEnum.CUDA: [
-        FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
-        DeepGemmFp8BlockScaledMMKernel,
-        CutlassFp8BlockScaledMMKernel,
-        B12xFp8BlockScaledMMKernel,
-        MarlinFP8ScaledMMLinearKernel,
-        HummingFP8ScaledMMLinearKernel,
-        TritonFp8BlockScaledMMKernel,
-        BlockWiseTorchFP8ScaledMMLinearKernel,
+        FlashInferFp8DeepGemmDynamicBlockLinearKernel,
+        DeepGemmFp8BlockLinearKernel,
+        CutlassFp8BlockLinearKernel,
+        B12xFp8BlockLinearKernel,
+        MarlinFp8LinearKernel,
+        HummingFp8LinearKernel,
+        TritonFp8BlockLinearKernel,
+        BlockWiseTorchFp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
-        AiterFp8BlockScaledMMKernel,
-        TritonFp8BlockScaledMMKernel,
+        AiterFp8BlockLinearKernel,
+        TritonFp8BlockLinearKernel,
     ],
     PlatformEnum.CPU: [
-        CPUFp8W8A8BlockScaledMMKernel,  # W8A8 preferred; falls back to W8A16 below
-        CPUFp8BlockScaledMMKernel,
+        CPUFp8W8A8BlockLinearKernel,  # W8A8 preferred; falls back to W8A16 below
+        CPUFp8BlockLinearKernel,
     ],
     PlatformEnum.XPU: [
-        XPUFp8BlockScaledMMKernel,
-        TritonFp8BlockScaledMMKernel,
-        BlockWiseTorchFP8ScaledMMLinearKernel,
+        XPUFp8BlockLinearKernel,
+        TritonFp8BlockLinearKernel,
+        BlockWiseTorchFp8LinearKernel,
     ],
 }
 
-_POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] = {
+_POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[Fp8LinearKernel]]] = {
     PlatformEnum.CUDA: [
-        HummingFP8ScaledMMLinearKernel,
-        MarlinFP8ScaledMMLinearKernel,
+        HummingFp8LinearKernel,
+        MarlinFp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
         # To be added
@@ -557,7 +561,7 @@ _POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]
         # To be added
     ],
     PlatformEnum.XPU: [
-        XPUW8A16FP8LinearKernel,
+        XPUW8A16Fp8LinearKernel,
     ],
 }
 
@@ -672,7 +676,7 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     ],
 }
 
-_KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel | MMLinearKernel)
+_KernelT = TypeVar("_KernelT", bound=LinearKernel)
 _LinearKernelT = TypeVar("_LinearKernelT", bound=LinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
 
@@ -736,7 +740,7 @@ def _first_usable_kernel(
     return None, failure_reasons
 
 
-def _int8_activation_quant_key(config: Int8ScaledMMLinearLayerConfig) -> QuantKey:
+def _int8_activation_quant_key(config: Int8LinearLayerConfig) -> QuantKey:
     if config.is_static_input_scheme:
         return kInt8StaticTensorSym if config.input_symmetric else kInt8StaticTensorAsym
     return kInt8DynamicTokenSym if config.input_symmetric else kInt8DynamicTokenAsym
@@ -844,7 +848,7 @@ def choose_scaled_mm_linear_kernel(
 
     raise ValueError(
         "Failed to find a kernel that can implement the "
-        "ScaledMM linear layer. Reasons: \n" + "\n".join(failure_reason_list)
+        "FP8 or INT8 linear layer. Reasons: \n" + "\n".join(failure_reason_list)
     )
 
 
@@ -854,14 +858,14 @@ def init_fp8_linear_kernel(
     input_dtype: torch.dtype,
     out_dtype: torch.dtype,
     weight_shape: tuple[int, int],
-    force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
+    force_kernel: type[Fp8LinearKernel] | None = None,
     module_name: str | None = None,
-) -> FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel:
+) -> Fp8LinearKernel | Fp8BlockLinearKernel:
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
         return FakeFp8LinearKernel()
 
-    scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
+    scaled_mm_linear_kernel_config = Fp8LinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
         input_dtype=input_dtype,
@@ -872,7 +876,7 @@ def init_fp8_linear_kernel(
     if activation_quant_key.scale.group_shape.is_per_group():
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
             force_kernel = _batch_invariant_fp8_kernel(
-                TritonFp8BlockScaledMMKernel,
+                TritonFp8BlockLinearKernel,
                 scaled_mm_linear_kernel_config,
                 "fp8_block_w8a8",
             )
@@ -892,9 +896,8 @@ def init_fp8_linear_kernel(
                 scope="global",
             )
 
-        # TODO make scaled_mm kernels inherit from MMLinearKernel
-        # only MarlinFP8ScaledMMLinearKernel is a type of FP8ScaledMMLinearKernel.
-        if issubclass(kernel_type, FP8ScaledMMLinearKernel):
+        # only MarlinFp8LinearKernel is a type of Fp8LinearKernel.
+        if issubclass(kernel_type, Fp8LinearKernel):
             return kernel_type(
                 scaled_mm_linear_kernel_config,
                 layer_param_names=[
@@ -912,7 +915,7 @@ def init_fp8_linear_kernel(
     else:
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
             force_kernel = _batch_invariant_fp8_kernel(
-                TritonFP8ScaledMMLinearKernel,
+                TritonFp8LinearKernel,
                 scaled_mm_linear_kernel_config,
                 "fp8_w8a8",
             )
@@ -944,15 +947,13 @@ def init_fp8_linear_kernel(
 
 
 def fp8_scaled_mm_is_batch_invariant(
-    kernel: FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel,
+    kernel: Fp8LinearKernel | Fp8BlockLinearKernel,
 ) -> bool:
     """Whether a row's output from the kernel is independent of the other rows."""
     # Weight-only here, and Humming honors VLLM_BATCH_INVARIANT itself.
-    if isinstance(kernel, HummingFP8ScaledMMLinearKernel):
+    if isinstance(kernel, HummingFp8LinearKernel):
         return True
-    if not isinstance(
-        kernel, (CutlassFP8ScaledMMLinearKernel, TritonFP8ScaledMMLinearKernel)
-    ):
+    if not isinstance(kernel, (CutlassFp8LinearKernel, TritonFp8LinearKernel)):
         return False
     # A dynamic per-tensor activation scale is an amax over every row.
     scale = kernel.config.activation_quant_key.scale
@@ -965,12 +966,12 @@ def init_int8_linear_kernel(
     input_symmetric: bool,
     module_name: str,
     is_fused_module: bool = False,
-) -> Int8ScaledMMLinearKernel:
+) -> Int8LinearKernel:
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
         return FakeInt8LinearKernel()
 
-    config = Int8ScaledMMLinearLayerConfig(
+    config = Int8LinearLayerConfig(
         is_channelwise=is_channelwise,
         is_static_input_scheme=is_static_input_scheme,
         input_symmetric=input_symmetric,
@@ -1272,14 +1273,14 @@ def init_wfp8_a16_linear_kernel(
     weight_shape: tuple[int, int],
     input_dtype: torch.dtype,
     out_dtype: torch.dtype,
-    force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
+    force_kernel: type[Fp8LinearKernel] | None = None,
     module_name: str | None = None,
-) -> FP8ScaledMMLinearKernel:
+) -> Fp8LinearKernel:
     # TODO: migrate to oracle base method.
     if LinearKernelOracle.maybe_skip_for_requantization_source():
         return FakeFp8LinearKernel()
 
-    config = FP8ScaledMMLinearLayerConfig(
+    config = Fp8LinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
         weight_shape=weight_shape,
@@ -1494,29 +1495,27 @@ __all__ = [
     "choose_mp_linear_kernel",
     "register_linear_kernel",
     "init_wfp8_a16_linear_kernel",
-    "FP8ScaledMMLinearKernel",
-    "Int8ScaledMMLinearKernel",
-    "ScaledMMLinearKernel",
-    "FP8ScaledMMLinearLayerConfig",
-    "Int8ScaledMMLinearLayerConfig",
-    "ScaledMMLinearLayerConfig",
-    "AiterHipbMMPerTokenFp8ScaledMMLinearKernel",
-    "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
-    "AiterPerTokenFp8ScaledMMLinearKernel",
-    "AiterTritonPerTensorFp8ScaledMMLinearKernel",
+    "Fp8LinearKernel",
+    "Int8LinearKernel",
+    "Fp8LinearLayerConfig",
+    "Int8LinearLayerConfig",
+    "AiterHipbMMPerTokenFp8LinearKernel",
+    "AiterPreshuffledPerTokenFp8LinearKernel",
+    "AiterPerTokenFp8LinearKernel",
+    "AiterTritonPerTensorFp8LinearKernel",
     "NvFp4LinearKernel",
     "NvFp4LinearLayerConfig",
-    "AiterInt8ScaledMMLinearKernel",
-    "CPUInt8ScaledMMLinearKernel",
-    "CutlassFP8ScaledMMLinearKernel",
-    "CutlassInt8ScaledMMLinearKernel",
-    "FlashInferFP8ScaledMMLinearKernel",
-    "ChannelWiseTorchFP8ScaledMMLinearKernel",
-    "PerTensorTorchFP8ScaledMMLinearKernel",
-    "RowWiseTorchFP8ScaledMMLinearKernel",
-    "ROCmFP8ScaledMMLinearKernel",
-    "TritonInt8ScaledMMLinearKernel",
-    "ZentorchInt8ScaledMMLinearKernel",
+    "AiterInt8LinearKernel",
+    "CPUInt8LinearKernel",
+    "CutlassFp8LinearKernel",
+    "CutlassInt8LinearKernel",
+    "FlashInferFp8LinearKernel",
+    "ChannelWiseTorchFp8LinearKernel",
+    "PerTensorTorchFp8LinearKernel",
+    "RowWiseTorchFp8LinearKernel",
+    "ROCmFp8LinearKernel",
+    "TritonInt8LinearKernel",
+    "ZentorchInt8LinearKernel",
     "ZentorchWNA16LinearKernel",
     "MPLinearKernel",
     "MPLinearLayerConfig",
@@ -1570,8 +1569,8 @@ __all__ = [
     "MarlinNvFp4LinearKernel",
     "TorchNvFp4LinearKernel",
     "_KernelT",
-    "DeepGemmFp8BlockScaledMMKernel",
-    "FlashInferFp8DeepGEMMDynamicBlockScaledKernel",
-    "B12xFp8BlockScaledMMKernel",
-    "B12xTensorFP8ScaledMMLinearKernel",
+    "DeepGemmFp8BlockLinearKernel",
+    "FlashInferFp8DeepGemmDynamicBlockLinearKernel",
+    "B12xFp8BlockLinearKernel",
+    "B12xTensorFp8LinearKernel",
 ]

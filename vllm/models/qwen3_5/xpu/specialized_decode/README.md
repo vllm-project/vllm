@@ -32,7 +32,7 @@ validation were measured on two Arc Pro B70 devices; other supported devices
 require separate validation.
 
 Routed experts must use `XPUExpertsFp8`; shared projections must use
-`XPUW8A16FP8LinearKernel`. Static guards also check routing semantics, sharding,
+`XPUW8A16Fp8LinearKernel`. Static guards also check routing semantics, sharding,
 scale shapes, native dimensions, device placement, contiguity and alignment.
 All detectable deployment and per-layer failures are collected across the TP
 CPU group and reported at startup with instructions to select `auto`.

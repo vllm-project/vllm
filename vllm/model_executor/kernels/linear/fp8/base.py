@@ -4,7 +4,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Generic, TypeVar
 
 import torch
 
@@ -22,19 +21,7 @@ from ..base import LinearKernel, MMLinearLayerConfig
 
 
 @dataclass(slots=True)
-class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
-    # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
-    is_static_input_scheme: bool
-    is_channelwise: bool
-    input_symmetric: bool
-    # More than one logical output partition (e.g. QKV). Per-tensor weight
-    # scales of such layers hold one scale per partition and are expanded to
-    # per-channel scales after loading.
-    is_fused_module: bool = False
-
-
-@dataclass(slots=True)
-class FP8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
+class Fp8LinearLayerConfig(MMLinearLayerConfig):
     weight_quant_key: QuantKey
     activation_quant_key: QuantKey
     weight_shape: tuple[int, int]
@@ -48,36 +35,11 @@ _FP8ParamsT = tuple[
     torch.Tensor | None,  # input_scale,
     torch.Tensor | None,  # input_scale_ub,
 ]
-_Int8ParamsT = tuple[
-    torch.Tensor,  # weight
-    torch.Tensor,  # weight_scale
-    torch.Tensor | None,  # input_scale,
-    torch.Tensor | None,  # input_zp
-    torch.Tensor | None,  # azp_adj
-]
-
-_ParamsT = TypeVar("_ParamsT", _Int8ParamsT, _FP8ParamsT)
-_ConfigT = TypeVar("_ConfigT", bound=MMLinearLayerConfig)
 
 
-class ScaledMMLinearKernel(LinearKernel[_ConfigT], Generic[_ConfigT, _ParamsT]):
-    def __init__(self, c: _ConfigT, layer_param_names: Sequence[str]) -> None:
-        assert self.can_implement(c)[0]
-        assert self.is_supported()[0]
-        self.config = c
-        self.layer_param_names = layer_param_names
-
-    # return a covariant type in the subclass
-    @abstractmethod
-    def _get_layer_params(self, layer) -> _ParamsT:
-        raise NotImplementedError
-
-
-class FP8ScaledMMLinearKernel(
-    ScaledMMLinearKernel[FP8ScaledMMLinearLayerConfig, _FP8ParamsT], ABC
-):
+class Fp8LinearKernel(LinearKernel[Fp8LinearLayerConfig], ABC):
     def __init__(
-        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+        self, c: Fp8LinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
         act_scale_descriptor = c.activation_quant_key.scale
         self.quant_fp8 = QuantFP8(
@@ -86,7 +48,8 @@ class FP8ScaledMMLinearKernel(
             num_token_padding=self.get_output_padding(),
         )
         self.fp8_dtype = current_platform.fp8_dtype()
-        super().__init__(c, layer_param_names)
+        super().__init__(c)
+        self.layer_param_names = layer_param_names
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
@@ -153,18 +116,3 @@ class FP8ScaledMMLinearKernel(
 
     def get_output_padding(self) -> int | None:
         return None
-
-
-class Int8ScaledMMLinearKernel(
-    ScaledMMLinearKernel[Int8ScaledMMLinearLayerConfig, _Int8ParamsT], ABC
-):
-    def _get_layer_params(self, layer) -> _Int8ParamsT:
-        w_q, w_s, i_s, i_zp, azp_adj = self.layer_param_names
-        return (
-            getattr(layer, w_q),
-            getattr(layer, w_s),
-            getattr(layer, i_s, None),
-            # A loaded zero point of a symmetric scheme stays registered, unused.
-            None if self.config.input_symmetric else getattr(layer, i_zp, None),
-            getattr(layer, azp_adj, None),
-        )

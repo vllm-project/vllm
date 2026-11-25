@@ -12,14 +12,16 @@ from typing import Any
 
 import torch
 
+from vllm.model_executor.kernels.linear.fp8 import (
+    Fp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.int8 import (
+    Int8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp4 import MxFp4LinearKernel
 from vllm.model_executor.kernels.linear.mxfp6 import MxFp6LinearKernel
 from vllm.model_executor.kernels.linear.mxfp8 import Mxfp8LinearKernel
 from vllm.model_executor.kernels.linear.nvfp4 import NvFp4LinearKernel
-from vllm.model_executor.kernels.linear.scaled_mm import (
-    FP8ScaledMMLinearKernel,
-    Int8ScaledMMLinearKernel,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 _NO_KERNEL = (
@@ -54,11 +56,11 @@ class _FakeLinearKernel:
         raise RuntimeError(_NO_KERNEL)
 
 
-class FakeFp8LinearKernel(_FakeLinearKernel, FP8ScaledMMLinearKernel):
+class FakeFp8LinearKernel(_FakeLinearKernel, Fp8LinearKernel):
     pass
 
 
-class FakeInt8LinearKernel(_FakeLinearKernel, Int8ScaledMMLinearKernel):
+class FakeInt8LinearKernel(_FakeLinearKernel, Int8LinearKernel):
     pass
 
 

@@ -55,17 +55,17 @@ def _assert_modernbert_online_fp8(model) -> None:
             f"{name} was not quantized with online FP8"
         )
         if current_platform.is_xpu():
-            from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
-                XPUW8A8FP8LinearKernel,
+            from vllm.model_executor.kernels.linear.fp8.xpu import (
+                XPUW8A8Fp8LinearKernel,
             )
 
-            assert isinstance(linear.quant_method.fp8_linear, XPUW8A8FP8LinearKernel)
+            assert isinstance(linear.quant_method.fp8_linear, XPUW8A8Fp8LinearKernel)
 
 
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(
     _fp8_scaled_mm_unsupported(),
-    reason="No FP8 ScaledMM kernel is available on this GPU type.",
+    reason="No FP8 linear kernel is available on this GPU type.",
 )
 def test_modernbert_online_fp8_mteb(hf_runner, vllm_runner, monkeypatch) -> None:
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")

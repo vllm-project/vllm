@@ -20,11 +20,11 @@ from vllm.utils.b12x import (
 )
 from vllm.utils.torch_utils import current_stream
 
-from .BlockScaledMMLinearKernel import (
-    Fp8BlockScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
+from .base import Fp8LinearKernel
+from .block_base import (
+    Fp8BlockLinearKernel,
+    Fp8LinearLayerConfig,
 )
-from .ScaledMMLinearKernel import FP8ScaledMMLinearKernel
 
 
 def _run_b12x_fp8_block_scaled_mm(
@@ -46,7 +46,7 @@ def _run_b12x_fp8_block_scaled_mm(
     )
 
 
-class B12xFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+class B12xFp8BlockLinearKernel(Fp8BlockLinearKernel):
     """K128 block-FP8 linear through the native B12X SM120 dense GEMM."""
 
     @classmethod
@@ -69,7 +69,7 @@ class B12xFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     @classmethod
     def can_implement(
         cls,
-        config: FP8ScaledMMLinearLayerConfig,
+        config: Fp8LinearLayerConfig,
     ) -> tuple[bool, str | None]:
         can_implement_base, reason = super().can_implement(config)
         if not can_implement_base:
@@ -198,7 +198,7 @@ def _apply_b12x_tensor_fp8_packed_linear(
     return output.view(*output_shape)
 
 
-class B12xTensorFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class B12xTensorFp8LinearKernel(Fp8LinearKernel):
     """Static per-tensor FP8 linear through the B12X SM12x dense GEMM."""
 
     @classmethod
@@ -221,7 +221,7 @@ class B12xTensorFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def can_implement(
         cls,
-        config: FP8ScaledMMLinearLayerConfig,
+        config: Fp8LinearLayerConfig,
     ) -> tuple[bool, str | None]:
         activation_scale = config.activation_quant_key.scale
         weight_scale = config.weight_quant_key.scale
@@ -336,6 +336,6 @@ class B12xTensorFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
 
 __all__ = [
-    "B12xFp8BlockScaledMMKernel",
-    "B12xTensorFP8ScaledMMLinearKernel",
+    "B12xFp8BlockLinearKernel",
+    "B12xTensorFp8LinearKernel",
 ]

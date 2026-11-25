@@ -26,13 +26,13 @@ from vllm.config.cache import CacheConfig, CacheDType
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor import parameter
-from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
-    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
-    AiterPerTokenFp8ScaledMMLinearKernel,
-    AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+from vllm.model_executor.kernels.linear.fp8.aiter import (
+    AiterHipbMMPerTokenFp8LinearKernel,
+    AiterPerTokenFp8LinearKernel,
+    AiterPreshuffledPerTokenFp8LinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
-    FP8ScaledMMLinearLayerConfig,
+from vllm.model_executor.kernels.linear.fp8.base import (
+    Fp8LinearLayerConfig,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -141,9 +141,9 @@ QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
 AITER_AVAILABLE = is_aiter_found_and_supported()
 
 AITER_PTPC_KERNELS = (
-    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
-    AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
-    AiterPerTokenFp8ScaledMMLinearKernel,
+    AiterHipbMMPerTokenFp8LinearKernel,
+    AiterPreshuffledPerTokenFp8LinearKernel,
+    AiterPerTokenFp8LinearKernel,
 )
 
 DEVICE_TYPE = current_platform.device_type
@@ -1592,7 +1592,7 @@ def test_quark_fp8_ptpc_exposes_kernel_input_quant_key(monkeypatch):
     # Llama-3.1-70B qkv_proj at TP1 (aiter-tuned N, K on gfx950).
     N, K = 10240, 8192
     dtype = torch.bfloat16
-    kernel_config = FP8ScaledMMLinearLayerConfig(
+    kernel_config = Fp8LinearLayerConfig(
         weight_quant_key=kFp8StaticChannelSym,
         activation_quant_key=kFp8DynamicTokenSym,
         weight_shape=(N, K),
@@ -3227,8 +3227,8 @@ def test_quark_static_int8_moe_compilation(
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
 
     def check_model(model):
-        from vllm.model_executor.kernels.linear.scaled_mm.triton import (
-            TritonInt8ScaledMMLinearKernel,
+        from vllm.model_executor.kernels.linear.int8.triton import (
+            TritonInt8LinearKernel,
         )
 
         for layer in model.model.layers:
@@ -3245,7 +3245,7 @@ def test_quark_static_int8_moe_compilation(
             assert experts.w13_input_scale.item() == 0.03125
             assert experts.w2_input_scale.item() == 0.015625
             assert isinstance(
-                layer.self_attn.qkv_proj.scheme.kernel, TritonInt8ScaledMMLinearKernel
+                layer.self_attn.qkv_proj.scheme.kernel, TritonInt8LinearKernel
             )
 
     outputs = []

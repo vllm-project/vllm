@@ -11,11 +11,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm import (
-    CutlassFP8ScaledMMLinearKernel,
+from vllm.model_executor.kernels.linear.fp8 import (
+    CutlassFp8LinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
-    CutlassFp8BlockScaledMMKernel,
+from vllm.model_executor.kernels.linear.fp8.cutlass import (
+    CutlassFp8BlockLinearKernel,
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
@@ -86,9 +86,9 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
         kernel = getattr(self, "fp8_linear", None)
-        return isinstance(kernel, CutlassFP8ScaledMMLinearKernel) or (
+        return isinstance(kernel, CutlassFp8LinearKernel) or (
             self.weight_block_size == [128, 128]
-            and isinstance(kernel, CutlassFp8BlockScaledMMKernel)
+            and isinstance(kernel, CutlassFp8BlockLinearKernel)
         )
 
     @classmethod
