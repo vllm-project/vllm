@@ -10,6 +10,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed.device_communicators.all_reduce_utils import (
     NCCL_SYMM_MEM_ALL_REDUCE_CONFIG,
+    can_p2p,
     should_nccl_symm_mem_ag_rs,
     should_nccl_symm_mem_allreduce,
 )
@@ -60,6 +61,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_torch_symm_mem = False
             use_flashinfer_allreduce = False
             use_flashinfer_pcie_ipc_allreduce = False
+            use_pinned_host_allreduce = False
             use_aiter_allreduce = False
         else:
             from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
@@ -74,6 +76,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 envs.VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC
                 and not envs.VLLM_BATCH_INVARIANT
             )
+            use_pinned_host_allreduce = envs.VLLM_ALLREDUCE_USE_PINNED_HOST
             # Neither AITER nor QuickReduce all-reduce has a fixed reduction order.
             use_aiter_allreduce = (
                 use_custom_allreduce
@@ -85,6 +88,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
         self.use_flashinfer_pcie_ipc_allreduce = use_flashinfer_pcie_ipc_allreduce
+        self.use_pinned_host_allreduce = use_pinned_host_allreduce
         self.use_aiter_allreduce = use_aiter_allreduce
 
         # lazy import to avoid documentation build error
@@ -96,6 +100,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
         from vllm.distributed.device_communicators.flashinfer_pcie_ipc_all_reduce import (  # noqa: E501
             FlashInferPcieIpcAllReduce,
+        )
+        from vllm.distributed.device_communicators.pinned_host_all_reduce import (
+            PinnedHostAllReduce,
         )
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
         from vllm.distributed.device_communicators.quick_all_reduce import (
@@ -117,6 +124,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
         self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
+        self.pinned_host_ar_comm: PinnedHostAllReduce | None = None
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
         self.use_aiter_ag_rs: bool = False
         self.use_aiter_tp_all_gather: bool = False
@@ -153,6 +161,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 group=self.cpu_group,
                 device=self.device,
                 register_graph_buffers=register,
+            )
+
+        # Only where custom allreduce cannot run: two GPUs without peer access.
+        if (
+            self.use_pinned_host_allreduce
+            and self.world_size == 2
+            and current_platform.is_cuda()
+            and tcp_store_group is None
+            and (config is None or not config.parallel_config.use_ubatching)
+            and not self._can_access_peer()
+        ):
+            self.pinned_host_ar_comm = PinnedHostAllReduce(
+                group=self.cpu_group, device=self.device
             )
 
         if use_custom_allreduce and self.aiter_ar_comm is None and self.world_size > 1:
@@ -305,6 +326,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 scope="global",
             )
 
+    def _can_access_peer(self) -> bool:
+        from vllm.distributed.parallel_state import get_world_group
+
+        # Local ranks are the logical device IDs `can_p2p` takes.
+        local_rank = get_world_group().local_rank
+        local_ranks: list[int] = [0] * self.world_size
+        torch.distributed.all_gather_object(
+            local_ranks, local_rank, group=self.cpu_group
+        )
+        return can_p2p(local_rank, local_ranks)
+
     @staticmethod
     def _mori_ep_v2() -> bool:
         config = get_current_vllm_config_or_none()
@@ -327,6 +359,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "QUICK_REDUCE",
             "AITER_CUSTOM",
             "CUSTOM",
+            "PINNED_HOST",
             "SYMM_MEM",
             "PYNCCL",
         ]
@@ -372,6 +405,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             enabled_ar_backends.append("AITER_CUSTOM")
         if self.ca_comm is not None and not self.ca_comm.disabled:
             enabled_ar_backends.append("CUSTOM")
+        if (
+            self.pinned_host_ar_comm is not None
+            and not self.pinned_host_ar_comm.disabled
+        ):
+            enabled_ar_backends.append("PINNED_HOST")
         if self.symm_mem_comm is not None and not self.symm_mem_comm.disabled:
             enabled_ar_backends.append("SYMM_MEM")
         if self.pynccl_comm is not None and not self.pynccl_comm.disabled:
@@ -440,6 +478,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = ca_comm.custom_all_reduce(input_)
             assert out is not None
             return out
+        pinned_host_ar_comm = self.pinned_host_ar_comm
+        if pinned_host_ar_comm is not None and pinned_host_ar_comm.should_use(input_):
+            return pinned_host_ar_comm.all_reduce(input_)
         if (
             envs.VLLM_BATCH_INVARIANT
             and current_platform.is_rocm()
@@ -876,6 +917,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.fi_pcie_ipc_ar_comm is not None:
             self.fi_pcie_ipc_ar_comm.destroy()
             self.fi_pcie_ipc_ar_comm = None
+        if self.pinned_host_ar_comm is not None:
+            self.pinned_host_ar_comm.close()
+            self.pinned_host_ar_comm = None
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
             self.all2all_manager = None  # type: ignore[assignment]

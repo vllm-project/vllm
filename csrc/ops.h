@@ -671,6 +671,17 @@ std::tuple<int64_t, torch::stable::Tensor> allocate_shared_buffer_and_handle(
 int64_t open_mem_handle(torch::stable::Tensor& mem_handle);
 void free_shared_buffer(int64_t buffer);
 
+#ifndef USE_ROCM
+int64_t pinned_host_ar_buffer_size(int64_t ll_max, int64_t flag_max,
+                                   int64_t max_size);
+fptr_t init_pinned_host_ar(int64_t host_ptr, int64_t host_bytes, int64_t rank,
+                           int64_t ll_max, int64_t flag_max, int64_t max_size,
+                           int64_t start_seq);
+void pinned_host_all_reduce(fptr_t _fa, torch::stable::Tensor& inp,
+                            torch::stable::Tensor& out);
+void dispose_pinned_host_ar(fptr_t _fa);
+#endif
+
 void muse_spark_mul_tanh_soft_cap(torch::stable::Tensor& out,
                                   torch::stable::Tensor& input,
                                   double multiplier, double soft_cap_temp);

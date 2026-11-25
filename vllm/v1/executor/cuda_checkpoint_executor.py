@@ -110,6 +110,7 @@ class CUDACheckpointExecutor(MultiprocExecutor):
                 "VLLM_ALLREDUCE_USE_FLASHINFER": "0",
                 "VLLM_ALLREDUCE_USE_SYMM_MEM": "0",
                 "VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC": "0",
+                "VLLM_ALLREDUCE_USE_PINNED_HOST": "0",
                 "VLLM_USE_NCCL_SYMM_MEM": "0",
             }
             if vllm_config.model_config.enable_nccl_comm_suspend:

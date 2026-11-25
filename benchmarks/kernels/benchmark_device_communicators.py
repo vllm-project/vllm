@@ -4,7 +4,7 @@
 
 """Benchmark script for device communicators:
 CustomAllreduce (oneshot, twoshot), PyNcclCommunicator,
-and SymmMemCommunicator (multimem, two-shot).
+SymmMemCommunicator (multimem, two-shot) and PinnedHostAllReduce (two GPUs).
 
 for NCCL symmetric memory you need to set the environment variables
 NCCL_NVLS_ENABLE=1 NCCL_CUMEM_ENABLE=1 VLLM_USE_NCCL_SYMM_MEM=1, otherwise NCCL does
@@ -42,6 +42,9 @@ from vllm.distributed.device_communicators.custom_all_reduce import CustomAllred
 from vllm.distributed.device_communicators.flashinfer_all_reduce import (
     FlashInferAllReduce,
 )
+from vllm.distributed.device_communicators.pinned_host_all_reduce import (
+    PinnedHostAllReduce,
+)
 from vllm.distributed.device_communicators.pynccl import (
     PyNcclCommunicator,
     register_nccl_symmetric_ops,
@@ -78,6 +81,7 @@ COMM_COLLECTIVE = {
     "symm_mem_two_shot": "all-reduce",
     "flashinfer_trtllm": "all-reduce",
     "flashinfer_mnnvl": "all-reduce",
+    "pinned_host": "all-reduce",
     "aiter_ag": "all-gather",
     "pynccl_ag": "all-gather",
     "tp_ag": "all-gather",
@@ -134,6 +138,7 @@ class CommunicatorBenchmark:
         self.symm_mem_comm_multimem = None
         self.symm_mem_comm_two_shot = None
         self.fi_ar_comm = None
+        self.pinned_host_ar_comm = None
         self.aiter_comm = None
         self.tp_comm: CudaCommunicator | None = None
 
@@ -215,6 +220,11 @@ class CommunicatorBenchmark:
                 e,
             )
             self.symm_mem_comm_two_shot = None
+
+        if self.world_size == 2:
+            self.pinned_host_ar_comm = PinnedHostAllReduce(self.cpu_group, self.device)
+            if self.pinned_host_ar_comm.disabled:
+                self.pinned_host_ar_comm = None
 
         try:
             self.fi_ar_comm = FlashInferAllReduce(
@@ -363,6 +373,19 @@ class CommunicatorBenchmark:
                     nullcontext(),
                     {"VLLM_FLASHINFER_ALLREDUCE_BACKEND": "mnnvl"},
                     lambda c=comm: c.destroy(),
+                )
+            )
+
+        if self.pinned_host_ar_comm is not None:
+            comm = self.pinned_host_ar_comm
+            communicators.append(
+                (
+                    "pinned_host",
+                    lambda t, c=comm: c.all_reduce(t),
+                    lambda t, c=comm: c.should_use(t),
+                    nullcontext(),
+                    {},  # no env variable needed
+                    None,  # no destroy function
                 )
             )
 

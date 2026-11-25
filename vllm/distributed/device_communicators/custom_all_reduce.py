@@ -12,7 +12,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.all_reduce_utils import (
     CUSTOM_ALL_REDUCE_MAX_SIZES,
-    gpu_p2p_access_check,
+    can_p2p,
 )
 from vllm.distributed.device_communicators.nvlink_fabric import (
     SymmetricMemoryTopology,
@@ -84,23 +84,6 @@ def _group_can_attempt_mnnvl(
         and _has_local_multicast_support(device)
     )
     return _all_ranks_true(group, local_support)
-
-
-def _can_p2p(rank: int, world_size: int) -> bool:
-    for i in range(world_size):
-        if i == rank:
-            continue
-        if envs.VLLM_SKIP_P2P_CHECK:
-            logger.debug("Skipping P2P check and trusting the driver's P2P report.")
-            # can_device_access_peer takes visible device ordinals, while
-            # rank and i are logical local IDs.
-            return torch.cuda.can_device_access_peer(
-                current_platform.logical_device_id_to_visible_device_id(rank),
-                current_platform.logical_device_id_to_visible_device_id(i),
-            )
-        if not gpu_p2p_access_check(rank, i):
-            return False
-    return True
 
 
 def _supports_mnnvl_multimem_reduce_scatter(
@@ -290,7 +273,7 @@ class CustomAllreduce:
         if (
             same_node
             and not current_platform.is_rocm()
-            and not _can_p2p(rank, world_size)
+            and not can_p2p(rank, range(world_size))
         ):
             logger.warning(
                 "Custom allreduce is disabled because your platform lacks "

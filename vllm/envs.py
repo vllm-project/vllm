@@ -296,6 +296,7 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
+    VLLM_ALLREDUCE_USE_PINNED_HOST: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -2101,6 +2102,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # integration is being qualified.
     "VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "0"))
+    ),
+    # Whether to use the pinned-host all-reduce for TP=2 on one node when the
+    # two GPUs have no peer access (e.g. consumer GPUs on PCIe), where NCCL
+    # falls back to its shared-memory transport. Inputs up to 2 MiB are
+    # exchanged through pinned host memory; larger ones still use NCCL.
+    "VLLM_ALLREDUCE_USE_PINNED_HOST": lambda: bool(
+        int(os.getenv("VLLM_ALLREDUCE_USE_PINNED_HOST", "0"))
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(

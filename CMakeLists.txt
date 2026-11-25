@@ -485,7 +485,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
-      "csrc/fused_qknorm_rope_cache_kernel.cu")
+      "csrc/fused_qknorm_rope_cache_kernel.cu"
+      "csrc/pinned_host_all_reduce.cu")
     # CUDA-only: the tanh.approx inline PTX does not hipify.
     list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/mamba/gdn_prefill_conv.cu")
