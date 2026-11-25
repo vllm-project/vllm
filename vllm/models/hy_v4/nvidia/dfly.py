@@ -38,10 +38,10 @@ from vllm.transformers_utils.configs.hy_v4 import HYV4Config
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import set_default_torch_dtype
 
+from ..common.mrope import set_token_rope
 from ..dfly_config import HYV4DFlySpeculatorConfig
 from .model import HYV4DecoderLayer
 from .moe import HYV4FeedForward
-from .mrope import set_token_rope
 
 
 class HYV4DFlyQuantizationConfig(CompressedTensorsConfig):

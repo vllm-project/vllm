@@ -70,9 +70,9 @@ def test_registry_imports(model_arch):
 
     if (
         model_arch == "HYV4VLForConditionalGeneration"
-        and not current_platform.is_cuda()
+        and not current_platform.is_cuda_alike()
     ):
-        pytest.skip("HYV4 VL is only supported on NVIDIA CUDA")
+        pytest.skip("HYV4 VL is only supported on CUDA and ROCm")
 
     if (
         model_arch == "DeepseekV4ForConditionalGeneration"
@@ -206,6 +206,21 @@ def test_registry_inspect_does_not_init_cuda(model_arch):
             not (current_platform.is_rocm() or current_platform.is_xpu()),
         ),
         ("KimiK3ForConditionalGeneration", not current_platform.is_rocm()),
+        ("Qwen3_5ForCausalLM", True),
+        ("Qwen3_5MoeForCausalLM", True),
+        ("Qwen3_5ForConditionalGeneration", True),
+        ("Qwen3_5MoeForConditionalGeneration", True),
+        *(
+            pytest.param(
+                arch,
+                True,
+                marks=pytest.mark.skipif(
+                    not current_platform.is_cuda_alike(),
+                    reason="Qwen4Exp supports CUDA and ROCm only",
+                ),
+            )
+            for arch in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration")
+        ),
         ("Mamba2ForCausalLM", False),
         ("Zamba2ForCausalLM", False),
     ],
