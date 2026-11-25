@@ -248,6 +248,22 @@ def test_a_committed_rebind_keeps_the_capacity_views(forward_context):
     assert mixer.kv_cache[0].shape[0] == NUM_BLOCKS - 2
 
 
+def test_shared_replayssm_tracker_setup_skips_gdp_layers(forward_context):
+    """--use-replayssm makes the model runner bind the shared ReplaySSM trackers
+    (Mamba-2, Gated DeltaNet) on every layer that sets MambaBase.use_replayssm.
+    GDP replay keeps its own cursors, so a GDP layer must not be picked up."""
+    from vllm.v1.worker.replayssm_utils import initialize_replayssm_ring_trackers
+
+    name = "model.layers.0.shared_trackers"
+    mixer = _mixer(3, name)
+    assert mixer.use_gdp_replayssm and not mixer.use_replayssm
+    groups = [SimpleNamespace(layer_names=[name])]
+    initialize_replayssm_ring_trackers(
+        SimpleNamespace(kv_cache_groups=groups), {name: mixer}
+    )
+    assert not hasattr(mixer, "_replayssm_ring_start")
+
+
 def test_without_replay_a_rebind_takes_the_new_views(forward_context):
     mixer = _mixer(3, "model.layers.0.plain_rebind")
     mixer.gdp_replay_trackers = None
