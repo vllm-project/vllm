@@ -1035,27 +1035,10 @@ class TestTritonTopkTopp:
         tt.apply_top_k_top_p_triton(logits, k, None)
         assert torch.accelerator.memory_allocated() == reserved
 
-    def test_launch_cache_releases_inputs(self):
-        """Launches are cached per shape, but not their logits, k and p: verification
-        sees hundreds of row counts, and keeping each one's logits ran out of memory.
-        Checked after the first call (cache miss) and after a repeated one (hit)."""
-        import vllm.v1.sample.ops.topk_topp_triton as tt
-
-        tt.reset_buffer_cache()
-        batch, vocab = 40, 65536
-        tt.reserve_workspace(torch.device(DEVICE_TYPE, 0), batch, vocab)
-        before = torch.accelerator.memory_allocated()
-        for _ in range(2):
-            logits = torch.randn(batch, vocab, generator=self.generator)
-            k = torch.full((batch,), 20, dtype=torch.int32)
-            tt.apply_top_k_top_p_triton(logits, k, torch.full((batch,), 0.9))
-            del logits, k
-            assert torch.accelerator.memory_allocated() == before
-
     def test_misaligned_logits_after_an_aligned_call(self):
         """Triton specializes pointers on 16-byte alignment, so logits 4 bytes off
-        it must not reuse the cached launch of an aligned call of the same shape
-        (it failed with `CUDA error: misaligned address`)."""
+        it must not run the variant of an aligned call of the same shape (it failed
+        with `CUDA error: misaligned address`)."""
         from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
         batch, vocab = 8, 65536

@@ -22,11 +22,11 @@
    c. Fill (rows x splits): -inf, then the kept logits of the rows cut by a tier.
 Exactly k logits are kept, ties broken by the lowest index, then the smallest prefix
 whose mass reaches p. Runtime ints are not specialized, so one compiled variant serves
-every batch size and k/p mix, and the launches are cached per shape.
+every batch size and k/p mix.
 """
 
 import functools
-from typing import Any, NamedTuple
+from typing import Any
 
 import torch
 
@@ -110,15 +110,15 @@ def apply_top_k_top_p_triton(
     empty = functools.partial(torch.empty, 0, device=logits.device)
     k = empty(dtype=torch.int32) if k is None else k.to(torch.int32)
     p = empty(dtype=torch.float32) if p is None else p.to(torch.float32)
-    # Triton specializes pointers on 16-byte alignment, which cached launches skip.
-    aligned = all(t.data_ptr() % 16 == 0 for t in (logits, k, p))
-    key = Key(logits.device, rows, vocab, logits.stride(0), has_k, has_p, aligned)
-    plan = _PLANS.get(key)
-    if plan is None:
-        return launch_jit(logits, k, p, key)
-    stream = torch.cuda.current_stream(logits.device).cuda_stream
-    run(plan.levels, stream, (logits, k, p))
-    run(plan.filter, stream, (logits, k, p))
+    device = logits.device
+    b = buffers(device, rows, vocab)
+    levels_args, filter_args = kernel_args(
+        logits, k, p, has_k, has_p, b, num_sms(device)
+    )
+    _levels_kernel[(rows, levels_args["splits"])](**levels_args, **LEVELS_OPTS)
+    capacity_key = (device, filter_args["SUPERGROUPS_P2"])
+    programs = min(capacity(capacity_key, filter_args), rows * levels_args["splits"])
+    _filter_kernel[(programs,)](**filter_args, **FILTER_OPTS)
     return logits
 
 
@@ -136,7 +136,6 @@ def register_warmups() -> None:
 
 def reset_buffer_cache() -> None:
     _BUFFERS.clear()
-    _PLANS.clear()
 
 
 @functools.cache
@@ -151,68 +150,6 @@ def _supported_device() -> bool:
         return False
     capability = current_platform.get_device_capability()
     return capability is not None and capability.major >= 8
-
-
-class Key(NamedTuple):
-    """The shape of a call: the logits' device, shape and row stride, whether k and p
-    are given, and whether all three pointers (logits, k, p) are 16-byte aligned."""
-
-    device: torch.device
-    logits_shape0: int
-    logits_shape1: int
-    logits_stride0: int
-    has_k: bool
-    has_p: bool
-    aligned: bool
-
-
-class Launch(NamedTuple):
-    """A compiled kernel, its grid, and its arguments after logits, k and p."""
-
-    kernel: Any  # triton CompiledKernel
-    grid: tuple
-    fixed: list
-
-
-class Plan(NamedTuple):
-    """The launches of one shape."""
-
-    levels: Launch
-    filter: Launch
-
-
-# Launches cached per shape: Triton's launcher with ~40 keyword arguments costs tens
-# of µs of host time per call, which shows at small batch. They never hold the
-# caller's logits, k or p.
-_PLANS: dict[Key, Plan] = {}
-
-
-def launch_jit(
-    logits: torch.Tensor, k: torch.Tensor, p: torch.Tensor, key: Key
-) -> torch.Tensor:
-    """Launch through Triton's JIT (compiling if needed) and cache the launches."""
-    rows, vocab = logits.shape
-    device = logits.device
-    b = buffers(device, rows, vocab)
-    args = (logits, k, p, key.has_k, key.has_p, b, num_sms(device))
-    levels_args, filter_args = kernel_args(*args)
-    levels_grid = (rows, levels_args["splits"], 1)
-    levels = _levels_kernel[levels_grid](**levels_args, **LEVELS_OPTS)
-    capacity_key = (device, filter_args["SUPERGROUPS_P2"])
-    programs = min(capacity(capacity_key, filter_args), rows * levels_args["splits"])
-    filter_ = _filter_kernel[(programs,)](**filter_args, **FILTER_OPTS)
-    _PLANS[key] = Plan(
-        levels=cached_launch(levels, _levels_kernel, levels_grid, levels_args),
-        filter=cached_launch(filter_, _filter_kernel, (programs, 1, 1), filter_args),
-    )
-    return logits
-
-
-def run(launch: Launch, stream: int, per_call: tuple) -> None:
-    """Launch a cached kernel directly, without Triton's argument handling."""
-    kernel = launch.kernel
-    meta = (kernel.function, kernel.packed_metadata, None, None, None)
-    kernel.run(*launch.grid, stream, *meta, *per_call, *launch.fixed)
 
 
 LEVELS_OPTS = dict(num_warps=4)
@@ -327,12 +264,10 @@ _SYNC: dict[torch.device, torch.Tensor] = {}
 
 
 def buffers(device: torch.device, rows: int, vocab: int) -> dict[str, torch.Tensor]:
-    """Per-row workspace for at least rows rows. Growing it drops the cached launches,
-    which hold the old one."""
+    """Per-row workspace for at least rows rows."""
     key = (device, vocab)
     if key not in _BUFFERS or _BUFFERS[key]["state"].numel() < rows:
         _BUFFERS[key] = allocate(device, rows, vocab)
-        _PLANS.clear()
     return _BUFFERS[key]
 
 
@@ -363,11 +298,6 @@ def allocate(device: torch.device, rows: int, vocab: int) -> dict[str, torch.Ten
         queue=empty(rows, dtype=torch.int32),
         sync=_SYNC[device],
     )
-
-
-def cached_launch(compiled, jit, grid: tuple, kwargs: dict) -> Launch:
-    assert jit.arg_names[:3] == ["logits_ptr", "k_ptr", "p_ptr"]
-    return Launch(compiled, grid, [kwargs[name] for name in jit.arg_names[3:]])
 
 
 def split_chunk(vocab: int, splits: int) -> int:
