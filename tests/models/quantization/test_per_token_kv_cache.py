@@ -17,9 +17,9 @@ from vllm.platforms import current_platform
 from ..utils import check_logprobs_close, check_logprobs_shift
 
 # (mean, largest) logprob shift from bf16 allowed per position, see
-# `check_logprobs_shift`. On MI355X the mean is 0.21-0.24 for int4, 0.04-0.05
-# for int8 and 0.07-0.08 for fp8 with every request grouping and GEMM kernel
-# set; the largest is at most 1.51, 0.28 and 0.70.
+# `check_logprobs_shift`. On MI355X, over the request groupings and GEMM kernel
+# sets tried, the mean is 0.21-0.24 for int4, 0.04-0.05 for int8 and 0.07-0.08
+# for fp8; the largest is at most 1.51, 0.33 and 0.70.
 LOGPROB_SHIFT_BOUNDS = {
     "int4_per_token_head": (0.3, 2.0),
     "int8_per_token_head": (0.065, 0.45),
