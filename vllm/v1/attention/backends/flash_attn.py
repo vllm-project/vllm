@@ -896,7 +896,10 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.mm_prefix_query_ranges_cpu: torch.Tensor | None = None
         self.mm_prefix_query_ranges_np: np.ndarray | None = None
         self.mm_prefix_query_ranges_gpu: torch.Tensor | None = None
-        if self.model_config.is_mm_prefix_lm:
+        layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+        if self.model_config.is_mm_prefix_lm and (
+            not layers or any(layer.use_mm_prefix for layer in layers.values())
+        ):
             max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             self.mm_prefix_query_ranges_cpu = torch.empty(
                 (max_num_tokens, 2), dtype=torch.int32, pin_memory=PIN_MEMORY
