@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
-
-import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+
+from ..base import LinearKernel
 
 
 @dataclass(slots=True)
@@ -31,7 +30,7 @@ class Mxfp8LinearLayerConfig:
     activation_quant_key: QuantKey | None = kMxfp8Dynamic
 
 
-class Mxfp8LinearKernel(ABC):
+class Mxfp8LinearKernel(LinearKernel[Mxfp8LinearLayerConfig]):
     """Base class for MXFP8 quantized linear kernels.
 
     Each subclass implements a specific GEMM backend (FlashInfer CUTLASS,
@@ -41,11 +40,6 @@ class Mxfp8LinearKernel(ABC):
     supports_pre_processed_weights: bool = False
     """True if `process_weights_after_loading` only rewrites parameters, so
     weights exported by the weight cache daemon can be used as-is."""
-
-    def __init__(self, c: Mxfp8LinearLayerConfig) -> None:
-        assert self.can_implement(c)[0]
-        assert self.is_supported()[0]
-        self.config = c
 
     @classmethod
     def _supports_quant_scheme(
@@ -57,49 +51,3 @@ class Mxfp8LinearKernel(ABC):
         externally quantized inputs, not the precision used inside the GEMM.
         """
         return weight_key == kMxfp8Static and activation_key == kMxfp8Dynamic
-
-    def input_quant_key(self) -> QuantKey | None:
-        """Return the input quantization key supported by this kernel. If the kernel
-        does not support input quantization outside of the kernel, return None.
-        """
-        return None
-
-    @classmethod
-    @abstractmethod
-    def is_supported(
-        cls, compute_capability: int | None = None
-    ) -> tuple[bool, str | None]:
-        raise NotImplementedError
-
-    @classmethod
-    def executed_activation_key(
-        cls, activation_quant_key: QuantKey | None
-    ) -> QuantKey | None:
-        """The activation quantization the kernel runs for a layer requesting
-        `activation_quant_key`. Weight-only kernels return None; kernel
-        selection then warns about, or under VLLM_STRICT_QUANT_SCHEME forbids,
-        the fallback."""
-        return activation_quant_key
-
-    @classmethod
-    @abstractmethod
-    def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
-        raise NotImplementedError
-
-    @classmethod
-    def supports_batch_invariance(cls) -> bool:
-        """Whether a row's output is independent of the other rows in the batch."""
-        return False
-
-    @abstractmethod
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        raise NotImplementedError

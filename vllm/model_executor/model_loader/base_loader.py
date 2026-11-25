@@ -4,6 +4,7 @@ import gc
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Generator
+from weakref import WeakKeyDictionary
 
 import torch
 import torch.nn as nn
@@ -19,6 +20,7 @@ from vllm.model_executor.model_loader.reload.direct import (
 )
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
+    log_layer_backends,
     process_weights_after_loading,
 )
 from vllm.platforms import current_platform
@@ -50,6 +52,54 @@ class BaseModelLoader(ABC):
         """Load weights into a model. This standalone API allows
         inplace weights loading for an already-initialized model"""
         raise NotImplementedError
+
+    def on_sleep(self, level: int) -> None:  # noqa: B027
+        """Called before `Worker.sleep(level)` frees the GPU memory holding
+        the weights of the model this loader loaded.
+
+        No-op by default. Override to release or pause any external state
+        that depends on that memory remaining valid before it becomes
+        invalid.
+        """
+
+    def on_wake_up(self, tags: list[str] | None) -> None:  # noqa: B027
+        """Called after `Worker.wake_up(tags)` returns.
+
+        No-op by default. Override to resume whatever `on_sleep` paused.
+        `tags` is the same argument `wake_up` was called with; the weights
+        are woken only when it is `None` or includes `"weights"`. Once woken
+        after a level-1 sleep, the weights are valid here. After a level-2
+        sleep they are not: they only become valid once the `reload_model`
+        call that follows has completed.
+        """
+
+    def reload_model(
+        self,
+        vllm_config: VllmConfig,
+        model_config: ModelConfig,
+        model: nn.Module,
+        *,
+        is_checkpoint_format: bool = True,
+    ) -> None:
+        """Reload `model`'s weights in place from this loader's source.
+
+        Used by `reload_weights()` when no weights are provided. After a
+        level-2 sleep this is the point where weights become valid again.
+        The default streams `get_all_weights()` through the generic in-place
+        reload. Loaders that write final weights into the model themselves
+        override it; the instance that loaded `model` is then reused, so
+        state it keeps across `on_sleep`/`on_wake_up` sees the reload.
+        """
+        from vllm.model_executor.model_loader.reload.inplace import (
+            reload_weights_from_iterator,
+        )
+
+        reload_weights_from_iterator(
+            vllm_config,
+            model,
+            self.get_all_weights(model_config, model),
+            is_checkpoint_format,
+        )
 
     def create_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
@@ -101,37 +151,65 @@ class BaseModelLoader(ABC):
                     time_after_load - time_before_load,
                 )
 
-            logger.debug("Loading weights on %s ...", load_device)
-            if direct_reload_enabled():
-                track_loaded_params(model)  # what every update must load again
-            self.load_weights(model, model_config)
+            try:
+                logger.debug("Loading weights on %s ...", load_device)
+                if direct_reload_enabled():
+                    track_loaded_params(model)  # what every update must load again
+                self.load_weights(model, model_config)
 
-            # Release transient tensors held by PyTorch's caching allocator
-            # before weight post-processing and raw CUDA driver allocations.
+                # Release transient tensors held by PyTorch's caching allocator
+                # before weight post-processing and raw CUDA driver allocations.
+                gc.collect()
+                torch.accelerator.empty_cache()
+
+                # Log peak GPU memory after loading weights. This is needed
+                # to have test coverage on peak memory for online quantization.
+                if current_platform.is_cuda_alike() or current_platform.is_xpu():
+                    peak_memory = torch.accelerator.max_memory_allocated()
+                    logger.debug_once(
+                        "Peak GPU memory after loading weights: %s GiB",
+                        format_gib(peak_memory),
+                    )
+
+                # Process weights into kernel format. Note that when using online
+                # quantization, weights are (typically) quantized as they are loaded.
+                if _has_online_quant(model):
+                    finalize_layerwise_processing(model, model_config)
+
+                process_weights_after_loading(model, model_config, target_device)
+                log_online_quantization_time(vllm_config)
+            except Exception:
+                # The model runner logs the backends of a loaded model. A
+                # failed load never reaches it, but its selections were made.
+                log_layer_backends(model, model_config, load_failed=True)
+                raise
+
             gc.collect()
             torch.accelerator.empty_cache()
 
-            # Log peak GPU memory after loading weights. This is needed
-            # to have test coverage on peak memory for online quantization.
-            if current_platform.is_cuda_alike() or current_platform.is_xpu():
-                peak_memory = torch.accelerator.max_memory_allocated()
-                logger.debug_once(
-                    "Peak GPU memory after loading weights: %s GiB",
-                    format_gib(peak_memory),
-                )
+        model = model.eval()
+        bind_model_loader(model, self)
+        return model
 
-            # Process weights into kernel format. Note that when using online
-            # quantization, weights are (typically) quantized as they are loaded.
-            if _has_online_quant(model):
-                finalize_layerwise_processing(model, model_config)
 
-            process_weights_after_loading(model, model_config, target_device)
-            log_online_quantization_time(vllm_config)
+_MODEL_LOADERS: WeakKeyDictionary[nn.Module, BaseModelLoader] = WeakKeyDictionary()
 
-            gc.collect()
-            torch.accelerator.empty_cache()
 
-        return model.eval()
+def bind_model_loader(model: nn.Module, loader: BaseModelLoader) -> None:
+    """Record `loader` as the loader that loaded `model`."""
+    _MODEL_LOADERS[model] = loader
+
+
+def get_bound_model_loader(model: nn.Module | None) -> BaseModelLoader | None:
+    """Return the loader that loaded `model`, if it was recorded."""
+    return None if model is None else _MODEL_LOADERS.get(model)
+
+
+def unbind_model_loader(model: nn.Module | None) -> None:
+    """Forget the loader recorded for `model`. A loader that references its
+    model keeps the entry, and so the model, alive until this is called."""
+    if model is not None:
+        _MODEL_LOADERS.pop(model, None)
 
 
 def log_model_inspection(model: nn.Module) -> None:

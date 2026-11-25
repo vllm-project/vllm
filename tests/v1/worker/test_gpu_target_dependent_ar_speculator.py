@@ -23,10 +23,13 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
+    prepare_input_buffers,
+    prepare_input_hidden_states_and_embeddings,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as spec_module
@@ -340,6 +343,79 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
     assert speculator.inputs_embeds.shape == (4, 3)
     assert speculator.cached_draft_input_embeds is not None
     assert speculator.cached_draft_input_embeds.shape == (2, 2, 3)
+
+
+@pytest.mark.parametrize("use_input_embeds", [False, True])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires a GPU")
+def test_multi_module_mtp_reprefill_uses_only_cached_request_history(
+    use_input_embeds,
+):
+    """Rejecting all drafts must not replay the previous slot occupant's data."""
+    device = torch.device("cuda")
+    steps, hidden_size, max_reqs, max_tokens, slot = 4, 8, 2, 5, 1
+    target_buffers = InputBuffers(max_reqs, max_tokens, device)
+    batch = InputBatch.make_dummy(1, max_tokens, target_buffers, is_padding=False)
+    batch.idx_mapping.fill_(slot)
+    batch.idx_mapping_np.fill(slot)
+    batch.input_ids.copy_(torch.tensor([5100, 1, 2, 3, 4], device=device))
+    batch.positions.copy_(torch.arange(2, 7, device=device))
+    batch.seq_lens.fill_(7)
+    buffers = InputBuffers(max_reqs, max_tokens, device)
+    buffers.query_start_loc.copy_(target_buffers.query_start_loc)
+    hidden_states = torch.zeros(max_tokens, hidden_size, device=device)
+    embeds = torch.full_like(hidden_states, 30.0) if use_input_embeds else None
+    cached_ids = torch.tensor([[0, 0, 0], [9005, 5001, 5100]], device=device)
+    cached_hidden = torch.full((max_reqs, steps - 1, hidden_size), 3.0, device=device)
+    cached_hidden[slot, 0].fill_(7.0)
+    num_cached_tokens = torch.tensor([0, 2], dtype=torch.int32, device=device)
+    rejected = torch.tensor([4], dtype=torch.int32, device=device)
+    last_indices = torch.zeros(max_reqs, dtype=torch.int64, device=device)
+    prepare_input_buffers(
+        1,
+        batch,
+        cached_ids,
+        num_cached_tokens,
+        torch.ones(1, dtype=torch.int32, device=device),
+        rejected,
+        torch.full((max_reqs,), 5200, device=device),
+        torch.zeros(steps, max_reqs, dtype=torch.int32, device=device),
+        torch.full((max_reqs, steps - 1), -1, device=device),
+        buffers,
+        last_indices,
+        max_reqs,
+        steps,
+    )
+    prepare_input_hidden_states_and_embeddings(
+        1,
+        max_tokens,
+        hidden_states,
+        torch.full_like(hidden_states, 3.0),
+        cached_hidden,
+        num_cached_tokens,
+        embeds,
+        10 * cached_hidden if use_input_embeds else None,
+        batch,
+        buffers,
+        rejected,
+        steps,
+    )
+
+    assert buffers.input_ids[:3].tolist() == [5001, 5100, 5200]
+    assert buffers.positions[:3].tolist() == [0, 1, 2]
+    assert last_indices[0].item() == 2
+    torch.testing.assert_close(
+        hidden_states[:3],
+        torch.full_like(hidden_states[:3], 3.0),
+        rtol=0,
+        atol=0,
+    )
+    if embeds is not None:
+        torch.testing.assert_close(
+            embeds[:3],
+            torch.full_like(embeds[:3], 30.0),
+            rtol=0,
+            atol=0,
+        )
 
 
 @pytest.mark.parametrize(
