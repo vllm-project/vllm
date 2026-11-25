@@ -292,7 +292,6 @@ def _pool_bytes_per_block_from_builder(
     value through `KVCacheConfigBuilder._get_pool_bytes_per_block`. HiSparse
     keeps the pure computation, since probing its placement would check the host
     pool against `max_model_len` before auto-fit shortens it.
-    `num_gpu_blocks_override` is suppressed so it cannot inflate the probe.
     """
     if not kv_cache_groups:
         return 0
@@ -301,14 +300,14 @@ def _pool_bytes_per_block_from_builder(
     pool_bytes = builder._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
     if pool_bytes is not None:
         return pool_bytes
-    saved_override = vllm_config.cache_config.num_gpu_blocks_override
-    vllm_config.cache_config.num_gpu_blocks_override = None
-    try:
-        probe = builder.get_kv_cache_config_from_groups(
-            vllm_config, kv_cache_groups, num_blocks=1
+    probe = builder.get_kv_cache_config_from_groups(
+        vllm_config, kv_cache_groups, num_blocks=1
+    )
+    if probe.num_blocks != 1:
+        raise ValueError(
+            "KVCacheConfigBuilder.get_kv_cache_config_from_groups() must "
+            f"materialize the requested num_blocks (1), got {probe.num_blocks}."
         )
-    finally:
-        vllm_config.cache_config.num_gpu_blocks_override = saved_override
     backing_sizes = {
         tensor.size for tensor in probe.kv_cache_tensors if not tensor.host_resident
     }
@@ -633,22 +632,12 @@ def validate_kv_cache_layout(
         )
 
 
-def get_kv_cache_config_from_groups(
+def _build_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroup],
-    available_memory: int,
+    num_blocks: int,
 ) -> KVCacheConfig:
-    """Generate the KV cache configuration from the KV cache groups and spec
-    of each layer.
-
-    Args:
-        vllm_config: The global VllmConfig
-        kv_cache_groups: The KV cache groups
-        available_memory: Memory available for KV cache in bytes
-    Returns:
-        The generated KVCacheConfig
-
-    """
+    """Materialize a `KVCacheConfig` for `kv_cache_groups` with `num_blocks`."""
     if len(kv_cache_groups) == 0:
         # Attention free models do not have KV cache.
         # Return num_blocks=1 as BlockPool always needs a null_block.
@@ -664,16 +653,13 @@ def get_kv_cache_config_from_groups(
     if vllm_config.attention_config.hisparse_config is not None:
         host_budget = get_hisparse_host_pool_bytes(vllm_config)
         return get_hisparse_kv_cache_config(
-            vllm_config, kv_cache_groups, available_memory, host_budget
+            vllm_config, kv_cache_groups, num_blocks, host_budget
         )
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
     bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups, layout)
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
-
-    num_blocks = available_memory // bytes_per_block
-    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     size = bytes_per_block * num_blocks
 
     # Groups alias from byte 0. Spec regions are laid out differently:
@@ -725,6 +711,34 @@ def get_kv_cache_config_from_groups(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
     )
+
+
+def get_kv_cache_config_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroup],
+    available_memory: int,
+) -> KVCacheConfig:
+    """Generate the KV cache configuration from the KV cache groups and spec
+    of each layer.
+
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_groups: The KV cache groups
+        available_memory: Memory available for KV cache in bytes
+    Returns:
+        The generated KVCacheConfig
+
+    """
+    if len(kv_cache_groups) == 0:
+        return _build_kv_cache_config_from_groups(
+            vllm_config, kv_cache_groups, num_blocks=1
+        )
+
+    bytes_per_block = _pool_bytes_per_block(vllm_config, kv_cache_groups)
+    num_blocks = may_override_num_blocks(
+        vllm_config, available_memory // bytes_per_block
+    )
+    return _build_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
 
 
 def _is_local_attention(layer_config: KVCacheLayerConfig) -> bool:
@@ -1738,20 +1752,8 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
         num_blocks: int,
     ) -> KVCacheConfig:
         """See `KVCacheConfigBuilder.get_kv_cache_config_from_groups`."""
-        if len(kv_cache_groups) == 0:
-            # Attention free models do not have KV cache.
-            # Return num_blocks=1 as BlockPool always needs a null_block.
-            return KVCacheConfig(
-                num_blocks=1,
-                kv_cache_tensors=[],
-                kv_cache_groups=kv_cache_groups,
-                prefix_cache_retention_interval=(
-                    vllm_config.cache_config.prefix_cache_retention_interval
-                ),
-            )
-        bytes_per_block = _pool_bytes_per_block(vllm_config, kv_cache_groups)
-        return get_kv_cache_config_from_groups(
-            vllm_config, kv_cache_groups, num_blocks * bytes_per_block
+        return _build_kv_cache_config_from_groups(
+            vllm_config, kv_cache_groups, num_blocks
         )
 
 

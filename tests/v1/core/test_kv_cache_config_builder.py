@@ -215,9 +215,10 @@ class TestProjectionPreservesGroupMetadata:
 
 
 class TestBytesPerBlockProbe:
-    """The single-block probe must not be polluted by num_gpu_blocks_override."""
+    """The single-block probe and builder placement must honor exact num_blocks."""
 
-    def test_probe_suppresses_override(self):
+    @pytest.mark.parametrize("layout", ["LBNHC", "BLHNC"])
+    def test_builder_and_probe_ignore_num_gpu_blocks_override(self, layout):
         import torch
 
         from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -235,16 +236,44 @@ class TestBytesPerBlockProbe:
             model_config=ModelConfig(max_model_len=100),
             cache_config=CacheConfig(block_size=16),
         )
-        resolve_kv_cache_layout(vc, [["BLHNC"]], [full_layer(spec)])
+        resolve_kv_cache_layout(vc, [[layout]], [full_layer(spec)])
         groups = [new_kv_cache_group([name], spec) for name in "ab"]
 
         pure_c = _pool_bytes_per_block(vc, groups)
         vc.cache_config.num_gpu_blocks_override = 500
-        probed_c = _pool_bytes_per_block_from_builder(
-            DefaultKVCacheConfigBuilder(), vc, groups
-        )
+        builder = DefaultKVCacheConfigBuilder()
+
+        cfg = builder.get_kv_cache_config_from_groups(vc, groups, num_blocks=3)
+        assert cfg.num_blocks == 3
+        assert {t.size for t in cfg.kv_cache_tensors} == {3 * pure_c}
+
+        probed_c = _pool_bytes_per_block_from_builder(builder, vc, groups)
         assert probed_c == pure_c
         assert vc.cache_config.num_gpu_blocks_override == 500
+
+    def test_probe_rejects_builder_ignoring_num_blocks(self):
+        from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block_from_builder
+        from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
+
+        class OverridingBuilder(DefaultKVCacheConfigBuilder):
+            def get_kv_cache_config_from_groups(self, vllm_config, groups, num_blocks):
+                return KVCacheConfig(
+                    num_blocks=500,
+                    kv_cache_tensors=[
+                        KVCacheTensor(
+                            size=500 * 64,
+                            layers=groups[0].layer_names,
+                            layer_stride=500 * 64,
+                            block_stride=64,
+                        )
+                    ],
+                    kv_cache_groups=groups,
+                )
+
+        vc = _make_vllm_config()
+        groups = [new_kv_cache_group(["a"], new_kv_cache_spec())]
+        with pytest.raises(ValueError, match="requested num_blocks"):
+            _pool_bytes_per_block_from_builder(OverridingBuilder(), vc, groups)
 
     @pytest.mark.parametrize("declares_pool_bytes", [False, True])
     def test_several_device_allocations_need_declared_pool_bytes(

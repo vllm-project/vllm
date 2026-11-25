@@ -125,7 +125,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             nnodes_within_dp=1,
         ),
         cache_config=SimpleNamespace(
-            num_gpu_blocks_override=7,
+            num_gpu_blocks_override=99,
             prefix_cache_retention_interval=None,
             kv_cache_layout=KVCacheLayout.BLHNC.name,
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
@@ -134,8 +134,10 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     monkeypatch.setattr(
         kv_cache_planning, "get_hisparse_host_pool_bytes", lambda _: 2**30
     )
-    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        config, get_hisparse_kv_cache_groups(config, specs), available_memory=2**30
+    cache_config = (
+        kv_cache_planning.DefaultKVCacheConfigBuilder().get_kv_cache_config_from_groups(
+            config, get_hisparse_kv_cache_groups(config, specs), num_blocks=7
+        )
     )
     assert cache_config.num_blocks == 7
     assert cache_config.hisparse_host_num_blocks is not None
