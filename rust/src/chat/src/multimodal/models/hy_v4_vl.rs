@@ -1513,6 +1513,7 @@ mod tests {
             .prepare_videos(
                 vec![clip(2, "two"), clip(5, "five")],
                 vec![None, None],
+                0,
                 ModelDtype::Float32,
             )
             .await

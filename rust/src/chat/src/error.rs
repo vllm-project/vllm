@@ -56,6 +56,8 @@ pub enum Error {
     RustFrontendUnsupportedModality { modality: &'static str },
     #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
     MmLimitExceeded { modality: String, limit: usize },
+    #[error("video media bytes exceed the per-request limit of {limit} bytes")]
+    VideoBudgetExceeded { limit: usize },
     #[error("invalid inline multimodal features: {message}")]
     InvalidPreprocessedMultimodal { message: String },
     #[error(
@@ -183,7 +185,8 @@ impl Error {
             | Self::UnsupportedModality { .. }
             | Self::RustFrontendUnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
-            | Self::MmLimitExceeded { .. } => true,
+            | Self::MmLimitExceeded { .. }
+            | Self::VideoBudgetExceeded { .. } => true,
             // A media host that timed out or failed, and a decoder that failed
             // on this side, stay server errors, as in Python.
             Self::Media(error) => error.fault() == llm_multimodal::MediaFault::Client,
@@ -220,7 +223,14 @@ impl From<llm_multimodal::MultiModalError> for Error {
 
 impl From<llm_multimodal::TransformError> for Error {
     fn from(error: llm_multimodal::TransformError) -> Self {
-        Self::Multimodal(error.to_report_string())
+        match error {
+            llm_multimodal::TransformError::DecodedTooLarge {
+                limit,
+                knob: "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES",
+                ..
+            } => Self::VideoBudgetExceeded { limit },
+            error => Self::Multimodal(error.to_report_string()),
+        }
     }
 }
 

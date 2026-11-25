@@ -46,6 +46,7 @@ impl MultimodalModelInfo {
         &self,
         clips: Vec<Arc<VideoClip>>,
         uuids: Vec<Option<String>>,
+        mut used: usize,
         model_dtype: ModelDtype,
     ) -> Result<PreparedMedia> {
         let support = self
@@ -54,9 +55,11 @@ impl MultimodalModelInfo {
             .ok_or_else(|| self.unsupported_modality(MmModality::Video))?;
         let mut replacements = Vec::with_capacity(clips.len());
         let mut items = Vec::with_capacity(clips.len());
+        let limit = super::media_request_decode_bytes();
 
         for (clip, uuid) in izip!(&clips, uuids) {
             let preprocessed = self.preprocess_video_clip(support, Arc::clone(clip)).await?;
+            super::charge_video_bytes(&mut used, preprocessed.encoder_input.nbytes(), limit)?;
             // Hand the replacement hook the clip's decoder-side sampling so
             // temporal groups are stamped with the actually-sampled frames'
             // times. A clip whose decoder reported no sampling (`None`)
@@ -123,6 +126,9 @@ impl MultimodalModelInfo {
                             clip.sampling.as_ref(),
                         ) {
                             Ok(preprocessed) => return Ok(preprocessed),
+                            Err(error @ llm_multimodal::TransformError::DecodedTooLarge { .. }) => {
+                                return Err(error.into());
+                            }
                             Err(error) => warn!(
                                 error = %error.as_report(),
                                 "RGB video preprocessing fast path failed; falling back to materialized frames"
@@ -407,12 +413,13 @@ mod tests {
                     frame_indices: vec![0, 8, 17, 26, 35, 44, 53, 62],
                 }))],
                 vec![None],
+                0,
                 ModelDtype::Float32,
             )
             .await
             .unwrap();
         let fallback = info
-            .prepare_videos(vec![clip(None)], vec![None], ModelDtype::Float32)
+            .prepare_videos(vec![clip(None)], vec![None], 0, ModelDtype::Float32)
             .await
             .unwrap();
 
@@ -436,6 +443,34 @@ mod tests {
         .assert_eq(&sampled_text);
         expect_test::expect!["<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>0.0 seconds<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>2.0 seconds<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>4.0 seconds<|begin_of_image|><|image|><|image|><|image|><|image|><|image|><|image|><|end_of_image|>6.0 seconds"]
         .assert_eq(&fallback_text);
+    }
+
+    #[tokio::test]
+    async fn video_preprocessing_rejects_when_request_budget_is_already_spent() {
+        use image::{DynamicImage, Rgb, RgbImage};
+        use llm_multimodal::VideoSource;
+
+        use super::super::tests::muse_spark_info;
+
+        let info = muse_spark_info();
+        let clip = Arc::new(VideoClip::new_with_sample_fps(
+            vec![DynamicImage::ImageRgb8(RgbImage::from_pixel(
+                28,
+                28,
+                Rgb([128; 3]),
+            ))],
+            bytes::Bytes::new(),
+            VideoSource::InlineBytes,
+            "clip".to_owned(),
+            2.0,
+        ));
+        let limit = super::super::media_request_decode_bytes().unwrap();
+        let error = info
+            .prepare_videos(vec![clip], vec![None], limit - 1, ModelDtype::Float32)
+            .await
+            .err()
+            .expect("video request should exceed the budget");
+        assert!(matches!(error, Error::VideoBudgetExceeded { limit: value } if value == limit));
     }
 
     /// Nemotron's reference layout needs the decoder's source frame indices,
@@ -482,7 +517,7 @@ mod tests {
         )
         .with_sampling(clip.sampling.clone());
         let prepare = async |clip| {
-            info.prepare_videos(vec![Arc::new(clip)], vec![None], ModelDtype::Float32)
+            info.prepare_videos(vec![Arc::new(clip)], vec![None], 0, ModelDtype::Float32)
                 .await
                 .unwrap()
         };

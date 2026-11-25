@@ -105,6 +105,10 @@ denial of service:
 
 The request-wide media download and decode limits cover the entire batch in
 online pooling, scoring, reranking, embedding, and batched chat requests.
+In the experimental Rust frontend, `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` also
+limits the sum of compressed video bytes, decoded video frames, and preprocessed
+video tensors in a request. Video clips are fetched and decoded sequentially
+to bound request memory while this limit is enforced.
 
 Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the

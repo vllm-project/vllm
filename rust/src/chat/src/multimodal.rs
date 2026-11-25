@@ -422,8 +422,45 @@ struct FetchedMedia {
     image_uuids: Vec<Option<String>>,
     videos: Vec<Arc<VideoClip>>,
     video_uuids: Vec<Option<String>>,
+    video_bytes: usize,
     audios: Vec<Arc<AudioClip>>,
     audio_uuids: Vec<Option<String>>,
+}
+
+const DEFAULT_MEDIA_REQUEST_DECODE_BYTES: usize = 715_827_880;
+
+fn media_request_decode_bytes() -> Option<usize> {
+    let limit = std::env::var("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_MEDIA_REQUEST_DECODE_BYTES);
+    (limit != 0).then_some(limit)
+}
+
+fn charge_video_bytes(used: &mut usize, bytes: usize, limit: Option<usize>) -> Result<()> {
+    *used = used.checked_add(bytes).ok_or(Error::VideoBudgetExceeded {
+        limit: limit.unwrap_or(usize::MAX),
+    })?;
+    if let Some(limit) = limit {
+        if *used > limit {
+            return Err(Error::VideoBudgetExceeded { limit });
+        }
+    }
+    Ok(())
+}
+
+fn video_clip_bytes(clip: &VideoClip) -> Result<usize> {
+    let decoded = match clip.rgb_video() {
+        Some(video) => video.data.len(),
+        None => clip.frames.iter().try_fold(0usize, |sum, frame| {
+            sum.checked_add(frame.as_bytes().len())
+                .ok_or(Error::VideoBudgetExceeded { limit: usize::MAX })
+        })?,
+    };
+    clip.raw_bytes
+        .len()
+        .checked_add(decoded)
+        .ok_or(Error::VideoBudgetExceeded { limit: usize::MAX })
 }
 
 /// One modality's preprocessed output, ready for the shared expansion and
@@ -1164,8 +1201,15 @@ impl MultimodalModelInfo {
             );
         }
         if !fetched.videos.is_empty() {
-            prepared
-                .push(self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype).await?);
+            prepared.push(
+                self.prepare_videos(
+                    fetched.videos,
+                    fetched.video_uuids,
+                    fetched.video_bytes,
+                    model_dtype,
+                )
+                .await?,
+            );
         }
         if !fetched.audios.is_empty() {
             prepared.push(self.prepare_audios(fetched.audios, fetched.audio_uuids).await?);
@@ -1254,20 +1298,51 @@ impl MultimodalModelInfo {
         let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector))
             .with_image_transparency(transparency);
         let video_sampling_policy = self.video_sampling_policy();
-        if let Some((sampling, default_fps)) = video_sampling_policy {
-            tracker = tracker
-                .with_video_frame_sampling(sampling)
-                .with_default_video_sample_fps(default_fps);
-        }
+        let mut video_parts = Vec::new();
         for mut part in media_parts {
             apply_video_fps(
                 &mut part,
                 video_sampling_policy.map(|(sampling, _)| sampling),
             )?;
-            tracker.push_part(part)?;
+            if matches!(
+                part,
+                MediaContentPart::VideoUrl { .. } | MediaContentPart::VideoData { .. }
+            ) {
+                video_parts.push(part);
+            } else {
+                tracker.push_part(part)?;
+            }
         }
 
         let mut tracker_output = tracker.finalize().await?;
+
+        let limit = media_request_decode_bytes();
+        let mut used = 0;
+        for part in video_parts {
+            let mut video_tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
+            if let Some((sampling, default_fps)) = video_sampling_policy {
+                video_tracker = video_tracker
+                    .with_video_frame_sampling(sampling)
+                    .with_default_video_sample_fps(default_fps);
+            }
+            video_tracker.push_part(part)?;
+            let mut output = video_tracker.finalize().await?;
+            let media = output.data.remove(&Modality::Video).unwrap_or_default();
+            for item in &media {
+                let TrackedMedia::Video(clip) = item else {
+                    return Err(multimodal!(
+                        "tracker returned non-video media for the video modality"
+                    ));
+                };
+                charge_video_bytes(&mut used, video_clip_bytes(clip)?, limit)?;
+            }
+            tracker_output.data.entry(Modality::Video).or_default().extend(media);
+            tracker_output
+                .uuids
+                .entry(Modality::Video)
+                .or_default()
+                .extend(output.uuids.remove(&Modality::Video).unwrap_or_default());
+        }
 
         let images = tracker_output
             .data
@@ -1316,6 +1391,7 @@ impl MultimodalModelInfo {
             image_uuids,
             videos,
             video_uuids,
+            video_bytes: used,
             audios,
             audio_uuids,
         })
@@ -1365,6 +1441,22 @@ impl TokenResolver for TokenizerResolver {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn video_budget_rejects_aggregate_bytes_and_overflow() {
+        let mut used = 0;
+        super::charge_video_bytes(&mut used, 6, Some(10)).unwrap();
+        assert!(matches!(
+            super::charge_video_bytes(&mut used, 5, Some(10)),
+            Err(super::Error::VideoBudgetExceeded { limit: 10 })
+        ));
+
+        let mut used = usize::MAX;
+        assert!(matches!(
+            super::charge_video_bytes(&mut used, 1, Some(10)),
+            Err(super::Error::VideoBudgetExceeded { limit: 10 })
+        ));
+    }
+
     use std::sync::Arc;
 
     use expect_test::expect;
@@ -2073,7 +2165,7 @@ mod tests {
             .with_regular_token("<|soft_audio_end|>", 201464)
     }
 
-    fn muse_spark_info() -> MultimodalModelInfo {
+    pub(super) fn muse_spark_info() -> MultimodalModelInfo {
         let config = serde_json::json!({
             "model_type": "muse_spark",
             "audio_config": {"patch_sizes": [16, 6, 5, 4]},
@@ -2270,8 +2362,10 @@ mod tests {
             "video".to_owned(),
             2.0,
         ));
-        let prepared =
-            info.prepare_videos(vec![clip], vec![None], ModelDtype::Float32).await.unwrap();
+        let prepared = info
+            .prepare_videos(vec![clip], vec![None], 0, ModelDtype::Float32)
+            .await
+            .unwrap();
         let token_ids =
             prepared.replacements[0].tokens.iter().map(|&id| id as u32).collect::<Vec<_>>();
         // Two frames uniformly sampled at 2 fps with temporal_patch_size=2
@@ -3080,8 +3174,10 @@ mod tests {
             "clip".to_string(),
             2.0,
         ));
-        let prepared =
-            info.prepare_videos(vec![clip], vec![None], ModelDtype::Float32).await.unwrap();
+        let prepared = info
+            .prepare_videos(vec![clip], vec![None], 0, ModelDtype::Float32)
+            .await
+            .unwrap();
 
         // 512x512 frames survive adaptive_resize; each frame's 32x32 patch
         // grid merges to 16 x (16 + 1 newline) = 272 embed tokens, and the
