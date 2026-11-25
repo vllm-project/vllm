@@ -931,13 +931,13 @@ class MoRIIOConnectorScheduler:
 
         The decoder recomputes the last token locally to derive h(N) correctly
         (see the READ len-1 accounting in get_num_new_matched_tokens). Guarded
-        by `_p_side_truncated` to avoid repeated truncation across a
+        by `request._p_side_truncated` to avoid repeated truncation across a
         preemption/reschedule. Mirrors the NIXL scheduler.
         """
         params = request.kv_transfer_params
         if (
             params is not None
-            and not params.get("_p_side_truncated")
+            and not request._p_side_truncated
             and request.num_prompt_tokens > 1
         ):
             if request.prompt_token_ids is not None:
@@ -955,7 +955,7 @@ class MoRIIOConnectorScheduler:
             request.truncate_block_hashes(
                 hash_block_size, self.vllm_config.num_hash_lookahead_tokens
             )
-            params["_p_side_truncated"] = True
+            request._p_side_truncated = True
 
     def send_notify_block(
         self,

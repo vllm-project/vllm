@@ -139,6 +139,11 @@ class ReqContext:
         """Number of prompt and output tokens, excluding speculative tokens."""
         return None
 
+    @property
+    def p_side_truncated(self) -> bool:
+        """Whether the prefiller shortened this request's prompt."""
+        return False
+
     def set_state(self, val: Any) -> None:
         self._state[type(val)] = val
 

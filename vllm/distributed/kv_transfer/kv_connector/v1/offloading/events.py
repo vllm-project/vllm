@@ -125,7 +125,6 @@ class _RequestEventContext:
     all_token_ids: Sequence[int]
     lora_request: "LoRARequest | None"
     resumable: bool
-    kv_transfer_params: dict[str, Any] | None
     group_configs: dict[int, "GroupOffloadConfig"]
 
 
@@ -206,7 +205,6 @@ class OffloadingEventsTracker:
                     all_token_ids=request.all_token_ids,
                     lora_request=request.lora_request,
                     resumable=request.resumable,
-                    kv_transfer_params=request.kv_transfer_params,
                     group_configs={
                         config.group_idx: config for config in group_configs
                     },
@@ -228,7 +226,7 @@ class OffloadingEventsTracker:
             or boundary % group_config.tokens_per_chunk != 0
         ):
             return None
-        if state.resumable or (state.kv_transfer_params or {}).get("_p_side_truncated"):
+        if state.resumable or req_context.p_side_truncated:
             return None
         chunk_idx = boundary // group_config.tokens_per_chunk - 1
         return self._build_event_metadata(state, group_config, chunk_idx)

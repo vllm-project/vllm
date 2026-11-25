@@ -125,6 +125,7 @@ class _RequestTokens(NamedTuple):
     num_in_flight_tokens: int
     num_prompt_tokens: int
     num_tokens: int
+    p_side_truncated: bool
 
 
 @dataclass(slots=True)
@@ -155,6 +156,13 @@ class _VllmReqContext(ReqContext):
     @property
     def num_tokens(self) -> int:
         return self._request_tokens.num_tokens
+
+    @property
+    def p_side_truncated(self) -> bool:
+        tokens = self._request_tokens
+        if isinstance(tokens, Request):
+            return tokens._p_side_truncated
+        return tokens.p_side_truncated
 
 
 def _create_req_context(
@@ -1646,6 +1654,7 @@ class OffloadingConnectorScheduler:
                 request.num_in_flight_tokens,
                 request.num_prompt_tokens,
                 request.num_tokens,
+                request._p_side_truncated,
             )
         )
 
