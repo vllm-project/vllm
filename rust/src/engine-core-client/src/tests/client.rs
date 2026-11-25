@@ -4222,6 +4222,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     let nixl_stats = multi_connector_stats.nixl.as_ref().expect("NIXL stats decode");
     assert_eq!(nixl_stats.num_failed_handshakes, [1]);
     assert_eq!(nixl_stats.num_notifications_after_expiry, [2]);
+    assert_eq!(nixl_stats.num_declined_expired_reads, [1, 1]);
 
     let metrics = vllm_metrics::Metrics::new();
     let recorder = SchedulerStatsRecorder::new(
@@ -4263,6 +4264,9 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     ));
     assert!(rendered_metrics.contains(
         "vllm:nixl_num_notifications_after_expiry_total{model_name=\"test-model\",engine=\"0\"} 2"
+    ));
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_declined_expired_reads_total{model_name=\"test-model\",engine=\"0\"} 2"
     ));
     assert!(rendered_metrics.contains(
         "vllm:umbp_transfer_bytes_total{model_name=\"test-model\",engine=\"0\",\

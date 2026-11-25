@@ -258,6 +258,7 @@ mod tests {
             num_failed_handshakes: vec![1],
             num_kv_expired_reqs: vec![1],
             num_notifications_after_expiry: vec![2],
+            num_declined_expired_reads: vec![1, 1],
         }
     }
 
@@ -303,6 +304,7 @@ mod tests {
         expect![[r#"
             vllm:nixl_bytes_transferred_count{model_name="model",engine="0"} 2
             vllm:nixl_bytes_transferred_sum{model_name="model",engine="0"} 12288.0
+            vllm:nixl_num_declined_expired_reads_total{model_name="model",engine="0"} 2
             vllm:nixl_num_descriptors_count{model_name="model",engine="0"} 2
             vllm:nixl_num_descriptors_sum{model_name="model",engine="0"} 6.0
             vllm:nixl_num_failed_notifications_total{model_name="model",engine="0"} 1

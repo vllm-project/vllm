@@ -618,6 +618,7 @@ nixl_stats = {
     "num_failed_handshakes": [1],
     "num_kv_expired_reqs": [1],
     "num_notifications_after_expiry": [2],
+    "num_declined_expired_reads": [1, 1],
 }
 mooncake_stats = {
     "load_get": [
