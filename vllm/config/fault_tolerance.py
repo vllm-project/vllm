@@ -64,24 +64,29 @@ def ft_tp_barrier_required(parallel_config: "ParallelConfig") -> bool:
     )
 
 
-def warn_ft_config_conflicts(pc: "ParallelConfig") -> None:
+def warn_ft_config_conflicts(parallel_config: "ParallelConfig") -> None:
     """Warn when a timeout that surfaces a peer fault is too long for FT."""
-    if not pc.enable_fault_tolerance:
+    if not parallel_config.enable_fault_tolerance:
         return
 
     in_step: dict[str, int] = {}
-    if pc.all2all_backend in _FT_KERNEL_TIMEOUT_SEC:
-        name = f"{pc.all2all_backend} kernel timeout"
-        in_step[name] = _FT_KERNEL_TIMEOUT_SEC[pc.all2all_backend]
-    if pc.world_size > 1 or pc.data_parallel_size > 1:
-        cpu = pc.cpu_distributed_timeout_seconds
+    if parallel_config.all2all_backend in _FT_KERNEL_TIMEOUT_SEC:
+        name = f"{parallel_config.all2all_backend} kernel timeout"
+        in_step[name] = _FT_KERNEL_TIMEOUT_SEC[parallel_config.all2all_backend]
+    if parallel_config.world_size > 1 or parallel_config.data_parallel_size > 1:
+        cpu = parallel_config.cpu_distributed_timeout_seconds
         if cpu is None:
             cpu = int(default_pg_timeout.total_seconds())
         in_step["cpu_distributed_timeout_seconds"] = cpu
 
-    recovery = pc.fault_tolerance_config.engine_recovery_timeout_sec
+    recovery = parallel_config.fault_tolerance_config.engine_recovery_timeout_sec
+    # A timeout that surfaces a peer fault must be strictly shorter than the
+    # recovery window. With the mp executor, execute_model's RPC timeout wraps a
+    # model step, so the kernel and CPU group timeouts must also be strictly
+    # shorter than the RPC timeout, and the RPC timeout strictly shorter than
+    # the recovery window: kernel/CPU group < RPC < engine_recovery_timeout_sec.
     checks = [("engine_recovery_timeout_sec", recovery, in_step)]
-    if pc.distributed_executor_backend == "mp":
+    if parallel_config.distributed_executor_backend == "mp":
         rpc = envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
         reporting = {**in_step, "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": rpc}
         checks = [
@@ -100,8 +105,8 @@ def warn_ft_config_conflicts(pc: "ParallelConfig") -> None:
                 limit_name,
             )
 
-    communicator = pc.eplb_config.communicator
-    if pc.enable_eplb and communicator in ("torch_nccl", "pynccl"):
+    communicator = parallel_config.eplb_config.communicator
+    if parallel_config.enable_eplb and communicator in ("torch_nccl", "pynccl"):
         logger.warning(
             "Fault tolerance: EPLB communicator '%s' is NCCL-based, and the "
             "NCCL watchdog aborts the process when a collective fails. Use "
