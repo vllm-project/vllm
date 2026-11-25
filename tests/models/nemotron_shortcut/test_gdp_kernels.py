@@ -146,10 +146,18 @@ def test_prefill_kernel_matches_recurrence(lengths, heads):
     a = torch.randn(tokens, heads, device=device, dtype=torch.bfloat16)
     b = torch.randn(tokens, n, heads, device=device, dtype=torch.bfloat16)
     initial = torch.randn(len(lengths), heads, VALUE, KEY, device=device) * 0.1
-    starts = torch.tensor([0, *lengths], device=device).cumsum(0).to(torch.int32)
+    starts_cpu = torch.tensor([0, *lengths], device="cpu").cumsum(0, dtype=torch.int32)
+    starts = starts_cpu.to(device)
     decay = -mixer.A_log.float().exp() * F.softplus(a.float() + mixer.dt_bias)
     out, last = gdp_prefill(
-        q, k, v, decay, b.float().sigmoid(), initial.clone(), starts
+        q,
+        k,
+        v,
+        decay,
+        b.float().sigmoid(),
+        initial.clone(),
+        starts,
+        cu_seqlens_cpu=starts_cpu,
     )
     expected = torch.empty(tokens, heads, VALUE, device=device)
     for request, (start, stop) in enumerate(zip(starts[:-1], starts[1:])):
