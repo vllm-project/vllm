@@ -23,8 +23,10 @@ reimplementation cannot reproduce. This mirrors
 """
 
 import copy
+import math
 from collections.abc import Mapping
 from dataclasses import replace as dataclass_replace
+from functools import cached_property
 
 import torch
 
@@ -39,6 +41,7 @@ from vllm.multimodal.processing.processor import (
 
 from .minicpmv import MiniCPMVDummyInputsBuilder, MiniCPMVImageEmbeddingItems
 from .minicpmv4_6 import (
+    _MAX_ASPECT_RATIO,
     MiniCPMV4_6ForConditionalGeneration,
     MiniCPMV4_6MultiModalProcessor,
     MiniCPMV4_6ProcessingInfo,
@@ -144,6 +147,94 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
         patch_tokens = patch_h * patch_w // tokens_per_patch
         return grids, source_tokens, patch_tokens
 
+    def _get_tiny_upsize_tokens(self, size: ImageSize, modality: str) -> int:
+        from transformers.models.minicpm_ocr.image_processing_minicpm_ocr import (
+            TINY_PIXELS,
+            TINY_RESOLUTION,
+        )
+
+        max_slice_nums, downsample_mode = self._get_slicing_kwargs(modality)
+        image_processor = self._pinned_image_processor(downsample_mode)
+        hf_image_size = (size.height, size.width)
+        if (
+            modality != "image"
+            or image_processor.scale_resolution >= TINY_RESOLUTION
+            or size.width * size.height >= TINY_PIXELS
+            or image_processor.get_sliced_grid(
+                hf_image_size, max_slice_nums, image_processor.scale_resolution
+            )
+            is not None
+        ):
+            return 0
+        height, width = image_processor.find_best_resize(
+            hf_image_size,
+            TINY_RESOLUTION,
+            image_processor.patch_size,
+            downsample_mode=image_processor.downsample_mode,
+            allow_upscale=True,
+        )
+        token_divisor = 4 if image_processor.downsample_mode == "4x" else 16
+        return height * width // (image_processor.patch_size**2 * token_divisor)
+
+    @cached_property
+    def _tiny_upsize_image_sizes(self) -> list[ImageSize]:
+        from transformers.models.minicpm_ocr.image_processing_minicpm_ocr import (
+            TINY_PIXELS,
+            TINY_RESOLUTION,
+        )
+
+        if self.get_image_processor().scale_resolution >= TINY_RESOLUTION:
+            return []
+        max_ratio = _MAX_ASPECT_RATIO["image"]
+        max_width, max_height = self._get_size_hint("image")
+        sizes = [
+            size
+            for short in range(1, math.isqrt(TINY_PIXELS) + 1)
+            for long in range(
+                short, min(max_ratio * short, (TINY_PIXELS - 1) // short) + 1
+            )
+            for size in (ImageSize(long, short), ImageSize(short, long))
+            if size.width <= (max_width or size.width)
+            and size.height <= (max_height or size.height)
+        ]
+        tokens = {size: self._get_tiny_upsize_tokens(size, "image") for size in sizes}
+        most = max(tokens.values(), default=0)
+        return [size for size, num in tokens.items() if num == most and num > 0]
+
+    def _get_frame_tokens(self, size: ImageSize, modality: str) -> int:
+        return max(
+            super()._get_frame_tokens(size, modality),
+            self._get_tiny_upsize_tokens(size, modality),
+        )
+
+    def _get_padded_tokens(self, size: ImageSize, modality: str) -> int:
+        return max(
+            super()._get_padded_tokens(size, modality),
+            self._get_tiny_upsize_tokens(size, modality),
+        )
+
+    def _get_unhinted_dummy_sizes(self, modality: str) -> list[ImageSize]:
+        sizes = super()._get_unhinted_dummy_sizes(modality)
+        if modality == "image":
+            sizes += self._tiny_upsize_image_sizes
+        return sizes
+
+    def get_max_image_tokens(self) -> int:
+        return max(
+            [
+                super().get_max_image_tokens(),
+                *(
+                    self._get_tiny_upsize_tokens(size, "image")
+                    for size in self._tiny_upsize_image_sizes
+                ),
+            ]
+        )
+
+    def uses_tiny_upsize(self, size: ImageSize) -> bool:
+        return self._get_tiny_upsize_tokens(size, "image") > super()._get_frame_tokens(
+            size, "image"
+        )
+
 
 class MiniCPMOcrMultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
     def _promote_image_upsize_kwargs(
@@ -222,10 +313,17 @@ class MiniCPMOcrMultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
         mm_options: MultiModalDummyOptions,
     ) -> ProcessorInputs:
         inputs = super().get_dummy_inputs(seq_len, mm_counts, mm_options)
+        info = self.info
+        assert isinstance(info, MiniCPMOcrProcessingInfo)
+        upsize = "always"
+        if mm_counts.get("image", 0) and info.uses_tiny_upsize(
+            info.get_image_size_with_most_features()
+        ):
+            upsize = "adaptive"
         return dataclass_replace(
             inputs,
             hf_processor_mm_kwargs={
-                "images_kwargs": {"small_image_upsize": "always"},
+                "images_kwargs": {"small_image_upsize": upsize},
             },
         )
 

@@ -741,19 +741,20 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         return max(self._video_sizes_by_tokens | self._hinted_video_sizes_by_tokens)
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        canvas = super().get_image_size_with_most_features()
-        if self._hint_keeps_canvas("image", canvas):
-            return canvas
-        sizes = self._hinted_image_sizes_by_tokens
-        if self._get_size_hint("image") != (None, None):
-            return sizes[max(sizes)]
-        return max(
-            [*sizes.values(), *self._get_thin_sizes("image")],
+        largest = max(
+            self._get_unhinted_dummy_sizes("image"),
             key=lambda size: (
                 self._get_padded_tokens(size, "image"),
                 self._get_frame_tokens(size, "image"),
             ),
         )
+        if self._fits_size_hint("image", largest):
+            return largest
+        canvas = super().get_image_size_with_most_features()
+        if self._hint_keeps_canvas("image", canvas):
+            return canvas
+        sizes = self._hinted_image_sizes_by_tokens
+        return sizes[max(sizes)]
 
     def get_video_frame_size_with_most_features(self) -> ImageSize:
         canvas = super().get_video_frame_size_with_most_features()
@@ -767,21 +768,27 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> tuple[ImageSize, int]:
-        canvas = super().get_video_frame_size_with_most_features()
         num_videos = max(mm_counts.get("video", 0), 1)
+        video_options = self.ctx.get_mm_config().limit_per_prompt.get("video")
+        max_tokens = seq_len // num_videos
+        max_frames = getattr(video_options, "num_frames", None) or max_tokens
+        largest = self._get_video_size_and_frames(
+            max_tokens,
+            max_frames,
+            self._get_unhinted_dummy_sizes("video"),
+            padded=True,
+        )
+        if self._fits_size_hint("video", largest[0]):
+            return largest
+        canvas = super().get_video_frame_size_with_most_features()
         if self._hint_keeps_canvas("video", canvas):
             return self._get_video_size_and_frames(
                 seq_len // num_videos, _MAX_FRAMES_PER_VIDEO, [canvas]
             )
-        video_options = self.ctx.get_mm_config().limit_per_prompt.get("video")
-        max_tokens = seq_len // num_videos
-        sizes = [*self._hinted_video_sizes_by_tokens.values()]
-        if self._get_size_hint("video") == (None, None):
-            sizes += self._get_thin_sizes("video")
         return self._get_video_size_and_frames(
             max_tokens,
-            getattr(video_options, "num_frames", None) or max_tokens,
-            sizes,
+            max_frames,
+            self._hinted_video_sizes_by_tokens.values(),
             padded=True,
         )
 
@@ -860,6 +867,20 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             )
             if max(size) <= max_ratio * min(size)
         ]
+
+    def _get_unhinted_dummy_sizes(self, modality: str) -> list[ImageSize]:
+        sizes = (
+            self._image_sizes_by_tokens
+            if modality == "image"
+            else self._video_sizes_by_tokens
+        )
+        return [*sizes.values(), *self._get_thin_sizes(modality)]
+
+    def _fits_size_hint(self, modality: str, size: ImageSize) -> bool:
+        max_width, max_height = self._get_size_hint(modality)
+        return size.width <= (max_width or size.width) and size.height <= (
+            max_height or size.height
+        )
 
     def _get_slicing_kwargs(self, modality: str) -> tuple[int, str]:
         merged = self._merge_and_resolve_mm_processor_kwargs({})

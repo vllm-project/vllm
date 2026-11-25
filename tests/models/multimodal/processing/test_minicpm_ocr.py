@@ -751,6 +751,39 @@ def test_image_budget_covers_the_largest_image(mm_processor_kwargs):
         )
 
 
+@pytest.mark.parametrize("scale_resolution", [56, 64])
+def test_image_budget_covers_adaptive_tiny_images(scale_resolution):
+    model_config, processor = _ocr_processor(
+        {
+            "scale_resolution": scale_resolution,
+            "max_slice_nums": 1,
+            "images_kwargs": {"small_image_upsize": "adaptive"},
+        },
+        limit_mm_per_prompt={"image": 1, "video": 0},
+    )
+    budget = processor.info.get_mm_max_tokens_per_item(
+        seq_len=model_config.max_model_len, mm_counts={"image": 1}
+    )
+    dummy = processor.get_dummy_mm_inputs({"image": 1})
+    dummy_pixels = dummy["mm_kwargs"].get_data()["pixel_values"]
+
+    assert budget is not None
+    for size in ((196, 1), (1, 196)):
+        processed = processor(
+            processor.info.image_pattern,
+            mm_items=processor.info.parse_mm_data(
+                {"image": [PIL.Image.new("RGB", size)]}
+            ),
+            hf_processor_mm_kwargs={},
+        )
+        pixels = processed["mm_kwargs"].get_data()["pixel_values"]
+        num_embeds = processed["mm_placeholders"]["image"][0].get_num_embeds()
+        assert budget["image"] >= num_embeds
+        assert dummy_pixels.shape[-4] * dummy_pixels.shape[-1] >= (
+            pixels.shape[-4] * pixels.shape[-1]
+        )
+
+
 # --------------------------------------------------------------------------
 # Model wiring
 # --------------------------------------------------------------------------

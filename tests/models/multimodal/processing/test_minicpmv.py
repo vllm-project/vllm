@@ -209,17 +209,44 @@ def test_minicpmv4_6_image_budget_covers_largest_image(
     assert _padded_patches(dummy, "image") >= _padded_patches(processed, "image")
 
 
+@pytest.mark.parametrize("hint", [{"width": 8192}, {"height": 20000}])
+def test_minicpmv4_6_image_dummy_ignores_hints_that_keep_the_largest_input(
+    hint: dict[str, int],
+):
+    ctx = build_model_context(
+        "openbmb/MiniCPM-V-4_6",
+        limit_mm_per_prompt={"image": {"count": 1, **hint}, "video": 0},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    info = processor.info
+    assert isinstance(info, MiniCPMV4_6ProcessingInfo)
+    dummy = processor.get_dummy_mm_inputs({"image": 1})
+    processed = processor(
+        info.image_pattern,
+        mm_items=info.parse_mm_data({"image": [Image.new("RGB", (84, 16726))]}),
+        hf_processor_mm_kwargs={},
+    )
+
+    assert _padded_patches(dummy, "image") >= _padded_patches(processed, "image")
+
+
 @pytest.mark.parametrize(
-    ("max_num_batched_tokens", "encoder_budget"), [(2048, 11520), (16384, 16384)]
+    ("max_num_batched_tokens", "encoder_budget", "video_hint"),
+    [
+        (2048, 11520, {}),
+        (16384, 16384, {}),
+        (16384, 16384, {"width": 8192}),
+        (16384, 16384, {"height": 11000}),
+    ],
 )
 def test_minicpmv4_6_video_profile_covers_largest_scheduled_video(
-    max_num_batched_tokens: int, encoder_budget: int
+    max_num_batched_tokens: int, encoder_budget: int, video_hint: dict[str, int]
 ):
     max_model_len = 32768
     ctx = build_model_context(
         "openbmb/MiniCPM-V-4_6",
         model_config_kwargs={"max_model_len": max_model_len},
-        limit_mm_per_prompt={"image": 0, "video": 1},
+        limit_mm_per_prompt={"image": 0, "video": {"count": 1, **video_hint}},
     )
     scheduler_config = SchedulerConfig(
         max_model_len=max_model_len,
