@@ -2978,9 +2978,9 @@ tqdm==4.67.3 \
     #   -c requirements/test/cuda.txt
     #   huggingface-hub
     #   transformers
-transformers==5.23.0 \
-    --hash=sha256:018e82fd07490ad5bb58414f65e31576033dc7f36bed10c574843f69b90991bf \
-    --hash=sha256:19d647a4d5d903a7c644ca5cde2d86efc3dde7d8c687ae7988806ff2205efa71
+transformers==5.24.1 \
+    --hash=sha256:505b39d3e45a3715f3acb81b858eb245ce1a462373b7f99e26f0dcd41ed4cd0f \
+    --hash=sha256:71fae247d9ad61f553fb84de2089f427f5ff2c080686f9deb51e660487e8c270
     # via
     #   -c requirements/common.txt
     #   -c requirements/test/cuda.txt
