@@ -155,6 +155,7 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # HYV4 also runs without torch.compile, preserving runtime-shape
         # kernel selection during graph capture.
         # Qwen3.5 runs the eager vllm/models/qwen3_5/amd model.
+        # GLM DSA benefits from breakable CUDA graphs on ROCm.
         return (
             frozenset(
                 {
@@ -162,7 +163,6 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
                     "HYV4ForCausalLM",
                     "HYV4VLForConditionalGeneration",
                     "HYV4MTPModel",
-                    # GLM DSA benefits from breakable CUDA graphs on ROCm.
                     "GlmMoeDsaForCausalLM",
                     "DeepseekV32MTPModel",
                 }
