@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Warm up the watermarked sampler's Triton kernel.
 
-``_philox_gumbel_kernel`` is JIT-compiled once per (key, logits dtype,
-skip-mask, ``USE_FP64``) specialization. The generic sampler warmup samples with
-``SamplingParams.for_sampler_warmup()``, whose feature-heavy logits processing
-forces the fp32 copy in ``apply_sampling_params``, so the first ordinary
+`_philox_gumbel_kernel` is JIT-compiled once per (key, logits dtype,
+skip-mask, `USE_FP64`) specialization. The generic sampler warmup samples with
+`SamplingParams.for_sampler_warmup()`, whose feature-heavy logits processing
+forces the fp32 copy in `apply_sampling_params`, so the first ordinary
 temperature-1.0 request is the first launch with model-dtype logits and pays
 the compilation inside inference. This pre-compiles every specialization the
 sampler path can launch for the configured watermark.

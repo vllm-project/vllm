@@ -19,7 +19,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.nccl import pin_nccl_env
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 def _matmul_launch_metadata(
@@ -507,7 +506,7 @@ def _softmax_kernel(
     BLOCK_SIZE: tl.constexpr,
     LOG: tl.constexpr = False,
 ):
-    """Compute softmax, or log_softmax when ``LOG``, along the last dimension of a
+    """Compute softmax, or log_softmax when `LOG`, along the last dimension of a
     2D tensor. Each block handles one row of the input tensor, in a fixed block
     order, so the result never depends on the row count.
     """
@@ -1094,12 +1093,12 @@ def rms_norm_batch_invariant(
     Args:
         input: Input tensor of shape (..., hidden_size)
         weight: Weight tensor of shape (hidden_size,), or None to skip the
-            per-channel multiply (``RMSNorm(has_weight=False)``)
+            per-channel multiply (`RMSNorm(has_weight=False)`)
         eps: Small constant for numerical stability
         residual: Optional residual tensor fused into the normalization path
 
     Returns:
-        RMS normalized tensor, or ``(output, residual_out)`` when ``residual``
+        RMS normalized tensor, or `(output, residual_out)` when `residual`
         is provided
 
     """
@@ -1161,11 +1160,11 @@ def dequantize_gptq_weight(
     group_size: int,
     zero_bias: int,
 ) -> torch.Tensor:
-    """Unpack a symmetric GPTQ weight (no act-order) to ``scales.dtype``.
+    """Unpack a symmetric GPTQ weight (no act-order) to `scales.dtype`.
 
-    ``qweight`` is in the checkpoint layout: ``[K // pack_factor, N]`` int32
-    with ``pack_factor`` consecutive input rows packed into each element,
-    lowest bits first. Returns ``(q - zero_bias) * scale`` of shape ``[K, N]``.
+    `qweight` is in the checkpoint layout: `[K // pack_factor, N]` int32
+    with `pack_factor` consecutive input rows packed into each element,
+    lowest bits first. Returns `(q - zero_bias) * scale` of shape `[K, N]`.
     """
     packed_rows, output_size = qweight.shape
     pack_factor = 32 // num_bits
@@ -1224,9 +1223,9 @@ def _fixed_order_sum_kernel(
     BLOCK_SIZE: tl.constexpr,
     LARGE: tl.constexpr,
 ):
-    """Sum ``WORLD_SIZE`` contributions in ascending rank order, fp32 accumulator.
+    """Sum `WORLD_SIZE` contributions in ascending rank order, fp32 accumulator.
 
-    An output element sums exactly ``WORLD_SIZE`` values in a compile-time
+    An output element sums exactly `WORLD_SIZE` values in a compile-time
     constant order and rounds once, so the result depends only on the rank
     ordering and never on how many elements are being reduced.
     """
@@ -1255,7 +1254,7 @@ def all_reduce_batch_invariant(
     contributions are summed changes with the number of tokens in the batch.
 
     Instead, all-gather the contributions -- pure data movement, so bitwise
-    reproducible at any size -- and reduce them with ``_fixed_order_sum_kernel``.
+    reproducible at any size -- and reduce them with `_fixed_order_sum_kernel`.
     """
     world_size = dist.get_world_size(group)
     if world_size == 1:
@@ -1288,21 +1287,21 @@ def reduce_scatter_batch_invariant(
 ) -> torch.Tensor:
     """Sum reduce-scatter over dim 0 whose result does not depend on the size.
 
-    ``ncclReduceScatter`` picks its chunking from the message size just as
-    ``ncclAllReduce`` does. Route around it the same way
-    ``all_reduce_batch_invariant`` does: an all-to-all sends rank ``d`` exactly
+    `ncclReduceScatter` picks its chunking from the message size just as
+    `ncclAllReduce` does. Route around it the same way
+    `all_reduce_batch_invariant` does: an all-to-all sends rank `d` exactly
     the rows it owns from every rank -- pure data movement, so bitwise
     reproducible however the library chunks it -- and lands them rank-major,
-    which is the layout ``_fixed_order_sum_kernel`` already consumes.
+    which is the layout `_fixed_order_sum_kernel` already consumes.
 
-    ``sizes`` (the reduce-scatterv case) changes only *which* rows a rank
+    `sizes` (the reduce-scatterv case) changes only *which* rows a rank
     receives, never how the received contributions are summed, so variable
     shard sizes are invariant for the same reason.
 
     Args:
         input_: Contiguous full-size input; dim 0 is the scattered axis.
         group: Process group, defaults to the world group.
-        sizes: Per-rank row counts. Uniform split when ``None``.
+        sizes: Per-rank row counts. Uniform split when `None`.
 
     Returns:
         This rank's shard of the sum.
@@ -1414,9 +1413,12 @@ def enable_batch_invariant_mode():
             _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, key)
             _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, key)
         else:
-            # Hopper (SM90) and Blackwell (SM100): the only source of batch
-            # variance is split-k, which we disable via the cuBLAS workspace
-            # config.
+            # Hopper (SM90) and Blackwell (SM100): aten matmuls are not
+            # overridden here; the cuBLAS workspace config below disables
+            # split-k. That alone does not make cuBLAS batch invariant for
+            # every shape (e.g. narrow MoE router projections), so unquantized
+            # Linear layers use the Triton linear_batch_invariant on every
+            # CUDA device (see #35404).
             os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
             os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
 
@@ -1461,9 +1463,7 @@ def enable_batch_invariant_mode():
             "aten::bmm.out", bmm_out_batch_invariant, key, allow_override=True
         )
 
-    reduced_precision_val = (
-        (False, False) if is_torch_equal_or_newer("2.10.0") else False
-    )
+    reduced_precision_val = (False, False)
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (
         reduced_precision_val
     )
@@ -1481,6 +1481,11 @@ def override_envs_for_invariance():
     if current_platform.is_rocm():
         # The skinny GEMMs pick their split of K from the batch size.
         os.environ["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
+        # MIOpen's split-K forward conv solver accumulates with atomics.
+        # TODO: Replace with torch.backends.cudnn.deterministic = True once the
+        # ROCm base image is on ROCm 10.3; on 10.0, MIOpen's deterministic mode
+        # finds no solver for some forward convs.
+        os.environ["MIOPEN_DEBUG_CONV_IMPLICIT_GEMM_ASM_FWD_GTC_XDLOPS_NHWC"] = "0"
     else:
         # NCCL determinism settings. NCCL keeps the launch mode process-wide, so,
         # unlike the pins below, it also applies to communicators shared with other

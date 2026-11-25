@@ -149,7 +149,7 @@ mod tests {
                 UnifiedParserEvent::ToolCall(crate::tool::ToolCallDelta {
                     tool_index: 0,
                     name: Some("get_weather".to_string()),
-                    arguments: r#"{"city":"Beijing"}"#.to_string(),
+                    arguments: r#"{"city": "Beijing"}"#.to_string(),
                 }),
             ]
         );
@@ -186,10 +186,10 @@ mod tests {
         let tools = tools();
         let tokenizer = Arc::new(tokenizer());
         let mut parser = HyV3UnifiedParser::new(&tools, tokenizer.clone()).unwrap();
-        for (prompt, inside) in [
-            ("<think:opensource>", true),
-            ("</think:opensource>", false),
-            ("", false),
+        for (prompt, state) in [
+            ("<think:opensource>", "inside"),
+            ("</think:opensource>", "closed"),
+            ("", "outside"),
         ] {
             parser.initialize(&tokenizer.encode(prompt, false).unwrap()).unwrap();
             let grammar = parser
@@ -204,12 +204,17 @@ mod tests {
                 .unwrap();
             let value = serde_json::to_value(grammar.format).unwrap();
             let root = &value["elements"][0];
-            if inside {
-                assert_eq!(root["begin"], "");
-                assert_eq!(root["end"], "</think:opensource>");
-            } else {
-                assert_eq!(root["type"], "optional");
-                assert_eq!(root["content"]["begin"], "<think:opensource>");
+            match state {
+                "inside" => {
+                    assert_eq!(root["begin"], "");
+                    assert_eq!(root["end"], "</think:opensource>");
+                }
+                // A prompt that closed reasoning starts with the tool calls.
+                "closed" => assert_eq!(root["value"], "<tool_calls:opensource>\n"),
+                _ => {
+                    assert_eq!(root["type"], "optional");
+                    assert_eq!(root["content"]["begin"], "<think:opensource>");
+                }
             }
         }
     }

@@ -3,7 +3,7 @@
 """Unit tests for the token_in_token_out request/response protocol.
 
 These tests intentionally avoid spinning up a server — they exercise the
-pydantic validators on ``GenerateRequest`` directly so they run fast and
+pydantic validators on `GenerateRequest` directly so they run fast and
 fail loudly if the validator semantics ever drift.
 """
 
@@ -40,7 +40,7 @@ def _base_payload() -> dict:
 
 
 def test_omitted_max_tokens_is_not_provided():
-    """Body without ``max_tokens`` must surface as 'not provided' so the
+    """Body without `max_tokens` must surface as 'not provided' so the
     server can apply its own default instead of the dataclass 16."""
     req = GenerateRequest.model_validate(_base_payload())
     # SamplingParams' dataclass default leaks through the parsed instance —
@@ -81,8 +81,8 @@ def test_json_roundtrip_preserves_provided_keys():
 
 
 def test_internal_instance_construction_treats_all_as_provided():
-    """When internal callers build ``GenerateRequest`` from a pre-resolved
-    ``SamplingParams`` instance, every field is considered explicitly set
+    """When internal callers build `GenerateRequest` from a pre-resolved
+    `SamplingParams` instance, every field is considered explicitly set
     so server-side defaulting can't clobber values resolved upstream."""
     sp = SamplingParams(max_tokens=500, temperature=0.0)
     req = GenerateRequest(token_ids=[1, 2, 3], sampling_params=sp)
@@ -93,9 +93,9 @@ def test_internal_instance_construction_treats_all_as_provided():
 
 
 def test_dump_roundtrip_keeps_default_max_tokens_provided():
-    """``/render`` returns ``model_dump()`` of a request built from a resolved
-    ``SamplingParams``. ``max_tokens=16`` equals the dataclass default, which
-    ``omit_defaults`` leaves out; it must still reach generate as provided."""
+    """`/render` returns `model_dump()` of a request built from a resolved
+    `SamplingParams`. `max_tokens=16` equals the dataclass default, which
+    `omit_defaults` leaves out; it must still reach generate as provided."""
     sp = SamplingParams(max_tokens=16)
     req = GenerateRequest(token_ids=[1, 2, 3], sampling_params=sp)
     dumped = req.model_dump()
@@ -118,18 +118,63 @@ def test_multimodal_features_reject_mismatched_parallel_fields():
         )
 
 
-def test_multimodal_features_reject_overlapping_placeholders():
-    with pytest.raises(ValueError, match="non-overlapping"):
-        MultiModalFeatures(
-            mm_hashes={"image": ["a", "b"]},
-            mm_placeholders={
-                "image": [
-                    PlaceholderRangeInfo(offset=1, length=2),
-                    PlaceholderRangeInfo(offset=2, length=2),
-                ]
+def _features(placeholders: dict[str, list[tuple[int, int, list[bool] | None]]]):
+    return MultiModalFeatures(
+        mm_hashes={
+            modality: [f"{modality}-{i}" for i in range(len(ranges))]
+            for modality, ranges in placeholders.items()
+        },
+        mm_placeholders={
+            modality: [
+                PlaceholderRangeInfo(offset=offset, length=length, is_embed=is_embed)
+                for offset, length, is_embed in ranges
+            ]
+            for modality, ranges in placeholders.items()
+        },
+    )
+
+
+def test_multimodal_features_accept_a_span_shared_across_modalities():
+    """Qwen2.5-Omni and Qwen3-Omni place a video and its audio track on one
+    span with `use_audio_in_video`, each embedding its own positions."""
+    _features(
+        {
+            "image": [(0, 2, None)],
+            "video": [(2, 4, [True, False, True, False])],
+            "audio": [(2, 4, [False, True, False, True])],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "placeholders",
+    [
+        pytest.param({"image": [(1, 2, None), (2, 2, None)]}, id="partial"),
+        pytest.param({"video": [(0, 4, None)], "audio": [(1, 2, None)]}, id="nested"),
+        pytest.param(
+            {
+                "video": [(0, 4, [True, False, True, False])],
+                "audio": [(0, 2, [False, True])],
             },
-            kwargs_data={"image": ["a", "b"]},
-        )
+            id="same-offset",
+        ),
+        pytest.param(
+            {"video": [(0, 2, [True, False]), (0, 2, [False, True])]},
+            id="same-modality",
+        ),
+        pytest.param(
+            {"video": [(0, 2, [True, False])], "audio": [(0, 2, [True, True])]},
+            id="intersecting-masks",
+        ),
+        pytest.param(
+            {"video": [(0, 2, None)], "audio": [(0, 2, [False, True])]},
+            id="absent-mask",
+        ),
+    ],
+)
+def test_multimodal_features_reject_overlapping_placeholders(placeholders):
+    with pytest.raises(ValueError, match="non-overlapping"):
+        _features(placeholders)
 
 
 def test_generate_request_rejects_placeholder_outside_prompt():

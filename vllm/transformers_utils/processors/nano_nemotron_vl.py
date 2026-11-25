@@ -7,11 +7,12 @@
 #     LICENSE is in root directory.
 # --------------------------------------------------------
 
+import importlib.util
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cache, cached_property
 from typing import Any, TypeVar
 
 import einops
@@ -21,15 +22,22 @@ import regex as re
 import torch
 from PIL import Image
 from transformers import BatchFeature, PreTrainedConfig, TensorType
+from transformers.image_transforms import to_pil_image
 
+from vllm import envs
+from vllm.exceptions import VLLMValidationError
+from vllm.logger import init_logger
 from vllm.model_executor.models.parakeet import ParakeetExtractor
 from vllm.multimodal.inputs import AudioItem
+from vllm.multimodal.processing.context import is_profiling_media
 from vllm.multimodal.processing.processor import PromptUpdateDetails, cached_encode
 from vllm.multimodal.video_prune.evs import compute_retained_tokens_count
 from vllm.platforms import current_platform
 from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import calculate_internvl_targets, get_internvl_target_ratios
+
+logger = init_logger(__name__)
 
 _T = TypeVar("_T")
 
@@ -70,9 +78,9 @@ def _bicubic_resize_and_normalize(
 
     Input must be a raw 4-D **NHWC** tensor.
 
-    *size*: target ``(H, W)``; skips interpolation when ``None``.
+    *size*: target `(H, W)`; skips interpolation when `None`.
     *norm_mean* / *norm_std*: when both provided, apply normalization.
-    When *do_cpu_normalize* is false, return the resized ``uint8`` tensor
+    When *do_cpu_normalize* is false, return the resized `uint8` tensor
     unchanged so rescaling and normalization can run on the model device.
     """
     tensor = tensor.permute(0, 3, 1, 2)
@@ -90,6 +98,140 @@ def _bicubic_resize_and_normalize(
     if norm_mean is not None and norm_std is not None:
         tensor = (tensor - norm_mean) / norm_std
     return tensor.to(dtype=dtype).contiguous()
+
+
+@cache
+def _cvcuda_available() -> bool:
+    # find_spec, not import: importing CV-CUDA in every API server costs
+    # ~0.3 s and ~130 MB each.
+    return current_platform.is_cuda() and importlib.util.find_spec("cvcuda") is not None
+
+
+# CV-CUDA's bicubic resize needs a scratch buffer that grows with the frame
+# count, source height and target width. CV-CUDA keeps every scratch buffer it
+# allocates until the process exits, and reuses one only for requests no larger
+# than it. So each resize is chunked to need at most this much, and the first
+# one reserves exactly this much: one buffer, allocated in the startup memory
+# profile, serves every resize.
+_CVCUDA_SCRATCH_BYTES = 512 * 1024 * 1024
+_cvcuda_scratch_reserved: set[int] = set()  # device indices
+
+# Frames in host memory are uploaded on a stream of their own. A copy from
+# pageable memory first waits for its stream, so on the model's stream it would
+# hold the engine thread until the GPU finishes every step already queued.
+# Not aux_stream(): model layers queue their own work on that one.
+_upload_streams: dict[int, torch.cuda.Stream] = {}  # device index -> stream
+
+
+def _upload_stream(device_index: int) -> torch.cuda.Stream:
+    if device_index not in _upload_streams:
+        _upload_streams[device_index] = torch.cuda.Stream(device_index)
+    return _upload_streams[device_index]
+
+
+class _CudaArrayOnStream:
+    """CUDA Array Interface v3 view of a torch tensor written on *stream*.
+
+    CV-CUDA orders its work after *stream*. Given a torch tensor directly
+    (interface v2, which names no stream) it calls cudaDeviceSynchronize
+    instead. The view keeps no reference to the tensor, so CV-CUDA's object
+    cache holds no torch memory: torch reuses it in stream order, after the
+    queued CV-CUDA work.
+    """
+
+    def __init__(self, tensor: torch.Tensor, stream: int) -> None:
+        self.__cuda_array_interface__ = {
+            **tensor.__cuda_array_interface__,
+            "version": 3,
+            "stream": stream,
+        }
+
+
+def cvcuda_bicubic_resize(
+    frames: torch.Tensor,
+    size: tuple[int, int],
+    device: torch.device,
+    max_chunk_bytes: int = 256 * 1024 * 1024,
+) -> torch.Tensor:
+    """GPU counterpart of `_bicubic_resize_and_normalize` with
+    `do_cpu_normalize=False`.
+
+    Resizes uint8 NHWC RGB *frames* to *size* `(H, W)` on *device* with
+    CV-CUDA and returns uint8 NCHW pixels; the cast to float, rescaling and
+    normalization stay with the model's input norm. Frames are uploaded in
+    chunks of at most *max_chunk_bytes*, from host memory on a separate stream,
+    so the caller waits for the copy but not for work queued on the current
+    stream. The resize is queued on the current stream, after the upload.
+    """
+    import cvcuda
+
+    torch_stream = torch.cuda.current_stream(device)
+    stream = cvcuda.as_stream(torch_stream)
+    # CUDA Array Interface v3 numbers the legacy default stream 1.
+    stream_id = torch_stream.cuda_stream or 1
+
+    def tvresize(dst: torch.Tensor, src: torch.Tensor) -> None:
+        # The destination's shape sets the output size.
+        cvcuda.tvresize_into(
+            cvcuda.as_tensor(_CudaArrayOnStream(dst, stream_id), "NHWC"),
+            cvcuda.as_tensor(_CudaArrayOnStream(src, stream_id), "NHWC"),
+            interp=cvcuda.Interp.CUBIC,
+            antialias=True,
+            stream=stream,
+        )
+
+    if torch_stream.device_index not in _cvcuda_scratch_reserved:
+        # One frame from 16 columns to 4096 needs exactly the cap.
+        rows = -(-_CVCUDA_SCRATCH_BYTES // (12 * 4096))
+        tvresize(
+            torch.empty((1, 16, 4096, 3), dtype=torch.uint8, device=device),
+            torch.zeros((1, rows, 16, 3), dtype=torch.uint8, device=device),
+        )
+        _cvcuda_scratch_reserved.add(torch_stream.device_index)
+
+    num_frames, height, width, _ = frames.shape
+    out = torch.empty((num_frames, 3, *size), dtype=torch.uint8, device=device)
+    upload = (
+        _upload_stream(torch_stream.device_index)
+        if frames.device.type == "cpu"
+        else None
+    )
+    resize = (height, width) != tuple(size)
+    step = max(1, max_chunk_bytes // (height * width * 3))
+    if resize:
+        # CV-CUDA 0.19's scratch: 12 bytes per frame, source row and target
+        # column, plus 136 bytes per target row and column. Only frames of
+        # extreme aspect ratio need more than the cap on their own.
+        frame_scratch = 12 * height * size[1]
+        filter_scratch = 136 * (size[0] + size[1])
+        step = max(
+            1, min(step, (_CVCUDA_SCRATCH_BYTES - filter_scratch) // frame_scratch)
+        )
+    for start in range(0, num_frames, step):
+        chunk = frames[start : start + step]
+        if upload is None:
+            src = chunk.to(device, non_blocking=True)
+        else:
+            # Pinning the frames first would let the copy run asynchronously,
+            # but its host copy costs more on the engine's single torch thread.
+            with torch.cuda.stream(upload):
+                src = chunk.to(device, non_blocking=True)
+            torch_stream.wait_stream(upload)
+            # src was allocated on the upload stream: keep its memory until the
+            # work queued on the current stream has read it.
+            src.record_stream(torch_stream)
+        if resize:
+            resized = src.new_empty((src.shape[0], *size, 3))
+            tvresize(resized, src)
+            src = resized
+        cvcuda.reformat_into(
+            cvcuda.as_tensor(
+                _CudaArrayOnStream(out[start : start + step], stream_id), "NCHW"
+            ),
+            cvcuda.as_tensor(_CudaArrayOnStream(src, stream_id), "NHWC"),
+            stream=stream,
+        )
+    return out
 
 
 def _pil_to_nhwc_tensor(image: Image.Image) -> torch.Tensor:
@@ -140,6 +282,8 @@ def dynamic_preprocess(
         .permute(0, 2, 4, 1, 3, 5)
         .reshape(B * hp * wp, C, image_size, image_size)
     )
+    # Drop the resized buffer if rearranging the patches made a copy.
+    del resized_img
 
     if use_thumbnail and patches.shape[0] > 1:
         thumb = _bicubic_resize_and_normalize(
@@ -150,6 +294,7 @@ def dynamic_preprocess(
             do_cpu_normalize=do_cpu_normalize,
             dtype=dtype,
         )
+        del tensor
         patches = torch.cat([patches, thumb], dim=0)
 
     return patches
@@ -241,6 +386,8 @@ def video_to_pixel_values(
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Convert video ndarray (T, H, W, C) to normalized pixel tensor (T, C, H, W)."""
+    if isinstance(video, torch.Tensor):
+        video = video.cpu().numpy()
     orig_h, orig_w = video.shape[1], video.shape[2]
     size: tuple[int, int] | None = None
 
@@ -352,15 +499,18 @@ class DynamicResolutionImageTiler:
     def max_num_tokens_available(self, text_prompt_length: int) -> int:
         return self._max_model_len - text_prompt_length - 4
 
-    def _images_to_pixel_values_lst(
+    @dataclass(slots=True)
+    class DynamicResolutionParams:
+        media: Image.Image
+        num_tiles: int
+        num_embeddings: int
+        patch_size: tuple[int, int]
+
+    def get_image_tensors(
         self,
-        text_prompt_length: int,
-        images: list[Image.Image],
+        params_per_image: Sequence[DynamicResolutionParams],
         dtype: torch.dtype = torch.float32,
     ) -> tuple[list[torch.Tensor], list[int]]:
-        num_tokens_available = self.max_num_tokens_available(text_prompt_length)
-        params_per_image = self.compute_params(images, num_tokens_available)
-
         feature_sizes = []
         images = []
         for param in params_per_image:
@@ -370,26 +520,22 @@ class DynamicResolutionImageTiler:
                 feature_sizes.append(param.num_embeddings)
         return images, feature_sizes
 
-    @dataclass
-    class DynamicResolutionParams:
-        media: Image.Image
-        num_tiles: int
-        num_embeddings: int
-        patch_size: tuple[int, int]
+    def get_target_size(self, params: DynamicResolutionParams) -> tuple[int, int]:
+        """Target (height, width) in pixels of the resized image."""
+        return (
+            params.patch_size[1] * self._patch_size,
+            params.patch_size[0] * self._patch_size,
+        )
 
     def apply_params(
         self,
         params: DynamicResolutionParams,
         dtype: torch.dtype = torch.float32,
     ) -> list[torch.Tensor]:
-        target_size = (
-            params.patch_size[1] * self._patch_size,
-            params.patch_size[0] * self._patch_size,
-        )
         tensor = _pil_to_nhwc_tensor(params.media)
         resized_img = _bicubic_resize_and_normalize(
             tensor,
-            size=target_size,
+            size=self.get_target_size(params),
             norm_mean=self.norm_mean,
             norm_std=self.norm_std,
             do_cpu_normalize=self.do_cpu_normalize,
@@ -613,9 +759,26 @@ class BaseNanoNemotronVLProcessor(ABC):
         max_model_len: int,
         max_num_tiles: int | None = None,
         do_cpu_normalize: bool = True,
+        device_resize: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
+
+        if device_resize:
+            if do_cpu_normalize:
+                raise ValueError("device_resize requires mm_device_do_normalize=True")
+            if not _cvcuda_available():
+                raise ValueError(
+                    "device_resize requires CUDA and CV-CUDA: pip install vllm[cvcuda]"
+                )
+            logger.info_once(
+                "Resizing Nemotron VL images and video frames on the GPU with "
+                "CV-CUDA (device_resize)."
+            )
+        # With device_resize, dynamic-resolution images and video frames are
+        # sent to the model as decoded uint8 RGB at their source resolution and
+        # resized on its device with CV-CUDA (`cvcuda_bicubic_resize`).
+        self.device_resize = device_resize
 
         self.config = config
         self.tokenizer = tokenizer
@@ -684,11 +847,76 @@ class BaseNanoNemotronVLProcessor(ABC):
 
         return num_patches * self.num_image_token
 
+    def _estimate_image_resize_bytes(
+        self,
+        images: Sequence[Image.Image],
+        resize_sizes: Sequence[tuple[int, int]],
+        pixels: int,
+        *,
+        concatenates: bool = False,
+    ) -> int:
+        if self.do_cpu_normalize:
+            dtype = self.dtype or torch.float32
+            itemsize = max(torch.float32.itemsize, dtype.itemsize)
+            scratch_pixels = max(
+                (image.width * image.height for image in images), default=0
+            )
+            scratch_itemsize = torch.float32.itemsize
+        else:
+            itemsize = scratch_itemsize = torch.uint8.itemsize
+            # Reserve the RGB source copy and the larger of the horizontal
+            # interpolation buffer and the contiguous output's layout copy.
+            scratch_pixels = max(
+                (
+                    image.width * image.height + max(image.height, height) * width
+                    for image, (height, width) in zip(images, resize_sizes, strict=True)
+                ),
+                default=0,
+            )
+        output_bytes = pixels * 3 * itemsize
+        scratch_bytes = scratch_pixels * 3 * scratch_itemsize
+        # Resize working buffers are released before concatenating the tiles.
+        concat_bytes = output_bytes if concatenates else 0
+        return output_bytes + max(scratch_bytes, concat_bytes)
+
+    @staticmethod
+    def _validate_image_preprocessing_budget(size_bytes: int, limit: int) -> None:
+        if size_bytes > limit:
+            raise VLLMValidationError(
+                "Image preprocessing exceeds VLLM_MAX_MEDIA_PREPROCESSING_BYTES="
+                f"{limit} (estimated {size_bytes} bytes).",
+                parameter="image",
+            )
+
     def _images_to_pixel_values_lst(
         self,
         images: list[Image.Image],
         max_num_tiles: int,
     ) -> list[torch.Tensor]:
+        limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
+        if limit > 0 and not is_profiling_media():
+            target_ratios = get_internvl_target_ratios(1, max_num_tiles)
+            tilings = [
+                calculate_internvl_targets(
+                    orig_width=image.width,
+                    orig_height=image.height,
+                    target_ratios=target_ratios,
+                    image_size=self.image_size,
+                    use_thumbnail=self.use_thumbnail,
+                )
+                for image in images
+            ]
+            num_patches = sum(count for count, _, _ in tilings)
+            size_bytes = self._estimate_image_resize_bytes(
+                images,
+                [(height, width) for _, width, height in tilings],
+                num_patches * self.image_size**2,
+                concatenates=(
+                    len(images) > 1 or (self.use_thumbnail and num_patches > 1)
+                ),
+            )
+            self._validate_image_preprocessing_budget(size_bytes, limit)
+
         return [
             dynamic_preprocess(
                 image,
@@ -712,21 +940,61 @@ class BaseNanoNemotronVLProcessor(ABC):
         if len(images) == 0:
             return text, {}
 
+        images = [to_pil_image(image) for image in images]
         image_inputs: dict[str, Any]
         if tiler := self.dynamic_tiler:
             sans_images = text[0].replace("<image>", "")
             text_prompt_length = len(
                 self.tokenizer(sans_images, add_special_tokens=False).input_ids
             )
-            pixel_values_lst, num_tokens_per_image = tiler._images_to_pixel_values_lst(
-                text_prompt_length=text_prompt_length,
-                images=images,
-                dtype=self.dtype,
+            params = tiler.compute_params(
+                images, tiler.max_num_tokens_available(text_prompt_length)
             )
-            imgs_sizes = [(pv.shape[-2], pv.shape[-1]) for pv in pixel_values_lst]
-            image_num_patches = torch.tensor([1] * len(num_tokens_per_image))
+            imgs_sizes = [tiler.get_target_size(p) for p in params]
+            limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
+            if limit > 0 and not is_profiling_media():
+                if self.device_resize:
+                    source_pixels = sum(p.media.width * p.media.height for p in params)
+                    size_bytes = source_pixels * 3 * torch.uint8.itemsize
+                else:
+                    resized_pixels = sum(height * width for height, width in imgs_sizes)
+                    size_bytes = self._estimate_image_resize_bytes(
+                        images, imgs_sizes, resized_pixels
+                    )
+                    output_dtype = (
+                        (self.dtype or torch.float32)
+                        if self.do_cpu_normalize
+                        else torch.uint8
+                    )
+                    # Packing retains resized images, rearranged patches, and the
+                    # concatenated output after the resize scratch is released.
+                    output_bytes = resized_pixels * 3 * output_dtype.itemsize
+                    size_bytes = max(size_bytes, 3 * output_bytes)
+                self._validate_image_preprocessing_budget(size_bytes, limit)
+            pixel_values: list[torch.Tensor] | torch.Tensor
+            if self.device_resize:
+                pixel_values = [_pil_to_nhwc_tensor(p.media)[0] for p in params]
+                num_tokens_per_image = [p.num_embeddings for p in params]
+            else:
+                pixel_values_lst, num_tokens_per_image = tiler.get_image_tensors(
+                    params, dtype=self.dtype
+                )
+                pixel_values = DynamicResolutionImageTiler.stack(
+                    pixel_values_lst, self.config.patch_size
+                )[0]
+            image_num_patches = torch.tensor(
+                [
+                    (height // self.config.patch_size)
+                    * (width // self.config.patch_size)
+                    for height, width in imgs_sizes
+                ]
+            )
+            pixels_key = (
+                "pixel_values_raw" if self.device_resize else "pixel_values_flat"
+            )
             image_inputs = {
-                "pixel_values_flat": pixel_values_lst,
+                pixels_key: pixel_values,
+                "image_num_patches": image_num_patches,
                 "imgs_sizes": imgs_sizes,
                 "num_tokens_per_image": num_tokens_per_image,
             }
@@ -808,6 +1076,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         use_audio_in_video: bool = False,
         do_rescale: bool = True,
         do_normalize: bool = True,
+        device_resize: bool = False,
     ) -> None:
         if do_rescale != do_normalize:
             raise ValueError(
@@ -820,6 +1089,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             max_model_len=max_model_len,
             max_num_tiles=max_num_tiles,
             do_cpu_normalize=do_normalize,
+            device_resize=device_resize,
         )
         # add extra video token for video processing
         self.video_token = video_token
@@ -924,6 +1194,20 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             for video in videos
         ]
 
+    def _video_frame_size(self, video: npt.NDArray) -> tuple[int, int]:
+        """Target (height, width) of the frames, as in `video_to_pixel_values`."""
+        if self.video_target_num_patches is None:
+            return self.image_size, self.image_size
+        width, height, _ = get_video_target_size_and_feature_size(
+            orig_w=video.shape[2],
+            orig_h=video.shape[1],
+            target_patches=self.video_target_num_patches,
+            maintain_aspect_ratio=self.video_maintain_aspect_ratio,
+            patch_size=self.config.patch_size,
+            downsample_ratio=self.config.downsample_ratio,
+        )
+        return height, width
+
     def _preprocess_video(
         self,
         text: list[str],
@@ -935,10 +1219,20 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         videos_lst = [v[0] for v in videos]
         video_metadata_lst = [v[1] for v in videos]
 
-        pixel_values_lst_video = self._videos_to_pixel_values_lst(
-            videos_lst,
-            dtype=self.dtype,
-        )
+        if self.device_resize:
+            # The model resizes the decoded frames on its device.
+            pixel_values_lst_video = [
+                torch.from_numpy(np.ascontiguousarray(video)) for video in videos_lst
+            ]
+            frame_sizes = [self._video_frame_size(video) for video in videos_lst]
+        else:
+            pixel_values_lst_video = self._videos_to_pixel_values_lst(
+                videos_lst,
+                dtype=self.dtype,
+            )
+            frame_sizes = [
+                (pv.shape[-2], pv.shape[-1]) for pv in pixel_values_lst_video
+            ]
 
         # We use frame duration in milliseconds (as integer) to ensure
         # we have consistent timestamps calculation. At preprocessing
@@ -954,14 +1248,21 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         ]
         video_num_patches = torch.tensor([len(item) for item in pixel_values_lst_video])
 
-        # Normalization already fused into resize above.
-        # Skip the torch.cat copy when there is exactly one video
-        if len(pixel_values_lst_video) == 1:
-            pixel_values_flat = pixel_values_lst_video[0]
+        video_inputs: dict[str, Any]
+        if self.device_resize:
+            video_inputs = {
+                "pixel_values_raw_video": pixel_values_lst_video,
+                "video_frame_sizes": torch.tensor(frame_sizes),
+            }
         else:
-            pixel_values_flat = torch.cat(pixel_values_lst_video)
-        video_inputs = {
-            "pixel_values_flat_video": pixel_values_flat,
+            # Normalization already fused into resize above.
+            # Skip the torch.cat copy when there is exactly one video
+            if len(pixel_values_lst_video) == 1:
+                pixel_values_flat = pixel_values_lst_video[0]
+            else:
+                pixel_values_flat = torch.cat(pixel_values_lst_video)
+            video_inputs = {"pixel_values_flat_video": pixel_values_flat}
+        video_inputs |= {
             "video_num_patches": video_num_patches,
             "frames_indices": frames_indices_lst,
             "frame_duration_ms": torch.tensor(frame_duration_ms_lst),
@@ -972,19 +1273,21 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
         T = self.video_temporal_patch_size
 
-        for pixel_values, _, frames_indices, frame_duration_ms in zip(
+        for pixel_values, (frame_h, frame_w), frames_indices, frame_duration_ms in zip(
             pixel_values_lst_video,
-            video_metadata_lst,
+            frame_sizes,
             frames_indices_lst,
             frame_duration_ms_lst,
         ):
             num_frames = pixel_values.shape[0]
-            frame_h, frame_w = pixel_values.shape[-2], pixel_values.shape[-1]
             tokens_in_single_frame = int(
                 (frame_h * frame_w // patch_size**2) * (downsample_ratio**2)
             )
             num_tubelets = math.ceil(num_frames / T) if T > 1 else num_frames
 
+            use_video_pruning = (
+                self.video_pruning_rate is not None and self.video_pruning_rate > 0.0
+            )
             if self.video_pruning_rate is not None and self.video_pruning_rate > 0.0:
                 # Start of EVS-specific code
                 num_tokens = compute_retained_tokens_count(
@@ -1011,6 +1314,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                 img_end_token_ids=self._img_end_token_ids,
                 img_context_token_ids=self._img_context_token_ids,
                 video_temporal_patch_size=T,
+                select_token_ids=not use_video_pruning,
             )
 
             # video_repl.full is a list of token IDs
@@ -1102,6 +1406,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         )
         if ragged_frames_indices:
             combined_inputs.pop("frames_indices")
+        # Videos of different sizes can't be stacked: bypass BatchFeature.
+        raw_videos = combined_inputs.pop("pixel_values_raw_video", None)
 
         if self.dynamic_tiler is None:
             batch = BatchFeature(
@@ -1110,9 +1416,10 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             )
         else:
             batch = BatchFeature(combined_inputs, tensor_type=return_tensors)
-            # allow images to be exempt from the BatchFeature validation:
-            # We will .stack() them in _parse_and_validate_image_input
+            # Raw images for device resize can have different shapes.
             batch.update(image_inputs)
+        if raw_videos is not None:
+            batch["pixel_values_raw_video"] = raw_videos
         if ragged_frames_indices:
             assert isinstance(frames_indices, list)
             batch["frames_indices"] = [
@@ -1162,16 +1469,16 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         img_end_token_ids: list[int],
         img_context_token_ids: list[int],
         video_temporal_patch_size: int = 1,
+        select_token_ids: bool = False,
     ) -> PromptUpdateDetails:
         """Build prompt replacement for a video.
-        The replacement returned is not actually used to replace the placeholder
-        tokens - it's just used to make sure we allocate the correct number
-        of tokens.
-        Actual replacement is done in embed_multimodal of
-        NemotronH_Nano_VL_V2
-        (specifically in _process_video_input -> _create_final_video_embeddings).
-        There, we create the final embeddings with text embeddings for indicator tokens
-        and video embeddings for video tokens.
+
+        When select_token_ids is true, only image context tokens receive video
+        embeddings; timestamps and structural tokens use text embeddings.
+        Otherwise, the final merge is handled in embed_multimodal of
+        NemotronH_Nano_VL_V2 (specifically in _process_video_input ->
+        _create_final_video_embeddings).
+
         This is a single function that handles all cases - non EVS, EVS dummy, EVS real.
         The differentiation is done via tokens_per_frame parameter.
         - non EVS case - constant value same value across all frames
@@ -1189,6 +1496,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             img_end_token_ids (list[int]): pre-tokenized IMG_END tokens
             img_context_token_ids (list[int]): pre-tokenized IMG_CONTEXT tokens
             video_temporal_patch_size (int): temporal patch size for videos
+            select_token_ids (bool): whether to select only image context tokens
+                for video embeddings
         """
         # TODO: Add support of frame_duration_ms to be None
         # At preprocessing step we should allow absent / metadata without
@@ -1255,4 +1564,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             all_token_ids.extend(img_context_token_ids * num_tokens)
             all_token_ids.extend(img_end_token_ids)
 
+        if select_token_ids:
+            return PromptUpdateDetails.select_token_ids(
+                all_token_ids, img_context_token_ids
+            )
         return PromptUpdateDetails.from_seq(all_token_ids)

@@ -60,6 +60,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             captured_lora_counts=captured_lora_counts,
         )
 
+        self.all_lora_ids = torch.arange(
+            -1, self.max_loras, dtype=torch.int32, device=device
+        )
+
         # When speculative decoding is enabled, max_num_samples is
         # max_batches * (num_speculative_decoding_tokens + 1).
         # This line can be optimized by replacing max_num_batched_tokens
@@ -357,6 +361,25 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         )
         y.copy_(result)
 
+    def _moe_meta_args(
+        self, num_tokens: int, token_lora_mapping: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor, bool, torch.Tensor]:
+        meta = self.token_mapping_meta
+        mapping, _, _, _, lora_ids, no_lora_flag, num_active_loras = meta.meta_args(
+            num_tokens, self.lora_config.specialize_active_lora
+        )
+        if token_lora_mapping is None or (
+            token_lora_mapping.data_ptr() == mapping.data_ptr()
+        ):
+            return mapping, lora_ids, bool(no_lora_flag.item()), num_active_loras
+        # Tokens gathered from other DP/EP ranks can use slots this rank does not.
+        return (
+            token_lora_mapping,
+            self.all_lora_ids,
+            False,
+            meta.default_num_active_loras_cpu,
+        )
+
     def moe_lora_align_block_size(
         self,
         topk_ids: torch.Tensor,
@@ -377,19 +400,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         read from `self.token_mapping_meta`. This is how EP+LoRA injects the
         per-rank-local token→LoRA map after all-to-all dispatch.
         """
-        (
-            token_lora_mapping_meta,
-            _,
-            _,
-            _,
-            lora_ids,
-            _,
-            _,
-        ) = self.token_mapping_meta.meta_args(
-            num_tokens, self.lora_config.specialize_active_lora
+        token_lora_mapping, lora_ids, _, _ = self._moe_meta_args(
+            num_tokens, token_lora_mapping
         )
-        if token_lora_mapping is None:
-            token_lora_mapping = token_lora_mapping_meta
         # Under EP the caller passes local_num_experts but topk_ids carries
         # GLOBAL expert indices. The CUDA kernel uses num_experts to size
         # its bucketing table; with EP we must size by global_num_experts
@@ -470,25 +483,13 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         add_inputs: bool = True,
     ):
         """Perform a fused forward computation for a LoRA MoE layer."""
-        (
-            token_lora_mapping_meta,
-            _,
-            _,
-            _,
-            lora_ids,
-            no_lora_flag,
-            num_active_loras,
-        ) = self.token_mapping_meta.meta_args(
-            x.size(0), self.lora_config.specialize_active_lora
+        token_lora_mapping, lora_ids, no_lora, num_active_loras = self._moe_meta_args(
+            x.size(0), token_lora_mapping
         )
-
-        assert no_lora_flag.numel() == 1
-        if no_lora_flag.item():
+        if no_lora:
             # None of the inputs require LoRA.
             return
 
-        if token_lora_mapping is None:
-            token_lora_mapping = token_lora_mapping_meta
         fused_moe_lora(
             y,
             x,

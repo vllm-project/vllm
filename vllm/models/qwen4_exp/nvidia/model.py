@@ -11,6 +11,7 @@ from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
@@ -86,6 +87,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
+from .mega_moe import Qwen4ExpMegaMoeBlock
 from .ops.cute_dsl.hc_down_silu import request_hc_down_silu_warmup
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
@@ -98,7 +100,7 @@ _QSA_LAYER_TYPES = ("qwen_sparse_attention", "indexed_attention")
 def without_modelopt_fp4(
     quant_config: QuantizationConfig | None,
 ) -> QuantizationConfig | None:
-    """Return ``None`` for weights excluded from Qwen4Exp ModelOpt-FP4."""
+    """Return `None` for weights excluded from Qwen4Exp ModelOpt-FP4."""
     if quant_config is not None and quant_config.get_name() == "modelopt_fp4":
         return None
     return quant_config
@@ -110,9 +112,9 @@ def _remap_qsa_cache_scale_name(
 ) -> str:
     """Map serialized main-cache scales onto the merged QSA owner.
 
-    Regular attention keeps cache scales below its ``attn`` child. QSA owns
+    Regular attention keeps cache scales below its `attn` child. QSA owns
     that cache directly, so only QSA layers need the final path component
-    moved to the owner's persistent ``_k_scale``/``_v_scale`` buffers.
+    moved to the owner's persistent `_k_scale`/`_v_scale` buffers.
     """
     scale_suffixes = {
         "k_proj.k_scale": "_k_scale",
@@ -238,6 +240,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
                 reduce_results=not self.use_hc_sequence_parallel,
+                overlap_ba_proj=True,
             )
         elif layer_type in _QSA_LAYER_TYPES:
             use_qsa = getattr(config, "indexer_n_heads", None) is not None
@@ -265,11 +268,15 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             raise ValueError(f"Invalid layer_type {layer_type}")
 
-        self.mlp = Qwen4ExpSparseMoeBlock(
-            vllm_config=vllm_config,
-            prefix=f"{prefix}.mlp",
-            reduce_results=not self.use_hc_sequence_parallel,
-        )
+        self.mlp: Qwen4ExpSparseMoeBlock | Qwen4ExpMegaMoeBlock
+        if vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS:
+            self.mlp = Qwen4ExpMegaMoeBlock(vllm_config, prefix=f"{prefix}.mlp")
+        else:
+            self.mlp = Qwen4ExpSparseMoeBlock(
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.mlp",
+                reduce_results=not self.use_hc_sequence_parallel,
+            )
 
         hc_config = HyperConnectionConfig(
             hc_count=config.hc_count,
@@ -373,7 +380,7 @@ class Qwen4ExpMixtureOfExperts(MixtureOfExperts):
         example_moe = None
         for layer in layers:
             if isinstance(layer, Qwen4ExpDecoderLayer) and isinstance(
-                layer.mlp, Qwen4ExpSparseMoeBlock
+                layer.mlp, (Qwen4ExpSparseMoeBlock, Qwen4ExpMegaMoeBlock)
             ):
                 example_moe = layer.mlp
                 self.moe_mlp_layers.append(layer.mlp)
@@ -561,8 +568,9 @@ class Qwen4ExpModel(nn.Module):
                         forward_context.is_padding, hidden_states
                     )
                 hidden_states = sp_shard(hidden_states)
-            # Expand only the local token rows when SP is enabled.
-            hidden_states = hidden_states.repeat(1, self.config.hc_count)
+            # Expand only the local token rows when SP is enabled. cat hits a
+            # vectorized copy path; repeat lowers to a slow broadcast copy.
+            hidden_states = torch.cat([hidden_states] * self.config.hc_count, dim=-1)
         else:
             if intermediate_tensors is None:
                 raise ValueError("pipeline stage requires intermediate tensors")
@@ -852,6 +860,14 @@ class Qwen4ExpForCausalLM(
         return uses_recoverssm(vllm_config.cache_config, num_spec or 0)
 
     @classmethod
+    def _uses_gdn_replayssm(cls, vllm_config: VllmConfig) -> bool:
+        """ReplaySSM's cached GDN decode, for standard decoding only: with
+        speculative decoding, RecoverSSM replaces it."""
+        return vllm_config.cache_config.use_replayssm and not cls._uses_gdn_recoverssm(
+            vllm_config
+        )
+
+    @classmethod
     def get_gdn_mamba_state_dtype_from_config(
         cls, vllm_config: VllmConfig
     ) -> tuple[torch.dtype, ...]:
@@ -860,6 +876,7 @@ class Qwen4ExpForCausalLM(
                 vllm_config.model_config.dtype,
                 vllm_config.cache_config.mamba_cache_dtype,
                 vllm_config.cache_config.mamba_ssm_cache_dtype,
+                cls._uses_gdn_replayssm(vllm_config),
             )
         )
         if cls._uses_gdn_recoverssm(vllm_config):  # replay record, fp32
@@ -886,6 +903,9 @@ class Qwen4ExpForCausalLM(
             hf_config.linear_value_head_dim,
             hf_config.linear_conv_kernel_dim,
             num_spec,
+            vllm_config.cache_config.replayssm_buffer_len
+            if cls._uses_gdn_replayssm(vllm_config)
+            else None,
         )
         if cls._uses_gdn_recoverssm(
             vllm_config
@@ -1042,7 +1062,7 @@ class Qwen4ExpForConditionalGeneration(
             self.video_pruning_rate = 0.0
             self._tokenizer = None
             self.visual = StageMissingLayer("vision_tower")
-            self._tower_model_names = []
+            self._tower_model_names = ()
         else:
             self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
             self._init_video_pruning(multimodal_config)
@@ -1196,7 +1216,8 @@ class Qwen4ExpForConditionalGeneration(
         cls,
         vllm_config: VllmConfig,
     ) -> MambaStateShapes:
-        # GDN RecoverSSM adds a third state (the replay record) to Qwen3.5's two.
+        # Its GDN states follow its own hooks: the RecoverSSM replay record, or
+        # the ReplaySSM rings.
         return Qwen4ExpForCausalLM.get_mamba_state_shape_from_config(vllm_config)
 
     @classmethod

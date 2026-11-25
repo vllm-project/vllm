@@ -54,6 +54,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     _StoreBatch,
 )
 from vllm.platforms import current_platform
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroup,
+    KVCacheTensor,
+    MLAAttentionSpec,
+)
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="UMBP requires ROCm"
@@ -609,7 +619,8 @@ def _close_against_a_hung_server(role: str, stuck: str) -> None:
     if role == "scheduler":
         handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
         setattr(pool.clients[0], stuck, _hang)
-        assert handle.lookup(["k"]) == [False]
+        # A hung exists call is unavailable; with a hung close, "k" is absent.
+        assert handle.lookup(["k"]) == ([None] if stuck == "batch_exists" else [False])
     else:
         handle = runtime.create_worker_handle("ns", RankTopology(), None)
         source = torch.arange(16, dtype=torch.uint8)
@@ -940,7 +951,9 @@ def _stall_scheduler_call(server, monkeypatch, method, release) -> list:
     return calls
 
 
-def test_lookup_without_a_reply_misses_until_the_server_answers(server, monkeypatch):
+def test_lookup_without_a_reply_is_unavailable_until_the_server_answers(
+    server, monkeypatch
+):
     handle = _runtime(lookup_timeout_ms=50).create_scheduler_handle(
         "ns", RankTopology(), None
     )
@@ -948,8 +961,8 @@ def test_lookup_without_a_reply_misses_until_the_server_answers(server, monkeypa
     release = threading.Event()
     calls = _stall_scheduler_call(server, monkeypatch, "batch_exists", release)
     try:
-        assert handle.lookup(["k"]) == [False]
-        assert handle.lookup(["j"]) == [False]
+        assert handle.lookup(["k"]) == [None]
+        assert handle.lookup(["j"]) == [None]
         assert "returned" not in calls
 
         release.set()
@@ -987,7 +1000,7 @@ def test_scheduler_close_does_not_wait_on_a_stalled_server(server, monkeypatch, 
     calls = _stall_scheduler_call(server, monkeypatch, stuck, release)
     try:
         if stuck == "batch_exists":
-            assert handle.lookup(["k"]) == [False]
+            assert handle.lookup(["k"]) == [None]
 
         handle.close()
 
@@ -1003,7 +1016,7 @@ def test_scheduler_drops_its_client_once_a_stalled_call_returns(server, monkeypa
     )
     release = threading.Event()
     _stall_scheduler_call(server, monkeypatch, "batch_exists", release)
-    assert handle.lookup(["k"]) == [False]
+    assert handle.lookup(["k"]) == [None]
 
     handle.close()
     release.set()
@@ -1025,7 +1038,10 @@ def test_lookup_and_clear_degrade_when_the_server_is_lost(server, failure):
 
     server.lose(failure)
 
-    assert handle.lookup(["k", "j"]) == [False, False]
+    # MORI reports a lost server by result, which looks like a miss; only a
+    # raising RPC is known to be unavailable.
+    expected = [False, False] if failure == "server-down" else [None, None]
+    assert handle.lookup(["k", "j"]) == expected
     assert handle.clear() is False
     handle.close()
 
@@ -1035,7 +1051,7 @@ def test_lookup_rejects_a_short_result(server, monkeypatch):
     handle = runtime.create_scheduler_handle("ns", RankTopology(), None)
     monkeypatch.setattr(server.clients[0], "batch_exists", lambda keys: [True])
 
-    assert handle.lookup(["a", "b"]) == [False, False]
+    assert handle.lookup(["a", "b"]) == [None, None]
 
 
 @pytest.mark.parametrize("load_async", [False, True])
@@ -1221,3 +1237,42 @@ def test_stalled_store_stays_pending_and_refuses_new_transfers(server, monkeypat
     finally:
         release.set()
         worker.close()
+
+
+def _draft_replay_kv_cache_config() -> KVCacheConfig:
+    # Target MLA latents plus a draft sliding-window group that SWA replay
+    # (rebuild_sliding_window) keeps out of prefix caching.
+    spec = MLAAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=32, dtype=torch.float16
+    )
+    target = FullAttentionManager.layer_config(spec)
+    draft = SlidingWindowManager.layer_config(
+        spec, sliding_window=16, bounded_replay=True
+    )
+    return KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=8192, layers=["layer1"], layer_stride=8192, block_stride=1024
+            ),
+            KVCacheTensor(
+                size=8192, layers=["draft"], layer_stride=8192, block_stride=1024
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroup.from_layers({"layer1": target}),
+            KVCacheGroup.from_layers({"draft": draft}),
+        ],
+    )
+
+
+def test_dspark_draft_rebuilt_by_replay_is_accepted(server):
+    # DSpark/DFlash window KV derives from the target's hidden states, so the
+    # replay that rebuilds the target's window rebuilds the draft's too.
+    config = _draft_replay_kv_cache_config()
+    assert config.prefix_cacheable_group_ids == (0,)
+    UMBPStoreConnector(
+        _standalone_config(rebuild_sliding_window=True),
+        KVConnectorRole.SCHEDULER,
+        config,
+    )

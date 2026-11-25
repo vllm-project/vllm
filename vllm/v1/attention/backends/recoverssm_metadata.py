@@ -7,9 +7,9 @@ from dataclasses import dataclass
 import torch
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RecoverSSMPostprocessMetadata:
-    """Metadata used during postprocessing for align-mode prefix caching."""
+    """Metadata used during postprocessing for prefix caching."""
 
     num_spec_decodes: int
     request_indices: torch.Tensor | None
@@ -36,7 +36,7 @@ def recoverssm_spec_rows(
     builders (GDN, PLE).
 
     Every active decode row does (a draft-less step is a window of one token), plus
-    every row that has drafts. Only the first ``num_reqs`` rows are real; padding rows
+    every row that has drafts. Only the first `num_reqs` rows are real; padding rows
     never take the spec path. Returns the draft-count vector to hand to the base builder
     (1 for spec rows, -1 otherwise, padding included) and the spec rows in batch order,
     which is also the order of the base builder's spec state indices."""

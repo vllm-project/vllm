@@ -4,7 +4,7 @@
 
 Reference: the stock decode path fed the accepted tokens one at a time.
 RecoverSSM: one spec-mode conv over the whole window from the checkpoint
-(offset 0), then ``_PleConvCommit`` compacts the accepted suffix to the front.
+(offset 0), then `_PleConvCommit` compacts the accepted suffix to the front.
 The conv history is pure data movement, so the states must be bit-identical,
 and the outputs of the accepted tokens must match as well.
 """

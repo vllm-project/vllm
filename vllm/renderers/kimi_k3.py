@@ -2,8 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any, cast
 
+from transformers import PreTrainedTokenizerBase
+
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -11,13 +14,18 @@ from vllm.renderers.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.tokenizers.hf import HfTokenizer
+from vllm.renderers.chat_utils.chat_message import (
+    TEXT_PART_TYPES,
+    parse_chat_message_content_mm_part,
+)
+from vllm.tokenizers.hf import HfTokenizer, ThreadSafeHFTokenizerMixin
+from vllm.transformers_utils.processors.kimi_k3 import encode_k3_text_prompt
 from vllm.utils.async_utils import make_async
 
 from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
-from .params import ChatParams
+from .params import ChatParams, TokenizeParams
 
 # Keep the original image mode (including the alpha channel) for K3 instead of
 # flattening images onto a background color. Server-level (--media-io-kwargs)
@@ -67,13 +75,56 @@ def _apply_k3_thinking_kwargs(
         )
 
 
+def _k3_text_parts(content: list[Any]) -> list[dict[str, str]] | None:
+    """Text parts as parsing reads them, or None if `content` has others."""
+    parts = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append({"type": "text", "text": part})
+            continue
+        part_type, text = parse_chat_message_content_mm_part(part)
+        if part_type not in TEXT_PART_TYPES:
+            return None
+        if text is not None:
+            parts.append({"type": "text", "text": cast(str, text)})
+    return parts
+
+
+def _keep_k3_content_parts(
+    messages: list[ChatCompletionMessageParam],
+    conversation: list[ConversationMessage],
+) -> None:
+    """Pass message content to K3's encoder as part lists.
+
+    The encoder renders and tokenizes each part in order with no separator.
+    Parsing joins the text parts of a tool message with newlines, so those are
+    taken from the request instead.
+    """
+    for request_message, message in zip(messages, conversation, strict=True):
+        content = message.get("content")
+        request_content = request_message.get("content")
+        if (
+            message["role"] == "tool"
+            and isinstance(content, str)
+            and isinstance(request_content, list)
+        ):
+            message["content"] = _k3_text_parts(request_content) or content
+        elif isinstance(content, list):
+            message["content"] = [  # type: ignore[typeddict-item]
+                {"type": "text", "text": part["name"]}
+                if part["type"] == "tool_reference"
+                else part
+                for part in content
+            ]
+
+
 def _normalize_k3_tool_messages(
     conversation: list[ConversationMessage],
 ) -> list[dict[str, Any]]:
     """Reorder tool-result messages to match assistant tool_call order.
 
-    Supports matching by ``tool_call_id`` or by the synthetic
-    ``"{tool}:{zero_based_index}"`` alias. When any tool message in a
+    Supports matching by `tool_call_id` or by the synthetic
+    `"{tool}:{zero_based_index}"` alias. When any tool message in a
     block cannot be resolved, the whole block is left in its original
     order (graceful fallback).
 
@@ -147,7 +198,7 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
     """Render chat prompts with Kimi K3's Python XTML encoding.
 
     K3 ships no Jinja chat template; its tokenizer renders messages through
-    ``encoding_k3`` instead. We tokenize eagerly so the structural markers keep
+    `encoding_k3` instead. We tokenize eagerly so the structural markers keep
     their special-token ids while user- and tool-supplied text stays ordinary.
     """
 
@@ -168,6 +219,23 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         conversation: list[dict[str, Any]],
         params: ChatParams,
     ) -> list[int]:
+        tokenizer = self.get_tokenizer()
+        tokenizer_cls: type[PreTrainedTokenizerBase] = type(tokenizer)
+        if issubclass(tokenizer_cls, ThreadSafeHFTokenizerMixin):
+            # The pool overrides apply_chat_template to route calls to its
+            # copies; check the class it wraps.
+            tokenizer_cls = cast(
+                type[PreTrainedTokenizerBase], tokenizer_cls.__bases__[0]
+            )
+        if (
+            tokenizer_cls.apply_chat_template
+            is PreTrainedTokenizerBase.apply_chat_template
+        ):
+            raise VLLMValidationError(
+                "The kimi_k3 tokenizer mode requires native chat encoding.",
+                parameter="tokenizer_mode",
+            )
+
         # Tokenize eagerly: K3 encodes structural markers as special tokens and
         # user/tool text as ordinary tokens, so we cannot defer to a plain
         # re-tokenization of the rendered string downstream.
@@ -178,7 +246,24 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         if params.response_format is not None:
             kwargs["response_format"] = _dump_k3_template_value(params.response_format)
         kwargs["tokenize"] = True
-        return self.get_tokenizer().apply_chat_template(conversation, **kwargs)
+        return tokenizer.apply_chat_template(conversation, **kwargs)
+
+    def _tokenize_prompt(
+        self,
+        prompt: TextPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt:
+        if not (prompt.get("multi_modal_data") or prompt.get("multi_modal_uuids")):
+            return super()._tokenize_prompt(prompt, params)
+
+        # Truncation is applied to the token ids after tokenization.
+        token_ids = encode_k3_text_prompt(
+            self.get_tokenizer(),
+            prompt["prompt"],
+            self.model_config.hf_config.image_placeholder,
+            add_special_tokens=params.add_special_tokens,
+        )
+        return self._build_tokens_prompt(token_ids, prompt)
 
     def render_messages(
         self,
@@ -188,11 +273,12 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
             self.model_config,
-            content_format="string",
+            content_format="openai",
             media_io_kwargs=_merge_k3_media_io_kwargs(params.media_io_kwargs),
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
+        _keep_k3_content_parts(messages, conversation)
         rendered_conversation = _normalize_k3_tool_messages(conversation)
         prompt = parse_dec_only_prompt(
             self._apply_chat_template(rendered_conversation, params)
@@ -212,11 +298,12 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
             self.model_config,
-            content_format="string",
+            content_format="openai",
             media_io_kwargs=_merge_k3_media_io_kwargs(params.media_io_kwargs),
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
+        _keep_k3_content_parts(messages, conversation)
         rendered_conversation = _normalize_k3_tool_messages(conversation)
         token_ids = await self._apply_chat_template_async(rendered_conversation, params)
         prompt = parse_dec_only_prompt(token_ids)

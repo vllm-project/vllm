@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from vllm.multimodal.utils import strip_covered_mm_data
 from vllm.utils.gc_utils import untrack_long_lists
+from vllm.v1.metrics.iteration_workload import ScheduledWorkload
 
 if TYPE_CHECKING:
     import numpy as np
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
         AuxOutputConnectorMetadata,
     )
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
+    from vllm.distributed.ec_transfer.ec_events import ECCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
@@ -191,15 +193,38 @@ class CachedRequestData:
         )
 
 
-@dataclass
-class ScheduledEncoderInputStats:
-    """Stats for encoder inputs scheduled in one iteration."""
+@dataclass(slots=True)
+class IterationDetails:
+    """Scheduled prefill/decode request and input counts."""
 
-    num_inputs: int = 0
-    output_tokens: int = 0
+    num_prefill_requests: int = 0
+    num_prefill_tokens: int = 0
+    num_decode_requests: int = 0
+    num_decode_tokens: int = 0
+    num_encoder_inputs: int = 0
+    num_encoder_output_tokens: int = 0
+    # Only with --enable-logging-iteration-details.
+    scheduled_workload: ScheduledWorkload | None = None
+
+    # Temporary aliases for existing EngineCore and worker profiler consumers.
+    @property
+    def num_ctx_requests(self) -> int:
+        return self.num_prefill_requests
+
+    @property
+    def num_ctx_tokens(self) -> int:
+        return self.num_prefill_tokens
+
+    @property
+    def num_generation_requests(self) -> int:
+        return self.num_decode_requests
+
+    @property
+    def num_generation_tokens(self) -> int:
+        return self.num_decode_tokens
 
 
-@dataclass
+@dataclass(slots=True)
 class KVConnectorBlockState:
     """Scheduler-local block state offered to a producer-side KV connector."""
 
@@ -207,7 +232,7 @@ class KVConnectorBlockState:
     req_ids: set[str]
     # Resolve on access to avoid copying tables the connector never reads.
     resolve_block_ids: Callable[[str], tuple[list[int], ...]]
-    # Exact Mamba "align" boundary-state hand-offs.
+    # Exact Mamba boundary-state hand-offs.
     boundary_state_offloads: dict[str, list[tuple[int, int, int]]]
 
     def get_block_ids(self, req_id: str) -> tuple[list[int], ...] | None:
@@ -257,7 +282,8 @@ class SchedulerOutput:
         default_factory=dict
     )
 
-    scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
+    # Optional scheduling-time snapshot, before worker-side token adjustments.
+    iteration_details: IterationDetails | None = None
 
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
@@ -267,12 +293,13 @@ class SchedulerOutput:
     # Set only in async scheduling case.
     has_structured_output_requests: bool = False
 
+    # Whether any scheduled request uses structured output with speculative
+    # decoding. Set only in async scheduling case.
+    has_structured_output_spec_decode: bool = False
+
     # Whether the scheduled requests have all the output tokens they
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False
-
-    # Used for adjusting acceptance rate calculation.
-    num_invalid_spec_tokens: dict[str, int] | None = None
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
@@ -306,6 +333,11 @@ class SchedulerOutput:
     # drafter can skip proposing them.
     skip_drafts: bool = False
 
+    # Publish these events once this step's worker output is processed, even
+    # when the step schedules no tokens but frees encoder cache entries.
+    encoder_cache_events: "list[ECCacheEvent] | None" = None
+    encoder_cache_epoch: int = 0
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(
@@ -319,8 +351,14 @@ class SchedulerOutput:
             free_encoder_mm_hashes=[],
         )
 
+    def shares_requests_with(self, other: "SchedulerOutput") -> bool:
+        """Whether any request is scheduled in both this step and `other`."""
+        return not self.num_scheduled_tokens.keys().isdisjoint(
+            other.num_scheduled_tokens
+        )
 
-@dataclass
+
+@dataclass(slots=True)
 class GrammarOutput:
     # ids of structured output requests.
     structured_output_request_ids: list[str]
