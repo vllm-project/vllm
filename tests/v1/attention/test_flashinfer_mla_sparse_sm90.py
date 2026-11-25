@@ -569,7 +569,7 @@ def _sm90_flashinfer_available():
 SM90_HEADS, SM90_TOPK, SM90_KPOOL, SM90_WIDTH = 16, 2048, 4, 2176
 
 
-def _real_state(rows):
+def _real_state(rows, **kwargs):
     return sm90_mod._SM90State(
         torch.device("cuda"),
         SM90_HEADS,
@@ -581,6 +581,7 @@ def _real_state(rows):
         HEAD**-0.5,
         SM90_TOPK,
         SM90_KPOOL,
+        **kwargs,
     )
 
 
@@ -694,7 +695,7 @@ def test_plan_admits_cache_smaller_than_stale_indices():
     HiSparse staging workspace)."""
     torch.manual_seed(0)
     rows, width = 8, SM90_WIDTH
-    state = _real_state(rows)
+    state = _real_state(rows, reset_kv_indices_on_plan=True)
     state.kv_indices.fill_((1 << 16) - 1)
     lens = torch.full((rows,), 4, dtype=torch.int32)
     state.plan(rows, lens, None, None)

@@ -263,6 +263,7 @@ class _SM90State:
         index_topk: int,
         index_kpool: int,
         workspace: torch.Tensor | None = None,
+        reset_kv_indices_on_plan: bool = False,
     ) -> None:
         from flashinfer.mla import BatchMLAPagedAttentionWrapper
 
@@ -272,6 +273,7 @@ class _SM90State:
             else workspace
         )
         self.device = device
+        self.reset_kv_indices_on_plan = reset_kv_indices_on_plan
         self.num_heads = num_heads
         self.kv_dtype = kv_dtype
         self.max_tokens = max_tokens
@@ -375,13 +377,13 @@ class _SM90State:
         self._lens_cpu[:num_tokens] = kv_lens
         self._kv_cpu[0] = 0
         torch.cumsum(self._lens_cpu, dim=0, out=self._kv_cpu[1:])
-        # The forward writes kv_indices after planning, but FlashInfer records
-        # the planned page range from them: stale slots from a step over a
-        # larger cache would reject this step's smaller one (the HiSparse
-        # staging workspace).
         num_indices = max(int(self._kv_cpu[-1]), 1)
         kv_indices = self.kv_indices[:num_indices]
-        kv_indices.zero_()
+        # The forward writes kv_indices after planning, but FlashInfer records
+        # the planned page range from them: with HiSparse, stale slots from a
+        # step over the hot cache would reject the smaller staging workspace.
+        if self.reset_kv_indices_on_plan:
+            kv_indices.zero_()
         self.wrapper.plan(
             self._qo_cpu,
             self._kv_cpu,
@@ -489,6 +491,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             if kv_cache_spec.dtype == torch.uint8
             else kv_cache_spec.dtype
         )
+        hisparse = vllm_config.attention_config.hisparse_config is not None
         make_state = functools.partial(
             _SM90State,
             device,
@@ -501,12 +504,11 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
             sm_scale=impl.scale,
             index_topk=int(hf_config.index_topk),
             index_kpool=int(getattr(hf_config, "index_kpool", 1) or 1),
+            reset_kv_indices_on_plan=hisparse,
         )
         self.state = make_state()
         self.prefill_state = (
-            make_state(workspace=self.state.workspace)
-            if vllm_config.attention_config.hisparse_config is not None
-            else None
+            make_state(workspace=self.state.workspace) if hisparse else None
         )
         spec_config = vllm_config.speculative_config
         self._adaptive_verification = bool(
