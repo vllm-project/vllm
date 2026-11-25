@@ -134,9 +134,12 @@ def _create_random_top_token_test_vector(
     if sampled_token_id in choice_tensor[1:]:
         # Use 1-based rank to match the top-k rank convention used by the
         # consumer (logprobs.py assigns ranks starting from 1).
-        sampled_token_rank = (choice_tensor[1:] == sampled_token_id).nonzero(
-            as_tuple=True
-        )[0].item() + 1
+        sampled_token_rank = (
+            int(
+                (choice_tensor[1:] == sampled_token_id).nonzero(as_tuple=True)[0].item()
+            )
+            + 1
+        )
     else:
         # If not found, assign a random int between num_logprobs and 50700
         sampled_token_rank = random.randint(num_logprobs, 50700)

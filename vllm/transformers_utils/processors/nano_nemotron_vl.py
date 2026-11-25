@@ -1096,7 +1096,6 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         self.video_pruning_rate = video_pruning_rate
         self.use_audio_in_video = use_audio_in_video
 
-        # Video params live exclusively in vision_config
         vision_config = getattr(config, "vision_config", config)
         self.video_temporal_patch_size: int = getattr(
             vision_config, "video_temporal_patch_size", 1
@@ -1248,21 +1247,16 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         ]
         video_num_patches = torch.tensor([len(item) for item in pixel_values_lst_video])
 
-        video_inputs: dict[str, Any]
-        if self.device_resize:
-            video_inputs = {
-                "pixel_values_raw_video": pixel_values_lst_video,
-                "video_frame_sizes": torch.tensor(frame_sizes),
-            }
-        else:
-            # Normalization already fused into resize above.
-            # Skip the torch.cat copy when there is exactly one video
-            if len(pixel_values_lst_video) == 1:
-                pixel_values_flat = pixel_values_lst_video[0]
-            else:
-                pixel_values_flat = torch.cat(pixel_values_lst_video)
-            video_inputs = {"pixel_values_flat_video": pixel_values_flat}
-        video_inputs |= {
+        # One tensor per video: videos that keep their aspect ratio can differ
+        # in frame size. Normalization is already fused into the resize above.
+        pixels_key = (
+            "pixel_values_raw_video"
+            if self.device_resize
+            else "pixel_values_flat_video"
+        )
+        video_inputs: dict[str, Any] = {
+            pixels_key: pixel_values_lst_video,
+            "video_frame_sizes": torch.tensor(frame_sizes),
             "video_num_patches": video_num_patches,
             "frames_indices": frames_indices_lst,
             "frame_duration_ms": torch.tensor(frame_duration_ms_lst),
@@ -1407,7 +1401,11 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         if ragged_frames_indices:
             combined_inputs.pop("frames_indices")
         # Videos of different sizes can't be stacked: bypass BatchFeature.
-        raw_videos = combined_inputs.pop("pixel_values_raw_video", None)
+        video_pixels = {
+            key: combined_inputs.pop(key)
+            for key in ("pixel_values_raw_video", "pixel_values_flat_video")
+            if key in combined_inputs
+        }
 
         if self.dynamic_tiler is None:
             batch = BatchFeature(
@@ -1418,8 +1416,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             batch = BatchFeature(combined_inputs, tensor_type=return_tensors)
             # Raw images for device resize can have different shapes.
             batch.update(image_inputs)
-        if raw_videos is not None:
-            batch["pixel_values_raw_video"] = raw_videos
+        batch.update(video_pixels)
         if ragged_frames_indices:
             assert isinstance(frames_indices, list)
             batch["frames_indices"] = [
