@@ -50,7 +50,10 @@ class _Planner:
         self.ring_pos[torch.tensor(slots, dtype=torch.int32, device=DEVICE)] = 0
 
     def step(
-        self, slots: list[int], seq_lens: list[int]
+        self,
+        slots: list[int],
+        seq_lens: list[int],
+        force_flush: list[bool] | None = None,
     ) -> tuple[list[int], list[int]]:
         state_indices = torch.tensor(slots, dtype=torch.int32, device=DEVICE)
         plan_replayssm_decode(
@@ -61,6 +64,9 @@ class _Planner:
             buffer_len=self.buffer_len,
             seq_lens=torch.tensor(seq_lens, dtype=torch.int32, device=DEVICE),
             align_block_size=self.align_block_size,
+            force_flush=None
+            if force_flush is None
+            else torch.tensor(force_flush, dtype=torch.int8, device=DEVICE),
         )
         n = len(slots)
         return self.write_pos[:n].tolist(), self.is_flush[:n].tolist()
@@ -107,6 +113,20 @@ def test_rows_plan_independently(align_block_size):
     assert write_pos == [wp for wp, _ in expected] + [0, 0]
     assert is_flush == [fl for _, fl in expected] + [0, 0]
     assert torch.equal(planner.ring_pos[[0, 2]], untouched_before)
+
+
+def test_force_flush_flushes_mid_ring():
+    """A prompt token run as a decode flushes mid-ring, so the prompt's next
+    prefill chunk starts from a complete state."""
+    planner = _Planner(16)
+    planner.reset([2, 5])
+    for num_computed in range(100, 103):
+        planner.step([2, 5], [num_computed + 1] * 2)
+    assert planner.step([2, 5], [104, 104], force_flush=[True, False]) == (
+        [3, 3],
+        [1, 0],
+    )
+    assert planner.step([2, 5], [105, 105]) == ([0, 4], [0, 0])
 
 
 def test_prefill_reset_reanchors_resumed_request():

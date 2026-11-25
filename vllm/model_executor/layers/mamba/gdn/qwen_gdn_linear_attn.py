@@ -2730,6 +2730,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 buffer_len=self.replayssm_buffer_len,
                 seq_lens=attn_metadata.replayssm_seq_lens_d,
                 align_block_size=attn_metadata.replayssm_align_block_size,
+                force_flush=attn_metadata.force_flush_d,
             )
         _, ssm_state, d_cache, k_cache, g_cache = self.kv_cache
         fused_recurrent_gated_delta_rule_replayssm(

@@ -34,6 +34,7 @@ def _plan_replayssm_decode_kernel(
     ring_pos,
     state_batch_indices,
     seq_lens,
+    force_flush,
     write_pos,
     is_flush,
     state_batch_indices_stride,
@@ -42,6 +43,7 @@ def _plan_replayssm_decode_kernel(
     buffer_len: tl.constexpr,
     align_block_size: tl.constexpr,
     pad_slot_id: tl.constexpr,
+    HAS_FORCE_FLUSH: tl.constexpr,
     BLOCK: tl.constexpr,
 ) -> None:
     rows = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -62,6 +64,8 @@ def _plan_replayssm_decode_kernel(
         # step completing a block flushes its exact state for prefix caching.
         pos = tl.where((seq_len - 1) % align_block_size == 0, 0, pos)
         flush = (pos == buffer_len - 1) | (seq_len % align_block_size == 0)
+    if HAS_FORCE_FLUSH:
+        flush |= tl.load(force_flush + rows, mask=valid, other=0) != 0
     pos = tl.where(valid, pos, 0)
     flush = valid & flush
     tl.store(write_pos + rows, pos, mask=mask)
@@ -78,6 +82,7 @@ def plan_replayssm_decode(
     seq_lens: torch.Tensor | None = None,
     align_block_size: int = 0,
     pad_slot_id: int = NULL_BLOCK_ID,
+    force_flush: torch.Tensor | None = None,
 ) -> None:
     """Plan one Triton ReplaySSM standard-decode step on the GPU.
 
@@ -91,6 +96,10 @@ def plan_replayssm_decode(
     `get_replayssm_align_block_size`), the ring restarts at the first step of
     every `align_block_size` tokens and flushes on the step completing them;
     `seq_lens` must then hold each row's sequence length.
+
+    Rows set in `force_flush` flush this step. A prompt token run as a decode
+    must flush, because the prompt's next prefill chunk starts from the state
+    and resets the ring.
     """
     if state_batch_indices.dim() > 1:
         state_batch_indices = state_batch_indices[:, 0]
@@ -105,6 +114,7 @@ def plan_replayssm_decode(
         ring_pos,
         state_batch_indices,
         seq_lens if align_block_size > 0 else state_batch_indices,
+        force_flush if force_flush is not None else state_batch_indices,
         write_pos,
         is_flush,
         state_batch_indices.stride(0),
@@ -113,6 +123,7 @@ def plan_replayssm_decode(
         buffer_len,
         align_block_size,
         pad_slot_id,
+        HAS_FORCE_FLUSH=force_flush is not None,
         BLOCK=block,
     )
 

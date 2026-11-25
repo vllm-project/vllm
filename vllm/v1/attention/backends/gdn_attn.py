@@ -145,6 +145,7 @@ class GDNAttentionMetadata:
     # sequence lengths. None unless use_replayssm is enabled.
     write_pos_d: torch.Tensor | None = None
     is_flush_d: torch.Tensor | None = None
+    force_flush_d: torch.Tensor | None = None
     replayssm_seq_lens_d: torch.Tensor | None = None
     replayssm_align_block_size: int = 0
 
@@ -311,6 +312,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.decode_is_flush_d: torch.Tensor = torch.zeros(
                 (replayssm_max_bs,), dtype=torch.int8, device=device
             )
+            self.decode_force_flush_d: torch.Tensor = torch.zeros(
+                (replayssm_max_bs,), dtype=torch.int8, device=device
+            )
 
     @staticmethod
     def _check_chunk_metadata_override(
@@ -387,6 +391,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
+        prefill_runs_as_decode: torch.Tensor | None = None,
     ) -> GDNAttentionMetadata:
         m = common_attn_metadata
 
@@ -690,6 +695,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
         write_pos_d = None
         is_flush_d = None
+        force_flush_d = None
         replayssm_seq_lens_d = None
         replayssm_align_block_size = 0
         if self.use_replayssm and spec_sequence_masks is None and num_decodes > 0:
@@ -697,6 +703,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             # rows as no-ops.
             write_pos_d = self.decode_write_pos_d[: m.num_reqs]
             is_flush_d = self.decode_is_flush_d[: m.num_reqs]
+            force_flush_d = self.decode_force_flush_d[: m.num_reqs]
+            if prefill_runs_as_decode is None:
+                force_flush_d.zero_()
+            else:
+                async_tensor_h2d(
+                    prefill_runs_as_decode[: m.num_reqs], out=force_flush_d
+                )
             cache_config = self.vllm_config.cache_config
             if cache_config.enable_prefix_caching:
                 replayssm_seq_lens_d = m.seq_lens[: m.num_reqs]
@@ -796,6 +809,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             uniform_spec_sequence_length=uniform_spec_sequence_length,
             write_pos_d=write_pos_d,
             is_flush_d=is_flush_d,
+            force_flush_d=force_flush_d,
             replayssm_seq_lens_d=replayssm_seq_lens_d,
             replayssm_align_block_size=replayssm_align_block_size,
             nums_dict=nums_dict,
