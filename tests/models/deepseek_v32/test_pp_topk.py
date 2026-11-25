@@ -89,7 +89,7 @@ class _TopkReusingLayer(nn.Module):
         self.topk_indices_buffer = topk_indices_buffer
         self.seen_topk: torch.Tensor | None = None
 
-    def forward(self, positions, hidden_states, residual, attn_in=None):
+    def forward(self, positions, hidden_states, residual, attn_in=None, sp_shards=None):
         num_tokens = hidden_states.shape[0]
         self.seen_topk = self.topk_indices_buffer[:num_tokens].clone()
         self.topk_indices_buffer[:num_tokens] += 10
@@ -104,6 +104,7 @@ def test_middle_pp_stage_receives_and_forwards_topk(monkeypatch):
     model.layers = nn.ModuleList([layer])
     model.start_layer, model.end_layer = 0, 1
     model.use_sequence_parallel = False
+    model.sequence_parallel = False
     model.shardq_sequence_parallel = False
     model.aux_hidden_state_layers = ()
     model.pp_buffers = {"topk_indices": model.topk_indices_buffer}

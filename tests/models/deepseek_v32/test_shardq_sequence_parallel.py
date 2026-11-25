@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Extend token sharding without changing TP/EP weights or model outputs."""
+"""Shard sparse-MLA work across TP ranks by token without changing outputs."""
 
 import logging
 from functools import partial
@@ -97,6 +97,24 @@ def shardq_mtp_checkpoint(shardq_checkpoint, tmp_path_factory):
         ),
         dim=1,
     )
+    config.save_pretrained(path)
+    save_file(weights, path / "model.safetensors", metadata={"format": "pt"})
+    return str(path)
+
+
+@pytest.fixture(scope="module")
+def shared_topk_mtp_checkpoint(shardq_mtp_checkpoint, tmp_path_factory):
+    """GLM-5.x-style top-k sharing: the second layer reuses the first's."""
+    path = tmp_path_factory.mktemp("deepseek_v32_shared_topk_mtp")
+    config = DeepseekV32Config.from_pretrained(shardq_mtp_checkpoint)
+    config.indexer_types = ["full", "shared"]
+    weights = {
+        name: tensor
+        for name, tensor in load_file(
+            Path(shardq_mtp_checkpoint) / "model.safetensors"
+        ).items()
+        if not name.startswith("model.layers.1.self_attn.indexer.")
+    }
     config.save_pretrained(path)
     save_file(weights, path / "model.safetensors", metadata={"format": "pt"})
     return str(path)
@@ -288,4 +306,110 @@ def test_shardq_keeps_tp_weights_and_projects_local_rows(
         outputs_1_lst=[(list(r.token_ids), "", r.logprobs) for r in outputs[1]],
         name_0="TP",
         name_1="TP with extended ShardQ",
+    )
+
+
+def _sequence_parallel_layout(worker):
+    model = worker.model_runner.model.model
+    attn = model.layers[0].self_attn
+    return (
+        model.sequence_parallel,
+        type(worker.model_runner.model_state).__name__,
+        attn.num_local_heads,
+        attn.q_b_proj.tp_size,
+        attn.o_proj.tp_size,
+        model.layers[1].self_attn.indexer is None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("spec_method", "enforce_eager"),
+    [(None, True), (None, False), ("mtp", True), ("mtp", False)],
+    ids=["eager", "cudagraph", "mtp", "mtp-cudagraph"],
+)
+def test_sparse_mla_sequence_parallel_matches_tp(
+    vllm_runner,
+    shared_topk_mtp_checkpoint,
+    monkeypatch,
+    caplog_vllm,
+    spec_method,
+    enforce_eager,
+):
+    """Split every step's tokens, decodes included, zigzag across TP and keep
+    TP's generations, with MTP drafts and the padding-skipping MoE default."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    caplog_vllm.set_level(logging.INFO, logger="vllm.v1.metrics.loggers")
+    speculative_config = None
+    if spec_method:
+        speculative_config = {
+            "method": spec_method,
+            "num_speculative_tokens": 3,
+            "index_share_for_mtp_iteration": True,
+        }
+    max_tokens = 16 if spec_method else 8
+    prompts = [
+        {"prompt_token_ids": [2 + i % 997 for i in range(n)]} for n in (769, 17, 3)
+    ]
+    sampling = SamplingParams(
+        temperature=0, max_tokens=max_tokens, ignore_eos=True, logprobs=16
+    )
+    outputs: list[list[CompletionOutput]] = []
+    for sequence_parallel in (False, True):
+        with vllm_runner(
+            shared_topk_mtp_checkpoint,
+            tensor_parallel_size=2,
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            enforce_eager=enforce_eager,
+            speculative_config=speculative_config,
+            disable_log_stats=False,
+            cudagraph_metrics=not enforce_eager,
+            compilation_config={
+                "cudagraph_mode": "FULL_AND_PIECEWISE",
+                "prefill_cudagraph_capture_token_sizes": [64, 128, 255],
+                "decode_cudagraph_capture_request_sizes": [1, 2, 4],
+            }
+            if not enforce_eager
+            else None,
+            max_model_len=1024,
+            max_num_batched_tokens=255,
+            max_num_seqs=4,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=True,
+            block_size=64,
+            kv_cache_dtype="fp8_ds_mla",
+            attention_config={
+                "backend": "FLASHMLA_SPARSE",
+                "sparse_mla_shard_q": False,
+                "sparse_mla_sequence_parallel": sequence_parallel,
+            },
+            gpu_memory_utilization=0.1,
+        ) as runner:
+            caplog_vllm.clear()
+            expected = (
+                (True, "DeepseekV32SequenceParallelModelState", 16, 1, 2, True)
+                if sequence_parallel
+                else (False, "DefaultModelState", 8, 2, 2, True)
+            )
+            assert (
+                runner.llm.collective_rpc(_sequence_parallel_layout) == [expected] * 2
+            )
+            runs: list[CompletionOutput] = []
+            for batch in (prompts, prompts[:1]):
+                result = runner.llm.generate(batch, sampling, use_tqdm=False)
+                runs.extend(r.outputs[0] for r in result)
+            if spec_method:
+                metrics = {m.name: m for m in runner.llm.get_metrics()}
+                assert metrics["vllm:spec_decode_num_accepted_tokens"].value > 0
+            if not enforce_eager:
+                runner.llm.llm_engine.do_log_stats()
+                for mode in ("FULL", "PIECEWISE"):
+                    assert re.search(rf"\|\s+{mode}\s+\|", caplog_vllm.text)
+            outputs.append(runs)
+    assert all(len(run.token_ids) == max_tokens for runs in outputs for run in runs)
+    check_logprobs_close(
+        outputs_0_lst=[(list(r.token_ids), "", r.logprobs) for r in outputs[0]],
+        outputs_1_lst=[(list(r.token_ids), "", r.logprobs) for r in outputs[1]],
+        name_0="TP",
+        name_1="TP with whole-batch sequence parallelism",
     )

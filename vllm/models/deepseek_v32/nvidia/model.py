@@ -40,13 +40,21 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.common.ops.sequence_parallel import (
+    ZigzagShards,
     is_sequence_parallel_active,
     sp_all_gather,
     sp_padding_mask,
     sp_reduce_scatter,
     sp_shard,
+    zigzag_all_gather,
+    zigzag_padding_mask,
+    zigzag_shard,
+    zigzag_shards,
 )
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
+from vllm.models.deepseek_v32.sequence_parallel import (
+    use_sparse_mla_sequence_parallel,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import (
     SparseMLAIndexGroupBuilder,
@@ -124,10 +132,13 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         attn_in: torch.Tensor | None = None,
+        sp_shards: ZigzagShards | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         full_num_tokens = positions.shape[0]
         use_sequence_parallel = (
-            self.use_sequence_parallel or hidden_states.shape[0] < full_num_tokens
+            sp_shards is not None
+            or self.use_sequence_parallel
+            or hidden_states.shape[0] < full_num_tokens
         )
 
         if residual is None:
@@ -147,7 +158,9 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 hidden_states, residual, self.input_layernorm
             )
         # self_attn's o_proj runs reduce_results=False; reduce before RMSNorm.
-        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
+        hidden_states = self.self_attn(
+            positions=positions, hidden_states=hidden_states, sp_shards=sp_shards
+        )
         if use_sequence_parallel:
             hidden_states = sp_reduce_scatter(hidden_states)
             hidden_states, residual = self.post_attention_layernorm(
@@ -160,7 +173,10 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
 
         if use_sequence_parallel and not self.use_sequence_parallel:
             # These MLP/expert weights retain their existing TP/EP layout.
-            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+            hidden_states = sp_all_gather(hidden_states)
+            # Zigzag padding rows sit between the ranks' rows, so they stay.
+            if sp_shards is None:
+                hidden_states = hidden_states[:full_num_tokens]
             hidden_states = self.mlp(hidden_states)
             hidden_states = sp_reduce_scatter(hidden_states)
         elif self.use_sequence_parallel and isinstance(self.mlp, DeepseekV2MoE):
@@ -186,6 +202,8 @@ class DeepseekV32Model(torch.nn.Module):
         self.vocab_size = config.vocab_size
         parallel_config = vllm_config.parallel_config
         self.use_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        # Whole-batch zigzag sequence parallelism of the attention layers.
+        self.sequence_parallel = use_sparse_mla_sequence_parallel(vllm_config)
         # DSA is always sparse (has index_topk); allocate the shared top-k
         # buffer the indexer writes and the sparse MLA backend reads.
         self.is_v32 = True
@@ -265,6 +283,11 @@ class DeepseekV32Model(torch.nn.Module):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         full_num_tokens = positions.shape[0]
+        sp_shards = (
+            zigzag_shards(full_num_tokens, positions.device)
+            if self.sequence_parallel
+            else None
+        )
         use_sequence_parallel = self.use_sequence_parallel or (
             self.shardq_sequence_parallel
             and is_sequence_parallel_active(
@@ -296,7 +319,17 @@ class DeepseekV32Model(torch.nn.Module):
         # Later PP stages receive the TP-reduced residual stream, like an embedding.
         residual = None
 
-        if use_sequence_parallel:
+        if sp_shards is not None:
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+                # The MoE layers run on the ranks' rows, gathered rank-major.
+                forward_context = get_forward_context()
+                forward_context.is_padding = zigzag_padding_mask(
+                    forward_context.is_padding, full_num_tokens, sp_shards
+                )
+            hidden_states = zigzag_shard(hidden_states, sp_shards)
+            if attn_in is not None:
+                attn_in = zigzag_shard(attn_in, sp_shards)
+        elif use_sequence_parallel:
             if (
                 self.use_sequence_parallel
                 and envs.VLLM_MOE_SKIP_PADDING
@@ -319,7 +352,9 @@ class DeepseekV32Model(torch.nn.Module):
                 aux_hidden_states.append(
                     hidden_states if residual is None else hidden_states + residual
                 )
-            hidden_states, residual = layer(positions, hidden_states, residual, attn_in)
+            hidden_states, residual = layer(
+                positions, hidden_states, residual, attn_in, sp_shards
+            )
             attn_in = None
 
         if not get_pp_group().is_last_rank:
@@ -338,7 +373,11 @@ class DeepseekV32Model(torch.nn.Module):
                 }
             )
 
-        if use_sequence_parallel:
+        if sp_shards is not None:
+            assert not aux_hidden_states
+            hidden_states, _ = self.norm(hidden_states, residual)
+            hidden_states = zigzag_all_gather(hidden_states, sp_shards)
+        elif use_sequence_parallel:
             hidden_states, _ = self.norm(hidden_states, residual)
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
@@ -464,6 +503,15 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         if self.config.model_type == "glm_moe_dsa":
             enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)
+
+    def get_model_state_cls(self):
+        if self.model.sequence_parallel:
+            from .model_state import DeepseekV32SequenceParallelModelState
+
+            return DeepseekV32SequenceParallelModelState
+        from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+
+        return DefaultModelState
 
     def set_moe_parameters(self):
         # Same as the base, but keyed on the MoE block type rather than the

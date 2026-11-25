@@ -20,7 +20,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
@@ -447,7 +447,9 @@ class FlashMLASparseMetadataBuilder(
         # PCP+DCP attends prefill rows over the DCP-gathered KV, which only the
         # separate prefill/decode path can do.
         self.pcp_dcp_kv_gather = self.use_pcp and self.dcp_world_size > 1
-        self.fp8_use_mixed_batch = use_fp8_mixed_batch(
+        # Sequence-parallel layers run their tokens on the mixed-batch kernel
+        # with all heads, as ShardQ's do.
+        self.fp8_use_mixed_batch = self.sequence_parallel or use_fp8_mixed_batch(
             self.num_heads, self.use_hisparse, self.pcp_dcp_kv_gather
         )
 
@@ -718,6 +720,7 @@ class FlashMLASparseMetadataBuilder(
 
 class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
     supports_shardq: ClassVar[bool] = True
+    supports_sequence_parallel: ClassVar[bool] = True
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
@@ -789,6 +792,15 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
         vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        if self.sequence_parallel:
+            if kv_cache_dtype not in QUANTIZED_DS_MLA_CACHE_FORMATS:
+                raise NotImplementedError(
+                    "sparse_mla_sequence_parallel runs on the mixed-batch fp8 "
+                    f"kernel, which needs an fp8_ds_mla KV cache, got {kv_cache_dtype}"
+                )
+            # A rank attends its two zigzag chunks of the step.
+            tp_size = vllm_config.parallel_config.tensor_parallel_size
+            max_tokens = 2 * cdiv(max_tokens, 2 * tp_size)
         q_concat_heads = num_heads
         if not is_quantized_kv_cache(kv_cache_dtype):
             q_concat_heads = (
@@ -817,7 +829,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 and parallel_config.decode_context_parallel_size > 1
             )
             # Same decision as the metadata builder.
-            self.fp8_use_mixed_batch = use_fp8_mixed_batch(
+            self.fp8_use_mixed_batch = self.sequence_parallel or use_fp8_mixed_batch(
                 num_heads,
                 vllm_config.attention_config.hisparse_config is not None,
                 self.pcp_dcp_kv_gather,
