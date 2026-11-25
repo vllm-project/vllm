@@ -7186,18 +7186,22 @@ def _run_mamba_finished_request(
 
 @pytest.mark.parametrize("deprioritize", [False, True])
 def test_mamba_deprioritize_superseded_state(deprioritize):
-    """States two or more turns behind the latest tip are deprioritized
-    (evicted after uncached blocks but before normal LRU-cached blocks), while
-    the immediate predecessor stays in normal LRU as a rollback fallback."""
+    """States two or more turns behind the latest tip are deprioritized across
+    all Mamba groups sharing one tracker (evicted after uncached blocks but
+    before normal LRU-cached blocks), while the immediate predecessor stays in
+    normal LRU as a rollback fallback."""
     block_size = 16
     manager = make_kv_cache_manager(
-        _make_hybrid_kv_cache_config(block_size, 50, ["full", "mamba"]),
+        _make_hybrid_kv_cache_config(block_size, 60, ["full", "mamba", "mamba"]),
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=block_size,
         retention_interval=0,
         deprioritize_superseded_mamba_states=deprioritize,
     )
+    if deprioritize:
+        assert len(manager._mamba_tip_groups) == 1
+        assert manager._mamba_tip_groups[0].group_ids == (1, 2)
     older = make_request("o", [9] * 40, block_size, sha256)
     assert _run_mamba_finished_request(manager, older, [32, 40]) == 0
     turn1 = make_request("t1", [1] * 40, block_size, sha256)
@@ -7224,17 +7228,19 @@ def test_mamba_deprioritize_superseded_state(deprioritize):
     num_uncached = sum(b.block_hash is None for b in free_blocks)
     assert num_uncached > 0
 
-    # Consuming all uncached blocks keeps the deprioritized state alive.
+    # Consuming all uncached blocks keeps the deprioritized states alive.
     pool.get_new_blocks(num_uncached)
-    assert pool.get_cached_block(turn1.block_hashes[1], [1]) is not None
+    assert pool.get_cached_block(turn1.block_hashes[1], [1, 2]) is not None
 
-    # The first cached eviction takes turn1's state when enabled (while keeping
-    # turn2's fallback intact), or older's blocks when disabled.
-    pool.get_new_blocks(1)
-    turn1_state = pool.get_cached_block(turn1.block_hashes[1], [1])
-    turn2_state = pool.get_cached_block(turn2.block_hashes[4], [1])
-    older_prefix = pool.get_cached_block(older.block_hashes[1], [0, 1])
-    assert (turn1_state is None) == deprioritize
+    # The first 2 cached evictions take turn1's superseded states across both
+    # Mamba groups when enabled (keeping turn2's fallback intact), or older's
+    # blocks when disabled.
+    pool.get_new_blocks(2)
+    turn1_g1 = pool.get_cached_block(turn1.block_hashes[1], [1])
+    turn1_g2 = pool.get_cached_block(turn1.block_hashes[1], [2])
+    turn2_state = pool.get_cached_block(turn2.block_hashes[4], [1, 2])
+    older_prefix = pool.get_cached_block(older.block_hashes[1], [0, 1, 2])
+    assert (turn1_g1 is None and turn1_g2 is None) == deprioritize
     assert turn2_state is not None
     assert (older_prefix is None) == (not deprioritize)
 
@@ -7350,7 +7356,9 @@ def test_mamba_deprioritize_preempted_request_keeps_old_state():
     # Preempted (not finished): free without deprioritizing turn1's state.
     turn3.status = RequestStatus.PREEMPTED
     manager.free(turn3)
-    assert turn3.request_id not in manager._prefix_hit_tokens
+    leader = manager._mamba_tip_groups[0].leader
+    assert turn3.request_id not in leader._req_hit_hash
+    assert turn3.request_id not in leader._req_tip
 
     pool = manager.block_pool
     num_uncached = sum(

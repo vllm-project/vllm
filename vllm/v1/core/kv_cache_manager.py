@@ -3,8 +3,9 @@
 
 import itertools
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from typing import Literal, overload
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Final, Literal, overload
 
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
@@ -14,7 +15,13 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    KVCacheBlock,
+    KVCacheBlockCopy,
+    make_block_hash_with_group_id,
+    trim_null_head,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     MambaManager,
@@ -28,6 +35,32 @@ from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
+
+
+class _TipState(Enum):
+    """Sentinel marking a cached tip already extended once (t-1 fallback)."""
+
+    FALLBACK = 0
+
+
+_FALLBACK: Final = _TipState.FALLBACK
+
+
+@dataclass(slots=True)
+class _MambaTipGroup:
+    """Shared tip-chain tracker for Mamba groups with the same pool and block size.
+
+    `tips` maps each tracked raw `BlockHash` to:
+      - `None`: leaf tip with no tracked predecessor
+      - `BlockHash`: leaf tip whose `t-1` rollback fallback is that hash
+      - `_FALLBACK`: `t-1` fallback (already extended by one child)
+    Shared-prefix junctions and multi-branch fork points are popped so they
+    stay in normal LRU order.
+    """
+
+    leader: MambaManager
+    group_ids: tuple[int, ...]
+    tips: dict[BlockHash, BlockHash | _TipState | None] = field(default_factory=dict)
 
 
 @dataclass
@@ -184,15 +217,22 @@ class KVCacheManager:
             for manager in self.coordinator.single_type_managers:
                 if isinstance(manager, MambaManager):
                     manager.shared_prefix_checkpoint = True
-        self._mamba_deprioritize_managers: list[MambaManager] = []
+        self._mamba_tip_groups: list[_MambaTipGroup] = []
         if enable_caching and deprioritize_superseded_mamba_states:
-            self._mamba_deprioritize_managers = [
-                manager
-                for manager in self.coordinator.single_type_managers
-                if isinstance(manager, MambaManager) and manager.prefix_caching
-            ]
-        # Request ID -> first-admission local prefix-cache hit in tokens.
-        self._prefix_hit_tokens: dict[str, int] = {}
+            grouped: dict[tuple[int, int], list[MambaManager]] = {}
+            for manager in self.coordinator.single_type_managers:
+                if isinstance(manager, MambaManager) and manager.prefix_caching:
+                    key = (id(manager.block_pool), manager.block_size)
+                    grouped.setdefault(key, []).append(manager)
+            for managers in grouped.values():
+                leader = managers[0]
+                leader._track_tip_transitions = True
+                self._mamba_tip_groups.append(
+                    _MambaTipGroup(
+                        leader=leader,
+                        group_ids=tuple(m.kv_cache_group_id for m in managers),
+                    )
+                )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         # Called when an allocation is short; returns True only if it can now proceed.
@@ -623,11 +663,6 @@ class KVCacheManager:
         ):
             return None
 
-        if self._mamba_deprioritize_managers:
-            self._prefix_hit_tokens.setdefault(
-                request.request_id, num_local_computed_tokens
-            )
-
         if (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
             or num_external_computed_tokens > 0
@@ -717,13 +752,69 @@ class KVCacheManager:
         return blocks
 
     def _deprioritize_superseded_mamba_states(self, request: Request) -> None:
-        if not self._mamba_deprioritize_managers:
+        if not self._mamba_tip_groups:
             return
-        hit_tokens = self._prefix_hit_tokens.pop(request.request_id, None)
-        if not request.is_finished() or hit_tokens is None:
-            return
-        for manager in self._mamba_deprioritize_managers:
-            manager.deprioritize_superseded_states(request, hit_tokens)
+        finished = request.is_finished()
+        block_hashes = request.block_hashes
+        for group in self._mamba_tip_groups:
+            hit_hash, tip_hash = group.leader.take_tip_transition(request.request_id)
+            if not finished:
+                continue
+            block_pool = group.leader.block_pool
+            alignment = group.leader.cache_hit_alignment_tokens
+            junction_idx = (
+                request.shared_prefix_boundary
+                // alignment
+                * alignment
+                // block_pool.hash_block_size
+                - 1
+            )
+            junction_hash = (
+                block_hashes[junction_idx]
+                if 0 <= junction_idx < len(block_hashes)
+                else None
+            )
+            tips = group.tips
+            if junction_hash is not None:
+                tips.pop(junction_hash, None)
+            if tip_hash is None or tip_hash in (hit_hash, junction_hash):
+                continue
+
+            new_prev: BlockHash | None = None
+            if hit_hash is not None and hit_hash in tips:
+                prev = tips[hit_hash]
+                if prev is _FALLBACK:
+                    # Shared fork point: stop tracking so it stays in normal LRU.
+                    tips.pop(hit_hash)
+                else:
+                    tips[hit_hash] = _FALLBACK
+                    new_prev = hit_hash
+                    if prev is not None and prev in tips:
+                        tips.pop(prev)
+                        get_cached = block_pool.cached_block_hash_to_block.get_one_block
+                        stale_blocks = [
+                            block
+                            for gid in group.group_ids
+                            if (
+                                block := get_cached(
+                                    make_block_hash_with_group_id(prev, gid)
+                                )
+                            )
+                            is not None
+                        ]
+                        if stale_blocks:
+                            block_pool.deprioritize_blocks(stale_blocks, defer=True)
+
+            tips[tip_hash] = new_prev
+            if len(tips) > block_pool.num_gpu_blocks:
+                leader_gid = group.group_ids[0]
+                get_cached = block_pool.cached_block_hash_to_block.get_one_block
+                group.tips = {
+                    h: v
+                    for h, v in tips.items()
+                    if get_cached(make_block_hash_with_group_id(h, leader_gid))
+                    is not None
+                }
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """Evict blocks from the prefix cache by their block IDs.
@@ -746,9 +837,10 @@ class KVCacheManager:
         """
         if not self.coordinator.reset_prefix_cache():
             return False
-        for manager in self._mamba_deprioritize_managers:
-            manager._tips.clear()
-        self._prefix_hit_tokens.clear()
+        for group in self._mamba_tip_groups:
+            group.tips.clear()
+            group.leader._req_hit_hash.clear()
+            group.leader._req_tip.clear()
         if self.collect_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.reset = True
