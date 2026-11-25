@@ -3,7 +3,9 @@
 import argparse
 import contextlib
 import json
+import math
 import multiprocessing
+import sys
 import threading
 import time
 import weakref
@@ -276,6 +278,26 @@ class APIServerProcessManager:
             )
 
 
+# Rust frontend arguments that Python reads only from environment variables,
+# or, for `api_key` and `max_tokenize_tokens`, from the environment when the
+# CLI flag is not given. `vllm.envs` resolves them and --args-json carries the
+# result, so the Rust frontend reads no environment on that path.
+_RUST_FRONTEND_ENV_ARGS = {
+    "api_key": "VLLM_API_KEY",
+    "max_tokenize_tokens": "VLLM_MAX_TOKENIZE_TOKENS",
+    "log_stats_interval": "VLLM_LOG_STATS_INTERVAL",
+    "disable_request_id_randomization": "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION",
+    "keep_alive_on_engine_death": "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
+    "http_max_request_body_size": "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
+    "skip_model_name_validation": "VLLM_SKIP_MODEL_NAME_VALIDATION",
+    "server_dev_mode": "VLLM_SERVER_DEV_MODE",
+    "allow_runtime_lora_updating": "VLLM_ALLOW_RUNTIME_LORA_UPDATING",
+    "max_n_sequences": "VLLM_MAX_N_SEQUENCES",
+    "enable_cohere_api": "VLLM_ENABLE_COHERE_API",
+    "enable_responses_api_store": "VLLM_ENABLE_RESPONSES_API_STORE",
+}
+
+
 class RustFrontendProcessManager:
     """Manages a single Rust frontend subprocess.
 
@@ -369,6 +391,18 @@ class RustFrontendProcessManager:
         # frontends.
         args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
         args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+        for key, name in _RUST_FRONTEND_ENV_ARGS.items():
+            if key in args_dict or not envs.is_set(name):
+                continue
+            value = getattr(envs, name)
+            # Like a default, an off value is left out, so the Rust frontend
+            # does not refuse a disabled feature it does not implement.
+            if value is None or value is False or value == "":
+                continue
+            # JSON has no infinity; Rust reads a too long interval as never.
+            if value == math.inf:
+                value = sys.float_info.max
+            args_dict[key] = value
 
         # `--log-level` and `--logging-config` default to
         # argparse.SUPPRESS, so get_non_default_args() never sees them;

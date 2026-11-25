@@ -471,23 +471,37 @@ def test_default_chat_template_kwargs_default_none(serve_parser):
 
 
 @pytest.mark.parametrize(
-    "default_kwargs,cohere_format,expected",
+    "default_kwargs,cohere_format,tokenizer_mode,expected",
     [
-        (None, "cmd3", {"cohere_format": "cmd3"}),
+        (None, "cmd3", "cohere", {"cohere_format": "cmd3"}),
+        (None, "cmd4", "cohere", {"cohere_format": "cmd4"}),
+        (None, "cmd4", "mistral", {}),
+        (None, "cmd4", "hf", {}),
+        (None, "cmd4", "auto", {}),
+        (None, "cmd4", None, {}),
         (
             {"cohere_format": "cmd4", "custom": True},
             "cmd3",
+            "cohere",
             {"cohere_format": "cmd4", "custom": True},
         ),
+        ({"custom": True}, "cmd3", "mistral", {"custom": True}),
     ],
 )
-def test_resolve_default_chat_template_kwargs(default_kwargs, cohere_format, expected):
+def test_resolve_default_chat_template_kwargs(
+    default_kwargs, cohere_format, tokenizer_mode, expected
+):
     args = SimpleNamespace(
         default_chat_template_kwargs=default_kwargs,
         cohere_format=cohere_format,
     )
 
-    assert cli_args_module.resolve_default_chat_template_kwargs(args) == expected
+    assert (
+        cli_args_module.resolve_default_chat_template_kwargs(
+            args, tokenizer_mode=tokenizer_mode
+        )
+        == expected
+    )
 
 
 def test_default_chat_template_kwargs_invalid_json(serve_parser):

@@ -26,10 +26,13 @@ from transformers import PreTrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
@@ -44,7 +47,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.llama import LlamaMLP
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
@@ -54,6 +56,43 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+
+
+class IQuestLoopCoderMLP(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            input_size=intermediate_size,
+            output_size=hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+        )
+        if hidden_act != "silu":
+            raise ValueError(
+                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+            )
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x, _ = self.gate_up_proj(x)
+        x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
+        x, _ = self.down_proj(x)
+        return x
 
 
 class LoopCoderAttention(nn.Module):
@@ -226,7 +265,7 @@ class LoopCoderDecoderLayer(nn.Module):
             attn_type=attn_type,
             layer_idx=self.layer_idx,
         )
-        self.mlp = LlamaMLP(
+        self.mlp = IQuestLoopCoderMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
