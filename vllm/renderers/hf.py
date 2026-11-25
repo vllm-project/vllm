@@ -1136,7 +1136,7 @@ async def detokenize_prompt_async(
 _T = TypeVar("_T", bound=TokenizerLike)
 
 
-class HfRendererMixin(BaseRenderer[_T]):
+class BaseHfRenderer(BaseRenderer[_T]):
     """Shared tokenization and echo reconstruction for HF-family renderers."""
 
     def _tokenize_prompt(
@@ -1156,7 +1156,7 @@ class HfRendererMixin(BaseRenderer[_T]):
         return await detokenize_prompt_async(self._async_tokenizer_decode, prompt)
 
 
-class HfRenderer(HfRendererMixin[HfTokenizer]):
+class HfRenderer(BaseHfRenderer[HfTokenizer]):
     def __init__(
         self,
         config: VllmConfig,

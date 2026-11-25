@@ -18,7 +18,7 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async
 
 from .hf import (
-    HfRendererMixin,
+    BaseHfRenderer,
     _get_detokenization_tokens,
     detokenize_prompt,
     detokenize_prompt_async,
@@ -69,7 +69,7 @@ def _get_chat_template_kwargs(params: ChatParams) -> dict[str, Any]:
     return kwargs
 
 
-class MistralRenderer(HfRendererMixin[MistralTokenizer]):
+class MistralRenderer(BaseHfRenderer[MistralTokenizer]):
     def __init__(
         self,
         config: VllmConfig,
