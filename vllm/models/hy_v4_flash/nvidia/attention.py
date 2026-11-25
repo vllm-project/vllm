@@ -29,6 +29,11 @@ from .compressed_indexer import FlashCompressedIndexer
 from .swa import FlashSparseBackend, FlashSWABackend, FlashWindowIndexer
 
 
+class HYV4FlashMLAAttention(MLAAttention):
+    # FlashSWABackend indexes live pages and forces the paged FP8 kernel.
+    supports_fp8_ds_mla_sliding_window = True
+
+
 class HYV4FlashAttention(HYV4MLAAttention):
     q_a_layernorm: RMSNorm
     q_b_proj: ColumnParallelLinear
@@ -171,7 +176,7 @@ class HYV4FlashAttention(HYV4MLAAttention):
             self.num_local_heads, torch.float32
         )
         self._force_sparse_mqa()
-        self.mla_attn = MLAAttention(
+        self.mla_attn = HYV4FlashMLAAttention(
             num_heads=self.num_local_heads,
             scale=self.scaling,
             qk_nope_head_dim=self.qk_nope_head_dim,

@@ -2019,53 +2019,6 @@ def gdn_prefill_conv(
     )
 
 
-# mamba
-def selective_scan_fwd(
-    u: torch.Tensor,
-    delta: torch.Tensor,
-    A: torch.Tensor,
-    B: torch.Tensor,
-    C: torch.Tensor,
-    D_: torch.Tensor | None,
-    z_: torch.Tensor | None,
-    delta_bias_: torch.Tensor | None,
-    delta_softplus: bool,
-    query_start_loc: torch.Tensor | None,
-    cache_indices: torch.Tensor | None,
-    has_initial_state: torch.Tensor | None,
-    ssm_states: torch.Tensor,
-    null_block_id: int,
-    block_size: int = 1024,
-    block_idx_first_scheduled_token: torch.Tensor | None = None,
-    block_idx_last_scheduled_token: torch.Tensor | None = None,
-    initial_state_idx: torch.Tensor | None = None,
-    cu_chunk_seqlen: torch.Tensor | None = None,
-    last_chunk_indices: torch.Tensor | None = None,
-):
-    torch.ops._C.selective_scan_fwd(
-        u,
-        delta,
-        A,
-        B,
-        C,
-        D_,
-        z_,
-        delta_bias_,
-        delta_softplus,
-        query_start_loc,
-        cache_indices,
-        has_initial_state,
-        ssm_states,
-        null_block_id,
-        block_size,
-        block_idx_first_scheduled_token,
-        block_idx_last_scheduled_token,
-        initial_state_idx,
-        cu_chunk_seqlen,
-        last_chunk_indices,
-    )
-
-
 # ROCm skinny gemms
 def LLMM1(a: torch.Tensor, b: torch.Tensor, rows_per_block: int) -> torch.Tensor:
     return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
