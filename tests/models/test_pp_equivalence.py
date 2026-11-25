@@ -61,7 +61,6 @@ MINIMAL_PP_ARCH_LIST = [
 # Architectures that fail on main. A fix removes its entry; `strict` fails the
 # test once the fix lands.
 KNOWN_PP_DEFECTS: dict[str, str] = {
-    "Glm5NextForCausalLM": "Declares PP without implementing it; fixed by #57121",
     "LongcatFlashNgramForCausalLM": "Later stages build n-gram embeddings; see #66290",
 }
 # Decoders that modify their input before the layers, run with the Transformers
