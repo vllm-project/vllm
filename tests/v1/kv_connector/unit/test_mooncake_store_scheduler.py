@@ -428,7 +428,7 @@ def test_range_load_trims_payload_clears_stale_store_key_boundary(terminal, end)
 
     config = create_vllm_config(kv_connector="MooncakeStoreConnector")
     caches = make_kv_cache_config(16, swa_enabled=True)
-    module = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler"
+    module = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler"
     with patch(f"{module}.LookupKeyClient") as client:
         client.return_value.lookup.return_value = MooncakeLookupResult(
             64, (TailKeyBoundary(0, 64), TailKeyBoundary(1, 64))
@@ -459,8 +459,8 @@ def test_range_capability_excludes_recurrent_state(mamba):
     from .utils import create_vllm_config, make_kv_cache_config
 
     config = create_vllm_config(kv_connector="MooncakeStoreConnector")
-    caches = make_kv_cache_config(16, mamba_enabled=mamba, mamba_cache_mode="align")
-    module = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler"
+    caches = make_kv_cache_config(16, mamba_enabled=mamba, enable_prefix_caching=True)
+    module = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler"
     with patch(f"{module}.LookupKeyClient"):
         scheduler = MooncakeStoreScheduler(config, caches)
     assert scheduler.supports_load_range is not mamba

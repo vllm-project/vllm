@@ -2739,14 +2739,14 @@ def test_register_kv_caches_excludes_non_transfer_groups():
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_consumer"
     )
-    spec = FullAttentionSpec(
+    spec = AttentionSpec(
         block_size=16,
         num_kv_heads=4,
         head_size=64,
         dtype=torch.float16,
     )
     groups = [
-        KVCacheGroupSpec(
+        make_kv_cache_group(
             [f"model.layers.{i}.self_attn"],
             spec,
             enable_kv_transfer=i > 0,
@@ -2785,7 +2785,7 @@ def test_register_kv_caches_excludes_non_transfer_groups():
             for group in groups
         }
 
-        with patch.object(worker.engine, "batch_register_memory", return_value=0):
+        with patch.object(FakeMooncakeWrapper, "batch_register_memory", return_value=0):
             connector.register_kv_caches(kv_caches)
 
         assert worker.registered_layer_names == [

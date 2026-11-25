@@ -38,12 +38,10 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     get_reusable_prefix_length,
-    MambaSpec,
-    get_mamba_prefill_checkpoint_position,
-    is_full_attention_spec,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
@@ -171,8 +169,8 @@ class MooncakeStoreScheduler:
         self._range_load_group_ids = tuple(
             store_idx
             for store_idx, group_id in enumerate(self._store_group_ids)
-            if is_full_attention_spec(
-                kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+            if issubclass(
+                kv_cache_config.kv_cache_groups[group_id].manager_cls, FullAttentionManager
             )
         )
 
@@ -346,7 +344,7 @@ class MooncakeStoreScheduler:
             groups = self.kv_cache_config.prefix_cacheable_groups
             boundaries = []
             for boundary in load_spec.tail_key_boundaries:
-                block_size = groups[boundary.group_id].kv_cache_spec.block_size
+                block_size = groups[boundary.group_id].block_size
                 if cdiv(load_range.end_token, block_size) == cdiv(
                     load_spec.kvpool_cached_tokens, block_size
                 ):

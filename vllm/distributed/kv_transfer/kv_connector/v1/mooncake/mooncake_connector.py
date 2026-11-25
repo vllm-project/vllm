@@ -97,8 +97,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
@@ -1108,7 +1106,6 @@ class MooncakeConnectorScheduler:
         self._bounded_replay = any(
             g.prefix_replay_tokens > 0 for g in kv_cache_config.kv_cache_groups
         )
-        specs = [group.kv_cache_spec for group in transfer_groups]
         # Attention pages are independently addressable. Recurrent-state pages
         # cannot be safely composed from concurrent prefix sources.
         parallel = vllm_config.parallel_config
@@ -1116,13 +1113,14 @@ class MooncakeConnectorScheduler:
             parallel.decode_context_parallel_size == 1
             and parallel.prefill_context_parallel_size == 1
             and all(
-                type(g.kv_cache_spec) in (FullAttentionSpec, SlidingWindowSpec)
+                g.manager_cls in (FullAttentionManager, SlidingWindowManager)
+                and all(type(s) is AttentionSpec for s in g.kv_cache_specs.values())
                 for g in kv_cache_config.kv_cache_groups
             )
         )
         dcp = vllm_config.parallel_config.decode_context_parallel_size
         self._piecewise_group_block_sizes = tuple(
-            spec.block_size * dcp for spec in specs
+            g.block_size * dcp for g in transfer_groups
         )
 
         # Requests that need to start recv/send.
@@ -1359,10 +1357,7 @@ class MooncakeConnectorScheduler:
         return tuple(
             i
             for i in self.kv_cache_config.transfer_group_ids
-            if isinstance(
-                self.kv_cache_config.kv_cache_groups[i].kv_cache_spec,
-                SlidingWindowSpec,
-            )
+            if self.kv_cache_config.kv_cache_groups[i].manager_cls is SlidingWindowManager
         )
 
     def update_state_after_alloc_for_range(
@@ -1386,9 +1381,9 @@ class MooncakeConnectorScheduler:
             self._piecewise_group_block_sizes,
             strict=True,
         ):
-            spec = self.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+            manager = self.kv_cache_config.kv_cache_groups[group_id].manager_cls
             group = block_ids[group_id]
-            if isinstance(spec, SlidingWindowSpec):
+            if manager is SlidingWindowManager:
                 if group_id in load_range.window_group_ids:
                     assert load_range.window_end_token is not None
                     end = cdiv(load_range.window_end_token, block_size)
