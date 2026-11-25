@@ -218,8 +218,22 @@ class _RemoteStage:
     # Number of blocks and cache group of each of the stage's paired regions.
     region_num_blocks: list[int]
     region_group_ids: list[int]
-    # Remote TP rank -> prepped descriptor list of that rank's paired regions.
+    # Remote TP rank -> prepped descriptor list of that rank's paired regions
+    # (only the device regions when the rank also holds DRAM regions).
     xfer_side_handles: dict[int, int] = field(default_factory=dict)
+    # Remote TP rank -> that rank's DRAM regions, for a mixed-memory remote.
+    dram_descs: dict[int, "_MixedMemDescs"] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class _MixedMemDescs:
+    """A descriptor list split across a DRAM and a device prepped list."""
+
+    # Prepped list of the DRAM descriptors.
+    dram_handle: int
+    # Per flat descriptor: whether it is in DRAM, and its index in its list.
+    desc_is_dram: np.ndarray
+    desc_pos: np.ndarray
 
 
 class NixlBaseConnectorWorker:
@@ -2395,6 +2409,25 @@ class NixlBaseConnectorWorker:
         counts = strided_descs[:, 4]
         return np.cumsum(counts) - counts
 
+    @classmethod
+    def _split_descs_by_memory(
+        cls, strided_descs: np.ndarray, desc_is_dram: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Split strided descs into a DRAM and a device list, in place.
+
+        Returns each flat desc's index within its own list and which strided
+        descs are DRAM. DRAM descs are moved to CPU device 0, under which
+        DRAM is registered.
+        """
+        assert len(desc_is_dram) == strided_descs[:, 4].sum()
+        desc_pos = np.empty(len(desc_is_dram), dtype=np.int64)
+        for mask in (desc_is_dram, ~desc_is_dram):
+            desc_pos[mask] = np.arange(np.count_nonzero(mask), dtype=np.int64)
+        # A strided desc never spans regions, so its first block decides.
+        strided_is_dram = desc_is_dram[cls._strided_desc_starts(strided_descs)]
+        strided_descs[strided_is_dram, 2] = 0
+        return desc_pos, strided_is_dram
+
     def _build_fa_local(
         self,
         base_addresses: list[int],
@@ -2527,18 +2560,11 @@ class NixlBaseConnectorWorker:
                     )
                 ]
             )
-            assert len(desc_is_dram) == blocks_data[:, 4].sum()
-            desc_pos = np.empty(len(desc_is_dram), dtype=np.int64)
-            dram_idx = np.where(desc_is_dram)[0]
-            vram_idx = np.where(~desc_is_dram)[0]
-            desc_pos[dram_idx] = np.arange(len(dram_idx), dtype=np.int64)
-            desc_pos[vram_idx] = np.arange(len(vram_idx), dtype=np.int64)
+            desc_pos, strided_is_dram = self._split_descs_by_memory(
+                blocks_data, desc_is_dram
+            )
             self._desc_is_dram_by_block_size[block_size] = desc_is_dram
             self._desc_pos_by_block_size[block_size] = desc_pos
-            # DRAM descriptors are registered under CPU device 0.
-            # A strided desc never spans regions, so its first block decides.
-            strided_is_dram = desc_is_dram[self._strided_desc_starts(blocks_data)]
-            blocks_data[strided_is_dram, 2] = 0
             if self._skip_dram_xfer:
                 self._dram_src_handles_by_block_size[block_size] = None
             else:
@@ -2867,18 +2893,58 @@ class NixlBaseConnectorWorker:
             )
             blocks_data = np.concatenate([blocks_data, mamba])
 
-        remote_mem_types = set(
-            nixl_agent_meta.region_mem_types or [self.nixl_memory_type]
+        handle, dram_descs = self._prep_remote_xfer_dlists(
+            remote_agent_name,
+            blocks_data,
+            nixl_agent_meta.region_mem_types,
+            stage.region_num_blocks,
         )
-        if len(remote_mem_types) != 1:
-            raise NotImplementedError(
-                "NIXL pull does not yet support a mixed-memory producer"
-            )
-        stage.xfer_side_handles[remote_tp_rank] = self.nixl_wrapper.prep_xfer_dlist(
-            remote_agent_name, blocks_data, mem_type=remote_mem_types.pop()
-        )
+        stage.xfer_side_handles[remote_tp_rank] = handle
+        if dram_descs is not None:
+            stage.dram_descs[remote_tp_rank] = dram_descs
 
         return remote_agent_name
+
+    def _prep_remote_xfer_dlists(
+        self,
+        remote_agent_name: str,
+        blocks_data: np.ndarray,
+        region_mem_types: list[str] | None,
+        region_num_blocks: list[int],
+    ) -> tuple[int, _MixedMemDescs | None]:
+        """Prep a remote rank's descriptors: one list per memory type when
+        it holds both DRAM and device regions (a HiSparse decoder's host MLA
+        KV), else one list."""
+        mem_types = region_mem_types or [self.nixl_memory_type]
+        if len(set(mem_types)) == 1:
+            handle = self.nixl_wrapper.prep_xfer_dlist(
+                remote_agent_name, blocks_data, mem_type=mem_types[0]
+            )
+            return handle, None
+        (device_mem_type,) = set(mem_types) - {"DRAM"}
+        assert self.use_mla and not self._has_mamba, (
+            "Mixed-memory remote KV is only supported for MLA models without "
+            "Mamba layers."
+        )
+        desc_is_dram = np.repeat(
+            np.array([t == "DRAM" for t in mem_types]), region_num_blocks
+        )
+        desc_pos, strided_is_dram = self._split_descs_by_memory(
+            blocks_data, desc_is_dram
+        )
+        dram_descs = _MixedMemDescs(
+            dram_handle=self.nixl_wrapper.prep_xfer_dlist(
+                remote_agent_name, blocks_data[strided_is_dram], mem_type="DRAM"
+            ),
+            desc_is_dram=desc_is_dram,
+            desc_pos=desc_pos,
+        )
+        handle = self.nixl_wrapper.prep_xfer_dlist(
+            remote_agent_name,
+            blocks_data[~strided_is_dram],
+            mem_type=device_mem_type,
+        )
+        return handle, dram_descs
 
     def _add_remote_stage(
         self,
@@ -4467,6 +4533,8 @@ class NixlBaseConnectorWorker:
         for stage in self._remote_stages.pop(engine_id, {}).values():
             for handle in stage.xfer_side_handles.values():
                 self.nixl_wrapper.release_dlist_handle(handle)
+            for dram_descs in stage.dram_descs.values():
+                self.nixl_wrapper.release_dlist_handle(dram_descs.dram_handle)
         # Pop under the handshake lock; NIXL teardown stays outside it.
         with self._handshake_lock:
             agents = self._remote_agents.pop(engine_id)

@@ -11,6 +11,7 @@ import numpy as np
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
+    _MixedMemDescs,
     _RegionPairs,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -499,6 +500,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     local_xfer_side_handle=local_xfer_side_handle,
                     local_dram_handle=local_dram_handle,
                     remote_xfer_side_handle=stage.xfer_side_handles[spec.remote_rank],
+                    remote_dram_descs=stage.dram_descs.get(spec.remote_rank),
                     expected_consumers=plan.local_consumers,
                     awaiting_kvs=meta.awaiting_kvs,
                     region_pairs=stage.pairs,
@@ -543,6 +545,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_xfer_side_handle: int,
         local_dram_handle: int | None,
         remote_xfer_side_handle: int,
+        remote_dram_descs: _MixedMemDescs | None,
         expected_consumers: int,
         awaiting_kvs: bool,
         region_pairs: _RegionPairs,
@@ -663,13 +666,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Prepare transfer with Nixl.
         handle = None
         try:
-            if self._mixed_mem_types:
+            if self._mixed_mem_types or remote_dram_descs is not None:
                 self._read_blocks_mixed(
                     request_id=request_id,
                     local_block_size_key=remote_info.remote_block_size,
                     local_device_handle=local_xfer_side_handle,
                     local_dram_handle=local_dram_handle,
                     remote_xfer_side_handle=remote_xfer_side_handle,
+                    remote_dram_descs=remote_dram_descs,
                     local_block_descs_ids=local_block_descs_ids,
                     remote_block_descs_ids=remote_block_descs_ids,
                     notif_agent=remote_agent,
@@ -718,41 +722,57 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_block_descs_ids: np.ndarray,
         notif_agent: str,
         notif_id: bytes,
+        remote_dram_descs: _MixedMemDescs | None = None,
     ) -> None:
-        """Split a READ across the local DRAM and device descriptor lists."""
-        desc_is_dram = self._desc_is_dram_by_block_size[local_block_size_key]
-        desc_pos = self._desc_pos_by_block_size[local_block_size_key]
+        """Split a READ by the memory type of the descriptors on each side."""
         local_ids = np.asarray(local_block_descs_ids)
         remote_ids = np.asarray(remote_block_descs_ids)
-        is_dram = desc_is_dram[local_ids]
+        if self._mixed_mem_types:
+            local_is_dram = self._desc_is_dram_by_block_size[local_block_size_key][
+                local_ids
+            ]
+            local_ids = self._desc_pos_by_block_size[local_block_size_key][local_ids]
+        else:
+            local_is_dram = np.zeros(len(local_ids), dtype=bool)
+        if remote_dram_descs is not None:
+            remote_is_dram = remote_dram_descs.desc_is_dram[remote_ids]
+            remote_ids = remote_dram_descs.desc_pos[remote_ids]
+        else:
+            remote_is_dram = np.zeros(len(remote_ids), dtype=bool)
 
         if self._skip_dram_xfer:
             # TP rank 0 reads the DRAM (shared host pool) part for every
             # local rank; keep only the device part. Register the request
             # even if nothing is left, so it still completes and notifies.
-            keep = ~is_dram
+            keep = ~local_is_dram
             local_ids = local_ids[keep]
             remote_ids = remote_ids[keep]
-            is_dram = is_dram[keep]
+            local_is_dram = local_is_dram[keep]
+            remote_is_dram = remote_is_dram[keep]
             self._recving_transfers.setdefault(request_id, [])
-        assert local_dram_handle is not None or not is_dram.any()
-        reads = (
-            (is_dram, local_dram_handle),
-            (~is_dram, local_device_handle),
-        )
+        assert local_dram_handle is not None or not local_is_dram.any()
+        local_handles = {True: local_dram_handle, False: local_device_handle}
+        remote_handles = {
+            True: remote_dram_descs.dram_handle if remote_dram_descs else None,
+            False: remote_xfer_side_handle,
+        }
         handles: list[int] = []
         try:
-            for mask, local_handle in reads:
-                if mask.any():
-                    handles.append(
-                        self.nixl_wrapper.make_prepped_xfer(
-                            "READ",
-                            local_handle,
-                            desc_pos[local_ids[mask]],
-                            remote_xfer_side_handle,
-                            remote_ids[mask],
-                        )
+            for local_dram in (True, False):
+                for remote_dram in (False, True):
+                    mask = (local_is_dram == local_dram) & (
+                        remote_is_dram == remote_dram
                     )
+                    if mask.any():
+                        handles.append(
+                            self.nixl_wrapper.make_prepped_xfer(
+                                "READ",
+                                local_handles[local_dram],
+                                local_ids[mask],
+                                remote_handles[remote_dram],
+                                remote_ids[mask],
+                            )
+                        )
         except Exception:
             for handle in handles:
                 if not self._try_release_xfer_handle(request_id, handle):
