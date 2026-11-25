@@ -7,11 +7,12 @@
 // Per group it writes each decode row's request pages split by locality domain
 // into compact per-domain block tables (lbt0/lbt1) followed by 64 zeros (valid
 // ids for DeepGEMM's prefetch), the row's per-domain context lengths
-// (llen0/llen1), the join map, the per-domain local-to-request page maps
-// (inv0/inv1), the reset of rows num_rows..cap (lengths 0, 64 zeros), and both
-// domains' DeepGEMM paged-MQA-logits schedules ((sms + 1) x 2 int32: a port of
-// DeepGEMM 2.8.1's sm100_paged_mqa_logits_metadata with SPLIT_KV = 384,
-// BLOCK_Q = 4 and the domain's SM count). Other entries are not written.
+// (llen0/llen1), the join map ((local page << 1) | domain per request page),
+// the per-domain local-to-request page maps (inv0/inv1), the reset of rows
+// num_rows..cap (lengths 0, 64 zeros), and both domains' DeepGEMM
+// paged-MQA-logits schedules ((sms + 1) x 2 int32: a port of DeepGEMM 2.8.1's
+// sm100_paged_mqa_logits_metadata with SPLIT_KV = 384, BLOCK_Q = 4 and the
+// domain's SM count). Other entries are not written.
 //
 // Requests (DeepGEMM's varlen form): consecutive rows with the same index are
 // one request, whose rows see one more key each (speculative decoding).
@@ -63,7 +64,7 @@ struct Group {
   int* lbt1;
   int* inv0;  // [cap, out_stride] die-d local page -> request page
   int* inv1;
-  int* jmap;   // [cap, jmap_stride] request page -> (local_col << 1) | die
+  int* jmap;   // [cap, jmap_stride] request page -> (local page << 1) | die
   int* llen0;  // [cap] die-0 context rows
   int* llen1;
   int* sched0;  // [(sms0 + 1) * 2] die-0 DeepGEMM schedule
@@ -91,9 +92,6 @@ struct Params {
   int sms0;
   int sms1;
 };
-
-static_assert(sizeof(Group) == 192, "Group layout");
-static_assert(sizeof(Params) == 784, "Params layout");
 
 static __device__ __forceinline__ u32 ld_relaxed_u32(const u32* p) {
   u32 v;
@@ -153,33 +151,31 @@ static __device__ __forceinline__ int request_split_len(const Group& G, int r) {
 // Waits until the flag carries `tag` (this launch) and returns its count.
 static __device__ __forceinline__ u32 wait_flag(const u64* f, u32 tag) {
   u64 x = ld_relaxed_u64(f);
-  u32 spins = 0;
   while ((u32)(x >> 32) != tag) {
     __nanosleep(20);
     x = ld_relaxed_u64(f);
-    if (++spins == (1u << 26)) __trap();  // a hang would be a bug: fail loudly
   }
   return (u32)x;
 }
 
-// Block-wide exclusive scan (int); returns the thread's exclusive prefix,
-// `total` = block sum.
-static __device__ __forceinline__ int block_excl_scan(int v, int* s_warp,
-                                                      int& total) {
+// Block-wide exclusive scan; returns the thread's exclusive prefix, `total` =
+// block sum. T is int, or u32 for DeepGEMM's wrapping prefix arithmetic.
+template <typename T>
+static __device__ __forceinline__ T block_excl_scan(T v, T* s_warp, T& total) {
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
-  int x = v;
+  T x = v;
 #pragma unroll
   for (int o = 1; o < 32; o <<= 1) {
-    const int y = __shfl_up_sync(0xffffffffu, x, o);
+    const T y = __shfl_up_sync(0xffffffffu, x, o);
     if (lane >= o) x += y;
   }
   if (lane == 31) s_warp[warp] = x;
   __syncthreads();
-  int before = 0, tot = 0;
+  T before = 0, tot = 0;
 #pragma unroll
   for (int w = 0; w < kWarps; ++w) {
-    const int s = s_warp[w];
-    before += (w < warp) ? s : 0;
+    const T s = s_warp[w];
+    before += (w < warp) ? s : (T)0;
     tot += s;
   }
   __syncthreads();
@@ -187,85 +183,56 @@ static __device__ __forceinline__ int block_excl_scan(int v, int* s_warp,
   return before + x - v;
 }
 
-// In-place inclusive scan of a[0, n) in shared memory, uint32 with wraparound
-// (DeepGEMM's prefix arithmetic).
-static __device__ void block_incl_scan_u32(u32* a, int n, u32* s_warp) {
-  const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+// In-place inclusive scan of a[0, n) in shared memory.
+static __device__ void block_incl_scan(u32* a, int n, u32* s_warp) {
   u32 carry = 0;
   for (int t0 = 0; t0 < n; t0 += kThreads) {
     const int t = t0 + threadIdx.x;
-    u32 x = t < n ? a[t] : 0u;
-#pragma unroll
-    for (int o = 1; o < 32; o <<= 1) {
-      const u32 y = __shfl_up_sync(0xffffffffu, x, o);
-      if (lane >= o) x += y;
-    }
-    if (lane == 31) s_warp[warp] = x;
-    __syncthreads();
-    u32 before = 0, tot = 0;
-#pragma unroll
-    for (int w = 0; w < kWarps; ++w) {
-      const u32 s = s_warp[w];
-      before += (w < warp) ? s : 0u;
-      tot += s;
-    }
-    if (t < n) a[t] = carry + before + x;
+    const u32 v = t < n ? a[t] : 0u;
+    u32 tot;
+    const u32 before = block_excl_scan(v, s_warp, tot);
+    if (t < n) a[t] = carry + before + v;
     carry += tot;
-    __syncthreads();
   }
+  __syncthreads();
 }
 
 // Both dies' DeepGEMM schedules from per-row die lens in shared memory
 // (ln0/ln1, T rows). rs, pf: T u32 of shared scratch each (request starts,
-// cost prefix sums).
+// cost prefix sums). DeepGEMM falls back to token costs when the cost sum
+// passes 32 bits; it stays far below here (at most one row per SM of a domain,
+// each costing at most 9 x ceil(len / 384)), so that fallback is not ported.
 static __device__ void schedules(const Group& G, int sms0, int sms1,
                                  const u32* ln0, const u32* ln1, u32* rs,
-                                 u32* pf, int* s_warp) {
+                                 u32* pf, u32* s_warp) {
   const int tid = threadIdx.x;
   const int T = G.num_rows;
   // Request runs: token t starts one if t == 0 or indices[t] != indices[t - 1].
-  int base = 0;
+  u32 nreq = 0;
   for (int t0 = 0; t0 < T; t0 += kThreads) {
     const int t = t0 + tid;
-    int is = 0;
-    if (t < T) is = (t == 0) || (G.indices[t] != G.indices[t - 1]);
-    int tot;
-    const int ex = block_excl_scan(is, s_warp, tot);
-    if (is) rs[base + ex] = (u32)t;
-    base += tot;
+    const u32 is = t < T && (t == 0 || G.indices[t] != G.indices[t - 1]);
+    u32 tot;
+    const u32 ex = block_excl_scan(is, s_warp, tot);
+    if (is) rs[nreq + ex] = (u32)t;
+    nreq += tot;
   }
-  const int nreq = base;
   __syncthreads();
   for (int d = 0; d < 2; ++d) {
     const u32* lens = d ? ln1 : ln0;
     int* sched = d ? G.sched1 : G.sched0;
     const u32 S = (u32)(d ? sms1 : sms0);
-    int ovf = 0;
-    for (int i = tid; i < nreq; i += kThreads) {
-      const u32 e0 = (i + 1 < nreq) ? rs[i + 1] : (u32)T;
-      const u32 nq = e0 - rs[i];
-      const u64 cost =
-          (u64)ceil_div_u32(lens[e0 - 1], kSplitKV) * (u64)split_cost(nq);
-      pf[i] = (u32)cost;
-      ovf |= cost > 0xffffffffull;
+    for (u32 i = tid; i < nreq; i += kThreads) {
+      const u32 e0 = i + 1 < nreq ? rs[i + 1] : (u32)T;
+      pf[i] = ceil_div_u32(lens[e0 - 1], kSplitKV) * split_cost(e0 - rs[i]);
     }
     __syncthreads();
-    block_incl_scan_u32(pf, nreq, (u32*)s_warp);
-    for (int i = tid + 1; i < nreq; i += kThreads) ovf |= pf[i] < pf[i - 1];
-    ovf = __syncthreads_or(ovf);
-    if (ovf) {  // DeepGEMM's fallback: token cost
-      for (int i = tid; i < nreq; i += kThreads) {
-        const u32 e0 = (i + 1 < nreq) ? rs[i + 1] : (u32)T;
-        pf[i] = ceil_div_u32(lens[e0 - 1], kSplitKV) * (e0 - rs[i]);
-      }
-      __syncthreads();
-      block_incl_scan_u32(pf, nreq, (u32*)s_warp);
-    }
-    const u32 total = nreq > 0 ? pf[nreq - 1] : 0u;
+    block_incl_scan(pf, nreq, s_warp);
+    const u32 total = pf[nreq - 1];
     const u32 q = total / S, rem = total % S;
-    for (u32 sm = (u32)tid; sm <= S; sm += kThreads) {
+    for (u32 sm = tid; sm <= S; sm += kThreads) {
       const u32 target = sm * q + (sm < rem ? sm : rem);
-      u32 lo = 0, hi = (u32)nreq;
+      u32 lo = 0, hi = nreq;
       while (lo < hi) {  // first prefix > target
         const u32 mid = (lo + hi) / 2;
         if (pf[mid] <= target)
@@ -274,12 +241,11 @@ static __device__ void schedules(const Group& G, int sms0, int sms1,
           hi = mid;
       }
       u32 qt = (u32)T, kv = 0;  // tail sentinel: one past the end
-      if (lo < (u32)nreq) {
+      if (lo < nreq) {
         const u32 before = lo == 0 ? 0u : pf[lo - 1];
-        const u32 e0 = (lo + 1 < (u32)nreq) ? rs[lo + 1] : (u32)T;
-        const u32 nq = e0 - rs[lo];
+        const u32 e0 = lo + 1 < nreq ? rs[lo + 1] : (u32)T;
         qt = rs[lo];
-        kv = (target - before) / (ovf ? nq : split_cost(nq));
+        kv = (target - before) / split_cost(e0 - rs[lo]);
       }
       sched[2 * sm] = (int)qt;
       sched[2 * sm + 1] = (int)kv;
@@ -288,89 +254,11 @@ static __device__ void schedules(const Group& G, int sms0, int sms1,
   }
 }
 
-// Both dies' schedules for T <= 32 rows: warp d computes die d's, lane t
-// holding row t (registers and shuffles only; the same arithmetic as
-// schedules()). idx: indices[lane] (lanes < T), ln0/ln1: per-row die lens in
-// shared memory.
-static __device__ void schedules_warp(const Group& G, int sms0, int sms1,
-                                      const u32* ln0, const u32* ln1, int idx) {
-  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  if (warp >= 2) return;
-  const u32 full = 0xffffffffu;
-  const int T = G.num_rows;
-  const u32* lens = warp ? ln1 : ln0;
-  int* sched = warp ? G.sched1 : G.sched0;
-  const u32 S = (u32)(warp ? sms1 : sms0);
-  const int prev = __shfl_up_sync(full, idx, 1);
-  const bool is = lane < T && (lane == 0 || idx != prev);
-  // Bit t: token t starts a request.
-  const u32 starts = __ballot_sync(full, is);
-  const int nreq = __popc(starts);
-  // lane i < nreq holds request i: its first token, token count, cost
-  const bool live = lane < nreq;
-  const u32 st = live ? (u32)(__fns(starts, 0, lane + 1)) : (u32)T;
-  // Bits 0..st.
-  const u32 upto = (live && st < 31u) ? ((2u << st) - 1u) : 0xffffffffu;
-  const u32 after = live ? (starts & ~upto) : 0u;  // starts after this one
-  const u32 en = live ? (after ? (u32)(__ffs(after) - 1) : (u32)T) : (u32)T;
-  const u32 nq = en - st;
-  const u32 ctx = live ? lens[en - 1] : 0u;
-  const u64 c64 =
-      live ? (u64)ceil_div_u32(ctx, kSplitKV) * (u64)split_cost(nq) : 0ull;
-  u32 pf = (u32)c64;
-#pragma unroll
-  for (int o = 1; o < 32; o <<= 1) {
-    const u32 y = __shfl_up_sync(full, pf, o);
-    if (lane >= o) pf += y;
-  }
-  const u32 pprev = __shfl_up_sync(full, pf, 1);
-  const bool ovf = __any_sync(
-      full, (live && c64 > 0xffffffffull) || (live && lane > 0 && pf < pprev));
-  if (ovf) {  // DeepGEMM's fallback: token cost
-    pf = live ? ceil_div_u32(ctx, kSplitKV) * nq : 0u;
-#pragma unroll
-    for (int o = 1; o < 32; o <<= 1) {
-      const u32 y = __shfl_up_sync(full, pf, o);
-      if (lane >= o) pf += y;
-    }
-  }
-  const u32 total = nreq > 0 ? __shfl_sync(full, pf, nreq - 1) : 0u;
-  const u32 q = total / S, rem = total % S;
-  for (u32 b0 = 0; b0 <= S; b0 += 32) {
-    const u32 sm = b0 + lane;
-    const u32 target = sm * q + (sm < rem ? sm : rem);
-    u32 lo = 0, hi = (u32)nreq;
-#pragma unroll
-    for (int it = 0; it < 6; ++it) {  // first prefix > target (nreq <= 32)
-      const u32 mid = (lo + hi) / 2;
-      const u32 v = __shfl_sync(full, pf, mid & 31);
-      if (lo < hi) {
-        if (v <= target)
-          lo = mid + 1;
-        else
-          hi = mid;
-      }
-    }
-    const u32 before = __shfl_sync(full, pf, (lo - 1) & 31);
-    const u32 qst = __shfl_sync(full, st, lo & 31);
-    const u32 qnq = __shfl_sync(full, nq, lo & 31);
-    if (sm <= S) {
-      u32 qt = (u32)T, kv = 0;  // tail sentinel: one past the end
-      if (lo < (u32)nreq) {
-        qt = qst;
-        kv = (target - (lo == 0 ? 0u : before)) / (ovf ? qnq : split_cost(qnq));
-      }
-      sched[2 * sm] = (int)qt;
-      sched[2 * sm + 1] = (int)kv;
-    }
-  }
-}
-
 // The group's schedule block: per-row die lens of the rows' requests from the
 // split lengths, last pages and chunk flags, then schedules (which read the
 // lens of each request's last row only).
 static __device__ void schedule_block(const Group& G, int sms0, int sms1,
-                                      u32* dsm, int* s_warp, int* s_misc) {
+                                      u32* dsm, u32* s_warp, int* s_misc) {
   const int tid = threadIdx.x;
   const int T = G.num_rows, R = G.R;
   u32* ln0 = dsm;
@@ -380,12 +268,10 @@ static __device__ void schedule_block(const Group& G, int sms0, int sms1,
   // Until the lens are known: (ln0, ln1, rs and pf are free)
   u32* s_split = ln0;  // [T] split length (the request's last row's length)
   u32* s_n1 = ln1;     // [T] domain-1 pages of the split (from the flags)
-  u32* s_last = rs;    // [T] the split's last block id
+  u32* s_d1 = rs;      // [T] the domain of the split's last page
   u32* s_id = pf;      // [T] request index, then
   u32* s_np = pf;      // [T] pages of the split
   if (tid == 0) s_misc[4] = (int)(ld_relaxed_u32(G.state) + 1u);
-  // Warps 0-1 use it (T <= 32 path).
-  const int idx = (T <= 32 && (tid & 31) < T) ? G.indices[tid & 31] : 0;
   for (int r = tid; r < T; r += kThreads) s_id[r] = (u32)G.indices[r];
   __syncthreads();
   for (int r = tid; r < T; r += kThreads) {
@@ -398,51 +284,34 @@ static __device__ void schedule_block(const Group& G, int sms0, int sms1,
     const int npages = ((int)s_split[r] + R - 1) / R;
     s_np[r] = (u32)npages;
     s_n1[r] = 0;
-    s_last[r] = npages > 0 ? (u32)G.bt[(i64)r * G.bt_stride + npages - 1] : 0u;
+    s_d1[r] = npages > 0 ? page_dom(G, G.bt[r * G.bt_stride + npages - 1]) : 0;
   }
   __syncthreads();
   const u32 tag = (u32)s_misc[4];
-  // The last pages' domains: issued now, consumed after the flag waits (rows
-  // tid, tid + kThreads, ...: first 4).
-  int dl[4];
-#pragma unroll
-  for (int k = 0; k < 4; ++k) {
-    const int r = tid + k * kThreads;
-    dl[k] = (r < T && s_np[r] > 0) ? page_dom(G, (int)s_last[r]) : 0;
-  }
   // Every chunk flag of every row, spread over the threads.
-  const int nfl = T * G.nch;
-  for (int i = tid; i < nfl; i += kThreads) {
-    const int r = i / G.nch, c = i - (i / G.nch) * G.nch;
+  for (int i = tid; i < T * G.nch; i += kThreads) {
+    const int r = i / G.nch, c = i % G.nch;
     if (c * kChunk < (int)s_np[r])
       atomicAdd(&s_n1[r], wait_flag(G.flags + i, tag));
   }
   __syncthreads();
-  for (int r = tid, k = 0; r < T; r += kThreads, ++k) {
-    const int d_last =
-        k < 4 ? dl[k] : (s_np[r] > 0 ? page_dom(G, (int)s_last[r]) : 0);
-    const int L = (int)s_split[r];
-    const int npages = (int)s_np[r];
-    const int n1 = (int)s_n1[r];
-    const int n0 = npages - n1;
-    const int sh = R * npages - L;  // rows missing from the last page
-    ln0[r] = (u32)(n0 * R - ((npages > 0 && d_last == 0) ? sh : 0));
-    ln1[r] = (u32)(n1 * R - ((npages > 0 && d_last != 0) ? sh : 0));
+  for (int r = tid; r < T; r += kThreads) {
+    const int npages = (int)s_np[r], n1 = (int)s_n1[r];
+    const int sh = R * npages - (int)s_split[r];  // rows the last page lacks
+    ln0[r] = (u32)((npages - n1) * R - (s_d1[r] ? 0 : sh));
+    ln1[r] = (u32)(n1 * R - (s_d1[r] ? sh : 0));
   }
   __syncthreads();
   // Every block that read the epoch has published (and every flag of this
   // launch has been read): next launch.
   if (tid == 0) atomicAdd(G.state, 1u);
-  if (T <= 32)
-    schedules_warp(G, sms0, sms1, ln0, ln1, idx);
-  else
-    schedules(G, sms0, sms1, ln0, ln1, rs, pf, s_warp);
+  schedules(G, sms0, sms1, ln0, ln1, rs, pf, s_warp);
 }
 
 static __device__ void split_block(const Group& G, int item, int* s_warp,
                                    int* s_misc) {
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
-  const int r = item / G.nch, c = item - (item / G.nch) * G.nch;
+  const int r = item / G.nch, c = item % G.nch;
   const int R = G.R;
   if (tid == 0) s_misc[4] = (int)(ld_relaxed_u32(G.state) + 1u);
   const i64 rbt = (i64)r * G.bt_stride;
@@ -458,7 +327,7 @@ static __device__ void split_block(const Group& G, int item, int* s_warp,
   // The request's pages up to its last row (the split), and this row's own
   // length (a prefix of them).
   const int L = request_split_len(G, r);
-  const int L_row = min(G.lens[r], L);
+  const int L_row = G.lens[r];
   const int npages = (L + R - 1) / R;
   const int np_row = (L_row + R - 1) / R;
   const int nchr = (npages + kChunk - 1) / kChunk;
@@ -512,22 +381,14 @@ static __device__ void split_block(const Group& G, int item, int* s_warp,
   const int valid_before = min(nvalid, tid * kPer);
   int p1 = pre1 + t1;
   int p0 = pre0 + (valid_before - t1);
-  const int twoR = 2 * R;
 #pragma unroll
   for (int k = 0; k < kPer; ++k) {
     if (!val[k]) continue;
     const int pp = pbase + k;
-    if (one[k]) {
-      G.lbt1[rout + p1] = bk[k];
-      G.inv1[rout + p1] = pp;
-      G.jmap[rj + pp] = p1 * twoR + 1;
-      ++p1;
-    } else {
-      G.lbt0[rout + p0] = bk[k];
-      G.inv0[rout + p0] = pp;
-      G.jmap[rj + pp] = p0 * twoR;
-      ++p0;
-    }
+    const int p = one[k] ? p1++ : p0++;
+    (one[k] ? G.lbt1 : G.lbt0)[rout + p] = bk[k];
+    (one[k] ? G.inv1 : G.inv0)[rout + p] = pp;
+    G.jmap[rj + pp] = 2 * p + one[k];
     if (pp == np_row - 1) {  // the row's own last page: its lengths
       const int sh = R * np_row - L_row;  // rows missing from that page
       G.llen0[r] = p0 * R - (one[k] ? 0 : sh);
@@ -574,7 +435,7 @@ static __device__ void reset_block(const Group& G, int item) {
 extern "C" __global__ void __launch_bounds__(kThreads)
     indexer_localize_build(const __grid_constant__ Params p) {
   extern __shared__ u32 dsm[];
-  __shared__ int s_warp[kWarps];
+  __shared__ u32 s_warp[kWarps];
   __shared__ int s_misc[8];
   const int b = blockIdx.x;
   for (int gi = 0; gi < p.num_groups; ++gi) {
@@ -584,7 +445,7 @@ extern "C" __global__ void __launch_bounds__(kThreads)
       return;
     }
     if (b > G.split_begin && b <= G.split_begin + G.num_rows * G.nch) {
-      split_block(G, b - G.split_begin - 1, s_warp, s_misc);
+      split_block(G, b - G.split_begin - 1, (int*)s_warp, s_misc);
       return;
     }
     if (b >= G.reset_begin && b < G.reset_end) {

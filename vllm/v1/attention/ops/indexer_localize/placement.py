@@ -11,7 +11,6 @@ and cache-insert kernels are unchanged.
 """
 
 import math
-import threading
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -63,7 +62,6 @@ class DomainResources:
 
 
 _RESOURCES: dict[int, DomainResources | None] = {}
-_LOCK = threading.Lock()
 
 
 def _unsupported_device_reason(device_index: int) -> str | None:
@@ -93,27 +91,18 @@ def get_domain_resources(device: torch.device) -> DomainResources | None:
     the installed stack cannot split the decode scan by locality domain.
     """
     idx = device.index
-    if idx is None:
-        idx = torch.accelerator.current_device_index()
-    with _LOCK:
-        if idx in _RESOURCES:
-            return _RESOURCES[idx]
+    if idx not in _RESOURCES:
         res = None
-        try:
-            reason = _unsupported_device_reason(idx)
-            if reason is None:
-                domains = get_locality_domain_contexts(idx)
-                res = DomainResources(
-                    device=idx,
-                    streams=list(domains.streams),
-                    sms=[int(n) for n in domains.sm_counts],
-                    total_sms=torch.cuda.get_device_properties(
-                        idx
-                    ).multi_processor_count,
-                )
-        except Exception as e:  # noqa: BLE001 - never break startup over this
-            reason = f"{type(e).__name__}: {e}"
-        if res is None:
+        reason = _unsupported_device_reason(idx)
+        if reason is None:
+            domains = get_locality_domain_contexts(idx)
+            res = DomainResources(
+                device=idx,
+                streams=list(domains.streams),
+                sms=[int(n) for n in domains.sm_counts],
+                total_sms=torch.cuda.get_device_properties(idx).multi_processor_count,
+            )
+        else:
             logger.warning(
                 "VLLM_INDEXER_LOCALIZE is set but unavailable on device %d (%s); "
                 "using the stock sparse indexer.",
@@ -121,7 +110,7 @@ def get_domain_resources(device: torch.device) -> DomainResources | None:
                 reason,
             )
         _RESOURCES[idx] = res
-        return res
+    return _RESOURCES[idx]
 
 
 # (base, end, run_bytes, granule) of each localized VMM range. The tensors own
@@ -141,37 +130,23 @@ def find_buffer(ptr: int) -> tuple[int, int, int, int] | None:
     return None
 
 
-def _run_bytes(bytes_per_block: int | None, granule: int) -> int:
-    """A run close to 32 MiB of whole blocks and, when the two fit together,
-    whole granules (then every page's granule lies in its own run)."""
-    unit = math.lcm(bytes_per_block, granule) if bytes_per_block else granule
+def _run_bytes(block_bytes: int, granule: int) -> int:
+    """A run close to 32 MiB of whole blocks and, when the two fit together
+    (Kimi K3.1's blocks do not), whole granules (then every page's granule
+    lies in its own run)."""
+    unit = math.lcm(block_bytes, granule)
     if unit > 4 * _TARGET_RUN_BYTES:
-        unit = bytes_per_block or granule
+        unit = block_bytes
     return max(1, round(_TARGET_RUN_BYTES / unit)) * unit
-
-
-def _block_bytes(kv_cache_config: Any) -> int | None:
-    """Bytes of one KV block across every layer: the block stride the
-    block-outermost tensors share (without any, the single-layer ones), else
-    None."""
-    tensors = kv_cache_config.kv_cache_tensors
-    strides = {t.block_stride for t in tensors if t.block_stride > t.layer_stride}
-    if not strides:
-        strides = {t.block_stride for t in tensors if len(t.layers) == 1}
-    return strides.pop() if len(strides) == 1 else None
 
 
 def _place_by_domain(buffer: ExtensibleTensor, run_bytes: int) -> None:
     """Create each granule `buffer` commits from now on in the locality domain
     of its midpoint's run, with cuda-bindings' `cuMemCreate` (it resolves the
-    driver entry point that accepts locality-domain locations). A domain can
-    fill up before the device does: a run that does not fit its domain is
-    then created anywhere on the device, and the indexer reads its pages
-    remotely (same results, less locality).
+    driver entry point that accepts locality-domain locations).
     """
     from cuda.bindings import driver as cu
 
-    device_index = int(buffer.device.index)
     props = []
     for domain in range(NUM_DOMAINS):
         prop = cu.CUmemAllocationProp()
@@ -179,41 +154,17 @@ def _place_by_domain(buffer: ExtensibleTensor, run_bytes: int) -> None:
         prop.location.type = (
             cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN
         )
-        prop.location.localized.deviceId = device_index
+        prop.location.localized.deviceId = int(buffer.device.index)
         prop.location.localized.localityDomainId = domain
         props.append(prop)
-    anywhere = cu.CUmemAllocationProp()
-    anywhere.type = cu.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
-    anywhere.location.type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
-    anywhere.location.id = device_index
     granule = buffer.granularity
-    ok = cu.CUresult.CUDA_SUCCESS
-    warned = False
 
     def domain_of(g: int) -> int:
         return ((g * granule + granule // 2) // run_bytes) % NUM_DOMAINS
 
     def create(nbytes: int, domain: int) -> int:
-        nonlocal warned
         err, handle = cu.cuMemCreate(nbytes, props[domain], 0)
-        if err != ok:
-            # Memory idling in torch's caching allocator may be in this domain.
-            torch.accelerator.empty_cache()
-            err, handle = cu.cuMemCreate(nbytes, props[domain], 0)
-        if err != ok:
-            domain_err = err
-            err, handle = cu.cuMemCreate(nbytes, anywhere, 0)
-            if err == ok and not warned:
-                warned = True
-                logger.warning(
-                    "VLLM_INDEXER_LOCALIZE: locality domain %d is full (%r); KV "
-                    "cache runs that do not fit their domain are placed anywhere "
-                    "on the device, and the sparse indexer reads their pages "
-                    "remotely.",
-                    domain,
-                    domain_err,
-                )
-        if err != ok:
+        if err != cu.CUresult.CUDA_SUCCESS:
             raise RuntimeError(
                 f"cuMemCreate in locality domain {domain} failed: {err!r}"
             )
@@ -256,8 +207,7 @@ def localized_kv_allocate(
     domain) or None (one localized allocation of the whole cache). Returns
     `allocate` unchanged when placement is unavailable.
     """
-    tensors = kv_cache_config.kv_cache_tensors
-    if device.type != "cuda" or not tensors or any(t.host_resident for t in tensors):
+    if device.type != "cuda":  # the CPU worker allocates its cache here too
         return allocate
     # The engine allocates under its config; without one (direct callers)
     # only the device decides.
@@ -281,37 +231,18 @@ def localized_kv_allocate(
     if get_domain_resources(device) is None:
         return allocate
     if allocate is None:
-        block_bytes = _block_bytes(kv_cache_config)
+        # Both models force block-outermost layouts: one block stride.
+        block_bytes = kv_cache_config.kv_cache_tensors[0].block_stride
 
         def allocate_localized(size: int) -> torch.Tensor:
             buffer = ExtensibleTensor(size, device=device)
             _place_by_domain(buffer, _run_bytes(block_bytes, buffer.granularity))
-            try:
-                buffer.resize_segments_([size], zero_new=True)
-            except RuntimeError as e:
-                _forget(buffer.base_ptr)
-                del buffer
-                logger.warning(
-                    "VLLM_INDEXER_LOCALIZE: placing the KV cache by locality "
-                    "domain failed (%s); stock placement and indexer.",
-                    e,
-                )
-                from vllm.v1.worker.utils import _allocate_kv_cache_buffer
-
-                return _allocate_kv_cache_buffer(size, device)
+            buffer.resize_segments_([size], zero_new=True)
             return torch.as_tensor(_Owner(buffer, size), device=device)
 
         return allocate_localized
-    from vllm.v1.worker.extensible_kv_cache import ExtensibleKVCache
-
-    kv_cache = getattr(allocate, "__self__", None)
-    if not isinstance(kv_cache, ExtensibleKVCache):
-        logger.warning(
-            "VLLM_INDEXER_LOCALIZE: KV cache allocator %s cannot be placed by "
-            "locality domain; using the stock sparse indexer.",
-            allocate,
-        )
-        return allocate
+    # The extensible KV cache's allocate, the only one the model runner passes.
+    kv_cache = allocate.__self__  # type: ignore[attr-defined]
     buffer = kv_cache.buffer
     _place_by_domain(buffer, _run_bytes(kv_cache.bytes_per_block, buffer.granularity))
     return allocate
@@ -326,8 +257,6 @@ def page_domain_table(
     `kv` is `[num_pages, rows, bytes]`, page `p` starting at
     `data_ptr + p * stride(0)` bytes. None if not in a localized allocation.
     """
-    if kv.numel() == 0:
-        return None
     buf = find_buffer(kv.data_ptr())
     if buf is None:
         return None
@@ -343,10 +272,12 @@ def page_domain_table(
 
 def page_domain_plan(kv: torch.Tensor) -> tuple[int, int]:
     """`(q0, k)` with `table[b] == ((q0 + b) // k) % 2` for every page `b`
-    of `page_domain_table(kv)`, or `(0, 0)` (the build kernel then reads the
-    table). The table is `((off + b * stride) // run) % 2`; with `run` a whole
-    number `k` of page strides and `off = q0 * stride + r0` (`r0 < stride`)
-    that is `((q0 + b) // k) % 2`, verified against the table on the host.
+    of `page_domain_table(kv)`, or `(0, 0)`: the build kernel then reads the
+    table. With `run` a whole number `k` of page strides and the first page's
+    midpoint at `q0 * stride + r0` (`r0 < stride`), page `b`'s midpoint lies
+    in run `(q0 + b) // k`; the table holds the domain of the granule around
+    that midpoint, which differs where a granule straddles two runs, so the
+    plan is verified against the table on the host.
     """
     buf = find_buffer(kv.data_ptr())
     table = page_domain_table(kv, device="cpu")
@@ -355,12 +286,7 @@ def page_domain_plan(kv: torch.Tensor) -> tuple[int, int]:
     base, _, run_bytes, _ = buf
     stride = kv.stride(0) * kv.element_size()
     page_bytes = math.prod(kv.shape[1:]) * kv.element_size()
-    off = (kv.data_ptr() - base) + page_bytes // 2
-    if stride <= 0 or off < 0 or run_bytes % stride:
-        return 0, 0
-    k, q0 = run_bytes // stride, off // stride
-    if k >= 2**31 or q0 + table.numel() >= 2**32:
-        return 0, 0
+    k, q0 = run_bytes // stride, ((kv.data_ptr() - base) + page_bytes // 2) // stride
     b = torch.arange(table.numel(), dtype=torch.int64)
     if not torch.equal((((q0 + b) // k) % NUM_DOMAINS).to(torch.int8), table):
         return 0, 0

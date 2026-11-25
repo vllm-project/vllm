@@ -51,15 +51,15 @@ def domains() -> placement.DomainResources | None:
 
 def _row_pages(rows: int, pages: int, page_rows: int, gen: torch.Generator):
     """Metadata for the merge and join kernels: each row's pages split between
-    the domains, as local-to-row page maps and the join map ((local column <<
-    1) | domain per row page)."""
+    the domains, as local-to-row page maps and the join map ((local page << 1)
+    | domain per row page)."""
     device = _device()
     order = torch.argsort(torch.rand(rows, 2 * pages, generator=gen, device=device))
     inv = [order[:, :pages].int().contiguous(), order[:, pages:].int().contiguous()]
     jmap = torch.empty(rows, 2 * pages, dtype=torch.int32, device=device)
     local = torch.arange(pages, dtype=torch.int32, device=device).expand(rows, -1)
     for d in range(2):
-        jmap.scatter_(1, inv[d].long(), local * page_rows * 2 + d)
+        jmap.scatter_(1, inv[d].long(), local * 2 + d)
     # The kernels read only the device and its SM count (the join's grid).
     sms = torch.cuda.get_device_properties(device).multi_processor_count
     meta = build.LocalizedDecodeMetadata(
@@ -70,7 +70,6 @@ def _row_pages(rows: int, pages: int, page_rows: int, gen: torch.Generator):
         schedules=[],
         join_map=jmap,
         inv_maps=inv,
-        page_stride=0,
         resources=placement.DomainResources(device.index, [], [sms // 2] * 2, sms),
     )
     return inv, meta
@@ -149,9 +148,6 @@ def test_merge_kernel_matches_reference(nvrtc, topk, score_dtype, page_rows):
         # Short rows have fewer than K candidates.
         cols[d, topk // 3 :] = -1
         idx.append(cols.contiguous())
-    assert scan._merge_kernel(loc, topk, score_dtype == torch.float32), (
-        "the CUDA merge does not build"
-    )
     out = torch.full((rows, topk), -7, dtype=torch.int32, device=device)
     scan.merge_candidates(loc, scores[0], scores[1], idx, topk, out)
     assert torch.equal(out, _reference_merge(scores, idx, inv, page_rows, topk))
@@ -301,7 +297,7 @@ def _reference_build(
             out["bt"][d][r, k : k + 64] = 0
             out["inv"][d][r, :k] = pages
             local = torch.arange(k, dtype=torch.int32)
-            out["jmap"][0][r, pages] = local * 2 * page_rows + d
+            out["jmap"][0][r, pages] = local * 2 + d
             mine = int((on1[:own_pages] == d).sum())
             last = own_pages > 0 and bool(on1[own_pages - 1]) == bool(d)
             out["lens"][d][r] = mine * page_rows - (short if last else 0)
@@ -316,7 +312,7 @@ def _reference_build(
 
 
 @pytest.mark.parametrize("rows_per_request", [1, 6], ids=["one_row", "2_to_6_rows"])
-@pytest.mark.parametrize("rows", [19, 40])  # warp and block schedule paths
+@pytest.mark.parametrize("rows", [19, 40])
 @pytest.mark.parametrize("domain_plan", [True, False])
 def test_build_kernel_matches_reference(nvrtc, domain_plan, rows, rows_per_request):
     """The one-launch build writes what the torch split and DeepGEMM's
@@ -377,8 +373,6 @@ def test_build_kernel_matches_reference(nvrtc, domain_plan, rows, rows_per_reque
         dom_q0=q0,
         dom_k=k,
     )
-    kernel = build._build_kernel(device.index)
-    assert kernel is not None
 
     def check() -> None:
         _reference_build(bt, lens, dom, indices, page_rows, sms, ref)
@@ -386,11 +380,11 @@ def test_build_kernel_matches_reference(nvrtc, domain_plan, rows, rows_per_reque
             for got, want in zip(tensors, ref[name]):
                 assert torch.equal(got.cpu(), want), name
 
-    kernel.launch([args], sms)
+    build._launch_build([args], sms, device.index)
     check()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        kernel.launch([args], sms)
+        build._launch_build([args], sms, device.index)
     for _ in range(20):
         for t, new in zip((bt, lens, indices), inputs()):
             t.copy_(new)
@@ -422,7 +416,7 @@ def test_topk_cluster_capacity_of_the_domains(domains):
     """The occupancy query per domain: clusters never hold more CTAs than the
     domain's SMs, and single-CTA clusters fill every SM (one CTA per SM)."""
     capacity = build.topk_cluster_capacity(domains)
-    assert capacity is not None and set(capacity) == {16, 8, 4, 2, 1}
+    assert set(capacity) == {16, 8, 4, 2, 1}
     for cluster, n in capacity.items():
         assert n * cluster <= min(domains.sms), (cluster, n)
     assert capacity[1] == min(domains.sms)
@@ -473,13 +467,10 @@ def test_models_opt_in_to_die_local_indexer(arch, opted_in):
     assert getattr(model_cls, "supports_localized_indexer", False) is opted_in
 
 
-@pytest.mark.parametrize("case", ["plain", "extensible", "domain_1_full"])
-def test_kv_cache_granules_live_in_their_planned_domain(domains, monkeypatch, case):
+@pytest.mark.parametrize("extensible", [False, True], ids=["plain", "extensible"])
+def test_kv_cache_granules_live_in_their_planned_domain(domains, extensible):
     """Every committed granule of the KV cache is in the locality domain of
-    its midpoint's run, and the page-to-domain table follows the plan. When
-    domain 1 is full, its runs are created anywhere on the device instead, so
-    the extensible KV cache still commits; domain 0's runs keep their
-    placement."""
+    its midpoint's run, and the page-to-domain table follows the plan."""
     from cuda.bindings import driver as cu
 
     from vllm.utils.extensible_tensor import granule_size
@@ -487,22 +478,12 @@ def test_kv_cache_granules_live_in_their_planned_domain(domains, monkeypatch, ca
     from vllm.v1.worker.extensible_kv_cache import ExtensibleKVCache
 
     domain_type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN
-    if case == "domain_1_full":
-        real_create = cu.cuMemCreate
-
-        def create(nbytes, prop, flags):
-            loc = prop.location
-            if loc.type == domain_type and loc.localized.localityDomainId == 1:
-                return cu.CUresult.CUDA_ERROR_OUT_OF_MEMORY, None
-            return real_create(nbytes, prop, flags)
-
-        monkeypatch.setattr(cu, "cuMemCreate", create)
     device = _device()
     page_rows, row_bytes = 64, 132
     config = _cache_config(6000, page_rows * row_bytes, 4)
     size = config.kv_cache_tensors[0].size
     kv_cache = None
-    if case != "plain":
+    if extensible:
         kv_cache = ExtensibleKVCache(config, device, KVCacheLayout.BLHNC)
     allocate = placement.localized_kv_allocate(
         config, device, None if kv_cache is None else kv_cache.allocate
@@ -523,12 +504,8 @@ def test_kv_cache_granules_live_in_their_planned_domain(domains, monkeypatch, ca
         location = cu.cuMemGetAllocationPropertiesFromHandle(handle)[1].location
         cu.cuMemRelease(handle)
         planned = ((g * granule + granule // 2) // run_bytes) % 2
-        if case == "domain_1_full" and planned == 1:
-            device_type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
-            assert location.type == device_type, g
-        else:
-            assert location.type == domain_type, g
-            assert location.localized.localityDomainId == planned, g
+        assert location.type == domain_type, g
+        assert location.localized.localityDomainId == planned, g
     buf.fill_(1)
     assert int(buf.view(torch.uint8).sum()) == size
 
@@ -564,7 +541,14 @@ class _DecodeCase:
     seeing one key more than the one before; in every other request the last
     row reads only the first key of a page."""
 
-    def __init__(self, fp4: bool, page_rows: int, requests: int, rows_per_request: int):
+    def __init__(
+        self,
+        domains: placement.DomainResources,
+        fp4: bool,
+        page_rows: int,
+        requests: int,
+        rows_per_request: int,
+    ):
         from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
         from vllm.utils.deep_gemm import (
             fp8_fp4_paged_mqa_logits,
@@ -614,7 +598,7 @@ class _DecodeCase:
         self.localizer = build.IndexerDecodeLocalizer(
             [cache.prefix],
             vllm_config.compilation_config.static_forward_context,
-            device,
+            domains,
             rows,
             self.width,
             page_rows,
@@ -662,7 +646,7 @@ class _DecodeCase:
 
     def join(self, loc: build.LocalizedDecodeMetadata, fp32: bool) -> torch.Tensor:
         """The die-split scan and join, FP32 or in the scan's dtype."""
-        out = scan.localized_paged_mqa_logits(
+        return scan.localized_paged_mqa_logits(
             loc,
             self.q,
             self.kv,
@@ -673,8 +657,6 @@ class _DecodeCase:
             self.indices,
             lambda t: fp32,
         )
-        assert out is not None
-        return out
 
 
 def _assert_same_scores(out: torch.Tensor, ref: torch.Tensor, lens: torch.Tensor):
@@ -721,14 +703,13 @@ def test_localized_decode_matches_single_launch(
     per-domain top-k (`cooperative_topk`, `persistent_topk` above 64 rows)
     and merge keep the stock top-k's scores, also deferred inside a CUDA
     graph replayed over new queries."""
-    case = _DecodeCase(fp4, page_rows, requests, rows_per_request)
+    case = _DecodeCase(domains, fp4, page_rows, requests, rows_per_request)
     rows = case.seq_lens.shape[0]
     meta = case.localize(rows)
     assert meta is not None, "the localizer refused the batch"
     # A row count whose per-domain top-k needs a second round takes the stock
     # indexer.
     capacity = build.topk_cluster_capacity(domains)
-    assert capacity is not None
     second_round = next(
         n for n in range(1, 256) if not build.use_die_split(n, capacity)
     )
@@ -744,8 +725,8 @@ def test_localized_decode_matches_single_launch(
     assert backend == ("cooperative" if rows <= 64 else "persistent")
     kept = torch.full((rows, topk), -7, dtype=torch.int32, device=ref.device)
 
-    def localized_topk() -> bool:
-        return scan.localized_paged_mqa_topk(
+    def localized_topk() -> None:
+        scan.localized_paged_mqa_topk(
             meta,
             case.q,
             case.kv,
@@ -759,13 +740,13 @@ def test_localized_decode_matches_single_launch(
             topk_backend=backend,
         )
 
-    assert localized_topk()
+    localized_topk()
     _assert_same_kept_scores(kept, case.stock(), case.seq_lens)
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         indexer_overlap.request_deferred_topk()
-        assert localized_topk()
+        localized_topk()
         stream, _ = indexer_overlap.take_deferred_topk()
         assert stream is not None, "the top-k was not deferred"
         torch.cuda.current_stream().wait_stream(stream)
@@ -814,7 +795,7 @@ def test_candidate_source_matches_stock(domains, candidate_stream, rows_per_requ
     )
 
     topk, block_size, topk_blocks, sparse_block_kv = 512, 8, 2048, 8
-    case = _DecodeCase(True, 128, 4, rows_per_request)
+    case = _DecodeCase(domains, True, 128, 4, rows_per_request)
     rows = case.seq_lens.shape[0]
     device = case.seq_lens.device
     loc = case.localize(rows)

@@ -445,11 +445,9 @@ def get_pdl() -> bool | None:
 
 
 def set_pdl(enable: bool) -> None:
-    _lazy_init()
-    dg = _import_deep_gemm()
-    if dg is None:
-        raise RuntimeError("DeepGEMM is not available")
-    dg.set_pdl(enable)
+    """Set DeepGEMM's programmatic dependent launch; only where `get_pdl`
+    returned a setting."""
+    _import_deep_gemm().set_pdl(enable)
 
 
 def get_mk_alignment_for_contiguous_layout() -> list[int]:

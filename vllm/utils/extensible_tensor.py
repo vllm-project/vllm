@@ -130,18 +130,19 @@ class _VirtualBuffer:
         """Map granules `[first, last)` as one chunk or, with a placement, one
         chunk per run of granules of a location: all of them or none."""
         granule = self.granularity
-        if self.placement is None:
+        placement = self.placement
+        if placement is None:
             self._map_chunk_at(first * granule, (last - first) * granule)
             return
         num_handles = len(self._handles)
         try:
             for location, run in itertools.groupby(
-                range(first, last), self.placement.location
+                range(first, last), placement.location
             ):
                 granules = list(run)
-                self._map_chunk_at(
-                    granules[0] * granule, len(granules) * granule, location
-                )
+                size = len(granules) * granule
+                create = partial(placement.create, size, location)
+                self._map_chunk_at(granules[0] * granule, size, create)
         except Exception:
             for handle, offset, size in self._handles[num_handles:]:
                 self._driver.unmap(self.base_ptr + offset, size)
@@ -150,19 +151,16 @@ class _VirtualBuffer:
             raise
 
     def _map_chunk_at(
-        self, offset: int, size: int, location: int | None = None
+        self, offset: int, size: int, create: Callable[[], int] | None = None
     ) -> None:
-        """Create one physical chunk of `size` bytes, on the device or in a
-        placement `location`, and map it at `offset`."""
+        """Create one physical chunk of `size` bytes, on the device or with
+        `create`, and map it at `offset`."""
         driver = self._driver
         driver.ensure_context(self.device_index)
-        if location is None:
+        if create is None:
             create = partial(
                 driver.create, size, self.device_index, self.export_handle_types
             )
-        else:
-            assert self.placement is not None
-            create = partial(self.placement.create, size, location)
         try:
             handle = create()
         except RuntimeError:
@@ -350,8 +348,6 @@ class ExtensibleTensor:
     def set_granule_placement(self, placement: GranulePlacement) -> None:
         """Create the granules committed from now on as `placement` says,
         instead of on the device. Not for buffers that export their memory."""
-        if self._buffer.export_handle_types:
-            raise ValueError("Exported memory cannot take a granule placement.")
         self._buffer.placement = placement
 
     def full_view(self) -> torch.Tensor:

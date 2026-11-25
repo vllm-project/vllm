@@ -47,12 +47,12 @@ under a second.
 
 Requirements: a GPU with two locality domains, DeepGEMM, `cuda-bindings` 13.4 or
 later (driver API and NVRTC), and a PyTorch build with locality-domain green
-contexts and `torch.cuda.execute_on_streams` (2.16). Where any of these is
-missing, vLLM logs why and runs the stock indexer. The die split and the KV cache
-placement are also off for models whose class does not set
-`supports_localized_indexer` (today Kimi K3 / K3.1 and DeepSeek-V4.1), with
-decode or prefill context parallelism, a KV connector, and with the CuMem
-allocator on a plain (non-extensible) KV cache.
+contexts and `torch.cuda.execute_on_streams` (2.16). Without the GPU,
+`cuda-bindings` or these PyTorch APIs, vLLM logs why and runs the stock indexer;
+NVRTC errors stop start-up. The die split and the KV cache placement are also
+off for models whose class does not set `supports_localized_indexer` (today Kimi
+K3 / K3.1 and DeepSeek-V4.1), with decode or prefill context parallelism, a KV
+connector, and with the CuMem allocator on a plain (non-extensible) KV cache.
 
 `VLLM_INDEXER_LOCALIZE` is independent of
 [`VLLM_USE_LOCALITY_DOMAINS`](../configuration/env_vars.md), which splits the
@@ -63,9 +63,7 @@ backfilled ones.
 When active, each rank logs `KV cache placed in ... runs alternating between 2
 locality domains`, the decode batch sizes that take the die split and, once per
 indexer cache group, `Die-local sparse indexer active for N layers`. Each
-fallback is logged once as a warning. If one domain fills up before the device
-does, the KV cache runs that do not fit it are created anywhere on the device,
-and the indexer reads their pages remotely, with the same results.
+fallback is logged once as a warning.
 
 ## Indexer overlap (`VLLM_INDEXER_OVERLAP`)
 

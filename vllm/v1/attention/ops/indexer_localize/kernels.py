@@ -11,7 +11,6 @@ current stream, so CUDA graphs capture it like any other kernel.
 
 import ctypes
 import os
-import threading
 import time
 from collections.abc import Sequence
 
@@ -140,37 +139,14 @@ class CudaKernel:
         return int(_check(cu.cuOccupancyMaxActiveClusters(func, config)))
 
 
-_KERNELS: dict[tuple, CudaKernel | None] = {}
-_LOCK = threading.Lock()
+_KERNELS: dict[tuple, CudaKernel] = {}
 
 
 def get_kernel(
-    source: str,
-    name: str,
-    defines: Sequence[tuple[str, int]],
-    device_index: int,
-    build: bool = True,
-) -> CudaKernel | None:
-    """The kernel of one configuration, compiled once per process.
-
-    Returns None, after one warning, when it cannot be compiled or loaded
-    (cuda-bindings or NVRTC missing, an NVRTC that does not know the device),
-    and without `build` when it has not been compiled yet.
-    """
+    source: str, name: str, defines: Sequence[tuple[str, int]], device_index: int
+) -> CudaKernel:
+    """The kernel of one configuration, compiled once per process."""
     key = (source, name, tuple(defines), device_index)
-    with _LOCK:
-        if key not in _KERNELS:
-            if not build:
-                return None
-            try:
-                _KERNELS[key] = CudaKernel(source, name, defines, device_index)
-            except Exception as e:  # noqa: BLE001 - callers fall back
-                logger.warning(
-                    "Die-local indexer: cannot build %s %s (%s: %s)",
-                    source,
-                    dict(defines),
-                    type(e).__name__,
-                    e,
-                )
-                _KERNELS[key] = None
-        return _KERNELS[key]
+    if key not in _KERNELS:
+        _KERNELS[key] = CudaKernel(source, name, defines, device_index)
+    return _KERNELS[key]
