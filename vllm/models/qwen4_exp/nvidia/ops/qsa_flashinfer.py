@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""QSA attention of prefill steps with FlashInfer's PrimTS
+"""QSA attention of prefill steps with FlashInfer's
 QToken-KvBlock-Sparse kernel (sm_100/sm_103, BF16 K/V).
 
 The Triton kernel attends each row on its own, so a K/V load serves only the
-query heads of one row. PrimTS runs GROUP_SIZE consecutive rows of a request
-as one tile over the union of their selected blocks, reading each block once
-per group.
+query heads of one row. FlashInfer runs GROUP_SIZE consecutive rows of a
+request as one tile over the union of their selected blocks, reading each block
+once per group.
 """
 
 from dataclasses import dataclass, field
@@ -28,7 +28,7 @@ _MAX_BLOCK_TOPK = 512
 _MAX_TILE_ROWS = 128
 
 
-def primts_supported(
+def flashinfer_supported(
     block_size: int, block_topk: int, head_dim: int, num_heads: int, num_kv_heads: int
 ) -> bool:
     return (
@@ -40,9 +40,9 @@ def primts_supported(
 
 
 @dataclass
-class PrimTSBuffers:
-    """Storage that PrimTS plans retain across steps. The metadata builder owns
-    it, so prepared plans, which reference the KV cache, go with the cache.
+class FlashInferBuffers:
+    """Storage that FlashInfer plans retain across steps. The metadata builder
+    owns it, so prepared plans, which reference the KV cache, go with the cache.
     All plans share one workspace, sized for the largest bucket seen."""
 
     max_num_reqs: int
@@ -54,7 +54,7 @@ class PrimTSBuffers:
 
 
 @dataclass
-class PrimTSRoutes:
+class FlashInferRoutes:
     """A step's rows padded to `num_rows`, so each layer reuses one plan per
     bucket. Padding rows sit at position 0 of request 0 and select nothing."""
 
@@ -64,17 +64,17 @@ class PrimTSRoutes:
     token_to_req: torch.Tensor  # int32 [num_rows]
     positions: torch.Tensor  # int32 [num_rows]
     block_table: torch.Tensor  # int32 [max_num_reqs, blocks]
-    buffers: PrimTSBuffers
+    buffers: FlashInferBuffers
 
 
-def build_primts_routes(
+def build_flashinfer_routes(
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     token_to_req: torch.Tensor,
     block_table: torch.Tensor,
     num_tokens: int,
-    buffers: PrimTSBuffers,
-) -> PrimTSRoutes:
+    buffers: FlashInferBuffers,
+) -> FlashInferRoutes:
     num_rows = (
         max(64, next_power_of_2(num_tokens))
         if num_tokens <= 1024
@@ -110,7 +110,7 @@ def build_primts_routes(
         table = block_table.new_zeros((buffers.max_num_reqs, block_table.shape[1]))
         buffers.block_table = table
     table[: block_table.shape[0]] = block_table
-    return PrimTSRoutes(
+    return FlashInferRoutes(
         num_tokens, num_rows, qo_indptr, rows[0], rows[1], table, buffers
     )
 
@@ -139,12 +139,12 @@ def _sigmoid_gate_kernel(
         )
 
 
-def primts_attention(
+def flashinfer_attention(
     layer_name: str,
     query: torch.Tensor,
     kv_cache: torch.Tensor,
     selected: torch.Tensor,
-    routes: PrimTSRoutes,
+    routes: FlashInferRoutes,
     scale: float,
     output_gate: torch.Tensor,
     out: torch.Tensor,

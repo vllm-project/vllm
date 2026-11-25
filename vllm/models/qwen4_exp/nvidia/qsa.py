@@ -38,7 +38,7 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_prims_ts_qsa
+from vllm.utils.flashinfer import has_flashinfer_qsa_prefill
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     kv_cache_dtype_str_to_dtype,
@@ -72,14 +72,14 @@ from vllm.v1.kv_cache_interface import (
 from ..common.qsa import Qwen4ExpQSAMetadata, Qwen4ExpQSAMetadataBuilder
 from ..common.qsa_indexer import QSAIndexerMetadata, qsa_kv_cache_dtype
 from . import model
-from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
-from .ops.qsa_primts import (
-    PrimTSBuffers,
-    PrimTSRoutes,
-    build_primts_routes,
-    primts_attention,
-    primts_supported,
+from .ops.qsa_flashinfer import (
+    FlashInferBuffers,
+    FlashInferRoutes,
+    build_flashinfer_routes,
+    flashinfer_attention,
+    flashinfer_supported,
 )
+from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
 from .qsa_indexer import QSAIndexer
 
 
@@ -225,12 +225,12 @@ class Qwen4ExpQSAHiSparseMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
 
 
 @dataclass(kw_only=True)
-class Qwen4ExpQSAPrimTSMetadata(Qwen4ExpQSAMetadata):
-    primts: PrimTSRoutes | None
+class Qwen4ExpQSAFlashInferMetadata(Qwen4ExpQSAMetadata):
+    flashinfer_routes: FlashInferRoutes | None
 
 
-class Qwen4ExpQSAPrimTSMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
-    """Route steps with a prefill to FlashInfer PrimTS on sm_100/sm_103."""
+class Qwen4ExpQSAFlashInferMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
+    """Route steps with a prefill to FlashInfer on sm_100/sm_103."""
 
     # Routes carry a copy of this group's block table.
     supports_update_block_table = False
@@ -244,14 +244,14 @@ class Qwen4ExpQSAPrimTSMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.max_decode_query_len = 1 + vllm_config.num_speculative_tokens
-        self.primts_buffers = None
+        self.flashinfer_buffers = None
         text_config = vllm_config.model_config.hf_text_config
         ratio = text_config.indexer_compress_ratio
         if (
             current_platform.is_device_capability_family(100)
             and kv_cache_spec.dtype == torch.bfloat16
-            and has_flashinfer_prims_ts_qsa()
-            and primts_supported(
+            and has_flashinfer_qsa_prefill()
+            and flashinfer_supported(
                 ratio,
                 text_config.indexer_budget // ratio,
                 kv_cache_spec.head_size,
@@ -262,7 +262,9 @@ class Qwen4ExpQSAPrimTSMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
             )
         ):
             scheduler_config = vllm_config.scheduler_config
-            self.primts_buffers = PrimTSBuffers(scheduler_config.max_num_seqs, ratio)
+            self.flashinfer_buffers = FlashInferBuffers(
+                scheduler_config.max_num_seqs, ratio
+            )
             self.token_to_req_buffer = torch.empty(
                 scheduler_config.max_num_batched_tokens,
                 dtype=torch.int32,
@@ -274,25 +276,25 @@ class Qwen4ExpQSAPrimTSMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-    ) -> Qwen4ExpQSAPrimTSMetadata:
+    ) -> Qwen4ExpQSAFlashInferMetadata:
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
         cm = common_attn_metadata
         routes = None
         # Decode batches keep the Triton kernel inside their CUDA graphs.
         if (
-            self.primts_buffers is not None
+            self.flashinfer_buffers is not None
             and not fast_build
             and cm.max_query_len > self.max_decode_query_len
         ):
-            routes = build_primts_routes(
+            routes = build_flashinfer_routes(
                 cm.query_start_loc,
                 cm.seq_lens,
                 cm.token_to_req_indices(self.token_to_req_buffer),
                 cm.block_table_tensor,
                 cm.num_actual_tokens,
-                self.primts_buffers,
+                self.flashinfer_buffers,
             )
-        return Qwen4ExpQSAPrimTSMetadata(**vars(metadata), primts=routes)
+        return Qwen4ExpQSAFlashInferMetadata(**vars(metadata), flashinfer_routes=routes)
 
 
 class Qwen4ExpQSABackend(AttentionBackend):
@@ -327,7 +329,7 @@ class Qwen4ExpQSABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls() -> type[Qwen4ExpQSAMetadataBuilder]:
-        return Qwen4ExpQSAPrimTSMetadataBuilder
+        return Qwen4ExpQSAFlashInferMetadataBuilder
 
     @classmethod
     def is_sparse(cls) -> bool:
@@ -426,13 +428,13 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
         out = output[:num_tokens]
         output_gate = output_gate[:num_tokens]
         if self.index_group is None:
-            routes = getattr(attn_metadata, "primts", None)
+            routes = getattr(attn_metadata, "flashinfer_routes", None)
             if (
                 routes is not None
                 and routes.num_tokens == num_tokens
                 and not torch.cuda.is_current_stream_capturing()
             ):
-                primts_attention(
+                flashinfer_attention(
                     layer.layer_name,
                     query,
                     kv_cache,

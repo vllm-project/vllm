@@ -1289,18 +1289,18 @@ def test_qsa_sparse_paged_attention_correctness(
 @requires_qsa_kernels
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
-    reason="PrimTS QSA runs on sm_100/sm_103",
+    reason="FlashInfer QSA prefill runs on sm_100/sm_103",
 )
 # Per-rank heads at TP1 and TP4.
 @pytest.mark.parametrize("heads, kv_heads", [(24, 2), (6, 1)], ids=["tp1", "tp4"])
-def test_qsa_primts_matches_sparse_attention(heads: int, kv_heads: int) -> None:
-    """Prefill steps through FlashInfer PrimTS write what the Triton kernel
+def test_qsa_flashinfer_matches_sparse_attention(heads: int, kv_heads: int) -> None:
+    """Prefill steps through FlashInfer write what the Triton kernel
     writes without blocking the host. Steps of different row buckets share the
     builder's buffers, and the plans do not outlive them."""
-    from vllm.models.qwen4_exp.nvidia.ops.qsa_primts import (
-        PrimTSBuffers,
-        build_primts_routes,
-        primts_attention,
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_flashinfer import (
+        FlashInferBuffers,
+        build_flashinfer_routes,
+        flashinfer_attention,
     )
     from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAImpl
 
@@ -1318,7 +1318,7 @@ def test_qsa_primts_matches_sparse_attention(heads: int, kv_heads: int) -> None:
         num_kv_heads=kv_heads,
         kv_cache_dtype="auto",
     )
-    buffers = PrimTSBuffers(max_num_reqs=64, block_size=ratio)
+    buffers = FlashInferBuffers(max_num_reqs=64, block_size=ratio)
     # (cached prefix, new rows) per request. A lone 32-row prompt fills the
     # smallest bucket; the mixed step has a decode with three draft rows, a short
     # and a long fresh prefill (past the selection budget) and a chunked prefill.
@@ -1370,10 +1370,10 @@ def test_qsa_primts_matches_sparse_attention(heads: int, kv_heads: int) -> None:
         for sync_mode in ("default", "error"):
             torch.cuda.set_sync_debug_mode(sync_mode)
             try:
-                routes = build_primts_routes(
+                routes = build_flashinfer_routes(
                     query_start_loc, seq_lens, token_to_req, tables, num_rows, buffers
                 )
-                primts_attention(
+                flashinfer_attention(
                     "layer",
                     q,
                     kv_cache,
@@ -1397,7 +1397,7 @@ def test_qsa_primts_matches_sparse_attention(heads: int, kv_heads: int) -> None:
 @requires_qsa_kernels
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
-    reason="PrimTS QSA runs on sm_100/sm_103",
+    reason="FlashInfer QSA prefill runs on sm_100/sm_103",
 )
 @pytest.mark.parametrize(
     "block_size, block_topk, head_dim, heads, kv_heads",
@@ -1409,19 +1409,19 @@ def test_qsa_primts_matches_sparse_attention(heads: int, kv_heads: int) -> None:
         (4, 512, 256, 32, 1),  # 8 rows x 32 heads exceed a 128-row tile
     ],
 )
-def test_qsa_primts_selection_matches_flashinfer(
+def test_qsa_flashinfer_selected_only_when_plannable(
     block_size: int, block_topk: int, head_dim: int, heads: int, kv_heads: int
 ) -> None:
-    """PrimTS is selected exactly for the geometries FlashInfer can plan, so
+    """FlashInfer is selected exactly for the geometries its planner accepts, so
     other QSA configs keep the Triton kernel instead of failing at runtime."""
     from flashinfer.attention.prims_ts import (
         QTokenKvBlockSparsePagedTSWrapper,
         get_q_token_kv_block_sparse_workspace_size,
     )
 
-    from vllm.models.qwen4_exp.nvidia.ops.qsa_primts import (
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_flashinfer import (
         GROUP_SIZE,
-        primts_supported,
+        flashinfer_supported,
     )
 
     rows, page_size = 64, 1600
@@ -1467,31 +1467,32 @@ def test_qsa_primts_selection_matches_flashinfer(
     except (ValueError, NotImplementedError):
         planned = False
     assert (
-        primts_supported(block_size, block_topk, head_dim, heads, kv_heads) == planned
+        flashinfer_supported(block_size, block_topk, head_dim, heads, kv_heads)
+        == planned
     )
 
 
 @requires_qsa_kernels
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
-    reason="PrimTS QSA runs on sm_100/sm_103",
+    reason="FlashInfer QSA prefill runs on sm_100/sm_103",
 )
 # A local JIT build of the metadata module is refused too: FlashInfer only
 # loads it through a ninja check, which FLASHINFER_DISABLE_JIT forbids.
 @pytest.mark.parametrize("local_build", [False, True], ids=["empty", "local_build"])
-def test_qsa_primts_needs_its_jit_module(tmp_path, local_build: bool) -> None:
-    """With FlashInfer's JIT disabled, PrimTS is not selected unless its
-    metadata module ships precompiled, so the first prefill runs on Triton
-    instead of raising MissingJITCacheError."""
+def test_qsa_flashinfer_needs_its_jit_module(tmp_path, local_build: bool) -> None:
+    """With FlashInfer's JIT disabled, QSA prefill stays on Triton unless the
+    kernel's metadata module ships precompiled, instead of raising
+    MissingJITCacheError on the first prefill."""
     code = (
         "from flashinfer.jit import "
         "gen_prims_ts_q_token_kv_block_sparse_metadata_module\n"
-        "from vllm.utils.flashinfer import has_flashinfer_prims_ts_qsa\n"
+        "from vllm.utils.flashinfer import has_flashinfer_qsa_prefill\n"
         "spec = gen_prims_ts_q_token_kv_block_sparse_metadata_module()\n"
         f"if {local_build}:\n"
         "    spec.get_library_path().parent.mkdir(parents=True, exist_ok=True)\n"
         "    spec.get_library_path().touch()\n"
-        "print(has_flashinfer_prims_ts_qsa(), spec.is_aot)"
+        "print(has_flashinfer_qsa_prefill(), spec.is_aot)"
     )
     env = {
         **os.environ,

@@ -529,10 +529,10 @@ def has_flashinfer_prims_ts_sparse_mla() -> bool:
 
 
 @functools.cache
-def has_flashinfer_prims_ts_qsa() -> bool:
-    """Return `True` if FlashInfer's prims_ts QToken-KvBlock-Sparse attention
-    can run. Its CUDA metadata module loads without a build step only when
-    precompiled (flashinfer-jit-cache does not ship it); a local JIT build is
+def has_flashinfer_qsa_prefill() -> bool:
+    """Return `True` if FlashInfer's QToken-KvBlock-Sparse attention (QSA
+    prefill) can run. Its CUDA metadata module loads without a build step only
+    when precompiled (flashinfer-jit-cache does not ship it); a local JIT build is
     rebuilt or checked by ninja on load, which FLASHINFER_DISABLE_JIT forbids."""
     if not has_flashinfer():
         return False
