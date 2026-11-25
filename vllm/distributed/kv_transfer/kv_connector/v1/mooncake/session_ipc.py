@@ -5,7 +5,7 @@
 The compression session machinery (ZMQ transport, protocol state machine,
 slot scheduling, timeout handling and completion accounting) runs in a
 helper process spawned per TP rank.  The engine process keeps the KV cache,
-the compression arena and the C++/CUDA encode-decode path; it only executes
+the compression arena and the C++/CUDA compression path; it only executes
 short jobs and publishes per-step metadata deltas.
 
 Messages are msgspec structs so both sides can share the definitions.  Keep
@@ -18,6 +18,8 @@ from __future__ import annotations
 import os
 
 import msgspec
+
+from vllm.distributed.kv_transfer.kv_connector.v1.compression import BufferSpan
 
 from .compression.protocol import MooncakeXferMetadata
 
@@ -43,12 +45,6 @@ def handshake_target_ranks(
     return [tp_rank * ratio + index for index in range(ratio)]
 
 
-class SlotAddresses(msgspec.Struct, tag=True):  # type: ignore[call-arg]
-    payload: int
-    aux: int
-    tail: int
-
-
 class InitMessage(msgspec.Struct, tag=True):  # type: ignore[call-arg]
     """One-time engine to helper configuration."""
 
@@ -65,7 +61,7 @@ class InitMessage(msgspec.Struct, tag=True):  # type: ignore[call-arg]
     rpc_port: int
     bootstrap_host: str
     bootstrap_port: int
-    slot_addresses: list[SlotAddresses]
+    slot_buffers: list[tuple[BufferSpan, ...]]
     kv_caches_base_addr: list[int]
     block_lens: list[int]
     kv_block_lens: list[int]
@@ -155,7 +151,7 @@ class OpenProducerJob(msgspec.Struct, tag=True):  # type: ignore[call-arg]
     num_tokens: int | None
 
 
-class EncodeChunkJob(msgspec.Struct, tag=True):  # type: ignore[call-arg]
+class CompressChunkJob(msgspec.Struct, tag=True):  # type: ignore[call-arg]
     job_id: int
     transfer_id: str
     d_req_id: str
@@ -165,12 +161,10 @@ class EncodeChunkJob(msgspec.Struct, tag=True):  # type: ignore[call-arg]
     local_block_ids: list[list[int]]
     valid_tokens_by_group: dict[int, int]
     remote_session: str
-    payload_addr: int
-    aux_addr: int
-    tail_addr: int
+    buffers: tuple[BufferSpan, ...]
 
 
-class DecodeChunkJob(msgspec.Struct, tag=True):  # type: ignore[call-arg]
+class DecompressChunkJob(msgspec.Struct, tag=True):  # type: ignore[call-arg]
     job_id: int
     transfer_id: str
     d_req_id: str
@@ -179,8 +173,8 @@ class DecodeChunkJob(msgspec.Struct, tag=True):  # type: ignore[call-arg]
     slot_id: int
     local_block_ids: list[list[int]]
     valid_tokens_by_group: dict[int, int]
-    codec_bytes: int
-    u8_bytes: int
+    lengths: tuple[int, ...]
+    descriptor: bytes
 
 
 class DrainSlotsJob(msgspec.Struct, tag=True):  # type: ignore[call-arg]
@@ -195,11 +189,11 @@ class JobDone(msgspec.Struct, tag=True):  # type: ignore[call-arg]
     total_chunks: int = 0
     local_block_ids: list[list[int]] = msgspec.field(default_factory=list)
     valid_tokens_by_group: dict[int, int] = msgspec.field(default_factory=dict)
-    u8_bytes: int = 0
-    codec_bytes: int = 0
+    lengths: tuple[int, ...] = ()
+    descriptor: bytes = b""
 
 
-HelperJob = OpenProducerJob | EncodeChunkJob | DecodeChunkJob | DrainSlotsJob
+HelperJob = OpenProducerJob | CompressChunkJob | DecompressChunkJob | DrainSlotsJob
 EngineToHelper = ProducerMetadata | ConsumerMetadata | JobDone | EngineStop
 HelperToEngine = (
     HelperJob

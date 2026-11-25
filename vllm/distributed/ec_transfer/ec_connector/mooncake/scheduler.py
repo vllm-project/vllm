@@ -408,7 +408,8 @@ class ECMooncakeScheduler:
             if record is not None:
                 self._scheduler_pending_work = True
                 all_ready = False
-            else:
+            elif getattr(request, "ec_transfer_params", None):
+                # Only requests with EC params expect a push.
                 waiting_id = transfer_id or f"{request.request_id}:{index}"
                 self._note_awaiting_push(mm_hash, waiting_id, request.request_id, now)
                 all_ready = False
@@ -468,7 +469,7 @@ class ECMooncakeScheduler:
                 )
 
     def update_state_after_free(self, request: Any, index: int) -> None:
-        if not self._is_consumer:
+        if not self._is_consumer or not getattr(request, "ec_transfer_params", None):
             return
         transfer_id = self._request_transfer_id(request, index)
         if transfer_id is None:
@@ -525,7 +526,7 @@ class ECMooncakeScheduler:
         return self._scheduler_pending_work
 
     def request_finished(self, request: Any) -> tuple[bool, dict[str, Any] | None]:
-        if self._is_consumer:
+        if self._is_consumer and getattr(request, "ec_transfer_params", None):
             for index in range(len(request.mm_features)):
                 transfer_id = self._request_transfer_id(request, index)
                 if transfer_id is None:

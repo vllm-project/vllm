@@ -24,6 +24,7 @@ from vllm.models.nemotron_shortcut.nvidia import sdsa
 from vllm.models.nemotron_shortcut.nvidia.sdsa import backend, prefill
 from vllm.models.nemotron_shortcut.nvidia.sdsa.prefill import PAGE, SdsaConfig
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import nvfp4_split_data_scale
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -453,3 +454,85 @@ def test_union_warm_up(monkeypatch, workspace_init) -> None:
     current_workspace_manager().unlock()  # a new worker reserves its workspace
     SdsaFixture(worker_config(112, 4096, 2))
     assert groups == [4]
+
+
+def test_nvfp4_prefill_launches() -> None:
+    """A prefill whose rows select at least its context converts it densely;
+    one whose regions exceed the workspace splits into launches that fit."""
+    launches, groups = backend._nvfp4_prefill_launches(
+        (2816, 50), (200_000, 150_000), 2048, 1 << 20, 65535, 256
+    )
+    assert launches == [(0, 2, 0, 2866, 200_000)]
+    assert groups.tolist() == [[0, 0, 2816, 0, 1], [1, 2816, 50, 200_000, 0]]
+    launches, groups = backend._nvfp4_prefill_launches(
+        (3000,), (900_000,), 2048, 300_000, 65535, 256
+    )
+    assert len(launches) == 21
+    assert launches[0] == (0, 1, 0, 146, 299_008)
+    assert launches[-1] == (20, 21, 2920, 3000, 163_840)
+    assert groups[:, 2].sum() == 3000 and not groups[:, 4].any()
+
+
+@pytest.mark.skipif(
+    not sdsa.flashinfer_ops.has_nvfp4_kv_conversion(),
+    reason="needs FlashInfer's NVFP4 K/V conversion by key position (#9527)",
+)
+@torch.inference_mode()
+def test_nvfp4_writer_and_conversion_roundtrip() -> None:
+    """VLLM's NVFP4 cache writer and FlashInfer's conversion by key position
+    give back the BF16 inputs: a K/V scale layout both get wrong fails."""
+    from flashinfer.sdsa.token_sparse import gather_nvfp4_kv_cache_by_position
+
+    torch.manual_seed(123)
+    tokens = 448
+    x = torch.randn(tokens, 1, HEAD, device="cuda")
+    x *= torch.linspace(0.1, 6.0, tokens, device="cuda")[:, None, None]
+    y = (
+        torch.randn_like(x)
+        * torch.linspace(3.0, 0.1, tokens, device="cuda")[:, None, None]
+    )
+    x, y = x.bfloat16(), y.bfloat16()
+    cache = torch.empty(7, 2, PAGE, 144, device="cuda", dtype=torch.uint8)
+    k_scale, v_scale = (torch.tensor(value, device="cuda") for value in (0.03, 0.07))
+    key_cache, value_cache = cache.transpose(1, 2).chunk(2, dim=-2)
+    ops.reshape_and_cache_flash(
+        x,
+        y,
+        key_cache,
+        value_cache,
+        torch.arange(tokens, device="cuda"),
+        "nvfp4",
+        k_scale,
+        v_scale,
+    )
+    k, v = cache.chunk(2, dim=1)
+    kd, ks = nvfp4_split_data_scale(k)
+    vd, vs = nvfp4_split_data_scale(v)
+    # One row selecting positions 0 .. tokens - 1 of one request whose block
+    # table is the identity, so key position p is cache slot p.
+    positions = torch.full((1, 512), -1, dtype=torch.int32, device="cuda")
+    positions[0, :tokens] = torch.arange(tokens, device="cuda", dtype=torch.int32)
+    block_table = torch.arange(cache.shape[0], device="cuda", dtype=torch.int32)
+    out = torch.empty(512, 1, 1, 2 * HEAD, dtype=E4M3, device="cuda")
+    seq_lens = torch.empty(1, device="cuda", dtype=torch.int32)
+    gather_nvfp4_kv_cache_by_position(
+        (kd, vd),
+        (ks, vs),
+        positions,
+        torch.zeros(1, device="cuda", dtype=torch.int32),
+        block_table[None],
+        out=out,
+        block_tables=torch.empty(1, 2, 512, device="cuda", dtype=torch.int32),
+        seq_lens=seq_lens,
+    )
+    assert seq_lens.item() == tokens
+    for original, converted, scale in zip(
+        (x, y), out[:tokens].chunk(2, dim=-1), (k_scale, v_scale)
+    ):
+        # The conversion divides by 6 to fit E4M3.
+        reconstructed = converted.reshape(tokens, 1, HEAD).float() * (6 * scale)
+        relative_rmse = (
+            (reconstructed - original.float()).square().mean()
+            / original.float().square().mean()
+        ).sqrt()
+        assert relative_rmse.item() < 0.14

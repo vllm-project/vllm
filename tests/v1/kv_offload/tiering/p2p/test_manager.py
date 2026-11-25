@@ -370,6 +370,50 @@ def test_on_new_request_policy(monkeypatch, kv_params, expected):
     assert mgr.on_new_request(_req_context(kv_params=kv_params)).policy is expected
 
 
+@pytest.mark.parametrize(
+    "kv_params,expect_p2p_store",
+    [
+        (None, False),
+        (_remote_prefiller_kv_params(), False),
+        (_remote_decoder_kv_params(), True),
+    ],
+    ids=["local", "consumer", "producer"],
+)
+def test_primary_store_only_cascades_to_p2p_for_producers(
+    monkeypatch, kv_params, expect_p2p_store
+):
+    p2p = _make_manager()
+    p2p.locality = None
+    _attach_fake_transports(p2p)
+    monkeypatch.setattr(p2p, "_get_or_create_session", lambda peer_id: None)
+    region = _mock_mmap_region(4)
+    example = ExampleSecondaryTierManager(
+        offloading_spec=SimpleNamespace(),
+        primary_kv_view=region.create_kv_memoryview(),
+        tier_type="example",
+    )
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=region)
+    tiering = TieringOffloadingManager(primary, [p2p, example], tier_poll_interval_s=0)
+    ctx = ReqContext(req_id="req", kv_transfer_params=kv_params)
+    keys = [OffloadKey(b"new-chunk")]
+    try:
+        tiering.on_new_request(ctx)
+        assert (
+            tiering.prepare_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        tiering.complete_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
+
+        # No P2P submission also means no primary read/pin or job accounting.
+        assert {job.tier_idx for job in tiering._jobs.values()} == (
+            {0, 1} if expect_p2p_store else {1}
+        )
+        assert example.lookup(keys[0], ctx) is LookupResult.HIT
+        assert bool(p2p._unbound_stores) is expect_p2p_store
+    finally:
+        tiering.shutdown()
+
+
 # ---------------------------------------------------------------------------
 # Tests for serve_external_requests
 # ---------------------------------------------------------------------------
@@ -1273,6 +1317,7 @@ class TestHasPendingWork:
 
         from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
             OffloadingConnectorScheduler,
+            _ManagerStepState,
         )
         from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
             OffloadingConnector,
@@ -1299,6 +1344,12 @@ class TestHasPendingWork:
             connector_scheduler.manager = manager
             connector_scheduler._job_statuses = {}
             connector_scheduler._reset_fence = {}
+            connector_scheduler._step_state = _ManagerStepState()
+            connector_scheduler._step_state.update(
+                manager.on_schedule_end(
+                    ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+                )
+            )
             connector = object.__new__(OffloadingConnector)
             connector.connector_scheduler = connector_scheduler
             scheduler = object.__new__(Scheduler)
@@ -1330,6 +1381,7 @@ class TestHasPendingWork:
 
         from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
             OffloadingConnectorScheduler,
+            _ManagerStepState,
         )
         from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
             OffloadingConnector,
@@ -1358,6 +1410,12 @@ class TestHasPendingWork:
             connector_scheduler.manager = manager
             connector_scheduler._job_statuses = {}
             connector_scheduler._reset_fence = {}
+            connector_scheduler._step_state = _ManagerStepState()
+            connector_scheduler._step_state.update(
+                manager.on_schedule_end(
+                    ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+                )
+            )
             connector = object.__new__(OffloadingConnector)
             connector.connector_scheduler = connector_scheduler
             scheduler = object.__new__(Scheduler)

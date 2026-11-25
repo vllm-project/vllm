@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -95,6 +96,13 @@ from .utils import (
 def _reset_shared_transfer_engine():
     yield
     transfer_engine_registry._SHARED = None
+
+
+def _stub_worker_shutdown(
+    worker: MooncakeConnectorWorker, shutdown: Callable[[], object]
+) -> None:
+    # Keep the stub installed through __del__, after the test's patch scopes end.
+    worker.shutdown = shutdown  # type: ignore[method-assign]
 
 
 @pytest.mark.parametrize(
@@ -393,7 +401,7 @@ def test_del_keeps_quiet_when_the_constructor_did_not_finish():
 def test_del_shuts_down_a_worker_that_started():
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.async_zmq_ctx = MagicMock()
-    worker.shutdown = MagicMock()
+    worker.shutdown = MagicMock()  # type: ignore[method-assign]
 
     worker.__del__()
 
@@ -541,6 +549,7 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
             _make_test_kv_cache_config(),
         )
         prefill_worker = prefill_connector.connector_worker
+        assert prefill_worker is not None
 
         block_len = 4096
         prefill_worker.kv_caches_base_addr = [0x1000]
@@ -628,6 +637,7 @@ def test_basic_interface():
         do_remote_prefill=True,
     )
     request_id = request.request_id
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params.update(
         {
             "transfer_id": request_id,
@@ -677,6 +687,7 @@ def test_prompt_less_than_block_size():
         do_remote_prefill=True,
         num_remote_blocks=1,
     )
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params.update(
         {
             "transfer_id": request.request_id,
@@ -1177,9 +1188,13 @@ def test_scheduler_request_finished():
         kv_connector="MooncakeConnector", kv_role="kv_producer"
     )
     scheduler = create_scheduler(vllm_config)
-    scheduler_connector = scheduler.get_kv_connector().connector_scheduler
+    connector = scheduler.get_kv_connector()
+    assert isinstance(connector, MooncakeConnector)
+    scheduler_connector = connector.connector_scheduler
+    assert scheduler_connector is not None
 
     request = create_request(request_id=1, do_remote_decode=True)
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params["transfer_id"] = request.request_id
 
     # Case: Capped length (Successful prefill, need to send to decoder)
@@ -1468,6 +1483,7 @@ def mooncake_register_worker(kv_cache_config, *, kv_role: str = "kv_consumer"):
             vllm_config, KVConnectorRole.WORKER, kv_cache_config
         )
         worker = connector.connector_worker
+        assert worker is not None
         mock_thread.return_value.is_alive.return_value = False
         with patch.object(
             FakeMooncakeWrapper, "batch_register_memory", return_value=0
@@ -1581,6 +1597,7 @@ async def test_receive_kv_selects_remote_pp_workers(
             _make_test_kv_cache_config(),
         )
         decode_worker = decode_connector.connector_worker
+        assert decode_worker is not None
         decode_worker.pp_size = local_pp_size
         decode_worker.pp_rank = local_pp_rank
         decode_worker._remote_agents = {
@@ -1689,6 +1706,7 @@ def test_mooncake_compressed_kernel_split(kernel_block_size, raises):
         worker = MooncakeConnector(
             config, KVConnectorRole.WORKER, _make_compressed_kv_cache_config()
         ).connector_worker
+        assert worker is not None
         worker.shutdown()
 
 
@@ -1704,6 +1722,7 @@ async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
         worker = MooncakeConnector(
             config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         ).connector_worker
+        assert worker is not None
         try:
             worker.pp_size = 4
             worker._physical_blocks_per_logical_kv_block = 1
@@ -1777,6 +1796,7 @@ async def test_kv_producer(monkeypatch):
             _make_test_kv_cache_config(),
         )
         prefill_worker = prefill_connector.connector_worker
+        assert prefill_worker is not None
         prefill_worker.kv_caches_base_addr = [0x1000]
         block_len = 4096
         prefill_worker.block_len_per_layer = [block_len]
@@ -1850,7 +1870,7 @@ async def test_kv_producer(monkeypatch):
 
             # Verify internal state cleanup
             assert transfer_id not in prefill_worker.reqs_need_send
-            assert "p-req-1" in prefill_worker.get_finished()[0]
+            assert "p-req-1" in (prefill_worker.get_finished()[0] or ())
 
             # More cases:
             # Consumer only needs 1 block (less than P)
@@ -1944,7 +1964,7 @@ def test_pull_completion_requires_local_blocks(
     expected_finished: set[str],
 ):
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-    worker.shutdown = MagicMock()
+    _stub_worker_shutdown(worker, MagicMock())
     worker._finished_recving = queue.SimpleQueue()
     worker._finished_sending = queue.SimpleQueue()
     worker.tp_rank = 0
@@ -2004,6 +2024,7 @@ async def test_peer_failure_only_settles_its_pending_requests(terminal):
                 )
             )
         )
+        assert isinstance(mooncake_connector.make_zmq_socket, MagicMock)
         sock = mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
         sock.recv.side_effect = [worker._encoder.encode(partial)] * 2 + [end]
         await worker.receive_kv_from_single_worker("tcp://producer:1234", metas)
@@ -2096,6 +2117,7 @@ async def test_expired_peer_finish_settles_pending_receive(first_peer_succeeds):
             )
             assert meta.pull_tasks_count == 1
             assert worker.get_finished()[1] is None
+            assert isinstance(mooncake_connector.make_zmq_socket, MagicMock)
             sock = (
                 mooncake_connector.make_zmq_socket.return_value.__enter__.return_value
             )
@@ -2129,6 +2151,7 @@ async def test_kv_consumuer(monkeypatch):
             _make_test_kv_cache_config(),
         )
         decode_worker = decode_connector.connector_worker
+        assert decode_worker is not None
         decode_worker.kv_caches_base_addr = [0x1000]
         decode_worker.block_len_per_layer = [4096]
         decode_worker.kv_block_len_per_layer = [4096]
@@ -2183,7 +2206,7 @@ async def test_kv_consumuer(monkeypatch):
         assert sent_meta.registered_layer_indices == [0]
 
         # Verify internal state is updated correctly.
-        assert "d-req-1" in decode_worker.get_finished()[1]
+        assert "d-req-1" in (decode_worker.get_finished()[1] or ())
 
         # Clean up
         decode_worker.shutdown()
@@ -2200,6 +2223,7 @@ async def test_worker_get_finished_timeout(monkeypatch):
             _make_test_kv_cache_config(),
         )
         prefill_worker = prefill_connector.connector_worker
+        assert prefill_worker is not None
 
         # Add an expired request (expire_time is in the past).
         prefill_worker.reqs_need_send["tx-expired"] = SendBlockMeta(
@@ -2231,6 +2255,7 @@ async def test_worker_get_finished_timeout(monkeypatch):
         prefill_worker._sweep_expired_sends()
         finished_reqs, _ = prefill_worker.get_finished()
 
+        assert finished_reqs is not None
         assert "p-req-expired" in finished_reqs
         assert "p-req-active" not in finished_reqs
         assert "tx-expired" not in prefill_worker.reqs_need_send
@@ -2280,6 +2305,7 @@ def _remote_prefill_request(request_id: int, block_size: int):
         num_tokens=block_size * 2,
         do_remote_prefill=True,
     )
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params.update(
         {
             "transfer_id": f"xfer-{request_id}",
@@ -2380,6 +2406,7 @@ async def test_decode_heartbeat_reaches_every_paired_prefill_worker():
         worker = MooncakeConnector(
             vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         ).connector_worker
+        assert worker is not None
         sock = mocks["mock_socket_object"]
         sock.recv.return_value = msgspec.msgpack.encode(
             MooncakeXferResponse(status=MooncakeXferResponseStatus.FINISH)
@@ -2423,6 +2450,7 @@ async def test_prefill_side_channel_renews_leases(kv_lease_duration):
         producer = MooncakeConnector(
             vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         ).connector_worker
+        assert producer is not None
 
         # Allocation, then prefill end, as the scheduler reports them.
         for block_ids in ([], [[1]]):
@@ -2475,6 +2503,7 @@ async def test_prefill_side_channel_renews_leases(kv_lease_duration):
             )
             response = await request(pull)
             assert response.status == MooncakeXferResponseStatus.ERROR
+            assert response.err_msg is not None
             assert "not paired" in response.err_msg
 
             producer._sweep_expired_sends()
@@ -2497,6 +2526,7 @@ async def test_pull_after_expiry_fails_without_waiting(with_live_req):
         producer = MooncakeConnector(
             vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         ).connector_worker
+        assert producer is not None
         producer.kv_caches_base_addr = [0x1000]
         producer.block_len_per_layer = [256]
         producer.kv_block_len_per_layer = [256]
@@ -2592,6 +2622,7 @@ async def test_pull_fails_fast_when_prefill_worker_is_lost(loss):
         worker = MooncakeConnector(
             vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         ).connector_worker
+        assert worker is not None
         worker._remote_agents = {
             "p-engine": {0: {0: addr}},
             "other-engine": {0: {0: "tcp://127.0.0.1:1"}},
@@ -3759,6 +3790,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
             _make_test_kv_cache_config(),
         )
         prefill_worker = prefill_connector.connector_worker
+        assert prefill_worker is not None
 
         # Override TP rank/size to simulate P TP=2
         prefill_worker.tp_rank = P_TP_RANK
@@ -3879,7 +3911,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         # After serving all D ranks, the request should be complete
         assert transfer_id not in prefill_worker.reqs_need_send
-        assert "p-req-h1" in prefill_worker.get_finished()[0]
+        assert "p-req-h1" in (prefill_worker.get_finished()[0] or ())
 
         prefill_worker.sender_loop = origin_sender_loop
         prefill_worker.shutdown()
@@ -3948,6 +3980,7 @@ def test_compression_rejects_kv_both_before_slot_allocation(monkeypatch, extra_c
         mooncake_connector, "get_compression_config", lambda extra: True
     )
     config = create_vllm_config(kv_connector="MooncakeConnector", kv_role="kv_both")
+    assert config.kv_transfer_config is not None
     config.kv_transfer_config.kv_connector_extra_config = extra_config
     with (
         set_current_vllm_config(config),
@@ -3967,6 +4000,7 @@ def test_compression_rejects_retired_inprocess_backend(monkeypatch, extra_config
     )
     monkeypatch.setenv("KVSERVE_SESSION_PROCESS", "0")
     config = create_vllm_config(kv_connector="MooncakeConnector", kv_role="kv_producer")
+    assert config.kv_transfer_config is not None
     config.kv_transfer_config.kv_connector_extra_config = extra_config
     with (
         set_current_vllm_config(config),

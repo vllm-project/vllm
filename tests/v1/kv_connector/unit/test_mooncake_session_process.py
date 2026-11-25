@@ -56,8 +56,8 @@ def _make_init(needs_sender, needs_receiver, slots=2):
         rpc_port=1234,
         bootstrap_host="127.0.0.1",
         bootstrap_port=1,
-        slot_addresses=[
-            ipc.SlotAddresses(1000 + i * 100, 2000 + i * 100, 3000 + i * 100)
+        slot_buffers=[
+            ((1000 + i * 100, 64), (2000 + i * 100, 64), (3000 + i * 100, 64))
             for i in range(slots)
         ],
         kv_caches_base_addr=[4096],
@@ -92,10 +92,10 @@ def test_session_open_preserves_layout_id(layout_id):
 
 
 @pytest.fixture
-def make_service():
+def make_service(monkeypatch):
     def factory(sender=True, slots=2):
         service = _SessionService(None, _make_init(sender, not sender, slots))
-        service._to_engine = lambda message: None
+        monkeypatch.setattr(service, "_to_engine", lambda message: None)
         service._sender_slots, service._receiver_slots = (
             asyncio.Queue(),
             asyncio.Queue(),
@@ -103,11 +103,6 @@ def make_service():
         for slot in range(slots):
             service._sender_slots.put_nowait(slot)
             service._receiver_slots.put_nowait(slot)
-        service._slot_payload, service._slot_aux, service._slot_tail = (
-            [1, 2][:slots],
-            [3, 4][:slots],
-            [5, 6][:slots],
-        )
         return service
 
     return factory
@@ -135,7 +130,11 @@ def producer_session(make_service):
             send_state=state,
         )
         service._producer_sessions[(b"peer", "t", "d")] = session
-        return service, state, CompressionChunkPull("t", "d", 0, 1, 2, 3, "n")
+        return (
+            service,
+            state,
+            CompressionChunkPull("t", "d", 0, ((1, 64), (2, 64), (3, 64)), "n"),
+        )
 
     return factory
 
@@ -170,11 +169,11 @@ def test_paired_helpers_complete_requests_and_release_processes():
                 local_block_ids=[[3, 4]],
                 valid_tokens_by_group={0: 32},
             )
-        if isinstance(job, (ipc.EncodeChunkJob, ipc.DecodeChunkJob)):
-            first = 3 if isinstance(job, ipc.EncodeChunkJob) else 11
+        if isinstance(job, (ipc.CompressChunkJob, ipc.DecompressChunkJob)):
+            first = 3 if isinstance(job, ipc.CompressChunkJob) else 11
             assert job.local_block_ids == [[first + job.chunk_id // 2]]
             assert job.valid_tokens_by_group == {0: 16}
-        return ipc.JobDone(job.job_id, u8_bytes=16, codec_bytes=16)
+        return ipc.JobDone(job.job_id, lengths=(16, 0, 0), descriptor=b"opaque")
 
     processes = [
         SessionProcess(
@@ -255,8 +254,8 @@ def test_paired_helpers_complete_requests_and_release_processes():
         }
         assert consumer.invalid_block_ids.empty()
         with lock:
-            assert sum(isinstance(job, ipc.EncodeChunkJob) for job in jobs) == 8
-            assert sum(isinstance(job, ipc.DecodeChunkJob) for job in jobs) == 8
+            assert sum(isinstance(job, ipc.CompressChunkJob) for job in jobs) == 8
+            assert sum(isinstance(job, ipc.DecompressChunkJob) for job in jobs) == 8
     finally:
         for process in reversed(started):
             process.shutdown()
@@ -318,7 +317,7 @@ async def test_pre_submit_abort_returns_unused_slot(producer_session):
     service._submit = submit
     response = await service._serve_producer_chunk(b"peer", request)
     assert response.error is not None
-    assert not any(isinstance(job, ipc.EncodeChunkJob) for job in jobs)
+    assert not any(isinstance(job, ipc.CompressChunkJob) for job in jobs)
     assert service._sender_slots.qsize() == 1
 
 
@@ -363,7 +362,9 @@ async def test_decode_failure_propagates_before_or_after_last_chunk(
     decoded_first = asyncio.Event()
 
     async def submit(job):
-        if isinstance(job, ipc.DecodeChunkJob):
+        if isinstance(job, ipc.DecompressChunkJob):
+            assert job.lengths == (16, 0, 0)
+            assert job.descriptor == b"opaque"
             if job.chunk_id == 0:
                 decoded_first.set()
             return ipc.JobDone(
@@ -401,7 +402,9 @@ async def test_decode_failure_propagates_before_or_after_last_chunk(
             await router.send_multipart(
                 [
                     identity,
-                    _ENC.encode(CompressionChunkReady(request.chunk_id, 16, 16)),
+                    _ENC.encode(
+                        CompressionChunkReady(request.chunk_id, (16, 0, 0), b"opaque")
+                    ),
                 ]
             )
 
@@ -442,7 +445,7 @@ def test_helper_failure_does_not_finish_while_decode_is_writing():
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(
             process._run_job,
-            ipc.DecodeChunkJob(
+            ipc.DecompressChunkJob(
                 job_id=1,
                 transfer_id="t",
                 d_req_id="d",
@@ -451,8 +454,8 @@ def test_helper_failure_does_not_finish_while_decode_is_writing():
                 slot_id=0,
                 local_block_ids=[[3]],
                 valid_tokens_by_group={0: 16},
-                codec_bytes=16,
-                u8_bytes=16,
+                lengths=(16, 0, 0),
+                descriptor=b"opaque",
             ),
         )
         try:
@@ -483,6 +486,7 @@ def test_helper_load_failure_uses_upstream_result_scope(hma):
 
     assert process.finished_recving.get_nowait() == "d"
     if hma:
+        assert process.failed_recving is not None
         assert process.failed_recving.get_nowait() == "d"
         assert process.invalid_block_ids.empty()
     else:
@@ -528,8 +532,17 @@ async def test_late_job_completion_precedes_cuda_drain(make_service):
     service._to_engine = send
     with pytest.raises(asyncio.TimeoutError):
         await service._submit(
-            ipc.EncodeChunkJob(
-                100, "t", "d", "n", 0, 0, [[0]], {0: 16}, "peer", 1, 2, 3
+            ipc.CompressChunkJob(
+                100,
+                "t",
+                "d",
+                "n",
+                0,
+                0,
+                [[0]],
+                {0: 16},
+                "peer",
+                ((1, 64), (2, 64), (3, 64)),
             )
         )
     task = asyncio.create_task(service._drain_slots([0]))
@@ -547,7 +560,9 @@ async def test_slot_drain_does_not_wait_for_other_request(make_service):
     service = make_service()
     service._loop = asyncio.get_running_loop()
     other = service._loop.create_future()
-    job = ipc.EncodeChunkJob(100, "other", "d", "n", 0, 1, [[0]], {}, "peer", 1, 2, 3)
+    job = ipc.CompressChunkJob(
+        100, "other", "d", "n", 0, 1, [[0]], {}, "peer", ((1, 64), (2, 64), (3, 64))
+    )
     service._pending_jobs[100] = job, other
     service._to_engine = lambda drain: service._on_engine_message(
         ipc.JobDone(drain.job_id)
@@ -623,7 +638,7 @@ async def test_abort_ack_waits_for_timed_out_engine_write(producer_session):
         await original_drain(slots)
 
     def send(message):
-        if isinstance(message, ipc.EncodeChunkJob):
+        if isinstance(message, ipc.CompressChunkJob):
             jobs.append(message)
         elif isinstance(message, ipc.DrainSlotsJob):
             service._on_engine_message(ipc.JobDone(job_id=message.job_id))
@@ -685,9 +700,7 @@ async def test_consumer_cancellation_aborts_before_reusing_slot(
         abort_seen.set()
         await allow_ack.wait()
         queued = (
-            CompressionSessionOpened(1, 1)
-            if during_open
-            else CompressionChunkReady(0, 0, 0)
+            CompressionSessionOpened(1, 1) if during_open else CompressionChunkReady(0)
         )
         await router.send_multipart([identity, _ENC.encode(queued)])
         if not acknowledged:
