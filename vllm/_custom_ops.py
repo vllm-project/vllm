@@ -1972,6 +1972,53 @@ def scaled_int8_quant(
     return output, input_scales, input_azp
 
 
+# GDN prefill fused conv1d + post-conv prep (csrc/mamba/gdn_prefill_conv.cu)
+def gdn_prefill_conv(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    conv_states: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    cache_indices: torch.Tensor,
+    has_initial_state: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    num_k_heads: int,
+    head_dim: int,
+    output_g_exp: bool,
+    beta_scale: float,
+    null_block_id: int,
+):
+    torch.ops._C.gdn_prefill_conv(
+        x,
+        weight,
+        conv_states,
+        query_start_loc,
+        cache_indices,
+        has_initial_state,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        num_k_heads,
+        head_dim,
+        output_g_exp,
+        beta_scale,
+        null_block_id,
+    )
+
+
 # mamba
 def selective_scan_fwd(
     u: torch.Tensor,
@@ -3355,6 +3402,10 @@ def top_k_per_row_decode(
     stride1: int,
     topk_tokens: int,
 ) -> None:
+    """Select per-row indices with a runtime width in [1, 8192].
+
+    Device shared-memory limits can further restrict the width for a given launch.
+    """
     torch.ops._C.top_k_per_row_decode(
         logits,
         next_n,
