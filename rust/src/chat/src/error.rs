@@ -137,6 +137,8 @@ pub enum Error {
     ToolReferenceNotFound { name: String },
     #[error("at least one tool must have defer_loading=false; all tools cannot be deferred")]
     AllToolsDeferred,
+    #[error("tool parameter schemas are too complex to build an output grammar")]
+    ToolSchemaTooComplex,
     #[error("failed to build output grammar")]
     OutputGrammar {
         #[source]
@@ -164,6 +166,7 @@ impl Error {
             | Self::ToolChoiceFunctionNotFound { .. }
             | Self::ToolReferenceNotFound { .. }
             | Self::AllToolsDeferred
+            | Self::ToolSchemaTooComplex
             | Self::ParserUnavailableForModel { .. }
             | Self::ParserDisabled { .. }
             | Self::UnsupportedChatRole { .. }
@@ -198,6 +201,7 @@ impl Error {
         match self {
             Self::Text(error) => error.param(),
             Self::UnsupportedRequestChatTemplate => Some("chat_template"),
+            Self::ToolSchemaTooComplex => Some("tools"),
             _ => None,
         }
     }

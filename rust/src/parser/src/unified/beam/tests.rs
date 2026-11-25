@@ -147,6 +147,18 @@ fn grammar_in(
     Some(outline(&grammar.format))
 }
 
+#[test]
+fn argument_building_stops_at_shared_budget() {
+    let values = (0..4096).collect::<Vec<_>>();
+    let schema = json!({"properties": {"value": {"enum": values}}});
+    let mut budget = super::ToolGrammarBudget::default();
+    assert!(super::arguments(&schema, false, &mut budget).is_ok());
+    assert!(matches!(
+        super::arguments(&schema, false, &mut budget),
+        Err(crate::output_grammar::OutputGrammarError::ToolSchemaTooComplex)
+    ));
+}
+
 fn constrained_grammar(
     position: HfPosition,
     tool_choice: ToolChoice,

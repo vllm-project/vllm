@@ -9,7 +9,7 @@ use std::sync::{Arc, Once};
 
 use futures::StreamExt as _;
 use tracing::info;
-use vllm_parser::output_grammar::{BuiltOutputGrammar, OutputGrammarContext};
+use vllm_parser::output_grammar::{BuiltOutputGrammar, OutputGrammarContext, OutputGrammarError};
 use vllm_parser::unified::{CombinedParser, UnifiedParser};
 use vllm_text::tokenizer::DynTokenizer;
 use xgrammar_structural_tag::ToolChoice;
@@ -285,8 +285,11 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
                 parallel_tool_calls: inputs.parallel_tool_calls,
                 answer: inputs.answer.as_ref(),
             })
-            .map_err(|error| Error::OutputGrammar {
-                error: Box::new(error),
+            .map_err(|error| match error {
+                OutputGrammarError::ToolSchemaTooComplex => Error::ToolSchemaTooComplex,
+                error => Error::OutputGrammar {
+                    error: Box::new(error),
+                },
             })
     }
 

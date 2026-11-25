@@ -479,6 +479,10 @@ fn fake_chat_tokenizer() -> TestTokenizer {
         .with_regular_token("<|END_THINKING|>", 0xF004)
         .with_regular_token("◁think▷", 0xF005)
         .with_regular_token("◁/think▷", 0xF006)
+        .with_special_token("<|open|>", 0xF007)
+        .with_special_token("<|close|>", 0xF008)
+        .with_special_token("<|sep|>", 0xF009)
+        .with_special_token("<|end_of_msg|>", 0xF00A)
         .with_regular_token("<｜fim▁hole｜>", 128800)
         .with_regular_token("<｜fim▁begin｜>", 128801)
         .with_regular_token("<｜fim▁end｜>", 128802)
@@ -927,6 +931,52 @@ async fn chat_completions_with_tools_returns_400_without_tool_parser() {
         assert_eq!(json["error"]["type"], "BadRequestError");
         assert_eq!(json["error"]["message"], message);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_rejects_tool_grammar_over_shared_budget() {
+    let (chat, engine_task) = test_chat_with_engine_handle().await;
+    let parser = ParserSelection::Explicit("kimi_k3".to_string());
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat.with_tool_call_parser(parser.clone()).with_reasoning_parser(parser),
+    )));
+    let values = (0..4096).collect::<Vec<_>>();
+    let make_tool = |name| {
+        json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "strict": true,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"value": {"enum": values}},
+                    "required": ["value"],
+                    "additionalProperties": false
+                }
+            }
+        })
+    };
+    let mut body = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tool_choice": "required",
+        "tools": [make_tool("lookup"), make_tool("search")],
+    });
+
+    let (status, error) = post_json(&mut app, "/v1/chat/completions", body.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["error"]["param"], "tools");
+    assert_eq!(
+        error["error"]["message"],
+        "tool parameter schemas are too complex to build an output grammar"
+    );
+
+    body["tools"].as_array_mut().unwrap().pop();
+    let (status, response) = post_json(&mut app, "/v1/chat/completions", body).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    engine_task.await.expect("mock engine task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

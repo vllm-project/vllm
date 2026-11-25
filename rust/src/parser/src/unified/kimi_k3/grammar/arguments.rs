@@ -8,8 +8,10 @@ use xgrammar_structural_tag::format::{Format, JsonSchemaFormat, TagFormat};
 use xgrammar_structural_tag::tool::{FunctionToolParam, function_parameters};
 
 use super::super::{ARG_CLOSE, ARG_OPEN, CALL_CLOSE, JSON_CLOSE, JSON_OPEN, OPEN, SEP};
+use crate::output_grammar::Result;
 use crate::output_grammar::arguments::{
-    self, ArgumentOptions, ArgumentSyntax, JsonType, ParameterKey, ValueOption, group_by, one_of,
+    self, ArgumentOptions, ArgumentSyntax, JsonType, ParameterKey, ToolGrammarBudget, ValueOption,
+    group_by, one_of,
 };
 
 /// XTML arguments:
@@ -77,13 +79,21 @@ fn xtml_type(ty: JsonType) -> &'static str {
 }
 
 /// Build the tag for one call to `tool`.
-pub(super) fn call_tag(tool: &FunctionToolParam) -> TagFormat {
+pub(super) fn call_tag(
+    tool: &FunctionToolParam,
+    budget: &mut ToolGrammarBudget,
+) -> Result<TagFormat> {
     let parameters = function_parameters(&tool.function);
-    let typed_arguments =
-        arguments::arguments(&parameters, &XtmlArguments, &ArgumentOptions::default());
+    let typed_arguments = arguments::arguments(
+        &parameters,
+        &XtmlArguments,
+        &ArgumentOptions::default(),
+        budget,
+    )?;
+    budget.charge_schema(&parameters)?;
     let call_body = Format::or(vec![typed_arguments, raw_json_arguments(&parameters)]);
 
-    TagFormat::new(
+    Ok(TagFormat::new(
         format!(
             "{OPEN}call tool=\"{}\" index=\"",
             escape_attr_value(&tool.function.name)
@@ -94,7 +104,7 @@ pub(super) fn call_tag(tool: &FunctionToolParam) -> TagFormat {
             call_body,
         ]),
         CALL_CLOSE,
-    )
+    ))
 }
 
 fn raw_json_arguments(parameters: &Value) -> Format {
@@ -123,7 +133,8 @@ mod tests {
         let tool = FunctionToolParam::new(
             FunctionDefinition::new("get_weather").with_parameters(parameters),
         );
-        expected.assert_eq(&outline(&Format::Tag(super::call_tag(&tool))));
+        let tag = super::call_tag(&tool, &mut super::ToolGrammarBudget::default()).unwrap();
+        expected.assert_eq(&outline(&Format::Tag(tag)));
     }
 
     #[test]
