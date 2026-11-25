@@ -157,15 +157,15 @@ class LogitsProcessor(PluggableLayer):
             )
         if (
             self.head_dtype == torch.float32
-            and (current_platform.is_cuda() or current_platform.is_rocm())
-            and hidden_states.is_cuda
+            and (current_platform.is_cuda_alike() or current_platform.is_xpu())
+            and hidden_states.device.type == current_platform.device_type
         ):
             # Accumulate the projection directly into fp32. This avoids
             # materializing an fp32 copy of the lm_head weight on every step,
             # unlike casting both operands. `torch.mm(out_dtype=...)` only
             # supports fp32 output for fp16/bf16 inputs, and is only
-            # implemented for CUDA and ROCm (the latter via the non-Lt GEMM
-            # path); other platforms fall back to the cast path below.
+            # implemented for CUDA, ROCm (via the non-Lt GEMM path) and XPU;
+            # other platforms fall back to the cast path below.
             flat = hidden_states.reshape(-1, hidden_states.shape[-1])
             logits = torch.mm(flat, lm_head.weight.t(), out_dtype=self.head_dtype)
             if embedding_bias is not None:
@@ -201,10 +201,10 @@ class LogitsProcessor(PluggableLayer):
     def _mask_outside_vocab(
         self, logits: torch.Tensor, lm_head: VocabParallelEmbedding
     ) -> None:
-        """Mask this shard's padding and any head rows past ``org_vocab_size``.
+        """Mask this shard's padding and any head rows past `org_vocab_size`.
 
         A head shared with another model can have rows past this processor's
-        vocabulary, as ``_get_logits`` drops them.
+        vocabulary, as `_get_logits` drops them.
         """
         shard_indices = lm_head.shard_indices
         if shard_indices.num_org_vocab_padding > 0:

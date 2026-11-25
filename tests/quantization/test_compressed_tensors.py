@@ -28,14 +28,17 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
+    CompressedTensorsKVCacheMethod,
     CompressedTensorsLinearMethod,
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
+    CompressedTensorsW6A8Mxfp6,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -48,6 +51,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
+    should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -55,10 +59,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     ScaleDesc,
     kFp8Dynamic128Sym,
+    kMxfp8Dynamic,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.import_utils import has_humming
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
 # AITER only supports per-channel-per-channel INT8 gemm
@@ -100,7 +107,7 @@ def _compressed_tensors_actorder_config(actorder):
     "actorder", [ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC, True]
 )
 def test_compressed_tensors_rejects_runtime_activation_order(actorder):
-    with pytest.raises(ValueError, match="group/dynamic activation ordering"):
+    with pytest.raises(ValueError, match="has been removed"):
         CompressedTensorsConfig.from_config(
             _compressed_tensors_actorder_config(actorder)
         )
@@ -406,6 +413,55 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
 
 
 @pytest.mark.parametrize(
+    ("is_fnuz", "has_scheme", "has_q_scale", "kv_expected", "q_expected"),
+    [
+        pytest.param(True, True, True, 0.6, 0.6, id="fnuz_with_q"),
+        pytest.param(True, True, False, 0.6, 1.0, id="fnuz_no_q"),
+        pytest.param(False, True, True, 0.3, 0.3, id="not_fnuz"),
+        pytest.param(True, False, True, 0.3, 0.3, id="fnuz_no_scheme"),
+    ],
+)
+def test_compressed_tensors_kv_scales_fnuz_doubling(
+    monkeypatch, is_fnuz, has_scheme, has_q_scale, kv_expected, q_expected
+):
+    """Loaded KV scales double on fnuz; a missing q_scale stays 1.0."""
+    monkeypatch.setattr(current_platform, "is_fp8_fnuz", lambda: is_fnuz)
+    scheme = {"type": "float", "num_bits": 8, "strategy": "tensor", "symmetric": True}
+    method = CompressedTensorsKVCacheMethod(
+        CompressedTensorsConfig(
+            target_scheme_map={},
+            ignore=[],
+            quant_format="float-quantized",
+            kv_cache_scheme=scheme if has_scheme else None,
+        )
+    )
+
+    layer = torch.nn.Module()
+    set_default_quant_scales(layer, register_buffer=True)
+    layer.kv_cache_dtype = "fp8"
+    layer.num_kv_heads = 1
+    method.create_weights(layer)
+    for name in ("k_scale", "v_scale"):
+        getattr(layer, name).data.fill_(0.3)
+    if has_q_scale:
+        layer.q_scale.data.fill_(0.3)
+
+    method.process_weights_after_loading(layer)
+    assert layer._k_scale.item() == pytest.approx(kv_expected)
+    assert layer._k_scale_float == pytest.approx(kv_expected)
+    assert layer._v_scale_float == pytest.approx(kv_expected)
+    assert layer._q_scale_float == pytest.approx(q_expected)
+    assert layer._k_scale_cpu.item() == pytest.approx(kv_expected)
+
+    # A second call must not compound the factor.
+    ptrs = [layer._k_scale.data_ptr(), layer._q_scale.data_ptr()]
+    method.process_weights_after_loading(layer)
+    assert [layer._k_scale.data_ptr(), layer._q_scale.data_ptr()] == ptrs
+    assert layer._k_scale_float == pytest.approx(kv_expected)
+    assert layer._q_scale_float == pytest.approx(q_expected)
+
+
+@pytest.mark.parametrize(
     "args",
     [
         ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16", True),
@@ -707,6 +763,141 @@ def test_get_scheme_dict_returns_none_on_no_match():
     assert result is None
 
 
+def test_apply_vllm_mapper_rewrites_regex_literals_and_keeps_fusion():
+    """Prefix, substring, and suffix rules apply to re: targets.
+
+    Stacked q/k/v maps stay on concrete paths. Class names and kv-cache
+    field names are left alone.
+    """
+    gate = {"weights": "gate"}
+    attn = {"weights": "attn"}
+    linear = {"weights": "linear"}
+    config = CompressedTensorsConfig(
+        target_scheme_map={
+            "Linear": linear,
+            r"re:^model\.layers\.\d+\.mlp\.fc1\.gate\Z": gate,
+            r"re:.*self_attn\..*": attn,
+            r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z": {"weights": "q"},
+        },
+        ignore=[
+            "multi_modal_projector.linear_1",
+            r"re:^multi_modal_projector\.linear_\d+\Z",
+            r"re:^model\.layers\.\d+\.mlp\.gate\Z",
+            r"re:^model\.layers\.\d+\.ffn\.gate\.bias\Z",
+            r"re:^mtp\.layers\.\d+\Z",
+        ],
+        quant_format="pack-quantized",
+        kv_cache_scheme={
+            "type": "float",
+            "num_bits": 8,
+            "strategy": "tensor",
+            "symmetric": True,
+        },
+    )
+    mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "multi_modal_projector.": "vision_tower.multi_modal_projector.",
+        },
+        orig_to_new_substr={
+            ".mlp.fc1.": ".fc1.",
+            ".mlp.fc2.": ".fc2.",
+            ".shared_experts.w2": ".shared_experts.down_proj",
+            "mtp.": None,
+        },
+        orig_to_new_suffix={
+            ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
+        },
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        },
+    )
+    config.apply_vllm_mapper(mapper)
+
+    assert config.target_scheme_map["Linear"] is linear
+    assert config.target_scheme_map[r"re:.*self_attn\..*"] is attn
+    assert config.target_scheme_map[r"re:^model\.layers\.\d+\.fc1\.gate\Z"] is gate
+    # Stacked fusion is not written into regex targets.
+    assert r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z" in config.target_scheme_map
+    assert config.kv_cache_scheme == {
+        "type": "float",
+        "num_bits": 8,
+        "strategy": "tensor",
+        "symmetric": True,
+    }
+    assert "vision_tower.multi_modal_projector.linear_1" in config.ignore
+    assert r"re:^vision_tower\.multi_modal_projector\.linear_\d+\Z" in config.ignore
+    assert r"re:^model\.layers\.\d+\.mlp\.gate\Z" in config.ignore
+    assert (
+        r"re:^model\.layers\.\d+\.ffn\.gate\.e_score_correction_bias\Z" in config.ignore
+    )
+    assert r"re:^mtp\.layers\.\d+\Z" not in config.ignore
+    assert should_ignore_layer(
+        "vision_tower.multi_modal_projector.linear_3",
+        ignore=config.ignore,
+    )
+    assert should_ignore_layer(
+        "model.layers.2.ffn.gate.e_score_correction_bias",
+        ignore=config.ignore,
+    )
+    assert not should_ignore_layer(
+        "model.layers.2.ffn.gate.bias",
+        ignore=config.ignore,
+    )
+
+    stacked = CompressedTensorsConfig(
+        target_scheme_map={
+            "model.layers.0.self_attn.q_proj": {"weights": "q"},
+            r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z": {"weights": "q"},
+        },
+        ignore=[],
+        quant_format="pack-quantized",
+    )
+    stacked.apply_vllm_mapper(
+        WeightsMapper(orig_to_new_stacked={".q_proj": (".qkv_proj", "q")})
+    )
+    assert "model.layers.0.self_attn.qkv_proj" in stacked.target_scheme_map
+    assert r"re:^model\.layers\.\d+\.self_attn\.q_proj\Z" in stacked.target_scheme_map
+
+    anchored = CompressedTensorsConfig(
+        target_scheme_map={r"re:^layers\.\d+\.mlp\.gate\Z": {"weights": "g"}},
+        ignore=["layers.1.mlp.gate"],
+        quant_format="pack-quantized",
+    )
+    anchored.apply_vllm_mapper(WeightsMapper(orig_to_new_prefix={"": "model."}))
+    assert r"re:^model\.layers\.\d+\.mlp\.gate\Z" in anchored.target_scheme_map
+    assert anchored.ignore == ["model.layers.1.mlp.gate"]
+
+
+def test_deepseek_v4_small_regex_matches_vllm_names():
+    """Checkpoint regex from the 2-layer DeepSeek-V4 small model.
+
+    The saved target uses the checkpoint name `w2`. vLLM's module is
+    `model.layers.*.ffn.shared_experts.down_proj`. Leaving the `re:`
+    target unchanged misses that module.
+    """
+    saved = r"re:^layers\.(?:0|1)\.ffn\.shared_experts\.w2\Z"
+    runtime = "model.layers.0.ffn.shared_experts.down_proj"
+    module = torch.nn.Linear(1, 1)
+    assert find_matched_target(runtime, module, [saved]) is None
+
+    config = CompressedTensorsConfig(
+        target_scheme_map={saved: {"weights": "fp8"}},
+        ignore=[],
+        quant_format="pack-quantized",
+    )
+    config.apply_vllm_mapper(
+        WeightsMapper(
+            orig_to_new_prefix={"layers.": "model.layers."},
+            orig_to_new_substr={".shared_experts.w2": ".shared_experts.down_proj"},
+        )
+    )
+    rewritten = r"re:^model\.layers\.(?:0|1)\.ffn\.shared_experts\.down_proj\Z"
+    assert rewritten in config.target_scheme_map
+    assert find_matched_target(runtime, module, [rewritten]) == rewritten
+
+
 # Test constants for activation quantization
 _STATIC_SYM_INT8_ACT = QuantizationArgs(
     num_bits=8,
@@ -976,6 +1167,22 @@ def test_quant_key_str_supports_scalar_type_dtypes():
     assert str(quant_key) == (
         "QuantKey(uint2b2,scale(f16,static,GroupShape(row=1, col=128)),symmetric)"
     )
+
+
+@pytest.mark.skipif(not has_humming(), reason="MXFP6 requires humming")
+def test_compressed_tensors_mxfp6(vllm_runner):
+    model_path = "nm-testing/Qwen3-0.6B-MXFP6A8"
+    with vllm_runner(model_path, enforce_eager=True) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+            for proj in (layer.self_attn.qkv_proj, layer.mlp.down_proj):
+                assert isinstance(proj.scheme, CompressedTensorsW6A8Mxfp6)
+                assert proj.scheme.kernel.config.activation_quant_key == kMxfp8Dynamic
+
+        llm.apply_model(check_model)
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
 
 
 @pytest.mark.skipif(

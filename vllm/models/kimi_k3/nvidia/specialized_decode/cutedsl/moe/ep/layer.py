@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DEP (TP1 attention, EP over all ranks) latent-MoE layer.
 
-``EpMoeLayer`` is the per-batch schedule of one MoE layer on a DEP rank (every op
+`EpMoeLayer` is the per-batch schedule of one MoE layer on a DEP rank (every op
 memory-bound at decode, so the schedule's job is to keep HBM streaming):
 
   main  [shared gate_up | latent down] in ONE split-K GEMM (both read x; one weight
-        stream instead of two cuBLAS launches) -> routed experts (``routed``)
+        stream instead of two cuBLAS launches) -> routed experts (`routed`)
   side  FP32 router GEMM + sigmoid top-16 beside the front GEMM; the shared SiTU and
         down-projection beside the routed experts
   main  latent RMSNorm + up-projection accumulated into the shared output (cuBLAS
@@ -14,11 +14,11 @@ memory-bound at decode, so the schedule's job is to keep HBM streaming):
 
 The routed callable is the deployment's EP kernel: the stock DeepGEMM MegaMoE (one
 fused dispatch / FC1 / FC2 / combine kernel; it requires every SM, so the side stream
-fills its gaps) or ``EpRouted``. Precision is stock: BF16 GEMMs with FP32
+fills its gaps) or `EpRouted`. Precision is stock: BF16 GEMMs with FP32
 accumulation (split-K reduces in FP32), FP32 router logits.
 
-``EpRouted`` is the split EP path: NVLink dispatch of the MXFP8 latent (bit-identical
-to ``mxfp8_quantize``) -> trtllm-gen MXFP4 x MXFP8 experts over the received rows ->
+`EpRouted` is the split EP path: NVLink dispatch of the MXFP8 latent (bit-identical
+to `mxfp8_quantize`) -> trtllm-gen MXFP4 x MXFP8 experts over the received rows ->
 NVLink combine fused with the latent RMSNorm (comm.py)."""
 
 import functools
@@ -86,7 +86,7 @@ class EpRouted:
         self.prepared = {}
 
     def prepare(self, tokens):
-        """Every rank of the group must run the same ``tokens`` in a step (vLLM pads
+        """Every rank of the group must run the same `tokens` in a step (vLLM pads
         DP ranks to one batch): the receive rows are addressed by stride(tokens)."""
         if not 0 < tokens <= self.buffers.layout.tokens:
             raise ValueError(
@@ -161,7 +161,7 @@ class EpRouted:
 
 def front_tactic(tokens, rows=64, split=1):
     """Split-K tactic (weight rows, token tile, split, stages) of a DEP projection at
-    ``tokens`` rows (GB300, TP1 MoE shapes, tactic sweep: 64-row
+    `tokens` rows (GB300, TP1 MoE shapes, tactic sweep: 64-row
     weight tiles, one K split, the deepest pipeline that fits)."""
     n = next(b for b in (8, 16, 32, 64, 128) if b >= tokens)
     return (rows, n, split, min(8, (200 * 1024) // ((rows + n) * 256)))
@@ -191,9 +191,9 @@ def pack_front(moe):
 class EpMoeLayer:
     """One DEP MoE layer's specialized schedule over the stock module's weights.
 
-    ``weights``: gate [896, 7168] BF16 + e_score_correction_bias FP32, front
-    (pack_front), shared down [7168, 6144], latent norm [3584], up [7168, 3584]; ``act``
-    the stock SiTU-and-mul; ``routed(latent, topk_weights, topk_ids) -> BF16 latent``
+    `weights`: gate [896, 7168] BF16 + e_score_correction_bias FP32, front
+    (pack_front), shared down [7168, 6144], latent norm [3584], up [7168, 3584]; `act`
+    the stock SiTU-and-mul; `routed(latent, topk_weights, topk_ids) -> BF16 latent`
     the EP experts. Batches above FRONT_MAX tokens (or unprepared) run the stock
     order."""
 

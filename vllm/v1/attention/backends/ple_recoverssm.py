@@ -310,7 +310,7 @@ class PleRecoverSSMMetadataBuilder(PleShortConvAttentionMetadataBuilder):
         if rows is None:
             raise ValueError("PLE RecoverSSM: spec rows without draft counts")
         req_idx = recoverssm_request_indices(rows, n, m.query_start_loc.device)
-        align = self.vllm_config.cache_config.mamba_cache_mode == "align"
+        align = self.vllm_config.cache_config.enable_prefix_caching
         commit = PleRecoverSSMCommitMetadata(
             state_indices=meta.spec_state_indices_tensor,
             query_start_loc=meta.spec_query_start_loc,

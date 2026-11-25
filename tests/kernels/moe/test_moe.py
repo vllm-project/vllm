@@ -29,6 +29,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
     fused_topk,
+    override_config,
 )
 from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
@@ -45,7 +46,13 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
 )
-from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+    TritonExperts,
+    TritonWNA16Experts,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+    MoEPrepareAndFinalizeNoDPEPModular,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     masked_amax_scale,
     moe_kernel_quantize_input,
@@ -71,6 +78,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
+    kInt8StaticTensorSym,
     quantize_weights,
 )
 from vllm.platforms import current_platform
@@ -84,6 +92,110 @@ DEVICE_TYPE = current_platform.device_type
 requires_deep_ep_v2 = pytest.mark.skipif(
     not has_deep_ep_v2(), reason="Requires DeepEP v2 (ElasticBuffer)"
 )
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+def test_xpu_qwen3_5_shared_expert_decode(tmp_path):
+    """FP8 shared-expert B1 decode uses the native kernel and matches stock MoE."""
+    from transformers import Qwen3_5MoeConfig, Qwen3_5MoeTextConfig
+
+    from vllm.config import ModelConfig
+    from vllm.distributed import (
+        cleanup_dist_env_and_memory,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsFp8
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
+    from vllm.models.qwen3_5.xpu.model import Qwen3_5SparseMoeBlock
+    from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
+        initialize_specialized_decode,
+    )
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
+
+    text_config = Qwen3_5MoeTextConfig(
+        hidden_size=128,
+        moe_intermediate_size=128,
+        shared_expert_intermediate_size=128,
+        num_experts=8,
+        num_experts_per_tok=2,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        head_dim=32,
+        vocab_size=128,
+        layer_types=["full_attention"],
+    )
+    Qwen3_5MoeConfig(text_config=text_config).save_pretrained(tmp_path)
+    config = VllmConfig(
+        additional_config={"decode_backend": "latency_specialized"},
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            dtype=torch.float16,
+            max_model_len=128,
+        ),
+        quant_config=Fp8Config(is_checkpoint_fp8_serialized=True),
+    )
+    try:
+        with set_current_vllm_config(config), set_default_torch_dtype(torch.float16):
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                local_rank=0,
+                backend=current_platform.dist_backend,
+                distributed_init_method=f"file://{tmp_path / 'distributed'}",
+            )
+            initialize_model_parallel(1, 1)
+            init_workspace_manager(torch.device(DEVICE_TYPE))
+            with torch.device(DEVICE_TYPE):
+                block = Qwen3_5SparseMoeBlock(config, prefix="model.layers.0.mlp")
+                torch.manual_seed(7)
+                with torch.no_grad():
+                    for name, param in block.named_parameters():
+                        if "scale" in name:
+                            param.fill_(0.0625)
+                        else:
+                            values = torch.randn(param.shape, dtype=torch.float32)
+                            if param.dtype != torch.float8_e4m3fn:
+                                values *= 0.0625
+                            param.copy_(values.to(param.dtype))
+                for layer in block.modules():
+                    method = getattr(layer, "quant_method", None)
+                    if method is not None:
+                        method.process_weights_after_loading(layer)
+                kernel = block.experts.routed_experts.quant_method.moe_kernel
+                assert kernel is not None
+                experts = kernel.fused_experts
+                assert isinstance(experts, XPUExpertsFp8)
+                provider = experts.fused_moe_impl
+                assert provider is not None
+                initialize_specialized_decode(block)
+                assert block._decode is not None
+                block._decode.runtime.prepare_capture(1, 1)
+                x = torch.randn(1, 128, dtype=torch.float16)
+            with set_forward_context(None, config), torch.inference_mode():
+                expected = Qwen3NextSparseMoeBlock.forward(block, x)
+                with torch.profiler.profile(
+                    activities=[torch.profiler.ProfilerActivity.CPU]
+                ) as profiler:
+                    actual = block(x)
+            assert experts.fused_moe_impl is provider
+            assert (
+                sum(
+                    event.count
+                    for event in profiler.key_averages()
+                    if event.key == "_xpu_C::moe_shared_fused_decode_interface"
+                )
+                == 1
+            )
+            torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+    finally:
+        reset_workspace_manager()
+        cleanup_dist_env_and_memory()
 
 
 def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:
@@ -124,6 +236,53 @@ def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None
     assert a_scale.ndim == 0
     assert captured_scale.shape == (1,)
     assert captured_scale.data_ptr() == a_scale.data_ptr()
+
+
+def test_triton_moe_launcher_defaults_weight_layout_to_activation_layout(
+    monkeypatch,
+) -> None:
+    """Callers that only set per_channel_quant keep their old weight layout.
+
+    Before the activation and weight scale layouts were split, per_channel_quant
+    selected per-channel weight scales too. Callers that do not pass
+    per_out_ch_quant must keep that behaviour instead of silently switching to
+    per-expert (per-tensor) weight scales.
+    """
+    captured: dict[str, bool] = {}
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs) -> None:
+                captured["per_channel_quant"] = kwargs["per_channel_quant"]
+                captured["per_out_ch_quant"] = kwargs["per_out_ch_quant"]
+
+            return launch
+
+    monkeypatch.setattr(fused_moe_module, "fused_moe_kernel", FakeKernel())
+
+    fused_moe_module.invoke_fused_moe_triton_kernel(
+        A=torch.ones((1, 1)),
+        B=torch.ones((1, 1, 1)),
+        C=torch.empty((1, 1, 1)),
+        A_scale=torch.tensor([0.5]),
+        B_scale=torch.ones((1, 1, 1)),
+        topk_weights=torch.ones((1, 1)),
+        sorted_token_ids=None,
+        expert_ids=torch.zeros(1, dtype=torch.int32),
+        num_tokens_post_padded=torch.ones(1, dtype=torch.int32),
+        mul_routed_weight=True,
+        top_k=1,
+        config={"BLOCK_SIZE_M": 1, "BLOCK_SIZE_N": 1, "BLOCK_SIZE_K": 1},
+        compute_type=tl.float32,
+        use_fp8_w8a8=False,
+        use_int8_w8a8=True,
+        use_int8_w8a16=False,
+        use_int4_w4a16=False,
+        per_channel_quant=True,
+    )
+
+    assert captured["per_channel_quant"] is True
+    assert captured["per_out_ch_quant"] is True
 
 
 def test_triton_moe_launcher_rejects_noncontiguous_topk_weights() -> None:
@@ -578,6 +737,7 @@ def test_host_resident_weights_take_sorted_path(
     """At small batch the naive path reads an expert once per (token, expert)
     pair. Weights read from host memory in place (UVA offloading) must take
     the sorted path instead, with the same output."""
+    from vllm.platforms import current_platform
     from vllm.utils.platform_utils import is_uva_available
     from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
@@ -628,7 +788,46 @@ def test_host_resident_weights_take_sorted_path(
         ref = torch_moe(a, w1.cuda(), w2.cuda(), score, topk)
     assert ref.abs().mean() > 0.1
     torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
-    assert bool(aligned) == host_resident
+    expected_aligned = host_resident or (current_platform.is_integrated_gpu() and m > 1)
+    assert bool(aligned) == expected_aligned
+
+
+@pytest.mark.parametrize("m", [1, 2, 4, 8])
+@pytest.mark.parametrize("is_integrated", [False, True])
+def test_integrated_gpu_expert_assignment(
+    m: int, is_integrated: bool, monkeypatch, workspace_init
+):
+    """Integrated GPUs (such as GB10 / DGX Spark) take the naive path only
+    at batch 1 to avoid repeated weight reads over unified memory.
+    Discrete GPUs preserve the heuristic threshold."""
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(
+        current_platform, "is_integrated_gpu", lambda device_id=0: is_integrated
+    )
+    aligned: list[int] = []
+    align = fused_moe_module.moe_align_block_size
+
+    def counting_align(*args, **kwargs):
+        aligned.append(1)
+        return align(*args, **kwargs)
+
+    monkeypatch.setattr(fused_moe_module, "moe_align_block_size", counting_align)
+
+    set_random_seed(7)
+    e, n, k, topk, dtype = 128, 256, 128, 8, torch.bfloat16
+    a = torch.randn((m, k), device="cuda", dtype=dtype)
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 8
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 8
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
+
+    with set_current_vllm_config(vllm_config):
+        out = fused_moe(a, w1, w2, score, topk, renormalize=False)
+        ref = torch_moe(a, w1, w2, score, topk)
+
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
+    expected_aligned = (m > 1) if is_integrated else (m * topk * 4 > e)
+    assert bool(aligned) == expected_aligned
 
 
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS_SMALL_M)
@@ -734,34 +933,17 @@ def test_naive_block_assignment_moe(
         )
 
 
-@pytest.mark.parametrize("m,n,k", FUSED_MOE_WN16_MNK_FACTORS)
-@pytest.mark.parametrize("e", NUM_EXPERTS)
-@pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("ep_size", EP_SIZE)
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("group_size", [64, 128])
-@pytest.mark.parametrize("has_zp", [True, False])
-@pytest.mark.parametrize("weight_bits", [4, 8])
-@pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
-    reason="MoE WNA16 Triton kernels require CUDA/ROCm or XPU.",
-)
-def test_fused_moe_wn16(
-    m: int,
+def _make_wn16_weights(
+    e: int,
     n: int,
     k: int,
-    e: int,
-    topk: int,
-    ep_size: int,
-    dtype: torch.dtype,
     group_size: int,
     has_zp: bool,
     weight_bits: int,
-):
-    a = torch.randn((m, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, ...]:
     w1 = torch.randn((e, 2 * n, k), device=DEVICE_TYPE, dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device=DEVICE_TYPE, dtype=dtype) / 10
-    score = torch.randn((m, e), device=DEVICE_TYPE, dtype=dtype)
 
     if weight_bits == 4:
         pack_factor = 2
@@ -828,6 +1010,89 @@ def test_fused_moe_wn16(
         if has_zp:
             w_qzeros[expert_id] = qzeros
 
+    return (
+        w1_ref,
+        w2_ref,
+        w1_qweight,
+        w2_qweight,
+        w1_scales,
+        w2_scales,
+        w1_qzeros,
+        w2_qzeros,
+    )
+
+
+# TD and pointer paths may round output elements differently. At the output
+# magnitude (~0.03, bf16 ULP 1.2e-4) this allows about 6 ULP, far below the
+# error of a wrong nibble order.
+WN16_TD_TOL = dict(atol=2.5e-4, rtol=1.6e-2)
+
+
+def _skip_unless_moe_td_supported() -> None:
+    if not hasattr(tl, "make_tensor_descriptor"):
+        pytest.skip("Triton < 3.6 lacks tl.make_tensor_descriptor")
+    if not moe_use_td_hw_supported():
+        pytest.skip("tensor_descriptor.gather requires XPU or NVIDIA sm100+")
+
+
+def _record_wn16_use_td(monkeypatch) -> list[bool]:
+    """Record USE_TD of every fused_moe_kernel_gptq_awq launch."""
+    kernel = fused_moe_module.fused_moe_kernel_gptq_awq
+    launches: list[bool] = []
+
+    class Spy:
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                launches.append(kwargs["USE_TD"])
+                return kernel[grid](*args, **kwargs)
+
+            return launch
+
+    monkeypatch.setattr(fused_moe_module, "fused_moe_kernel_gptq_awq", Spy())
+    return launches
+
+
+@pytest.mark.parametrize("m,n,k", FUSED_MOE_WN16_MNK_FACTORS)
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("ep_size", EP_SIZE)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("group_size", [64, 128])
+@pytest.mark.parametrize("has_zp", [True, False])
+@pytest.mark.parametrize("weight_bits,use_td", [(4, False), (4, True), (8, False)])
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="MoE WNA16 Triton kernels require CUDA/ROCm or XPU.",
+)
+def test_fused_moe_wn16(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    ep_size: int,
+    dtype: torch.dtype,
+    group_size: int,
+    has_zp: bool,
+    weight_bits: int,
+    use_td: bool,
+    monkeypatch,
+):
+    if use_td:
+        _skip_unless_moe_td_supported()
+    a = torch.randn((m, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    score = torch.randn((m, e), device=DEVICE_TYPE, dtype=dtype)
+    (
+        w1_ref,
+        w2_ref,
+        w1_qweight,
+        w2_qweight,
+        w1_scales,
+        w2_scales,
+        w1_qzeros,
+        w2_qzeros,
+    ) = _make_wn16_weights(e, n, k, group_size, has_zp, weight_bits, dtype)
+
     if ep_size > 1:
         local_e = e // ep_size
         e_ids = torch.randint(0, e, (local_e,), device=DEVICE_TYPE, dtype=torch.int32)
@@ -858,8 +1123,8 @@ def test_fused_moe_wn16(
         block_shape=[0, group_size],
     )
 
-    with set_current_vllm_config(vllm_config):
-        triton_output = fused_moe(
+    def run() -> torch.Tensor:
+        return fused_moe(
             a,
             w1_qweight,
             w2_qweight,
@@ -870,9 +1135,222 @@ def test_fused_moe_wn16(
             expert_map=e_map,
             quant_config=quant_config,
         )
+
+    launches = _record_wn16_use_td(monkeypatch)
+    with set_current_vllm_config(vllm_config):
+        monkeypatch.setenv("VLLM_TRITON_USE_TD", "0")
+        triton_output = run()
         torch_output = torch_moe(a, w1_ref, w2_ref, score, topk, expert_map=e_map)
+        assert not any(launches)
+        if use_td:
+            if not launches:
+                pytest.skip("shape is routed to the CUDA WNA16 kernel")
+            launches.clear()
+            monkeypatch.setenv("VLLM_TRITON_USE_TD", "1")
+            td_output = run()
+            # TD is gated off for a single token (in both GEMMs) and at the
+            # default BLOCK_SIZE_M=32, used for 20 < m <= 40.
+            assert any(launches) == (m > 1 and not 20 < m <= 40)
+            torch.testing.assert_close(td_output, triton_output, **WN16_TD_TOL)
 
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
+
+
+@pytest.mark.parametrize(
+    "m,n,k,group_size,config",
+    [
+        # Smallest BLOCK_SIZE_M the gather allows.
+        (33, 512, 128, 32, {"BLOCK_SIZE_M": 8, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32}),
+        # N tail in both GEMMs (N = 2 * n and N = k).
+        (33, 96, 96, 32, {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32}),
+    ],
+)
+@pytest.mark.parametrize("has_zp", [True, False])
+def test_fused_moe_wn16_td_forced_config(
+    m: int,
+    n: int,
+    k: int,
+    group_size: int,
+    config: dict[str, int],
+    has_zp: bool,
+    monkeypatch,
+):
+    _skip_unless_moe_td_supported()
+    e, topk, dtype = 8, 2, torch.bfloat16
+    a = torch.randn((m, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    score = torch.randn((m, e), device=DEVICE_TYPE, dtype=dtype)
+    (
+        w1_ref,
+        w2_ref,
+        w1_qweight,
+        w2_qweight,
+        w1_scales,
+        w2_scales,
+        w1_qzeros,
+        w2_qzeros,
+    ) = _make_wn16_weights(e, n, k, group_size, has_zp, 4, dtype)
+    quant_config = int4_w4a16_moe_quant_config(
+        w1_scale=w1_scales,
+        w2_scale=w2_scales,
+        w1_zp=w1_qzeros if has_zp else None,
+        w2_zp=w2_qzeros if has_zp else None,
+        block_shape=[0, group_size],
+    )
+
+    def run(use_td: bool) -> torch.Tensor:
+        monkeypatch.setenv("VLLM_TRITON_USE_TD", "1" if use_td else "0")
+        with override_config({**config, "GROUP_SIZE_M": 1, "SPLIT_K": 1}):
+            return fused_moe(
+                a,
+                w1_qweight,
+                w2_qweight,
+                score,
+                topk,
+                renormalize=False,
+                global_num_experts=e,
+                quant_config=quant_config,
+            )
+
+    launches = _record_wn16_use_td(monkeypatch)
+    with set_current_vllm_config(vllm_config):
+        pointer_output = run(use_td=False)
+        launches.clear()
+        td_output = run(use_td=True)
+        torch_output = torch_moe(a, w1_ref, w2_ref, score, topk)
+
+    assert launches == [True, True]
+    torch.testing.assert_close(td_output, pointer_output, **WN16_TD_TOL)
+    torch.testing.assert_close(td_output, torch_output, atol=2e-2, rtol=0)
+
+
+@pytest.mark.parametrize("m", [1, 8, 16])
+@pytest.mark.parametrize("has_zp", [True, False])
+def test_triton_wna16_experts_td(m: int, has_zp: bool, monkeypatch, workspace_init):
+    """TritonWNA16Experts (`--moe-backend triton`) launches the WNA16 Triton
+    kernel directly with its default config, including BLOCK_SIZE_M 8/16
+    shapes that fused_experts sends to the CUDA WNA16 kernel."""
+    _skip_unless_moe_td_supported()
+    e, topk, n, k, group_size, dtype = 8, 2, 128, 128, 32, torch.bfloat16
+    a = torch.randn((m, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    score = torch.randn((m, e), device=DEVICE_TYPE, dtype=dtype)
+    (
+        w1_ref,
+        w2_ref,
+        w1_qweight,
+        w2_qweight,
+        w1_scales,
+        w2_scales,
+        w1_qzeros,
+        w2_qzeros,
+    ) = _make_wn16_weights(e, n, k, group_size, has_zp, 4, dtype)
+    quant_config = int4_w4a16_moe_quant_config(
+        w1_scale=w1_scales,
+        w2_scale=w2_scales,
+        w1_zp=w1_qzeros if has_zp else None,
+        w2_zp=w2_qzeros if has_zp else None,
+        block_shape=[0, group_size],
+    )
+    moe_fn = modular_triton_fused_moe(
+        make_dummy_moe_config(), quant_config, experts_cls=TritonWNA16Experts
+    )
+    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+
+    def run(use_td: bool) -> torch.Tensor:
+        monkeypatch.setenv("VLLM_TRITON_USE_TD", "1" if use_td else "0")
+        return moe_fn.apply(
+            a,
+            w1_qweight,
+            w2_qweight,
+            topk_weights,
+            topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=e,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+    launches = _record_wn16_use_td(monkeypatch)
+    with set_current_vllm_config(vllm_config):
+        pointer_output = run(use_td=False)
+        assert launches == [False, False]
+        launches.clear()
+        td_output = run(use_td=True)
+        torch_output = torch_moe(a, w1_ref, w2_ref, score, topk)
+
+    # [first GEMM, down projection]: no TD in either for a single token.
+    assert launches == [m > 1, m > 1]
+    torch.testing.assert_close(td_output, pointer_output, **WN16_TD_TOL)
+    torch.testing.assert_close(td_output, torch_output, atol=2e-2, rtol=0)
+
+
+@pytest.mark.parametrize(
+    "m,k,block_m,block_k,use_int4,hw_supported,num_input_tokens,expected",
+    [
+        (16, 128, 16, 32, True, True, None, True),
+        (16, 128, 8, 32, True, True, None, True),
+        (16, 128, 32, 32, True, True, None, False),
+        (16, 128, 4, 32, True, True, None, False),
+        (1, 128, 16, 32, True, True, None, False),
+        # Down projection: A has num_input_tokens * top_k rows.
+        (4, 128, 16, 32, True, True, 1, False),
+        (4, 128, 16, 32, True, True, 2, True),
+        (16, 96, 16, 64, True, True, None, False),
+        (16, 128, 16, 16, True, True, None, False),
+        (16, 128, 16, 32, False, True, None, False),
+        (16, 128, 16, 32, True, False, None, False),
+    ],
+)
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_wna16_triton_launcher_td_gate(
+    m: int,
+    k: int,
+    block_m: int,
+    block_k: int,
+    use_int4: bool,
+    hw_supported: bool,
+    num_input_tokens: int | None,
+    expected: bool,
+    batch_invariant: bool,
+    monkeypatch,
+) -> None:
+    captured: dict[str, bool] = {}
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs) -> None:
+                captured["USE_TD"] = kwargs["USE_TD"]
+
+            return launch
+
+    monkeypatch.setenv("VLLM_TRITON_USE_TD", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1" if batch_invariant else "0")
+    monkeypatch.setattr(fused_moe_module, "fused_moe_kernel_gptq_awq", FakeKernel())
+    monkeypatch.setattr(
+        fused_moe_module, "moe_use_td_hw_supported", lambda: hw_supported
+    )
+    monkeypatch.setattr(fused_moe_module, "set_triton_allocator", lambda device: None)
+    e, n, group_size = 4, 64, 32
+    pack_factor = 2 if use_int4 else 1
+    fused_moe_module.invoke_fused_moe_wna16_triton_kernel(
+        A=torch.empty((m, k)),
+        B=torch.empty((e, n, k // pack_factor), dtype=torch.uint8),
+        C=torch.empty((m, 1, n)),
+        B_scale=torch.empty((e, n, k // group_size)),
+        B_zp=None,
+        topk_weights=None,
+        sorted_token_ids=torch.zeros(block_m, dtype=torch.int32),
+        expert_ids=torch.zeros(1, dtype=torch.int32),
+        num_tokens_post_padded=torch.ones(1, dtype=torch.int32),
+        mul_routed_weight=False,
+        top_k=1,
+        config={"BLOCK_SIZE_M": block_m, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": block_k},
+        compute_type=tl.bfloat16,
+        use_int8_w8a16=not use_int4,
+        use_int4_w4a16=use_int4,
+        block_shape=[0, group_size],
+        num_input_tokens=num_input_tokens,
+    )
+    assert captured["USE_TD"] is (expected and not batch_invariant)
 
 
 MARLIN_MOE_SCENARIOS = [
@@ -940,7 +1418,7 @@ def marlin_moe_generate_valid_test_cases():
     return cases
 
 
-@dataclass
+@dataclass(slots=True)
 class MarlinMoEWeightData:
     w_ref: torch.Tensor
     qweight: torch.Tensor
@@ -2030,7 +2508,7 @@ def _run_triton_experts(
     topk_ids,
     out_dtype,
 ):
-    """Drive ``TritonExperts.apply`` with caller-provided workspaces."""
+    """Drive `TritonExperts.apply` with caller-provided workspaces."""
     moe_config = experts.moe_config
     workspace13_shape, workspace2_shape, out_shape = experts.workspace_shapes(
         M=hidden_states.size(0),
@@ -2184,7 +2662,6 @@ def test_deepep_v2_padded_scale_ignores_padding_tail():
 
     prepare_finalize = object.__new__(DeepEPV2PrepareAndFinalize)
     prepare_finalize.defer_globalize = False
-    prepare_finalize.use_cudagraph = True
     prepare_finalize.rank_expert_offset = 0
     prepare_finalize.num_experts = 8
 
@@ -2199,11 +2676,8 @@ def test_deepep_v2_padded_scale_ignores_padding_tail():
 
     x_q, scale, meta, topk_ids, _ = prepare_finalize._receiver(
         SimpleNamespace(event=None),
-        False,
         expert_x,
         recv_topk_idx,
-        8,
-        [],
         recv_topk_weights,
         psum_recv_per_rank,
         None,
@@ -2524,3 +2998,98 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
 
     close = torch.isclose(trtllm_output, baseline_output, atol=1e-1, rtol=0.85)
     assert close.float().mean() > 0.925
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("per_out_ch_quant", [False, True])
+@pytest.mark.parametrize("weight_on_input", [False, True])
+def test_static_int8_modular_matches_legacy(
+    workspace_init, dtype, per_out_ch_quant, weight_on_input
+):
+    """Match legacy static scales, bias and router order for both GEMMs."""
+    # TODO: Replace the legacy comparison with a high-precision torch reference
+    # that preserves static quantization and router-weight application order.
+    experts, hidden, tokens = 3, 128, 4
+    moe = make_dummy_moe_config(
+        num_experts=experts, hidden_dim=hidden, intermediate_size=hidden, in_dtype=dtype
+    )
+    rng = torch.Generator(device="cuda").manual_seed(7)
+
+    def weights(rows):
+        return torch.randint(
+            -3,
+            4,
+            (experts, rows, hidden),
+            generator=rng,
+            device="cuda",
+            dtype=torch.int8,
+        )
+
+    def scales(rows, low, high):
+        channels = rows if per_out_ch_quant else 1
+        return torch.linspace(low, high, experts * channels, device="cuda").reshape(
+            experts, channels, 1
+        )
+
+    w1, w2 = weights(2 * hidden), weights(hidden)
+    qc = FusedMoEQuantConfig.make(
+        torch.int8,
+        w1_scale=scales(2 * hidden, 0.002, 0.018),
+        w2_scale=scales(hidden, 0.003, 0.021),
+        a1_scale=torch.tensor(0.035, device="cuda"),
+        a2_scale=torch.tensor(0.02, device="cuda"),
+        w1_bias=torch.linspace(
+            -0.25, 0.25, experts * 2 * hidden, device="cuda"
+        ).reshape(experts, 2 * hidden),
+        w2_bias=torch.linspace(-0.125, 0.125, experts * hidden, device="cuda").reshape(
+            experts, hidden
+        ),
+        per_out_ch_quant=per_out_ch_quant,
+    )
+    kernel = mk.FusedMoEKernel(
+        MoEPrepareAndFinalizeNoDPEPModular(),
+        TritonExperts(moe, qc, activation_key=kInt8StaticTensorSym),
+    )
+    x = torch.randn((tokens, hidden), device="cuda", dtype=dtype, generator=rng)
+    ids = torch.tensor([[0], [2], [1], [2]], device="cuda", dtype=torch.int32)
+    router = torch.tensor([[0.0], [0.37], [0.9], [1.0]], device="cuda")
+
+    def modular(inputs, topk_weights, topk_ids):
+        return kernel.apply(
+            hidden_states=inputs,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=experts,
+            expert_map=None,
+            apply_router_weight_on_input=weight_on_input,
+        )
+
+    with set_current_vllm_config(VllmConfig()):
+        expected = fused_moe_module.fused_experts(
+            x,
+            w1,
+            w2,
+            router,
+            ids,
+            apply_router_weight_on_input=weight_on_input,
+            quant_config=qc,
+        )
+        actual = modular(x, router, ids)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        empty = modular(x[:0], router[:0], ids[:0])
+        assert empty.shape == (0, hidden)
+        assert empty.dtype == dtype
+
+        if dtype == torch.bfloat16 and per_out_ch_quant and weight_on_input:
+            torch.accelerator.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = modular(x, router, ids)
+            graph.replay()
+            torch.testing.assert_close(captured, actual, rtol=0, atol=0)

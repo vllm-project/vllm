@@ -6,7 +6,7 @@ GLM-4.7 uses XML-like tool calls::
 
     <tool_call>func_name<arg_key>key</arg_key><arg_value>value</arg_value></tool_call>
 
-The function name can be followed directly by the first ``<arg_key>`` tag,
+The function name can be followed directly by the first `<arg_key>` tag,
 and tool calls may have no arguments.
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -52,23 +53,51 @@ GLM_TURN_BOUNDARIES = frozenset(
     ("<|system|>", "<|user|>", "<|assistant|>", "<|observation|>")
 )
 
-_ARG_RE = re.compile(
-    r"<arg_key>(?P<key>.*?)</arg_key>\s*"
-    r"<arg_value>(?P<value>.*?)</arg_value>",
-    re.DOTALL,
-)
-_PARTIAL_ARG_RE = re.compile(
-    r"<arg_key>(?P<key>.*?)</arg_key>\s*"
-    r"<arg_value>(?P<value>.*)$",
-    re.DOTALL,
-)
+_VALUE_START_RE = re.compile(r"\s*" + re.escape(ARG_VALUE_START))
+
+
+def _find_arg(text: str, pos: int) -> tuple[int, int, int] | None:
+    """Locate the first argument whose key starts at or after `pos`.
+
+    Returns the start and end of the key and the start of the value. The key
+    runs to the first `</arg_key>` that is followed by `<arg_value>`. When
+    the first `<arg_key>` has no such end, no later one has either, so each
+    call scans the text once.
+    """
+    start = text.find(ARG_KEY_START, pos)
+    if start < 0:
+        return None
+    key_start = start + len(ARG_KEY_START)
+    key_end = text.find(ARG_KEY_END, key_start)
+    while key_end >= 0:
+        value_start = _VALUE_START_RE.match(text, key_end + len(ARG_KEY_END))
+        if value_start is not None:
+            return key_start, key_end, value_start.end()
+        key_end = text.find(ARG_KEY_END, key_end + 1)
+    return None
+
+
+def _closed_args(text: str, pos: int) -> Iterator[tuple[int, str, str, int]]:
+    """Yield `(start, key, value, end)` for each closed argument from `pos`."""
+    while (arg := _find_arg(text, pos)) is not None:
+        key_start, key_end, value_start = arg
+        value_end = text.find(ARG_VALUE_END, value_start)
+        if value_end < 0:
+            return
+        pos = value_end + len(ARG_VALUE_END)
+        yield (
+            key_start - len(ARG_KEY_START),
+            text[key_start:key_end],
+            text[value_start:value_end],
+            pos,
+        )
 
 
 class _ClosedArgs:
     """Closed key/value pairs of a raw argument text, reused by longer texts.
 
     Raw arguments only grow while a call streams, so a parse of a text that
-    extends ``text`` resumes after its last closed value.
+    extends `text` resumes after its last closed value.
     """
 
     __slots__ = ("text", "params", "outside")
@@ -92,10 +121,10 @@ def _glm47_parse_args(
         pos = len(closed.text)
     start = pos
 
-    for match in _ARG_RE.finditer(raw_args, pos):
-        outside.append(raw_args[pos : match.start()])
-        params[match.group("key").strip()] = match.group("value")
-        pos = match.end()
+    for arg_start, key, value, end in _closed_args(raw_args, pos):
+        outside.append(raw_args[pos:arg_start])
+        params[key.strip()] = value
+        pos = end
 
     if closed is not None and pos > start:
         closed.text = raw_args[:pos]
@@ -105,11 +134,12 @@ def _glm47_parse_args(
     open_key = None
     if partial:
         remaining = "".join(outside) + raw_args[pos:]
-        match = _PARTIAL_ARG_RE.search(remaining)
-        if match:
-            key = match.group("key").strip()
+        arg = _find_arg(remaining, 0)
+        if arg is not None:
+            key_start, key_end, value_start = arg
+            key = remaining[key_start:key_end].strip()
             if key:
-                params[key] = match.group("value")
+                params[key] = remaining[value_start:]
                 open_key = key
 
     return params, open_key

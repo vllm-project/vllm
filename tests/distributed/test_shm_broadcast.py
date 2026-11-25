@@ -50,7 +50,7 @@ def distributed_run(fn, world_size, timeout=60, mp_context=None):
         fn: Function to run in each process
         world_size: Number of processes to spawn
         timeout: Maximum time in seconds to wait for processes (default: 60)
-        mp_context: Optional multiprocess context (e.g. ``mp.get_context("spawn")``)
+        mp_context: Optional multiprocess context (e.g. `mp.get_context("spawn")`)
             for workers that must not inherit the parent's thread/CUDA state.
 
     """

@@ -7,7 +7,7 @@ import torch
 from vllm import envs
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.flashinfer import has_flashinfer
@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 
 def register_top_k_top_p_warmups() -> None:
     """Register every native accelerator sampling kernel used at runtime."""
-    if HAS_TRITON and not current_platform.is_cpu():
+    if HAS_TRITON:
         _topk_topp.register_warmup()
         if current_platform.is_cuda_alike():
             _topp_split_stats.register_warmup()
@@ -70,16 +70,16 @@ def _flashinfer_jit_unsupported_reason(capability: DeviceCapability) -> str | No
 def flashinfer_sampler_supported() -> bool:
     """Decide whether FlashInfer's top-p/top-k sampler can be used.
 
-    Returns False (with appropriate logging) when ``VLLM_USE_FLASHINFER_SAMPLER``
+    Returns False (with appropriate logging) when `VLLM_USE_FLASHINFER_SAMPLER`
     is 0, when the platform isn't CUDA, when the GPU's compute capability is
     unsupported, when the GPU has 16 or fewer SMs, or when FlashInfer cannot
-    JIT-compile for the current GPU/CUDA toolchain. Raises ``RuntimeError`` if
+    JIT-compile for the current GPU/CUDA toolchain. Raises `RuntimeError` if
     the user explicitly opted in via the env var but FlashInfer is unavailable.
 
-    Assumes flashinfer is installed, as guaranteed by ``requirements/cuda.txt``;
-    otherwise importing the FlashInfer backend below raises ``ImportError``.
+    Assumes flashinfer is installed, as guaranteed by `requirements/cuda.txt`;
+    otherwise importing the FlashInfer backend below raises `ImportError`.
 
-    Note: callers must additionally ensure ``logprobs_mode`` doesn't require
+    Note: callers must additionally ensure `logprobs_mode` doesn't require
     post-top-k/top-p logits/logprobs for any request whose logprobs will be
     returned in this step, since FlashInfer doesn't expose those.
     """
@@ -135,7 +135,7 @@ def xpu_sampler_supported() -> bool:
     """Decide whether the fused XPU top-k/top-p sampler kernel can be used.
 
     Returns False (with appropriate logging) when the platform isn't XPU, when
-    ``VLLM_XPU_USE_SAMPLER_KERNEL`` is 0.
+    `VLLM_XPU_USE_SAMPLER_KERNEL` is 0.
 
     Note: callers must additionally ensure no request needs a per-request seed
     or greedy sampling, since the kernel draws from the device's default
@@ -214,6 +214,13 @@ def apply_top_k_top_p(
             logits, k, p, has_topp_only_rows=has_topp_only_rows
         )
 
+    if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
+        CpuArchEnum.ARM,
+        CpuArchEnum.POWERPC,
+        CpuArchEnum.S390X,
+    ):
+        return apply_top_k_top_p_cpu(logits, k, p)
+
     is_cpu = current_platform.is_cpu()
     return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=is_cpu)
 
@@ -282,6 +289,47 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     # Handle non-topk rows.
     top_k_mask.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))
     return logits.masked_fill_(logits < top_k_mask, -float("inf"))
+
+
+def apply_top_k_top_p_cpu(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+) -> torch.Tensor:
+    """CPU-optimized top-k + top-p. Uses C++ ternary-search kernels."""
+    from vllm._cpu_ops import cpu_topk_sampling as _cpu_topk_sampling_op
+    from vllm._cpu_ops import (
+        cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
+    )
+    from vllm._cpu_ops import cpu_topp_sampling as _cpu_topp_sampling_op
+
+    if p is None and k is None:
+        return logits
+
+    if k is not None:
+        # k=0 is not valid; callers use k=vocab_size to disable top-k.
+        assert (k > 0).all(), (
+            "k values must be > 0; use k=vocab_size to disable top-k filtering"
+        )
+        k = k.to(torch.int32).contiguous()
+
+    if p is not None:
+        p = p.float().contiguous()
+
+    if p is None:
+        logits = logits.contiguous()
+        _cpu_topk_sampling_op(logits, k)
+        return logits
+
+    if k is None:
+        logits = logits.contiguous()
+        _cpu_topp_sampling_op(logits, p)
+        return logits
+
+    # Joint k+p path.
+    logits = logits.contiguous()
+    _cpu_topk_topp_sampling_op(logits, k, p)
+    return logits
 
 
 def flashinfer_sample(

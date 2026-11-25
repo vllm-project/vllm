@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Generator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -41,7 +41,7 @@ logger = init_logger(__name__)
 
 
 class PassThroughAll2AllManager(All2AllManagerBase):
-    """Placeholder for ``all2all_backend="passthrough"``.
+    """Placeholder for `all2all_backend="passthrough"`.
 
     The MoE backend dispatches and combines itself, so there is no all2all to
     manage.
@@ -334,12 +334,16 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         num_global_experts: int,
         num_local_experts: int,
     ) -> dict[Any, Any]:
-        """max_num_tokens_per_dp_rank : the maximum number of tokens a DP rank
-          can dispatch all the ranks must hold the same value.
-        token_hidden_size: the hidden dimension of each token.
-        num_ep_ranks: the number of EP group ranks.
-        num_global_experts: Number of experts in the model.
-        num_local_experts: Number of experts in an EP rank.
+        """Build the kwargs for the DeepEP low-latency buffer.
+
+        Args:
+            max_num_tokens_per_dp_rank: The maximum number of tokens a DP rank can
+                dispatch. All the ranks must hold the same value.
+            token_hidden_size: The hidden dimension of each token.
+            num_ep_ranks: The number of EP group ranks.
+            num_global_experts: Number of experts in the model.
+            num_local_experts: Number of experts in an EP rank.
+
         """
         import deep_ep  # type: ignore[import-not-found]
 
@@ -426,7 +430,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         DeepEPLLAll2AllManager._last_mask[rank] = int(masked)
 
 
-@dataclass
+@dataclass(slots=True)
 class _NixlEPBufferState:
     buffer: Any
     max_num_ep_ranks: int
@@ -570,7 +574,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             self._unmask_connected_ranks(target_ep_size)
 
     @contextmanager
-    def mask_remote_ranks(self) -> Iterator[None]:
+    def mask_remote_ranks(self) -> Generator[None]:
         peers = [rank for rank in range(self.world_size) if rank != self.rank]
         assert NixlEPAll2AllManager._buffer is not None
         buffer = NixlEPAll2AllManager._buffer.buffer
@@ -736,9 +740,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
             top_k=top_k,
             max_tokens_per_rank=max_num_tokens,
             hidden_size=hidden_size,
-            # Received rows past a source rank's token count keep expert id
-            # num_experts, which no rank owns.
-            invalid_expert_id=num_experts,
+            invalid_expert_id=-1,
         )
         config = NVLinkTwoSidedConfig(comm_backend=CustomCommunicator(self.cpu_group))
         # Bootstrap metadata must stay on the CPU even when model layers are
@@ -763,10 +765,47 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         self.communications.clear()
 
 
+def _require_single_node_without_mnnvl() -> None:
+    """Fail clearly if one-sided all2all would span hosts without MNNVL.
+
+    GB200/GB300/VR200 connect hosts over MNNVL. On other hardware (HGX B200 and
+    B300) the NVLink domain ends at the node, so every rank must share one host.
+    """
+    from vllm.config.parallel import _is_gb200_gb300_or_vr200
+    from vllm.distributed.parallel_state import get_node_count
+
+    if _is_gb200_gb300_or_vr200():
+        return
+    try:
+        node_count = get_node_count()
+    except AssertionError:
+        # Used outside vLLM's distributed environment: the node count is unknown.
+        return
+    if node_count == 1:
+        return
+    auto = False
+    with suppress(Exception):
+        auto = get_current_vllm_config().parallel_config._all2all_backend_auto_one_sided
+    origin = (
+        " It was picked by default (all2all_backend='auto'), which assumes a "
+        "single physical node."
+        if auto
+        else ""
+    )
+    raise RuntimeError(
+        "The 'flashinfer_nvlink_one_sided' all2all backend needs every rank on "
+        "one physical node on this GPU, which has no NVLink between hosts, but "
+        f"the ranks span {node_count} nodes.{origin} Switch to the "
+        "'allgather_reducescatter' backend manually with "
+        "`--all2all-backend allgather_reducescatter`."
+    )
+
+
 class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
     """MoE EP communication using FlashInfer's NVLink one-sided wrapper."""
 
     def __init__(self, cpu_group):
+        _require_single_node_without_mnnvl()
         assert has_flashinfer_nvlink_one_sided(), (
             "FlashInfer MoEEpCommunication NVLink one-sided API not found. "
             "Please install FlashInfer 0.7.2 or later."
@@ -861,10 +900,6 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             extra_payload_bytes_per_token=extra_payload_bytes_per_token,
             use_low_precision_combine=envs.VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE,
             comm_backend=CustomCommunicator(self.cpu_group),
-            # Keep the fence transport; FlashInfer otherwise picks CFT counted
-            # writes or the Lamport transport where the platform supports them.
-            cft=False,
-            lamport=False,
         )
         if communication is not None:
             # Growth happens during model initialization, before graph capture.
@@ -1079,7 +1114,7 @@ def _mori_epv2_arena_bytes(cfg) -> int:
 _MORI_EPV2_WINDOW_ALIGN = 4 << 30
 
 
-@dataclass
+@dataclass(slots=True)
 class _MoriEPv2Window:
     comm: Any
     free_bytes: int

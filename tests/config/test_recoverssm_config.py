@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Configuration-level regression tests for Qwen4Exp GDN/PLE RecoverSSM selection.
 
-``--use-replayssm`` with speculative decoding selects RecoverSSM for Qwen4Exp, as it
-does for Kimi-K3 KDA. The MTP drafter's derived config shares ``cache_config`` and must
+`--use-replayssm` with speculative decoding selects RecoverSSM for Qwen4Exp, as it
+does for Kimi-K3 KDA. The MTP drafter's derived config shares `cache_config` and must
 keep the choice. These tests run the real validator function against stand-in configs.
 """
 
@@ -43,7 +43,7 @@ def _config(
         or SimpleNamespace(
             use_recoverssm=False,
             use_replayssm=use_replayssm,
-            mamba_cache_mode="align",
+            enable_prefix_caching=True,
         ),
         mamba_config=SimpleNamespace(
             enable_stochastic_rounding=False, backend=MambaBackendEnum.TRITON
@@ -114,9 +114,11 @@ def test_flag_unset_keeps_the_stock_path():
     assert not uses_recoverssm(cfg.cache_config, 3)
 
 
-def test_qwen4exp_replayssm_requires_speculative_decoding():
-    with pytest.raises(ValueError, match="requires speculative decoding"):
-        _validator()(_config(TARGET, num_spec=0))
+def test_qwen4exp_replayssm_without_speculation_keeps_gdn_replayssm():
+    # Without draft tokens the flag selects GDN ReplaySSM's cached decode.
+    cfg = _config(TARGET, num_spec=0)
+    _validator()(cfg)
+    assert cfg.cache_config.use_recoverssm is False
 
 
 def test_architecture_without_replayssm_support_is_rejected():
