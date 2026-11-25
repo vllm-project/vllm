@@ -488,13 +488,12 @@ def test_store_values_round_trip_every_layout(request, model, layout):
     planner_config = SimpleNamespace(
         cache_config=SimpleNamespace(
             get_resolved_kv_cache_layout=lambda: layout,
-            num_gpu_blocks_override=num_blocks,
             prefix_cache_retention_interval=None,
         ),
         attention_config=SimpleNamespace(hisparse_config=None),
     )
     try:
-        cfg = get_kv_cache_config_from_groups(planner_config, groups, 1 << 30)
+        cfg = get_kv_cache_config_from_groups(planner_config, groups, num_blocks)
         kv_caches = allocate_kv_cache(cfg, torch.device("cpu"), layout)
     except (ValueError, AssertionError):
         pytest.skip(f"{layout.name} cannot express {model}")

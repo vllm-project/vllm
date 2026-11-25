@@ -10,14 +10,14 @@ import torch
 
 from vllm.platforms import current_platform
 
-if not current_platform.is_cuda():
-    pytest.skip("requires CUDA", allow_module_level=True)
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+    pytest.skip("requires CUDA, ROCm or XPU", allow_module_level=True)
 
 from vllm.v1.worker.gpu.spec_decode.suffix.speculator import (  # noqa: E402
     SuffixSpeculator,
 )
 
-DEVICE = torch.device("cuda")
+DEVICE = torch.device(current_platform.device_type)
 
 
 def _local_draft(hist, k, depth):

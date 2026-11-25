@@ -1431,6 +1431,17 @@ class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):
             video_kwargs = mm_config.media_io_kwargs.setdefault("video", {})
             video_kwargs.setdefault("video_backend", "nemotron_vl")
 
+        # Super VL stores its video frame sizing in the image processor config.
+        vision_config = model_config.hf_config.vision_config
+        if (
+            getattr(vision_config, "video_target_num_patches", None) is None
+            and getattr(vision_config, "video_target_img_size", None) is None
+        ):
+            for key in ("video_target_num_patches", "video_maintain_aspect_ratio"):
+                value = model_config.hf_image_processor_config.get(key)
+                if value is not None:
+                    setattr(vision_config, key, value)
+
 
 class Nemotron3_5TranscribeForConditionalGenerationConfig(VerifyAndUpdateConfig):
     @classmethod
