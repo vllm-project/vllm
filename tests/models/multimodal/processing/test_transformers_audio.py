@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import transformers
@@ -12,6 +14,9 @@ from vllm.model_executor.model_loader import get_model_cls
 from vllm.model_executor.models.interfaces import (
     StreamingDiarizedTranscriptParser,
     supports_transcription,
+)
+from vllm.model_executor.models.transformers.multimodal import (
+    MultiModalMixin as TransformersMultiModalMixin,
 )
 from vllm.model_executor.models.transformers.multimodal import (
     MultiModalProcessor as TransformersMultiModalProcessor,
@@ -398,3 +403,23 @@ def test_diarized_stream_parser_rejects_unparsable_transformers_output(vibevoice
         assert list(parser.process_delta(char, finished=False)) == []
     with pytest.raises(ValueError, match="valid diarized transcript"):
         list(parser.process_delta("", finished=True))
+
+
+def test_flat_encoder_getters_are_preferred():
+    # `get_*_embeddings` return all items' rows in one tensor; models without them
+    # (older Transformers) fall back to `get_*_features`
+    def embeddings(*args, **kwargs):
+        pass
+
+    def features(*args, **kwargs):
+        pass
+
+    get_getter = TransformersMultiModalMixin._get_encoder_getter
+    flat = SimpleNamespace(
+        model=SimpleNamespace(
+            get_audio_embeddings=embeddings, get_audio_features=features
+        )
+    )
+    per_item = SimpleNamespace(model=SimpleNamespace(get_audio_features=features))
+    assert get_getter(flat, "audio") is embeddings
+    assert get_getter(per_item, "audio") is features

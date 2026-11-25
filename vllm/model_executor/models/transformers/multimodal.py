@@ -1399,6 +1399,13 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
 
         return list(torch.split(embeddings, token_split_sizes, dim=0))
 
+    def _get_encoder_getter(self, modality: str) -> Callable[..., Any]:
+        # The flat `get_*_embeddings` return all items' rows in one tensor. Models
+        # without them (older Transformers) only have the `get_*_features`
+        return getattr(self.model, f"get_{modality}_embeddings", None) or getattr(
+            self.model, f"get_{modality}_features"
+        )
+
     def _process_audio_input(self, **kwargs) -> list[torch.Tensor] | None:
         input_features: torch.Tensor | None = kwargs.pop("input_features", None)
         if input_features is None:
@@ -1424,7 +1431,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
                     else value
                     for key, value in kwargs.items()
                 }
-                audio_output = self.model.get_audio_features(
+                audio_output = self._get_encoder_getter("audio")(
                     input_features, return_dict=True, **kwargs
                 )
             return self._split_embeddings(audio_output.pooler_output, split_sizes)
@@ -1434,7 +1441,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         # padded to match another.
         embeddings: list[torch.Tensor] = []
         for index, features in enumerate(input_features):
-            audio_output = self.model.get_audio_features(
+            audio_output = self._get_encoder_getter("audio")(
                 features.unsqueeze(0),
                 return_dict=True,
                 **self._select_item_kwargs(kwargs, index, len(input_features)),
@@ -1542,8 +1549,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         # padding images via boolean-mask indexing, LlavaOnevision
         # branches on per-sample batch counts).
         with gpu_sync_allowed():
-            get_modality_features = getattr(self.model, f"get_{modality}_features")
-            features = get_modality_features(pixel_values, return_dict=True, **kwargs)
+            features = self._get_encoder_getter(modality)(
+                pixel_values, return_dict=True, **kwargs
+            )
         embeddings = features.pooler_output
         if not self.deepstack_num_levels:
             return embeddings
