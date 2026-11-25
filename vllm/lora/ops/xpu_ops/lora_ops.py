@@ -107,7 +107,9 @@ def _lora_linear_impl(
         slot = int(single_lora_slot[0])
     if slot >= 0:
         # Every token uses the same adapter: two dense GEMMs per slice are much
-        # faster than per-token BGMV for prefill-sized batches.
+        # faster than per-token BGMV for prefill-sized batches. Padded rows past
+        # the mapping also get the delta; their outputs are discarded, and BGMV
+        # reads stale indices for them anyway.
         offset = 0
         for lora_a, lora_b, slice_size in zip(
             lora_a_weights, lora_b_weights, output_slices

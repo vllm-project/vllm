@@ -110,12 +110,18 @@ class PunicaWrapperXPU(PunicaWrapperBase):
 
         # Use the per-token mapping: a chunked-prefill step need not sample, so
         # the prompt mapping can miss a request's adapter.
+        # The GEMM path only runs for batches larger than any captured graph,
+        # so skip the scan for smaller ones (e.g. decode).
         slot = -1
-        lora_ids = set(mapping.index_mapping)
-        if len(lora_ids) == 1:
-            (lora_id,) = lora_ids
-            if lora_id > 0 and lora_id in lora_index_to_id:
-                slot = lora_index_to_id.index(lora_id)
+        if (
+            self._max_graph_tokens is not None
+            and len(mapping.index_mapping) > self._max_graph_tokens
+        ):
+            lora_ids = set(mapping.index_mapping)
+            if len(lora_ids) == 1:
+                (lora_id,) = lora_ids
+                if lora_id > 0 and lora_id in lora_index_to_id:
+                    slot = lora_index_to_id.index(lora_id)
         self._single_lora_slot.fill_(slot)
 
         # Prepare kernel metadata tensors

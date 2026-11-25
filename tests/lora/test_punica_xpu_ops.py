@@ -437,6 +437,10 @@ def test_xpu_add_lora_linear_dispatch(
     wrapper.update_metadata(
         LoRAMapping(tuple(token_ids), tuple(token_ids)), [2, 3], 2, 32000
     )
+    # The slot is only recorded when the batch can take the GEMM path.
+    can_gemm = cudagraph_mode is not None and num_tokens > max_capture
+    expect_slot = 1 if mapping == "single" and can_gemm else -1
+    assert int(wrapper._single_lora_slot[0]) == expect_slot
     slot_of = {0: -1, 2: 0, 3: 1}
     indices = torch.tensor([slot_of[i] for i in token_ids])
 
