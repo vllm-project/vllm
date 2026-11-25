@@ -37,6 +37,9 @@ import flydsl.expr as fx  # noqa: E402
 from tests.models.minimax_m3.amd_specialized_decode import (  # noqa: E402
     _xcd_stress as xs,
 )
+from tests.models.minimax_m3.amd_specialized_decode._reference import (  # noqa: E402
+    reference_experts,
+)
 from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import (  # noqa: E402
     gemma_fused_add_rmsnorm,
 )
@@ -110,27 +113,6 @@ def weights():
         router=torch.randn(ffn.EXPERTS, H, device=dev, generator=g).mul(0.02),
         router_bias=torch.randn(ffn.EXPERTS, device=dev, generator=g).mul(0.01),
     )
-
-
-def _dequant_mxfp4(codes, scales):
-    from aiter.utility.fp4_utils import e8m0_to_f32, mxfp4_to_f32
-
-    return mxfp4_to_f32(codes) * e8m0_to_f32(scales).repeat_interleave(32, -1)
-
-
-def _reference_experts(x, w, ids, wts):
-    """FP32 A16W4 experts on the dequantized weights with a bf16 intermediate.
-    Not AITER's fused_moe: its tuned configs may quantize the activations."""
-    out = torch.zeros(x.shape[0], H, dtype=torch.float32, device=x.device)
-    for e in ids.unique().tolist():
-        rows, slot = (ids == e).nonzero(as_tuple=True)
-        h = x[rows].float() @ _dequant_mxfp4(w.raw.w13[e], w.raw.s13[e]).T
-        gate = h[:, :INTER].clamp(max=ffn.LIMIT)
-        up = h[:, INTER:].clamp(-ffn.LIMIT, ffn.LIMIT)
-        mid = (gate * torch.sigmoid(ffn.ALPHA * gate) * (up + ffn.BETA)).bfloat16()
-        y = mid.float() @ _dequant_mxfp4(w.raw.w2[e], w.raw.s2[e]).T
-        out.index_add_(0, rows, wts[rows, slot, None] * y)
-    return out
 
 
 def _native_route(logits, bias):
@@ -240,7 +222,7 @@ def test_ffn_stages_match_native(weights, s):
     shared = torch.full((s, 1), ffn.SHARED, dtype=torch.int32, device=r.x.device)
     all_ids = torch.cat([r.ids, shared], 1)
     all_wts = torch.cat([r.wts, torch.ones_like(r.wts[:, :1])], 1)
-    cos, rel = _metrics(r.out, _reference_experts(r.x, weights, all_ids, all_wts))
+    cos, rel = _metrics(r.out, reference_experts(r.x, weights.raw, all_ids, all_wts))
     assert cos > 0.9999 and rel < 1e-2
 
 
