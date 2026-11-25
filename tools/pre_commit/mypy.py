@@ -47,22 +47,7 @@ SILENT_GROUPS = [
     "tests/kernels",
     "tests/lora",
     "tests/model_executor",
-    "tests/models/deepseek_v32",
-    "tests/models/deepseek_v41",
-    "tests/models/flint",
-    "tests/models/glm5next",
-    "tests/models/hy_v4",
-    "tests/models/inkling",
-    "tests/models/kimi_k3",
-    "tests/models/language",
-    "tests/models/multimodal",
-    "tests/models/minimax_m3",
-    "tests/models/quantization",
-    "tests/models/qwen3_5",
-    "tests/models/qwen4_exp",
-    "tests/models/step5",
-    "tests/models/test_initialization.py",
-    "tests/models/transformers",
+    "tests/models",
     "tests/multimodal",
     "tests/parser",
     "tests/plugins/bge_m3_sparse_plugin",
@@ -86,7 +71,6 @@ SILENT_GROUPS = [
 # from "skip" to "silent", move its directory to SILENT_GROUPS.
 SEPARATE_GROUPS = [
     "tests",
-    "tests/models",
 ]
 
 

@@ -53,7 +53,7 @@ def run(path, index_topk, **kwargs) -> tuple[list, dict]:
         tensor_parallel_size=2,
         dtype="bfloat16",
         max_model_len=4096,
-        block_size=None,  # type: ignore[arg-type]  # the hybrid model picks it
+        block_size=None,  # the hybrid model picks it
         enable_chunked_prefill=True,
         max_num_batched_tokens=512,
         limit_mm_per_prompt={"image": 0, "video": 0},

@@ -147,7 +147,7 @@ def test_deepseek_v41_moe_routes_without_hash_table(
     bias = moe.gate.e_score_correction_bias
     if vision:
         image_mask = input_ids == IMAGE_SENTINEL_BASE_ID
-        bias = torch.where(image_mask[:, None], moe.gate.bias_vl, bias)
+        bias = torch.where(image_mask[:, None], moe.gate.bias_vl, bias)  # type: ignore[index]
     expected_ids = (scores + bias).topk(top_k, dim=-1).indices
     expected_weights = scores.gather(1, expected_ids)
     expected_weights *= config.routed_scaling_factor / expected_weights.sum(
@@ -479,6 +479,6 @@ def test_dspark_draft_registers_mixture_of_experts(dspark_draft_config, monkeypa
 
     assert is_mixture_of_experts(draft)
     assert get_mixture_of_experts_model(draft) is draft
-    assert len(draft.moe_layers) == draft.model.num_dspark_layers == 2
+    assert len(draft.moe_layers) == draft.model.num_dspark_layers == 2  # type: ignore[attr-defined]
     assert draft.num_routed_experts == dspark_draft_config.num_routed_experts
     assert draft.num_redundant_experts == 4

@@ -250,7 +250,7 @@ def test_aux_hidden_states_include_carried_residual(monkeypatch) -> None:
     model.uses_rms_norm = True
     model.aux_hidden_state_layers = (0, 1, 2)
 
-    output, aux_hidden_states = model.forward(
+    output, aux_hidden_states = model.forward(  # type: ignore[misc]
         input_ids=None,
         positions=torch.arange(hidden_states.shape[0]),
         inputs_embeds=hidden_states.clone(),
@@ -385,6 +385,7 @@ def test_fork_runs_mlp_inline_when_overlap_is_unsafe(
 
     assert forked is mlp_output
     assert mlp.calls == 1
+    assert layer.dual_stream is not None
     assert layer.dual_stream.join_pending is False
     torch.testing.assert_close(
         layer._join_mlp(attention_output, forked), attention_output + mlp_output
@@ -482,6 +483,7 @@ def test_fork_overlaps_on_side_stream_and_join_waits(monkeypatch) -> None:
             hidden_states=hidden_states,
             residual=None,
         )
+        assert layer.dual_stream is not None
         assert layer.dual_stream.join_pending is False
         torch.testing.assert_close(output, expected)
         torch.testing.assert_close(residual, hidden_states)

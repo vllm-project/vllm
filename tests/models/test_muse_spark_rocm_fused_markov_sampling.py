@@ -367,6 +367,7 @@ def test_fused_markov_is_deterministic(fp64):
     fused = _fused(spec)
     hidden = _hidden(spec)
     runs = []
+    assert spec.draft_logits is not None
     for _ in range(2):
         spec.draft_tokens.fill_(-1)
         spec.draft_logits.values.zero_()
@@ -459,6 +460,7 @@ def test_fused_markov_hook_drafts_what_the_stock_loop_drafts(monkeypatch, state)
         )
 
     def run() -> list[torch.Tensor]:
+        assert spec.draft_logits is not None
         spec.draft_tokens.fill_(-1)
         spec.draft_logits.values.zero_()
         DSparkSpeculator._sample_sequential(spec, num_reqs, _hidden(spec))

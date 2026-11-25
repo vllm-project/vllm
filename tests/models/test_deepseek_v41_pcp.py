@@ -145,7 +145,9 @@ def test_replay_kv_publishes_all_pcp_owners(pcp_size, monkeypatch):
         kv_mxfp8=False,
     )
     context = ForwardContext(
-        no_compile_layers={}, attn_metadata={"swa": metadata}, slot_mapping={}
+        no_compile_layers={},
+        attn_metadata={"swa": metadata},  # type: ignore[dict-item]
+        slot_mapping={},
     )
     with override_forward_context(context):
         attention_module.DeepseekV4Attention.forward_kv(layer, positions, kv)

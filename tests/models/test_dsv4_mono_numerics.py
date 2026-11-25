@@ -501,6 +501,7 @@ def _check_layer(rank: int, tp: int, device) -> None:
         exact = _ExactMoE(moe)  # the weights as loaded, before processing
         process_weights_after_loading(moe, vc.model_config, device)
         exact.shared(moe.shared_experts)
+        assert moe.shared_experts is not None
         moe.shared_experts.prepare_gateup_preshuffle()
         assert moe.shared_experts._gateup_scale is not None
         return moe, exact
@@ -741,7 +742,7 @@ def _check_layer(rank: int, tp: int, device) -> None:
 
         def step(mw=mw, x0=x0, res0=res0, post0=post0, comb0=comb0,
                  args=args, meta=meta, outs=outs):  # fmt: skip
-            runner.forward(mw, x0, res0, post0, comb0, *args, **meta, outs=outs)
+            runner.forward(mw, x0, res0, post0, comb0, *args, **meta, outs=outs)  # type: ignore[misc]
             return list(outs)
 
         steps.append(step)

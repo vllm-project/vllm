@@ -32,7 +32,7 @@ def run(path, pipeline_parallel_size: int) -> list:
         pipeline_parallel_size=pipeline_parallel_size,
         dtype="bfloat16",
         max_model_len=1024,
-        block_size=None,  # type: ignore[arg-type]  # the hybrid model picks it
+        block_size=None,  # the hybrid model picks it
         enable_chunked_prefill=True,  # the GDP layers' prefix caching needs it
         limit_mm_per_prompt={"image": 0, "video": 0},
     ) as vllm:

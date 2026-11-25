@@ -50,6 +50,8 @@ def test_prepare_compressor_gemm_fusion_aliases_original_weights():
     main_value = torch.arange(12, dtype=torch.float32).reshape(4, 3)
     indexer_value = torch.arange(6, dtype=torch.float32).reshape(2, 3) + 100
     attention = _make_attention(main_value, indexer_value)
+    assert attention.compressor is not None
+    assert attention.indexer is not None
     main_weight = attention.compressor.fused_wkv_wgate.weight
     indexer_weight = attention.indexer.compressor.fused_wkv_wgate.weight
 
@@ -79,11 +81,14 @@ def test_prepare_compressor_gemm_fusion_aliases_original_weights():
 
     fused_data_ptr = fused_weight.data_ptr()
     assert attention.prepare_compressor_gemm_fusion() is False
+    assert attention._fused_compressor_weight is not None
     assert attention._fused_compressor_weight.data_ptr() == fused_data_ptr
 
 
 def test_prepare_compressor_gemm_fusion_skips_weight_offloading(monkeypatch):
     attention = _make_attention(torch.ones(4, 3), torch.ones(2, 3))
+    assert attention.compressor is not None
+    assert attention.indexer is not None
     main_weight = attention.compressor.fused_wkv_wgate.weight
     indexer_weight = attention.indexer.compressor.fused_wkv_wgate.weight
 

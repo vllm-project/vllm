@@ -37,4 +37,5 @@ def test_target_layers_share_fp32_rope_cache(monkeypatch, default_vllm_config):
     )
 
     assert first.rotary_emb is second.rotary_emb
+    assert first.rotary_emb is not None
     assert first.rotary_emb.cos_sin_cache.dtype == torch.float32

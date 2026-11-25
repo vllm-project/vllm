@@ -190,6 +190,7 @@ def _load_draft(checkpoints, **spec):
 
     vllm_config = _vllm_config(checkpoints, **spec)
     vllm_config.quant_config = get_draft_quant_config(vllm_config)
+    assert vllm_config.speculative_config is not None
     draft_model_config = vllm_config.speculative_config.draft_model_config
     with set_current_vllm_config(vllm_config):
         return get_model(vllm_config=vllm_config, model_config=draft_model_config)

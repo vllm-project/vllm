@@ -201,7 +201,7 @@ class MonoProbe:
                 if not isinstance(md, dict):
                     return
                 swa = md.get(module.attn.swa_cache_layer.prefix)
-                if swa is None or swa.num_prefills != 0:
+                if swa is None or swa.num_prefills != 0:  # type: ignore[attr-defined]
                     return
                 pos = kwargs.get("positions", args[1] if len(args) > 1 else None)
                 for row, p in enumerate(pos.tolist()):
@@ -219,7 +219,7 @@ class MonoProbe:
                 if not isinstance(md, dict):
                     return
                 swa = md.get(layer.attn.swa_cache_layer.prefix)
-                if swa is None or swa.num_prefills != 0:
+                if swa is None or swa.num_prefills != 0:  # type: ignore[attr-defined]
                     return
                 h = args[0] if args else kwargs["hidden_states"]
                 logits = h.float() @ ffn.gate.weight.float().T
@@ -347,7 +347,7 @@ class MonoProbe:
         from vllm.models.deepseek_v41.amd import mono_decode
 
         runners = (mono_decode._runner, mono_decode._draft_runner)
-        merged = [len(r._captured_blocks) for r in runners]
+        merged = [len(r._captured_blocks) for r in runners]  # type: ignore[attr-defined]
         return {**self._merge_ab, "merged": merged}
 
 
@@ -405,11 +405,11 @@ def _patch_merge_ab() -> None:
         _draft_out[off[0], num_tokens] = out
         return out
 
-    DSV41MonoLayer.merges = merges_unless_off
-    md.MonoDecodeLayer._defers = defers_or_flushes
+    DSV41MonoLayer.merges = merges_unless_off  # type: ignore[method-assign]
+    md.MonoDecodeLayer._defers = defers_or_flushes  # type: ignore[method-assign]
     md._select = reproducible_select
-    CudaGraphManager.capture = capture_twice
-    DFlashSpeculator._run_model = keep_draft_out
+    CudaGraphManager.capture = capture_twice  # type: ignore[method-assign]
+    DFlashSpeculator._run_model = keep_draft_out  # type: ignore[method-assign]
 
 
 if os.environ.get(MERGE_AB):

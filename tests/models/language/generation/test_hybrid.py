@@ -580,7 +580,7 @@ def test_apc_single_prompt(
         pass
 
     compare_operator: Callable = (
-        check_logprobs_close if num_logprobs > 0 else check_outputs_equal  # type: ignore
+        check_logprobs_close if num_logprobs > 0 else check_outputs_equal
     )
 
     # Sample prompts.
@@ -644,7 +644,7 @@ def test_apc_single_prompt_block_align_alignment(
         pass
 
     compare_operator: Callable = (
-        check_logprobs_close if num_logprobs > 0 else check_outputs_equal  # type: ignore
+        check_logprobs_close if num_logprobs > 0 else check_outputs_equal
     )
 
     # Sample prompts. This custom prompt is used, as it causes the most issues
@@ -725,7 +725,7 @@ def test_apc_multiple_prompts_all_cached_outputs(
         pass
 
     compare_operator: Callable = (
-        check_logprobs_close if num_logprobs > 0 else check_outputs_equal  # type: ignore
+        check_logprobs_close if num_logprobs > 0 else check_outputs_equal
     )
 
     # Sample prompts.
@@ -794,7 +794,7 @@ def test_apc_multiple_prompts_block_align_alignment(
         pass
 
     compare_operator: Callable = (
-        check_logprobs_close if num_logprobs > 0 else check_outputs_equal  # type: ignore
+        check_logprobs_close if num_logprobs > 0 else check_outputs_equal
     )
 
     # Sample prompts. This custom prompt is used, as it causes the most issues
@@ -879,7 +879,7 @@ def test_apc_multiple_prompts_partial_cached_outputs(
         pass
 
     compare_operator: Callable = (
-        check_logprobs_close if num_logprobs > 0 else check_outputs_equal  # type: ignore
+        check_logprobs_close if num_logprobs > 0 else check_outputs_equal
     )
 
     # Sample prompts.

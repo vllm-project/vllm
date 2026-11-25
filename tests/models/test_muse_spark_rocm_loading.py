@@ -215,7 +215,7 @@ def test_router_weight_reload_refolds_and_preserves_planes(monkeypatch) -> None:
     moe = MuseSparkMoE.__new__(MuseSparkMoE)
     torch.nn.Module.__init__(moe)
     moe.router = torch.nn.Linear(4, 2, bias=False)
-    moe.router.weight_loader = ReplicatedLinear.weight_loader.__get__(moe.router)
+    moe.router.weight_loader = ReplicatedLinear.weight_loader.__get__(moe.router)  # type: ignore[method-assign]
     moe.router.weight.weight_loader = moe._load_router_weight
     moe.router_output_multiplier = 0.25
     moe._router_multiplier_folded = False
@@ -260,13 +260,13 @@ def test_aiter_kv_workspace_only_for_cache_readers(
     layer = Attention.__new__(Attention)
     torch.nn.Module.__init__(layer)
     layer.impl = AiterFlashAttentionImpl.__new__(AiterFlashAttentionImpl)
-    layer.impl.sliding_window = (-1, -1)
+    layer.impl.sliding_window = (-1, -1)  # type: ignore[attr-defined]
     layer.impl.num_heads = 1
-    layer.impl.num_kv_heads = 1
+    layer.impl.num_kv_heads = 1  # type: ignore[attr-defined]
     layer.impl.head_size = 64
-    layer.impl.alibi_slopes = None
-    layer.impl.sinks = None
-    layer.impl._fast_verify = False
+    layer.impl.alibi_slopes = None  # type: ignore[attr-defined]
+    layer.impl.sinks = None  # type: ignore[attr-defined]
+    layer.impl._fast_verify = False  # type: ignore[attr-defined]
     layer.kv_sharing_target_layer_name = "source" if sharing else None
     layer.kv_cache_update_bypass = bypass
     monkeypatch.setattr(

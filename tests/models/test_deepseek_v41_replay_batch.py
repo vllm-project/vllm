@@ -447,7 +447,7 @@ def dp_state(state, monkeypatch):
     state.vllm_config.parallel_config.data_parallel_size = 2
     state.vllm_config.parallel_config.data_parallel_rank = 0
     state.vllm_config.parallel_config.is_moe_model = True
-    state.other = (False, 0)  # type: ignore[attr-defined]
+    state.other = (False, 0)
 
     def all_reduce(tensor, group):
         tensor[:, 1] = torch.tensor(state.other, dtype=torch.int32)
@@ -556,6 +556,7 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
         [],
         groups,
     )
+    assert state._replay is not None
     assert state._replay[0] == 0
     assert calls == {"pad_warmup": 0, "gather_warmup": 1, "pad_launch": 0}
     assert state._replay_start[:1].tolist() == [16]

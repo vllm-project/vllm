@@ -474,7 +474,7 @@ def _run_drafter(tiny: TinyDraft, step: DraftStep, **kw):
 
     tiny.lm.mono = DSparkDrafter(
         tiny.model,
-        {"draft": kernel, "attn_frag": attn_frag},
+        {"draft": kernel, "attn_frag": attn_frag},  # type: ignore[dict-item]
         rank=0,
         group=get_tp_group().cpu_group,
         device=torch.device("cuda", 0),
@@ -522,7 +522,7 @@ def test_second_step_reuses_the_descriptor_table(tiny_draft) -> None:
     kernel = _StockDraftKernel(tiny_draft)
     tiny_draft.lm.mono = DSparkDrafter(
         tiny_draft.model,
-        {"draft": kernel, "attn_frag": attn_frag},
+        {"draft": kernel, "attn_frag": attn_frag},  # type: ignore[dict-item]
         rank=0,
         group=get_tp_group().cpu_group,
         device=torch.device("cuda", 0),
