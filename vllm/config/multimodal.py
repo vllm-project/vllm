@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import uuid
 from collections.abc import Mapping
+from functools import cache
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, TypeVar, final, overload
 
+import pybase64
 import torch
 from pydantic import (
     ConfigDict,
@@ -18,12 +21,33 @@ from pydantic_core import core_schema
 
 import vllm.envs as envs
 from vllm.config.ec_transfer import ECTransferConfig
-from vllm.config.utils import config
+from vllm.config.utils import (
+    CompileFactors,
+    config,
+    get_compile_factors,
+    get_from_deprecated_env_if_set,
+)
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
+
+
+@cache
+def _generate_shm_name() -> str:
+    # Fit macOS's 30-character limit without truncating the UUID.
+    encoded_uuid = pybase64.urlsafe_b64encode(uuid.uuid4().bytes).decode("ascii")
+    return "vllm_mm_" + encoded_uuid.rstrip("=")
+
+
+def _get_default_shm_name() -> str:
+    name = get_from_deprecated_env_if_set(
+        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
+        "v0.36.0",
+        "mm_shm_cache_buffer_name",
+    )
+    return name if name is not None else _generate_shm_name()
+
 
 _T = TypeVar("_T")
 
@@ -43,7 +67,7 @@ def _recursively_merge_mm_processor_kwargs(
     defaults: Mapping[str, object],
     overrides: Mapping[str, object],
 ) -> dict[str, object]:
-    """Merge two mappings recursively, with ``overrides`` taking precedence.
+    """Merge two mappings recursively, with `overrides` taking precedence.
 
     Nested values are merged only when both values are mappings; otherwise the
     override replaces the existing value.
@@ -212,31 +236,33 @@ def _merge_mm_processor_kwargs(
 class BaseDummyOptions:
     """Base options for generating dummy data during profiling."""
 
-    count: int = Field(999, ge=0)
+    count: int | None = Field(default=999, ge=0)
+    allow_embeds: bool = True
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
 class VideoDummyOptions(BaseDummyOptions):
     """Options for generating dummy video data during profiling."""
 
-    num_frames: int | None = Field(None, gt=0)
-    width: int | None = Field(None, gt=0)
-    height: int | None = Field(None, gt=0)
+    count: int | None = Field(default=None, ge=0)
+    num_frames: int | None = Field(default=None, gt=0)
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
 class ImageDummyOptions(BaseDummyOptions):
     """Options for generating dummy image data during profiling."""
 
-    width: int | None = Field(None, gt=0)
-    height: int | None = Field(None, gt=0)
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
 class AudioDummyOptions(BaseDummyOptions):
     """Options for generating dummy audio data during profiling."""
 
-    length: int | None = Field(None, gt=0)
+    length: int | None = Field(default=None, gt=0)
 
 
 @final
@@ -310,7 +336,8 @@ class MultiModalConfig:
     """The maximum number of input items and options allowed per
     prompt for each modality.
 
-    Defaults to 999 for each modality.
+    Defaults to 999 for each modality unless the model processor provides a
+    lower default.
 
     Legacy format (count only):
         {"image": 16, "video": 2}
@@ -322,6 +349,10 @@ class MultiModalConfig:
     Mixed format (combining both):
         {"image": 16, "video": {"count": 1, "num_frames": 32, "width": 512,
         "height": 512}}
+
+    Set `"allow_embeds": false` to reject pre-computed embeddings of a modality
+    even when `enable_mm_embeds` is on:
+        {"image": 0, "video": {"count": 0, "allow_embeds": false}}
     """
     enable_mm_embeds: bool = False
     """If `True`, enables passing multimodal embeddings:
@@ -376,6 +407,9 @@ class MultiModalConfig:
     """Size limit (in MiB) for each object stored in the multi-modal processor
     shared memory cache. Only effective when `mm_processor_cache_type` is
     `"shm"`."""
+    mm_shm_cache_buffer_name: str = Field(default_factory=_get_default_shm_name)
+    """Name of the shared memory buffer used by the multi-modal processor cache.
+    Only effective when `mm_processor_cache_type` is `"shm"`."""
     mm_encoder_only: bool = False
     """
     When enabled, skips the language component of the model.
@@ -452,7 +486,8 @@ class MultiModalConfig:
     placeholder range.
 
     Derived, not user-settable: `VllmConfig.__post_init__` sets this to True
-    on EC and KV consumers. Everywhere else it stays False so that a request
+    on EC consumers, and on KV consumers unless `language_model_only` is set
+    without `enable_mm_embeds`. Everywhere else it stays False so that a request
     which forgets its embeddings still fails fast in the frontend, with a clear
     error, rather than deep inside the model."""
 
@@ -471,7 +506,7 @@ class MultiModalConfig:
     @classmethod
     def _validate_limit_per_prompt(
         cls,
-        value: dict[str, int | dict[str, int]],
+        value: dict[str, int | dict[str, Any]],
     ) -> MultiModalDummyOptions:
         out = MultiModalDummyOptions()
 
@@ -497,12 +532,6 @@ class MultiModalConfig:
     def _validate_mm_encoder_attn_backend(
         cls, value: str | AttentionBackendEnum | None
     ) -> AttentionBackendEnum | None:
-        if isinstance(value, str) and value.upper() == "XFORMERS":
-            raise ValueError(
-                "Attention backend 'XFORMERS' has been removed (See PR #29262 for "
-                "details). Please select a supported attention backend."
-            )
-
         if value is None or isinstance(value, AttentionBackendEnum):
             return value
 
@@ -669,28 +698,33 @@ class MultiModalConfig:
             device_type,
         )
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+    def compile_factors(self) -> CompileFactors:
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
         """
-        factors: list[Any] = [
-            self.mm_encoder_attn_backend.name
-            if self.mm_encoder_attn_backend is not None
-            else None,
-            self.mm_encoder_tp_mode,
-            self.mm_encoder_attn_dtype,
-            self.mm_encoder_fp8_scale_path,
-            self.mm_device_do_normalize,
-        ]
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        ignored_factors = {
+            "language_model_only",
+            "limit_per_prompt",
+            "enable_mm_embeds",
+            "media_io_kwargs",
+            "mm_processor_kwargs",
+            "mm_processor_cache_gb",
+            "mm_processor_cache_type",
+            "mm_hasher_algorithm",
+            "mm_shm_cache_buffer_name",
+            "mm_shm_cache_max_object_size_mb",
+            "mm_encoder_only",
+            "mm_encoder_fp8_scale_save_path",
+            "mm_encoder_fp8_scale_save_margin",
+            "interleave_mm_strings",
+            "skip_mm_profiling",
+            "video_pruning_rate",
+            "video_pruning_method",
+            "mm_tensor_ipc",
+            "allow_missing_mm_embeddings",
+            "mm_ipc_gpu_memory_gb",
+        }
+        return get_compile_factors(self, ignored_factors)
 
     def get_limit_per_prompt(self, modality: str) -> int:
         """Get the maximum number of input items allowed per prompt
@@ -701,11 +735,20 @@ class MultiModalConfig:
 
         limit_data = self.limit_per_prompt.get(modality)
 
-        if limit_data is None:
+        if limit_data is None or limit_data.count is None:
             # Unspecified modality is set to 999 by default
             return 999
 
         return limit_data.count
+
+    def is_mm_embeds_enabled(self, modality: str) -> bool:
+        """Whether pre-computed embeddings are accepted for the given modality."""
+        if not self.enable_mm_embeds:
+            return False
+
+        limit_data = self.limit_per_prompt.get(modality)
+
+        return limit_data is None or limit_data.allow_embeds
 
     def merge_mm_processor_kwargs(
         self,

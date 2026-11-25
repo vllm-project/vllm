@@ -8,141 +8,173 @@
 
 from packaging import version
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
-from vllm.triton_utils import tl, triton
+from vllm.model_executor.layers.mamba.ops.triton_helpers import (
+    fast_exp,
+    launch_autotuned,
+)
+from vllm.platforms import current_platform
+from vllm.triton_utils import (
+    tensor_descriptor_compatible,
+    tl,
+    triton,
+    use_tensor_descriptor,
+)
+from vllm.triton_utils.allocation import set_triton_allocator
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
 
 
+def _drop_racy_wgmma_configs(configs: list[triton.Config]) -> list[triton.Config]:
+    """Drop the configs that Triton miscompiles on sm90.
+
+    With whole warpgroups (num_warps % 4 == 0) and BLOCK_SIZE_M % 64 == 0,
+    `tl.dot(cb, x)` lowers to wgmma with `cb` in registers. With
+    num_stages > 1, Triton leaves that wgmma running across the loop
+    back-edge while the next iteration overwrites the registers of `cb`,
+    which writes NaN/Inf into whole output rows.
+    """
+    if not (current_platform.is_cuda() and current_platform.is_device_capability(90)):
+        return configs
+    return [
+        c
+        for c in configs
+        if c.num_stages == 1
+        or c.num_warps % 4 != 0
+        or c.kwargs["BLOCK_SIZE_M"] % 64 != 0
+    ]
+
+
 @triton.autotune(
-    configs=[
-        # =================================================================
-        # Higher warp count configs for better latency hiding
-        # More warps = more instructions in flight = better memory latency hiding
-        # =================================================================
-        triton.Config(
-            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
-            num_stages=2,
-            num_warps=8,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=2,
-            num_warps=8,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
-            num_stages=2,
-            num_warps=8,
-        ),
-        # Smaller tiles with more stages for software pipelining
-        triton.Config(
-            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
-            num_stages=3,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 64},
-            num_stages=2,
-            num_warps=4,
-        ),
-        # =================================================================
-        # Low register pressure configs (num_stages=1) for large dstate
-        # =================================================================
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64},
-            num_stages=1,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=1,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=1,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=1,
-            num_warps=4,
-        ),
-        # num_stages=2 configs - moderate register pressure
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64},
-            num_stages=2,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=2,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=2,
-            num_warps=4,
-        ),
-        # Original configs for larger dstate values
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64},
-            num_stages=3,
-            num_warps=8,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=4,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
-            num_stages=5,
-            num_warps=2,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=5,
-            num_warps=2,
-        ),
-        triton.Config(
-            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
-            num_stages=4,
-            num_warps=2,
-        ),
-    ],
-    key=["chunk_size", "hdim", "dstate", "IS_CAUSAL"],
+    configs=_drop_racy_wgmma_configs(
+        [
+            # =================================================================
+            # Higher warp count configs for better latency hiding
+            # More warps = more instructions in flight = better memory latency hiding
+            # =================================================================
+            triton.Config(
+                {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
+                num_stages=2,
+                num_warps=8,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=2,
+                num_warps=8,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
+                num_stages=2,
+                num_warps=8,
+            ),
+            # Smaller tiles with more stages for software pipelining
+            triton.Config(
+                {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
+                num_stages=3,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 64},
+                num_stages=2,
+                num_warps=4,
+            ),
+            # =================================================================
+            # Low register pressure configs (num_stages=1) for large dstate
+            # =================================================================
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64},
+                num_stages=1,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=1,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=1,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=1,
+                num_warps=4,
+            ),
+            # num_stages=2 configs - moderate register pressure
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64},
+                num_stages=2,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=2,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=2,
+                num_warps=4,
+            ),
+            # Original configs for larger dstate values
+            triton.Config(
+                {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64},
+                num_stages=3,
+                num_warps=8,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 32},
+                num_stages=4,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32},
+                num_stages=4,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=4,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32},
+                num_stages=4,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64},
+                num_stages=4,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64},
+                num_stages=4,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
+                num_stages=4,
+                num_warps=4,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
+                num_stages=5,
+                num_warps=2,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=5,
+                num_warps=2,
+            ),
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=4,
+                num_warps=2,
+            ),
+        ]
+    ),
+    key=["chunk_size", "hdim", "dstate", "IS_CAUSAL", "USE_TD"],
 )
 @triton.jit
 def _chunk_scan_fwd_kernel(
@@ -208,6 +240,10 @@ def _chunk_scan_fwd_kernel(
     BLOCK_SIZE_DSTATE: tl.constexpr,
     IS_TRITON_22: tl.constexpr,
     HAS_INITSTATES: tl.constexpr,
+    # Load/store the 2D tiles through tensor descriptors (TMA on NVIDIA
+    # sm90+, 2D block IO on Intel); the pointer-path branches are then
+    # compiled out.
+    USE_TD: tl.constexpr = False,
 ):
     pid_c = tl.program_id(axis=1).to(tl.int64)
     pid_h = tl.program_id(axis=2)
@@ -271,7 +307,36 @@ def _chunk_scan_fwd_kernel(
     )
 
     scale_m = fast_exp(dA_cs_m)
-    if BLOCK_SIZE_DSTATE <= 128:
+    if USE_TD:
+        # Descriptors zero-pad outside `shape`, which replaces the masks.
+        # prev_states is stored [hdim, dstate], so load it that way and
+        # transpose the tile. A new sequence without initial states has zero
+        # prev_states, so skip the dot (acc is already zero) rather than
+        # merging a zeros tile into the loaded one, which measured slower on XPU.
+        BLOCK_K_DSTATE: tl.constexpr = (
+            BLOCK_SIZE_DSTATE if BLOCK_SIZE_DSTATE <= 128 else BLOCK_SIZE_K
+        )
+        C_desc = tl.make_tensor_descriptor(
+            C_ptr,
+            shape=[chunk_size_limit, dstate],
+            strides=[stride_C_seqlen, 1],
+            block_shape=[BLOCK_SIZE_M, BLOCK_K_DSTATE],
+        )
+        prev_states_desc = tl.make_tensor_descriptor(
+            prev_states_ptr,
+            shape=[hdim, dstate],
+            strides=[prev_states_hdim, 1],
+            block_shape=[BLOCK_SIZE_N, BLOCK_K_DSTATE],
+        )
+        if HAS_INITSTATES or (seq_idx == seq_idx_prev):
+            for k in range(0, dstate, BLOCK_K_DSTATE):
+                C = C_desc.load([pid_m * BLOCK_SIZE_M, k])
+                prev_states = tl.trans(
+                    prev_states_desc.load([pid_n * BLOCK_SIZE_N, k])
+                ).to(C_ptr.dtype.element_ty)
+                acc += tl.dot(C, prev_states)
+            acc *= scale_m[:, None]
+    elif BLOCK_SIZE_DSTATE <= 128:
         C = tl.load(
             C_ptrs,
             mask=(offs_m[:, None] < chunk_size_limit)
@@ -339,17 +404,34 @@ def _chunk_scan_fwd_kernel(
     )
     dt_ptrs = dt_ptr + offs_k * stride_dt_csize
     dA_cumsum_ptrs = dA_cumsum_ptr + offs_k * stride_dA_cs_csize
+    if USE_TD:
+        cb_desc = tl.make_tensor_descriptor(
+            cb_ptr,
+            shape=[chunk_size, chunk_size],
+            strides=[stride_cb_csize_m, 1],
+            block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
+        )
+        x_desc = tl.make_tensor_descriptor(
+            x_ptr,
+            shape=[chunk_size_limit, hdim],
+            strides=[stride_x_seqlen, 1],
+            block_shape=[BLOCK_SIZE_K, BLOCK_SIZE_N],
+        )
     K_MAX = (
         chunk_size_limit
         if not IS_CAUSAL
         else min((pid_m + 1) * BLOCK_SIZE_M, chunk_size_limit)
     )
     for k in range(0, K_MAX, BLOCK_SIZE_K):
-        cb = tl.load(
-            cb_ptrs,
-            mask=(offs_m[:, None] < chunk_size) & (offs_k[None, :] < chunk_size - k),
-            other=0.0,
-        ).to(tl.float32)
+        if USE_TD:
+            cb = cb_desc.load([pid_m * BLOCK_SIZE_M, k]).to(tl.float32)
+        else:
+            cb = tl.load(
+                cb_ptrs,
+                mask=(offs_m[:, None] < chunk_size)
+                & (offs_k[None, :] < chunk_size - k),
+                other=0.0,
+            ).to(tl.float32)
         dA_cs_k = tl.load(dA_cumsum_ptrs, mask=offs_k < chunk_size - k, other=0.0).to(
             tl.float32
         )
@@ -362,14 +444,20 @@ def _chunk_scan_fwd_kernel(
             mask = offs_m[:, None] >= k + offs_k[None, :]
             cb = tl.where(mask, cb, 0.0)
         cb = cb.to(x_ptr.dtype.element_ty)
-        x = tl.load(
-            x_ptrs,
-            mask=(offs_k[:, None] < chunk_size_limit - k) & (offs_n[None, :] < hdim),
-            other=0.0,
-        )
+        if USE_TD:
+            x = x_desc.load([k, pid_n * BLOCK_SIZE_N])
+        else:
+            x = tl.load(
+                x_ptrs,
+                mask=(offs_k[:, None] < chunk_size_limit - k)
+                & (offs_n[None, :] < hdim),
+                other=0.0,
+            )
         acc += tl.dot(cb, x)
-        cb_ptrs += BLOCK_SIZE_K * stride_cb_csize_k
-        x_ptrs += BLOCK_SIZE_K * stride_x_seqlen
+        if not USE_TD:
+            # TD loads take absolute tile offsets instead.
+            cb_ptrs += BLOCK_SIZE_K * stride_cb_csize_k
+            x_ptrs += BLOCK_SIZE_K * stride_x_seqlen
         dt_ptrs += BLOCK_SIZE_K * stride_dt_csize
         dA_cumsum_ptrs += BLOCK_SIZE_K * stride_dA_cs_csize
 
@@ -383,36 +471,71 @@ def _chunk_scan_fwd_kernel(
             ).to(tl.float32)
         else:
             D = tl.load(D_ptr + pid_h * stride_D_head).to(tl.float32)
-        x_residual = tl.load(
-            x_ptr
-            + (offs_m[:, None] * stride_x_seqlen + offs_n[None, :] * stride_x_hdim),
-            mask=(offs_m[:, None] < chunk_size_limit) & (offs_n[None, :] < hdim),
-            other=0.0,
-        ).to(tl.float32)
+        if USE_TD:
+            x_residual_desc = tl.make_tensor_descriptor(
+                x_ptr,
+                shape=[chunk_size_limit, hdim],
+                strides=[stride_x_seqlen, 1],
+                block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+            )
+            x_residual = x_residual_desc.load(
+                [pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N]
+            ).to(tl.float32)
+        else:
+            x_residual = tl.load(
+                x_ptr
+                + (offs_m[:, None] * stride_x_seqlen + offs_n[None, :] * stride_x_hdim),
+                mask=(offs_m[:, None] < chunk_size_limit) & (offs_n[None, :] < hdim),
+                other=0.0,
+            ).to(tl.float32)
         acc += x_residual * D
 
     if HAS_Z:
         z_ptr += chunk_seqlen_start * stride_z_seqlen + pid_h * stride_z_head
-        z_ptrs = z_ptr + (
-            stride_z_seqlen * offs_out_m[:, None] + stride_z_hdim * offs_out_n[None, :]
-        )
-        z = tl.load(
-            z_ptrs,
-            mask=(offs_out_m[:, None] < chunk_size_limit)
-            & (offs_out_n[None, :] < hdim),
-            other=0.0,
-        ).to(tl.float32)
+        if USE_TD:
+            z_desc = tl.make_tensor_descriptor(
+                z_ptr,
+                shape=[chunk_size_limit, hdim],
+                strides=[stride_z_seqlen, 1],
+                block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+            )
+            z = z_desc.load([pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N]).to(tl.float32)
+        else:
+            z_ptrs = z_ptr + (
+                stride_z_seqlen * offs_out_m[:, None]
+                + stride_z_hdim * offs_out_n[None, :]
+            )
+            z = tl.load(
+                z_ptrs,
+                mask=(offs_out_m[:, None] < chunk_size_limit)
+                & (offs_out_n[None, :] < hdim),
+                other=0.0,
+            ).to(tl.float32)
         acc *= z * tl.sigmoid(z)
 
     out_ptr += chunk_seqlen_start * stride_out_seqlen + pid_h * stride_out_head
-    out_ptrs = out_ptr + (
-        stride_out_seqlen * offs_out_m[:, None] + offs_out_n[None, :] * stride_out_hdim
-    )
-    tl.store(
-        out_ptrs,
-        acc,
-        mask=(offs_out_m[:, None] < chunk_size_limit) & (offs_out_n[None, :] < hdim),
-    )
+    if USE_TD:
+        out_desc = tl.make_tensor_descriptor(
+            out_ptr,
+            shape=[chunk_size_limit, hdim],
+            strides=[stride_out_seqlen, 1],
+            block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+        )
+        out_desc.store(
+            [pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N],
+            acc.to(out_ptr.dtype.element_ty),
+        )
+    else:
+        out_ptrs = out_ptr + (
+            stride_out_seqlen * offs_out_m[:, None]
+            + offs_out_n[None, :] * stride_out_hdim
+        )
+        tl.store(
+            out_ptrs,
+            acc,
+            mask=(offs_out_m[:, None] < chunk_size_limit)
+            & (offs_out_n[None, :] < hdim),
+        )
 
 
 def _chunk_scan_fwd(
@@ -453,6 +576,16 @@ def _chunk_scan_fwd(
         nheads,
     )
 
+    # Any operand a descriptor cannot cover sends the whole launch down the
+    # pointer path.
+    use_td = use_tensor_descriptor() and tensor_descriptor_compatible(
+        cb, x, C, states, out, z, initial_states
+    )
+    if use_td:
+        # On every launch: Triton's allocator is a per-thread ContextVar, and
+        # DBO runs forwards on fresh threads.
+        set_triton_allocator(x.device)
+
     z_strides = (z.stride(0), z.stride(1), z.stride(2)) if z is not None else (0, 0, 0)
     initial_states_strides = (
         (
@@ -465,7 +598,9 @@ def _chunk_scan_fwd(
         else (0, 0, 0, 0)
     )
 
-    _chunk_scan_fwd_kernel[grid](
+    launch_autotuned(
+        _chunk_scan_fwd_kernel,
+        grid,
         cb_ptr=cb,
         x_ptr=x,
         z_ptr=z,
@@ -521,5 +656,6 @@ def _chunk_scan_fwd(
         BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
         IS_TRITON_22=TRITON_22,
         HAS_INITSTATES=initial_states is not None,
+        USE_TD=use_td,
     )
     return

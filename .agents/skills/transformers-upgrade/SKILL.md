@@ -23,12 +23,14 @@ A version change is one of two jobs, and they usually come as a pair:
 2. Read the release notes for config validation changes, renamed auto-mapping
    formats, and removed attributes; these are what break vLLM.
 3. Search `tests/` for `min_transformers_version` and skip markers naming the
-   new version, and un-gate them.
+   new version, and run those tests on the new pin. Keep the gates: older
+   versions in the supported range still lack the feature, so a gate goes
+   only when the floor reaches it.
 4. Run the suites in [Testing](#testing) and fix what breaks. Mark every
    shim with a `# Transformers >= X` comment so the next floor raise finds it.
 
-Done when the [Testing](#testing) suites pass on the new pin and every test
-waiting on this version is un-gated.
+Done when the [Testing](#testing) suites and every test gated on this
+version pass on the new pin.
 
 ## Raise the floor (unvendoring pass)
 

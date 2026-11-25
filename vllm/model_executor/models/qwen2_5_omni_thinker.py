@@ -29,10 +29,11 @@ from typing import Annotated, Any, Literal
 import numpy as np
 import torch
 import torch.nn as nn
+import transformers
+from packaging.version import Version
 from transformers import PreTrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import (
-    Qwen2_5OmniConfig,
     Qwen2_5OmniThinkerConfig,
 )
 from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import (
@@ -40,15 +41,18 @@ from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import (
 )
 from transformers.models.qwen2_5_omni.processing_qwen2_5_omni import (
     Qwen2_5OmniProcessor,
+    Qwen2_5OmniProcessorKwargs,
 )
+from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from transformers.models.whisper import WhisperFeatureExtractor
 from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import MultiModalDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionTransformer,
@@ -74,10 +78,12 @@ from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
+    VideoItem,
 )
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     DictEmbeddingItems,
+    ImageSize,
     ModalityDataItems,
     MultiModalDataItems,
 )
@@ -95,6 +101,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.utils import get_mm_embedding_modality_masks
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -146,6 +153,45 @@ def unpad_and_flat_audio_features(
         for audio_feature, length in zip(input_audio_features, audio_feature_lengths)
     ]
     return torch.cat(unpadded_features, dim=-1)
+
+
+def may_interleave_audio_video(multimodal_embeddings: Sequence[torch.Tensor]) -> bool:
+    """Whether the batch may hold interleaved audio-in-video tokens.
+
+    Judged from the modality the encoder gather sets on each embedding, so it
+    needs no host read of `input_ids`. Untagged embeddings count as possibly
+    interleaved.
+    """
+    modalities = {getattr(embed, "modality", None) for embed in multimodal_embeddings}
+    return None in modalities or {"audio", "video"} <= modalities
+
+
+def get_omni_modality_masks(
+    input_ids: torch.Tensor,
+    multimodal_embeddings: Sequence[torch.Tensor],
+    is_multimodal: torch.Tensor,
+    token_ids: Mapping[str, int],
+) -> dict[str, torch.Tensor]:
+    """Position mask per modality in `token_ids`, restricted to `is_multimodal`.
+
+    Built from the batch placement the encoder gather attaches to each
+    embedding. Without it, falls back to reading `input_ids` on the host; that
+    read is deliberately not allow-listed so VLLM_GPU_SYNC_CHECK flags a lost
+    placement.
+    """
+    masks = get_mm_embedding_modality_masks(multimodal_embeddings, is_multimodal)
+    if masks is not None:
+        return {
+            modality: masks[modality]
+            if modality in masks
+            else torch.zeros_like(is_multimodal)
+            for modality in token_ids
+        }
+    input_ids_cpu = input_ids.cpu()
+    return {
+        modality: is_multimodal & (input_ids_cpu == token_id)
+        for modality, token_id in token_ids.items()
+    }
 
 
 def check_interleaved_audio_video(
@@ -205,7 +251,7 @@ def merge_interleaved_embeddings(
 
     When use_audio_in_video=True, video and audio tokens are interleaved in
     the token sequence, but embeddings are provided as separate contiguous
-    tensors. This function scatters each modality by the ``modality`` attribute
+    tensors. This function scatters each modality by the `modality` attribute
     attached to each embedding tensor (set during encoder gather) and also
     supports image embeddings in the same interleaved request.
 
@@ -347,6 +393,10 @@ def create_qwen2_5_omni_thinker_field_factory(
 class Qwen2_5OmniThinkerMultiModalDataParser(Qwen2VLMultiModalDataParser):
     embedding_fields = {
         **Qwen2VLMultiModalDataParser.embedding_fields,
+        "video": {
+            **Qwen2VLMultiModalDataParser.embedding_fields["video"],
+            "second_per_grid_ts": "metadata",
+        },
         "audio": {
             "input_audio_features": "values",
             "audio_feature_lengths": "metadata",
@@ -378,12 +428,39 @@ class Qwen2_5OmniThinkerMultiModalDataParser(Qwen2VLMultiModalDataParser):
 
         return super()._parse_audio_data(data)
 
+    def _parse_video_data(
+        self,
+        data: dict[str, torch.Tensor] | ModalityData[VideoItem],
+    ) -> ModalityDataItems[Any, Any] | None:
+        if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("video")
+            # Legacy embedding inputs omit timing and use the model's default.
+            required.discard("second_per_grid_ts")
+            optional.add("second_per_grid_ts")
+            if "second_per_grid_ts" in data:
+                data = {
+                    **data,
+                    "second_per_grid_ts": data["second_per_grid_ts"].flatten(),
+                }
+            return DictEmbeddingItems(
+                data,
+                modality="video",
+                required_fields=required,
+                optional_fields=optional,
+                fields_factory=create_qwen2_5_omni_thinker_field_factory(
+                    self._spatial_merge_size
+                ),
+            )
+        return super()._parse_video_data(data)
+
 
 class Qwen2_5OmniThinkerProcessingInfo(
     Qwen2AudioProcessingInfo, Qwen2_5_VLProcessingInfo
 ):
+    processor_kwargs_cls: type = Qwen2_5OmniProcessorKwargs
+
     def get_hf_config(self):
-        return self.ctx.get_hf_config(Qwen2_5OmniConfig).thinker_config
+        return self.ctx.get_hf_config(Qwen2_5OmniThinkerConfig)
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5OmniProcessor:
         return self.ctx.get_hf_processor(
@@ -414,6 +491,73 @@ class Qwen2_5OmniThinkerProcessingInfo(
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
+
+    def _get_videos_kwargs(self) -> dict[str, Any]:
+        processor = self.get_hf_processor()
+        return processor._merge_kwargs(
+            self.processor_kwargs_cls,
+            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+            **self.ctx.get_merged_mm_kwargs({}),
+        )["videos_kwargs"]
+
+    def _get_video_size(self) -> dict[str, int]:
+        merged_kwargs = self.ctx.get_merged_mm_kwargs({})
+        if merged_kwargs.keys() & {"size", "min_pixels", "max_pixels"}:
+            return self._get_vision_size(
+                merged_kwargs,
+                default_size=self.get_hf_processor().video_processor.size,
+            )
+        return self._get_videos_kwargs()["size"]
+
+    def get_video_size_with_most_features(self) -> ImageSize:
+        return self.get_image_size_with_most_features(
+            max_pixels=self._get_video_size()["longest_edge"]
+        )
+
+    def get_video_frame_size(self, width: int, height: int) -> ImageSize:
+        video_processor = self.get_hf_processor().video_processor
+        if not self._get_videos_kwargs().get("do_resize", video_processor.do_resize):
+            return ImageSize(width=width, height=height)
+        vision_config = self.get_hf_config().vision_config
+        video_size = self._get_video_size()
+        resized_height, resized_width = smart_resize(
+            height=height,
+            width=width,
+            factor=vision_config.patch_size * vision_config.spatial_merge_size,
+            min_pixels=video_size["shortest_edge"],
+            max_pixels=video_size["longest_edge"],
+        )
+        return ImageSize(width=resized_width, height=resized_height)
+
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        num_videos: int,
+        max_frames_per_video: int | None = None,
+    ) -> int:
+        video_processor = self.get_hf_processor().video_processor
+        temporal_patch_size = video_processor.temporal_patch_size
+        target_size = self.get_video_size_with_most_features()
+        tokens_per_step = self.get_num_video_tokens(
+            image_width=target_size.width,
+            image_height=target_size.height,
+            num_frames=temporal_patch_size,
+            image_processor=video_processor,
+            mm_kwargs={},
+        )
+        num_videos = max(num_videos, 1)
+        num_steps = max(seq_len // num_videos // tokens_per_step, 1)
+        num_frames = num_steps * temporal_patch_size
+        if max_frames_per_video is not None:
+            num_frames = min(num_frames, max_frames_per_video)
+        return num_frames
+
+    def get_max_video_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        return seq_len
 
     def get_mm_max_tokens_per_item(
         self,
@@ -451,7 +595,9 @@ class Qwen2_5OmniThinkerProcessingInfo(
 
 _I = TypeVar("_I", bound=BaseProcessingInfo, default=Qwen2_5OmniThinkerProcessingInfo)
 _VI = TypeVar(
-    "_VI", bound=Qwen2VLProcessingInfo, default=Qwen2_5OmniThinkerProcessingInfo
+    "_VI",
+    bound=Qwen2_5OmniThinkerProcessingInfo,
+    default=Qwen2_5OmniThinkerProcessingInfo,
 )
 
 
@@ -490,9 +636,16 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[_VI]):
         )
 
         target_width, target_height = self.info.get_image_size_with_most_features()
-        target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
-        )
+        video_size = self.info.get_video_size_with_most_features()
+        video_overrides = mm_options.get("video")
+        if video_overrides and (video_overrides.width or video_overrides.height):
+            video_size = self.info.get_video_frame_size(
+                video_overrides.width or video_size.width,
+                video_overrides.height or video_size.height,
+            )
+            video_overrides = VideoDummyOptions(
+                count=video_overrides.count, num_frames=video_overrides.num_frames
+            )
 
         mm_data = {
             "audio": self._get_dummy_audios(
@@ -507,15 +660,23 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[_VI]):
                 overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
-                num_frames=target_num_frames,
+                width=video_size.width,
+                height=video_size.height,
+                num_frames=self.info.get_num_frames_with_most_features(
+                    seq_len, mm_counts.get("video", 0)
+                ),
                 num_videos=mm_counts.get("video", 0),
-                overrides=mm_options.get("video"),
+                overrides=video_overrides,
             ),
         }
 
         return mm_data
+
+
+# Transformers 5.23 validates audio counts unless video audio slots are marked.
+_PASS_AUDIO_FROM_VIDEO_INDICES = Version(transformers.__version__) >= Version(
+    "5.23.0.dev0"
+)
 
 
 class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
@@ -541,6 +702,12 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 standalone_mm_counts = dict(mm_counts)
                 standalone_mm_counts["audio"] -= num_videos
                 hf_inputs.hf_data["text"] = self._get_hf_mm_text(standalone_mm_counts)
+                if _PASS_AUDIO_FROM_VIDEO_INDICES:
+                    num_standalone = standalone_mm_counts["audio"]
+                    hf_inputs.hf_data["audio_from_video_indices"] = [
+                        *range(num_videos),
+                        *[None] * num_standalone,
+                    ]
 
         hf_data = hf_inputs.hf_data
         normalized_kwargs = hf_inputs.hf_kwargs
@@ -831,7 +998,10 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
             audio_in_video_item_idx += 1
 
             second_per_grid_ts = hf_processor_mm_kwargs.get("second_per_grid_ts", None)
-            if second_per_grid_ts:
+            processed_second_per_grid_ts = out_mm_data.get("second_per_grid_ts")
+            if isinstance(processed_second_per_grid_ts, torch.Tensor):
+                video_second_per_grid_t = processed_second_per_grid_ts[item_idx].item()
+            elif second_per_grid_ts:
                 video_second_per_grid_t = second_per_grid_ts[item_idx]
             else:
                 video_second_per_grid_t = 1.0
@@ -875,8 +1045,8 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
     def _postprocess_hf_mm_data(
         self,
-        hf_data: Mapping[str, object],
-        hf_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
         input_features = processed_data.pop("input_features", None)
@@ -897,7 +1067,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if video_second_per_grid is not None:
             processed_data["second_per_grid_ts"] = video_second_per_grid
 
-        use_audio_in_video = hf_kwargs.get("use_audio_in_video", False)
+        use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
         processed_data["use_audio_in_video"] = torch.tensor(use_audio_in_video)
         processed_data.pop("input_ids", None)
 
@@ -998,37 +1168,39 @@ class Qwen2_5OmniConditionalGenerationMixin:
         audio_input: Qwen2_5OmniAudioFeatureInputs,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
-        # audio_feature_lengths is keep_on_cpu; the audio tower derives
-        # device placement from feature_lens, so move it explicitly.
-        audio_feature_lengths = async_tensor_h2d(
-            audio_input["audio_feature_lengths"], input_features.device
-        )
-
+        # audio_feature_lengths is keep_on_cpu: take the split sizes from the
+        # host copy, and move it for the audio tower, which derives device
+        # placement from feature_lens.
+        audio_feature_lengths_cpu = audio_input["audio_feature_lengths"]
         audio_feat_lengths, audio_output_lengths = (
-            self.audio_tower._get_feat_extract_output_lengths(audio_feature_lengths)
+            self.audio_tower._get_feat_extract_output_lengths(audio_feature_lengths_cpu)
         )
+        audio_feature_lengths = async_tensor_h2d(
+            audio_feature_lengths_cpu, input_features.device
+        )
+        audio_feat_lengths = async_tensor_h2d(audio_feat_lengths, input_features.device)
 
+        # The transformers audio encoder reads its lengths back internally.
         with gpu_sync_allowed():
             audio_outputs = self.audio_tower(
                 input_features.to(self.audio_tower.dtype),
                 feature_lens=audio_feature_lengths,
                 aftercnn_lens=audio_feat_lengths,
             )
-            split_sizes = audio_output_lengths.tolist()
-        return audio_outputs.last_hidden_state.split(split_sizes)
+        return audio_outputs.last_hidden_state.split(audio_output_lengths.tolist())
 
     def _process_image_input(
         self, image_input: Qwen2_5_VLImageInputs
     ) -> tuple[torch.Tensor, ...]:
-        if image_input["type"] == "image_embeds":
-            return image_input["image_embeds"].type(self.visual.dtype)
-
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
 
-        pixel_values = image_input["pixel_values"].type(self.visual.dtype)
-        with set_forward_context(None, self.vllm_config):
-            image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+        if image_input["type"] == "image_embeds":
+            image_embeds = image_input["image_embeds"].type(self.visual.dtype)
+        else:
+            pixel_values = image_input["pixel_values"]
+            with set_forward_context(None, self.vllm_config):
+                image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod(-1) // merge_size // merge_size
@@ -1038,16 +1210,16 @@ class Qwen2_5OmniConditionalGenerationMixin:
     def _process_video_input(
         self,
         video_input: Qwen2_5_VLVideoInputs,
-    ) -> torch.Tensor:
-        if video_input["type"] == "video_embeds":
-            return video_input["video_embeds"].type(self.visual.dtype)
-
+    ) -> tuple[torch.Tensor, ...]:
         grid_thw = video_input["video_grid_thw"]
         assert grid_thw.ndim == 2
 
-        pixel_values_videos = video_input["pixel_values_videos"].type(self.visual.dtype)
-        with set_forward_context(None, self.vllm_config):
-            video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
+        if video_input["type"] == "video_embeds":
+            video_embeds = video_input["video_embeds"].type(self.visual.dtype)
+        else:
+            pixel_values_videos = video_input["pixel_values_videos"]
+            with set_forward_context(None, self.vllm_config):
+                video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod(-1) // merge_size // merge_size
@@ -1068,6 +1240,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     SupportsMRoPE,
     Qwen2_5OmniConditionalGenerationMixin,
 ):
+    supports_mm_device_do_normalize = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "thinker.lm_head.": "language_model.lm_head.",
@@ -1108,9 +1282,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.vllm_config = vllm_config
-        thinker_config: Qwen2_5OmniThinkerConfig = (
-            vllm_config.model_config.hf_config.thinker_config
-        )
+        thinker_config: Qwen2_5OmniThinkerConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = thinker_config
@@ -1138,6 +1310,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 vision_config=thinker_config.vision_config,
                 norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
+                input_norm=build_mm_input_norm(vllm_config.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
@@ -1509,13 +1682,22 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         video_token_id = self.config.video_token_index
         audio_token_id = self.config.audio_token_index
 
-        with gpu_sync_allowed():
-            input_ids_cpu = input_ids.cpu()
-            is_video = is_multimodal & (input_ids_cpu == video_token_id)
-            is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
+        if not may_interleave_audio_video(multimodal_embeddings):
+            return super().embed_input_ids(
+                input_ids,
+                multimodal_embeddings=multimodal_embeddings,
+                is_multimodal=is_multimodal,
+            )
 
-            num_video = is_video.sum().item()
-            num_audio = is_audio.sum().item()
+        masks = get_omni_modality_masks(
+            input_ids,
+            multimodal_embeddings,
+            is_multimodal,
+            {"video": video_token_id, "audio": audio_token_id},
+        )
+        is_video, is_audio = masks["video"], masks["audio"]
+        num_video = is_video.sum().item()
+        num_audio = is_audio.sum().item()
 
         if check_interleaved_audio_video(is_video, is_audio, num_video, num_audio):
             inputs_embeds = self._embed_text_input_ids(

@@ -17,7 +17,7 @@ from .protocol import (
     OpenAIDecisionUsage,
     OutputTokensDetails,
 )
-from .question_types import StructuredDecisionError
+from .question_types import Question, StructuredDecisionError
 from .strategies import ReadStrategy
 
 
@@ -37,6 +37,20 @@ class BaseServingDecisions(BaseServing):
         self.strategy = strategy
         self.limits = strategy.limits()
 
+    def _admit(self, questions: list[Question], joint: bool) -> bool:
+        """Admits the reads and returns whether they read jointly."""
+        if joint and not self.strategy.joint_reads:
+            raise StructuredDecisionError(
+                "joint: this model reads each question on its own; "
+                "joint reads need DiffusionGemma"
+            )
+        # One question reads best with the per-question prompt.
+        joint = joint and len(questions) > 1
+        self.strategy.context.engine_client.check_admission(
+            self.strategy.num_requests(questions, joint=joint)
+        )
+        return joint
+
 
 class OpenAIServingDecisions(BaseServingDecisions):
     async def create_decisions(
@@ -54,11 +68,13 @@ class OpenAIServingDecisions(BaseServingDecisions):
                     f"questions: at most {self.limits.max_questions} for this model"
                 )
             questions = [
-                make_read_question(i, question, self.limits.max_options)
+                make_read_question(
+                    i, question, self.limits.max_options, self.limits.labeled
+                )
                 for i, question in enumerate(request.questions)
             ]
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
-            engine.check_admission(len(questions))
+            joint = self._admit(questions, request.joint)
             trace_headers = (
                 None
                 if raw_request is None
@@ -66,7 +82,8 @@ class OpenAIServingDecisions(BaseServingDecisions):
             )
             text = input_text(request.input)
             self._log_inputs(request_id, text, None, lora_request)
-            reads = await self.strategy.read(
+            read_fn = self.strategy.read_joint if joint else self.strategy.read
+            reads = await read_fn(
                 questions,
                 None,
                 text,

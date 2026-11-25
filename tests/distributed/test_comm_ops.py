@@ -23,7 +23,12 @@ from vllm.distributed import (
 )
 from vllm.distributed.device_communicators import flashinfer_all_reduce
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
-from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    TensorMetadata,
+    single_pp_stage,
+)
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
 from ..utils import (
@@ -46,12 +51,12 @@ def all_reduce_test_worker(
     # they will be able to set the device to the correct GPU
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{current_platform.device_type}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     num_elements = 8
     all_tensors = [
-        torch.arange(num_elements, dtype=torch.float32, device="cuda") * (r + 1)
+        torch.arange(num_elements, dtype=torch.float32, device=device) * (r + 1)
         for r in range(tp_size)
     ]
     expected = torch.sum(torch.stack(all_tensors, dim=0), dim=0)
@@ -72,13 +77,13 @@ def reduce_scatter_test_worker(
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{current_platform.device_type}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     num_elements = 8
     all_tensors = [
-        torch.arange(num_elements, dtype=torch.float32, device="cuda") * (r + 1)
+        torch.arange(num_elements, dtype=torch.float32, device=device) * (r + 1)
         for r in range(tp_size)
     ]
 
@@ -103,7 +108,7 @@ def all_gather_test_worker(
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{current_platform.device_type}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     num_dimensions = 3
@@ -113,7 +118,7 @@ def all_gather_test_worker(
         total_size *= s
     for all_gather_dimension in range(num_dimensions):
         all_tensors = [
-            torch.arange(total_size, dtype=torch.float32, device="cuda").reshape(
+            torch.arange(total_size, dtype=torch.float32, device=device).reshape(
                 tensor_size
             )
             * (r + 1)
@@ -137,19 +142,19 @@ def broadcast_tensor_dict_test_worker(
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{current_platform.device_type}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     test_dict = {
         # device tensor
-        "a": torch.arange(8, dtype=torch.float32, device="cuda"),
+        "a": torch.arange(8, dtype=torch.float32, device=device),
         # CPU tensor
         "b": torch.arange(16, dtype=torch.int8, device="cpu"),
         "c": "test",
         "d": [1, 2, 3],
         "e": {"a": 1, "b": 2},
         # empty tensor
-        "f": torch.tensor([], dtype=torch.float32, device="cuda"),
+        "f": torch.tensor([], dtype=torch.float32, device=device),
     }
 
     if (rank % tp_size) == 0:
@@ -174,20 +179,20 @@ def send_recv_tensor_dict_test_worker(
     distributed_init_port: str,
 ):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{current_platform.device_type}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     test_dict = {
         # device tensor
-        "a": torch.arange(8, dtype=torch.float32, device="cuda"),
+        "a": torch.arange(8, dtype=torch.float32, device=device),
         # CPU tensor
         "b": torch.arange(16, dtype=torch.int8, device="cpu"),
         "c": "test",
         "d": [1, 2, 3],
         "e": {"a": 1, "b": 2},
         # empty tensor
-        "f": torch.tensor([], dtype=torch.float32, device="cuda"),
+        "f": torch.tensor([], dtype=torch.float32, device=device),
     }
 
     if not get_pp_group().is_first_rank:
@@ -204,6 +209,29 @@ def send_recv_tensor_dict_test_worker(
         assert recv_dict["d"] == test_dict["d"]
         assert recv_dict["e"] == test_dict["e"]
         torch.testing.assert_close(recv_dict["f"], test_dict["f"])
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def single_pp_stage_test_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+):
+    """A model built in `single_pp_stage()`, such as a draft model, sees this
+    rank alone as the PP group, and its PP communication stays on this rank."""
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(device)
+    init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+
+    with single_pp_stage():
+        stage = get_pp_group()
+        assert stage.is_first_rank and stage.is_last_rank
+        for group in (stage.cpu_group, stage.device_group):
+            assert torch.distributed.get_process_group_ranks(group) == [rank]
+    assert get_pp_group().world_size == pp_size
 
 
 class _DummyWork:
@@ -396,15 +424,161 @@ def test_cuda_communicator_resume_retries_failed_restore(
     assert workspace.checkpoint_restore.call_count == 2
 
 
+def _fabric_probe_must_not_run(device: int) -> bool:
+    raise AssertionError("fabric probe must not be consulted on this path")
+
+
+def _patch_fi_ar_module(
+    monkeypatch: pytest.MonkeyPatch,
+    node_count: int,
+    fabric_supported: Callable[[int], bool],
+) -> tuple[Mock, Mock]:
+    # patch flashinfer_all_reduce for CPU-only _create_workspace tests; returns
+    # the fake flashinfer_comm and the all_ranks_support_mnnvl vote mock.
+    fake_comm = Mock()
+    fake_comm.create_allreduce_fusion_workspace.return_value.mc_ptr = 1
+    vote = Mock(
+        side_effect=lambda local_supported, world_size, comm_backend: local_supported
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "flashinfer_comm", fake_comm, raising=False
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "TorchDistBackend", lambda group: group, raising=False
+    )
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace_groups", {})
+    monkeypatch.setattr(flashinfer_all_reduce, "_node_count", lambda group: node_count)
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "is_mnnvl_fabric_supported",
+        fabric_supported,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "all_ranks_support_mnnvl", vote, raising=False
+    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    return fake_comm, vote
+
+
+def _create_mnnvl_workspace(group: object | None = None):
+    return flashinfer_all_reduce._create_workspace(
+        backend="mnnvl",
+        world_size=4,
+        rank=0,
+        max_token_num=128,
+        hidden_dim=64,
+        dtype=torch.bfloat16,
+        group=group if group is not None else object(),
+    )
+
+
+def test_create_workspace_skips_mnnvl_when_multinode_fabric_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # on IB-only multi-node the creation attempt itself hangs and leaks
+    # (#51986), so the fabric must be probed before it is ever made.
+    group = object()
+    fake_comm, vote = _patch_fi_ar_module(
+        monkeypatch, node_count=2, fabric_supported=lambda device: False
+    )
+
+    assert _create_mnnvl_workspace(group) is None
+    fake_comm.create_allreduce_fusion_workspace.assert_not_called()
+    # TorchDistBackend is identity-patched: the vote must get this group's
+    # comm backend.
+    assert vote.call_args.args == (False, 4, group)
+
+
+def test_create_workspace_attempts_mnnvl_when_multinode_fabric_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_comm, _ = _patch_fi_ar_module(
+        monkeypatch, node_count=2, fabric_supported=lambda device: True
+    )
+
+    workspace = _create_mnnvl_workspace()
+
+    assert workspace is fake_comm.create_allreduce_fusion_workspace.return_value
+    fake_comm.create_allreduce_fusion_workspace.assert_called_once()
+
+
+def test_create_workspace_skips_fabric_probe_for_node_local_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # a group confined to one node (single-node job, or TP=8 in a 2-node DP
+    # job) needs no NVLink fabric.
+    fake_comm, _ = _patch_fi_ar_module(
+        monkeypatch, node_count=1, fabric_supported=_fabric_probe_must_not_run
+    )
+
+    workspace = _create_mnnvl_workspace()
+
+    assert workspace is fake_comm.create_allreduce_fusion_workspace.return_value
+    fake_comm.create_allreduce_fusion_workspace.assert_called_once()
+
+
+def test_create_workspace_joins_collective_vote_when_local_probe_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # a rank whose probe fails must still vote (as unsupported), otherwise
+    # the other ranks deadlock in the allgather.
+    def broken_probe(device: int) -> bool:
+        raise RuntimeError("NVML unavailable")
+
+    fake_comm, vote = _patch_fi_ar_module(
+        monkeypatch, node_count=2, fabric_supported=broken_probe
+    )
+
+    assert _create_mnnvl_workspace() is None
+    vote.assert_called_once()
+    assert vote.call_args.args[0] is False
+    fake_comm.create_allreduce_fusion_workspace.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "getter_name", ["get_fi_ar_workspace", "get_fi_ar_quant_workspace"]
+)
+def test_flashinfer_workspace_failure_does_not_repeat_mnnvl_vote(
+    monkeypatch: pytest.MonkeyPatch,
+    getter_name: str,
+) -> None:
+    # The public getters latch failures, keeping probes out of the per-layer path.
+    fake_comm, vote = _patch_fi_ar_module(
+        monkeypatch, node_count=2, fabric_supported=lambda device: False
+    )
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace", None)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_quant_workspace", None)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace_failed", False)
+    monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_quant_workspace_failed", False)
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "_resolve_fi_ar_backend",
+        Mock(return_value=("mnnvl", False)),
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce, "_get_tuned_standalone_max_size", Mock(return_value=None)
+    )
+    get_workspace = getattr(flashinfer_all_reduce, getter_name)
+    args = (4, 0, 128, 64, torch.bfloat16, object())
+
+    assert get_workspace(*args) is None
+    assert get_workspace(*args) is None
+    vote.assert_called_once()
+    fake_comm.create_allreduce_fusion_workspace.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("backend", "capability", "world_size", "nodes", "expected"),
     [
-        ("mnnvl", 103, 4, 1, 80 * flashinfer_all_reduce.MiB - 1),
-        ("mnnvl", 103, 8, 2, 64 * flashinfer_all_reduce.MiB - 1),
-        ("mnnvl", 103, 16, 4, 8 * flashinfer_all_reduce.MiB - 1),
+        ("mnnvl", 100, 8, 1, 128 * flashinfer_all_reduce.MiB),
+        ("mnnvl", 100, 8, 2, 128 * flashinfer_all_reduce.MiB),
+        ("mnnvl", 103, 4, 1, 80 * flashinfer_all_reduce.MiB),
+        ("mnnvl", 103, 8, 2, 128 * flashinfer_all_reduce.MiB),
+        ("mnnvl", 103, 16, 4, 8 * flashinfer_all_reduce.MiB),
         ("mnnvl", 103, 2, 1, None),
         ("mnnvl", 103, 12, 3, None),
-        ("mnnvl", 103, 8, 1, 64 * flashinfer_all_reduce.MiB - 1),
+        ("mnnvl", 103, 8, 1, 128 * flashinfer_all_reduce.MiB),
         ("trtllm", 103, 8, 2, None),
         ("mnnvl", 90, 8, 2, None),
     ],
@@ -432,9 +606,12 @@ def test_flashinfer_standalone_size_tuning(
     )
 
 
-@pytest.mark.parametrize(("enabled", "expected"), [(True, 4681), (False, 128)])
+@pytest.mark.parametrize(
+    ("enabled", "hidden_dim", "expected"),
+    [(True, 7168, 9362), (True, 4096, 16384), (False, 4096, 128)],
+)
 def test_flashinfer_standalone_workspace_size(
-    monkeypatch: pytest.MonkeyPatch, enabled: bool, expected: int
+    monkeypatch: pytest.MonkeyPatch, enabled: bool, hidden_dim: int, expected: int
 ) -> None:
     create_workspace = Mock(return_value=Mock(backend="mnnvl"))
     monkeypatch.setattr(
@@ -450,11 +627,13 @@ def test_flashinfer_standalone_workspace_size(
     monkeypatch.setattr(
         flashinfer_all_reduce,
         "_get_tuned_standalone_max_size",
-        Mock(return_value=64 * flashinfer_all_reduce.MiB - 1),
+        Mock(return_value=128 * flashinfer_all_reduce.MiB),
     )
     monkeypatch.setattr(flashinfer_all_reduce, "_create_workspace", create_workspace)
 
-    flashinfer_all_reduce.get_fi_ar_workspace(8, 0, 128, 7168, torch.bfloat16, Mock())
+    flashinfer_all_reduce.get_fi_ar_workspace(
+        8, 0, 128, hidden_dim, torch.bfloat16, Mock()
+    )
 
     assert create_workspace.call_args.args[3] == expected
 
@@ -462,8 +641,8 @@ def test_flashinfer_standalone_workspace_size(
 @pytest.mark.parametrize(
     ("node_count", "is_blackwell", "expected"),
     [
-        (1, False, ("trtllm", False)),
-        (1, True, ("trtllm", False)),
+        (1, False, ("mnnvl", True)),
+        (1, True, ("mnnvl", True)),
         (2, False, (None, False)),
         (2, True, ("mnnvl", False)),
     ],
@@ -550,6 +729,79 @@ def test_aiter_all_gather_precedes_pynccl(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(communicator, "_can_use_aiter_ag_rs", Mock(return_value=True))
 
     assert communicator.all_gatherv(torch.empty(1)) is output
+
+
+def test_reduce_scatter_falls_back_when_pynccl_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.world_size = 2
+    communicator.pynccl_comm = Mock(disabled=True)
+    fallback = Mock(return_value=torch.empty(2))
+    monkeypatch.setattr(
+        "vllm.distributed.device_communicators.base_device_communicator."
+        "DeviceCommunicatorBase.reduce_scatter",
+        fallback,
+    )
+
+    inp = torch.empty(4)
+    assert communicator.reduce_scatter(inp, 0) is fallback.return_value
+    fallback.assert_called_once_with(inp, 0)
+
+
+@pytest.mark.parametrize(
+    ("enabled", "world_size", "shape", "dim", "dtype", "transpose", "aiter_args"),
+    [
+        (True, 4, (7, 1296), 0, torch.bfloat16, False, ((7, 1296), 0)),
+        (True, 4, (7, 6, 256), 1, torch.bfloat16, False, ((7, 1536), -1)),
+        (True, 8, (7, 6400), -1, torch.float32, False, ((7, 6400), -1)),
+        (False, 4, (7, 6400), -1, torch.bfloat16, False, None),
+        (True, 4, (8, 12), 1, torch.bfloat16, False, None),
+        (True, 4, (0, 1536), 1, torch.bfloat16, False, None),
+        (True, 4, ((1 << 19) + 8,), 0, torch.bfloat16, False, None),
+        (True, 4, (7, 64), 0, torch.int32, False, None),
+        (True, 4, (64, 7), -1, torch.bfloat16, True, None),
+    ],
+)
+def test_rocm_tp_all_gather_uses_aiter(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled,
+    world_size,
+    shape,
+    dim,
+    dtype,
+    transpose,
+    aiter_args,
+) -> None:
+    def gather(inp: torch.Tensor, dim: int) -> torch.Tensor:
+        return torch.cat([inp + rank for rank in range(world_size)], dim=dim)
+
+    aiter_comm = Mock()
+    aiter_comm.should_custom_ag.side_effect = lambda inp: inp.nbytes <= 1 << 20
+    aiter_comm.all_gather_unreg.side_effect = gather
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.world_size = world_size
+    communicator.use_aiter_tp_all_gather = enabled
+    communicator.aiter_ar_comm = aiter_comm
+    communicator.pynccl_comm = Mock(disabled=False)
+    module = "vllm.distributed.device_communicators"
+    monkeypatch.setattr(
+        f"{module}.cuda_communicator.current_platform.is_rocm", lambda: True
+    )
+    monkeypatch.setattr(
+        f"{module}.base_device_communicator.DeviceCommunicatorBase.all_gather",
+        Mock(side_effect=gather),
+    )
+
+    inp = (torch.randn(shape) * 100).to(dtype)
+    if transpose:
+        inp = inp.t()
+    assert torch.equal(communicator.all_gather(inp, dim), gather(inp, dim))
+    if aiter_args is None:
+        aiter_comm.all_gather_unreg.assert_not_called()
+    else:
+        (aiter_inp,), kwargs = aiter_comm.all_gather_unreg.call_args
+        assert (aiter_inp.shape, kwargs["dim"]) == aiter_args
 
 
 def test_isend_object_posts_size_then_object_and_releases_on_wait(
@@ -719,12 +971,12 @@ def send_recv_test_worker(
     distributed_init_port: str,
 ):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    device = torch.device(f"cuda:{rank}")
+    device = torch.device(f"{current_platform.device_type}:{rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     size = 64
-    test_tensor = torch.arange(64, dtype=torch.float32, device="cuda")
+    test_tensor = torch.arange(64, dtype=torch.float32, device=device)
 
     if not get_pp_group().is_first_rank:
         recv_tensor = get_pp_group().recv(size, dtype=torch.float32)
@@ -753,7 +1005,12 @@ def test_multi_process_tensor_parallel(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("pp_size", [2])
 @pytest.mark.parametrize(
-    "test_target", [send_recv_test_worker, send_recv_tensor_dict_test_worker]
+    "test_target",
+    [
+        send_recv_test_worker,
+        send_recv_tensor_dict_test_worker,
+        single_pp_stage_test_worker,
+    ],
 )
 def test_multi_process_pipeline_parallel(
     monkeypatch: pytest.MonkeyPatch,

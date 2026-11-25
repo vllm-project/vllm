@@ -12,6 +12,7 @@ from vllm.utils.import_utils import PlaceholderModule
 from .base import (
     VideoSourceMetadata,
     VideoTargetMetadata,
+    charge_sampled_frames,
     check_frame_pixel_limit,
 )
 
@@ -34,14 +35,17 @@ def decode_opencv(
     frame_recovery: bool = False,
 ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
     cap = OpenCVVideoBackendMixin.open_video_capture(data)
-    check_frame_pixel_limit(
-        int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-        int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    check_frame_pixel_limit(width, height)
+    source = loader_cls._prepare_source(
+        OpenCVVideoBackendMixin.get_video_metadata(data, cap=cap)
     )
-    source = loader_cls._prepare_source(OpenCVVideoBackendMixin.get_video_metadata(cap))
     frame_idx = loader_cls.compute_frames_index_to_sample(
         source=source, target=target, **sampling_kwargs
     )
+    # OpenCV reads each distinct index once.
+    charge_sampled_frames(len(set(frame_idx)), width, height)
     frames, valid = loader_cls.read_frames(
         cap,
         frame_idx,
@@ -74,10 +78,37 @@ class OpenCVVideoBackendMixin:
             raise ValueError("Could not open video stream")
         return cap
 
+    @classmethod
+    def demux_count_frames(cls, data: bytes) -> int:
+        """Count frames with OpenCV's demuxer-only mode."""
+        # NOTE: buf must stay referenced until after release().
+        # OpenCV's Python stream binding does not safely own the stream object
+        buf = BytesIO(data)
+        demux_cap = cv2.VideoCapture(
+            buf, cls.get_cv2_video_api(), [cv2.CAP_PROP_FORMAT, -1]
+        )
+        count = 0
+        while demux_cap.grab():
+            count += 1
+        demux_cap.release()
+        if count == 0:
+            raise ValueError("Could not determine the number of video frames")
+        return count
+
     @staticmethod
-    def get_video_metadata(cap: "cv2.VideoCapture") -> VideoSourceMetadata:
+    def get_video_metadata(
+        data: bytes, *, cap: "cv2.VideoCapture | None" = None
+    ) -> VideoSourceMetadata:
+        if cap is None:
+            cap = OpenCVVideoBackendMixin.open_video_capture(data)
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         original_fps = cap.get(cv2.CAP_PROP_FPS)
+        if total_frames_num <= 0:
+            # Streamed WebM/MKV and raw H.264 miss frame count in headers;
+            # We need to use demux frames count for retrieval
+            total_frames_num = OpenCVVideoBackendMixin.demux_count_frames(data)
+            duration = total_frames_num / original_fps if original_fps > 0 else 0
+            return VideoSourceMetadata(total_frames_num, original_fps, duration)
         # CAP_PROP_FRAME_COUNT counts every physical sample in the container,
         # overstating the presentable frames when an mp4 edit list hides the
         # decode lead-in (e.g. a lossless `ffmpeg -ss ... -c copy` trim).
@@ -87,7 +118,7 @@ class OpenCVVideoBackendMixin:
         # may land mid-stream on corrupt files, so only trust it when the
         # stream really ends there. A one-frame tolerance keeps mere header
         # miscounts from being "corrected".
-        if total_frames_num > 0 and cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1.0):
+        if total_frames_num > 1 and cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1.0):
             visible_frames = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
             at_stream_end = not cap.grab()
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)

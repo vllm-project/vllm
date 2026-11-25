@@ -112,7 +112,7 @@ def test_sentencepiece_leading_space_matches_engine():
     strings match the engine's per-token detokenization (leading space
     restored), so `/v1/completions/derender` top_logprobs keys do not collide.
     Regression test for #59241."""
-    tokenizer = get_tokenizer("hmellor/tiny-random-LlamaForCausalLM")
+    tokenizer = get_tokenizer("vllm-project/tiny-random-LlamaForCausalLM")
     spaced = tokenizer.convert_tokens_to_ids("▁true")
     bare = tokenizer.convert_tokens_to_ids("true")
     assert spaced != bare
@@ -139,7 +139,7 @@ def test_sentencepiece_leading_space_matches_engine():
     assert [t.token for t in entry.top_logprobs] == convert_ids_list_to_tokens(
         tokenizer, [spaced, bare]
     )
-    completion = _convert_chat_logprobs_to_completion_logprobs(resolved)
+    completion = _convert_chat_logprobs_to_completion_logprobs(resolved, logprobs)
     assert completion.top_logprobs == [{" true": -0.5, "true": -1.5}]
 
 
@@ -169,4 +169,26 @@ def test_unknown_top_id_does_not_shift_the_other_candidates():
     assert [(t.token, t.bytes) for t in entry.top_logprobs] == [
         ("", None),
         ("ok", list(b"ok")),
+    ]
+
+
+def test_token_id_placeholders_preserve_sampled_and_top_logprobs():
+    logprobs = GenerateLogProbs(
+        content=[
+            GenerateLogProbsContent(
+                token_id=SECOND_BYTE,
+                logprob=-0.5,
+                top_logprobs=[
+                    GenerateLogProb(token_id=FIRST_BYTE, logprob=-1.5),
+                ],
+            )
+        ]
+    )
+    resolved = _resolve_logprobs(
+        logprobs, _StubTokenizer(), return_tokens_as_token_ids=True
+    )
+    entry = resolved.content[0]
+    assert (entry.token, entry.bytes, entry.logprob) == ("token_id:11", None, -0.5)
+    assert [(top.token, top.bytes, top.logprob) for top in entry.top_logprobs] == [
+        ("token_id:10", None, -1.5)
     ]

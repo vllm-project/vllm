@@ -36,7 +36,7 @@ For further details on pooling models, please refer to [this page](../models/poo
 
 For further details on profiling, please refer to [this page](../contributing/profiling.md).
 
-- `LLM.start_profile` - Starts profiling with an optional custom trace prefix.
+- `LLM.start_profile` - Starts profiling with an optional custom trace prefix (`profile_prefix`) and optional profiler keyword arguments (`profiler_kwargs`).
 - `LLM.stop_profile` - Stops the ongoing profiling session.
 
 ## Sleep Mode APIs
@@ -59,7 +59,7 @@ For further details on metrics, please refer to [this page](../design/metrics.md
 
 ## Weight Transfer APIs (RL Training)
 
-For further details on Weight Transfer, please refer to [this page](../training/weight_transfer/README.md).
+For further details on Weight Transfer, please refer to [this page](../training/weight_updates/README.md).
 
 - `LLM.init_weight_transfer_engine` - Initializes the weight transfer engine for RL training.
 - `LLM.start_weight_update` - Starts a new weight update cycle.
@@ -72,6 +72,10 @@ For further details on Weight Transfer, please refer to [this page](../training/
 
 - `LLM.collective_rpc` - Executes a method or callable collectively across all workers.
 - `LLM.apply_model` - Applies a function directly to the model inside each worker.
+
+## Model Inspection APIs
+
+- `LLM.get_model_inspection` - Returns a hierarchical view of the model, querying workers on the first call and caching the result.
 
 ## API Reference
 

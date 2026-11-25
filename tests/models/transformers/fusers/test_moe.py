@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from vllm.model_executor.models.transformers.fusers import MoEBlockFuser
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .test_linear import GLUMLP
 
@@ -493,8 +494,26 @@ def test_moe_fuser_reads_router_dtype_from_the_gate():
     with torch.device("meta"):
         fp32 = MoEBlockFuser.match(MoEBlock(Fp32Router), "experts")
         default = MoEBlockFuser.match(MoEBlock(TopKRouter), "experts")
+    assert fp32 is not None and default is not None
     assert fp32.router_dtype == torch.float32
     assert default.router_dtype is None
+
+
+@pytest.mark.parametrize("weight_dtype", [torch.bfloat16, torch.float32])
+def test_moe_fuser_gate_keeps_hf_weight_dtype(dist_init, weight_dtype):
+    """An fp32 router computes fp32 logits whatever its weight is stored in. The
+    weight keeps the dtype Transformers built it in, so a gate in
+    `_keep_in_fp32_modules_strict` (Sarvam-30B's fp32 checkpoint) stays in fp32
+    and other gates keep the model dtype and its bf16 router GEMMs."""
+    with torch.device("meta"):
+        block = MoEBlock(Fp32Router)
+    block.gate.to(weight_dtype)
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert fuser is not None
+    with set_default_torch_dtype(torch.bfloat16):
+        gate = fuser.gate(block, "model.layers.0.mlp")
+    assert gate.out_dtype == torch.float32
+    assert gate.weight.dtype == weight_dtype
 
 
 def test_moe_fuser_detects_shared_experts():
@@ -566,6 +585,7 @@ def test_moe_fuser_unrecognized_router_moves_shared_expert():
     with torch.device("meta"):
         block = MoEBlockSharedBiasedRouter()
     fuser = MoEBlockFuser.match(block, "experts")
+    assert fuser is not None
     assert fuser.scoring_func is None
     assert fuser.shared_name == "shared_expert"
 
@@ -580,6 +600,7 @@ def test_moe_fuser_unrecognized_router_moves_shared_expert():
 def test_moe_fuser_divided_shared_output(block_cls, scoring_func):
     with torch.device("meta"):
         fuser = MoEBlockFuser.match(block_cls(), "experts", divides_shared_output=True)
+    assert fuser is not None
     assert fuser.scoring_func == scoring_func
 
 
@@ -600,6 +621,7 @@ def test_moe_fuser_scaled_output_with_vllm_routing():
     """A scaled block fuses because vLLM routing applies `routed_scaling_factor`."""
     with torch.device("meta"):
         fuser = MoEBlockFuser.match(MoEBlockScaled(), "experts")
+    assert fuser is not None
     assert fuser.scoring_func == "softmax"
     assert fuser.shared_name == "shared_expert"
 
@@ -608,4 +630,5 @@ def test_moe_fuser_scaled_output_with_vllm_routing():
 def test_moe_fuser_looks_through_casts_and_identity(block_cls):
     with torch.device("meta"):
         fuser = MoEBlockFuser.match(block_cls(), "experts")
+    assert fuser is not None
     assert fuser.shared_name == "shared_expert"

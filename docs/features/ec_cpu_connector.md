@@ -7,8 +7,7 @@ Setting `ec_enable_nixl: true` in `ec_connector_extra_config` additionally enabl
 
 ## Prerequisites
 
-- `ECCPUConnector` requires the V2 model runner: `VLLM_USE_V2_MODEL_RUNNER=1`. It raises `ValueError` at construction otherwise.
-- Local CPU-tier offload (`ec_enable_nixl` unset or `false`) needs no extra packages — the gate-off code path (`cpu/connector.py`, `cpu/scheduler/`, `cpu/worker/`, `cpu/common.py`) imports no `nixl`/`zmq`/`msgspec`, enforced by a repo test (`tests/v1/ec_connector/unit/test_no_nixl_imports.py`).
+- Local CPU-tier offload (`ec_enable_nixl` unset or `false`) needs no extra packages — the gate-off code path (`cpu/connector.py`, `cpu/scheduler/`, `cpu/worker/`, `cpu/common.py`) imports neither `nixl` nor the P2P transport modules, enforced by a repo test (`tests/v1/ec_connector/unit/test_no_nixl_imports.py`).
 - P2P NIXL mode (`ec_enable_nixl: true`) requires the `nixl` package: `uv pip install nixl` (pinned to `nixl==1.3.2` in `requirements/kv_connectors.txt`, shared with `NixlConnector`). Refer to the [NIXL repository](https://github.com/ai-dynamo/nixl) for platform-specific installation. If `nixl` isn't importable, the connector raises `RuntimeError: ec_enable_nixl requires NIXL; install the nixl package or remove ec_enable_nixl from ec_connector_extra_config.`
 
 ## Basic Usage
@@ -65,13 +64,13 @@ vllm serve <model> --ec-transfer-config '{
 
    The two halves are published together or not at all. An `mm_hash` the producer cannot serve — never saved because the region was full, or evicted since — is reported with empty `metadata` and no address, so an orchestrator leaves the media on the request and the consumer encodes it locally.
 2. The orchestrator issues a follow-up request with the same `mm_hash` to a consumer instance, passing the producer's `ec_transfer_params` through `SamplingParams.extra_args["ec_transfer_params"]`.
-3. On the consumer, `ECCPUScheduler.ensure_cache_available()` reads `request.ec_transfer_params`. For each `mm_hash` not already cached locally, it opens a ZMQ session to `(peer_host, peer_port)`, sends an `XferReq`, and on an `OK` `XferAck` issues a NIXL READ that pulls the blocks straight from the producer's mmap into its own. The request is deferred until the READ completes.
+3. On the consumer, `ECCPUScheduler.ensure_cache_available()` checks `request.ec_transfer_params`. A ready CPU-tier entry or a runner encoder-cache entry with a matching embedding count avoids a remote transfer. For each announced `mm_hash` without either cache hit, it opens a ZMQ session to `(peer_host, peer_port)`, sends an `XferReq`, and on an `OK` `XferAck` issues a NIXL READ that pulls the blocks straight from the producer's mmap into its own. The request is deferred until the READ completes.
 4. A `NACK_NOT_READY` means the producer announced the encoding but its GPU→mmap save has not landed yet. The consumer releases the in-flight entry without recording a failure and re-requests the read on a later step, so a save that lands a few steps late costs latency rather than a recompute.
 5. On any other NACK (`NACK_MISSING`, `NACK_INCOMPAT`, `NACK_VERSION`, `NACK_INTERNAL`), ack timeout, read timeout, or peer disconnect, the consumer discards the in-flight entry and falls back to local encoding for that `mm_hash` — a P2P failure never blocks the request indefinitely.
 
 ### Protocol
 
-- **Control plane**: ZMQ. The producer binds a `ROUTER` socket on `VLLM_EC_SIDE_CHANNEL_HOST:VLLM_EC_SIDE_CHANNEL_PORT`; each consumer opens one `DEALER` connection per producer peer, with ZMQ heartbeating (2s interval, 4s timeout, 8s TTL) to detect a dead peer. `XferReq`/`XferAck` are `msgspec` msgpack structs, versioned by `EC_CONNECTOR_VERSION` (currently `1`) — a version mismatch is NACKed.
+- **Control plane**: ZMQ. By default, each producer binds a `ROUTER` socket on the local IP returned by vLLM's `get_ip()` with an OS-assigned port and advertises the bound port through `ec_transfer_params.peer_port`. Optional host and port overrides are listed below. Each consumer opens one `DEALER` connection per producer peer, with ZMQ heartbeating (2s interval, 4s timeout, 8s TTL) to detect a dead peer. `XferReq`/`XferAck` are `msgspec` msgpack structs, versioned by `EC_CONNECTOR_VERSION` (currently `1`) — a version mismatch is NACKed.
 - **Compatibility check**: every `XferReq` carries a SHA-256 hash over `(vllm_version, model, dtype, block_size_bytes)`; the producer NACKs (`NACK_INCOMPAT`) any peer whose hash differs.
 - **Ack statuses**: `OK`, `NACK_MISSING` (the producer no longer holds the encoding), `NACK_NOT_READY` (held, but its save has not landed), `NACK_INCOMPAT`, `NACK_VERSION`, `NACK_INTERNAL`. Only `NACK_NOT_READY` is retryable — `RETRYABLE_NACKS` in `cpu/protocol.py` is what both ends consult, so the classification lives with the wire vocabulary rather than at each call site.
 - **Data plane**: NIXL, `UCX` backend, consumer-initiated `READ` — the consumer pulls bytes directly out of the producer's registered mmap region; the producer never pushes.
@@ -98,14 +97,14 @@ EC transfer is configured via `--ec-transfer-config` (CLI) or the `ec_transfer_c
 | `consumer_ack_timeout_s` | `float` | No (default `2.0`) | How long a consumer waits for an `XferAck` before giving up on a read. The producer answers `XferReq`s from its own scheduler step, so its reply latency scales with the encoder's `--max-num-batched-tokens`: a loaded encoder whose steps run longer than this makes consumers abandon reads the producer is about to grant. Raise it for large encoder batches. |
 | `ec_cpu_bytes` | `int` | Yes | Total size, in bytes, of the shared CPU mmap region. `ECCPUConnector` raises `ValueError` if unset. Block count = `ec_cpu_bytes // block_size_bytes`, where each block holds one LLM input-embedding vector. Entries allocate enough blocks for their modality-specific output shape, including visual DeepStack features. |
 
-### Environment Variables
+The control address uses vLLM's standard IP discovery. Set `VLLM_HOST_IP` to select a specific network interface when automatic discovery is unsuitable.
 
-| Variable | Default | Description |
+| Environment variable | Default | Description |
 | --- | --- | --- |
-| `VLLM_EC_SIDE_CHANNEL_HOST` | `localhost` | Host the producer's ZMQ `ROUTER` socket binds to. Set to a routable address (e.g. the pod IP) for multi-instance/multi-node P2P — the default only works when producer and consumer share a host. |
-| `VLLM_EC_SIDE_CHANNEL_PORT` | `5601` | Port for the same ZMQ `ROUTER` socket. |
+| `VLLM_EC_SIDE_CHANNEL_HOST` | Unset | Override the EC control host instead of using `get_ip()`. Must be reachable by consumers; wildcard addresses are rejected. |
+| `VLLM_EC_SIDE_CHANNEL_PORT` | `0` | `0` selects an OS-assigned port per producer. A nonzero value binds `base_port + data_parallel_index`; an occupied port fails startup. |
 
-Both are read only when `ec_enable_nixl=True` on a producer (`ec_role="ec_producer"` or `"ec_both"`).
+For fixed ports, assign non-overlapping ranges to independent instances sharing a host. Consumers use the advertised address and do not need matching port configuration.
 
 ## Limitations
 

@@ -441,10 +441,13 @@ vllm serve model --enable-lora --max-lora-cls-labels 8
 
 The equivalent `LLM` argument is `max_lora_cls_labels`. It defaults to the base model's `num_labels`, and each request returns its adapter's number of labels.
 
-This support has the following limitations:
+A classification head stored as float32 is converted to the runtime head dtype when it is loaded.
 
-- A classification head stored as float32 is converted to the runtime head dtype when it is loaded.
-- Token-classification adapters are not supported by this feature.
+## Token-Classification LoRA Adapters
+
+For token-classification models that support LoRA, use `pooling_task="token_classify"` with `LLM.encode`.
+
+Classification heads support LoRA A/B weights (matching the base head's output size) or `modules_to_save=["classifier"]`. Full heads follow the [sequence-classification configuration](#sequence-classification-lora-adapters) above, including `max_lora_cls_labels` for different label counts.
 
 ## Using Tips
 
