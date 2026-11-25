@@ -16,6 +16,11 @@ from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
+from vllm.v1.hisparse.prefill import (
+    bind_sparse_prefill_staging,
+    select_fp8_sparse_prefill_rows,
+    stage_sparse_prefill_rows,
+)
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparsePrefillStagingPlan,
@@ -169,6 +174,9 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
     hisparse_group: Any | None = None
     prefill_stream: torch.Stream | None = None
     prefill_ready_events: list[torch.Event] = field(default_factory=list)
+    sparse_prefill_staging: bool = False
+    _prefill_mask_cache: Any = field(default=None, init=False, repr=False)
+    _topk_owner: Any = field(default=None, init=False, repr=False)
 
     def _current_stream(self) -> Any:
         return torch.accelerator.current_stream()
@@ -203,6 +211,8 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
             index_group=self,
         )
         assert cache is not None
+        if layer_index == 0:
+            bind_sparse_prefill_staging(self, vllm_config)
         self.caches.append(cache)
         cache.index_group_caches = self.caches
         self.prefill_ready_events.append(torch.Event())
@@ -217,6 +227,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
 
     def prepare_for_batch(self, layer_index: int, attn_metadata: Any | None) -> None:
         if layer_index == 0:
+            self._prefill_mask_cache = None
             self.cache(0).prepare_group_for_batch(attn_metadata)
 
     def convert_logical_to_physical_topk(
@@ -268,12 +279,12 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         prefill = attn_metadata.prefill
         staging_plan = prefill.host_staging_plan if prefill is not None else None
         assert staging_plan is not None
-        staged_cache = cache.stage_prefill_rows(
-            kv_cache, staging_plan, attn_metadata.num_decodes
-        )
         req_ids = attn_metadata.req_id_per_token[attn_metadata.num_decode_tokens :]
         if attn_metadata.num_decodes > 0:
             req_ids = req_ids - attn_metadata.num_decodes
+        staged_cache = stage_sparse_prefill_rows(
+            self, layer_index, cache, kv_cache, staging_plan, attn_metadata, req_ids
+        )
         return staged_cache, staging_plan.block_table, req_ids
 
     def _prefill_gather_plan(
@@ -305,6 +316,9 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         prefill_stream = self.prefill_stream
         assert prefill_stream is not None
         block_table = plan.block_table[request_start : request_start + batch_size]
+        device_row_ids = select_fp8_sparse_prefill_rows(
+            self, layer_index, cache, plan, attn_metadata, request_start, batch_size
+        )
         prefill_stream.wait_stream(torch.accelerator.current_stream())
         with prefill_stream:
             ops.cp_gather_and_upconvert_fp8_kv_cache(
@@ -315,7 +329,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
                 batch_size,
                 host_cache=source_cache.view(-1, row_width),
                 host_row_ids=plan.row_ids,
-                device_row_ids=plan.gpu_row_ids,
+                device_row_ids=device_row_ids,
             )
             ready = self.prefill_ready_events[layer_index]
             ready.record(prefill_stream)
