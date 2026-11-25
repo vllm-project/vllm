@@ -37,6 +37,7 @@ def _make_experts(
     max_num_batched_tokens=3000,
     swiglu_limit=None,
     fuse_shared_expert=False,
+    num_logical_experts=None,
 ):
     monkeypatch.setattr(
         mega_moe_module,
@@ -56,6 +57,7 @@ def _make_experts(
         intermediate_size=intermediate_size,
         swiglu_limit=swiglu_limit,
         fuse_shared_expert=fuse_shared_expert,
+        num_logical_experts=num_logical_experts,
     )
 
 
@@ -115,6 +117,54 @@ def test_experts_load_into_local_slots(monkeypatch):
             assert torch.all(w13[:INTER] == 10 * expert + 1)
             assert torch.all(w13[INTER:] == 10 * expert + 2)
             assert torch.all(w2 == 10 * expert + 3)
+
+
+@pytest.mark.cpu_test
+def test_eplb_redundant_slots_load_their_logical_expert(monkeypatch):
+    # 4 logical + 2 redundant physical experts over 2 ranks: rank 1 holds
+    # physical 3, 4, 5, i.e. logical 3, 0, 1 under EPLB's initial placement.
+    experts = _make_experts(
+        monkeypatch, ep_rank=1, ep_size=2, num_experts=6, num_logical_experts=4
+    )
+    param = experts.w2_weight
+    for expert in range(4):
+        weight = torch.full((HIDDEN, INTER // 2), expert, dtype=torch.uint8)
+        loaded = experts.weight_loader(
+            param, weight, "w2_weight", "w2", expert, return_success=True
+        )
+        assert loaded == (expert in (0, 1, 3))
+    assert [int(param.data[slot, 0, 0]) for slot in range(3)] == [3, 0, 1]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("fuse_shared_expert", [False, True])
+@pytest.mark.parametrize("flat_scales", [False, True])
+def test_eplb_expert_weights_are_routed_expert_views(
+    monkeypatch, fuse_shared_expert, flat_scales
+):
+    experts = _make_experts(
+        monkeypatch, ep_size=2, num_experts=4, fuse_shared_expert=fuse_shared_expert
+    )
+    if flat_scales:
+        # finalize_weights leaves the shuffled scales 2-D, expert-major.
+        for name in ("w13_weight_scale", "w2_weight_scale"):
+            param = getattr(experts, name)
+            param.data = param.data.view(-1, param.shape[-1])
+    views = experts.get_expert_weights()
+    assert len(views) == 4
+    for view, name in zip(
+        views, ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale")
+    ):
+        param = getattr(experts, name)
+        assert view.shape == (2, param.numel() // experts.num_local_experts)
+        assert view.is_contiguous()
+        # EPLB writes through the view into the live parameter.
+        view[1].fill_(7)
+        slots = param.data.view(experts.num_local_experts, -1)
+        assert torch.all(slots[1] == 7)
+        assert torch.all(slots[0] == 0)
+        if fuse_shared_expert:
+            assert torch.all(slots[2] == 0)
 
 
 @pytest.mark.cpu_test
@@ -188,6 +238,75 @@ def test_shared_expert_route_appended(monkeypatch):
     torch.testing.assert_close(out_ids, expected_ids)
     torch.testing.assert_close(
         out_weights, torch.cat([weights, torch.ones(37, 1, device="cuda")], 1)
+    )
+
+
+def _eplb_reference(ids, l2p, replica_count, num_unpadded, record, num_physical):
+    """Replica choice and load of `eplb_map_and_record` for one token row
+    index per row."""
+    rows = torch.arange(ids.shape[0], device=ids.device)[:, None].expand_as(ids)
+    valid = (ids >= 0) & (ids < l2p.shape[0])
+    safe = torch.where(valid, ids, 0).long()
+    hashed = (rows.long() * 2654435769) & 0xFFFFFFFF
+    replica = hashed % replica_count[safe].long()
+    physical = torch.where(valid, l2p[safe, replica], -1)
+    load = torch.zeros(num_physical, dtype=torch.int32, device=ids.device)
+    if record:
+        counted = physical[(rows < num_unpadded) & (physical >= 0)]
+        load.index_add_(0, counted, torch.ones_like(counted, dtype=torch.int32))
+    return physical, load
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
+@pytest.mark.parametrize("fuse_shared_expert", [False, True])
+@pytest.mark.parametrize("record", [False, True])
+def test_eplb_place_experts_matches_reference(monkeypatch, fuse_shared_expert, record):
+    # 384 logical + 16 redundant experts over 8 ranks: 50 routed slots a rank.
+    num_logical, num_physical, ep_size, ep_rank = 384, 400, 8, 3
+    experts = _make_experts(
+        monkeypatch,
+        ep_rank=ep_rank,
+        ep_size=ep_size,
+        num_experts=num_physical,
+        num_logical_experts=num_logical,
+        fuse_shared_expert=fuse_shared_expert,
+    )
+    # Logical 0..15 have a second replica in the redundant slots 384..399.
+    replica_count = torch.ones(num_logical, dtype=torch.int64, device="cuda")
+    replica_count[:16] = 2
+    l2p = torch.full((num_logical, 2), -1, dtype=torch.int64, device="cuda")
+    l2p[:, 0] = torch.arange(num_logical, device="cuda")
+    l2p[:16, 1] = torch.arange(384, 400, device="cuda")
+    load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
+    experts.set_eplb_state(0, load[None], l2p[None], replica_count[None])
+    num_tokens, num_unpadded = 37, 30
+    experts.eplb_state.should_record_tensor = torch.tensor(record, device="cuda")
+    experts.eplb_state.num_unpadded_tokens_tensors = [
+        torch.tensor(num_unpadded, dtype=torch.int32, device="cuda")
+    ]
+
+    ids = torch.randint(0, 16, (num_tokens, 2), device="cuda", dtype=torch.int32)
+    ids[::5, 1] = -1
+    weights = torch.rand(num_tokens, 2, device="cuda")
+    out_weights, out_ids = experts.place_experts(weights, ids)
+
+    physical, expected_load = _eplb_reference(
+        ids, l2p, replica_count, num_unpadded, record, num_physical
+    )
+    torch.testing.assert_close(load, expected_load)
+    if not fuse_shared_expert:
+        torch.testing.assert_close(out_ids, physical.to(ids.dtype))
+        assert out_weights is weights
+        return
+    routed = 50
+    shared = torch.full((num_tokens, 1), ep_rank * (routed + 1) + routed, device="cuda")
+    expected_ids = torch.cat(
+        [torch.where(physical >= 0, physical + physical // routed, physical), shared],
+        1,
+    )
+    torch.testing.assert_close(out_ids, expected_ids.to(ids.dtype))
+    torch.testing.assert_close(
+        out_weights, torch.cat([weights, torch.ones(num_tokens, 1, device="cuda")], 1)
     )
 
 
