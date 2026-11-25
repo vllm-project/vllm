@@ -3,11 +3,17 @@
 """Tests for HF_HUB_OFFLINE mode."""
 
 import importlib
+import json
+import os
+import subprocess
 import sys
+import textwrap
 
 import pytest
 import regex as re
 import urllib3
+
+from vllm.transformers_utils.repo_utils import hf_api
 
 MODEL_CONFIGS = [
     {
@@ -56,6 +62,59 @@ def _create_runner(vllm_runner, model_config):
     model = runner_config.pop("model")
     tokenizer_name = runner_config.pop("tokenizer", None)
     return vllm_runner(model, tokenizer_name=tokenizer_name, **runner_config)
+
+
+def test_local_model_with_modelscope_preference():
+    """A local checkpoint generates identical tokens without optional Hub packages."""
+    model = hf_api().snapshot_download(repo_id="facebook/opt-125m")
+    token_ids = []
+    for use_modelscope in ("false", "true"):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                textwrap.dedent("""\
+                    import json
+                    import sys
+                    sys.modules["modelscope"] = None
+                    from vllm import LLM, SamplingParams
+
+                    llm = LLM(
+                        model=sys.argv[1], enforce_eager=True, seed=0,
+                        max_model_len=64, max_num_batched_tokens=64,
+                        max_num_seqs=1, gpu_memory_utilization=0.2,
+                    )
+                    output = llm.generate(
+                        ["The capital of France is"],
+                        SamplingParams(temperature=0, max_tokens=8, ignore_eos=True),
+                    )
+                    ids = output[0].outputs[0].token_ids
+                    assert len(ids) == 8
+                    print("TOKEN_IDS=" + json.dumps(ids))
+                    """),
+                model,
+            ],
+            env={
+                **os.environ,
+                "VLLM_USE_MODELSCOPE": use_modelscope,
+                "VLLM_NO_USAGE_STATS": "1",
+                "HF_HUB_OFFLINE": "1",
+            },
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        token_ids.append(
+            json.loads(
+                next(
+                    line.removeprefix("TOKEN_IDS=")
+                    for line in result.stdout.splitlines()
+                    if line.startswith("TOKEN_IDS=")
+                )
+            )
+        )
+    assert token_ids[0] == token_ids[1]
 
 
 @pytest.fixture(scope="module")

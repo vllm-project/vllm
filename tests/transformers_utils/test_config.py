@@ -6,6 +6,10 @@ only get the `eos_token_id` from the tokenizer as defined by
 """
 
 import json
+import os
+import subprocess
+import sys
+import textwrap
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -24,6 +28,67 @@ from vllm.transformers_utils.config import (
     uses_mrope,
 )
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
+
+
+@pytest.mark.cpu_test
+def test_local_checkpoint_without_modelscope(tmp_path):
+    """An inherited Hub preference must not require ModelScope for local assets."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""\
+                import sys
+                sys.modules["modelscope"] = None
+
+                from transformers import (
+                    GenerationConfig, LlamaConfig, TokenizersBackend,
+                )
+                from tokenizers import Tokenizer
+                from tokenizers.models import WordLevel
+                from vllm.transformers_utils.config import (
+                    get_config, try_get_generation_config,
+                )
+                from vllm.tokenizers import get_tokenizer
+                from vllm.model_executor.model_loader.weight_utils import (
+                    maybe_download_from_modelscope,
+                )
+
+                model = sys.argv[1]
+                LlamaConfig(hidden_size=16, num_hidden_layers=1,
+                            num_attention_heads=2).save_pretrained(model)
+                GenerationConfig(max_new_tokens=7).save_pretrained(model)
+                tokenizer = TokenizersBackend(
+                    tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0, "hello": 1},
+                                                        unk_token="[UNK]")),
+                    unk_token="[UNK]",
+                )
+                tokenizer.save_pretrained(model)
+
+                config = get_config(model, trust_remote_code=False)
+                assert config.model_type == "llama" and config.hidden_size == 16
+                ids = get_tokenizer(model).encode("hello", add_special_tokens=False)
+                assert ids == [1]
+                assert try_get_generation_config(model, False).max_new_tokens == 7
+                assert maybe_download_from_modelscope(model) == model
+
+                try:
+                    get_config("modelscope-owner/remote-model", trust_remote_code=False)
+                except ImportError as exc:
+                    assert "Please install modelscope>=1.18.1" in str(exc)
+                else:
+                    raise AssertionError("Remote ModelScope requires its dependency")
+                print("local checkpoint loaded; remote dependency error preserved")
+                """),
+            str(tmp_path),
+        ],
+        env={**os.environ, "VLLM_USE_MODELSCOPE": "true"},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "local checkpoint loaded; remote dependency error preserved" in result.stdout
 
 
 @pytest.mark.parametrize("layout", ["mixed", "flat"])

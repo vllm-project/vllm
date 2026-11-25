@@ -17,7 +17,7 @@ import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
 from huggingface_hub.utils import HFValidationError, validate_repo_id
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers import GenerationConfig, PreTrainedConfig
+from transformers import AutoConfig, GenerationConfig, PreTrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
@@ -28,6 +28,7 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.transformers_utils import maybe_init_modelscope
 from vllm.transformers_utils.repo_utils import is_mistral_model_repo
 from vllm.transformers_utils.utils import (
     parse_safetensors_file_metadata,
@@ -44,11 +45,6 @@ from .repo_utils import (
     try_get_local_file,
     with_retry,
 )
-
-if envs.VLLM_USE_MODELSCOPE:
-    from modelscope import AutoConfig
-else:
-    from transformers import AutoConfig
 
 MISTRAL_CONFIG_NAME = "params.json"
 
@@ -384,6 +380,12 @@ class HFConfigParser(ConfigParserBase):
         code_revision: str | None = None,
         **kwargs,
     ) -> tuple[dict, PreTrainedConfig]:
+        auto_config_cls = AutoConfig
+        if maybe_init_modelscope(model):
+            from modelscope import AutoConfig as ModelScopeAutoConfig
+
+            auto_config_cls = ModelScopeAutoConfig
+
         kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
         trust_remote_code |= kwargs.get("trust_remote_code", False)
         kwargs = without_trust_remote_code(kwargs)
@@ -530,7 +532,7 @@ class HFConfigParser(ConfigParserBase):
                 trust_remote_code = False
             try:
                 kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
-                config = AutoConfig.from_pretrained(
+                config = auto_config_cls.from_pretrained(
                     model,
                     trust_remote_code=trust_remote_code,
                     revision=revision,
@@ -978,6 +980,7 @@ def get_config(
     hf_overrides_fn: Callable[[PreTrainedConfig], PreTrainedConfig] | None = None,
     **kwargs,
 ) -> PreTrainedConfig:
+    maybe_init_modelscope(model)
     if config_format == "auto":
         try:
             # First check for Mistral to avoid defaulting to
@@ -1381,6 +1384,7 @@ def try_get_generation_config(
     config_format: str | ConfigFormat = "auto",
     hf_token: bool | str | None = None,
 ) -> GenerationConfig | None:
+    maybe_init_modelscope(model)
     try:
         return GenerationConfig.from_pretrained(
             model,

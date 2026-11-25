@@ -54,6 +54,7 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
 from vllm.model_executor.utils import copy_weight_
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
+from vllm.transformers_utils import maybe_init_modelscope
 from vllm.transformers_utils.repo_utils import hf_api, hf_fs
 from vllm.utils.cpu_resource_utils import get_available_memory
 from vllm.utils.file_utils import atomic_writer as atomic_writer
@@ -144,6 +145,9 @@ def maybe_download_from_modelscope(
     Returns the path to the downloaded model, or None if the model is not
     downloaded from ModelScope."""
     if envs.VLLM_USE_MODELSCOPE:
+        if os.path.exists(model):
+            return model
+        maybe_init_modelscope(model)
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
         # pylint: disable=C.

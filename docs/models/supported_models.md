@@ -339,6 +339,11 @@ To use models from [ModelScope](https://www.modelscope.cn) instead of Hugging Fa
 export VLLM_USE_MODELSCOPE=True
 ```
 
+This selects ModelScope for remote repositories. Existing local model, config,
+and tokenizer directories do not require the optional `modelscope` package.
+Remote resources, including a separately specified tokenizer or draft model,
+still require ModelScope to be installed.
+
 And use with `trust_remote_code=True`.
 
 ```python

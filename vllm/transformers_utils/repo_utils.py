@@ -23,6 +23,7 @@ from huggingface_hub.utils import (
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.transformers_utils import maybe_init_modelscope
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -152,6 +153,7 @@ def list_repo_files(
         # if model is remote, use hf_hub api to list files
         try:
             if envs.VLLM_USE_MODELSCOPE:
+                maybe_init_modelscope(repo_id)
                 from vllm.transformers_utils.utils import modelscope_list_repo_files
 
                 return modelscope_list_repo_files(
@@ -294,6 +296,7 @@ def get_model_path(model: str | Path, revision: str | None = None):
     )
 
     if envs.VLLM_USE_MODELSCOPE:
+        maybe_init_modelscope(model)
         from modelscope.hub.snapshot_download import snapshot_download
 
         return snapshot_download(model_id=model, **common_kwargs)
@@ -420,6 +423,7 @@ def _try_download_from_hf_hub(
     """
     if Path(model).is_dir():
         return None
+    maybe_init_modelscope(model)
     try:
         return Path(
             hf_api().hf_hub_download(

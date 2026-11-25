@@ -1,11 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import cache
+from pathlib import Path
+from threading import Lock
+
 from vllm import envs
 
-if envs.VLLM_USE_MODELSCOPE:
+_modelscope_init_lock = Lock()
+
+
+def maybe_init_modelscope(model: str | Path) -> bool:
+    """Initialize ModelScope only for a remote ModelScope resource."""
+    if not envs.VLLM_USE_MODELSCOPE or Path(model).exists():
+        return False
+    with _modelscope_init_lock:
+        _patch_modelscope_hub()
+    return True
+
+
+@cache
+def _patch_modelscope_hub() -> None:
     try:
-        # Patch here, before each import happens
         import modelscope
         from packaging import version
 
@@ -17,7 +33,6 @@ if envs.VLLM_USE_MODELSCOPE:
             )
         from modelscope.utils.hf_util import patch_hub
 
-        # Patch hub to download models from modelscope to speed up.
         patch_hub()
     except ImportError as err:
         raise ImportError(
