@@ -102,6 +102,10 @@ from vllm.model_executor.layers.fused_moe.oracle.w4a8_int8 import (
     map_w4a8_int8_backend,
     select_w4a8_int8_moe_backend,
 )
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptFp8Config,
+    ModelOptFp8MoEMethod,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
@@ -542,7 +546,7 @@ def _select_fp8(moe_backend, weight_key=kFp8Static128BlockSym):
 def test_fp8_selects_oot_backend(moe_backend, expected, oot_backends):
     """`auto` takes the platform's first supported backend; a name forces one."""
     backend, experts_cls = _select_fp8(moe_backend)
-    assert backend.value == expected
+    assert backend is Fp8MoeBackend.OOT
     assert experts_cls is oot_backends[expected]
 
 
@@ -578,17 +582,50 @@ def test_fp8_oot_backend_resolves_weight_block_shape(oot_backends):
 
 @pytest.mark.usefixtures("default_vllm_config")
 def test_fp8_oot_backend_converts_weights(oot_backends):
-    """The FP8 oracle, shared by all model producers, applies the conversion."""
-    backend, _ = _select_fp8("foo")
+    """The FP8 oracle applies the selected experts' conversion."""
+    backend, experts_cls = _select_fp8("foo")
     w13, w2 = torch.empty(2, 16, 4), torch.empty(2, 4, 8)
     scale = torch.ones(2)
     new_w13, new_w2, new_w13_scale, new_w2_scale = convert_to_fp8_moe_kernel_format(
-        backend, torch.nn.Module(), w13, w2, scale, scale, None, None
+        backend,
+        torch.nn.Module(),
+        w13,
+        w2,
+        scale,
+        scale,
+        None,
+        None,
+        experts_cls=experts_cls,
     )
     assert new_w13 is w13
     assert new_w2.shape == (2, 8, 4)
     assert new_w13_scale is scale
     torch.testing.assert_close(new_w2_scale, scale * 2, rtol=0, atol=0)
+
+
+@pytest.mark.usefixtures("default_vllm_config", "dist_init")
+def test_modelopt_fp8_converts_oot_weights(oot_backends):
+    """Quant methods must hand their selected experts to the oracle."""
+    oot_backends["baz"] = _oot_experts(kFp8StaticTensorSym)
+    method = ModelOptFp8MoEMethod(
+        ModelOptFp8Config("FP8", True, None, []), make_dummy_moe_config()
+    )
+    layer = torch.nn.Module()
+    layer._expert_routing_tables = lambda: None
+    method.create_weights(
+        layer, 1, 4, 8, torch.bfloat16, weight_loader=lambda *args, **kwargs: None
+    )
+    # Not `process_weights_after_loading`: its requantization needs a CUDA op.
+    method._setup_kernel(
+        layer,
+        layer.w13_weight,
+        layer.w2_weight,
+        layer.w13_weight_scale.max(dim=1).values,
+        layer.w2_weight_scale,
+        layer.w13_input_scale,
+        layer.w2_input_scale,
+    )
+    assert layer.w2_weight.shape == (1, 8, 4)
 
 
 def test_oot_backend_names_are_accepted_by_config(oot_backends):

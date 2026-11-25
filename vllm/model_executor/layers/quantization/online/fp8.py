@@ -11,7 +11,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEQuantConfig,
     )
-    from vllm.model_executor.layers.fused_moe.oracle.base import OOTMoEBackend
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -576,7 +575,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
     weights onto meta device and materializes them just-in-time."""
 
     # Declared here for mypy; actual values are set in __init__.
-    fp8_backend: "Fp8MoeBackend | OOTMoEBackend"
+    fp8_backend: "Fp8MoeBackend"
     experts_cls: "type[mk.FusedMoEExperts] | None"
     weight_scale_name: str
     weight_block_size: list[int] | None
@@ -642,6 +641,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
             w2_scale=w2_scale,
             w13_input_scale=w13_input_scale,
             w2_input_scale=w2_input_scale,
+            experts_cls=self.experts_cls,
         )
 
         # Replace parameters with updated versions. Note that this helper
