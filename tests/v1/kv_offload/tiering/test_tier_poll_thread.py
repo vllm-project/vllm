@@ -24,7 +24,6 @@ from vllm.v1.kv_offload.base import (
     OffloadingManager,
     OffloadKey,
     ReqContext,
-    RequestOffloadingContext,
     ScheduleEndContext,
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
@@ -32,6 +31,7 @@ from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     ParentManager,
     SecondaryTierManager,
+    SecondaryTierRequestContext,
     TransferJob,
 )
 from vllm.v1.kv_offload.tiering.manager import (
@@ -79,8 +79,8 @@ class _FakeTier(SecondaryTierManager):
         self.polls += 1
         return ()
 
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        return RequestOffloadingContext()
+    def on_new_request(self, req_context: ReqContext) -> SecondaryTierRequestContext:
+        return SecondaryTierRequestContext()
 
     def drain_jobs(self) -> None:
         pass
