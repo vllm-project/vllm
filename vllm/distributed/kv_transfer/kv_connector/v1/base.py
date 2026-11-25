@@ -748,11 +748,21 @@ class KVConnectorBase_V1(ABC):
         KV blocks are waiting to be WRITTEN to a D node).
 
         Connectors that don't implement push-based KV transfer should
-        leave this as False.
+        leave this as False. Connector maintenance may also request steps;
+        background threads must call the registered engine wakeup callback.
         """
         # TODO: replace with a more general connector hook for keeping the
         # scheduler alive (e.g. extend has_unfinished_requests).
         return False
+
+    def set_engine_wakeup(self, callback: Callable[[], None]) -> None:
+        """Register a thread-safe notification that wakes the scheduler.
+
+        The callback only requests a step. Pool mutations must still run on
+        the scheduler thread. In-process engines are driven by their caller
+        and do not register a callback.
+        """
+        return None
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

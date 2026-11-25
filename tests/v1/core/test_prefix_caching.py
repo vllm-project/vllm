@@ -6,6 +6,7 @@ import copy
 import gc
 import weakref
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import replace
 from functools import partial
 from math import lcm
@@ -4168,7 +4169,7 @@ def test_maybe_evict_cached_block():
     assert cache._cache == {block_hash0: 0, block_hash1: 1, block_hash2: 2}
     assert cache._dup_ids == {block_hash0: {0: None, 3: None}}
     # Evict block1
-    pool._maybe_evict_cached_block(block1)
+    assert pool._maybe_evict_cached_block(block1)
     assert cache._cache == {block_hash0: 0, block_hash2: 2}
     assert cache._dup_ids == {block_hash0: {0: None, 3: None}}
     # Evict block0: block_hash0 entry should NOT be removed, as block3
@@ -4181,8 +4182,9 @@ def test_maybe_evict_cached_block():
     pool._maybe_evict_cached_block(block2)
     assert cache._cache == {block_hash0: 3}
     # Evict block3
-    pool._maybe_evict_cached_block(block3)
+    assert pool._maybe_evict_cached_block(block3)
     assert cache._cache == {}
+    assert not pool._maybe_evict_cached_block(block3)
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
@@ -7195,3 +7197,165 @@ def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
     full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
     manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
     assert manager.estimate_cached_tokens(request) == 3 * block_size
+
+
+class _ExternalLeases:
+    """External reader used to exercise the pool's lease contract."""
+
+    def __init__(self, window: int):
+        self.window = window
+        self.pins: set[int] = set()
+        self.withheld: list[KVCacheBlock] = []
+        self.cached: list[tuple[int, bytes, int | None]] = []
+        self.frozen = False
+
+    def on_cached(self, block, key, *, num_tokens):
+        self.cached.append((block.block_id, key, num_tokens))
+
+    def on_uncached(self, block, *, popped=False):
+        pinned = block.block_id in self.pins
+        if pinned and block.ref_cnt == 0:
+            self.withheld.append(block)
+        return pinned
+
+    def admission_reserve(self):
+        return self.window - len(self.withheld)
+
+    @contextmanager
+    def reset_scope(self):
+        self.frozen = True
+        try:
+            yield not self.pins and not self.withheld
+        finally:
+            self.frozen = False
+
+
+def test_external_leases_preserve_multigroup_admission():
+    """Using the entire window in group one leaves group two allocatable."""
+    pool = BlockPool(101, enable_caching=True, hash_block_size=4)
+    leases = _ExternalLeases(window=10)
+    pool.lease_guard = leases
+    blocks = pool.get_new_blocks(90)
+    request = make_request("lease", list(range(360)), 4, sha256)
+    pool.cache_full_blocks(request, blocks, 0, 90, 4, 3)
+    assert leases.cached == [
+        (block.block_id, make_block_hash_with_group_id(key, 3), (i + 1) * 4)
+        for i, (block, key) in enumerate(zip(blocks, request.block_hashes))
+    ]
+    pool.free_blocks(blocks)
+    leases.pins.update(block.block_id for block in blocks[:10])
+    assert pool.get_num_free_blocks() == 90
+    first = pool.get_new_blocks(45)
+    assert len(leases.withheld) == 10
+    assert pool.get_num_free_blocks() == 45
+    second = pool.get_new_blocks(45)
+    assert not leases.pins.intersection(b.block_id for b in first + second)
+    assert pool.get_num_free_blocks() == 0
+    leases.pins.clear()
+    pool.return_withheld(leases.withheld)
+    leases.withheld.clear()
+    pool.free_blocks(first + second)
+    assert pool.free_block_queue.num_free_blocks == 100
+    assert pool.get_usage() == 0
+
+
+def test_external_leases_reset_scope():
+    pool = BlockPool(4, enable_caching=True, hash_block_size=4)
+    leases = _ExternalLeases(window=10)
+    pool.lease_guard = leases
+    leases.pins.add(1)
+    assert not pool.reset_prefix_cache()
+    assert not leases.frozen
+    leases.pins.clear()
+    assert pool.reset_prefix_cache()
+    assert not leases.frozen
+
+
+def test_external_leases_evict_pinned_free_block():
+    """Explicit eviction withholds a pinned free row exactly once."""
+    pool = BlockPool(5, enable_caching=True, hash_block_size=4)
+    leases = _ExternalLeases(window=1)
+    pool.lease_guard = leases
+    block = pool.get_new_blocks(1)[0]
+    request = make_request("evict-free", list(range(4)), 4, sha256)
+    pool.cache_full_blocks(request, [block], 0, 1, 4, 0)
+    pool.free_blocks([block])
+    leases.pins.add(block.block_id)
+    pool.evict_blocks({block.block_id})
+    assert leases.withheld == [block]
+    assert block.block_hash is None
+    allocated = pool.get_new_blocks(3)
+    assert block not in allocated
+    leases.pins.clear()
+    pool.return_withheld(leases.withheld)
+    assert pool.free_block_queue.num_free_blocks == 1
+    assert pool.get_new_blocks(1) == [block]
+    assert pool.free_block_queue.num_free_blocks == 0
+
+
+@pytest.mark.parametrize("caching", [False, True])
+def test_unpin_keeps_unhashed_blocks_last(caching):
+    pool = BlockPool(5, enable_caching=caching, hash_block_size=4)
+    block = pool.get_new_blocks(1)[0]
+    reused: list[KVCacheBlock] = []
+    pool.unpin_blocks([block], reused.append)
+    assert pool.get_new_blocks(3) == pool.blocks[2:]
+    assert not reused
+    assert pool.get_new_blocks(1) == [block]
+    assert reused == [block]
+
+
+class _ReleaseClassifier:
+    def __init__(self, redundant):
+        self.redundant = redundant
+        self.batches = []
+        self.reused = []
+
+    def classify(self, blocks):
+        self.batches.append(list(blocks))
+        return [b.block_id in self.redundant for b in blocks]
+
+    def on_reuse(self, block):
+        self.reused.append(block)
+
+
+def test_freed_classification_preserves_batches_and_refree_order():
+    pool = BlockPool(9, enable_caching=True, hash_block_size=4)
+    blocks = pool.get_new_blocks(5)
+    request = make_request("classify", list(range(20)), 4, sha256)
+    pool.cache_full_blocks(request, blocks, 0, 5, 4, 0)
+    classifier = _ReleaseClassifier({b.block_id for b in blocks[:4]})
+    pool.eviction_order_policy = classifier
+    pool.free_blocks([blocks[1], blocks[0]])
+    pool.free_blocks([blocks[3], blocks[2]])
+    cached = lambda: [
+        b for b in pool.free_block_queue.iter_blocks_after(None) if b.block_hash
+    ]
+    assert cached() == [blocks[3], blocks[2], blocks[1], blocks[0]]
+    pool.touch([blocks[1]])
+    assert classifier.reused == [blocks[1]]
+    pool.free_blocks([blocks[1]])
+    assert cached() == [blocks[1], blocks[3], blocks[2], blocks[0]]
+    pool.free_blocks([blocks[4]], evict_first=True)
+    assert cached()[0] is blocks[4]
+    assert classifier.batches == [blocks[1::-1], blocks[3:1:-1], [blocks[1]]]
+    assert pool.get_new_blocks(3) == [blocks[4], blocks[1], blocks[3]]
+
+
+def test_freed_classification_uses_each_owning_pool_once():
+    pools = [BlockPool(5, enable_caching=True, hash_block_size=4) for _ in range(2)]
+    request = make_request("multi-pool", list(range(8)), 4, sha256)
+    groups = [p.get_new_blocks(2) for p in pools]
+    classifiers = [_ReleaseClassifier({1}), _ReleaseClassifier({2})]
+    for pool, blocks, classifier in zip(pools, groups, classifiers):
+        pool.cache_full_blocks(request, blocks, 0, 2, 4, 0)
+        pool.eviction_order_policy = classifier
+    pools[0].touch([groups[0][0]])
+    pools[0].free_blocks([groups[1][0], groups[0][1], groups[1][1], groups[0][0]])
+    assert classifiers[0].batches == [[groups[0][1]]]
+    assert classifiers[1].batches == [groups[1]]
+    assert [
+        b for b in pools[1].free_block_queue.iter_blocks_after(None) if b.block_hash
+    ] == groups[1][::-1]
+    pools[0].free_blocks([groups[0][0]])
+    assert classifiers[0].batches[-1] == [groups[0][0]]

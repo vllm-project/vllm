@@ -1356,6 +1356,25 @@ _INPUT_SPIN_DURATION_S = 1.0
 _INPUT_POLL_INTERVAL_S = 0.001
 
 
+class _ConnectorWakeup:
+    """Coalesce background notifications into the engine's input queue."""
+
+    def __init__(self, input_queue: queue.Queue):
+        self._queue = input_queue
+        self._lock = threading.Lock()
+        self._queued = False
+
+    def notify(self) -> None:
+        with self._lock:
+            if not self._queued:
+                self._queued = True
+                self._queue.put_nowait((EngineCoreRequestType.WAKEUP, None))
+
+    def consume(self) -> None:
+        with self._lock:
+            self._queued = False
+
+
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
@@ -1376,6 +1395,7 @@ class EngineCoreProc(EngineCore):
         engine_index: int = 0,
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
+        self._connector_wakeup = _ConnectorWakeup(self.input_queue)
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
         # Inputs taken from input_queue while waiting for a step's output that
         # must not be handled until the step completes (see _wait_for_output).
@@ -1434,6 +1454,9 @@ class EngineCoreProc(EngineCore):
                 executor_fail_callback,
                 internal_dp_balancing,
             )
+            connector = self.scheduler.get_kv_connector()
+            if connector is not None:
+                connector.set_engine_wakeup(self._connector_wakeup.notify)
 
             # Initialize fault tolerance settings.
             self.enable_fault_tolerance = (
@@ -2010,6 +2033,7 @@ class EngineCoreProc(EngineCore):
     ) -> None:
         """Dispatch request from client."""
         if request_type == EngineCoreRequestType.WAKEUP:
+            self._connector_wakeup.consume()
             return
         elif request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
