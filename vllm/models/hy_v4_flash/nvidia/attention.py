@@ -14,7 +14,7 @@ from vllm.model_executor.layers.hpc import hpc_gated_mla_gemm, hpc_gated_mla_sup
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    ReplicatedLinear,
+    MergedColumnParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -30,9 +30,9 @@ from .swa import FlashSparseBackend, FlashSWABackend, FlashWindowIndexer
 
 
 class HYV4FlashAttention(HYV4MLAAttention):
+    fused_qkv_a_proj: MergedColumnParallelLinear
     q_a_layernorm: RMSNorm
     q_b_proj: ColumnParallelLinear
-    kv_a_proj_with_mqa: ReplicatedLinear
     linear_gate: ColumnParallelLinear
 
     def __init__(self, vllm_config, config, layer_idx, topk_indices_buffer, prefix):
@@ -98,20 +98,14 @@ class HYV4FlashAttention(HYV4MLAAttention):
         ):
             raise ValueError("Flash requires normalized ungrouped RoPE MLA")
         quant = vllm_config.quant_config
-        self.fused_qkv_a_proj = None
-        self.q_a_proj = ReplicatedLinear(
+        self.kv_a_proj_with_mqa = None
+        self.fused_qkv_a_proj = MergedColumnParallelLinear(
             config.hidden_size,
-            self.q_lora_rank,
+            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
             bias=False,
             quant_config=quant,
-            prefix=f"{prefix}.q_a_proj",
-        )
-        self.kv_a_proj_with_mqa = ReplicatedLinear(
-            config.hidden_size,
-            self.kv_lora_rank + self.qk_rope_head_dim,
-            bias=False,
-            quant_config=quant,
-            prefix=f"{prefix}.kv_a_proj_with_mqa",
+            prefix=f"{prefix}.fused_qkv_a_proj",
+            disable_tp=True,
         )
         self.q_a_layernorm = RMSNorm(self.q_lora_rank, config.rms_norm_eps)
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, config.rms_norm_eps)
@@ -199,8 +193,8 @@ class HYV4FlashAttention(HYV4MLAAttention):
         )
 
     def forward(self, positions, hidden_states, llama_4_scaling=None):
-        q_c = self.q_a_proj(hidden_states)[0]
-        kv = self.kv_a_proj_with_mqa(hidden_states)[0]
+        qkv = self.fused_qkv_a_proj(hidden_states)[0]
+        q_c, kv = qkv.split(self.fused_qkv_a_proj.output_sizes, dim=-1)
         if positions.ndim == 2:
             q_c, kv_c, k_pe, rope_pos, cos_sin = fused_mrope_norm(
                 self.rotary_emb,
