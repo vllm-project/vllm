@@ -42,7 +42,8 @@ def _gather(rank, device):
 
 @pytest.mark.distributed(num_gpus=4)
 @pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100), reason="Requires SM100"
+    not any(current_platform.is_device_capability_family(sm) for sm in (90, 100)),
+    reason="Requires SM90 or SM100 with NVLink multicast",
 )
 def test_logits_gather_matches_concatenated_shards():
     run_tp4(_gather)

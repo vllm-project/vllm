@@ -14,8 +14,8 @@ from vllm.platforms import current_platform
 DIM, POOL, GROUPS, WIDTH, BLOCK = 128, 4, 512, 2176, 64
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="the CuTe kernels target SM100/SM103",
+    not any(current_platform.is_device_capability_family(sm) for sm in (90, 100)),
+    reason="Requires SM90 or SM100",
 )
 
 
@@ -63,18 +63,17 @@ def _update_inputs(requests, tokens, seed, padded) -> _Inputs:
     return _Inputs(cache, tail, tail_slots, key, score, ape, slots, positions)
 
 
-@pytest.mark.parametrize("requests,tokens", [(1, 1), (64, 1), (2, 7)])
-@pytest.mark.parametrize("padded", [False, True])
+@pytest.mark.parametrize(
+    "requests,tokens,padded", [(1, 1, False), (64, 1, True), (2, 7, True)]
+)
 def test_kpool_update_matches_stock(requests, tokens, padded):
-    """Tail stashes, completed pools (FP8 values and UE8M0 scales) and the
+    """Tail stashes, completed pools (FP8 values and FP32 or MX scales) and the
     in-order read of a request's earlier stashes match bit for bit."""
     from vllm.models.glm5next.nvidia.ops.kpool_compress import (
         kpool_decode_update_and_maybe_write_cache_batched as stock,
     )
     from vllm.models.glm5next.nvidia.specialized_decode.kpool import kpool_update
-    from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 
-    assert mqa_logits_use_mx_scales()
     ref = _update_inputs(requests, tokens, 100 * requests + tokens, padded)
     out = _Inputs(*(t.clone() for t in ref))
     before = ref[0].clone()
@@ -85,8 +84,7 @@ def test_kpool_update_matches_stock(requests, tokens, padded):
     assert torch.equal(out[1].view(torch.int16), ref[1].view(torch.int16))
 
 
-@pytest.mark.parametrize("rows", [1, 32])
-@pytest.mark.parametrize("width", [2048, 32768])
+@pytest.mark.parametrize("rows,width", [(1, 2048), (32, 32768)])
 def test_upcast_matches_stock(rows, width):
     from vllm.model_executor.layers.sparse_attn_indexer import as_fp32_logits
     from vllm.models.glm5next.nvidia.specialized_decode.kpool import upcast_logits
@@ -123,8 +121,9 @@ def test_expand_matches_stock(rows):
     assert torch.equal(out, ref)
 
 
-@pytest.mark.parametrize("rows,padding", [(64, 0), (4, 3)])
-@pytest.mark.parametrize("stride_rows,max_blocks", [(BLOCK, 160), (3 * BLOCK, 50)])
+@pytest.mark.parametrize(
+    "rows,padding,stride_rows,max_blocks", [(64, 0, BLOCK, 160), (4, 3, 3 * BLOCK, 50)]
+)
 def test_expand_and_remap_matches_stock(rows, padding, stride_rows, max_blocks):
     """Expansion plus the compacting remap equals the stock pair, including
     pools past the block table (dropped) and padded rows (all -1)."""

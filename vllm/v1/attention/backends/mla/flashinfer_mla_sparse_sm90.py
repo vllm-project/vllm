@@ -32,6 +32,7 @@ per-token x 128-channel-group `ckv_scale_arr` layout is supported by the
 kernel but not wired yet (it needs a group-quantizing cache-write op).
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -618,6 +619,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
 
 class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Metadata]):
     supports_shardq: ClassVar[bool] = True
+    use_index_group_remap: Callable[[], bool] | None = None
 
     def __init__(
         self,
@@ -682,18 +684,24 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
         kv_c_and_k_pe_cache, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
-        # return_valid_counts=True keeps the compacted-prefix layout: valid
-        # entries at [0, valid_count), -1 past it — exactly the prefix the
-        # planned per-row lengths address.
-        topk_slots, _ = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token[:num_tokens],
-            attn_metadata.block_table,
-            topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            BLOCK_STRIDE_ROWS=block_stride_rows,
-            NUM_TOPK_TOKENS=topk_indices.shape[1],
-            return_valid_counts=True,
-        )
+        # compacted valid prefixes match the row lengths in the FlashInfer plan
+        if self.use_index_group_remap is not None and self.use_index_group_remap():
+            topk_slots, _ = self._convert_logical_to_physical_topk(
+                topk_indices,
+                attn_metadata,
+                block_stride_rows=block_stride_rows,
+                return_valid_counts=True,
+            )
+        else:
+            topk_slots, _ = triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token[:num_tokens],
+                attn_metadata.block_table,
+                topk_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                return_valid_counts=True,
+            )
         state = attn_metadata.state
         assert state is not None
         # Pack valid prefixes at the offsets refreshed by plan() before replay.

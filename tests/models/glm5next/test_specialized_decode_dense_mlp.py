@@ -15,7 +15,8 @@ from .test_specialized_decode_shared_expert import _packed, _quant, _weight
 HIDDEN, INTER, LIMIT = 4096, 3072, 10.0
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100), reason="Requires SM100"
+    not any(current_platform.is_device_capability_family(sm) for sm in (90, 100)),
+    reason="Requires SM90 or SM100",
 )
 
 
@@ -73,6 +74,10 @@ def _run(tokens, ue8m0):
 
 
 @pytest.mark.parametrize("tokens", [1, 8])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Requires SM100 DeepGEMM with UE8M0",
+)
 def test_dense_mlp_no_worse_than_stock(tokens):
     """UE8M0 scales, the only ones DeepGEMM takes on SM100."""
     from vllm.utils.deep_gemm import is_deep_gemm_supported

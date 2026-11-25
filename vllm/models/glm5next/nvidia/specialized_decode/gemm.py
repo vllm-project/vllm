@@ -17,6 +17,7 @@ from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
     shape_dynamic_skinny_gemm,
 )
+from vllm.platforms import current_platform
 
 # (block size, outputs per block, K unroll) per token count, by weight (N, K),
 # from a GB300 sweep with the weights rotated out of L2.
@@ -77,7 +78,7 @@ class Projection:
             if tile is not None:
                 policies[m] = tactics[tile]
         self.split_k = None
-        if policies:
+        if policies and current_platform.is_device_capability_family(100):
             from .cutedsl.projection import PreparedProjection
 
             self.split_k = PreparedProjection(weight, policies).prepare()

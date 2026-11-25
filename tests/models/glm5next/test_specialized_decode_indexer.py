@@ -15,7 +15,8 @@ HIDDEN, KEY, GATE, DIM = 4096, 128, 128, 128
 HEADS = 32  # index_n_heads, replicated on every TP rank
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100), reason="Requires SM100"
+    not any(current_platform.is_device_capability_family(sm) for sm in (90, 100)),
+    reason="Requires SM90 or SM100",
 )
 
 

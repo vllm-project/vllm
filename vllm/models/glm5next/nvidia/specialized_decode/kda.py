@@ -17,6 +17,7 @@ import torch
 
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.platforms import current_platform
 
 from .cutedsl.host import (
     layout,
@@ -83,8 +84,15 @@ class KdaStage:
         self.conv_dim_first = is_conv_state_dim_first()
         # Policy keys: a batch, or (requests, tokens) for verify steps.
         self.keys: list = list(batches)
-        self.keys += [(b // q, q) for b in batches if q > 1 and b % q == 0]
+        verify_batches = [b for b in batches if q > 1 and b % q == 0]
+        if q == 4 and current_platform.is_device_capability_family(90):
+            # at 64 rows the SM90 kernel exceeds the stock state error bound.
+            verify_batches = [b for b in verify_batches if b < 64]
+        self.keys += [(b // q, q) for b in verify_batches]
         self.kernels: dict = {}
+
+    def supports(self, batch: int, q: int) -> bool:
+        return (batch if q == 1 else (batch // q, q)) in self.kernels
 
     def _operands(self, caches, projected, gate, slots, out, accepted=None, g_b=None):
         conv, state = caches[:2]
@@ -134,7 +142,7 @@ class KdaStage:
         """The attention output, TP-reduced unless `reduce` is False."""
         a = self.attention
         skinny = self.projections
-        if skinny is not None and not skinny[0].supports(x.shape[0]):
+        if skinny is not None and not all(p.supports(x.shape[0]) for p in skinny):
             skinny = None
         projected = skinny[0](x) if skinny is not None else a.in_proj_qkvbfg_a(x)[0]
         d = self.dim

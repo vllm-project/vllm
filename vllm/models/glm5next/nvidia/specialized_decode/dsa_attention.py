@@ -183,8 +183,8 @@ class _HeadGemvKernel:
     `scale[0]`, clamped and converted as the stock static FP8 quant.
 
     `cache` (latent width): CTA `gemv CTAs + t` writes token t's latent row
-    into the FP8 KV cache as `concat_and_cache_mla` (`kv / k_scale`, padded
-    slots skipped).
+    into the KV cache as `concat_and_cache_mla`. FP8 storage applies the
+    cache scale. Padded slots are skipped.
     """
 
     def __init__(
@@ -259,16 +259,17 @@ class _HeadGemvKernel:
                 kv.iterator + t * self.cache + tid * 8,
                 count=4, word_type="u32", mutable=True,
             )  # fmt: skip
-            scale = k_scale[0]
-            v = []
-            for i in cutlass.range_constexpr(4):
-                lo, hi = unpack_bf16(got[i])
-                v += [div_rn(lo, scale), div_rn(hi, scale)]
             block = slot // Int64(block_size)
             offset = slot - block * Int64(block_size)
-            address = cache.iterator + block * block_stride
-            address = address + offset * entry_stride + tid * 8
-            store_words(address, (pack_fp8(tuple(v[:4])), pack_fp8(tuple(v[4:]))))
+            address = cache.iterator + block * block_stride + offset * entry_stride
+            if cutlass.const_expr(cache.element_type == cutlass.Uint8):
+                scale = k_scale[0]
+                v = []
+                for i in cutlass.range_constexpr(4):
+                    lo, hi = unpack_bf16(got[i])
+                    v += [div_rn(lo, scale), div_rn(hi, scale)]
+                got = (pack_fp8(tuple(v[:4])), pack_fp8(tuple(v[4:])))
+            store_words(address + tid * 8, got)
 
     @cute.jit
     def gemv(self, w, x, out, scale, partial, tid, block):
@@ -370,7 +371,7 @@ def head_gemv(
         weight: [H, I, J] BF16 weights.
         out: [M, H, J] BF16 or FP8 output.
         scale: the static FP8 scale of an FP8 `out`.
-        cache: optionally (kv [M, L] BF16, kv_cache [blocks, block size, L] FP8,
+        cache: optionally (kv [M, L] BF16, kv_cache [blocks, block size, L] FP8 or BF16,
             slots int64, k_scale), written as `concat_and_cache_mla`.
 
     """
@@ -395,7 +396,9 @@ def head_gemv(
         assert kv.shape[0] == m and kv.is_contiguous() and kv_cache.shape[-1] == width
         assert kv_cache.dim() == 3 and kv_cache.stride(2) == 1
         assert slots.dim() == 1 and slots.dtype == torch.int64
-        raw = kv_cache.view(torch.uint8)
+        raw = (
+            kv_cache if kv_cache.dtype == torch.bfloat16 else kv_cache.view(torch.uint8)
+        )
         kv_args = (kv.view(-1), _flat(raw), slots, k_scale)
         ints = (
             Int32(raw.shape[1]), Int64(raw.stride(0)), Int64(raw.stride(1)),
@@ -406,7 +409,7 @@ def head_gemv(
     args = (_flat(weight), _flat(x), out.view(-1), scale, *kv_args)
     st = stream(dev)
     key: tuple = ("gemv", heads, rows, cols, tile, rpt, m, strides, fp8, width)
-    key += (x.stride(0), dev.index) + tuple(t.shape for t in args)
+    key += (x.stride(0), dev.index) + tuple((t.shape, t.dtype) for t in args)
     if key not in _compiled:
         kernel = _HeadGemvKernel(
             heads, rows, cols, tile, rpt, m, strides, fp8, width, x.stride(0)
@@ -428,17 +431,29 @@ class DsaAttentionStage:
         from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
             FlashInferMLASparseImpl,
         )
+        from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 import (
+            FlashInferMLASparseSM90Impl,
+        )
 
         w = attention.mla_attn
         mla = w.mla_attn
         impl = mla.impl
+        self.split_query = isinstance(impl, FlashInferMLASparseSM90Impl)
+        self.fp8_cache = mla.kv_cache_dtype in ("fp8", "fp8_e4m3")
         checks = (
             (w.q_lora_rank is not None and w.fuse_qkv_rmsnorm, "a fused q/kv a-norm"),
             (w.rotary_emb is None and w.qk_rope_head_dim == 0, "NoPE"),
             (w.indexer is not None and not w.skip_topk, "its own indexer"),
             (w.g_proj is None and not w.dcp_q_replicate, "no gate or DCP query"),
-            (isinstance(impl, FlashInferMLASparseImpl), "the TRTLLM-Gen sparse MLA"),
-            (str(mla.kv_cache_dtype) in ("fp8", "fp8_e4m3"), "an FP8 KV cache"),
+            (
+                self.split_query or isinstance(impl, FlashInferMLASparseImpl),
+                "the FlashInfer sparse MLA backend",
+            ),
+            (
+                self.fp8_cache
+                or (self.split_query and mla.kv_cache_dtype in ("auto", "bfloat16")),
+                "a supported MLA KV cache dtype",
+            ),
             (mla.q_pad_num_heads is None and not mla.use_pcp, "no padding or PCP"),
             (mla.hisparse_cache is None and impl.dcp_world_size == 1, "no HiSparse"),
             (mla.W_UK_T.stride(-1) == 1, "a column-major W_UK"),
@@ -488,18 +503,23 @@ class DsaAttentionStage:
             self.q_size,
         )
         q = w.q_b_proj(q_c)[0].view(m, self.heads, -1)
-        q_fp8 = torch.empty(
+        q_absorbed = torch.empty(
             (m, self.heads, self.w_uk.shape[2]),
-            dtype=torch.float8_e4m3fn,
+            dtype=q.dtype if self.split_query else torch.float8_e4m3fn,
             device=q.device,
         )
         cache = (kv_c, mla.kv_cache, context.slot_mapping[mla.layer_name], mla._k_scale)
-        head_gemv(q, self.w_uk, q_fp8, mla._q_scale, cache)
+        q_scale = None if self.split_query else mla._q_scale
+        head_gemv(q, self.w_uk, q_absorbed, q_scale, cache)
         if not w.skip_topk:  # MTP draft steps 1+ reuse step 0's top-k
             w.indexer(hidden_states, q_c, positions, w.indexer_rope_emb)
         self.impl.record_logical_topk_ready()
-        kv_cache = mla.kv_cache.view(current_platform.fp8_dtype())
-        latent, _ = self.impl.forward_mqa(q_fp8, kv_cache, md, mla)
+        kv_cache = mla.kv_cache
+        if self.fp8_cache:
+            # SM100 flashinfer sparse MLA, SM90 we use bf16
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
+        decode_query = (q_absorbed, q[..., :0]) if self.split_query else q_absorbed
+        latent, _ = self.impl.forward_mqa(decode_query, kv_cache, md, mla)
         out = torch.empty(
             (m, self.heads, self.w_uv.shape[2]), dtype=q.dtype, device=q.device
         )

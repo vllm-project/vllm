@@ -23,6 +23,8 @@ import cutlass.cute as cute
 import torch
 from cutlass import Float32, Int64, Uint32
 
+from vllm.platforms import current_platform
+
 from .cutedsl.host import (
     _checked,
     resolve_kernel,
@@ -63,9 +65,14 @@ def _f16x4(word):
 def _fma_f16x2(a, b, c):
     """`c` plus the two products of the F16x2 words `a` and `b`: each product
     exact, each sum rounded in FP32."""
-    code = "{ .reg .b16 al,ah,bl,bh; .reg .f32 t; mov.b32 {al,ah},$1; "
-    code += "mov.b32 {bl,bh},$2; fma.rn.f32.f16 t,al,bl,$3; "
-    code += "fma.rn.f32.f16 $0,ah,bh,t; }"
+    code = "{ .reg .b16 al,ah,bl,bh; .reg .f32 t; "
+    code += "mov.b32 {al,ah},$1; mov.b32 {bl,bh},$2; "
+    if current_platform.is_device_capability_family(100):
+        code += "fma.rn.f32.f16 t,al,bl,$3; fma.rn.f32.f16 $0,ah,bh,t; }"
+    else:
+        code += ".reg .f32 a,b; cvt.f32.f16 a,al; cvt.f32.f16 b,bl; "
+        code += "fma.rn.f32 t,a,b,$3; cvt.f32.f16 a,ah; cvt.f32.f16 b,bh; "
+        code += "fma.rn.f32 $0,a,b,t; }"
     return code, "=f,r,r,f", (a, b, c)
 
 
@@ -362,6 +369,24 @@ def block_scales(packed: torch.Tensor, n: int, k: int) -> torch.Tensor:
     rows = exponents.view(n // GROUP, GROUP, groups)
     assert bool((rows == rows[:, :1]).all()), "scales vary inside a 128-row block"
     return (rows[:, 0].to(torch.int32) << 23).view(torch.float32).contiguous()
+
+
+def uses_ue8m0_activation(projection) -> bool:
+    """Match the stock FP8 linear kernel at the small batches these GEMVs use."""
+    from vllm import envs
+    from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
+        FlashInferFp8BlockScaledMMKernel,
+        FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+    )
+    from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+
+    kernel = getattr(projection.quant_method, "fp8_linear", None)
+    if isinstance(kernel, FlashInferFp8BlockScaledMMKernel) or (
+        isinstance(kernel, FlashInferFp8DeepGEMMDynamicBlockScaledKernel)
+        and not envs.VLLM_BATCH_INVARIANT
+    ):
+        return False
+    return is_deep_gemm_e8m0_used()
 
 
 def _largest_carveout(compiled, device: int) -> None:

@@ -84,9 +84,7 @@ class SpecializedDraft(LayerStages):
                     layer.self_attn,
                     self.policy.tokens("dsa_value_up", "cute"),
                 )
-        self.mega: dict[int, Any] = {}
-        if self.policy.enabled("moe"):
-            self.mega = self._build_mega(prefill_q=self.q)
+        self.moe = self._build_moe(prefill_q=self.q)
         self.dense: dict[int, Any] = {}
         self.ar_norm = None
         if self.policy.enabled("boundary"):

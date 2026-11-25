@@ -93,13 +93,14 @@ def _bf16x4(words):
 class _UpdateKernel:
     """One warp per request; lane `l` owns dimensions `4l .. 4l + 3`."""
 
-    def __init__(self, pool, ring, page, page_bytes, tail_block, tail_half):
+    def __init__(self, pool, ring, page, page_bytes, tail_block, tail_half, mx_scale):
         self.pool, self.ring, self.page = pool, ring, page
         self.page_bytes, self.tail_block, self.tail_half = (
             page_bytes,
             tail_block,
             tail_half,
         )
+        self.mx_scale = mx_scale
 
     @cute.jit
     def __call__(
@@ -228,9 +229,13 @@ class _UpdateKernel:
         in_page = loc64 % self.page
         store_words(page_base + in_page * DIM + dim, (pack_fp8(tuple(y)),))
         if lane == 0:
+            if cutlass.const_expr(self.mx_scale):
+                scale_word = Uint32(exponent + 127) * Uint32(0x01010101)
+            else:
+                scale_word = float_bits(scale)
             store_words(
                 page_base + self.page * DIM + in_page * 4,
-                (Uint32(exponent + 127) * Uint32(0x01010101),),
+                (scale_word,),
             )
 
 
@@ -252,8 +257,7 @@ def kpool_update(
     positions: torch.Tensor,
     pool_size: int,
 ) -> None:
-    """`kpool_decode_update_and_maybe_write_cache_batched` with power-of-two
-    UE8M0 (MX) scales; the same arguments, `head_dim` 128."""
+    """Batched decode update for 128-wide FP8 keys with power-of-two scales."""
     requests, tokens = key.shape[0], key.shape[1]
     if requests == 0 or tokens == 0:
         return
@@ -274,7 +278,7 @@ def kpool_update(
     st = stream(key.device)
     config = (
         pool_size, ring, page, kv_cache.stride(0), tail_kv_cache.stride(0),
-        tail_kv_cache.stride(1),
+        tail_kv_cache.stride(1), mqa_logits_use_mx_scales(),
     )  # fmt: skip
     compile_key = (config, positions.dtype, key.device.index)
     cute_args = [to_cute(t, 8) for t in args]
@@ -675,6 +679,10 @@ class KpoolStage:
     """
 
     def __init__(self, attentions, max_rows: int, device):
+        from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 import (
+            FlashInferMLASparseSM90Impl,
+        )
+
         self.pending: tuple[torch.Tensor, torch.Tensor, int] | None = None
         self.fuse = False
         # Indexer caches of the fused layers: others (the MTP draft's) never
@@ -686,7 +694,7 @@ class KpoolStage:
         )
         impls = [attn.mla_attn.mla_attn.impl for attn in attentions]
         groups = [getattr(impl, "index_group", None) for impl in impls]
-        if all(
+        if impls and all(
             type(group) is SparseMLAIndexGroup
             and group.has_indexer
             and group.num_layers == 1
@@ -696,8 +704,10 @@ class KpoolStage:
         ):
             self.fuse = True
             self.layers = {str(attn.indexer.k_cache.prefix) for attn in attentions}
-            for group in groups:
+            for impl, group in zip(impls, groups):
                 FusedRemap(group, self)
+                if isinstance(impl, FlashInferMLASparseSM90Impl):
+                    impl.use_index_group_remap = lambda: self.pending is not None
 
     @staticmethod
     def active() -> bool:
@@ -735,7 +745,7 @@ class KpoolStage:
         kv_cache, tail_kv_cache, tail_slot_mapping, key, slot_score, ape,
         slot_mapping, positions, pool_size, head_dim=DIM, round_scale=True,
     ):  # fmt: skip
-        if head_dim != DIM or not mqa_logits_use_mx_scales():
+        if head_dim != DIM or not (round_scale or mqa_logits_use_mx_scales()):
             return kpool_decode_update_and_maybe_write_cache_batched(
                 kv_cache, tail_kv_cache, tail_slot_mapping, key, slot_score, ape,
                 slot_mapping, positions, pool_size, head_dim, round_scale=round_scale,

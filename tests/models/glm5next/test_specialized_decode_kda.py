@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The specialized decode's fused KDA core (`KdaStage` on Kimi K3's KdaSplit) at
-32 and 64 tokens, plain decode and q = 4 verify, against an FP64 reference: its
+plain decode and verify batches, against an FP64 reference: its
 output and recurrent-state error must not exceed the stock kernels' (conv update,
 F_B GEMM, fused recurrence, gated RMSNorm), and its conv rows must match. With
 g_b_proj folded in, the reference takes the FP64 gate and stock its BF16 GEMM."""
@@ -19,9 +19,11 @@ HEADS, HEAD_DIM = 16, 128
 DIM = HEADS * HEAD_DIM
 PITCH = 3 * DIM + HEADS + 2 * HEAD_DIM
 LOWER_BOUND, EPS = -5.0, 1e-5
+HOPPER = current_platform.is_device_capability_family(90)
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100), reason="Requires SM100"
+    not any(current_platform.is_device_capability_family(sm) for sm in (90, 100)),
+    reason="Requires SM90 or SM100",
 )
 
 
@@ -59,7 +61,7 @@ class _Case:
     def clone_caches(self):
         return tuple(c.clone() for c in self.caches)
 
-    def specialized(self, caches, fold):
+    def stage(self, caches, fold):
         from vllm.models.glm5next.nvidia.specialized_decode.kda import KdaStage
 
         conv = lambda w: SimpleNamespace(weight=w)
@@ -80,6 +82,9 @@ class _Case:
         fold_tokens = {self.tokens} if fold else ()
         stage = KdaStage(attention, [self.tokens], self.q, fold_tokens=fold_tokens)
         stage.prepare_caches(caches)
+        return stage
+
+    def specialized(self, stage):
         x = torch.empty(self.tokens, 1, device="cuda", dtype=torch.bfloat16)
         metadata = SimpleNamespace(
             non_spec_state_indices_tensor=self.slots.view(-1),
@@ -222,13 +227,20 @@ def _errors(out, caches, reference):
     return [float(v) for v in quantiles] + [state]
 
 
-@pytest.mark.parametrize("fold", [False, True], ids=["gate", "fold_g_b"])
-@pytest.mark.parametrize(("requests", "q"), [(64, 1), (16, 4)])
+@pytest.mark.parametrize(
+    ("requests", "q", "fold"),
+    [(64, 1, False), (64, 1, True), (16, 4, False)]
+    + ([(8, 6, False), (8, 6, True)] if HOPPER else [(16, 4, True)]),
+)
 def test_kda_core_no_worse_than_stock(requests, q, fold):
     case = _Case(requests, q)
-    reference = case.reference(exact_gate=fold)
     ours_caches, stock_caches = case.clone_caches(), case.clone_caches()
-    ours = _errors(case.specialized(ours_caches, fold), ours_caches, reference)
+    stage = case.stage(ours_caches, fold)
+    if q == 4 and HOPPER:
+        assert not stage.supports(case.tokens, q)
+        return
+    reference = case.reference(exact_gate=fold)
+    ours = _errors(case.specialized(stage), ours_caches, reference)
     stock = _errors(case.stock(stock_caches), stock_caches, reference)
     # Median, p99 and max output error and the max state error.
     assert all(a <= b for a, b in zip(ours, stock)), (ours, stock)

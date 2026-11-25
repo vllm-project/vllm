@@ -15,6 +15,8 @@ from contextlib import contextmanager
 
 import torch
 
+from vllm.platforms import current_platform
+
 from .gemm import Projection
 
 MAX_TOKENS = 2
@@ -70,7 +72,8 @@ def route(module, split_k_tokens=()) -> bool:
     except ValueError:
         return False
     tokens = {m for m in projection.configs if m <= MAX_TOKENS}
-    tokens |= {m for m in split_k_tokens if projection.supports(m)}
+    if current_platform.is_device_capability_family(100):
+        tokens |= {m for m in split_k_tokens if projection.supports(m)}
     if not tokens:  # no tactic splits this K
         return False
     module.quant_method = _RoutedApply(module.quant_method, projection, tokens)

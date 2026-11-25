@@ -312,6 +312,16 @@ class DenseMlp:
         self.limit, self.ue8m0 = limit, ue8m0
         self.compiled: dict = {}
 
+    def supports(self, tokens: int) -> bool:
+        shapes = ((self.n1, self.k, GATE_UP_SHAPE), (self.n2, self.inter, DOWN_SHAPE))
+        return 1 <= tokens <= MAX_TOKENS and all(
+            k % SLICE == 0
+            and rows % (16 * tiles) == 0
+            and 16 * tokens <= 32 * (k // SLICE)
+            and 32 * (k // SLICE) * tiles <= 1024
+            for rows, k, (tiles, _, _) in shapes
+        )
+
     def prepare(self, tokens: list[int]) -> None:
         """Compiles for these token counts before graph capture."""
         for m in tokens:

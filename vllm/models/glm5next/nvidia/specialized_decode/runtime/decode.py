@@ -99,11 +99,34 @@ class LayerStages:
     moe_layers: list[Any]
     batches: list[int]
     kda: dict[int, Any]
-    mega: dict[int, Any]
+    moe: dict[int, Any]
     policy: Policy
     config: Any
     # Dense layers whose MLP runs as the CuTe GEMVs.
     dense: dict[int, Any]
+
+    def _build_moe(self, prefill_q: int = 1) -> dict[int, Any]:
+        if set(self.policy.tables["moe"].values()) == {"triton"}:
+            from ..triton_moe import build_triton_moe
+
+            moe = build_triton_moe(self.moe_layers, self.policy)
+            if moe and self.policy.enabled("router"):
+                self._prepare_router()
+            return moe
+        return self._build_mega(prefill_q) if self.policy.enabled("moe") else {}
+
+    @staticmethod
+    def _prepare_router() -> None:
+        from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+            ll_bf16_gemm_kernel,
+        )
+
+        split_k, stages, _ = ROUTER_SPLIT_K
+        ll_bf16_gemm_kernel.compile(
+            ll_bf16_gemm_kernel.CompileKey(
+                backend="splitk", split_k=split_k, num_stages=stages
+            )
+        )
 
     def _build_mega(self, prefill_q: int = 1) -> dict[int, Any]:
         from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
@@ -179,16 +202,7 @@ class LayerStages:
             )
             device = routed.w13_weight.device
         if any(self.policy("router", m) for m in tokens):
-            from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-                ll_bf16_gemm_kernel,
-            )
-
-            split_k, stages, _ = ROUTER_SPLIT_K
-            ll_bf16_gemm_kernel.compile(
-                ll_bf16_gemm_kernel.CompileKey(
-                    backend="splitk", split_k=split_k, num_stages=stages
-                )
-            )
+            self._prepare_router()
         if mega:
             top_k = self.text_config.num_experts_per_tok
             self.route_order = torch.arange(
@@ -199,9 +213,8 @@ class LayerStages:
         return mega
 
     def _build_dense(self) -> dict[int, Any]:
-        from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
-
         from ..dense_mlp import DenseMlp
+        from ..shared_expert import uses_ue8m0_activation
 
         tokens = [b for b in self.batches if self.policy("dense_mlp", b)]
         dense: dict[int, Any] = {}
@@ -211,7 +224,10 @@ class LayerStages:
             if layer._mlp_is_moe:
                 continue
             gate_up, down = layer.mlp.gate_up_proj, layer.mlp.down_proj
-            if getattr(gate_up, "weight_scale_inv", None) is None:
+            if (
+                getattr(gate_up, "weight_scale_inv", None) is None
+                or getattr(down, "weight_scale_inv", None) is None
+            ):
                 continue
             mlp = DenseMlp(
                 gate_up.weight,
@@ -219,10 +235,12 @@ class LayerStages:
                 down.weight,
                 down.weight_scale_inv,
                 layer.mlp.swiglu_limit,
-                is_deep_gemm_e8m0_used(),
+                uses_ue8m0_activation(gate_up),
             )
-            mlp.prepare(tokens)
-            dense[layer.layer_idx] = mlp
+            supported = [m for m in tokens if mlp.supports(m)]
+            if supported:
+                mlp.prepare(supported)
+                dense[layer.layer_idx] = mlp
         logger.info("Specialized decode runs %d dense MLPs as GEMVs", len(dense))
         return dense
 
@@ -231,7 +249,7 @@ class LayerStages:
         from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 
         moe = layer.mlp
-        per_route, grouped = self.mega[layer.layer_idx]
+        per_route, grouped = self.moe[layer.layer_idx]
         bias = moe.gate.e_score_correction_bias
         if choice == "grouped":
             # The grouped kernel runs the shared expert as one more expert.
@@ -281,7 +299,7 @@ class LayerStages:
         """Routed and shared experts as the grouped kernel, finalized and
         all-reduced (token counts without a fused boundary)."""
         moe = layer.mlp
-        _, grouped = self.mega[layer.layer_idx]
+        _, grouped = self.moe[layer.layer_idx]
         logits = self._router(moe, x)
         bias = moe.gate.e_score_correction_bias
         return tensor_model_parallel_all_reduce(grouped(x, logits, bias, finalize=True))
@@ -299,7 +317,7 @@ class LayerStages:
         """The attention output and whether it is still TP-partial."""
         partial = self.partial(x.shape[0])
         stage = self.kda.get(layer.layer_idx)
-        if stage is not None and self.policy("kda", x.shape[0]):
+        if stage is not None and stage.supports(x.shape[0], step.q):
             md = step.metadata[layer.self_attn.prefix]
             return stage.run(x, md, step.q, reduce=not partial), partial
         o_proj = layer.self_attn.o_proj
@@ -310,15 +328,17 @@ class LayerStages:
         """The FFN output and whether it is still TP-partial."""
         partial = self.partial(x.shape[0])
         dense = self.dense.get(layer.layer_idx)
-        if dense is not None and self.policy("dense_mlp", x.shape[0]):
+        if dense is not None and x.shape[0] in dense.compiled:
             out = dense(x)
             if not partial:
                 out = tensor_model_parallel_all_reduce(out)
             return out, partial
         moe_tokens = x.shape[0] if moe_policy_tokens is None else moe_policy_tokens
         choice = self.policy("moe", moe_tokens)
-        if layer.layer_idx in self.mega and choice:
+        if choice and (moe := self.moe.get(layer.layer_idx)) is not None:
             if partial:
+                if callable(moe):
+                    return moe(x, self._router), True
                 return self._mega_moe(layer, x, choice), True
             if choice == "grouped":
                 return self._grouped_moe(layer, x), False
@@ -365,7 +385,7 @@ class SpecializedDecode(LayerStages):
         if self.policy.enabled("dsa_proj"):
             from ..linear import route
 
-            split = [b for b in self.batches if self.policy("dsa_proj", b)]
+            split = [b for b in self.batches if self.policy("dsa_proj", b) == "split_k"]
             for layer in self.layers:
                 if layer.layer_kind != "mla":
                     continue
@@ -405,10 +425,7 @@ class SpecializedDecode(LayerStages):
             logger.info(
                 "Specialized decode kpool kernels (fused index remap: %s)", kpool.fuse
             )
-        # MoE layers whose routed experts run as one mega kernel.
-        self.mega: dict[int, Any] = {}
-        if self.policy.enabled("moe"):
-            self.mega = self._build_mega()
+        self.moe = self._build_moe()
         self.dense: dict[int, Any] = {}
         if self.policy.enabled("dense_mlp"):
             self.dense = self._build_dense()

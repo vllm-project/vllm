@@ -13,7 +13,8 @@ HEADS, NOPE, LATENT, V = 16, 256, 512, 256
 Q_LORA = 1536
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100), reason="Requires SM100"
+    not any(current_platform.is_device_capability_family(sm) for sm in (90, 100)),
+    reason="Requires SM90 or SM100",
 )
 
 
@@ -107,12 +108,9 @@ def test_norm_matches_stock(tokens):
         assert (ours == theirs).float().mean() > 0.99
 
 
-@pytest.mark.parametrize("tokens", [1, 8])
-@pytest.mark.parametrize("k_scale", [0.5])
-def test_absorb_writes_kv_cache_as_stock(tokens, k_scale):
-    """The absorb kernel's cache CTAs write `concat_and_cache_mla`'s FP8 bytes
-    at the valid slots of a padded-stride cache and nothing else, and leave
-    the query as it is without them."""
+@pytest.mark.parametrize("tokens,fp8_cache", [(1, True), (8, True), (6, False)])
+def test_absorb_writes_kv_cache_as_stock(tokens, fp8_cache):
+    """Compare cache bytes with `concat_and_cache_mla` for padded block strides."""
     from vllm import _custom_ops as ops
     from vllm.models.glm5next.nvidia.specialized_decode.dsa_attention import (
         head_gemv,
@@ -125,23 +123,30 @@ def test_absorb_writes_kv_cache_as_stock(tokens, k_scale):
     kv = kv.bfloat16()
     blocks, block_size = 8, 64
     # A padded block stride, as the hybrid KV cache allocates it.
-    cache = torch.zeros(blocks, block_size + 2, LATENT, dtype=torch.uint8)
+    cache_dtype = torch.uint8 if fp8_cache else torch.bfloat16
+    cache = torch.zeros(blocks, block_size + 2, LATENT, dtype=cache_dtype)
     cache = cache.cuda()[:, :block_size]
     stock_cache = cache.clone()
     slots = torch.randperm(blocks * block_size)[:tokens].cuda()
     if tokens > 1:
         slots[-1] = -1
-    scale = torch.tensor([k_scale], dtype=torch.float32, device="cuda")
-    q_scale = torch.ones(1, dtype=torch.float32, device="cuda")
+    scale = torch.tensor([0.5], dtype=torch.float32, device="cuda")
+    q_scale = torch.ones(1, dtype=torch.float32, device="cuda") if fp8_cache else None
 
-    out = torch.empty(tokens, HEADS, LATENT, dtype=torch.float8_e4m3fn, device="cuda")
+    q_dtype = torch.float8_e4m3fn if fp8_cache else torch.bfloat16
+    out = torch.empty(tokens, HEADS, LATENT, dtype=q_dtype, device="cuda")
     head_gemv(q, w_uk, out, q_scale, (kv, cache, slots, scale))
     plain = torch.empty_like(out)
     head_gemv(q, w_uk, plain, q_scale)
     assert torch.equal(out.view(torch.uint8), plain.view(torch.uint8))
 
     ops.concat_and_cache_mla(
-        kv, kv[:, :0], stock_cache.view(torch.float8_e4m3fn), slots, "fp8", scale
+        kv,
+        kv[:, :0],
+        stock_cache.view(q_dtype),
+        slots,
+        "fp8" if fp8_cache else "auto",
+        scale,
     )
     assert torch.equal(cache, stock_cache)
     untouched = torch.ones(blocks * block_size, dtype=torch.bool, device="cuda")
@@ -172,6 +177,9 @@ def test_kda_gate_matches_linear(tokens):
     assert ours[0] <= theirs[0] and ours[1] <= theirs[1] * 1.02, (ours, theirs)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100), reason="Requires SM100"
+)
 @pytest.mark.parametrize(
     "shape,tokens",
     [

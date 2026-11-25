@@ -30,8 +30,6 @@ from vllm.distributed import get_tp_group
 from vllm.models.common.ops.moe_tail_fusion.primitives import (
     current_cu_stream,
     make_fake_dynamic_compact_tensor,
-    to_cute,
-    to_cute_dynamic,
 )
 
 from .cutedsl.primitives import (
@@ -170,6 +168,7 @@ class LogitsGather:
                 Int32(0),
                 Int32(capacity),
                 current_cu_stream(),
+                options="--enable-tvm-ffi",
             )
             torch.accelerator.synchronize()
         dist.barrier(group=group)
@@ -182,11 +181,11 @@ class LogitsGather:
         assert logits.dtype == torch.bfloat16 and logits.is_contiguous()
         parity, self._parity = self._parity, self._parity ^ 1
         self._kernel(
-            to_cute_dynamic(logits.flatten(), 16, divisibility=self.columns),
-            to_cute(self._flags, 4),
-            Int64(self._flags_multicast),
-            Int32(parity),
-            Int32(m),
+            logits.view(-1),
+            self._flags,
+            self._flags_multicast,
+            parity,
+            m,
             current_cu_stream(),
         )
         return self._buffer[parity, :m]

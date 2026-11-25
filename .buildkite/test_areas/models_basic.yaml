@@ -733,22 +733,22 @@ steps:
   - pytest -v -s distributed/test_custom_all_reduce.py -k all_reduce_mhc
   - pytest -v -s kernels/test_engram.py
 
-- label: ":nvidia: (4xH100) GLM-5.3-Flash mHC Boundary"
+- label: ":nvidia: (4xH100) GLM-5.3-Flash Specialized Decode"
   key: glm5next-mhc-boundary-4xh100
   optional: true
-  timeout_in_minutes: 15
+  timeout_in_minutes: 25
   device: h100
   num_devices: 4
   source_file_dependencies:
-  - vllm/models/glm5next/nvidia/specialized_decode/all_reduce_mhc.py
-  - vllm/models/glm5next/nvidia/specialized_decode/runtime/
+  - vllm/models/glm5next/nvidia/specialized_decode/
   - vllm/models/glm5next/common/mtp.py
-  - vllm/models/glm5next/nvidia/specialized_decode/cutedsl/finalize_publish.py
-  - vllm/models/common/ops/moe_tail_fusion/primitives.py
-  - tests/models/glm5next/test_specialized_decode_ar_mhc.py
-  - tests/models/glm5next/tp4.py
+  - vllm/models/glm5next/nvidia/sparse_indexer.py
+  - vllm/models/common/ops/moe_tail_fusion/
+  - vllm/model_executor/layers/fused_moe/experts/triton_moe.py
+  - vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm90.py
+  - tests/models/glm5next/
   commands:
-  - pytest -v -s models/glm5next/test_specialized_decode_ar_mhc.py
+  - pytest -v -s models/glm5next -k specialized_decode
 
 - label: ":nvidia: (4xB200) GLM-5.3-Flash Specialized Decode"
   key: glm5next-nvidia-specialized-decode-4xb200
