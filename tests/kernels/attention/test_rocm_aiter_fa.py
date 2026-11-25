@@ -1289,16 +1289,21 @@ def test_asm_kv_scale_tables_shared_across_builders():
 
 
 @pytest.mark.parametrize("sliding_window", [None, 16])
-def test_aiter_fa_metadata_build_does_not_sync(sliding_window):
+@pytest.mark.parametrize("num_speculative_tokens", [0, 3])
+def test_aiter_fa_metadata_build_does_not_sync(sliding_window, num_speculative_tokens):
     """Building the metadata for prefill and extend rows must not wait for
-    queued GPU work: the builder runs while the previous step executes."""
+    queued GPU work: the builder runs while the previous step executes.
+
+    With speculative decoding, the decode row is a verification row of
+    1 + num_speculative_tokens tokens. It must stay a decode, and its
+    overstated CPU bound must not reach the extend or prefill rows."""
     from tests.v1.attention.utils import (
         BatchSpec,
         create_common_attn_metadata,
         create_standard_kv_cache_spec,
         create_vllm_config,
     )
-    from vllm.config import set_current_vllm_config
+    from vllm.config import SpeculativeConfig, set_current_vllm_config
     from vllm.model_executor.layers.attention import Attention
     from vllm.v1.attention.backends.rocm_aiter_fa import (
         AiterFlashAttentionBackend,
@@ -1311,6 +1316,14 @@ def test_aiter_fa_metadata_build_does_not_sync(sliding_window):
         dtype="bfloat16",
         max_num_batched_tokens=1024,
     )
+    if num_speculative_tokens > 0:
+        # ngram needs no draft model; the reorder threshold becomes
+        # 1 + num_speculative_tokens.
+        config.speculative_config = SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=num_speculative_tokens,
+        )
+    decode_len = 1 + num_speculative_tokens
     num_heads = config.model_config.get_num_attention_heads(config.parallel_config)
     num_kv_heads = config.model_config.get_num_kv_heads(config.parallel_config)
     head_size = config.model_config.get_head_size()
@@ -1331,8 +1344,10 @@ def test_aiter_fa_metadata_build_does_not_sync(sliding_window):
             config,
             torch.device("cuda"),
         )
-    # One decode, one extend over cached context and one prefill.
-    batch_spec = BatchSpec(seq_lens=[48, 80, 24], query_lens=[1, 32, 24])
+    assert builder.reorder_batch_threshold == decode_len
+    # One decode (a verification row when speculative decoding is on), one
+    # extend over cached context and one prefill.
+    batch_spec = BatchSpec(seq_lens=[48, 80, 24], query_lens=[decode_len, 32, 24])
     common = create_common_attn_metadata(
         batch_spec, BLOCK_SIZE, torch.device("cuda"), max_block_idx=32
     )
@@ -1352,6 +1367,8 @@ def test_aiter_fa_metadata_build_does_not_sync(sliding_window):
         1,
         1,
     )
+    assert metadata.decode_metadata is not None
+    assert metadata.decode_metadata.max_query_len == decode_len
     # The overstated decode row did not leak into the other rows' lengths.
     assert metadata.extend_metadata is not None
     assert metadata.prefill_metadata is not None
