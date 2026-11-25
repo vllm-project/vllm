@@ -7,22 +7,25 @@
 
 #pragma once
 
-// <torch/all.h> is not needed here: it also pulls in autograd, nn and jit,
-// which is several seconds of frontend for every skinny GEMM translation unit.
-#include <torch/types.h>            // torch::Tensor, torch::empty, AT_DISPATCH
-#include <ATen/cuda/CUDAContext.h>  // at::cuda::getCurrentCUDAStream
-#include <c10/cuda/CUDAGuard.h>     // at::cuda::OptionalCUDAGuard
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/Exception.h>
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <utility>
 
 #include "core/cuda_compat.h"
 #include "core/utils.hpp"
+#include "../dispatch_utils.h"
+#include "torch_utils.h"
 
 // TODO(rasmith): The kernels in this file are susceptible to integer overflow
 // issues, do not take strides, and are unable to handle PyTorch tensors that
@@ -70,7 +73,7 @@
 // instead of one per translation unit, which is what the callers want.
 inline int get_lds_size() {
   static const int result = [] {
-    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const auto* dprops = get_device_prop();
     const std::string device_arch = dprops->gcnArchName;
     return device_arch.find("gfx95") == std::string::npos ? 64 * 1024
                                                           : 160 * 1024;
@@ -80,7 +83,7 @@ inline int get_lds_size() {
 
 inline bool on_gfx1x() {
   static const bool result = [] {
-    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const auto* dprops = get_device_prop();
     const std::string device_arch = dprops->gcnArchName;
     return device_arch.find("gfx11") != std::string::npos ||
            device_arch.find("gfx12") != std::string::npos;
@@ -90,7 +93,7 @@ inline bool on_gfx1x() {
 
 inline bool on_gfx12() {
   static const bool result = [] {
-    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const auto* dprops = get_device_prop();
     const std::string device_arch = dprops->gcnArchName;
     return device_arch.find("gfx12") != std::string::npos;
   }();
@@ -99,7 +102,7 @@ inline bool on_gfx12() {
 
 inline bool on_gfx120x() {
   static const bool result = [] {
-    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const auto* dprops = get_device_prop();
     const std::string device_arch = dprops->gcnArchName;
     return device_arch.find("gfx1200") != std::string::npos ||
            device_arch.find("gfx1201") != std::string::npos;
@@ -109,7 +112,7 @@ inline bool on_gfx120x() {
 
 inline bool on_gfx1151() {
   static const bool result = [] {
-    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const auto* dprops = get_device_prop();
     const std::string device_arch = dprops->gcnArchName;
     return device_arch.find("gfx1151") != std::string::npos;
   }();
@@ -119,7 +122,7 @@ inline bool on_gfx1151() {
 // gfx1150, gfx1152 and gfx1153: 1024 VGPRs a lane and a 128-bit memory bus.
 inline bool on_gfx1150_class() {
   static const bool result = [] {
-    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const auto* dprops = get_device_prop();
     const std::string device_arch = dprops->gcnArchName;
     return device_arch.find("gfx1150") != std::string::npos ||
            device_arch.find("gfx1152") != std::string::npos ||

@@ -12,52 +12,8 @@
 // https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#annotations
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
-  // vLLM custom ops for rocm
-
-// The skinny GEMM sources (LLMM1/wvSplitK/wvSplitKrc/wvSplitKQ,
-// csrc/rocm/skinny_gemms*.cu) are excluded on gfx1250 (gfx9/gfx11 ISA,
-// unsupported there); skip these registrations to avoid undefined symbols. vLLM
-// uses default/Triton GEMM for these ops on gfx1250.
-#ifndef VLLM_SKIP_SKINNY_GEMMS
-  // Custom gemm op for matrix-vector multiplication
-  rocm_ops.def(
-      "LLMM1(Tensor in_a, Tensor in_b, int rows_per_block) -> "
-      "Tensor");
-  rocm_ops.impl("LLMM1", torch::kCUDA, &LLMM1);
-
-  // Custom gemm op for skinny matrix-matrix multiplication
-  rocm_ops.def(
-      "wvSplitK(Tensor in_a, Tensor in_b, Tensor? in_bias, int CuCount) -> "
-      "Tensor");
-  rocm_ops.impl("wvSplitK", torch::kCUDA, &wvSplitK);
-
-  // W4A16 grouped skinny GEMM: packed int4 weights, per-group scales,
-  // optional zero points [M/8, K/group_size] int32 for asymmetric
-  // quantization
-  rocm_ops.def(
-      "wvSplitK_int4_g(Tensor in_a, Tensor in_b, Tensor in_scale, "
-      "Tensor? in_zero_points, Tensor? in_bias, int CuCount, "
-      "int group_size) -> Tensor");
-  rocm_ops.impl("wvSplitK_int4_g", torch::kCUDA, &wvSplitK_int4_g);
-
-  // Custom gemm op for skinny matrix-matrix multiplication
-  rocm_ops.def(
-      "wvSplitKrc(Tensor in_a, Tensor in_b, Tensor? in_bias, int CuCount) -> "
-      "Tensor");
-  rocm_ops.impl("wvSplitKrc", torch::kCUDA, &wvSplitKrc);
-
-  // wvSplitK for fp8
-  rocm_ops.def(
-      "wvSplitKQ(Tensor in_a, Tensor in_b, Tensor? in_bias, Tensor! out_c, "
-      "Tensor scale_a, "
-      "          Tensor scale_b, int CuCount) -> ()");
-  rocm_ops.impl("wvSplitKQ", torch::kCUDA, &wvSplitKQ);
-
-  rocm_ops.def(
-      "swmmacGEMM(Tensor in_a, Tensor in_b, "
-      "Tensor? in_bias, int logical_M, int CuCount) -> Tensor");
-  rocm_ops.impl("swmmacGEMM", torch::kCUDA, &swmmacGEMM);
-#endif  // VLLM_SKIP_SKINNY_GEMMS
+  // vLLM custom ops for rocm. The skinny GEMMs (LLMM1, wvSplitK*, swmmacGEMM)
+  // are registered into this namespace by skinny_gemms_torch_bindings.cpp.
 
 #ifdef VLLM_ROCM_GFX1100
   // MXFP4 weights x int8 activations GEMV for RDNA3/RDNA3.5 (gfx11) decode,

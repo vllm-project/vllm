@@ -1685,8 +1685,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms_int4_n6.cu"
     "csrc/rocm/skinny_gemms_int4_n7.cu"
     "csrc/rocm/skinny_gemms_int4_n8.cu")
-  # Both families are built into _rocm_C_skinny below.
-  list(APPEND VLLM_SKINNY_SRC ${VLLM_SKINNY_INT4_SRC})
+  # Both families are built into _rocm_C_skinny below, with their op
+  # registrations.
+  list(APPEND VLLM_SKINNY_SRC ${VLLM_SKINNY_INT4_SRC}
+    "csrc/rocm/skinny_gemms_torch_bindings.cpp")
 
   # The paged attention instantiations are split over one generated translation
   # unit per (dtype, kv-cache dtype, head size, block size); compiling them in a
@@ -1778,7 +1780,6 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
 
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
-    ${VLLM_SKINNY_SRC}
     "csrc/rocm/attention_dispatch.cu"
     ${VLLM_ATTENTION_PAGED_ATTN_SRC})
 
@@ -1792,10 +1793,9 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_ROCM_EXT_FLAGS ${VLLM_GPU_FLAGS} --offload-compress)
 
   # skinny_gemms*.cu are built on gfx9/gfx11 ISA (MFMA, dot2/dot4, legacy
-  # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them from the
-  # gfx1250 build and disable their op registrations (VLLM_SKIP_SKINNY_GEMMS);
-  # vLLM falls back to default/Triton GEMM for those ops on gfx1250.
-  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC ${VLLM_SKINNY_SRC})
+  # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude them, and
+  # their op registrations, from the gfx1250 build; vLLM falls back to
+  # default/Triton GEMM for those ops on gfx1250.
   set(VLLM_SKINNY_ARCHES ${VLLM_GPU_ARCHES})
   list(FILTER VLLM_SKINNY_ARCHES EXCLUDE REGEX "gfx1250")
   if(VLLM_SKINNY_ARCHES)
@@ -1811,11 +1811,14 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     target_include_directories(_rocm_C_skinny PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc)
     target_compile_options(_rocm_C_skinny PRIVATE
       $<$<COMPILE_LANGUAGE:${VLLM_GPU_LANG}>:${VLLM_ROCM_EXT_FLAGS}>)
-    target_compile_definitions(_rocm_C_skinny PRIVATE "-DTORCH_EXTENSION_NAME=_rocm_C")
+    # The skinny GEMMs only use the stable ABI and are linked into
+    # _C_stable_libtorch, so they build against its TORCH_TARGET_VERSION.
+    target_compile_definitions(_rocm_C_skinny PRIVATE
+      TORCH_TARGET_VERSION=0x020B000000000000ULL USE_ROCM)
     target_link_libraries(_rocm_C_skinny PRIVATE torch)
+    target_link_libraries(_C_stable_libtorch PRIVATE _rocm_C_skinny)
   else()
     message(STATUS "Only gfx1250, skipping skinny_gemms")
-    list(APPEND VLLM_ROCM_EXT_FLAGS "-DVLLM_SKIP_SKINNY_GEMMS")
   endif()
 
   set(VLLM_ROCM_HAS_GFX1100 OFF)
@@ -1862,12 +1865,6 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
-  
-  if(TARGET _rocm_C_skinny)
-    target_link_libraries(_rocm_C PRIVATE _rocm_C_skinny)
-  else()
-    target_compile_definitions(_rocm_C PRIVATE VLLM_SKIP_SKINNY_GEMMS)
-  endif()
 
   # The paged attention units are identical whatever the arch list is; whether the
   # Navi (gfx11/gfx12) kernel set is needed is decided here, as a compile

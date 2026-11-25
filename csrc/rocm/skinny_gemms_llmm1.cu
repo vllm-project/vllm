@@ -4,19 +4,24 @@
 // Host-side launcher of the LLMM1 skinny GEMM; kernels in skinny_gemms.cuh.
 #include "skinny_gemms.cuh"
 
-torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
-                    const int64_t rows_per_block) {
+torch::stable::Tensor LLMM1(torch::stable::Tensor& in_a,
+                            torch::stable::Tensor& in_b,
+                            const int64_t rows_per_block) {
   auto M = in_a.size(0);
   auto K = in_a.size(1);
   auto N = in_b.size(0);
 
-  TORCH_CHECK(N == 1, "Row number of activation tensor must be 1.");
-  TORCH_CHECK(in_a.dtype() == in_b.dtype());
-  TORCH_CHECK(in_b.dtype() == torch::kFloat16 ||
-              in_b.dtype() == torch::kBFloat16);
+  STD_TORCH_CHECK(N == 1, "Row number of activation tensor must be 1.");
+  STD_TORCH_CHECK(in_a.scalar_type() == in_b.scalar_type(),
+                  "in_a and in_b must have the same dtype, got ",
+                  in_a.scalar_type(), " and ", in_b.scalar_type());
+  STD_TORCH_CHECK(
+      in_b.scalar_type() == torch::headeronly::ScalarType::Half ||
+          in_b.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "only float16 and bfloat16 are supported, got ", in_b.scalar_type());
 
-  auto out_c = torch::empty(
-      {N, M}, torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
+  auto out_c = torch::stable::empty({N, M}, in_b.scalar_type(), std::nullopt,
+                                    in_b.device());
 
   // NUM_TREADS need to be a multiple of WARP_SIZE, as we are using warp shuffle
   // operations.
@@ -28,14 +33,15 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
 
   int NUM_BLOCKS = M / rows_per_block;
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_b));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      in_b.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(in_b.get_device_index());
 
   // call the kernel function...
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "LLGemm1", [&] {
-    auto a_ptr = in_a.data_ptr<scalar_t>();
-    auto b_ptr = in_b.data_ptr<scalar_t>();
-    auto c_ptr = out_c.data_ptr<scalar_t>();
+  VLLM_STABLE_DISPATCH_HALF_TYPES(in_b.scalar_type(), "LLGemm1", [&] {
+    auto a_ptr = in_a.const_data_ptr<scalar_t>();
+    auto b_ptr = in_b.const_data_ptr<scalar_t>();
+    auto c_ptr = out_c.mutable_data_ptr<scalar_t>();
     if (rows_per_block == 2) {
       LLGemm1_kernel<scalar_t, 2>
           <<<NUM_BLOCKS, NUM_THREADS, 0, stream>>>(a_ptr, b_ptr, c_ptr, K);

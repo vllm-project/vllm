@@ -2,32 +2,6 @@
 
 #include <torch/all.h>
 
-torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
-                    const int64_t rows_per_block);
-
-torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
-                       const std::optional<at::Tensor>& in_bias,
-                       const int64_t CuCount);
-
-torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
-                              const at::Tensor& in_scale,
-                              const std::optional<at::Tensor>& in_zero_points,
-                              const std::optional<at::Tensor>& in_bias,
-                              const int64_t CuCount, const int64_t group_size);
-
-torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
-                         const std::optional<at::Tensor>& in_bias,
-                         const int64_t CuCount);
-
-torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
-                         const std::optional<at::Tensor>& in_bias,
-                         const int64_t logical_M, const int64_t CuCount);
-
-void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
-               const std::optional<at::Tensor>& in_bias, at::Tensor& out_c,
-               const at::Tensor& scale_a, const at::Tensor& scale_b,
-               const int64_t CuCount);
-
 torch::Tensor mxfp4_w4a8_gemv_rdna3(const at::Tensor& a, const at::Tensor& b_q,
                                     const at::Tensor& b_scale);
 
