@@ -90,8 +90,9 @@ Oversized payloads are rejected with a `400` before any `tokenizer.decode()` or 
 
 The derenderer builds its tool and reasoning parsers from its own server flags plus the `chat_request` sent with each call. It can't see how the request was rendered or served anywhere else, so for its output to match a `vllm serve` server:
 
-- Start the render server with the same `--tool-call-parser`, `--reasoning-parser`, `--enable-auto-tool-choice`, `--chat-template` and `--default-chat-template-kwargs` you'd give `vllm serve` for this model. If `/render` and `/derender` run on different servers, give both the same values.
+- Start the render server with the same `--tool-call-parser`, `--reasoning-parser`, `--enable-auto-tool-choice`, `--chat-template`, `--default-chat-template-kwargs` and `--response-role` you'd give `vllm serve` for this model. If `/render` and `/derender` run on different servers, give both the same values.
 - Send the full `chat_request` that went to `/render`, not just `messages` and `tools`. Fields like `chat_template_kwargs`, `reasoning_effort`, `tool_choice` and `include_reasoning` change how the output is parsed.
+- The message `role` is `--response-role`, or the last message's role when `add_generation_prompt` is `false`. With `echo: true`, the last message's content is prepended when its role matches, as on `/v1/chat/completions`. Streaming puts the echoed text at the start of the first chunk's `content` instead of in a chunk of its own.
 
 `/derender` decodes with the flags in `chat_request` which can differ from what the engine ran with. For parsers whose `adjust_request` changes decoding, use [`output_mode: "derender"`](token_in_token_out.md#derender) on `/inference/v1/generate`. It parses the engine's own text and matches coupled chat.
 
@@ -139,7 +140,7 @@ When a tool or reasoning parser is configured, parser internal state (buffered m
 - **Transport**: `output_token_ids` and `output_chunk_lens` round-trip in full in both directions on every call. `output_chunk_lens` has one entry per chunk, which is one per token without speculative decoding. This means O(n) bytes per chunk, O(n²) bytes over a full generation. Bounded by `max_model_len`. `prompt_token_ids` is sent in full on every call too and it isn't trimmed as `output_token_ids` grows. This means that for most of a stream it dominates the per chunk payload. A 100k token prompt with 1k tokens of output means `prompt_token_ids` is ~99% of the request body on every chunk.
 - **Compute**: replay is O(n) `parse_delta` calls per chunk (O(n²) per generation). `parse_delta` itself is O(n) for parsers that re-scan accumulated text (e.g. Hermes tool-call JSON, DeepSeek-R1 reasoning). The per-generation cost is O(n³) character work, not O(n²). This is a deliberately minimal first implementation with no caching layer.
 - The parser path also requires `prompt_token_ids` so `parse_delta` can settle whether the prompt left reasoning open or not. Since parser state can't be carried across calls, it re-scans the full prompt once per chunk. Send the full list and not a suffix because the last reasoning marker can be anywhere in the prompt.
-- Replay runs off the event loop on the renderer's executor (`renderer_num_workers`, default `1`). Size it for the expected number of concurrent parser configured streams.
+- Replay runs off the event loop on the renderer's executor (`renderer_num_workers`, default `4` for the async server path, `1` for pooling models). Size it for the expected number of concurrent parser configured streams.
 
 `output_token_ids` and `prompt_token_ids` are both bounded by `max_model_len` but callers streaming long reasoning traces through a parser configured model should expect materially more state transport and CPU cost than the plain detokenization path.
 

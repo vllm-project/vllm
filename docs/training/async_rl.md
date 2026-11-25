@@ -51,6 +51,8 @@ await engine.resume_generation()
 
 Resumes the scheduler after a pause. Any requests frozen with `mode="keep"` will continue generating.
 
+Wait for `pause_generation()` to finish before resuming, since a data-parallel MoE engine can reject an early resume. Once generation resumes, calling `resume_generation()` again has no effect.
+
 ### HTTP Endpoints
 
 With `VLLM_SERVER_DEV_MODE=1`, the vLLM HTTP server exposes the same functionality via:
@@ -70,7 +72,7 @@ A typical async RL loop with weight syncing looks like this:
 
 1. Start generating rollouts from the current policy
 2. Once trainer has new weights to update to, pause generation with `mode="keep"`
-3. Sync the updated weights from the trainer to the inference engine (see [Weight Transfer](weight_transfer/README.md)) and set their weight version
+3. Sync the updated weights from the trainer to the inference engine (see [Weight Transfer](weight_updates/README.md)) and set their weight version
 4. Resume generation -- in-flight requests continue with the new weights
 5. Repeat
 

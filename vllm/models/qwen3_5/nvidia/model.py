@@ -70,6 +70,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -81,19 +82,21 @@ from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     HasInnerState,
     IsHybrid,
+    MambaStateShapes,
     MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
+    SupportsReplaySSM,
     _require_is_multimodal,
 )
-from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5MoeProcessingInfo,
     Qwen3_5ProcessingInfo,
 )
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.qwen3_next import (
     Qwen3NextAttention,
     Qwen3NextDecoderLayer,
@@ -118,6 +121,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
     sequence_parallel_chunk,
+    spec_decode_needs_target_embed,
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -127,8 +131,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.utils.flashinfer import has_flashinfer
 
+from ..common.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
 from .ops.fused_allreduce_norm_quant import fused_allreduce_gemma_rms_norm_quant
-from .ops.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
 from .ops.fused_norm_quant import (
     FP8_DTYPE,
     gemma_add_rms_norm,
@@ -145,7 +149,7 @@ def _norm_quant_key(linear: nn.Module) -> QuantKey | None:
     them (requires_unquantized_input).
     """
     key = get_input_quant_key(linear)
-    if key == kFp8StaticTensorSym:
+    if key in (kFp8StaticTensorSym, kFp8DynamicTokenSym):
         return key
     # The norm writes block scales for exactly K = hidden_size, in whole
     # 4-column scale tiles (weights only require K % 32 == 0).
@@ -253,8 +257,12 @@ class Qwen3_5RMSNorm(nn.Module):
             return None, *self(x, residual)
 
         assert linear is not None
-        nvfp4 = key == kNvfp4Dynamic
-        scale = linear.input_global_scale_inv if nvfp4 else linear.input_scale
+        if key == kFp8DynamicTokenSym:
+            scale = None
+        elif key == kNvfp4Dynamic:
+            scale = linear.input_global_scale_inv
+        else:
+            scale = linear.input_scale
         if allreduce:
             assert residual is not None
             out = fused_allreduce_gemma_rms_norm_quant(
@@ -262,11 +270,11 @@ class Qwen3_5RMSNorm(nn.Module):
             )
             if out is not None:
                 return out
-            # Above the FlashInfer workspace budget: explicit all-reduce, then
-            # the Triton norm-quant.
+            # No FlashInfer AR+norm (unavailable or above its workspace
+            # budget): explicit all-reduce, then the Triton norm-quant.
             x = tensor_model_parallel_all_reduce(x)
         q, block_scale, y = gemma_add_rms_norm_quant(
-            x, residual, self.weight, self.variance_epsilon, scale, nvfp4, write_y
+            x, residual, self.weight, self.variance_epsilon, scale, key, write_y
         )
         qa = QuantizedActivation(
             data=q,
@@ -297,9 +305,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         self.layer_idx = extract_layer_index(prefix)
         is_moe_layer = config.model_type == "qwen3_5_moe_text"
         self.use_attn_reduce_scatter_for_moe = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-            and is_moe_layer
+            parallel_config.use_sequence_parallel_moe and is_moe_layer
         )
         # Defer row-parallel all-reduces to the following norm
         # (deepseek_v32 pattern); exclude PP and SP.
@@ -506,10 +512,17 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
 
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        if (
+            get_pp_group().is_first_rank
+            or (config.tie_word_embeddings and get_pp_group().is_last_rank)
+            or spec_decode_needs_target_embed(vllm_config)
+        ):
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
 
         def get_layer(prefix: str):
             return Qwen3_5DecoderLayer(
@@ -590,7 +603,8 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
         full_num_tokens = positions.shape[-1]
         if self.use_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
-            assert residual is None
+            if residual is not None:
+                residual = sequence_parallel_chunk(residual)
 
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
@@ -607,6 +621,11 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             )
 
         if not get_pp_group().is_last_rank:
+            if self.use_sequence_parallel:
+                # PP transport expects full-token tensors replicated across TP ranks.
+                packed = torch.cat([hidden_states, residual], dim=-1)
+                packed = tensor_model_parallel_all_gather(packed, 0)[:full_num_tokens]
+                hidden_states, residual = packed.chunk(2, dim=-1)
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
@@ -647,6 +666,7 @@ class Qwen3_5ForCausalLMBase(
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
+    SupportsReplaySSM,
 ):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -733,17 +753,18 @@ class Qwen3_5ForCausalLMBase(
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, ...]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
+            vllm_config.cache_config.use_replayssm,
         )
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> MambaStateShapes:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
@@ -752,6 +773,7 @@ class Qwen3_5ForCausalLMBase(
             if vllm_config.speculative_config
             else 0
         )
+        cache_config = vllm_config.cache_config
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
             tp_size,
             hf_config.linear_num_key_heads,
@@ -760,6 +782,7 @@ class Qwen3_5ForCausalLMBase(
             hf_config.linear_value_head_dim,
             hf_config.linear_conv_kernel_dim,
             num_spec,
+            cache_config.replayssm_buffer_len if cache_config.use_replayssm else None,
         )
 
     @classmethod
@@ -815,7 +838,9 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
     info=Qwen3_5ProcessingInfo,
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
-class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
+class Qwen3_5ForConditionalGeneration(
+    Qwen3VLForConditionalGeneration, IsHybrid, SupportsReplaySSM
+):
     supports_multimodal_pruning = True
 
     hf_to_vllm_mapper = (
@@ -937,17 +962,18 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, ...]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
+            vllm_config.cache_config.use_replayssm,
         )
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> MambaStateShapes:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
@@ -956,6 +982,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             if vllm_config.speculative_config
             else 0
         )
+        cache_config = vllm_config.cache_config
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
             tp_size,
             hf_config.linear_num_key_heads,
@@ -964,6 +991,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             hf_config.linear_value_head_dim,
             hf_config.linear_conv_kernel_dim,
             num_spec,
+            cache_config.replayssm_buffer_len if cache_config.use_replayssm else None,
         )
 
     @classmethod
