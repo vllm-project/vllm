@@ -9156,13 +9156,12 @@ def _make_encoder_instance_request(scheduler, text_prefix=8, image_tokens=16):
     return request
 
 
-@pytest.mark.parametrize("ec_role", ["ec_producer", "ec_both"])
-def test_ec_producer_republishes_runner_hit_after_cpu_eviction(ec_role):
-    """A runner hit reserves a new CPU save without encoding or loading again."""
+def _make_eccpu_scheduler(ec_role, cpu_blocks, **scheduler_kwargs):
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
         use_ec_connector=True,
         ec_role=ec_role,
+        **scheduler_kwargs,
     )
     config = scheduler.vllm_config
     ec_config = config.ec_transfer_config
@@ -9170,17 +9169,28 @@ def test_ec_producer_republishes_runner_hit_after_cpu_eviction(ec_role):
     ec_config.ec_connector = "ECCPUConnector"
     ec_config.mm_encoder_output_widths = {"image": width}
     ec_config.ec_connector_extra_config = {
-        "ec_cpu_bytes": 2 * width * config.model_config.dtype.itemsize,
+        "ec_cpu_bytes": cpu_blocks * width * config.model_config.dtype.itemsize,
     }
     connector = ECCPUConnector(config, ECConnectorRole.SCHEDULER)
     scheduler.ec_connector = connector
-    request, replacement = create_requests(
-        num_requests=2,
+    connector.bind_encoder_cache_query(
+        scheduler.encoder_cache_manager.get_cached_num_encoder_embeds
+    )
+    return scheduler, connector
+
+
+@pytest.mark.parametrize("ec_role", ["ec_producer", "ec_both"])
+def test_ec_producer_republishes_runner_hit_after_cpu_eviction(ec_role):
+    """A runner hit reserves a new CPU save without encoding or loading again."""
+    scheduler, connector = _make_eccpu_scheduler(ec_role, cpu_blocks=2)
+    request, replacement, repeat = create_requests(
+        num_requests=3,
         num_tokens=8,
-        mm_hashes_list=[["cached-image"], ["replacement-image"]],
+        mm_hashes_list=[["cached-image"], ["replacement-image"], ["cached-image"]],
         mm_positions=[
             [PlaceholderRange(offset=0, length=1)],
             [PlaceholderRange(offset=0, length=2)],
+            [PlaceholderRange(offset=0, length=1)],
         ],
     )
 
@@ -9221,8 +9231,10 @@ def test_ec_producer_republishes_runner_hit_after_cpu_eviction(ec_role):
             )
         )
         assert entry.ready
-        connector.update_state_after_cache_hit(request, 0)
-        metadata = connector.build_connector_meta(None)
+        scheduler.add_request(repeat)
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens[repeat.request_id] == 8
+        metadata = output.ec_connector_metadata
         assert metadata.saves == {}
         assert metadata.loads == {}
     finally:
@@ -9232,21 +9244,7 @@ def test_ec_producer_republishes_runner_hit_after_cpu_eviction(ec_role):
 @pytest.mark.parametrize("cpu_blocks", [1, 2])
 def test_ec_republish_preserves_selected_cpu_load(cpu_blocks):
     """A runner hit can only republish using space left after pinning loads."""
-    scheduler = create_scheduler(
-        model="llava-hf/llava-1.5-7b-hf",
-        use_ec_connector=True,
-        ec_role="ec_both",
-    )
-    config = scheduler.vllm_config
-    ec_config = config.ec_transfer_config
-    width = config.model_config.get_inputs_embeds_size()
-    ec_config.ec_connector = "ECCPUConnector"
-    ec_config.mm_encoder_output_widths = {"image": width}
-    ec_config.ec_connector_extra_config = {
-        "ec_cpu_bytes": cpu_blocks * width * config.model_config.dtype.itemsize,
-    }
-    connector = ECCPUConnector(config, ECConnectorRole.SCHEDULER)
-    scheduler.ec_connector = connector
+    scheduler, connector = _make_eccpu_scheduler("ec_both", cpu_blocks)
     cpu_hashes = ["cpu-only", "evictable"][:cpu_blocks]
     seed, request = create_requests(
         num_requests=2,
@@ -9279,6 +9277,52 @@ def test_ec_republish_preserves_selected_cpu_load(cpu_blocks):
         metadata = output.ec_connector_metadata
         assert metadata.loads.keys() == {"cpu-only"}
         assert metadata.saves.keys() == ({"runner-only"} if cpu_blocks == 2 else set())
+    finally:
+        connector.shutdown()
+
+
+@pytest.mark.parametrize("masked_prefix", [False, True])
+def test_ec_republish_waits_for_chunk_with_embeddings(masked_prefix):
+    """A runner hit is republished only when the chunk uses its embeddings."""
+    scheduler, connector = _make_eccpu_scheduler(
+        "ec_both",
+        cpu_blocks=2,
+        max_num_seqs=1,
+        max_num_batched_tokens=4,
+        max_model_len=64,
+    )
+    position = (
+        PlaceholderRange(
+            offset=2,
+            length=4,
+            is_embed=torch.tensor([False, False, True, True]),
+        )
+        if masked_prefix
+        else PlaceholderRange(offset=4, length=2)
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        mm_hashes_list=[["runner-only"]],
+        mm_positions=[[position]],
+    )
+
+    try:
+        manager = scheduler.encoder_cache_manager
+        manager.allocate(request, 0)
+        manager.free(request)
+        scheduler.add_request(request)
+
+        first = scheduler.schedule()
+        assert first.num_scheduled_tokens == {request.request_id: 4}
+        assert first.scheduled_encoder_inputs == {}
+        assert first.ec_connector_metadata.saves == {}
+
+        second = scheduler.schedule()
+        assert second.num_scheduled_tokens == {request.request_id: 4}
+        assert second.scheduled_encoder_inputs == {}
+        assert second.ec_connector_metadata.loads == {}
+        assert second.ec_connector_metadata.saves.keys() == {"runner-only"}
     finally:
         connector.shutdown()
 

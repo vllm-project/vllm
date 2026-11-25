@@ -134,10 +134,6 @@ class ECCPUConnector(ECConnectorBase):
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_state_after_alloc(request, index)
 
-    def update_state_after_cache_hit(self, request: "Request", index: int) -> None:
-        assert self.connector_scheduler is not None
-        self.connector_scheduler.update_state_after_cache_hit(request, index)
-
     def build_connector_meta(
         self, scheduler_output: "SchedulerOutput"
     ) -> ECCPUConnectorMetadata:
