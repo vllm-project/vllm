@@ -290,17 +290,14 @@ class TestPromptBuilding:
     )
     async def test_item_ordering(self, renderer, item_first, expected):
         """Test that item_first flag controls prompt concatenation order."""
-        mock_engine = _create_mock_engine(renderer)
-        serving = _create_serving(mock_engine)
-
         request = GenerativeScoringRequest(
             query=[100, 101],
             items=[[200, 201], [300, 301]],
             label_token_ids=[500, 501],
             item_first=item_first,
         )
-        engine_inputs, _ = await serving._build_prompts(
-            request, renderer.get_tokenizer(), max_model_len=4096
+        engine_inputs, _ = await ServingGenerativeScoring._build_prompts(
+            request, renderer, max_model_len=4096
         )
 
         for i, exp in enumerate(expected):
@@ -312,8 +309,6 @@ class TestPromptBuilding:
     async def test_text_tokenization_preserves_tokens(
         self, renderer, item_first, text_kind
     ):
-        mock_engine = _create_mock_engine(renderer)
-        serving = _create_serving(mock_engine)
         tokenizer = renderer.get_tokenizer()
         max_model_len = 16
         if text_kind == "spaces":
@@ -332,8 +327,8 @@ class TestPromptBuilding:
         request = GenerativeScoringRequest(
             query=query, items=[item], label_token_ids=[500, 501], item_first=item_first
         )
-        engine_inputs, _ = await serving._build_prompts(
-            request, tokenizer, max_model_len=max_model_len
+        engine_inputs, _ = await ServingGenerativeScoring._build_prompts(
+            request, renderer, max_model_len=max_model_len
         )
         query_ids = (
             tokenizer.encode(query, add_special_tokens=request.add_special_tokens)
@@ -351,8 +346,6 @@ class TestPromptBuilding:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("text_part", ["query", "item"])
     async def test_text_tokenization_yields(self, renderer, text_part):
-        mock_engine = _create_mock_engine(renderer)
-        serving = _create_serving(mock_engine)
         request = GenerativeScoringRequest(
             query="hello" if text_part == "query" else [100],
             items=["world" if text_part == "item" else [200]],
@@ -360,8 +353,8 @@ class TestPromptBuilding:
         )
         callback_ran = asyncio.Event()
         asyncio.get_running_loop().call_soon(callback_ran.set)
-        await serving._build_prompts(
-            request, renderer.get_tokenizer(), max_model_len=16
+        await ServingGenerativeScoring._build_prompts(
+            request, renderer, max_model_len=16
         )
         assert callback_ran.is_set(), "Tokenization blocked the event loop"
 
