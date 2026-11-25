@@ -324,6 +324,9 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
                 pooling_params=ctx.pooling_params,
                 lora_request=ctx.lora_request,
                 priorities=ctx.priorities,
+                cache_salt=ctx.cache_salt,
+                media_io_kwargs=ctx.media_io_kwargs,
+                mm_processor_kwargs=ctx.mm_processor_kwargs,
             )
         )
 
@@ -1084,6 +1087,9 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
                 pooling_params=ctx.pooling_params,
                 lora_request=ctx.lora_request,
                 priorities=ctx.priorities,
+                cache_salt=ctx.cache_salt,
+                media_io_kwargs=ctx.media_io_kwargs,
+                mm_processor_kwargs=ctx.mm_processor_kwargs,
             ),
         )
 
