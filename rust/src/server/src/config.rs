@@ -393,7 +393,7 @@ pub struct Config {
     /// `tool_choice` is `none`.
     pub exclude_tools_when_tool_choice_none: bool,
     /// Maximum number of input items allowed per prompt for each modality.
-    /// Unspecified modalities default to 999 items.
+    /// Unspecified modalities default to the model's default, else 999 items.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
     /// Default overrides for multimodal processor options.
     pub mm_processor_kwargs: HashMap<String, Value>,
