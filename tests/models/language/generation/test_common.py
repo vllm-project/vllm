@@ -10,6 +10,30 @@ from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
+
+def _rotary_cache_length(model) -> int:
+    return model.model.layers[0].self_attn.rotary_emb.cos_sin_cache.size(0)
+
+
+@pytest.mark.core_model
+def test_dynamic_ntk_cache_covers_served_context(vllm_runner, enable_pickle):
+    with vllm_runner(
+        "axolotl-ai-co/tiny-mixtral-30m",
+        dtype="float16",
+        hf_overrides={
+            "max_position_embeddings": 128,
+            "rope_parameters": {
+                "rope_type": "dynamic",
+                "rope_theta": 10000.0,
+                "factor": 2.0,
+            },
+        },
+        max_model_len=256,
+        enforce_eager=True,
+    ) as model:
+        assert model.apply_model(_rotary_cache_length) == [256]
+
+
 # Models that require embedding scaling for prompt_embeds test
 EMBED_SCALING_MODELS = {
     "openbmb/MiniCPM4.1-8B",

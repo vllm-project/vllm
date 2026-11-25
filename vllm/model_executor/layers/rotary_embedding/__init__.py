@@ -6,6 +6,8 @@ from typing import Any
 
 import torch
 
+from vllm.config import get_current_vllm_config_or_none
+
 from .bailing_mrope import BailingMRotaryEmbedding
 from .base import RotaryEmbedding
 from .deepseek_scaling_rope import (
@@ -58,6 +60,17 @@ def get_rope(
             raise ValueError(f"{partial_rotary_factor=} must be between 0.0 and 1.0")
         rotary_dim = int(head_size * partial_rotary_factor)
 
+    # Size the Dynamic NTK cache to the serving limit independently of its base.
+    cache_len = max_position
+    if (
+        scaling_type == "dynamic"
+        and "factor" in rope_parameters
+        and "alpha" not in rope_parameters
+    ):
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None and vllm_config.model_config is not None:
+            cache_len = max(max_position, vllm_config.model_config.max_model_len)
+
     key = (
         head_size,
         rotary_dim,
@@ -66,6 +79,7 @@ def get_rope(
         rope_parameters_args,
         dtype,
         mrope_positions_factor,
+        cache_len,
     )
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
@@ -206,6 +220,7 @@ def get_rope(
                 is_neox_style,
                 scaling_factor,
                 dtype,
+                cache_len=cache_len,
             )
         else:
             raise ValueError(
