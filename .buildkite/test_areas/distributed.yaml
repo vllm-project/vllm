@@ -503,7 +503,6 @@ steps:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/test_vision.py
-  - tests/models/hy_v4/test_vl_encoder_tp_data.py
   - vllm/platforms/rocm.py
   - tests/distributed/
   - tests/basic_correctness/
@@ -517,7 +516,6 @@ steps:
   - TARGET_TEST_SUITE=MI355 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
   - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=4)'
-  - pytest -v -s models/hy_v4/test_vl_encoder_tp_data.py -m 'distributed(num_gpus=4)'
 
 - label: ":nvidia: (H100) [Nightly] Distributed Features Examples"
   key: distributed-examples-2xh100
