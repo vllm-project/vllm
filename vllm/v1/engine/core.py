@@ -2039,7 +2039,10 @@ class EngineCoreProc(EngineCore):
             req, request_wave = request
             if self._reject_add_in_shutdown(req) or self._reject_add_while_paused(req):
                 return
-            self.add_request(req, request_wave)
+            try:
+                self.add_request(req, request_wave)
+            except VLLMValidationError as error:
+                self._handle_request_validation_error(req, error)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:
@@ -2479,7 +2482,7 @@ class EngineCoreProc(EngineCore):
         self._send_error_outputs_to_client([request.request_id], request.client_index)
 
     def _handle_request_validation_error(
-        self, request: EngineCoreRequest, error: VLLMValidationError
+        self, request: EngineCoreRequest | Request, error: VLLMValidationError
     ) -> None:
         logger.info("Request %s failed validation: %s", request.request_id, error)
         self._send_finish_outputs_to_client(

@@ -858,7 +858,9 @@ def test_write_consumer_start_load_kv_does_not_wait_for_compute_stream(
     assert stream_events == []
 
 
-def _failed_read_worker_meta(stream_events, dst_block_ids, unzeroed_block_ids):
+def _failed_read_worker_meta(
+    stream_events, dst_block_ids, unzeroed_block_ids, replay_generations=None
+):
     worker = _consumer_worker(stream_events, MoRIIOMode.READ)
     worker._has_mamba = False
     worker._recving_local_blocks = {"a": dst_block_ids}
@@ -866,8 +868,10 @@ def _failed_read_worker_meta(stream_events, dst_block_ids, unzeroed_block_ids):
     worker._failed_read_block_ids_to_zero = set()
     metadata = _read_step_metadata(False, "a")
     metadata.unzeroed_read_block_ids = unzeroed_block_ids
+    metadata.pd_replay_generations = replay_generations or {}
     connector = MoRIIOConnector.__new__(MoRIIOConnector)
     connector.connector_worker = worker
+    connector.bind_connector_metadata(metadata)
 
     worker.start_load_kv(metadata)
     worker._record_failed_recv("a")
@@ -885,14 +889,32 @@ def test_failed_read_returns_its_unzeroed_destinations_once(stream_events):
     assert connector.build_connector_worker_meta() is None
 
 
-def test_unzeroed_destinations_of_every_rank_are_merged(stream_events):
-    first, _ = _failed_read_worker_meta(stream_events, [1, 2], {1, 2, 3})
-    second, _ = _failed_read_worker_meta(stream_events, [2, 3], {1, 2, 3})
+@pytest.mark.parametrize(
+    "first_generations,second_generations,expected",
+    [
+        ({}, {}, {}),
+        ({"a": 1}, {"a": 1}, {"a": 1}),
+        ({"a": 1}, {}, {}),
+        ({}, {"a": 1}, {}),
+        ({"a": 1}, {"a": 2}, {}),
+        ({"a": 1, "b": 2}, {"a": 1, "c": 3}, {"a": 1}),
+    ],
+)
+def test_unzeroed_destinations_of_every_rank_are_merged(
+    stream_events, first_generations, second_generations, expected
+):
+    first, _ = _failed_read_worker_meta(
+        stream_events, [1, 2], {1, 2, 3}, first_generations
+    )
+    second, _ = _failed_read_worker_meta(
+        stream_events, [2, 3], {1, 2, 3}, second_generations
+    )
 
     assert first is not None and second is not None
     merged = first.aggregate(second)
     assert isinstance(merged, moriio_common.MoRIIOConnectorWorkerMetadata)
     assert merged.blocks_to_zero == {1, 2, 3}
+    assert merged.pd_replay_generations == expected
 
 
 def test_requested_cudagraph_mode_is_never_overridden():

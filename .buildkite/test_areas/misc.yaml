@@ -269,6 +269,7 @@ steps:
   - tests/v1/kv_connector/unit/test_prefix_lookup.py
   - tests/v1/kv_connector/unit/peer_l1_utils.py
   - tests/v1/kv_connector/unit/utils.py
+  - tests/v1/kv_connector/unit/moriio/test_moriio_pd_replay.py
   - tests/v1/core/test_prefix_caching.py
   - tests/v1/core/utils.py
   commands:

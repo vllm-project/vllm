@@ -297,3 +297,44 @@ the vendors' own installation instructions.
 ## Further reading
 
 - [Next-Level Inference: Why Your Single-Node vLLM Setup Needs Prefill-Decode Disaggregation](https://vllm.ai/blog/2026-04-07-moriio-kv-connector).
+
+## Retaining replay tails
+
+For prefix-cached models, enable `"pd_replay_retention": true` in MoRIIO's
+`kv_connector_extra_config` on **both** PD instances, together with
+`"read_mode": true`. With MultiConnector, set it on the MoRIIO child.
+Use the explicit producer/consumer roles and identical original prompts on both
+legs; the consumer may allocate additional local/speculative trailing slots.
+Producer requests must use `max_tokens=1`, as the MoRIIO proxy does, so retained
+storage cannot grow through an additional producer-side decode phase.
+The router must forward the complete returned `pd_replay` field unchanged.
+Proxies that whitelist legacy transfer keys, including the MoRIIO toy proxy,
+need adaptation before enabling this option.
+The default is `false` and retains the existing transfer payload.
+
+The producer retains a contiguous suffix per cache group that covers the
+normal READ and the sliding-window tails needed at aligned replay boundaries.
+It returns absolute block ranges in `kv_transfer_params`; the consumer pairs
+blocks at those same positions, excluding its local recompute and speculative
+trailing blocks. Geometry, hash lookahead and speculative retention settings
+must match. Full-attention groups keep their normal prefix range.
+
+Extra storage is retained through chunked prefill and the producer's normal
+completion-ACK delayed free. The consumer releases the extra constraint only
+when the scheduler processes that load step's result, then resumes normal
+window eviction. Preemption invalidates the old allocation generation.
+Startup capacity planning includes a conservative bound on the extra storage.
+Attention reach and prefix-hit requirements do not change.
+
+This option supports READ mode, full attention and ordinary sliding-window
+managers, with DCP=PCP=1. `DFlashSlidingWindowManager` groups and WRITE mode
+are rejected. DSpark drafters using ordinary sliding-window managers remain
+supported; the restriction is on the manager type, not the speculative method.
+Existing multi-group READ failure recovery remains fail-stop; this option does
+not add HMA recompute recovery or alter the connector's DMA failure contract.
+
+Producer requests require `max_tokens=1`. Invalid request metadata is rejected
+without stopping the engine. A missing remote engine falls back to recompute.
+A local prefix hit backs only its ordinary attention tail; exported storage
+starts no earlier than that backed tail, even with re-prefill storage enabled.
+Failed admissions discard their provisional retention allocation before retry.
