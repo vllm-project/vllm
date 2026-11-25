@@ -15,7 +15,6 @@ from typing import Any, cast
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -711,7 +710,7 @@ class UMBPStoreConnectorScheduler:
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
-    ) -> KVConnectorMetadata:
+    ) -> UMBPConnectorMetadata:
         meta = UMBPConnectorMetadata(async_load=self.load_async)
         reserved_store_keys = {
             key for event in self._store_events.values() for key in event.iter_keys()
