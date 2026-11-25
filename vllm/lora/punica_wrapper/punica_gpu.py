@@ -11,6 +11,7 @@ from typing import Any, final
 import torch
 
 from vllm.lora.layers import LoRAMapping
+from vllm.lora.ops.torch_ops import lora_grouped_linear as lora_grouped_linear_torch
 from vllm.lora.utils import get_captured_lora_counts
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
@@ -287,7 +288,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             and x.dtype in (torch.bfloat16, torch.float16)
             and x.dtype == lora_a_stacked.dtype == lora_b_stacked.dtype == y.dtype
         ):
-            return super().add_lora_grouped_linear(y, x, lora_a_stacked, lora_b_stacked)
+            lora_grouped_linear_torch(
+                y, x, lora_a_stacked, lora_b_stacked, self.token_lora_indices
+            )
+            return
 
         # Adapter offsets index the full sorted token buffer.
         _, *kernel_meta = self.token_mapping_meta.meta_args(

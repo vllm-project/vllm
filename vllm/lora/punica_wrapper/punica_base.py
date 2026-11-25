@@ -430,14 +430,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
                 `[slot, group, out_features, rank]`.
 
         """
-        token_lora_indices = self.token_lora_indices[: x.shape[0]]
-        x_by_group = x.transpose(0, 1)
-        y_by_group = y.transpose(0, 1)
-        for slot in range(lora_a_stacked.shape[0]):
-            buffer = x_by_group @ lora_a_stacked[slot].transpose(-2, -1)
-            delta = buffer @ lora_b_stacked[slot].transpose(-2, -1)
-            mask = (token_lora_indices == slot)[None, :, None]
-            y_by_group.add_(torch.where(mask, delta, 0))
+        raise NotImplementedError
 
     @abstractmethod
     def add_lora_logits(

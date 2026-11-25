@@ -10,6 +10,7 @@ from vllm.lora.ops.torch_ops import (
     bgmv_expand,
     bgmv_expand_slice,
     bgmv_shrink,
+    lora_grouped_linear,
     sgmv_expand,
     sgmv_expand_slice,
     sgmv_shrink,
@@ -308,6 +309,17 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
         self.add_expand(
             y, buffer, lora_b_stacked, output_slices, add_inputs=True, **kwargs
+        )
+
+    def add_lora_grouped_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+    ) -> None:
+        lora_grouped_linear(
+            y, x, lora_a_stacked, lora_b_stacked, self.token_lora_indices
         )
 
     def add_lora_logits(

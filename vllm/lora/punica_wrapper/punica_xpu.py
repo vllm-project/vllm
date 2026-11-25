@@ -12,6 +12,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.lora.layers import LoRAMapping
+from vllm.lora.ops.torch_ops import lora_grouped_linear
 from vllm.lora.ops.xpu_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
 from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
@@ -286,6 +287,17 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             output_slices,
             add_inputs=add_inputs,
             **kwargs,
+        )
+
+    def add_lora_grouped_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+    ) -> None:
+        lora_grouped_linear(
+            y, x, lora_a_stacked, lora_b_stacked, self.token_lora_indices
         )
 
     @property
