@@ -48,7 +48,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Static,
 )
 from vllm.model_executor.utils import refill_derived
-from vllm.models.nemotron_shortcut.nvidia.moe.config import activation_clamp
+from vllm.models.nemotron_shortcut.nvidia.moe.config import (
+    activation_clamp,
+    ordered_mxfp8_finalize,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe, has_flashinfer_cutedsl
 from vllm.utils.func_utils import supports_kw
@@ -234,7 +237,7 @@ class NemotronShortcutCuteDslMxfp8Experts(mk.FusedMoEExpertsModular):
         self._w1_sf: torch.Tensor | None = None
         self._w2_sf: torch.Tensor | None = None
         self._alpha: torch.Tensor | None = None
-        self._ordered_finalize = envs.VLLM_BATCH_INVARIANT
+        self._ordered_finalize = envs.VLLM_BATCH_INVARIANT or ordered_mxfp8_finalize()
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         from flashinfer.cute_dsl.utils import convert_row_major_sf_to_mma_layout
@@ -286,6 +289,8 @@ class NemotronShortcutCuteDslMxfp8Experts(mk.FusedMoEExpertsModular):
         )
         if not supported:
             return supported, reason
+        if ordered_mxfp8_finalize() and not cls._supports_batch_invariance():
+            return False, "ordered MXFP8 finalize requires FlashInfer's swap_ab support"
         return _check_aligned(moe_config)
 
     @staticmethod

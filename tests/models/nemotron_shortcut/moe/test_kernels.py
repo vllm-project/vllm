@@ -38,8 +38,8 @@ def _make_experts(experts, topk, hidden, intermediate, clamp):
     from vllm.models.nemotron_shortcut.nvidia.moe.config import (
         NemotronShortcutMoEConfig,
     )
+    from vllm.models.nemotron_shortcut.nvidia.moe.experts import select_mxfp8_experts
     from vllm.models.nemotron_shortcut.nvidia.moe.flashinfer import (
-        NemotronShortcutCuteDslMxfp8Experts,
         has_cute_dsl_mxfp8,
     )
 
@@ -78,7 +78,7 @@ def _make_experts(experts, topk, hidden, intermediate, clamp):
         block_shape=[1, 32],
         is_scale_swizzled=False,
     )
-    kernel = NemotronShortcutCuteDslMxfp8Experts(config, quant_config)
+    kernel = select_mxfp8_experts(config)(config, quant_config)
     kernel.process_weights_after_loading(weights)
     return weights, kernel
 
@@ -104,10 +104,10 @@ def test_refit_updates_captured_mxfp8_scales():
 
 @pytest.mark.parametrize("tokens", [7, 32])
 @pytest.mark.parametrize("hidden,intermediate", [(128, 256), (256, 128)])
-@pytest.mark.parametrize("ordered", [False, True])
+@pytest.mark.parametrize("mode", ["default", "ordered", "batch_invariant"])
 @torch.inference_mode()
 def test_cute_dsl_mxfp8_experts_apply_the_clamp(
-    tokens, hidden, intermediate, ordered, monkeypatch
+    tokens, hidden, intermediate, mode, monkeypatch, default_vllm_config
 ):
     """Compare the clamped experts against a quantized reference. Ordered
     reduction must also produce bit-identical outputs across repeated calls."""
@@ -116,7 +116,14 @@ def test_cute_dsl_mxfp8_experts_apply_the_clamp(
         dequant_mxfp8_to_bf16,
     )
 
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1" if ordered else "0")
+    monkeypatch.setenv(
+        "VLLM_BATCH_INVARIANT", "1" if mode == "batch_invariant" else "0"
+    )
+    if mode == "ordered":
+        default_vllm_config.additional_config = {
+            "nemotron_mxfp8_ordered_finalize": True
+        }
+    ordered = mode != "default"
     torch.manual_seed(7)
     device = torch.device("cuda")
     experts, topk, clamp = 8, 8 if ordered else 2, 0.25

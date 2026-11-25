@@ -91,6 +91,7 @@ def test_sparse_checkpoint_without_indexer_is_rejected(
         head_dim=256,
         index_topk=K,
         max_position_embeddings=1024,
+        tie_word_embeddings=False,
     )
     save_checkpoint_config(tmp_path, text, image_token_id=text.vocab_size - 1)
     save_file(

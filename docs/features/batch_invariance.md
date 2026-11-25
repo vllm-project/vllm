@@ -160,6 +160,12 @@ When batch invariance is enabled, vLLM:
 6. Splits the LoRA shrink reduction into 8 fixed K chunks that are summed in a fixed order instead of with atomics
 7. Sums routed expert outputs in top-k order for Nemotron Shortcut's FlashInfer CuTe-DSL MXFP8 MoE on Blackwell GPUs (SM100 and SM103).
 
+Nemotron Shortcut hybrid models that use GDN attention can enable the ordered
+MXFP8 expert reduction independently with
+`--additional-config '{"nemotron_mxfp8_ordered_finalize": true}'`.
+This option controls the expert sum. Attention, routing and collectives keep
+their configured behavior.
+
 !!! warning
     Batch invariance under tensor parallelism is not yet supported for all-reduces whose size isn't a multiple of 16 bytes, for example a hidden size that isn't a multiple of 8 in fp16/bf16. Such tensors can switch between NCCL and custom all-reduce depending on batch size. All validated models meet this requirement.
 
