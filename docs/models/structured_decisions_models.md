@@ -427,3 +427,8 @@ vllm serve baselabs/mammoth-1
 - `instructions` returns 400, as does any `chat_template_kwargs` other than
   `{"enable_thinking": false}`. `/v1/decisions` reads every question as a
   choice and returns 400 for score levels with the same label.
+
+### Laya
+
+[Laya](laya.md) is served through `/classify`, with checkpoint-specific option
+markers and a separate action head. See its preparation and serving guide.
