@@ -395,9 +395,8 @@ vllm serve <checkpoint> --hf-overrides '{"ar_mode": true, "is_causal": false}' \
       state, and each question is read at its own mask slot. A question's
       answer does not depend on the other questions of the request. These
       reads need the `FLASH_ATTN` backend, which is selected by default.
-- Each option is listed under a one-token code, in the fine-tune's order (by
-  length and overlap with the state, then rotated), and answers map back to
-  the request's options. A question's probabilities are the softmax of its
+- Options are read in the order given: option i is listed under one-token
+  code i, and answers map back to the request's options. A question's probabilities are the softmax of its
   codes' logprobs at its mask.
 - A choice can have up to 256 options, or up to 512 with `--max-logprobs` of
   at least its option count. A packed read returns at most

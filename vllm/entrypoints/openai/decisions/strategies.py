@@ -10,7 +10,6 @@ import hashlib
 import json
 import math
 import random
-import re
 import string
 import time
 from abc import ABC, abstractmethod
@@ -1697,8 +1696,7 @@ class NemotronDecideStrategy(ReadStrategy):
     A question is read at a mask token appended to the prompt the checkpoint
     was fine-tuned on, each option under a one-token code, and its
     probabilities are the softmax of the codes' logprobs there. Options are
-    listed in the fine-tune's order: longest and least state-overlapping
-    first, then rotated by two.
+    read in the order given: option i gets code i.
 
     `decision_prompt` in the model config selects the prompt:
 
@@ -1721,32 +1719,6 @@ class NemotronDecideStrategy(ReadStrategy):
     )
     #: What a noul question's false and true options mean without a description.
     NOUL_MEANINGS = ("No, the condition does not hold.", "Yes, the condition holds.")
-    STOP_WORDS = frozenset(
-        [
-            "the",
-            "a",
-            "an",
-            "is",
-            "are",
-            "was",
-            "were",
-            "of",
-            "to",
-            "in",
-            "and",
-            "or",
-            "for",
-            "with",
-            "this",
-            "that",
-            "it",
-            "be",
-            "as",
-            "on",
-            "by",
-            "from",
-        ]
-    )
     #: Code candidates, in order; a code is kept if it is one distinct token.
     CODE_CANDIDATES = (
         *string.ascii_uppercase,
@@ -1835,23 +1807,15 @@ class NemotronDecideStrategy(ReadStrategy):
             **extra,
         )
 
-    def _words(self, text: str) -> set[str]:
-        return set(re.findall(r"\w+", text.casefold())) - self.STOP_WORDS
-
-    @staticmethod
-    def _text(value: Any) -> str:
-        return nemotron_prompt.value_text(value)
-
     def _raw(self, q: Question) -> tuple[Any, Any] | None:
         """The request's instructions and criteria, which the text prompt shows
         as JSON when they are not strings (vLLM keeps their str())."""
         return q.raw if self.packed else None
 
-    def _options(
-        self, q: Question, state_words: set[str]
-    ) -> tuple[list[dict], list[int]]:
-        """The options as the prompt lists them, and for each of the
-        question's options its position in that list."""
+    def _options(self, q: Question) -> tuple[list[dict], list[int]]:
+        """The options as the prompt lists them (in the order given, option i
+        under code i), and for each of the question's options its position in
+        that list."""
         kind = q.type.name
         raw = self._raw(q)
         criteria = raw[1] if raw is not None else None
@@ -1892,28 +1856,11 @@ class NemotronDecideStrategy(ReadStrategy):
             raise StructuredDecisionError(
                 f"question {q.id!r}: this model does not answer {kind!r} questions"
             )
-        texts = [self._text(meaning) for _, meaning in entries]
-        lengths = [
-            len(self.tokenizer.encode(t, add_special_tokens=False)) for t in texts
-        ]
-        longest = max(1, *lengths)
-        instructions = q.instructions if raw is None else self._text(raw[0])
-        evidence = state_words | self._words(instructions)
-        scores = []
-        for length, text in zip(lengths, texts):
-            words = self._words(text)
-            scores.append(
-                length / longest - 2 * len(words & evidence) / max(1, len(words))
-            )
-        order = sorted(range(len(entries)), key=scores.__getitem__, reverse=True)
-        shift = 2 % len(order)
-        order = order[shift:] + order[:shift]
         listed = [
-            {"code": self.codes[i][0], "label": entries[j][0], "meaning": entries[j][1]}
-            for i, j in enumerate(order)
+            {"code": self.codes[i][0], "label": label, "meaning": meaning}
+            for i, (label, meaning) in enumerate(entries)
         ]
-        position = {j: i for i, j in enumerate(order)}
-        return listed, [position[source[k]] for k in range(len(q.options))]
+        return listed, source
 
     def _prompt_text(self, state: Any, q: Question, options: list[dict]) -> str:
         if self.packed:
@@ -1978,13 +1925,11 @@ class NemotronDecideStrategy(ReadStrategy):
                 "this model reads a fixed prompt, so it takes no instructions"
             )
         value = getattr(state, "value", state)
-        # Option order weighs overlap with the state's JSON text.
-        state_words = self._words(json.dumps(value, ensure_ascii=False))
         listed: list[list[dict]] = []
         positions: list[list[int]] = []
         code_ids: list[list[int]] = []
         for q in questions:
-            options, position = self._options(q, state_words)
+            options, position = self._options(q)
             listed.append(options)
             positions.append(position)
             code_ids.append([t for _, t in self.codes[: len(options)]])

@@ -1652,6 +1652,8 @@ async def test_nemotron_chunked_prompt_is_one_packed_read(monkeypatch):
     assert state.endswith('State:\n{"ticket": "charged twice \\u003cSPECIAL_101>"}')
     first = text(ids[s : ends[0]])
     assert first.startswith("Question:\nWhich team?\nOptions:\n")
+    # Options are read in the order given: option i gets code i.
+    assert 'Options:\nA: billing: {"scope": "payments"}\nB: other' in first
     # A non-string meaning is shown as JSON.
     assert 'billing: {"scope": "payments"}' in first
     assert "other" in first and "other: null" not in first
