@@ -291,6 +291,7 @@ async fn generate_chunk_stream(
             token_ids,
             logprobs,
             sampling_mask,
+            ..
         } = sampled;
         continuous_usage.add_output_tokens(token_ids.len());
 

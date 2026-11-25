@@ -80,6 +80,7 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
+from vllm.utils.vmm_driver import CudaVmmDriver, get_vmm_driver
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -1379,19 +1380,6 @@ class MooncakeConnectorWorker:
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
-        # nvidia-peermem cannot pin VMM-backed memory; the transfer engine must
-        # register the extensible KV cache through DMA-BUF. Read at
-        # engine.initialize(), so settle it before constructing the engine.
-        if (
-            vllm_config.cache_config.enable_extensible_kv_cache
-            and os.environ.setdefault("WITH_NVIDIA_PEERMEM", "0") != "0"
-        ):
-            raise RuntimeError(
-                "WITH_NVIDIA_PEERMEM=1 is incompatible with the extensible KV "
-                "cache: nvidia-peermem cannot register VMM-backed memory. "
-                "Unset it to use Mooncake's DMA-BUF registration, or disable "
-                "the extensible KV cache."
-            )
         # Capture device BEFORE TransferEngine init — MNNVL's NVLink allocator
         # may change the current CUDA device during engine.initialize().
         self.device_id = torch.accelerator.current_device_index()
@@ -1412,6 +1400,22 @@ class MooncakeConnectorWorker:
         protocol = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "mooncake_protocol", "rdma"
         )
+        if vllm_config.cache_config.enable_extensible_kv_cache:
+            # Default to DMA-BUF before initializing the transfer engine.
+            use_peermem = os.environ.setdefault("WITH_NVIDIA_PEERMEM", "0") != "0"
+            if protocol == "rdma" and use_peermem:
+                driver = get_vmm_driver()
+                if not (
+                    isinstance(driver, CudaVmmDriver)
+                    and driver.supports_gpudirect_rdma_with_vmm(self.device_id)
+                ):
+                    raise RuntimeError(
+                        "Mooncake's nvidia-peermem registration with the "
+                        "extensible KV cache requires GPUDirect RDMA support "
+                        f"for CUDA VMM on device {self.device_id}. "
+                        "Unset WITH_NVIDIA_PEERMEM to use DMA-BUF, or disable "
+                        "the extensible KV cache."
+                    )
         device_name = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "device_name", ""
         )

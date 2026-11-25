@@ -54,7 +54,7 @@ from vllm.v1.simple_kv_offload.metrics import (
     MetricName,
     SimpleCPUOffloadStats,
 )
-from vllm.v1.simple_kv_offload.sizing import gpu_total_bytes
+from vllm.v1.simple_kv_offload.sizing import gpu_total_bytes, num_offload_blocks
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -154,7 +154,6 @@ class SimpleCPUOffloadScheduler:
         disk_capacity_bytes: int = 0,
         use_page_cache: bool = False,
         num_cpu_blocks: int | None = None,
-        aligned_num_cpu_blocks: int | None = None,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -174,7 +173,7 @@ class SimpleCPUOffloadScheduler:
         # Derive a CPU KVCacheConfig from the GPU config and build a coordinator
         assert kv_cache_config is not None
         self.cpu_kv_cache_config = self._derive_cpu_config(
-            kv_cache_config, offload_capacity, num_cpu_blocks, aligned_num_cpu_blocks
+            kv_cache_config, offload_capacity, num_cpu_blocks
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         self.prefix_cacheable_group_ids = (
@@ -212,7 +211,6 @@ class SimpleCPUOffloadScheduler:
             enable_caching=True,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
-            pcp_world_size=1,
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
             allow_partial_hash_hits=not lazy_offload,
@@ -282,14 +280,11 @@ class SimpleCPUOffloadScheduler:
         gpu_config: "KVCacheConfig",
         cpu_capacity_bytes: int,
         num_cpu_blocks: int | None = None,
-        aligned_num_cpu_blocks: int | None = None,
     ) -> "KVCacheConfig":
         """Derive a CPU KVCacheConfig from the GPU config.
         Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio.
 
-        An explicit `num_cpu_blocks` is checked against local capacity.
-        `aligned_num_cpu_blocks` comes from the live worker allocations and
-        is used as-is when no explicit count is configured."""
+        An explicit `num_cpu_blocks` is checked against local capacity."""
         # Import here to avoid potential circular imports
         from vllm.v1.kv_cache_interface import KVCacheTensor
 
@@ -300,10 +295,10 @@ class SimpleCPUOffloadScheduler:
             num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes(gpu_config)
         )
         if num_cpu_blocks is None:
-            num_cpu_blocks = (
-                aligned_num_cpu_blocks
-                if aligned_num_cpu_blocks is not None
-                else max(1, local_capacity)
+            num_cpu_blocks = num_offload_blocks(
+                gpu_config,
+                cpu_capacity_bytes,
+                gpu_total_bytes(gpu_config) // num_gpu_blocks,
             )
         elif (
             type(num_cpu_blocks) is not int or not 0 < num_cpu_blocks <= local_capacity
