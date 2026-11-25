@@ -312,7 +312,7 @@ class CudaVmmDriver(VmmDriver):
         return result == _SUCCESS and bool(flag.value)
 
     def supports_gpudirect_rdma_with_vmm(self, device_index: int) -> bool:
-        """Whether this CUDA device supports the RDMA flag for VMM allocations."""
+        """Return whether the device supports GPUDirect RDMA on VMM allocations."""
         if (capable := self._rdma_capable.get(device_index)) is None:
             capable = self._device_attribute(
                 _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device_index
@@ -323,7 +323,9 @@ class CudaVmmDriver(VmmDriver):
     def _make_alloc_prop(
         self, device_index: int, export_handle_types: int = 0
     ) -> _MemAllocationProp:
-        # Without this flag, ibv_reg_mr fails with EFAULT on VMM allocations.
+        # Request GPUDirect RDMA support where available, as the sleep-mode
+        # allocator does: without it, KV connectors cannot register the
+        # memory with RDMA NICs (ibv_reg_mr fails with EFAULT).
         prop = super()._make_alloc_prop(device_index, export_handle_types)
         prop.allocFlags.gpuDirectRDMACapable = int(
             self.supports_gpudirect_rdma_with_vmm(device_index)
@@ -514,9 +516,7 @@ def get_vmm_driver() -> VmmDriver:
 
 
 @cache
-def vmm_unavailable_reason(
-    export_handle_types: int = 0, *, require_gpudirect_rdma: bool = False
-) -> str | None:
+def vmm_unavailable_reason(export_handle_types: int = 0) -> str | None:
     """Why VMM cannot be used on the current device, or None if it can.
 
     Checks library load, entry points, known runtime defects (by probing), and
@@ -532,14 +532,6 @@ def vmm_unavailable_reason(
         driver = get_vmm_driver()
         device_index = torch.accelerator.current_device_index()
         driver.ensure_context(device_index)
-        if require_gpudirect_rdma and (
-            not isinstance(driver, CudaVmmDriver)
-            or not driver.supports_gpudirect_rdma_with_vmm(device_index)
-        ):
-            return (
-                "the device does not support GPUDirect RDMA with CUDA VMM, "
-                "required for nvidia-peermem registration"
-            )
         if reason := driver.unusable_runtime_reason(device_index):
             return reason
         granularity = driver.granularity(device_index)
