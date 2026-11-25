@@ -38,6 +38,20 @@
   #define VSX_DISPATCH(SCALAR_TYPE, ...) case cpu_utils::ISA::VSX:
 #endif
 
+// POWER VSX INT8 quantize_row only handles float32 and bfloat16 inputs.
+#if defined(__powerpc64__)
+  #define CPU_INT8_DISPATCH_CASE_FLOATING_TYPES(...)     \
+    AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__) \
+    AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)
+#else
+  #define CPU_INT8_DISPATCH_CASE_FLOATING_TYPES(...) \
+    VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__)
+#endif
+
+#define CPU_INT8_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
+  AT_DISPATCH_SWITCH(TYPE, NAME,                          \
+                     CPU_INT8_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
+
 #define CPU_INT8_ISA_DISPATCH_IMPL(ISA_TYPE, SCALAR_TYPE, ...) \
   [&] {                                                        \
     switch (ISA_TYPE) {                                        \
@@ -643,7 +657,7 @@ void cpu_fused_moe_int8(torch::Tensor& output, const torch::Tensor& input,
   TORCH_CHECK(!skip_weighted || topk_num == 1,
               "skip_weighted is only supported for topk=1 on CPU");
 
-  VLLM_DISPATCH_FLOATING_TYPES(
+  CPU_INT8_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "cpu_fused_moe_int8", [&]() {
         CPU_INT8_ISA_DISPATCH_IMPL(isa_type, scalar_t, [&]() {
           fused_moe_int8_impl<scalar_t, gemm_t>(

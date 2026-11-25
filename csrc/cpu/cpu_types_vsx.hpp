@@ -13,10 +13,10 @@ namespace vec_op {
 struct fp8_e4m3_tag {};
 struct fp8_e5m2_tag {};
 
-#define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)         \
-  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__) \
-  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)
-// Note: FP16 (Half) is not supported on POWER VSX — no FP16Vec16 type.
+#define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)            \
+  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
+  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
+  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)
 
 #define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
