@@ -1548,7 +1548,9 @@ class _LaunchSpy:
         return launch
 
 
-def _select_prefill_block_m(query_lens, num_heads, head_size, dtype=torch.bfloat16):
+def _select_prefill_block_m(
+    query_lens, num_heads, head_size, dtype=torch.bfloat16, kv_lens=None
+):
     return attention._get_prefill_block_m(
         head_size,
         num_heads[0] // num_heads[1],
@@ -1556,11 +1558,47 @@ def _select_prefill_block_m(query_lens, num_heads, head_size, dtype=torch.bfloat
         len(query_lens),
         num_heads[1],
         dtype,
+        _prefill_tile_stats(query_lens, kv_lens, num_heads, head_size)
+        if kv_lens is not None
+        else None,
     )
 
 
+def _prefill_tile_stats(query_lens, kv_lens, num_heads, head_size):
+    block_m = attention.prefill_tile_block_m(head_size)
+    return attention.prefill_tile_stats(
+        torch.tensor([0] + query_lens, device="cpu").cumsum(0),
+        torch.tensor(kv_lens, device="cpu"),
+        block_m // (num_heads[0] // num_heads[1]),
+    )
+
+
+def test_prefill_tile_stats() -> None:
+    # Rows shorter than one Q block (decode, spec verify) vs the rest; padded
+    # rows (query length 0) are ignored.
+    query_start_loc = torch.tensor([0, 2048, 2049, 2065, 2065], device="cpu")
+    seq_lens = torch.tensor([2048, 32768, 16384, 65536], device="cpu")
+    assert attention.prefill_tile_stats(query_start_loc, seq_lens, 32) == (
+        32768,
+        2,
+        2048,
+        2048 * 1024,
+    )
+    assert attention.prefill_tile_stats(query_start_loc, seq_lens, 16) == (
+        32768,
+        1,
+        2048 + 16,
+        2048 * 1024 + 16 * (16384 - 8),
+    )
+    assert attention.prefill_tile_stats(
+        torch.tensor([0, 4096], device="cpu"), torch.tensor([8192], device="cpu"), 32
+    ) == (0, 0, 4096, 4096 * 6144)
+
+
 @requires_prefill_tile_gpu
-def test_prefill_block_m_selection() -> None:
+@pytest.mark.parametrize("num_sms", [58, 108])  # L4, A100
+def test_prefill_block_m_selection(monkeypatch, num_sms: int) -> None:
+    monkeypatch.setattr(attention, "num_compute_units", lambda: num_sms)
     assert _select_prefill_block_m([8192], (64, 8), 64) == 64
     assert _select_prefill_block_m([8192], (32, 8), 128) == 128
     # Too few tokens, too few programs to fill the GPU, or decode-heavy.
@@ -1571,6 +1609,26 @@ def test_prefill_block_m_selection() -> None:
     assert _select_prefill_block_m([8192], (32, 8), 256) is None
     assert _select_prefill_block_m([8192], (32, 8), 128, torch.float32) is None
     assert _select_prefill_block_m([8192], (64, 2), 128) is None
+    # A decode or verify row with a longer KV than every prefill row would be
+    # the slowest program with the larger tile.
+    mixed = [2048] + [1] * 4
+    assert _select_prefill_block_m(mixed, (32, 8), 128, kv_lens=[2048] + [2048] * 4)
+    assert (
+        _select_prefill_block_m(mixed, (32, 8), 128, kv_lens=[2048] + [32768] * 4)
+        is None
+    )
+    verify = [1024, 1024] + [16] * 8
+    assert (
+        _select_prefill_block_m(verify, (32, 8), 128, kv_lens=[1024] * 2 + [32768] * 8)
+        is None
+    )
+    # A chunk deep in a long context keeps the tile, alone or next to decodes
+    # with a shorter context.
+    assert _select_prefill_block_m([2048], (32, 8), 128, kv_lens=[32768]) == 128
+    assert (
+        _select_prefill_block_m(mixed, (32, 8), 128, kv_lens=[32768] + [16384] * 4)
+        == 128
+    )
 
 
 @requires_prefill_tile_gpu
@@ -1714,3 +1772,72 @@ def test_prefill_tile_skipped_for_untested_features(monkeypatch, feature) -> Non
         **extra,
     )
     assert spy.launches[-1]["BLOCK_M"] == 16
+
+
+@requires_prefill_tile_gpu
+@pytest.mark.parametrize(
+    ("rows", "expect_tile"),
+    [
+        # (query_len, kv_len) per row
+        ([(2048, 2048)] + [(1, 12288)] * 8, False),  # prefill + long-context decodes
+        ([(1024, 1024)] * 2 + [(16, 12288)] * 4, False),  # spec verify rows
+        ([(2048, 8192)] + [(1, 4096)] * 8, True),  # chunk in a long context
+    ],
+)
+@torch.inference_mode()
+def test_prefill_tile_mixed_batches(monkeypatch, rows, expect_tile) -> None:
+    """Mixed batches pick the tile from host batch stats and match the reference."""
+    query_lens = [r[0] for r in rows]
+    kv_lens = [r[1] for r in rows]
+    num_heads, head_size, dtype = (32, 8), 128, torch.bfloat16
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    block_size = 16
+    blocks_per_seq = max(kv_lens) // block_size + 1
+    num_blocks = blocks_per_seq * len(rows)
+    query = torch.randn(sum(query_lens), num_heads[0], head_size, dtype=dtype)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_heads[1], head_size, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+    block_tables = torch.randperm(num_blocks, dtype=torch.int32).view(
+        len(rows), blocks_per_seq
+    )
+    spy = _LaunchSpy(attention.kernel_unified_attention)
+    monkeypatch.setattr(attention, "kernel_unified_attention", spy)
+    output = torch.empty_like(query)
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+            dim=0, dtype=torch.int32
+        ),
+        seqused_k=torch.tensor(kv_lens, dtype=torch.int32),
+        max_seqlen_q=max(query_lens),
+        max_seqlen_k=max(kv_lens),
+        softmax_scale=head_size**-0.5,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        prefill_tile=True,
+        prefill_tile_stats=_prefill_tile_stats(
+            query_lens, kv_lens, num_heads, head_size
+        ),
+    )
+    assert spy.launches[-1]["BLOCK_M"] == (128 if expect_tile else 16)
+    ref_output = ref_paged_attn(
+        query=query.clone(),
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=head_size**-0.5,
+    )
+    torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)
