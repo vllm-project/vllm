@@ -226,15 +226,13 @@ fn reasoning_parser(selection: &vllm_chat::ParserSelection) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
     use std::time::Duration;
 
     use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
-    use vllm_engine_core_client::TransportMode;
     use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 
     use super::*;
-    use crate::config::{CoordinatorMode, HttpListenerMode};
+    use crate::config::HttpListenerMode;
     use crate::fingerprint::FingerprintMode;
 
     fn render_config(model: &str) -> RenderConfig {
@@ -272,17 +270,8 @@ mod tests {
         }
     }
 
-    fn server_config(model: &str) -> Config {
-        Config {
-            transport_mode: TransportMode::Bootstrapped {
-                input_listener_fd: -1,
-                output_listener_fd: -1,
-                engine_start_index: 0,
-                engine_count: 1,
-                data_parallel_size: 1,
-                ready_timeout: Duration::ZERO,
-            },
-            coordinator_mode: CoordinatorMode::None,
+    fn server_config(model: &str) -> ServerConfig {
+        ServerConfig {
             model: model.to_string(),
             revision: None,
             tokenizer: None,
@@ -308,11 +297,8 @@ mod tests {
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: Default::default(),
             mm_processor_kwargs: HashMap::new(),
-            lora_modules: Vec::new(),
-            default_mm_loras: Default::default(),
             chat_template_content_format: ChatTemplateContentFormatOption::Auto,
             max_logprobs: None,
-            stream_interval: NonZeroU32::new(1).unwrap(),
             api_server_options: Default::default(),
             fingerprint_mode: FingerprintMode::default(),
             cors: Default::default(),
@@ -320,15 +306,9 @@ mod tests {
             tls: None,
             root_path: None,
             api_keys: Vec::new(),
-            disable_log_stats: false,
-            custom_histogram_buckets: Default::default(),
-            log_stats_interval: None,
-            disable_request_id_randomization: false,
             keep_alive_on_engine_death: false,
             shutdown_timeout: Duration::ZERO,
-            manages_engine: false,
             keep_alive_timeout: Duration::ZERO,
-            profiler: None,
         }
     }
 

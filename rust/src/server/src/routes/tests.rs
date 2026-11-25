@@ -2854,6 +2854,7 @@ fn completion_suffix_render_app(chat_renderer: DynChatRenderer) -> axum::Router 
     build_render_router(Arc::new(RenderState {
         model: "backend-model".to_string(),
         served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
+        render_fingerprint: "rf1:0000000000000000000000000000000000000000000000000000000000000000:vllm-rs/test;renderer=hf;tokenizer=vllm-tokenizer/test".to_string(),
         max_model_len: Some(128),
         text: TextRequestProcessor::new(backend.clone(), 128),
         chat: ChatRequestProcessor::new(backend, None, None),

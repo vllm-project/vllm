@@ -405,6 +405,7 @@ mod tests {
         RenderState {
             model: "Qwen/Qwen1.5-0.5B-Chat".to_string(),
             served_model_names: ServedModelNames::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()]),
+            render_fingerprint: "rf1:0000000000000000000000000000000000000000000000000000000000000000:vllm-rs/test;renderer=hf;tokenizer=vllm-tokenizer/test".to_string(),
             max_model_len: Some(64),
             text: TextRequestProcessor::new(Arc::new(TestTextBackend), 64),
             chat: ChatRequestProcessor::new(Arc::new(TestTextBackend), None, None),
