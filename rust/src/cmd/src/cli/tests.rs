@@ -18,6 +18,7 @@ use vllm_tracing::{LogFormatter, LogLevel};
 
 use super::{
     BenchCommand, Cli, Command, DtypeArg, LogStatsInterval, SharedRuntimeArgs, parse_int_flag,
+    parse_runtime_args_json,
 };
 
 /// Resolve the data parallel topology the way `vllm-rs serve` does at startup.
@@ -95,9 +96,6 @@ fn render_args_build_config_without_tls() {
         // hidden flag.
         "--skip-model-name-validation",
         "True",
-        // Set through `VLLM_MAX_N_SEQUENCES`, which binds this hidden flag.
-        "--max-n-sequences",
-        " 4 ",
     ])
     .unwrap();
 
@@ -125,7 +123,6 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.max_model_len, Some(32768));
     assert_eq!(config.served_model_name, ["qwen"]);
     assert!(config.skip_model_name_validation);
-    assert_eq!(config.max_n_sequences, 4);
     assert_eq!(config.tool_call_parser, ParserSelection::Auto);
     assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
@@ -147,7 +144,6 @@ fn render_args_allow_omitted_max_model_len() {
 
     assert_eq!(config.max_model_len, None);
     assert!(!config.skip_model_name_validation);
-    assert_eq!(config.max_n_sequences, 16384);
 }
 
 #[test]
@@ -274,6 +270,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             {},
                         ),
                         generation_config: Auto,
+                        override_generation_config: {},
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
@@ -291,6 +288,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
+                        mm_processor_kwargs: {},
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
@@ -305,7 +303,6 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_request_id_headers: false,
                         log_error_stack: None,
                         enable_scale_out: None,
-                        enable_tokenizer_info_endpoint: false,
                         tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
@@ -320,6 +317,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
                         server_dev_mode: false,
+                        allow_runtime_lora_updating: false,
                         max_n_sequences: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -840,9 +838,7 @@ fn frontend_args_json_resolves_logging_config() {
     )
     .unwrap_err();
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","logging_config":{"log_level":"DEBUG","formatter":"xml"}}' for '--args-json <JSON>': invalid JSON arguments: logging_config.formatter: unknown variant `xml`, expected `text` or `json` at line 1 column 86
-
-        For more information, try '--help'.
+        error: invalid JSON arguments: logging_config.formatter: unknown variant `xml`, expected `text` or `json` at line 1 column 86
     "#]].assert_eq(&error.to_string());
 }
 
@@ -956,10 +952,7 @@ fn serve_args_select_structured_outputs_backend_and_forward_config() {
 fn frontend_args_json_reads_python_structured_outputs_config() {
     for (backend, expected) in [
         ("auto", StructuredOutputBackend::Xgrammar),
-        (
-            "lm-format-enforcer",
-            StructuredOutputBackend::LmFormatEnforcer,
-        ),
+        ("outlines", StructuredOutputBackend::Outlines),
     ] {
         // The Python supervisor sends the whole config once any field is set.
         let args_json = serde_json::json!({
@@ -1069,6 +1062,7 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     assert!(!config.keep_alive_on_engine_death);
     assert!(!config.api_server_options.skip_model_name_validation);
     assert!(!config.api_server_options.server_dev_mode);
+    assert!(!config.api_server_options.allow_runtime_lora_updating);
     assert_eq!(config.api_server_options.max_n_sequences, 16384);
     assert_eq!(
         config.api_server_options.request_body_limit_bytes,
@@ -1079,8 +1073,8 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`,
     // `VLLM_KEEP_ALIVE_ON_ENGINE_DEATH`,
     // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, `VLLM_SKIP_MODEL_NAME_VALIDATION`,
-    // `VLLM_SERVER_DEV_MODE`, and `VLLM_MAX_N_SEQUENCES`, which bind these
-    // hidden flags.
+    // `VLLM_SERVER_DEV_MODE`, `VLLM_ALLOW_RUNTIME_LORA_UPDATING`, and
+    // `VLLM_MAX_N_SEQUENCES`, which bind these hidden flags.
     let config = parse(&[
         "--log-stats-interval",
         "2.5",
@@ -1094,6 +1088,8 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
         "1",
         "--server-dev-mode",
         " 1",
+        "--allow-runtime-lora-updating",
+        " True ",
         "--max-n-sequences",
         " 8 ",
     ]);
@@ -1102,14 +1098,21 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     assert!(config.keep_alive_on_engine_death);
     assert!(config.api_server_options.skip_model_name_validation);
     assert!(config.api_server_options.server_dev_mode);
+    assert!(config.api_server_options.allow_runtime_lora_updating);
     assert_eq!(config.api_server_options.max_n_sequences, 8);
     assert_eq!(
         config.api_server_options.request_body_limit_bytes,
         Some(1024 * 1024)
     );
     // Like Python, any value other than `1` or `true` leaves it off.
-    let config = parse(&["--skip-model-name-validation", "yes"]);
+    let config = parse(&[
+        "--skip-model-name-validation",
+        "yes",
+        "--allow-runtime-lora-updating",
+        "yes",
+    ]);
     assert!(!config.api_server_options.skip_model_name_validation);
+    assert!(!config.api_server_options.allow_runtime_lora_updating);
     let config = parse(&["--http-max-request-body-size", "0"]);
     assert_eq!(config.api_server_options.request_body_limit_bytes, None);
 
@@ -1126,75 +1129,54 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     }
 }
 
+/// Python resolves the settings it reads only from environment variables and
+/// passes them in `--args-json`.
 #[test]
-fn args_json_reads_env_only_settings_from_env() {
-    let apply = |vars: &[(&str, &str)]| {
-        let vars: HashMap<_, _> = vars.iter().copied().collect();
-        let mut args: SharedRuntimeArgs =
-            serde_json::from_str(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#).unwrap();
-        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
-            .map(|()| args)
+fn args_json_reads_env_only_settings() {
+    let parse = |fields: &str| {
+        parse_runtime_args_json(&format!(r#"{{"model_tag":"Qwen/Qwen3-0.6B"{fields}}}"#))
     };
 
-    let args = apply(&[]).unwrap();
+    let args = parse("").unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_secs(10)));
     assert!(!args.disable_request_id_randomization);
     assert!(!args.keep_alive_on_engine_death);
     assert!(!args.api_server_options().skip_model_name_validation);
     assert!(!args.api_server_options().server_dev_mode);
+    assert!(!args.api_server_options().allow_runtime_lora_updating);
     assert_eq!(args.api_server_options().max_n_sequences, 16384);
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(32 * 1024 * 1024)
     );
 
-    let args = apply(&[
-        ("VLLM_LOG_STATS_INTERVAL", "0.5"),
-        ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
-        ("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", "-1"),
-        ("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "1048576"),
-        ("VLLM_SKIP_MODEL_NAME_VALIDATION", " TRUE "),
-        ("VLLM_SERVER_DEV_MODE", " 1"),
-        ("VLLM_MAX_N_SEQUENCES", " 8 "),
-    ])
+    let args = parse(
+        r#","log_stats_interval":0.5,"disable_request_id_randomization":true,
+        "keep_alive_on_engine_death":true,"http_max_request_body_size":1048576,
+        "skip_model_name_validation":true,"server_dev_mode":true,
+        "allow_runtime_lora_updating":true,"max_n_sequences":8"#,
+    )
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
     assert!(args.disable_request_id_randomization);
     assert!(args.keep_alive_on_engine_death);
     assert!(args.api_server_options().skip_model_name_validation);
     assert!(args.api_server_options().server_dev_mode);
+    assert!(args.api_server_options().allow_runtime_lora_updating);
     assert_eq!(args.api_server_options().max_n_sequences, 8);
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(1024 * 1024)
     );
-    let args = apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "0")]).unwrap();
+    let args = parse(r#","http_max_request_body_size":0"#).unwrap();
     assert_eq!(args.api_server_options().request_body_limit_bytes, None);
 
-    let args = apply(&[("VLLM_LOG_STATS_INTERVAL", "inf")]).unwrap();
+    // Python sends the largest float for `inf`, which JSON cannot express.
+    let args = parse(r#","log_stats_interval":1.7976931348623157e308"#).unwrap();
     assert_eq!(args.log_stats_interval(), None);
 
-    let errors = [
-        apply(&[("VLLM_LOG_STATS_INTERVAL", "ten")]).unwrap_err(),
-        apply(&[("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "true")]).unwrap_err(),
-        apply(&[("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", "true")]).unwrap_err(),
-        apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "32MiB")]).unwrap_err(),
-        apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "-1")]).unwrap_err(),
-        apply(&[("VLLM_SERVER_DEV_MODE", "true")]).unwrap_err(),
-        apply(&[("VLLM_MAX_N_SEQUENCES", "1e3")]).unwrap_err(),
-    ];
-    expect![[r#"
-        [
-            "invalid VLLM_LOG_STATS_INTERVAL: `ten` is not a number of seconds",
-            "invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: `true` is not an integer",
-            "invalid VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: `true` is not an integer",
-            "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `32MiB` is not a number of bytes",
-            "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `-1` is not a number of bytes",
-            "invalid VLLM_SERVER_DEV_MODE: `true` is not an integer",
-            "invalid VLLM_MAX_N_SEQUENCES: `1e3` is not an integer",
-        ]
-    "#]]
-    .assert_debug_eq(&errors);
+    expect!["invalid JSON arguments: http_max_request_body_size: invalid value: integer `-1`, expected usize at line 1 column 62"]
+        .assert_eq(&parse(r#","http_max_request_body_size":-1"#).unwrap_err());
 }
 
 /// `--log-error-stack` falls back to `VLLM_SERVER_DEV_MODE`. Python leaves the
@@ -1223,18 +1205,17 @@ fn log_error_stack_defaults_to_server_dev_mode() {
         "false"
     ]));
 
-    let json = |args_json: &str, vars: &[(&str, &str)]| {
-        let vars: HashMap<_, _> = vars.iter().copied().collect();
-        let mut args: SharedRuntimeArgs = serde_json::from_str(args_json).unwrap();
-        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
-            .unwrap();
+    let json = |args_json: &str| {
+        let args: SharedRuntimeArgs = serde_json::from_str(args_json).unwrap();
         args.api_server_options().log_error_stack
     };
-    let model_only = r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#;
-    let disabled = r#"{"model_tag":"Qwen/Qwen3-0.6B","log_error_stack":false}"#;
-    assert!(!json(model_only, &[]));
-    assert!(json(model_only, &[("VLLM_SERVER_DEV_MODE", "1")]));
-    assert!(!json(disabled, &[("VLLM_SERVER_DEV_MODE", "1")]));
+    assert!(!json(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#));
+    assert!(json(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","server_dev_mode":true}"#
+    ));
+    assert!(!json(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","server_dev_mode":true,"log_error_stack":false}"#
+    ));
 }
 
 /// `--enable-scale-out` falls back to `VLLM_SERVER_DEV_MODE`, like
@@ -1262,18 +1243,17 @@ fn enable_scale_out_defaults_to_server_dev_mode() {
         "false"
     ]));
 
-    let json = |args_json: &str, vars: &[(&str, &str)]| {
-        let vars: HashMap<_, _> = vars.iter().copied().collect();
-        let mut args: SharedRuntimeArgs = serde_json::from_str(args_json).unwrap();
-        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
-            .unwrap();
+    let json = |args_json: &str| {
+        let args: SharedRuntimeArgs = serde_json::from_str(args_json).unwrap();
         args.api_server_options().enable_scale_out
     };
-    let model_only = r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#;
-    let disabled = r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_scale_out":false}"#;
-    assert!(!json(model_only, &[]));
-    assert!(json(model_only, &[("VLLM_SERVER_DEV_MODE", "1")]));
-    assert!(!json(disabled, &[("VLLM_SERVER_DEV_MODE", "1")]));
+    assert!(!json(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#));
+    assert!(json(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","server_dev_mode":true}"#
+    ));
+    assert!(!json(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","server_dev_mode":true,"enable_scale_out":false}"#
+    ));
 }
 
 #[test]
@@ -2196,18 +2176,15 @@ fn serve_args_reject_unsupported_flag_arg() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--uvicorn-log-level",
-        "debug",
+        "--tool-server",
+        "demo",
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'debug' for '--uvicorn-log-level <UVICORN_LOG_LEVEL>': argument is not implemented in Rust frontend yet
+        error: invalid value 'demo' for '--tool-server <TOOL_SERVER>': argument is not implemented in Rust frontend yet
 
-        Remove this unsupported argument to continue.
-
-        Alternatively, if you intend to pass it only to the Python engine, put it after `--` (e.g., `-- <arg>`).
-        This may lead to unexpected behavior as the Rust frontend will completely ignore that argument.
+        Remove this argument, or unset the environment variable bound to it, to continue.
 
         For more information, try '--help'.
     "#]].assert_eq(&error.to_string());
@@ -2281,10 +2258,7 @@ fn serve_args_reject_unsupported_no_flag_alias() {
     expect![[r#"
         error: invalid value 'true' for '--enable-ssl-refresh [<ENABLE_SSL_REFRESH>]': argument is not implemented in Rust frontend yet
 
-        Remove this unsupported argument to continue.
-
-        Alternatively, if you intend to pass it only to the Python engine, put it after `--` (e.g., `-- <arg>`).
-        This may lead to unexpected behavior as the Rust frontend will completely ignore that argument.
+        Remove this argument, or unset the environment variable bound to it, to continue.
 
         For more information, try '--help'.
     "#]]
@@ -2337,6 +2311,7 @@ fn frontend_args_accept_json() {
                             {},
                         ),
                         generation_config: Auto,
+                        override_generation_config: {},
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: None,
                         reasoning_parser: None,
@@ -2354,6 +2329,7 @@ fn frontend_args_accept_json() {
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
+                        mm_processor_kwargs: {},
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
@@ -2368,7 +2344,6 @@ fn frontend_args_accept_json() {
                         enable_request_id_headers: false,
                         log_error_stack: None,
                         enable_scale_out: None,
-                        enable_tokenizer_info_endpoint: false,
                         tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
@@ -2383,6 +2358,7 @@ fn frontend_args_accept_json() {
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
                         server_dev_mode: false,
+                        allow_runtime_lora_updating: false,
                         max_n_sequences: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -2705,6 +2681,64 @@ fn hf_overrides_reject_non_object_inputs() {
 }
 
 #[test]
+fn override_generation_config_reaches_frontend_and_engine() {
+    let overrides = r#"{"temperature":0.5,"max_new_tokens":100,"top_k":null}"#;
+    let expected: serde_json::Value = serde_json::from_str(overrides).unwrap();
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--override-generation-config",
+        overrides,
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args")
+    };
+    // The managed Python engine reads it too, so it is forwarded unchanged.
+    let engine = args.to_managed_engine_config(1234, &topology(&args), None);
+    let index = engine
+        .python_args
+        .iter()
+        .position(|arg| arg == "--override-generation-config")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&engine.python_args[index + 1]).unwrap(),
+        expected
+    );
+    let config = args.to_frontend_config("tcp://127.0.0.1:1234".to_string(), &topology(&args));
+    assert_eq!(
+        serde_json::Value::Object(config.override_generation_config),
+        expected
+    );
+
+    let payload = serde_json::json!({
+        "model_tag": "Qwen/Qwen3-0.6B",
+        "override_generation_config": expected,
+    });
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        &payload.to_string(),
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args")
+    };
+    assert_eq!(
+        serde_json::Value::Object(args.into_config().override_generation_config),
+        expected
+    );
+}
+
+#[test]
 fn frontend_args_json_accepts_supported_non_default_fields() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -2930,19 +2964,17 @@ fn frontend_args_json_rejects_unsupported_fields() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","uvicorn_log_level":"debug"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","tool_server":"demo"}"#,
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","uvicorn_log_level":"debug"}' for '--args-json <JSON>': 
-        The following arguments are not implemented in Rust frontend yet:
-        - uvicorn_log_level
+        error: The following arguments are not implemented in Rust frontend yet:
+        - tool_server
 
         Remove these arguments to continue.
-
-        For more information, try '--help'.
-    "#]].assert_eq(&error.to_string());
+    "#]]
+    .assert_eq(&error.to_string());
 }
 
 #[test]
@@ -2957,21 +2989,19 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","uvicorn_log_level":"debug"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","tool_server":"demo"}"#,
     ])
     .unwrap_err();
 
     let actual = error.to_string().replace(": \n", ":\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","uvicorn_log_level":"debug"}' for '--args-json <JSON>':
-        The following arguments are not implemented in Rust frontend yet:
+        error: The following arguments are not implemented in Rust frontend yet:
         - response_role
-        - uvicorn_log_level
+        - tool_server
 
         Remove these arguments to continue.
-
-        For more information, try '--help'.
-    "#]].assert_eq(&actual);
+    "#]]
+    .assert_eq(&actual);
 }
 
 /// Python args that have no meaningful Rust equivalent are accepted on both the
@@ -2983,8 +3013,12 @@ fn noop_args_are_accepted() {
         "serve",
         "Qwen/Qwen3-0.6B",
         "--disable-fastapi-docs",
+        "--enable-offline-docs",
+        "--aggregate-engine-logging",
+        "--uvicorn-log-level",
+        "debug",
     ])
-    .expect("--disable-fastapi-docs is accepted");
+    .expect("no-op flags are accepted");
 
     Cli::try_parse_from([
         "vllm-rs",
@@ -2996,9 +3030,9 @@ fn noop_args_are_accepted() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","disable_fastapi_docs":true}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","disable_fastapi_docs":true,"enable_offline_docs":true,"aggregate_engine_logging":true,"uvicorn_log_level":"debug"}"#,
     ])
-    .expect("disable_fastapi_docs is accepted");
+    .expect("no-op fields are accepted");
 }
 
 /// `--custom-histogram-buckets` reaches the frontend config on both the
@@ -3078,6 +3112,11 @@ fn unsupported_args_fail_startup() {
             "enable_tower_connector_lora",
         ),
         ("--enable-elastic-ep", "true", "enable_elastic_ep"),
+        (
+            "--enable-tokenizer-info-endpoint",
+            "true",
+            "enable_tokenizer_info_endpoint",
+        ),
     ];
     for (flag, value, key) in cases {
         let error = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag, value])
@@ -3108,6 +3147,70 @@ fn unsupported_args_fail_startup() {
     }
 }
 
+/// Python features that an environment variable turns on, and that Rust does
+/// not support yet, fail startup on both the `vllm-rs serve` path, where the
+/// variable binds a flag, and the `--args-json` path, where Python passes the
+/// value it resolves from the variable.
+#[test]
+fn unsupported_env_switches_fail_startup() {
+    let serve = |flag: &str, value: &str| {
+        Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag, value])
+            .map(drop)
+            .map_err(|error| error.to_string())
+    };
+
+    for (flag, key, name) in [
+        (
+            "--enable-cohere-api",
+            "enable_cohere_api",
+            "VLLM_ENABLE_COHERE_API",
+        ),
+        (
+            "--enable-responses-api-store",
+            "enable_responses_api_store",
+            "VLLM_ENABLE_RESPONSES_API_STORE",
+        ),
+        (
+            "--max-tokenize-tokens",
+            "max_tokenize_tokens",
+            "VLLM_MAX_TOKENIZE_TOKENS",
+        ),
+    ] {
+        // Like any `Unsupported` argument, every value is refused, including
+        // the off value `0`.
+        for value in ["0", "1", "true"] {
+            let error = serve(flag, value).unwrap_err();
+            assert!(error.contains(flag), "{flag}={value}: {error}");
+        }
+        let args_json = serde_json::json!({ "model_tag": "Qwen/Qwen3-0.6B", key: 1 }).to_string();
+        let error = parse_runtime_args_json(&args_json).unwrap_err();
+        assert!(
+            error.contains(&format!("- {key} ({name})\n")),
+            "{key}: {error}"
+        );
+    }
+
+    expect![[r#"
+        error: invalid value '0' for '--enable-cohere-api <ENABLE_COHERE_API>': argument is not implemented in Rust frontend yet
+
+        Remove this argument, or unset the environment variable bound to it, to continue.
+
+        For more information, try '--help'.
+    "#]].assert_eq(&serve("--enable-cohere-api", "0").unwrap_err());
+    expect![[r#"
+        The following arguments are not implemented in Rust frontend yet:
+        - enable_cohere_api (VLLM_ENABLE_COHERE_API)
+        - tool_server
+
+        Remove these arguments, or unset the environment variables bound to them, to continue."#]]
+    .assert_eq(
+        &parse_runtime_args_json(
+            r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_cohere_api":true,"tool_server":"demo"}"#,
+        )
+        .unwrap_err(),
+    );
+}
+
 #[test]
 fn frontend_args_json_rejects_malformed_json() {
     let error = Cli::try_parse_from([
@@ -3125,10 +3228,9 @@ fn frontend_args_json_rejects_malformed_json() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B"' for '--args-json <JSON>': invalid JSON arguments: EOF while parsing an object at line 1 column 30
-
-        For more information, try '--help'.
-    "#]].assert_eq(&error.to_string());
+        error: invalid JSON arguments: EOF while parsing an object at line 1 column 30
+    "#]]
+    .assert_eq(&error.to_string());
 }
 
 #[test]
@@ -3365,6 +3467,7 @@ fn serve_args_accept_handshake_aliases() {
                             {},
                         ),
                         generation_config: Auto,
+                        override_generation_config: {},
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
@@ -3382,6 +3485,7 @@ fn serve_args_accept_handshake_aliases() {
                         trust_request_chat_template: false,
                         exclude_tools_when_tool_choice_none: false,
                         limit_mm_per_prompt: {},
+                        mm_processor_kwargs: {},
                         lora_modules: [],
                         default_mm_loras: {},
                         chat_template_content_format: Auto,
@@ -3396,7 +3500,6 @@ fn serve_args_accept_handshake_aliases() {
                         enable_request_id_headers: false,
                         log_error_stack: None,
                         enable_scale_out: None,
-                        enable_tokenizer_info_endpoint: false,
                         tokens_only: false,
                         sse_keep_alive_interval: 0,
                         fingerprint_mode: Full,
@@ -3411,6 +3514,7 @@ fn serve_args_accept_handshake_aliases() {
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
                         server_dev_mode: false,
+                        allow_runtime_lora_updating: false,
                         max_n_sequences: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -3583,6 +3687,8 @@ fn serve_hybrid_lb_frontend_connects_only_its_ranks() {
             "13345",
             "--data-parallel-size",
             "4",
+            "--mm-processor-cache-gb",
+            "0",
             "--headless-client-handshake-address",
             "ipc:///tmp/vllm-rs-h",
             "--reasoning-parser",
@@ -3672,6 +3778,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 {},
             ),
             generation_config: Auto,
+            override_generation_config: {},
             served_model_name: [],
             listener_mode: BindTcp {
                 host: "127.0.0.1",
@@ -3690,6 +3797,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             trust_request_chat_template: false,
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
+            mm_processor_kwargs: {},
             lora_modules: [],
             default_mm_loras: {},
             chat_template_content_format: Auto,
@@ -3708,9 +3816,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 enable_request_id_headers: false,
                 log_error_stack: false,
                 enable_scale_out: false,
-                enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
                 server_dev_mode: false,
+                allow_runtime_lora_updating: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
@@ -3808,6 +3916,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 {},
             ),
             generation_config: Auto,
+            override_generation_config: {},
             served_model_name: [],
             listener_mode: BindTcp {
                 host: "127.0.0.1",
@@ -3826,6 +3935,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             trust_request_chat_template: false,
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
+            mm_processor_kwargs: {},
             lora_modules: [],
             default_mm_loras: {},
             chat_template_content_format: Auto,
@@ -3844,9 +3954,9 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 enable_request_id_headers: false,
                 log_error_stack: false,
                 enable_scale_out: false,
-                enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
                 server_dev_mode: false,
+                allow_runtime_lora_updating: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
@@ -4058,6 +4168,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 {},
             ),
             generation_config: Auto,
+            override_generation_config: {},
             served_model_name: [],
             listener_mode: InheritedFd {
                 fd: 3,
@@ -4075,6 +4186,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             trust_request_chat_template: false,
             exclude_tools_when_tool_choice_none: false,
             limit_mm_per_prompt: {},
+            mm_processor_kwargs: {},
             lora_modules: [],
             default_mm_loras: {},
             chat_template_content_format: Auto,
@@ -4093,9 +4205,9 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 enable_request_id_headers: false,
                 log_error_stack: false,
                 enable_scale_out: false,
-                enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
                 server_dev_mode: false,
+                allow_runtime_lora_updating: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
@@ -4360,4 +4472,49 @@ fn tokens_only_implies_scale_out_and_skip_tokenizer_init() {
     let config = args.into_config();
     assert!(config.api_server_options.enable_scale_out);
     assert!(config.skip_tokenizer_init);
+}
+
+#[test]
+fn mm_processor_kwargs_reach_frontend_engine_and_render() {
+    let kwargs = r#"{"images_kwargs":{"min_pixels":3136,"max_pixels":12544}}"#;
+    let expected: HashMap<String, serde_json::Value> = serde_json::from_str(kwargs).unwrap();
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen2-VL-2B-Instruct",
+        "--mm-processor-kwargs",
+        kwargs,
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args")
+    };
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    let forwarded = engine
+        .python_args
+        .windows(2)
+        .find(|args| args[0] == "--mm-processor-kwargs")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<HashMap<String, serde_json::Value>>(&forwarded[1]).unwrap(),
+        expected
+    );
+    assert_eq!(
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+            .mm_processor_kwargs,
+        expected
+    );
+
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2-VL-2B-Instruct",
+        "--mm-processor-kwargs",
+        kwargs,
+    ])
+    .unwrap();
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args")
+    };
+    assert_eq!(args.into_config().mm_processor_kwargs, expected);
 }

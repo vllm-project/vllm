@@ -42,6 +42,16 @@ tests/entrypoints/cli/test_serve.py  # added by #53124 (2026-09-15); no job coll
 # tests/kernels/
 tests/kernels/test_shuffle_rows.py  # explicitly --ignore'd in kernels.yaml with no follow-up job
 
+# tests/models/inkling2/ - B200 unit tests; not yet wired into a Buildkite job.
+tests/models/inkling2/test_attention.py  # Inkling2 B200 tests; CI job not added yet
+tests/models/inkling2/test_core_ops.py  # Inkling2 B200 tests; CI job not added yet
+tests/models/inkling2/test_model.py  # Inkling2 B200 tests; CI job not added yet
+tests/models/inkling2/test_moe.py  # Inkling2 B200 tests; CI job not added yet
+tests/models/inkling2/test_dspark.py  # Inkling2 B200 tests; CI job not added yet
+tests/models/inkling2/test_processing.py  # Inkling2 B200 tests; CI job not added yet
+tests/models/inkling2/test_allreduce.py  # Inkling2 B200 tests; CI job not added yet
+tests/models/inkling2/test_vision.py  # Inkling2 B200 tests; CI job not added yet
+
 # tests/lora/ - explicitly --ignore'd from the sharded LoRA run, with no
 # dedicated *_tp job (unlike the other ignored *_tp tests).
 tests/lora/test_deepseekv2_tp.py  # --ignore'd from sharded LoRA run; no dedicated *_tp job
@@ -66,7 +76,6 @@ tests/kernels/helion/test_config_manager.py  # CI jobs disabled pending locked h
 tests/kernels/helion/test_dynamic_per_token_scaled_fp8_quant.py  # CI jobs disabled pending locked helion transitive dependencies
 tests/kernels/helion/test_fused_qk_norm_rope.py  # CI jobs disabled pending locked helion transitive dependencies
 tests/kernels/helion/test_helion_available.py  # CI jobs disabled pending locked helion transitive dependencies
-tests/kernels/helion/test_pattern_matching.py  # CI jobs disabled pending locked helion transitive dependencies
 tests/kernels/helion/test_per_token_group_fp8_quant.py  # CI jobs disabled pending locked helion transitive dependencies
 tests/kernels/helion/test_register.py  # CI jobs disabled pending locked helion transitive dependencies
 tests/kernels/helion/test_rms_norm_dynamic_per_token_quant.py  # CI jobs disabled pending locked helion transitive dependencies
@@ -101,6 +110,7 @@ tests/parser/engine/test_ling3.py  # CI jobs disabled pending locked cmake insta
 tests/parser/engine/test_minicpmv_reasoning.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_minimax_m2.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_minimax_m3.py  # CI jobs disabled pending locked cmake installation
+tests/parser/engine/test_muse.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_nemotron_v3.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_parser_engine.py  # CI jobs disabled pending locked cmake installation
 tests/parser/engine/test_plamo3.py  # CI jobs disabled pending locked cmake installation

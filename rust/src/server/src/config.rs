@@ -91,19 +91,20 @@ pub struct ApiServerOptions {
     pub log_error_stack: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
     pub enable_scale_out: bool,
-    /// When `true`, register `/tokenizer_info`.
-    pub enable_tokenizer_info_endpoint: bool,
     /// Accept any requested model name, served by the base model unless it
     /// names a loaded LoRA adapter (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
     pub skip_model_name_validation: bool,
     /// When `true`, register the development routes (`VLLM_SERVER_DEV_MODE`).
     pub server_dev_mode: bool,
+    /// When `true`, register the LoRA load and unload routes
+    /// (`VLLM_ALLOW_RUNTIME_LORA_UPDATING`).
+    pub allow_runtime_lora_updating: bool,
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,
-    /// Maximum HTTP request body size in bytes
-    /// (`VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, default 32 MiB). `None` removes the
-    /// limit.
+    /// Maximum size in bytes of an HTTP request body and of a gRPC request
+    /// message (`VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, default 32 MiB). `None`
+    /// removes the limit.
     #[educe(Default(expression = Some(DEFAULT_REQUEST_BODY_LIMIT_BYTES)))]
     pub request_body_limit_bytes: Option<usize>,
     /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`, default 16384).
@@ -352,6 +353,8 @@ pub struct Config {
     pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.
     pub generation_config: GenerationConfigMode,
+    /// Keys applied over the generation-config sampling defaults.
+    pub override_generation_config: serde_json::Map<String, Value>,
     /// Model name(s) exposed to clients via the OpenAI API. When non-empty,
     /// the first entry is used as the primary ID in responses and all entries
     /// are accepted in requests. When empty, falls back to `model`.
@@ -389,8 +392,10 @@ pub struct Config {
     /// `tool_choice` is `none`.
     pub exclude_tools_when_tool_choice_none: bool,
     /// Maximum number of input items allowed per prompt for each modality.
-    /// Unspecified modalities are unlimited.
+    /// Unspecified modalities default to 999 items.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Default overrides for multimodal processor options.
+    pub mm_processor_kwargs: HashMap<String, Value>,
     /// LoRA adapters loaded at startup, in order. Startup fails if any of
     /// them cannot be loaded.
     pub lora_modules: Vec<LoraModulePath>,

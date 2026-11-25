@@ -14,7 +14,7 @@ use thiserror_ext::AsReport as _;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, trace, warn};
-use vllm_metrics::METRICS;
+use vllm_metrics::{LoraInfoExporter, METRICS};
 use zeromq::RouterSendHalf;
 
 use crate::client::readiness::{Readiness, RecheckGuard};
@@ -24,9 +24,7 @@ use crate::client::state::{
 use crate::client::stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
-use crate::metrics::{
-    EngineSleepState, IterationMetricHandles, LoraInfoExporter, SchedulerStatsRecorder,
-};
+use crate::metrics::{EngineSleepState, IterationMetricHandles, SchedulerStatsRecorder};
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::stats::SchedulerStats;

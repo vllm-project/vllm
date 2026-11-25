@@ -542,6 +542,7 @@ def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
 @pytest.mark.parametrize("num_heads", [(4, 4)])
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("interleaved", [False, True])
 @torch.inference_mode()
 def test_triton_unified_attention_per_token_head_scale(
     qcfg: QuantConfig,
@@ -549,6 +550,7 @@ def test_triton_unified_attention_per_token_head_scale(
     num_heads: tuple[int, int],
     head_size: int,
     block_size: int,
+    interleaved: bool,
 ):
     """End-to-end: quantized KV with per-token-head scale caches."""
     from vllm.utils.math_utils import next_power_of_2
@@ -657,6 +659,15 @@ def test_triton_unified_attention_per_token_head_scale(
         value_cache_q = scaled_v.clamp(qcfg.quant_min, qcfg.quant_max).to(
             qcfg.cache_dtype
         )
+
+    if interleaved:
+        # Engine layout: K and V share one buffer, an fp32 scale after each, so
+        # the kernel loads tiles with the alignment from kv_tile_alignment.
+        hs = key_cache_q.shape[-1]
+        kv = torch.zeros(*key_cache_q.shape[:3], 2 * hs + 8, dtype=key_cache_q.dtype)
+        kv[..., :hs] = key_cache_q
+        kv[..., hs + 4 : 2 * hs + 4] = value_cache_q
+        key_cache_q, value_cache_q = kv[..., :hs], kv[..., hs + 4 : 2 * hs + 4]
 
     cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
         dim=0, dtype=torch.int32
