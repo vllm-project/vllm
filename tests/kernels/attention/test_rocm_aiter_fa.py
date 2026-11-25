@@ -1241,7 +1241,11 @@ def test_aiter_fa_fp8_query_extend_matches_reference(
         for q in (
             query.float(),
             (query.float() / q_scale).to(fp8_dtype).float() * q_scale,
-            *([_exp_free_query(query, scale, q_scale)] if exp_free else []),
+            *(
+                [_exp_free_query(query, scale, q_scale, exp_free=exp_free)]
+                if flydsl
+                else []
+            ),
         )
     ]
 
@@ -1296,12 +1300,16 @@ FP8_EXTEND_REL_L2 = {False: 3e-2, True: 4e-2}
 
 
 def _exp_free_query(
-    query: torch.Tensor, scale: float, q_scale: float = 1.0, k_scale: float = 1.0
+    query: torch.Tensor,
+    scale: float,
+    q_scale: float = 1.0,
+    k_scale: float = 1.0,
+    exp_free: bool = True,
 ) -> torch.Tensor:
-    """The query the exp-free kernel sees: cast to FP8 pre-multiplied by
-    c = 8 log2(e) scale k_scale and a power-of-two 2^-e (e = ceil(log2(c q_scale)))
-    that the QK MFMA undoes."""
-    c = 8 * math.log2(math.e) * scale * k_scale
+    """The query the kernel sees: cast in-kernel to FP8 pre-multiplied by
+    c = log2(e) scale k_scale (times 8 for exp-free codes) and a power-of-two
+    2^-e (e = ceil(log2(c q_scale))) that the QK MFMA undoes."""
+    c = (8 if exp_free else 1) * math.log2(math.e) * scale * k_scale
     pre = c * 2.0 ** -math.ceil(math.log2(c * q_scale))
     cast = (query.float() * pre).clamp(-448, 448).to(torch.float8_e4m3fn)
     return cast.float() / pre
@@ -1395,10 +1403,7 @@ def test_rocm_fp8_extend_matches_reference(case, q_scale, exp_free):
         exp_free,
     )
     assert torch.isfinite(output).all()
-    if not exp_free:
-        query_ref = (query.float() / q_scale).to(fp8).float() * q_scale
-    else:
-        query_ref = _exp_free_query(query, scale, q_scale, k_scale)
+    query_ref = _exp_free_query(query, scale, q_scale, k_scale, exp_free)
     for b, (cached, n) in enumerate(reqs):
         rows = slice(int(cu_seqlens_q[b]), int(cu_seqlens_q[b + 1]))
         expected = ref_paged_attn(
@@ -1475,9 +1480,7 @@ def test_rocm_fp8_extend_far_keys_by_layer_type(exp_free, window):
     keys[1 : far + 1, 0] = 16.0 - octaves / math.log2(math.e)
     keys[far + 1, 0] = -448.0  # the new token's own key, negligible
     values[1 : far + 1, 0] = 1.0
-    q0 = 1.0
-    if exp_free:
-        q0 = _exp_free_query(torch.ones(1), 1.0).item()
+    q0 = _exp_free_query(torch.ones(1), 1.0, exp_free=exp_free).item()
     scores = q0 * keys.to(torch.float8_e4m3fn).float()[:, 0]
     p = torch.exp(scores - scores.max())
     with_far = (p * values[:, 0]).sum() / p.sum()
