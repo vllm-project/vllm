@@ -27,6 +27,9 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
     hidden states (and, for Gemma4, its KV cache) at each draft step.
     """
 
+    # Whether a step with no proposals must still update the drafter's state.
+    needs_draft_state_sync = True
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
@@ -131,8 +134,7 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         num_reqs = input_batch.num_reqs
         if num_speculative_tokens is None:
             num_speculative_tokens = self.num_speculative_steps
-        if num_speculative_tokens == 0 and not self.advance_draft_positions:
-            # Q-only drafters have no KV of their own to update for a later step.
+        if num_speculative_tokens == 0 and not self.needs_draft_state_sync:
             return self.draft_tokens[:num_reqs].fill_(-1)
         num_tokens = input_batch.num_tokens
         num_tokens_padded = input_batch.num_tokens_after_padding
