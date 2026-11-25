@@ -80,6 +80,7 @@ class _TimedIteration:
             num_encoder_inputs=details.num_encoder_inputs,
             num_encoder_output_tokens=details.num_encoder_output_tokens,
             is_dummy=self.is_dummy,
+            scheduled_workload=details.scheduled_workload,
         )
 
 

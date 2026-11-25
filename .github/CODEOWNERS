@@ -51,7 +51,7 @@
 /vllm/entrypoints/openai/responses @aarnphm @chaunceyjiang @sfeng33
 /vllm/entrypoints/pooling @noooop @DarkLight1337 @taneem-ibrahim
 /vllm/entrypoints/rl @aoshen02 @njhill
-/vllm/entrypoints/scale_out @aoshen02 @noooop @DarkLight1337
+/vllm/entrypoints/scale_out @aoshen02 @noooop @DarkLight1337 @hickeyma
 /vllm/entrypoints/speech_to_text @NickLucche
 /vllm/entrypoints/speech_to_text/realtime @njhill @NickLucche
 /vllm/entrypoints/serve @njhill
@@ -70,7 +70,7 @@
 /tests/entrypoints/openai/responses @aarnphm @chaunceyjiang @sfeng33
 /tests/entrypoints/pooling @noooop @DarkLight1337 @taneem-ibrahim
 /tests/entrypoints/rl @aoshen02 @njhill
-/tests/entrypoints/scale_out @noooop @DarkLight1337
+/tests/entrypoints/scale_out @noooop @DarkLight1337 @hickeyma
 /tests/entrypoints/speech_to_text @NickLucche
 /tests/entrypoints/speech_to_text/realtime @njhill @NickLucche
 /tests/entrypoints/serve @njhill
@@ -90,13 +90,13 @@
 /vllm/sampling_params.py @njhill @NickLucche
 /vllm/pooling_params.py @noooop @DarkLight1337 @taneem-ibrahim
 /vllm/tokenizers @DarkLight1337 @njhill
-/vllm/renderers @DarkLight1337 @njhill
+/vllm/renderers @DarkLight1337 @njhill @hickeyma
 /vllm/reasoning @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 /vllm/tool_parsers @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 /vllm/parser @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 
 /tests/tokenizers_ @DarkLight1337 @njhill
-/tests/renderers @DarkLight1337 @njhill
+/tests/renderers @DarkLight1337 @njhill @hickeyma
 /tests/reasoning @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 /tests/tool_parsers @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 /tests/tool_use @aarnphm @chaunceyjiang @sfeng33 @bbrowning
@@ -233,6 +233,7 @@ mkdocs.yaml @hmellor
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
 /vllm/**/*rocm* @tjtanaa @dllehr-amd @shen-shanshan
 /docker/Dockerfile.rocm* @tjtanaa @dllehr-amd @AndreasKaratzas
+/tools/vllm-rocm @tjtanaa @dllehr-amd @AndreasKaratzas
 /vllm/v1/attention/backends/rocm*.py @tjtanaa @dllehr-amd
 /vllm/v1/attention/backends/mla/rocm*.py @tjtanaa @dllehr-amd
 /vllm/v1/attention/ops/rocm*.py @tjtanaa @dllehr-amd
