@@ -241,10 +241,8 @@ class ForwardBench:
         # restore: neither rank skew, the restore nor host launch gaps reach
         # the timed interval.
         flag = torch.zeros(1, device=self.device)
-        # TODO(woosuk): Support ROCm. The bench hangs there, likely on these
-        # in-graph events.
         # `external=True` lets the event be queried outside the graph without
-        # being captured itself; CUDA-only, XPU graphs don't need it.
+        # being captured itself (CUDA and ROCm); XPU graphs don't need it.
         event_kwargs = (
             {"enable_timing": True, "external": True}
             if current_platform.is_cuda_alike()
@@ -306,6 +304,12 @@ class ForwardBench:
         # Each replay restores the state views, then (multi-rank) rendezvouses,
         # before the timed forward.
         skip = len(self.state_views) + (world.world_size > 1)
+        if current_platform.is_rocm() and self.profile_prefix is not None:
+            from vllm.benchmarks.forward.profile import count_gpu_activities
+
+            # A copy into a view spanning over 2 GiB (e.g. both halves of an
+            # LHBNC layer) runs as several kernels.
+            skip += count_gpu_activities(restore) - len(self.state_views)
         summary = profile_graph(graph, self.name, self.profile_prefix, skip)
         if summary is not None:
             self.result["profile"] = {
@@ -367,4 +371,8 @@ class ForwardBench:
         )
         for _ in range(int(count.item())):
             graph.replay()
+            if current_platform.is_rocm():
+                # ROCm 7.2's HIP runtime crashes once tens of thousands of
+                # kernel launches are queued; replay one at a time, as timed.
+                torch.accelerator.synchronize()
         torch.accelerator.synchronize()

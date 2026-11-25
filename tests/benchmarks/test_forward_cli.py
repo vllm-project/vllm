@@ -200,7 +200,8 @@ def test_balanced_routing_restores_expert_bias(dist_init):
 
 @pytest.mark.benchmark
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="Forward graph timing requires CUDA."
+    not current_platform.is_cuda_alike(),
+    reason="Forward graph timing requires CUDA or ROCm.",
 )
 @pytest.mark.parametrize("routing", ["auto", "balanced"])
 def test_bench_forward_hybrid_verify(tmp_path, routing):
@@ -306,7 +307,8 @@ def test_zipf_expert_selection():
 
 @pytest.mark.benchmark
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="Forward graph timing requires CUDA."
+    not current_platform.is_cuda_alike(),
+    reason="Forward graph timing requires CUDA or ROCm.",
 )
 @pytest.mark.parametrize("method", ["mtp", "eagle3", "dspark", "dflash"])
 def test_bench_forward_drafter(tmp_path, method):
@@ -679,6 +681,25 @@ def test_bench_forward_rejects_oversized_verify(capacity):
         run_case(runner, case, SimpleNamespace(), SamplingParams())
 
 
+def test_profile_summary_rocm_kernel_names():
+    """ROCm kernel names end with the kernel descriptor's `.kd`, demangled ones
+    with `[clone .kd]`; both group like CUDA names."""
+    names = [
+        "void ns::gemm<64>(Params) [clone .kd]",
+        "void ns::gemm<128>(Params) [clone .kd]",
+        "_fwd_kernel.kd",
+    ]
+    events = [
+        {"cat": "kernel", "name": name, "ts": 10 * i, "dur": 1}
+        for i, name in enumerate(names)
+    ]
+    summary = summarize(events, replays=1, skip=0)
+    assert [(k["name"], k["calls"]) for k in summary["kernels"]] == [
+        ("ns::gemm", 2),
+        ("_fwd_kernel", 1),
+    ]
+
+
 def test_profile_summary():
     """Each replay's leading restore/rendezvous activities are left out, and
     kernels are grouped by name without template or function arguments."""
@@ -709,10 +730,6 @@ def test_profile_summary():
 
 
 @pytest.mark.benchmark
-# TODO(woosuk): Support ROCm and re-enable this test there.
-@pytest.mark.skipif(
-    current_platform.is_rocm(), reason="Hangs on ROCm; the bench is CUDA-only."
-)
 @pytest.mark.skipif(
     current_platform.is_xpu(),
     reason="torch.profiler records no kernels when replaying XPU graphs.",
