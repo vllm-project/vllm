@@ -1008,6 +1008,27 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, conv):
         assert error < 2e-2, f"relative L2 error {error:.2e}"
 
 
+def test_aiter_conv1d_prefill_kill_switch(monkeypatch):
+    """`VLLM_ROCM_USE_AITER_CAUSAL_CONV1D=0` keeps vLLM's prefill conv."""
+    import vllm.envs as envs
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    # VLLM_ROCM_USE_AITER is read at import, and CI does not set it.
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    monkeypatch.delenv("VLLM_ROCM_USE_AITER_CAUSAL_CONV1D", raising=False)
+    assert envs.VLLM_ROCM_USE_AITER_CAUSAL_CONV1D
+    if not rocm_aiter_ops.is_causal_conv1d_prefill_available():
+        pytest.skip("requires gfx950 and AITER's HIP prefill conv")
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_CAUSAL_CONV1D", "0")
+    monkeypatch.setattr(
+        rocm_aiter_ops,
+        "_CAUSAL_CONV1D_ENABLED",
+        envs.VLLM_ROCM_USE_AITER_CAUSAL_CONV1D,
+    )
+    assert not rocm_aiter_ops.is_causal_conv1d_prefill_available()
+
+
 @pytest.mark.parametrize("prefill_len", [700, 5000])
 @pytest.mark.parametrize("dim_first", [False, True])
 @torch.inference_mode()

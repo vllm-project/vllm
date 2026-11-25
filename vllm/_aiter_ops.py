@@ -2333,6 +2333,7 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: Controls Triton unified attention.
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
+        VLLM_ROCM_USE_AITER_CAUSAL_CONV1D: Controls the HIP prefill causal conv1d.
         VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
         VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: Routes the fp8_ds_mla sparse MLA
             calls the FlyDSL kernel supports to it (gfx950).
@@ -2407,6 +2408,7 @@ class rocm_aiter_ops:
     _LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+    _CAUSAL_CONV1D_ENABLED = envs.VLLM_ROCM_USE_AITER_CAUSAL_CONV1D
     _TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
     _FLYDSL_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA
     _FLYDSL_SPARSE_MLA_MIN_TOKENS = envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS
@@ -2441,6 +2443,7 @@ class rocm_aiter_ops:
         cls._FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
         cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+        cls._CAUSAL_CONV1D_ENABLED = envs.VLLM_ROCM_USE_AITER_CAUSAL_CONV1D
         cls._TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
         cls._FLYDSL_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA
         cls._FLYDSL_SPARSE_MLA_MIN_TOKENS = (
@@ -2916,6 +2919,7 @@ class rocm_aiter_ops:
 
         return (
             cls._AITER_ENABLED
+            and cls._CAUSAL_CONV1D_ENABLED
             and on_gfx950()
             and cls._causal_conv1d_prefill_importable()
         )

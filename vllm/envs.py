@@ -161,6 +161,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: bool = False
     VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS: int = 160
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
+    VLLM_ROCM_USE_AITER_CAUSAL_CONV1D: bool = True
     VLLM_ROCM_USE_AITER_FP8BMM: bool = False
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
@@ -1464,6 +1465,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "False").lower() in ("true", "1")
+    ),
+    # Whether to use aiter's HIP prefill causal conv1d where a model supports it.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_CAUSAL_CONV1D": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_CAUSAL_CONV1D", "True").lower() in ("true", "1")
     ),
     # Whether to use aiter triton fp8 bmm kernel for MLA kv_b_proj.
     # By default is disabled: it re-quantizes the projection weights online,
