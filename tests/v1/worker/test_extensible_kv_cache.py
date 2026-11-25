@@ -56,7 +56,7 @@ def _make_config(layout: KVCacheLayout, num_blocks: int = NUM_BLOCKS):
     config = get_kv_cache_config_from_groups(
         vllm_config,
         [new_kv_cache_group(layers, spec)],
-        available_memory=NUM_LAYERS * spec.page_size_bytes * num_blocks,
+        num_blocks=num_blocks,
     )
     assert config.num_blocks == num_blocks
     return config, spec
@@ -524,7 +524,7 @@ def _make_mixed_config(num_blocks: int = NUM_BLOCKS):
     config = get_kv_cache_config_from_groups(
         vllm_config,
         [KVCacheGroup.from_layers({n: full_layer(s) for n, s in specs.items()})],
-        available_memory=sum(s.page_size_bytes for s in specs.values()) * num_blocks,
+        num_blocks=num_blocks,
     )
     assert config.num_blocks == num_blocks
     assert len({t.block_stride for t in config.kv_cache_tensors}) == 2
@@ -611,7 +611,7 @@ def test_block_outermost_views_have_mapped_memory_past_their_start(vmm, num_laye
     config = get_kv_cache_config_from_groups(
         vllm_config,
         [new_kv_cache_group(layers, spec)],
-        available_memory=num_layers * spec.page_size_bytes * NUM_BLOCKS,
+        num_blocks=NUM_BLOCKS,
     )
     kv_cache = ExtensibleKVCache(config, torch.device("cuda"), layout)
     try:
