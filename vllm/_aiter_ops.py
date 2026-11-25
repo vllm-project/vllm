@@ -922,17 +922,6 @@ def _rocm_aiter_w8a8_gemm_fake(
     return Y
 
 
-def _batch_invariant_fp4_asm_kernel(M: int) -> str:
-    """AITER's persistent 256x256 ASM FP4 kernel is not bitwise equal to the
-    other tiles, which agree with each other, so batch invariance picks among
-    those by M. Workaround until AITER can exclude persistent kernels."""
-    if M <= 256:
-        return "_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_64x128E"
-    if M <= 1024:
-        return "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_128x256E"
-    return "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E"
-
-
 def _rocm_aiter_mxfp4_gemm_dynamic_quant_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -997,31 +986,14 @@ def _rocm_aiter_mxfp4_gemm_dynamic_quant_impl(
                 x_q = x
                 x_s = x_scales
 
-            if envs.VLLM_BATCH_INVARIANT:
-                from aiter.ops.gemm_op_a4w4 import gemm_a4w4_asm
-
-                y = torch.empty(
-                    (M + 31) // 32 * 32, N, device=x_q.device, dtype=out_dtype
-                )
-                gemm_a4w4_asm(
-                    x_q,
-                    weight.view(x_q.dtype),
-                    x_s,
-                    weight_scale.view(x_s.dtype),
-                    y,
-                    _batch_invariant_fp4_asm_kernel(M),
-                    bpreshuffle=True,
-                    log2_k_split=0,
-                )
-            else:
-                y = gemm_a4w4(
-                    x_q,
-                    weight.view(x_q.dtype),
-                    x_s,
-                    weight_scale.view(x_s.dtype),
-                    dtype=out_dtype,
-                    bpreshuffle=True,
-                )
+            y = gemm_a4w4(
+                x_q,
+                weight.view(x_q.dtype),
+                x_s,
+                weight_scale.view(x_s.dtype),
+                dtype=out_dtype,
+                bpreshuffle=True,
+            )
         return y[:M]
     else:
         assert not hadamard_rotate, "hadamard_rotate needs the ASM GEMM path"
