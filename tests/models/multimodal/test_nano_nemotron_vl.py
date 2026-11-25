@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
@@ -17,7 +18,7 @@ from transformers import BatchEncoding, LlavaConfig, TokenizersBackend
 
 from tests.utils import RemoteLaunchRenderServer
 from vllm import envs
-from vllm.config import MultiModalConfig
+from vllm.config import ModelConfig, MultiModalConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
@@ -488,6 +489,80 @@ def test_render_rejects_over_budget_image_patches(
                 )
 
 
+def test_nemotron_processor_keeps_videos_of_different_sizes_apart():
+    videos = [
+        (np.zeros((2, h, w, 3), dtype=np.uint8), {"fps": 2.0, "frames_indices": [0, 1]})
+        for h, w in [(8, 32), (32, 8)]
+    ]
+    _, inputs = _make_processor()._preprocess_video(["<video><video>"], videos)
+
+    sizes = [tuple(frames.shape[-2:]) for frames in inputs["pixel_values_flat_video"]]
+    assert sizes == [(8, 32), (32, 8)]
+    assert inputs["video_frame_sizes"].tolist() == [list(size) for size in sizes]
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize(
+    ("vision_fields", "image_processor_values", "expected"),
+    [
+        pytest.param(
+            {},
+            (64, False),
+            {"video_target_num_patches": 64, "video_maintain_aspect_ratio": False},
+            id="explicit-false",
+        ),
+        pytest.param(
+            {"video_target_num_patches": 16, "video_maintain_aspect_ratio": True},
+            (64, False),
+            {"video_target_num_patches": 16, "video_maintain_aspect_ratio": True},
+            id="vision-patch-count",
+        ),
+        pytest.param(
+            {"video_target_img_size": 32, "video_maintain_aspect_ratio": True},
+            (64, False),
+            {"video_maintain_aspect_ratio": True},
+            id="vision-image-size",
+        ),
+        pytest.param({}, (None, None), {}, id="null-values"),
+    ],
+)
+def test_nemotron_video_frame_size_config_precedence(
+    tmp_path, vision_fields, image_processor_values, expected
+):
+    # Use local metadata to control which sizing fields each file provides.
+    hf_config = LlavaConfig(architectures=["NemotronH_Omni_Reasoning_V3"])
+    hf_config.vision_config.update(vision_fields)
+    hf_config.save_pretrained(tmp_path)
+    target_patches, maintain_aspect_ratio = image_processor_values
+    image_processor_config = {
+        "video_target_num_patches": target_patches,
+        "video_maintain_aspect_ratio": maintain_aspect_ratio,
+    }
+    (tmp_path / "preprocessor_config.json").write_text(
+        json.dumps(image_processor_config)
+    )
+
+    config = ModelConfig(model=str(tmp_path), skip_tokenizer_init=True)
+
+    vision_config = config.hf_config.vision_config
+    assert {
+        key: getattr(vision_config, key)
+        for key in image_processor_config
+        if hasattr(vision_config, key)
+    } == expected
+
+
+@pytest.mark.core_model
+def test_super_vl_video_frame_size_uses_image_processor_config():
+    config = ModelConfig(
+        model="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+        skip_tokenizer_init=True,
+    )
+
+    assert config.hf_config.vision_config.video_target_num_patches == 1024
+    assert config.hf_config.vision_config.video_maintain_aspect_ratio is True
+
+
 @pytest.mark.parametrize(
     ("device_normalize", "cvcuda_available", "device_resize", "expected"),
     [
@@ -610,7 +685,7 @@ def test_nemotron_processor_device_resize_sends_source_pixels(
             3 * 4 * 4,
         )
     else:
-        resized = [inputs["pixel_values_flat_video"]]
+        resized = inputs["pixel_values_flat_video"]
         raw = raw_inputs["pixel_values_raw_video"]
         sizes = raw_inputs["video_frame_sizes"].tolist()
         torch.testing.assert_close(
@@ -652,7 +727,7 @@ def test_nemotron_device_resize_profiles_a_real_video_resize(default_vllm_config
     shape, (text, inputs) = results[False]
     raw_shape, (raw_text, raw_inputs) = results[True]
     # Without device_resize, profiling frames are already at the target size.
-    assert tuple(inputs["pixel_values_flat_video"].shape[-2:]) == shape[1:3]
+    assert tuple(inputs["pixel_values_flat_video"][0].shape[-2:]) == shape[1:3]
     # With it, they are twice the target, so the profile run includes the
     # resize on the device; the prompt and token counts are unchanged.
     assert raw_text == text
@@ -797,7 +872,10 @@ def _uninitialized_model() -> NemotronH_Nano_VL_V2:
     return object.__new__(NemotronH_Nano_VL_V2)  # type: ignore[type-abstract]
 
 
-def test_nemotron_device_resize_embeds_videos_of_different_sizes_separately():
+@pytest.mark.parametrize(
+    "pixels_key", ["pixel_values_raw_video", "pixel_values_flat_video"]
+)
+def test_nemotron_embeds_videos_of_different_sizes_separately(pixels_key: str):
     # Videos that keep their aspect ratio can get different frame sizes, and
     # one encoder batch can hold several of them.
     model = _uninitialized_model()
@@ -814,7 +892,7 @@ def test_nemotron_device_resize_embeds_videos_of_different_sizes_separately():
         torch.zeros(2, 6, 6, 3, dtype=torch.uint8),
     ]
     kwargs = dict(
-        pixel_values_raw_video=frames,
+        **{pixels_key: frames},
         video_frame_sizes=torch.tensor([[32, 64], [48, 48]]),
         video_num_patches=torch.tensor([2, 2]),
         frames_indices=torch.tensor([[0, 1], [0, 1]]),
@@ -822,7 +900,7 @@ def test_nemotron_device_resize_embeds_videos_of_different_sizes_separately():
     )
     model.embed_multimodal(**kwargs)
     assert [k["video_frame_sizes"].tolist() for k in seen] == [[[32, 64]], [[48, 48]]]
-    assert all(k["pixel_values_raw_video"][0] is f for k, f in zip(seen, frames))
+    assert all(k[pixels_key][0] is f for k, f in zip(seen, frames))
     assert [k["video_num_patches"].tolist() for k in seen] == [[2], [2]]
 
     seen.clear()

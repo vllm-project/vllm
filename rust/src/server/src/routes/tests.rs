@@ -2721,6 +2721,62 @@ async fn completions_reject_missing_prompt() {
     engine_task.abort_and_join().await;
 }
 
+/// A request over a queue limit gets a retryable 503 before it reaches the
+/// engine, on both the text and the chat path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn requests_over_a_queue_limit_return_503() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-queue-limit".to_vec(),
+        |_dealer, _push| boxed_test_future(async {}),
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let llm = test_llm(client).with_admission_limits(crate::AdmissionLimits {
+        max_num_queued_reqs: Some(0),
+        max_num_queued_tokens: None,
+    });
+    let chat = ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new()))
+        .with_served_model_name("test-model");
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let mut results = Vec::new();
+    for (uri, body) in [
+        (
+            "/v1/completions",
+            json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello"}),
+        ),
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": "hello"}],
+            }),
+        ),
+    ] {
+        let (status, json) = post_json(&mut app, uri, body).await;
+        results.push(format!("{uri} -> {status} {json}"));
+    }
+    expect_test::expect![[r#"
+        /v1/completions -> 503 Service Unavailable {"error":{"message":"The engine is currently busy and cannot accept new requests. Please try again later or on a different instance.","type":"ServiceUnavailableError","param":null,"code":503}}
+        /v1/chat/completions -> 503 Service Unavailable {"error":{"message":"The engine is currently busy and cannot accept new requests. Please try again later or on a different instance.","type":"ServiceUnavailableError","param":null,"code":503}}"#]].assert_eq(&results.join("\n"));
+    engine_task.abort_and_join().await;
+}
+
 /// The render route lowers the same request, so it rejects a missing prompt
 /// too and shows the tokens of the accepted ones. Unlike Python, which rejects
 /// `prompt: ""` before tokenizing, an empty text prompt is left to
@@ -7660,6 +7716,20 @@ async fn engine_request_errors_map_to_http_status() {
                        "logprobs": 1, "stream": true}),
                 StatusCode::OK,
             ),
+            (
+                "/v1/completions",
+                json!({"model": model, "prompt": "hello", "echo": true, "stream": true}),
+                StatusCode::OK,
+            ),
+            // Building the echoed prompt's logprobs fails (no tokenizer piece
+            // for token 10000; `return_token_ids` skips decoding the echoed
+            // text), but the engine's error comes first.
+            (
+                "/v1/completions",
+                json!({"model": model, "prompt": [10000, 65], "echo": true, "logprobs": 0,
+                       "return_token_ids": true, "stream": true}),
+                StatusCode::OK,
+            ),
         ];
         for (uri, request, expected_status) in cases {
             let engine_error = error.clone();
@@ -7710,7 +7780,90 @@ async fn engine_request_errors_map_to_http_status() {
                     && text.contains(&error.message),
                 "{uri} {request}: {text}"
             );
+            // Like Python, an echoed prompt does not precede the error of the
+            // update it belongs to.
+            if uri == "/v1/completions" && request["stream"] == true {
+                let first_frame = text.split("\n\n").next().unwrap_or_default();
+                assert!(first_frame.contains("\"error\""), "{request}: {text}");
+            }
         }
+    }
+}
+
+/// A request the engine finishes during prefill, such as an abort, gets no
+/// prompt logprobs. Like Python, the echoed prompt still has one `logprobs`
+/// entry per token, each `null`, and `prompt_logprobs` is the first token's
+/// `[null]`.
+#[tokio::test]
+async fn completions_echo_logprobs_of_request_aborted_during_prefill() {
+    let model = "Qwen/Qwen1.5-0.5B-Chat";
+    for stream in [false, true] {
+        let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+            b"engine-openai",
+            |request_id| {
+                RequestBatchOutputs {
+                    outputs: vec![EngineCoreOutput {
+                        request_id: request_id.to_string(),
+                        finish_reason: Some(EngineCoreFinishReason::Abort),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }
+                .into()
+            },
+            |_| {},
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let mut app = build_router(Arc::new(AppState::new(vec![model.to_string()], chat)));
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"model": model, "prompt": "Hi!", "echo": true, "logprobs": 0,
+                               "add_special_tokens": false, "stream": stream})
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+        let choices: Vec<serde_json::Value> = if stream {
+            assert!(!text.contains("\"error\""), "{text}");
+            sse_json_payloads(&text)
+                .into_iter()
+                .flat_map(|event| event["choices"].as_array().cloned().unwrap_or_default())
+                .collect()
+        } else {
+            let response: serde_json::Value = serde_json::from_str(&text).expect("json response");
+            assert_eq!(response["choices"][0]["prompt_logprobs"], json!([null]));
+            response["choices"].as_array().cloned().unwrap_or_default()
+        };
+        let tokens: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| choice["logprobs"]["tokens"].as_array())
+            .flatten()
+            .collect();
+        let token_logprobs: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| choice["logprobs"]["token_logprobs"].as_array())
+            .flatten()
+            .collect();
+        assert_eq!(tokens, [&json!("H"), &json!("i"), &json!("!")], "{text}");
+        assert_eq!(token_logprobs, [&serde_json::Value::Null; 3], "{text}");
+        assert_eq!(
+            choices.last().expect("a choice")["finish_reason"],
+            json!("abort"),
+            "{text}"
+        );
     }
 }
 

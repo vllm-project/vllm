@@ -231,6 +231,7 @@ def test_scheduler_emits_only_objects_stored_by_every_worker():
             make_scheduler_output(new_reqs=[request], scheduled_tokens={"r": 32})
         )
 
+        assert isinstance(metadata, UMBPConnectorMetadata)
         complete_store(scheduler, metadata.store_event)
         assert scheduler.take_events() == []
 

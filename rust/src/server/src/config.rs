@@ -21,6 +21,7 @@ use vllm_chat::{
 use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
+use vllm_llm::AdmissionLimits;
 use vllm_metrics::CustomHistogramBuckets;
 use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 
@@ -392,7 +393,7 @@ pub struct Config {
     /// `tool_choice` is `none`.
     pub exclude_tools_when_tool_choice_none: bool,
     /// Maximum number of input items allowed per prompt for each modality.
-    /// Unspecified modalities default to 999 items.
+    /// Unspecified modalities default to the model's default, else 999 items.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
     /// Default overrides for multimodal processor options.
     pub mm_processor_kwargs: HashMap<String, Value>,
@@ -412,6 +413,8 @@ pub struct Config {
     /// output after the first one. Requests can raise it with their own
     /// `stream_interval`.
     pub stream_interval: NonZeroU32,
+    /// Queue limits that reject new requests with HTTP 503.
+    pub admission_limits: AdmissionLimits,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
     /// What `system_fingerprint` reports on chat and completion responses.
