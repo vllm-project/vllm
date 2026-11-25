@@ -16,19 +16,21 @@ from vllm.utils.network_utils import get_open_port
 
 @pytest.mark.parametrize("role", ["kv_producer", "kv_consumer", "kv_both"])
 @pytest.mark.parametrize(
-    "connector,extra,device,module,expected",
+    "connector,extra,device,expected",
     [
-        ("NixlConnector", {}, "cuda", None, True),
-        ("NixlPullConnector", {"transfer_mode": "pull"}, "cuda", None, True),
-        ("NixlConnector", {"transfer_mode": "push"}, "cuda", None, False),
-        ("NixlPushConnector", {}, "cuda", None, False),
-        ("NixlConnector", {}, "cpu", None, False),
-        ("NixlConnector", {}, "cuda", "custom_connector", False),
-        ("OffloadingConnector", {}, "cuda", None, False),
-        ("MultiConnector", {}, "cuda", None, False),
+        ("NixlConnector", {}, "cuda", True),
+        ("NixlConnector", {"transfer_mode": "pull"}, "cuda", True),
+        ("NixlConnector", {"transfer_mode": "push"}, "cuda", True),
+        ("NixlPullConnector", {}, "cuda", True),
+        ("NixlPushConnector", {}, "cuda", True),
+        ("NixlConnector", {}, "cpu", True),
+        ("OffloadingConnector", {}, "cuda", True),
+        ("SimpleCPUOffloadConnector", {}, "cuda", True),
+        ("LMCacheConnectorV1", {"use_layerwise": False}, "cuda", True),
+        ("LMCacheConnectorV1", {"use_layerwise": True}, "cuda", False),
     ],
 )
-def test_dep_kv_transfer_scope(role, connector, extra, device, module, expected):
+def test_dep_kv_transfer_scope(role, connector, extra, device, expected):
     from vllm.config.kv_transfer import KVTransferConfig
     from vllm.models.deepseek_v41.nvidia.specialized_decode.dep.config import (
         supports_kv_transfer,
@@ -39,10 +41,83 @@ def test_dep_kv_transfer_scope(role, connector, extra, device, module, expected)
         kv_role=role,
         kv_connector_extra_config=extra,
         kv_buffer_device=device,
-        kv_connector_module_path=module,
     )
     assert supports_kv_transfer(config) is expected
-    assert supports_kv_transfer(None)
+
+
+@pytest.mark.parametrize("empty_config", [False, True])
+def test_dep_no_kv_transfer(empty_config):
+    from vllm.config.kv_transfer import KVTransferConfig
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.dep.config import (
+        supports_kv_transfer,
+    )
+
+    assert supports_kv_transfer(KVTransferConfig() if empty_config else None)
+
+
+@pytest.mark.parametrize("layerwise", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+def test_dep_multi_connector_checks_every_child(layerwise, nested):
+    from vllm.config.kv_transfer import KVTransferConfig
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.dep.config import (
+        supports_kv_transfer,
+    )
+
+    child = {
+        "kv_connector": "LMCacheConnectorV1",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"use_layerwise": layerwise},
+    }
+    if nested:
+        child = {
+            "kv_connector": "MultiConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"connectors": [child]},
+        }
+    config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "NixlPushConnector", "kv_role": "kv_consumer"},
+                child,
+            ]
+        },
+    )
+    assert supports_kv_transfer(config) is (not layerwise)
+
+
+@pytest.mark.parametrize("layerwise", [False, True])
+def test_dep_external_connector_uses_graph_capability(layerwise):
+    from vllm.config.kv_transfer import KVTransferConfig
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.dep.config import (
+        supports_kv_transfer,
+    )
+
+    config = KVTransferConfig(
+        kv_connector="LMCacheConnectorV1",
+        kv_role="kv_both",
+        kv_connector_module_path=(
+            "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector"
+        ),
+        kv_connector_extra_config={"use_layerwise": layerwise},
+    )
+    assert supports_kv_transfer(config) is (not layerwise)
+
+
+def test_dep_kv_transfer_preserves_factory_validation():
+    from vllm.config.kv_transfer import KVTransferConfig
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.dep.config import (
+        supports_kv_transfer,
+    )
+
+    config = KVTransferConfig(
+        kv_connector="NixlConnector",
+        kv_role="kv_consumer",
+        kv_connector_extra_config={"transfer_mode": "invalid"},
+    )
+    with pytest.raises(ValueError, match="Invalid NixlConnector transfer_mode"):
+        supports_kv_transfer(config)
 
 
 @pytest.mark.skipif(

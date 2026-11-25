@@ -42,8 +42,9 @@ dispatch.
 - DSpark5 with adaptive verification disabled. Sampling is unchanged; the
   TP-sharded Markov sampler is not used across independent DP requests.
 - FULL decode graphs, FP8 KV, and the sparse MXFP4 indexer shown above.
-- KV transfer through the built-in NIXL pull connector with CUDA buffers.
-  Other connectors, NIXL push and host-buffered transfer are not supported.
+- KV connectors compatible with the model's cache layout and FULL CUDA graphs.
+  Connectors returning `True` from `requires_piecewise_for_cudagraph()` are rejected,
+  including a `MultiConnector` with any child that requires PIECEWISE graphs.
 - No LoRA, sleep, weight updates or batch-invariant mode.
 
 Unsupported configurations fail at initialization. Pure decode graphs up to
@@ -78,7 +79,8 @@ concurrency. Total concurrency is the per-rank count multiplied by the DP size.
 ## Disaggregated prefill and decode
 
 Keep the prefill instance on `decode_backend=auto`. On the decode instance,
-use `latency_specialized_dep` and add:
+use `latency_specialized_dep` with the connector's normal PD configuration.
+For example, the validated NIXL pull setup adds:
 
 ```bash
 --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda"}'
@@ -90,13 +92,27 @@ must use compatible model and KV-cache settings. TP remains 1, but their DP/EP
 widths need not match: a DEP2 prefill can feed a DEP2 or DEP4 decode instance.
 Each instance's EP group stays local to its own NVLink-connected GPUs.
 
-Forward the prefill response's `kv_transfer_params` to decode using the
-[NIXL disaggregated-serving flow](../features/nixl_connector_usage.md).
+For this pull setup, forward the prefill response's `kv_transfer_params` to
+decode using the [NIXL disaggregated-serving flow](../features/nixl_connector_usage.md).
 The scheduler waits for remote KV completion before admitting the request.
-KV registration, transfer completion and block lifetime remain with the
-connector; the executor reads and writes the original registered caches.
 Initial prompt replay and mixed prefill/decode batches keep the stock path.
 Eligible subsequent FULL decode graphs use the DEP executor.
+
+The executor has no connector-name, transfer-mode or buffer-device whitelist.
+It resolves the configured class through `KVConnectorFactory` and checks
+`requires_piecewise_for_cudagraph()` with the connector's extra configuration.
+This also applies to dynamically loaded connectors and `MultiConnector`.
+Modes requiring layer-wise Python callbacks cannot run inside FULL replay.
+Normal connector checks for model support, hybrid KV caches, layout and
+transfer settings still apply; passing the graph check does not override them.
+
+KV registration, load/save synchronization, transfer completion and block
+lifetime remain with the existing runner and connector. The executor reads
+and writes the original registered caches. Other connectors use their own
+serving flow, such as [NIXL push](../design/nixl_kv_push_connector.md), without
+DEP-specific transport code. End-to-end PD validation here covers NIXL pull;
+the configuration tests cover the generic admission check, not transfers for
+every connector.
 
 ## Experimental C8 attention
 

@@ -11,6 +11,7 @@ import vllm.envs as envs
 from vllm.config import CompilationMode, CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed import get_dp_group
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.models.deepseek_v41.nvidia.specialized_decode import DecodeConfig
 from vllm.platforms import current_platform
@@ -38,13 +39,13 @@ def supports_layout(p: ParallelConfig, dp_size: int) -> bool:
 
 
 def supports_kv_transfer(config: KVTransferConfig | None) -> bool:
-    # NIXL pull completes receives before scheduling the request and uses the
-    # original registered caches; it needs no layer-wise save/load hooks.
-    return config is None or (
-        config.kv_connector in ("NixlConnector", "NixlPullConnector")
-        and config.kv_connector_module_path is None
-        and config.kv_buffer_device == "cuda"
-        and config.get_from_extra_config("transfer_mode", "pull") == "pull"
+    if config is None or not config.is_kv_transfer_instance:
+        return True
+    # The runner owns step-level transfers. FULL replay cannot execute
+    # layer-wise Python hooks, including those of MultiConnector children.
+    connector_cls = KVConnectorFactory.get_connector_class(config)
+    return not connector_cls.requires_piecewise_for_cudagraph(
+        config.kv_connector_extra_config
     )
 
 
@@ -76,7 +77,7 @@ def requirements(config: VllmConfig, dp_size: int):
             and graph.mixed_mode() != CUDAGraphMode.FULL
             and c.mode != CompilationMode.STOCK_TORCH_COMPILE
         ),
-        "no KV transfer or CUDA-buffered NIXL pull": supports_kv_transfer(
+        "a KV connector compatible with FULL CUDA graphs": supports_kv_transfer(
             config.kv_transfer_config
         ),
         "no weight updates, sleep, LoRA or batch invariance": (
