@@ -6,7 +6,6 @@ from collections.abc import Callable
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -70,7 +69,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.weight_block_size = self.weight_quant.block_structure
 
         if self.weight_block_size is not None:
-            self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
             assert not self.is_static_input_scheme
             self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
             self.weight_quant_key = create_fp8_quant_key(

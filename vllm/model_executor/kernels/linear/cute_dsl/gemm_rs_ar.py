@@ -709,7 +709,7 @@ class Sm100GemmRsAr:
             partial_vecs = cute.zipped_divide(partial_uc, (1, WIDTH))
 
             bf16x16_atom = cute.make_copy_atom(
-                cute.nvgpu.CopyUniversalOp(),
+                cute.nvgpu.CopyR2GOp(),
                 BFloat16,
                 num_bits_per_copy=256,
                 l1c_evict_priority=cute.nvgpu.CacheEvictionPriority.NO_ALLOCATE,

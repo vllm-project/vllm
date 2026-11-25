@@ -7,8 +7,8 @@ and zero or more secondary tiers (Storage, Network, etc.) to provide
 hierarchical KV cache offloading.
 
 Key Design Principles:
-1. Cascade stored chunks to the secondary tiers that knew the request
-   when it started
+1. When a chunk is stored to the primary tier, cascade it to secondary tiers
+   that knew the request at its start and accept stores for it
 2. Primary tier is the gateway — Secondary tiers cannot access GPU memory
    directly; all data flows through the CPU primary tier
 3. Staged promotion — Chunks in secondary tiers must be promoted to the
@@ -45,6 +45,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
+    StepResult,
     StoreTrigger,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
@@ -105,6 +106,7 @@ class RequestState:
     pending_primary_stores: int = 0
     is_finished: bool = False
     request_level_tiers: set[int] | None = None
+    skip_cascade_tiers: set[int] | None = None
     pending_cascade_keys: list[OffloadKey] = field(default_factory=list)
 
 
@@ -749,6 +751,11 @@ class TieringOffloadingManager(OffloadingManager):
     def _should_store_to_tier(
         self, tier: SecondaryTierManager, num_blocks: int
     ) -> bool:
+        # A read-only tier never accepts stores; skipping the job here (rather
+        # than in the tier) avoids pinning primary chunks for a job that would
+        # never complete.
+        if not tier.access_mode.can_write:
+            return False
         detector = tier.bp_detector
         if detector is None:
             return True
@@ -841,6 +848,9 @@ class TieringOffloadingManager(OffloadingManager):
         any_retry = False
         for i, tier in enumerate(self._request_tiers(req_context)):
             if i == exclude_tier_idx:
+                continue
+            if not tier.access_mode.can_read:
+                # A write-only tier never serves loads.
                 continue
             if not req_context.load_tier_filter.allows(tier.medium, tier.locality):
                 continue
@@ -1041,7 +1051,7 @@ class TieringOffloadingManager(OffloadingManager):
         self._process_finished_jobs()
 
         # Step 2: Store to primary tier (new chunks only).
-        # Cascading to the request's secondary tiers
+        # Cascading of these newly-stored chunks to participating tiers
         # happens later in complete_store(), after the GPU→Primary transfer
         # completes.
         primary_result = self.primary_tier.prepare_store(
@@ -1058,10 +1068,11 @@ class TieringOffloadingManager(OffloadingManager):
         # Step 3: For request-level tiers, cascade chunks already in primary
         request_level_tiers = self._req_state[req_context.req_id].request_level_tiers
         if request_level_tiers:
-            keys_to_store_set = set(primary_result.keys_to_store)
-            keys_already_in_primary = tuple(
-                k for k in keys if k not in keys_to_store_set
-            )
+            # Keys to store cascade once stored, and keys to retry when offered
+            # again.
+            deferred_keys = set(primary_result.keys_to_store)
+            deferred_keys.update(primary_result.keys_to_retry)
+            keys_already_in_primary = tuple(k for k in keys if k not in deferred_keys)
             if keys_already_in_primary:
                 self._cascade_existing_chunks_to_request_level_tiers(
                     keys_already_in_primary, req_context, request_level_tiers
@@ -1138,8 +1149,8 @@ class TieringOffloadingManager(OffloadingManager):
         """Mark chunks as done storing from GPU to primary tier.
 
         This is where secondary tier cascading happens — after chunks are
-        confirmed to be in the primary tier, they are cascaded to the
-        secondary tiers that knew this request at its start.
+        confirmed to be in the primary tier, they are cascaded to secondary
+        tiers that knew this request at its start and accept stores for it.
 
         For each secondary tier:
         1. Call primary.prepare_read() to get LoadStoreSpec AND increment
@@ -1159,13 +1170,14 @@ class TieringOffloadingManager(OffloadingManager):
             keys, req_context, trigger=trigger, success=success
         )
 
+        req_id = req_context.req_id
+        state = self._req_state[req_id]
         if success:
-            # Step 2: Cascade to this request's secondary tiers.
-            # For each secondary tier, call primary.prepare_read() to get the
-            # LoadStoreSpec AND to increment ref_cnt (protecting chunks from
-            # eviction during the async transfer). One prepare_read() call per
-            # secondary tier.
+            # Each participating tier gets its own pin for the async transfer.
+            skip_tiers = state.skip_cascade_tiers
             for tier_idx, tier in enumerate(self._request_tiers(req_context)):
+                if skip_tiers is not None and tier_idx in skip_tiers:
+                    continue
                 if not self._should_store_to_tier(tier, len(keys)):
                     continue
                 job_metadata = self.create_store_job(keys, req_context, tier_idx)
@@ -1173,8 +1185,6 @@ class TieringOffloadingManager(OffloadingManager):
 
         # Note: The async transfers are now in flight. Their completion is
         # tracked via get_finished_jobs() / _maybe_process_finished_jobs().
-        req_id = req_context.req_id
-        state = self._req_state[req_id]
         assert state.pending_primary_stores > 0
         state.pending_primary_stores -= 1
         self._maybe_finalize_request(req_id)
@@ -1217,7 +1227,7 @@ class TieringOffloadingManager(OffloadingManager):
         """Query each secondary tier for its offload policy preference.
 
         Returns REQUEST_LEVEL if ANY secondary tier wants request-level.
-        Only stores REQUEST_LEVEL tier decisions for use in prepare_store.
+        Record request-level and cascade opt-out decisions separately.
         """
         state = RequestState(
             req_context=req_context, num_secondary_tiers=len(self.secondary_tiers)
@@ -1227,6 +1237,10 @@ class TieringOffloadingManager(OffloadingManager):
             if tier_idx == exclude_tier_idx:
                 continue
             tier_ctx = tier.on_new_request(req_context)
+            if not tier_ctx.receives_stores:
+                if state.skip_cascade_tiers is None:
+                    state.skip_cascade_tiers = set()
+                state.skip_cascade_tiers.add(tier_idx)
             if tier_ctx.policy == OffloadPolicy.REQUEST_LEVEL:
                 if state.request_level_tiers is None:
                     state.request_level_tiers = set()
@@ -1279,7 +1293,7 @@ class TieringOffloadingManager(OffloadingManager):
         del self._req_state[req_id]
 
     @override
-    def on_schedule_end(self, context: ScheduleEndContext) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> StepResult:
         """End-of-schedule hook: process finished jobs, flush deferred
         promotions, and reset the per-step gate.
 
@@ -1313,7 +1327,12 @@ class TieringOffloadingManager(OffloadingManager):
                 continue
             self._metrics.on_request_allocated(state.req_context)
 
-    @override
+        return StepResult(
+            pending=self.has_pending_work(),
+            events=list(self.take_events()),
+            stats=self.get_stats(),
+        )
+
     def has_pending_work(self) -> bool:
         """Report whether outstanding work needs an engine step to finish.
 
@@ -1334,7 +1353,6 @@ class TieringOffloadingManager(OffloadingManager):
             or any(tier.has_pending_work() for tier in self.secondary_tiers)
         )
 
-    @override
     def take_events(self) -> Iterable[OffloadingEvent]:
         """Yield events owned by the primary and secondary tiers.
 
@@ -1413,7 +1431,6 @@ class TieringOffloadingManager(OffloadingManager):
     def on_reset_flushed(self) -> None:
         self._promotions_held = False
 
-    @override
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = self.primary_tier.get_stats()
 
