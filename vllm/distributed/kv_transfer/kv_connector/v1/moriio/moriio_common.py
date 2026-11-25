@@ -18,6 +18,7 @@ from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
+    KVConnectorWorkerMetadata,
 )
 from vllm.distributed.parallel_state import (
     get_pipeline_model_parallel_rank,
@@ -616,6 +617,17 @@ class ReqMeta:
     transfer_state: WriteTransferState | None = None
 
 
+@dataclass
+class MoRIIOConnectorWorkerMetadata(KVConnectorWorkerMetadata):
+    blocks_to_zero: set[int]
+
+    def aggregate(
+        self, other: KVConnectorWorkerMetadata
+    ) -> "MoRIIOConnectorWorkerMetadata":
+        assert isinstance(other, MoRIIOConnectorWorkerMetadata)
+        return MoRIIOConnectorWorkerMetadata(self.blocks_to_zero | other.blocks_to_zero)
+
+
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
@@ -623,6 +635,8 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_abort: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self.order_reads_after_compute_stream = False
+        self.unzeroed_read_block_ids: set[int] = set()
 
     def __repr__(self):
         return (
@@ -630,7 +644,10 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             f"reqs_to_save={self.reqs_to_save}, "
             f"reqs_to_abort={self.reqs_to_abort}, "
             f"reqs_to_send={self.reqs_to_send}, "
-            f"transfer_id_to_request_id={self.transfer_id_to_request_id}"
+            f"transfer_id_to_request_id={self.transfer_id_to_request_id}, "
+            f"order_reads_after_compute_stream="
+            f"{self.order_reads_after_compute_stream}, "
+            f"unzeroed_read_block_ids={self.unzeroed_read_block_ids}"
         )
 
     def add_new_req(
