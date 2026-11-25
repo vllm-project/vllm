@@ -71,6 +71,9 @@ def test_per_token_head_kv_cache_accuracy(
     """
     with monkeypatch.context() as m:
         m.setenv("TOKENIZERS_PARALLELISM", "true")
+        # An in-process engine steps only once every prompt is queued, so the
+        # request grouping, and with it the logprobs, repeat from run to run.
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
         MAX_MODEL_LEN = 1024
         NUM_LOG_PROBS = 8
