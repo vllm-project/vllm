@@ -39,6 +39,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
+    NixlPushConnector,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
@@ -353,6 +356,18 @@ class TestPushScheduler:
             sched.build_connector_meta(scheduler_output)
 
         assert sched.get_kv_connector_stats() is None
+
+    def test_scheduler_role_connector_reports_scheduler_stats(self):
+        sched = make_nixl_push_scheduler()
+        sched._xfer_stats.record_registration_expired()
+        connector = NixlPushConnector.__new__(NixlPushConnector)
+        connector.connector_worker = None
+        connector.connector_scheduler = sched
+
+        stats = connector.get_kv_connector_stats()
+
+        assert stats is not None
+        assert stats.data["num_registration_expired"] == [1]
 
 
 # ----------------------------------------------------------------- #
