@@ -206,6 +206,7 @@ steps:
       - vllm/v1/core/
       - vllm/config/
       - tests/evals/gsm8k/configs/models-mi3xx-fp8-and-mixed.txt
+      - vllm/model_executor/layers/fused_moe/experts/aiter_mxfp4_w4a16_moe.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - tests/evals/gsm8k/

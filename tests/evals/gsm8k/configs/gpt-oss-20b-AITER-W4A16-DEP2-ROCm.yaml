@@ -1,0 +1,16 @@
+# AiterW4A16ExpertsMonolithic under DP attention with expert parallelism, over
+# the default allgather/reduce-scatter all2all. gpt-oss is the smallest MXFP4
+# checkpoint that reaches this kernel on ROCm.
+model_name: "openai/gpt-oss-20b"
+# Same floor as configs/humming/gpt-oss-20b-humming.yaml: catches garbage output.
+accuracy_threshold: 0.30
+num_questions: 1319
+num_fewshot: 5
+server_args: >-
+  --max-model-len 8192
+  --data-parallel-size 2
+  --enable-expert-parallel
+  --moe-backend aiter_triton_mxfp4_bf16
+env:
+  VLLM_ROCM_USE_AITER: "1"
+  ENABLE_CK: "0"  # Avoid AITER CK-based MHA JIT compilation to save time
