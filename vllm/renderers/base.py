@@ -11,7 +11,7 @@ from contextlib import ExitStack
 from dataclasses import replace
 from functools import cached_property
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Generic, overload, cast
+from typing import TYPE_CHECKING, Any, Generic, cast, overload
 
 from typing_extensions import TypeVar
 
@@ -1257,19 +1257,23 @@ class BaseRenderer(ABC, Generic[_T]):
             return
 
         for prompt in prompts:
-            if "encoder_prompt" in prompt:
-                enc_dec_prompt = cast(EncoderDecoderDictPrompt, prompt)
+            if (enc_dec_prompt := cast(EncoderDecoderDictPrompt, prompt)) and (
+                "encoder_prompt" in prompt
+            ):
                 targets: list[Any] = [enc_dec_prompt["encoder_prompt"]]
-                if enc_dec_prompt["decoder_prompt"] is not None:
-                    targets.append(enc_dec_prompt["decoder_prompt"])
+                if (decoder_prompt := enc_dec_prompt["decoder_prompt"]) is not None:
+                    targets.append(decoder_prompt)
             elif "prompt_embeds" in prompt:
-                # Embedding prompts have no multimodal data to decode.
                 continue
             else:
                 targets = [prompt]
 
             for target in targets:
-                if "multi_modal_data" in target:
+                # Merge media_io_kwargs only when the target has multimodal data or UUIDs. # noqa: E501
+                is_multimodal = (
+                    "multi_modal_data" in target or "multi_modal_uuids" in target
+                )
+                if is_multimodal:
                     target["media_io_kwargs"] = merge_media_io_kwargs(
                         target.get("media_io_kwargs"), req_media_io_kwargs
                     )
