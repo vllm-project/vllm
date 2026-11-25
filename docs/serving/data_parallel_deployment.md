@@ -153,7 +153,15 @@ vllm serve $MODEL --data-parallel-size 8 --enable-expert-parallel \
                   --prefill-hold-ttft-target 5
 ```
 
-Use `--prefill-hold-ttft-weight` (default `1.0`) to tune the TTFT vs. ITL trade-off: higher values weigh waiting requests' TTFT more heavily (holding less, including at low arrival rates), while lower values hold longer in favour of ITL.
+`--prefill-hold-ttft-target` (`T`) is the wall-clock budget that holding may spend out of each request's TTFT: a hold ends with a `deadline` release once some held request is projected to miss `T`. It bounds the delay added by holding and is not a TTFT guarantee. A prompt that needs `k` releases splits the budget across them (about `T / k` per hold), so a few very long uncached prompts can end holds long before any hold has lasted `T`.
+
+`--prefill-hold-ttft-weight` (default `1.0`) sets when a hold ends with a `cost` release instead: higher values hold less (favouring TTFT), lower values hold longer (favouring ITL).
+
+Tuning:
+
+- **Raising `T`** lengthens the TTFT tail but barely moves the median, and lowers ITL and raises throughput at high load. The gain flattens once `deadline` releases are rare.
+- **Raise `T` before lowering the weight.** While `T` is binding, a lower weight has little effect and can worsen ITL by forcing more releases. Avoid weights close to zero, which reduce throughput under closed-loop load.
+- **Check whether `T` is binding** in the summary DP rank 0 logs every 30 s (`DP prefill hold: cost=... deadline=... wait=... | ...`): it is when `deadline` is a sizeable share of `cost + deadline`. TTFT p99 is a poor indicator, since `deadline` releases usually come from a small fraction of requests and p99 can sit well below `T`.
 
 Notes and limitations:
 
