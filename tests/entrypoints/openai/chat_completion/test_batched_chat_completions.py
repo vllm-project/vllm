@@ -112,6 +112,44 @@ async def test_inference_invalid_model_error_is_bounded(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("batch", [False, True], ids=["chat", "batch-chat"])
+async def test_chat_message_validation_stops_at_first_invalid_message(
+    server: RemoteOpenAIServer, batch: bool
+) -> None:
+    conversation = [{"role": "user", "content": "Hello"}]
+    body = {"model": MODEL_NAME, "max_tokens": 1, "temperature": 0}
+    first_invalid: list[None] | list[list[None]]
+    more_invalid: list[None] | list[list[None]]
+    valid: list[dict[str, str]] | list[list[dict[str, str]]]
+    if batch:
+        url = server.url_for("v1/chat/completions/batch")
+        first_invalid = [[None]]
+        more_invalid = [[None, None], [None]]
+        valid = [conversation]
+        first_location = "body.messages.0.0"
+    else:
+        url = server.url_for("v1/chat/completions")
+        first_invalid = [None]
+        more_invalid = [None, None]
+        valid = conversation
+        first_location = "body.messages.0"
+
+    async with httpx.AsyncClient(timeout=60) as http_client:
+        first = await http_client.post(url, json={**body, "messages": first_invalid})
+        assert first.status_code == 400, first.text
+        expected = first.json()["error"]
+        assert expected["param"].startswith(first_location)
+
+        multiple = await http_client.post(url, json={**body, "messages": more_invalid})
+        assert multiple.status_code == 400, multiple.text
+        assert multiple.json()["error"] == expected
+
+        response = await http_client.post(url, json={**body, "messages": valid})
+        assert response.status_code == 200, response.text
+        assert len(response.json()["choices"]) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],

@@ -9,6 +9,7 @@ from vllm import envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.serve.utils.request_validation import FailFastRequestMixin
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import (
@@ -20,7 +21,7 @@ from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
 
-class PoolingBasicRequestMixin(OpenAIBaseModel):
+class PoolingBasicRequestMixin(FailFastRequestMixin, OpenAIBaseModel):
     # --8<-- [start:pooling-common-params]
     model: str | None = None
     user: str | None = None

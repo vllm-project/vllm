@@ -27,6 +27,7 @@ from vllm.entrypoints.serve.engine.protocol import (
 )
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.entrypoints.serve.utils.request_validation import FailFastRequestMixin
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
@@ -42,7 +43,7 @@ logger = init_logger(__name__)
 # ============================================================================
 
 
-class GenerativeScoringRequest(OpenAIBaseModel):
+class GenerativeScoringRequest(FailFastRequestMixin, OpenAIBaseModel):
     """Request for computing generative scoring.
 
     Attributes:

@@ -27,6 +27,7 @@ from vllm.entrypoints.generate.base.protocol import (
     validate_structured_outputs_structural_tag,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.serve.utils.request_validation import FailFastRequestMixin
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -50,7 +51,7 @@ _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
 
 
-class CompletionRequest(OpenAIBaseModel):
+class CompletionRequest(FailFastRequestMixin, OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str | None = None

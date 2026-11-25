@@ -40,6 +40,7 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionStreamResponse,
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
+from vllm.entrypoints.serve.utils.request_validation import FailFastRequestMixin
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -55,7 +56,7 @@ logger = init_logger(__name__)
 OutputMode: TypeAlias = Literal["tokens", "text", "derender"]
 
 
-class ParseContext(BaseModel):
+class ParseContext(FailFastRequestMixin, BaseModel):
     """Chat request context the generate server needs to parse output.
 
     Built by `/render` from the post-`adjust_request` chat request and read
@@ -109,7 +110,7 @@ class ParseContext(BaseModel):
         )
 
 
-class PlaceholderRangeInfo(BaseModel):
+class PlaceholderRangeInfo(FailFastRequestMixin, BaseModel):
     """Serializable placeholder location for a single multi-modal item."""
 
     offset: int = Field(ge=0)
@@ -136,7 +137,7 @@ def _has_serialized_mm_items(
     return any(item is not None for items in payload.values() for item in items)
 
 
-class MultiModalFeatures(BaseModel):
+class MultiModalFeatures(FailFastRequestMixin, BaseModel):
     """Lightweight multimodal metadata produced by the render step.
 
     Carries hashes (for cache lookup / identification) and placeholder
@@ -242,7 +243,7 @@ class ReasoningParserKwargs(BaseModel):
     """The effective chat template kwargs the prompt was rendered with."""
 
 
-class GenerateRequest(BaseModel):
+class GenerateRequest(FailFastRequestMixin, BaseModel):
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
         description=(
@@ -506,7 +507,7 @@ class GenerateLogProb(BaseModel):
     rank: int | None = None
 
 
-class GenerateLogProbsContent(GenerateLogProb):
+class GenerateLogProbsContent(FailFastRequestMixin, GenerateLogProb):
     """The sampled token at one position, plus its top-k candidates.
 
     `top_logprobs` is a list, not a dict: JSON turns dict keys into strings
@@ -517,7 +518,7 @@ class GenerateLogProbsContent(GenerateLogProb):
     top_logprobs: list[GenerateLogProb] = []
 
 
-class GenerateLogProbs(BaseModel):
+class GenerateLogProbs(FailFastRequestMixin, BaseModel):
     """Output logprobs for one choice.
 
     `content` holds one entry per generated token.
@@ -526,7 +527,7 @@ class GenerateLogProbs(BaseModel):
     content: list[GenerateLogProbsContent] | None = None
 
 
-class GenerateChoiceBase(BaseModel):
+class GenerateChoiceBase(FailFastRequestMixin, BaseModel):
     """Fields shared by every `output_mode` of a non-streaming choice."""
 
     index: int
@@ -573,7 +574,7 @@ class GenerateTextChoice(GenerateChoiceBase):
     """Logprobs with decoded token strings and `bytes`."""
 
 
-class GenerateStreamChoiceBase(BaseModel):
+class GenerateStreamChoiceBase(FailFastRequestMixin, BaseModel):
     """Fields shared by every `output_mode` of a streaming choice."""
 
     index: int
@@ -612,7 +613,7 @@ class GenerateDerenderStreamChoice(GenerateStreamChoiceBase):
         return delta.model_dump(exclude_none=True)
 
 
-class GenerateStreamResponseBase(BaseModel):
+class GenerateStreamResponseBase(FailFastRequestMixin, BaseModel):
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
         description=(
@@ -655,7 +656,7 @@ class GenerateDerenderChoice(GenerateChoiceBase):
     is hidden by `include_reasoning=false`."""
 
 
-class GenerateResponseBase(BaseModel):
+class GenerateResponseBase(FailFastRequestMixin, BaseModel):
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
         description=(
@@ -740,13 +741,13 @@ GenerateStreamResponse: TypeAlias = Annotated[
 ]
 
 
-class AbortRequestsRequest(BaseModel):
+class AbortRequestsRequest(FailFastRequestMixin, BaseModel):
     """Request for the /inference/v1/abort_requests endpoint."""
 
     request_ids: str | list[str]
 
 
-class DerenderChatRequest(BaseModel):
+class DerenderChatRequest(FailFastRequestMixin, BaseModel):
     """Request for the /v1/chat/completions/derender endpoint (non-streaming).
 
     Wraps a complete GenerateResponse and caller supplied metadata needed to
@@ -795,7 +796,7 @@ class DerenderChatRequest(BaseModel):
     # --8<-- [end:derender-chat-request]
 
 
-class DerenderCompletionRequest(BaseModel):
+class DerenderCompletionRequest(FailFastRequestMixin, BaseModel):
     """Request for the /v1/completions/derender endpoint (non-streaming).
 
     Parallel to DerenderChatRequest but handles the multi-prompt completions
@@ -855,7 +856,7 @@ class DerenderCompletionRequest(BaseModel):
         return self
 
 
-class DerenderStreamState(BaseModel):
+class DerenderStreamState(FailFastRequestMixin, BaseModel):
     """Per sequence state for stateless streaming derender.
 
     The client carries this between successive per chunk HTTP calls to the
@@ -986,7 +987,7 @@ class DerenderStreamState(BaseModel):
     """
 
 
-class DerenderChatStreamRequest(BaseModel):
+class DerenderChatStreamRequest(FailFastRequestMixin, BaseModel):
     """One chunk streaming derender request for /v1/chat/completions/derender.
 
     The client sends one request per SSE chunk received from
@@ -1038,7 +1039,7 @@ class DerenderChatStreamRequest(BaseModel):
     # --8<-- [end:derender-chat-stream-request]
 
 
-class DerenderCompletionStreamRequest(BaseModel):
+class DerenderCompletionStreamRequest(FailFastRequestMixin, BaseModel):
     """One chunk streaming derender request for /v1/completions/derender.
 
     Parallel to `DerenderChatStreamRequest` for the completions endpoint.

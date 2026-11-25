@@ -9,6 +9,7 @@ from pydantic import ConfigDict, Field, StrictBool, model_validator
 
 from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.serve.utils.request_validation import FailFastRequestMixin
 from vllm.utils import random_uuid
 
 
@@ -18,7 +19,7 @@ class QuestionSpec(OpenAIBaseModel):
     criteria: Any = None
 
 
-class StructuredDecisionRequest(OpenAIBaseModel):
+class StructuredDecisionRequest(FailFastRequestMixin, OpenAIBaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model: str | None = None

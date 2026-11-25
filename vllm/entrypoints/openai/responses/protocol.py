@@ -73,6 +73,7 @@ from vllm.entrypoints.generate.base.protocol import (
     validate_cache_salt,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.serve.utils.request_validation import FailFastRequestMixin
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import (
@@ -314,7 +315,7 @@ class PromptCacheOptionsParam(PromptCacheOptions):
         )
 
 
-class ResponsesRequest(OpenAIBaseModel):
+class ResponsesRequest(FailFastRequestMixin, OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
     background: bool | None = False
