@@ -175,12 +175,11 @@ def test_cpu_config_info_capacity_accounts_for_tensor_parallel_copies(
     assert _capacity_tokens(spec) == spec.num_chunks * tokens_per_block
 
 
-def test_cpu_config_info_capacity_dedups_a_replicated_layout(monkeypatch):
-    """A replicated layout stores one copy, so capacity does not divide by TP.
-
-    Same TP=4 sizing as the test above, which yields 3 slots; deduplicating to a
-    single copy yields 12.
-    """
+@pytest.mark.parametrize(("local_world_size", "chunks"), [(4, 6), (2, 3)])
+def test_cpu_config_info_capacity_dedups_a_replicated_layout(
+    monkeypatch, local_world_size, chunks
+):
+    """One page-aligned copy per host counts against the engine's budget."""
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
@@ -190,16 +189,19 @@ def test_cpu_config_info_capacity_dedups_a_replicated_layout(monkeypatch):
     alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     tokens_per_block = 8
     spec = _create_spec(
-        cpu_bytes_to_use=alignment * 12,
-        worker_kv_bytes_per_block=alignment,
+        cpu_bytes_to_use=alignment * 13,
+        worker_kv_bytes_per_block=alignment + 1,
         world_size=4,
+        local_world_size=local_world_size,
         replicated_layout=True,
         groups=(OffloadingGroupConfig(tokens_per_block, ("layer",), 0),),
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
-    assert spec.num_chunks == 12
-    assert _capacity_tokens(spec) == 12 * tokens_per_block
+    assert spec.num_chunks == chunks
+    assert spec.kv_bytes_per_chunk == 2 * alignment
+    assert spec.cpu_info.cpu_kv_cache_size_bytes == 12 * alignment
+    assert _capacity_tokens(spec) == chunks * tokens_per_block
 
 
 def test_cpu_config_info_mirrors_spec_sizing():
@@ -382,8 +384,9 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
         spec_name="TieringOffloadingSpec",
         cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
-        rank=1,
+        rank=3,
         world_size=4,
+        local_world_size=2,
         replicated_layout=True,
     )
     assert isinstance(spec, TieringOffloadingSpec)
@@ -409,7 +412,7 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
 
     assert region_calls[0]["rank"] == 0
     # Workers share the slot, so each pre-faults only its share of the region.
-    assert region_calls[0]["populate_shard"] == (1, 4)
+    assert region_calls[0]["populate_shard"] == (1, 2)
     assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
@@ -698,6 +701,7 @@ def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
     [
         (True, 1, 5, 4, 4, "test-engine", False),
         (True, 0, 0, 4, 4, "test-engine", False),
+        (True, 3, 1, 4, 2, "test-engine", False),
         (False, 1, 5, 4, 4, "test-engine_1", False),
         (False, 0, 5, 4, 4, "test-engine_0", False),
         (False, 3, 6, 4, 4, "test-engine_3", False),
@@ -759,7 +763,7 @@ def test_cpu_spec_create_worker_region_assignment(
     assert region_calls[0]["engine_id"] == expected_engine_id
     assert region_calls[0]["rank"] == 0
     assert region_calls[0]["populate_shard"] == (
-        (rank, world_size) if replicated_layout else None
+        (rank % local_world_size, local_world_size) if replicated_layout else None
     )
     assert region_calls[0]["private"] is not replicated_layout
     if replicated_layout:

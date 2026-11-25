@@ -16,6 +16,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     PrepareStoreOutput,
     ReqContext,
+    ScheduleEndContext,
     StoreTrigger,
     make_offload_key,
 )
@@ -168,6 +169,43 @@ def test_cpu_stored_event_carries_request_context():
 
     [event] = manager.take_events()
     assert event.req_context is req_context
+
+
+def test_cpu_schedule_end_reports_events_and_stats_once():
+    manager = make_cpu_manager(num_chunks=2, enable_events=True)
+    manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
+    manager.complete_store(
+        to_keys([1]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
+    context = ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+
+    result = manager.on_schedule_end(context)
+
+    assert not result.pending
+    verify_events(result.events, expected_stores=({1},))
+    assert result.stats is not None
+    assert CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC in result.stats.reduce()
+    assert manager.on_schedule_end(context).events == []
+
+
+def test_reset_drops_undrained_stored_events():
+    manager = make_cpu_manager(num_chunks=2, enable_events=True)
+    manager.prepare_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
+    manager.complete_store(
+        to_keys([1, 2]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
+    list(manager.take_events())
+    # Evicts chunk 1, then stores chunk 3; neither event is drained yet.
+    manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
+    manager.complete_store(
+        to_keys([3]), _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE
+    )
+
+    manager.reset_cache()
+
+    verify_events(manager.take_events(), expected_evictions=({1},))
 
 
 def test_cpu_eviction_removed_precedes_stored():
@@ -2082,11 +2120,14 @@ def test_unfinished_prefix_survives_pressure_across_store_batches(
         assert all(manager.lookup(key, ctx) is LookupResult.HIT for key in group[:-1])
 
 
+@pytest.mark.parametrize("cache_policy", ["lru", "arc"])
 @pytest.mark.parametrize("reuse_method", ["load", "store"])
-def test_unfinished_lru_reused_prefix_outlives_new_tail(reuse_method):
-    manager = make_cpu_manager(num_chunks=4)
+def test_unfinished_reused_prefix_outlives_new_tail(reuse_method, cache_policy):
+    manager = make_cpu_manager(num_chunks=4, cache_policy=cache_policy)
     head, middle, tail = to_keys([1, 2, 3])
     seed = make_req_context("seed")
+    seed.set_offload_key_position(head, 16)
+    seed.set_offload_key_position(middle, 32)
     assert (
         manager.prepare_store([head, middle], seed, trigger=StoreTrigger.ON_COMPUTE)
         is not None
