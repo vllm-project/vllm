@@ -20,6 +20,7 @@ from tests.v1.core.utils import full_layer, new_kv_cache_group, sliding_window_l
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     _get_kv_cache_bytes_per_block,
@@ -50,7 +51,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.utils import allocate_kv_cache
 
-MEMORY = 8 * 1024 * 1024
+NUM_BLOCKS = 16
 
 
 def _mla(head_size: int) -> MLAAttentionSpec:
@@ -189,12 +190,7 @@ def test_replayssm_low_head_packed_alignment(layout):
         new_kv_cache_group(["other"], other),
     ]
     vllm_config = _mock_vllm_config(layout.name)
-    bytes_per_block = _get_kv_cache_bytes_per_block(groups, layout)
-    config = get_kv_cache_config_from_groups(
-        vllm_config,
-        groups,
-        4 * bytes_per_block,
-    )
+    config = get_kv_cache_config_from_groups(vllm_config, groups, num_blocks=4)
     assert config.num_blocks == 4
     pages = allocate_kv_cache(config, torch.device("cpu"), layout)
     states = [_mamba_states(pages[name], spec) for name in ("a0", "a1")]
@@ -390,9 +386,7 @@ class TestCSALinearGrouping:
         for group in groups:
             assert sum(pages[n] for n in group.layer_names) <= bytes_per_block
 
-        kv_cache_config = get_kv_cache_config_from_groups(
-            config, groups, available_memory=bytes_per_block * 32
-        )
+        kv_cache_config = get_kv_cache_config_from_groups(config, groups, num_blocks=32)
         assert kv_cache_config.num_blocks == 32
         # Groups overlay from byte 0 of each block, so a layer never addresses
         # past the block it belongs to.
@@ -410,9 +404,7 @@ class TestCSALinearGrouping:
         groups = get_kv_cache_groups(
             config, _make_csa_linear_specs(enable_prefix_caching=True)
         )
-        kv_cache_config = get_kv_cache_config_from_groups(
-            config, groups, available_memory=BYTES_PER_BLOCK * 64
-        )
+        kv_cache_config = get_kv_cache_config_from_groups(config, groups, num_blocks=64)
         scheduler_config = generate_scheduler_kv_cache_config([kv_cache_config])
         manager = KVCacheManager(
             scheduler_config,
@@ -442,9 +434,7 @@ class TestCSALinearGrouping:
         config.cache_config.enable_prefix_caching = True
         specs = _make_csa_linear_specs(num_tuples=1, enable_prefix_caching=True)
         groups = get_kv_cache_groups(config, specs)
-        kv_cache_config = get_kv_cache_config_from_groups(
-            config, groups, available_memory=8 * MAIN_KV_PAGE_BYTES
-        )
+        kv_cache_config = get_kv_cache_config_from_groups(config, groups, num_blocks=8)
         assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (16, 16)
 
         # 2 tokens is not a multiple of the compression ratio 4: a prefix hit
@@ -459,9 +449,7 @@ class TestCSALinearGrouping:
         config.cache_config.enable_prefix_caching = True
         specs = _make_csa_linear_specs(num_tuples=1, enable_prefix_caching=True)
         groups = get_kv_cache_groups(config, specs)
-        kv_cache_config = get_kv_cache_config_from_groups(
-            config, groups, available_memory=8 * MAIN_KV_PAGE_BYTES
-        )
+        kv_cache_config = get_kv_cache_config_from_groups(config, groups, num_blocks=8)
         # The hash granularity is the GCD over prefix-cacheable groups only;
         # the 4-token scratch ring is excluded (it would drag it to 4).
         assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (16, 16)
@@ -500,9 +488,7 @@ class TestCSALinearGrouping:
             ),
         }
         groups = get_kv_cache_groups(config, specs)
-        kv_cache_config = get_kv_cache_config_from_groups(
-            config, groups, available_memory=8 * MAIN_KV_PAGE_BYTES
-        )
+        kv_cache_config = get_kv_cache_config_from_groups(config, groups, num_blocks=8)
 
         # Hashes are computed every 4 tokens, but without an align-mode Mamba
         # group cache hits remain on the 256-token scheduler boundary.
@@ -549,6 +535,7 @@ class TestCSALinearGrouping:
             )
 
         groups = _get_packed_kv_cache_groups(config, specs)
+        assert groups is not None
         gdn = [g for g in groups if g.layer_names[0].startswith("gdn.")]
 
         assert _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC) == sum(
@@ -625,7 +612,7 @@ class TestDensePacking:
         ) == _expected_bytes_per_block(groups)
 
         config = get_kv_cache_config_from_groups(
-            _mock_vllm_config("BLHNC"), groups, MEMORY
+            _mock_vllm_config("BLHNC"), groups, NUM_BLOCKS
         )
         # Groups overlay: both start at offset 0.
         assert [tensor.offset for tensor in config.kv_cache_tensors].count(0) == 2
@@ -639,7 +626,7 @@ class TestDensePacking:
         groups, _, _ = _mixed_page_groups()
         pages = _pages(groups)
         config = get_kv_cache_config_from_groups(
-            _mock_vllm_config("BLHNC"), groups, MEMORY
+            _mock_vllm_config("BLHNC"), groups, NUM_BLOCKS
         )
         offsets = {
             name: tensor.offset + i * tensor.layer_stride
@@ -657,12 +644,12 @@ class TestDensePacking:
         specs = {f"l.{i}": _full() for i in range(4)}
         groups = [new_kv_cache_group(list(specs), _full())]
         config = get_kv_cache_config_from_groups(
-            _mock_vllm_config(layout), groups, MEMORY
+            _mock_vllm_config(layout), groups, NUM_BLOCKS
         )
         (tensor,) = config.kv_cache_tensors
         page = _full().page_size_bytes
         assert tensor.layers == list(specs)
-        assert config.num_blocks == MEMORY // (4 * page)
+        assert config.num_blocks == NUM_BLOCKS
         assert tensor.size == 4 * page * config.num_blocks
         if layout == "LBNHC":
             assert (tensor.layer_stride, tensor.block_stride) == (
@@ -677,7 +664,7 @@ class TestDensePacking:
         specs = {"mla.0": _mla(512), "mla.1": _mla(512), "idx.0": _mla(128)}
         groups = [_uniform_group(specs)]
         config = get_kv_cache_config_from_groups(
-            _mock_vllm_config(layout), groups, MEMORY
+            _mock_vllm_config(layout), groups, NUM_BLOCKS
         )
         block_stride = _expected_bytes_per_block(groups)
         mla_tensor, idx_tensor = config.kv_cache_tensors
@@ -701,10 +688,11 @@ class TestDensePacking:
         idx = replace(_mla(128), block_stride_alignment=12288)
         groups = [_uniform_group({"mla.0": _mla(512), "idx.0": idx})]
         config = get_kv_cache_config_from_groups(
-            _mock_vllm_config("LBNHC"), groups, MEMORY
+            _mock_vllm_config("LBNHC"), groups, NUM_BLOCKS
         )
         mla_tensor, idx_tensor = config.kv_cache_tensors
-        assert config.num_blocks == MEMORY // (mla_page + 12288)
+        assert config.num_blocks == NUM_BLOCKS
+        assert mla_tensor.size == (mla_page + 12288) * NUM_BLOCKS
         assert (mla_tensor.block_stride, idx_tensor.block_stride) == (mla_page, 12288)
         assert idx_tensor.offset == mla_page * config.num_blocks
         _bind(config, "LBNHC")
@@ -721,9 +709,12 @@ class TestDensePacking:
     def test_overlaid_groups_alias_and_stay_isolated(self, layout, n_swa):
         groups, g1, g2 = _mixed_page_groups(n_swa=n_swa)
         config = get_kv_cache_config_from_groups(
-            _mock_vllm_config(layout), groups, MEMORY
+            _mock_vllm_config(layout), groups, NUM_BLOCKS
         )
-        assert config.num_blocks == MEMORY // _expected_bytes_per_block(groups)
+        assert config.num_blocks == NUM_BLOCKS
+        assert {t.size for t in config.kv_cache_tensors} == {
+            _expected_bytes_per_block(groups) * NUM_BLOCKS
+        }
         assert _pool_bytes_per_block(
             _mock_vllm_config(layout), groups
         ) == _expected_bytes_per_block(groups)
@@ -760,7 +751,9 @@ class TestDensePacking:
         with pytest.raises(
             ValueError, match="cannot express this model's mixed page sizes"
         ):
-            get_kv_cache_config_from_groups(_mock_vllm_config("LBNHC"), groups, MEMORY)
+            get_kv_cache_config_from_groups(
+                _mock_vllm_config("LBNHC"), groups, NUM_BLOCKS
+            )
 
     def test_layer_compact_overlay_follows_the_placement_order(self):
         # Layers with the same spec are placed together, so mla.0, idx.0, mla.1,
@@ -771,7 +764,7 @@ class TestDensePacking:
         swa = {f"swa.{i}": _mla(512) for i in range(2)}
         groups = [_uniform_group(mixed), _uniform_group(swa)]
         config = get_kv_cache_config_from_groups(
-            _mock_vllm_config("LBNHC"), groups, MEMORY
+            _mock_vllm_config("LBNHC"), groups, NUM_BLOCKS
         )
         views = _bind(config, "LBNHC")
         for i in range(2):
@@ -780,21 +773,23 @@ class TestDensePacking:
     def test_unresolved_layout_rejected(self):
         groups, _, _ = _mixed_page_groups()
         with pytest.raises(ValueError, match="has not been resolved"):
-            get_kv_cache_config_from_groups(_mock_vllm_config(None), groups, MEMORY)
+            get_kv_cache_config_from_groups(_mock_vllm_config(None), groups, NUM_BLOCKS)
 
     def test_head_outer_layout_rejected_for_mixed_pages(self):
         groups, _, _ = _mixed_page_groups()
         with pytest.raises(
             ValueError, match="cannot express this model's mixed page sizes"
         ):
-            get_kv_cache_config_from_groups(_mock_vllm_config("LHBNC"), groups, MEMORY)
+            get_kv_cache_config_from_groups(
+                _mock_vllm_config("LHBNC"), groups, NUM_BLOCKS
+            )
 
     @pytest.mark.parametrize("layout", ["LBNHC", "BLHNC"])
     def test_bound_views_round_trip(self, layout):
         specs = {"mla.0": _mla(512), "mla.1": _mla(512), "idx.0": _mla(128)}
         groups = [_uniform_group(specs)]
         config = get_kv_cache_config_from_groups(
-            _mock_vllm_config(layout), groups, MEMORY
+            _mock_vllm_config(layout), groups, NUM_BLOCKS
         )
         views = _bind(config, layout)
         for i, name in enumerate(specs):
@@ -852,12 +847,7 @@ class TestCompressorRingGroup:
         ring_groups = [g for g in groups if "state_cache" in g.layer_names[0]]
         assert len(ring_groups) == 1
         assert not ring_groups[0].prefix_cacheable
-        kv_cache_config = get_kv_cache_config_from_groups(
-            config,
-            groups,
-            available_memory=64
-            * _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC),
-        )
+        kv_cache_config = get_kv_cache_config_from_groups(config, groups, num_blocks=64)
         assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (128, 64)
         manager = KVCacheManager(
             generate_scheduler_kv_cache_config([kv_cache_config]),
@@ -907,12 +897,7 @@ class TestSWABoundedReplayGrouping:
         assert sorted((g.prefix_cacheable, g.prefix_replay_tokens) for g in groups) == [
             (False, 128)
         ] * 4 + [(True, 0)]
-        kv_cache_config = get_kv_cache_config_from_groups(
-            config,
-            groups,
-            available_memory=64
-            * _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC),
-        )
+        kv_cache_config = get_kv_cache_config_from_groups(config, groups, num_blocks=64)
         manager = KVCacheManager(
             generate_scheduler_kv_cache_config([kv_cache_config]),
             max_model_len=8192,
@@ -920,7 +905,9 @@ class TestSWABoundedReplayGrouping:
             hash_block_size=128,
             scheduler_block_size=128,
         )
-        (group,) = manager.coordinator.attention_groups
+        coordinator = manager.coordinator
+        assert isinstance(coordinator, HybridKVCacheCoordinator)
+        (group,) = coordinator.attention_groups
         assert group.manager_cls is FullAttentionManager
 
         # Allocating and caching a request goes through every group's manager;

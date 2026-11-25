@@ -58,7 +58,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
-from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
+from vllm.distributed.parallel_state import (
+    get_pp_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
@@ -92,6 +96,17 @@ DEFAULT_MAX_IO_ENTRIES = 8
 logger = init_logger(__name__)
 
 
+def _ptrs_to_int64(ptrs: list[int]) -> list[int]:
+    """Reinterpret unsigned 64-bit addresses as int64 bit patterns.
+
+    torch has no general uint64 support, so pointers are stored in an int64
+    tensor. Addresses >= 2**63 (e.g. on XPU) are mapped to their two's-
+    complement negative value; the Triton gather/scatter kernels cast int64 ->
+    pointer as a pure bit reinterpretation, so they round-trip unchanged.
+    """
+    return [p - (1 << 64) if p >= (1 << 63) else p for p in ptrs]
+
+
 # ============================================================================
 # Async Operation Management
 # ============================================================================
@@ -117,7 +132,7 @@ class AsyncOperationManager:
         self._pending_finished_requests: set[str] = set()
 
         # Initialize resources
-        self._init_cuda_resources()
+        self._init_device_resources()
         self._init_worker_threads()
 
         # Metrics
@@ -125,12 +140,12 @@ class AsyncOperationManager:
 
         logger.info("AsyncOperationManager initialized for rank %d", self._rank)
 
-    def _init_cuda_resources(self) -> None:
-        """Initialize CUDA streams, events and buffer allocators."""
-        # CUDA streams for async operations
-        self._save_stream = torch.cuda.Stream()
-        self._load_stream = torch.cuda.Stream()
-        self._save_event = torch.cuda.Event()
+    def _init_device_resources(self) -> None:
+        """Initialize accelerator streams, events and buffer allocators."""
+        # Accelerator streams for async operations
+        self._save_stream = torch.Stream(device=self._device)
+        self._load_stream = torch.Stream(device=self._device)
+        self._save_event = torch.Event(device=self._device)
 
         # Buffer allocators for data copying
         self._save_buffer_allocator = CopyBufferAllocator(
@@ -168,7 +183,7 @@ class AsyncOperationManager:
     def submit_save_operation(self, request_id: str, block_ids, block_hashes) -> Future:
         """Submit a save operation for async execution."""
         future: Future[Any] = Future()
-        main_stream_event = torch.cuda.Event()
+        main_stream_event = torch.Event(device=self._device)
         main_stream_event.record()
         task = (request_id, block_ids, block_hashes, future, main_stream_event)
         self._save_queue.put(task)
@@ -295,13 +310,13 @@ class AsyncOperationManager:
                 )
 
             # Synchronize streams and gather data
-            with torch.cuda.stream(self._save_stream):
+            with self._save_stream:
                 self._save_stream.wait_event(main_stream_event)  # Wait for main stream
                 self._connector._gather_or_scatter_kv_caches(
                     block_ids, buffers, "gather"
                 )
 
-                save_stream_event = torch.cuda.Event()
+                save_stream_event = torch.Event(device=self._device)
                 save_stream_event.record(self._save_stream)  # Record gather completion
 
             # Step3: Write data in batches
@@ -398,7 +413,7 @@ class AsyncOperationManager:
                 )
 
             # Step3: Scatter data back to KV cache
-            with torch.cuda.stream(self._load_stream):
+            with self._load_stream:
                 self._connector._gather_or_scatter_kv_caches(
                     block_ids, buffers, "scatter"
                 )
@@ -571,16 +586,18 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             content_dim,
         ]
 
-        self._kvcache_ptrs = torch.tensor(
-            [cache.data_ptr() for cache in self._kv_caches.values()],
-            dtype=torch.int64,
-            device=self._device,
-        )
+        ptrs = _ptrs_to_int64([cache.data_ptr() for cache in self._kv_caches.values()])
+        self._kvcache_ptrs = torch.tensor(ptrs, dtype=torch.int64, device=self._device)
 
     def _setup_storage_clients(self):
         os.makedirs(self._storage_path, exist_ok=True)
 
-        self._rank = get_tensor_model_parallel_rank()
+        # Pipeline stages hold different layers, so each (PP, TP) rank needs its
+        # own data file and metadata rank.
+        self._rank = (
+            get_pp_group().rank_in_group * get_tensor_model_parallel_world_size()
+            + get_tensor_model_parallel_rank()
+        )
         file_path = os.path.join(
             self._storage_path, f"hf3fs_vllm_data_file_{self._rank}"
         )
@@ -595,6 +612,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                     size=self._file_size,
                     bytes_per_page=self._bytes_per_page,
                     entries=DEFAULT_MAX_IO_ENTRIES,
+                    device=self._device,
                 )
                 for _ in range(self._numjobs)
             ]

@@ -248,7 +248,7 @@ class TestHybridAttentionIndices:
         mc = self._fake_model_config(text_cfg=cfg)
         assert _get_full_attention_layer_indices(mc) == [2, 4, 5]
 
-    def test_layers_block_type_jamba(self):
+    def test_layers_block_type_zamba2(self):
         from vllm.model_executor.layers.quantization.turboquant.config import (
             _get_full_attention_layer_indices,
         )
