@@ -435,6 +435,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     cache_policy=self.eviction_policy,
                     cache_policy_module_path=self.cache_policy_module_path,
                     enable_events=self.kv_events_config.enable_kv_cache_events,
+                    pin_capacity_ratio=self.pin_capacity_ratio,
                     mmap_region=scheduler_mmap,
                     info=self.cpu_info,
                 )
