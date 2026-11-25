@@ -885,3 +885,50 @@ def test_dsv4_swa_replay_only_with_a_connector_that_asks() -> None:
     assert not dsv4_swa_replay_enabled(config(extra={}))
     assert not dsv4_swa_replay_enabled(config(extra={"rebuild_sliding_window": False}))
     assert not dsv4_swa_replay_enabled(config(pcp=2))
+
+
+@pytest.mark.parametrize(
+    ("connector", "expected"),
+    [(None, True), ("PeerL1Connector", True), ("ExampleConnector", False)],
+)
+def test_swa_builder_preserves_aiter_for_canonical_kv(
+    monkeypatch, tmp_path, connector, expected
+):
+    """IPC copies of canonical KV retain the builder's sparse aiter path."""
+    from transformers import OPTConfig
+
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import KVTransferConfig
+    from vllm.models.deepseek_v4.amd.rocm import (
+        DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
+    )
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_triton_sparse_mla_enabled", lambda: True)
+    OPTConfig(num_hidden_layers=1, max_position_embeddings=256).save_pretrained(
+        tmp_path
+    )
+    config = create_vllm_config(
+        model_name=str(tmp_path),
+        max_model_len=256,
+        block_size=64,
+        max_num_seqs=1,
+        max_num_batched_tokens=64,
+        hf_config_override={"sliding_window": 128},
+    )
+    if connector:
+        config.kv_transfer_config = KVTransferConfig(
+            kv_connector=connector, kv_role="kv_both"
+        )
+    spec = MLAAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        tokens_per_state=1,
+    )
+    builder = DeepseekV4ROCMAiterSparseSWAMetadataBuilder(
+        spec, ["swa"], config, torch.device("cpu")
+    )
+    assert builder._use_aiter_sparse_mla_prefill == expected
