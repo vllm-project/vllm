@@ -26,7 +26,7 @@ from vllm.renderers.chat_utils import (
 from vllm.tokenizers.hf import HfTokenizer
 from vllm.utils.async_utils import make_async
 
-from .base import BaseRenderer
+from .hf import BaseHfRenderer
 from .inkling_encoding import (
     CONTENT_MODEL_END_SAMPLING,
     DEFAULT_REASONING_EFFORT,
@@ -117,7 +117,7 @@ class _HfBackedTmlTokenizer:
             raise ValueError(f"Inkling tokenizer does not define {token}") from None
 
 
-class InklingRenderer(BaseRenderer[HfTokenizer]):
+class InklingRenderer(BaseHfRenderer[HfTokenizer]):
     def __init__(
         self,
         config: VllmConfig,
