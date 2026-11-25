@@ -9,6 +9,7 @@ import pytest
 import requests
 
 from tests.utils import RemoteOpenAIServer
+from vllm.tokenizers import get_tokenizer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
@@ -23,6 +24,8 @@ def server():
         "--enforce-eager",
         "--max-num-seqs",
         "32",
+        # Compare text and token IDs with the same prefill shape.
+        "--no-enable-prefix-caching",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -151,6 +154,38 @@ class TestGenerativeScoringAPI:
         r1_score = r1.json()["data"][0]["score"]
         r2_score = r2.json()["data"][0]["score"]
         assert abs(r1_score - r2_score) < 1e-6
+
+    @pytest.mark.parametrize("item_first", [False, True])
+    def test_long_text_matches_token_ids(self, server: RemoteOpenAIServer, item_first):
+        tokenizer = get_tokenizer(MODEL_NAME)
+        text = " " * (511 * tokenizer.max_chars_per_token) + "hello world"
+        query, item = ("short query", text) if item_first else (text, "short item")
+        request = {
+            "model": MODEL_NAME,
+            "query": query,
+            "items": [item],
+            "item_first": item_first,
+            "label_token_ids": [100, 200],
+        }
+        text_response = requests.post(
+            server.url_for("generative_scoring"), json=request, timeout=60
+        )
+        token_response = requests.post(
+            server.url_for("generative_scoring"),
+            json={
+                **request,
+                "query": tokenizer.encode(query, add_special_tokens=True),
+                "items": [tokenizer.encode(item, add_special_tokens=False)],
+            },
+            timeout=60,
+        )
+        assert text_response.status_code == 200, text_response.text
+        assert token_response.status_code == 200, token_response.text
+        text_data, token_data = text_response.json(), token_response.json()
+        assert text_data["usage"] == token_data["usage"]
+        assert text_data["data"][0]["score"] == pytest.approx(
+            token_data["data"][0]["score"], abs=1e-6
+        )
 
 
 if __name__ == "__main__":

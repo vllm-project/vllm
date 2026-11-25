@@ -10,6 +10,7 @@ Tests cover:
 5. Prompt building and item ordering
 """
 
+import asyncio
 import math
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from vllm.config import ModelConfig, VllmConfig
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.generate.generative_scoring.serving import (
     GenerativeScoringItemResult,
@@ -30,11 +32,26 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.renderers import renderer_from_config
 from vllm.tokenizers import get_tokenizer
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
+
+
+@pytest.fixture
+def renderer():
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=MODEL_NAME, max_model_len=512, renderer_num_workers=1
+        )
+    )
+    renderer = renderer_from_config(config)
+    try:
+        yield renderer
+    finally:
+        renderer.shutdown()
 
 
 @dataclass(slots=True)
@@ -84,6 +101,7 @@ def _create_mock_engine():
 
     mock_renderer = MagicMock()
     mock_renderer.tokenizer = get_tokenizer(MODEL_NAME)
+    mock_renderer._executor = None
     mock_engine.renderer = mock_renderer
 
     return mock_engine
@@ -294,33 +312,38 @@ class TestPromptBuilding:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("item_first", [False, True])
-    async def test_oversized_text_is_cut_before_tokenizing(self, item_first):
-        """Text that cannot fit in `max_model_len` must not be tokenized in
-        full: that blocks the API server for seconds on multi-MiB inputs."""
-        serving = _create_serving(_create_mock_engine())
-        tokenizer = get_tokenizer(MODEL_NAME)
+    @pytest.mark.parametrize("text_part", ["query", "item"])
+    async def test_text_tokenization_yields_and_preserves_tokens(
+        self, renderer, item_first, text_part
+    ):
+        mock_engine = _create_mock_engine()
+        mock_engine.renderer = renderer
+        serving = _create_serving(mock_engine)
+        tokenizer = renderer.get_tokenizer()
         max_model_len = 16
-        max_chars = (max_model_len - 1) * tokenizer.max_chars_per_token
-        text = "hello world " * (max_chars // 4)
+        # Cutting this text at the character bound changes its final token.
+        text = " " * ((max_model_len - 1) * tokenizer.max_chars_per_token) + "hello"
+        query = text if text_part == "query" else [100]
+        item = text if text_part == "item" else [200]
         request = GenerativeScoringRequest(
-            query=text, items=[text], label_token_ids=[500, 501], item_first=item_first
+            query=query, items=[item], label_token_ids=[500, 501], item_first=item_first
         )
-
-        encoded_lengths = []
-        encode = tokenizer.encode
-
-        def recording_encode(text, **kwargs):
-            encoded_lengths.append(len(text))
-            return encode(text, **kwargs)
-
-        tokenizer.encode = recording_encode  # type: ignore[method-assign]
+        callback_ran = asyncio.Event()
+        asyncio.get_running_loop().call_soon(callback_ran.set)
         engine_inputs, _ = await serving._build_prompts(
             request, tokenizer, max_model_len=max_model_len
         )
-
-        assert max(encoded_lengths) <= max_chars
-        query_ids = encode(text, add_special_tokens=request.add_special_tokens)
-        item_ids = encode(text, add_special_tokens=False)
+        assert callback_ran.is_set(), "Tokenization blocked the event loop"
+        query_ids = (
+            tokenizer.encode(query, add_special_tokens=request.add_special_tokens)
+            if isinstance(query, str)
+            else query
+        )
+        item_ids = (
+            tokenizer.encode(item, add_special_tokens=False)
+            if isinstance(item, str)
+            else item
+        )
         full = item_ids + query_ids if item_first else query_ids + item_ids
         assert engine_inputs[0]["prompt_token_ids"] == full[: max_model_len - 1]  # type: ignore[typeddict-item]
 

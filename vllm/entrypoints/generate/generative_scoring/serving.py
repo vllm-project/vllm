@@ -33,6 +33,7 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
+from vllm.utils.async_utils import make_async
 
 logger = init_logger(__name__)
 
@@ -378,16 +379,12 @@ class ServingGenerativeScoring(BaseServing):
             Tuple of (list of EngineInput, list of prompt token counts).
 
         """
-        # Leave room for 1 output token
-        max_prompt_len = max_model_len - 1
-        # A token covers at most `max_chars_per_token` characters, so text past
-        # this point is truncated away below; cut it before tokenizing.
-        max_chars = max_prompt_len * tokenizer.max_chars_per_token
+        encode = make_async(tokenizer.encode, executor=self.renderer._executor)
 
         # Tokenize query if it's a string
         if isinstance(request.query, str):
-            query_token_ids = tokenizer.encode(
-                request.query[:max_chars],
+            query_token_ids = await encode(
+                request.query,
                 add_special_tokens=request.add_special_tokens,
             )
         else:
@@ -400,8 +397,8 @@ class ServingGenerativeScoring(BaseServing):
             # Tokenize item if it's a string
             if isinstance(item, str):
                 # Don't add special tokens for items to avoid duplicate BOS/EOS
-                item_token_ids = tokenizer.encode(
-                    item[:max_chars],
+                item_token_ids = await encode(
+                    item,
                     add_special_tokens=False,
                 )
             else:
@@ -414,6 +411,7 @@ class ServingGenerativeScoring(BaseServing):
                 prompt_token_ids = query_token_ids + item_token_ids
 
             # Truncate to max_model_len - 1 to leave room for 1 output token
+            max_prompt_len = max_model_len - 1
             if len(prompt_token_ids) > max_prompt_len:
                 prompt_token_ids = prompt_token_ids[:max_prompt_len]
 
