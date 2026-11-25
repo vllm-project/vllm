@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from enum import IntEnum, StrEnum
+from enum import IntEnum, StrEnum, unique
 from fractions import Fraction
 from functools import cached_property
 from math import prod
@@ -37,6 +37,7 @@ DS_MLA_STATE_CONTENT_BYTES = {"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}
 # ---------------------------------------------------------------------------
 
 
+@unique
 class KVQuantMode(IntEnum):
     """KV cache quantization mode.
 
@@ -66,7 +67,7 @@ class KVQuantMode(IntEnum):
     # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
     # False). Registered handlers return this when they own kernel selection
     # rather than reusing an upstream kernel path. See KVCacheDTypeHandler.
-    CUSTOM = 12
+    CUSTOM = 15
 
     @property
     def is_per_token_head(self) -> bool:
@@ -825,6 +826,15 @@ def prefix_lookup_groups(
     return list(lookups.values())
 
 
+@dataclass(frozen=True, slots=True)
+class KVCacheStage:
+    """The KV cache of one pipeline stage."""
+
+    bytes_per_block: int
+    """Bytes one block takes in the device KV cache of each worker of the
+    stage: the size the engine core plans that worker's `num_blocks` with."""
+
+
 @dataclass
 class KVCacheConfig:
     """The KV cache configuration of a model."""
@@ -860,6 +870,10 @@ class KVCacheConfig:
 
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
+
+    pipeline_stages: tuple[KVCacheStage, ...] = ()
+    """The KV cache of every pipeline stage, by PP rank, resolved by the engine
+    core so that both halves of a KV connector see every stage."""
 
     needs_kv_cache_zeroing: bool = field(init=False)
     """Whether newly allocated attention blocks must be zeroed before use.
