@@ -280,6 +280,25 @@ class CPUPenalties(_CPULogitsProcessor):
             return logits
 
         vocab_size = logits.shape[1]
+        if not torch.any(repetition_by_row != 1.0):
+            req_indices_list = req_indices.tolist()
+            output_ids = []
+            for row in active_rows.tolist():
+                req_idx = req_indices_list[row]
+                output_ids.append(
+                    self._output_tokens(req_idx, row, ctx) + row * vocab_size
+                )
+
+            output_ids_flat, counts = torch.unique(
+                torch.cat(output_ids).long(), return_counts=True
+            )
+            output_rows = output_ids_flat // vocab_size
+            flat_logits = logits.view(-1)
+            flat_logits[output_ids_flat] -= (
+                frequency_by_row[output_rows] * counts + presence_by_row[output_rows]
+            )
+            return logits
+
         prompt_ids = []
         output_ids = []
         req_indices_list = req_indices.tolist()
