@@ -2133,6 +2133,69 @@ def test_prefix_match_unit_allows_supported_and_fallback_unset(
     assert (scheduler_bs, hash_bs, hit_align) == expected
 
 
+def _single_attention_group_config(
+    manager_config=None, tokens_per_state: int = 1
+) -> KVCacheConfig:
+    spec = AttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        tokens_per_state=tokens_per_state,
+    )
+    return KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[new_kv_cache_group(["attn"], spec, manager_config)],
+    )
+
+
+def test_single_full_attention_group_accepts_finer_prefix_match_unit():
+    kv_cache_config = _single_attention_group_config()
+    vllm_config = VllmConfig(
+        cache_config=CacheConfig(
+            block_size=64, enable_prefix_caching=True, prefix_match_unit=16
+        )
+    )
+
+    scheduler_bs, hash_bs = kv_cache_utils.resolve_kv_cache_block_sizes(
+        kv_cache_config, vllm_config
+    )
+    hit_align = kv_cache_utils.resolve_cache_hit_alignment_tokens(
+        kv_cache_config, vllm_config, scheduler_bs, hash_bs
+    )
+    assert (scheduler_bs, hash_bs, hit_align) == (64, 16, 16)
+
+
+@pytest.mark.parametrize(
+    ("manager_config", "tokens_per_state", "unit", "kv_connector"),
+    [
+        (SlidingWindowManager.config(sliding_window=64), 1, 16, False),
+        (None, 4, 16, False),
+        (None, 1, 24, False),
+        (None, 1, 16, True),
+    ],
+    ids=["sliding_window", "compressed", "not_a_divisor", "kv_connector"],
+)
+def test_single_group_rejects_prefix_match_unit_without_partial_hits(
+    manager_config, tokens_per_state: int, unit: int, kv_connector: bool
+):
+    kv_cache_config = _single_attention_group_config(manager_config, tokens_per_state)
+    vllm_config = VllmConfig(
+        cache_config=CacheConfig(
+            block_size=64, enable_prefix_caching=True, prefix_match_unit=unit
+        ),
+        kv_transfer_config=(
+            KVTransferConfig(kv_connector="ExampleConnector", kv_role="kv_both")
+            if kv_connector
+            else None
+        ),
+    )
+
+    with pytest.raises(ValueError, match="with a single KV cache group"):
+        kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+
+
 def _swa_mla_spec(head_size=576):
     return MLAAttentionSpec(
         block_size=16, num_kv_heads=1, head_size=head_size, dtype=torch.float32

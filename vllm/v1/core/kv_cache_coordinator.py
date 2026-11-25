@@ -850,7 +850,10 @@ def get_kv_cache_coordinator(
             metrics_collector=metrics_collector,
             num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         )
-    if len(kv_cache_config.kv_cache_groups) == 1:
+    if (
+        len(kv_cache_config.kv_cache_groups) == 1
+        and hash_block_size == scheduler_block_size
+    ):
         return UnitaryKVCacheCoordinator(
             kv_cache_config,
             max_model_len,

@@ -2911,3 +2911,53 @@ def test_partial_hit_cow_source_keyed_this_step_is_deferred():
     assert manager.allocate_slots(reader, 3, num_computed, computed_blocks)
     copies, _ = manager.take_kv_cache_block_copies()
     assert any(copy.src_block_id == source_block_id for copy in copies)
+
+
+def test_single_full_attention_group_sibling_hits_partial_tail():
+    """n>1 siblings share a prompt that ends inside a block. A single
+    full-attention group with a finer prefix-match unit lets a sibling hit the
+    prompt tail via CoW, one step after the first sibling keys it."""
+    hash_block_size = 2
+    kv_cache_config = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group(
+                ["full"],
+                AttentionSpec(
+                    block_size=2 * hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            )
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    prompt = [0, 0, 1, 1, 2, 2, 3]
+    first = make_request("first", prompt, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(first)
+    assert manager.allocate_slots(first, len(prompt), num_computed, computed_blocks)
+    tail_block_id = manager.get_blocks("first").get_block_ids()[0][1]
+
+    sibling = make_request("sibling", prompt, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(sibling)
+    assert num_computed == 6
+    assert manager.allocate_slots(sibling, 1, num_computed, computed_blocks) is None
+
+    manager.new_step_starts()
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(sibling)
+    assert num_computed == 6
+    new_blocks = manager.allocate_slots(sibling, 1, num_computed, computed_blocks)
+    assert new_blocks is not None
+    copies, _ = manager.take_kv_cache_block_copies()
+    assert copies == [
+        KVCacheBlockCopy(
+            src_block_id=tail_block_id, dst_block_id=new_blocks.get_block_ids()[0][0]
+        )
+    ]
