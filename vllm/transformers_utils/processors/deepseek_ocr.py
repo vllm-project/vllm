@@ -3,6 +3,7 @@
 # adapted from https://github.com/deepseek-ai/DeepSeek-OCR/blob/main/DeepSeek-OCR-master/DeepSeek-OCR-vllm/process/image_process.py
 # and https://github.com/deepseek-ai/DeepSeek-OCR-2/blob/main/DeepSeek-OCR2-master/DeepSeek-OCR2-vllm/process/image_process.py
 import math
+from collections.abc import Iterator
 from typing import Literal
 
 import torch
@@ -11,6 +12,11 @@ from PIL import Image, ImageOps
 from transformers import BatchFeature, LlamaTokenizerFast
 from transformers.image_transforms import to_pil_image
 from transformers.processing_utils import ProcessorMixin
+
+from vllm.transformers_utils.processors.image_budget import (
+    get_image_width_height,
+    validate_image_tensor_budget,
+)
 
 # TODO(Isotr0py): change modes for variants
 # see: https://github.com/deepseek-ai/DeepSeek-OCR/blob/8cf003d38821fa1b19c73da3bd1b0dc262ea8136/DeepSeek-OCR-master/DeepSeek-OCR-vllm/config.py#L1-L6
@@ -79,43 +85,16 @@ def count_tiles(
     return target_aspect_ratio
 
 
-def dynamic_preprocess(
-    image, min_num=MIN_CROPS, max_num=MAX_CROPS, image_size=640, use_thumbnail=False
-):
-    orig_width, orig_height = image.size
-    aspect_ratio = orig_width / orig_height
-
-    # calculate the existing image aspect ratio
-    target_ratios = calculate_aspect_ratios(min_num, max_num)
-
-    # find the closest aspect ratio to the target
-    target_aspect_ratio = find_closest_aspect_ratio(
-        aspect_ratio, target_ratios, orig_width, orig_height, image_size
-    )
-
-    # calculate the target width and height
-    target_width = image_size * target_aspect_ratio[0]
-    target_height = image_size * target_aspect_ratio[1]
-    blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
-
-    # resize the image
-    resized_img = image.resize((target_width, target_height))
-    processed_images = []
-    for i in range(blocks):
-        box = (
-            (i % (target_width // image_size)) * image_size,
-            (i // (target_width // image_size)) * image_size,
-            ((i % (target_width // image_size)) + 1) * image_size,
-            ((i // (target_width // image_size)) + 1) * image_size,
-        )
-        # split the image
-        split_img = resized_img.crop(box)
-        processed_images.append(split_img)
-    assert len(processed_images) == blocks
-    if use_thumbnail and len(processed_images) != 1:
-        thumbnail_img = image.resize((image_size, image_size))
-        processed_images.append(thumbnail_img)
-    return processed_images, target_aspect_ratio
+def _iter_crops(
+    image: Image.Image, image_size: int, cols: int, rows: int
+) -> Iterator[Image.Image]:
+    """Yield the resized image's local views in row-major order."""
+    resized = image.resize((cols * image_size, rows * image_size))
+    for row in range(rows):
+        for col in range(cols):
+            left = col * image_size
+            top = row * image_size
+            yield resized.crop((left, top, left + image_size, top + image_size))
 
 
 class ImageTransform:
@@ -308,6 +287,15 @@ class DeepseekOCRProcessor(ProcessorMixin):
             color=tuple(int(x * 255) for x in self.image_transform.mean),
         )
 
+    def _get_crop_grid(self, image: Image.Image, cropping: bool) -> tuple[int, int]:
+        if cropping:
+            width, height = get_image_width_height(image)
+            if max(width, height) > self.image_size:
+                return count_tiles(
+                    width, height, max_num=self.max_crops, image_size=self.image_size
+                )
+        return (1, 1)
+
     def tokenize_with_images(
         self,
         conversation: str,
@@ -324,42 +312,55 @@ class DeepseekOCRProcessor(ProcessorMixin):
                 f"({num_image_tags}) does not match number of images "
                 f"({len(images)})."
             )
-        text_splits = conversation.split(self.image_token)
-        images_list, images_crop_list, images_seq_mask, images_spatial_crop = (
-            [],
-            [],
-            [],
-            [],
+        crop_grids = [self._get_crop_grid(image, cropping) for image in images]
+        crop_counts = [
+            cols * rows if (cols, rows) != (1, 1) else 0 for cols, rows in crop_grids
+        ]
+        num_crops = sum(crop_counts)
+        validate_image_tensor_budget(
+            images,
+            (self.base_size**2 + count * self.image_size**2 for count in crop_counts),
+            scratch_view_pixels=max(
+                self.base_size**2, self.image_size**2 if num_crops else 0
+            ),
         )
+        text_splits = conversation.split(self.image_token)
+        pixel_values = None
+        images_crop = None
+        crop_index = 0
+        images_seq_mask = []
         image_shapes = []
         num_image_tokens = []
         tokenized_str = []
-        for text_sep, image in zip(text_splits, map(to_pil_image, images)):
+        for page_index, image in enumerate(map(to_pil_image, images)):
+            text_sep = text_splits[page_index]
             tokenized_sep = self.encode(text_sep, bos=False, eos=False)
             tokenized_str += tokenized_sep
             images_seq_mask += [False] * len(tokenized_sep)
 
             image_shapes.append(image.size)
 
-            images_crop_raw = []
-            if image.size[0] <= self.image_size and image.size[1] <= self.image_size:
-                crop_ratio = [1, 1]
-            elif cropping:
-                images_crop_raw, crop_ratio = dynamic_preprocess(
-                    image, image_size=self.image_size, max_num=self.max_crops
-                )
-            else:
-                crop_ratio = [1, 1]
+            page_tensor = self.image_transform(
+                self._prepare_global_view(image, cropping)
+            )
+            if pixel_values is None:
+                pixel_values = page_tensor.new_empty((len(images), *page_tensor.shape))
+            pixel_values[page_index].view_as(page_tensor).copy_(page_tensor)
+            del page_tensor
 
-            global_view = self._prepare_global_view(image, cropping)
-            images_list.append(self.image_transform(global_view))
-
-            num_width_tiles, num_height_tiles = crop_ratio
-            images_spatial_crop.append([num_width_tiles, num_height_tiles])
-
-            if num_width_tiles > 1 or num_height_tiles > 1:
-                for cropped_image in images_crop_raw:
-                    images_crop_list.append(self.image_transform(cropped_image))
+            num_width_tiles, num_height_tiles = crop_grids[page_index]
+            if crop_counts[page_index]:
+                for tile in _iter_crops(
+                    image, self.image_size, num_width_tiles, num_height_tiles
+                ):
+                    tile_tensor = self.image_transform(tile)
+                    if images_crop is None:
+                        images_crop = tile_tensor.new_empty(
+                            (num_crops, *tile_tensor.shape)
+                        )
+                    images_crop[crop_index].view_as(tile_tensor).copy_(tile_tensor)
+                    crop_index += 1
+                    del tile_tensor
 
             num_queries = math.ceil(
                 (self.image_size // self.patch_size) / self.downsample_ratio
@@ -376,7 +377,7 @@ class DeepseekOCRProcessor(ProcessorMixin):
             tokenized_image = [self.image_token_id] * num_tokens_base
 
             tokenized_image += [self.image_token_id]
-            if num_width_tiles > 1 or num_height_tiles > 1:
+            if crop_counts[page_index]:
                 num_tokens_per_row = (
                     num_queries * num_width_tiles + 1
                     if self.strategy == "v1"
@@ -437,17 +438,11 @@ class DeepseekOCRProcessor(ProcessorMixin):
         target_ids = target_ids[:-1]
         images_seq_mask = images_seq_mask[:-1]
 
-        if len(images_list) == 0:
+        if pixel_values is None:
             pixel_values = torch.zeros((0, 3, self.base_size, self.base_size))
-            images_spatial_crop = torch.zeros((0, 2), dtype=torch.long)
+        if images_crop is None:
             images_crop = torch.zeros((0, 3, self.image_size, self.image_size))
-        else:
-            pixel_values = torch.stack(images_list, dim=0)
-            images_spatial_crop = torch.tensor(images_spatial_crop, dtype=torch.long)
-            if images_crop_list:
-                images_crop = torch.stack(images_crop_list, dim=0)
-            else:
-                images_crop = torch.zeros((0, 3, self.image_size, self.image_size))
+        images_spatial_crop = torch.tensor(crop_grids, dtype=torch.long).reshape(-1, 2)
 
         input_ids = input_ids.unsqueeze(0)
 

@@ -1012,6 +1012,8 @@ class WorkerProc:
                 logger.debug(
                     "WorkerProc handling signal %d, raising SystemExit", signum
                 )
+                if signum == signal.SIGTERM:
+                    get_watch_dog().handle_failure(signal.Signals(signum).name)
                 raise SystemExit()
 
         # Either SIGTERM or SIGINT will terminate the worker

@@ -7,10 +7,10 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
-def _group_prefix(
-    Starts, Lengths, Ends, BATCH: tl.constexpr, R: tl.constexpr, BLOCK: tl.constexpr
-):
+# Batch, token and slot counts change every step, so they stay runtime
+# arguments instead of triggering a recompile per value.
+@triton.jit(do_not_specialize=["BATCH"])
+def _group_prefix(Starts, Lengths, Ends, BATCH, R: tl.constexpr, BLOCK: tl.constexpr):
     request = tl.arange(0, BLOCK)
     start = tl.load(Starts + request, request < BATCH, 0)
     end = tl.load(Starts + request + 1, request < BATCH, 0)
@@ -21,7 +21,7 @@ def _group_prefix(
     tl.store(Ends + request, tl.cumsum(count), request < BATCH)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["BATCH", "TOKENS", "SLOTS", "POS_PLANE"])
 def _gather_groups(
     Keys,
     Positions,
@@ -35,14 +35,14 @@ def _gather_groups(
     Requests,
     Groups,
     Live,
-    BATCH: tl.constexpr,
-    TOKENS: tl.constexpr,
-    SLOTS: tl.constexpr,
+    BATCH,
+    TOKENS,
+    SLOTS,
     R: tl.constexpr,
     RING: tl.constexpr,
     KEY_ROW: tl.constexpr,
     KEY_COL: tl.constexpr,
-    POS_PLANE: tl.constexpr,
+    POS_PLANE,
     POS_TOKEN: tl.constexpr,
     THREE: tl.constexpr,
     TAIL_BLOCK: tl.constexpr,
@@ -114,23 +114,30 @@ def _gather_groups(
     tl.store(Live + slot, live)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["BATCH", "TOKENS"])
 def _query_metadata(
     Starts,
     Lengths,
+    Table,
     Owner,
     Logical,
     Upper,
+    ScoreLengths,
+    TokenTable,
     Live,
-    BATCH: tl.constexpr,
-    TOKENS: tl.constexpr,
+    BATCH,
+    TOKENS,
+    TABLE_ROW,
+    TABLE_COLS,
+    SEARCH_STEPS: tl.constexpr,
     R: tl.constexpr,
     BLOCK: tl.constexpr,
+    COLS: tl.constexpr,
 ):
     token = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     lo = tl.full((BLOCK,), 0, tl.int32)
     hi = tl.full((BLOCK,), BATCH, tl.int32)
-    for _ in range((BATCH + 1).bit_length()):
+    for _ in range(SEARCH_STEPS):
         mid = (lo + hi) // 2
         end = tl.load(Starts + mid + 1, mid < BATCH, 2147483647)
         left = token < end
@@ -143,13 +150,22 @@ def _query_metadata(
     context = length - (end - start)
     live = (lo < BATCH) & (end > start) & (context >= 0)
     logical = tl.maximum(context, 0).to(tl.int64) + token - start
-    tl.store(Owner + token, request, token < TOKENS)
-    tl.store(Logical + token, logical, token < TOKENS)
-    tl.store(Upper + token, tl.where(live, logical // R, 0), token < TOKENS)
-    tl.store(Live + token, live, token < TOKENS)
+    upper = tl.where(live, logical // R, 0)
+    valid = token < TOKENS
+    tl.store(Owner + token, request, valid)
+    tl.store(Logical + token, logical, valid)
+    tl.store(Upper + token, upper, valid)
+    tl.store(ScoreLengths + token, tl.maximum(upper, 1), valid)
+    tl.store(Live + token, live, valid)
+    source = Table + request.to(tl.int64)[:, None] * TABLE_ROW
+    target = TokenTable + token.to(tl.int64)[:, None] * TABLE_COLS
+    for begin in range(0, TABLE_COLS, COLS):
+        column = begin + tl.arange(0, COLS)[None, :]
+        mask = valid[:, None] & (column < TABLE_COLS)
+        tl.store(target + column, tl.load(source + column, mask, 0), mask)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["POS_PLANE"])
 def _write_tails(
     Keys,
     Positions,
@@ -160,7 +176,7 @@ def _write_tails(
     RING: tl.constexpr,
     KEY_ROW: tl.constexpr,
     KEY_COL: tl.constexpr,
-    POS_PLANE: tl.constexpr,
+    POS_PLANE,
     POS_TOKEN: tl.constexpr,
     THREE: tl.constexpr,
     TAIL_BLOCK: tl.constexpr,
@@ -198,18 +214,30 @@ def _write_tails(
     )
 
 
-def prepare_groups(keys, positions, tail, table, starts, lengths, tokens, ratio):
+def prepare_groups(
+    keys, positions, tail, table, pool_table, starts, lengths, tokens, ratio
+):
+    """Gather the groups to pool and the per-query scoring metadata.
+
+    Raw group keys come back in FP32 for the key projections, and
+    `pool_table` rows are gathered per query so paged MQA scoring can read
+    them directly.
+    """
     batch, device = lengths.numel(), keys.device
     slots = (tokens + batch * (ratio - 1)) // ratio
     prefix = torch.empty(batch, dtype=torch.int32, device=device)
-    raw = torch.empty((slots, ratio, 128), dtype=keys.dtype, device=device)
+    raw = torch.empty((slots, ratio, 128), dtype=torch.float32, device=device)
     coordinates = torch.empty((3, slots), dtype=torch.int64, device=device)
     requests = torch.empty(slots, dtype=torch.int32, device=device)
     groups = torch.empty(slots, dtype=torch.int64, device=device)
     group_live = torch.empty(slots, dtype=torch.bool, device=device)
-    owner = torch.empty(tokens, dtype=torch.int64, device=device)
+    owner = torch.empty(tokens, dtype=torch.int32, device=device)
     logical = torch.empty(tokens, dtype=torch.int64, device=device)
     upper = torch.empty(tokens, dtype=torch.int32, device=device)
+    score_lengths = torch.empty((tokens, 1), dtype=torch.int32, device=device)
+    token_table = torch.empty(
+        (tokens, pool_table.shape[1]), dtype=pool_table.dtype, device=device
+    )
     token_live = torch.empty(tokens, dtype=torch.bool, device=device)
     if batch:
         _group_prefix[(1,)](
@@ -244,17 +272,25 @@ def prepare_groups(keys, positions, tail, table, starts, lengths, tokens, ratio)
             table.stride(0),
         )
     if tokens:
-        _query_metadata[(triton.cdiv(tokens, 256),)](
+        assert pool_table.stride(1) == 1
+        _query_metadata[(triton.cdiv(tokens, 64),)](
             starts,
             lengths,
+            pool_table,
             owner,
             logical,
             upper,
+            score_lengths,
+            token_table,
             token_live,
             batch,
             tokens,
+            pool_table.stride(0),
+            pool_table.shape[1],
+            (batch + 1).bit_length(),
             ratio,
-            256,
+            64,
+            64,
         )
     group_positions = coordinates if positions.ndim == 2 else coordinates[0]
     return (
@@ -266,6 +302,8 @@ def prepare_groups(keys, positions, tail, table, starts, lengths, tokens, ratio)
         owner,
         logical,
         upper,
+        score_lengths,
+        token_table,
         token_live,
     )
 
