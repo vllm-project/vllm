@@ -22,6 +22,7 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.data.moriio import (
     _merge_segments,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
+    deserialize_mem_descriptor,
     serialize_mem_descriptor,
 )
 
@@ -395,6 +396,24 @@ def test_read_moves_requested_blocks_and_notifies_producer(fake_mori):
     finally:
         consumer.deregister()
         producer.deregister()
+
+
+def test_mem_descriptor_size_does_not_grow_with_the_region(fake_mori):
+    small = _transport("enc", 0)
+    large = MoRIIODataTransport(
+        agent_name="enc2",
+        region=torch.zeros((64 * _N, _BS), dtype=torch.int8),
+        block_size_bytes=_BS,
+        host="127.0.0.1",
+    )
+    try:
+        assert len(large.get_mem_descriptor()) == len(small.get_mem_descriptor())
+        assert deserialize_mem_descriptor(large.get_mem_descriptor()) == [
+            (large._base, _BS, 0)
+        ]
+    finally:
+        large.deregister()
+        small.deregister()
 
 
 def test_released_in_flight_handle_is_kept_until_it_finishes(fake_mori):

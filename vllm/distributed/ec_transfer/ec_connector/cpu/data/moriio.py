@@ -156,8 +156,11 @@ class MoRIIODataTransport(DataTransport):
                 notify_path=notify_path,
             )
         )
+        # Only the first block: READs address blocks by offset from the region
+        # start, and the descriptor travels in every XferAck, so a per-block
+        # list would grow with ec_cpu_bytes (about 60 MB for 40 GiB).
         self._mem_descriptor_bytes = serialize_mem_descriptor(
-            build_block_descs(self._base, region.shape[0], block_size_bytes)
+            build_block_descs(self._base, 1, block_size_bytes)
         )
 
     def get_agent_metadata(self) -> bytes:
