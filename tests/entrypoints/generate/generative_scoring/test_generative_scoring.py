@@ -33,7 +33,6 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers import renderer_from_config
-from vllm.tokenizers import get_tokenizer
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -91,18 +90,15 @@ class MockModelConfig:
         return self.vocab_size
 
 
-def _create_mock_engine():
-    """Create a mock AsyncLLM engine."""
+def _create_mock_engine(renderer):
+    """Create a mock AsyncLLM engine with a real renderer."""
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.get_tokenizer.return_value = renderer.get_tokenizer()
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
 
-    mock_renderer = MagicMock()
-    mock_renderer.tokenizer = get_tokenizer(MODEL_NAME)
-    mock_renderer._executor = None
-    mock_engine.renderer = mock_renderer
+    mock_engine.renderer = renderer
 
     return mock_engine
 
@@ -269,9 +265,9 @@ class TestValidation:
         ],
         ids=["invalid_token_id", "empty_items"],
     )
-    async def test_validation_errors(self, request_kwargs, expected_error):
+    async def test_validation_errors(self, renderer, request_kwargs, expected_error):
         """Test that invalid inputs return appropriate errors."""
-        mock_engine = _create_mock_engine()
+        mock_engine = _create_mock_engine(renderer)
         serving = _create_serving(mock_engine)
         request = GenerativeScoringRequest(model=MODEL_NAME, **request_kwargs)
         result = await serving.create_generative_scoring(request, None)
@@ -292,9 +288,9 @@ class TestPromptBuilding:
         ],
         ids=["query_first", "item_first"],
     )
-    async def test_item_ordering(self, item_first, expected):
+    async def test_item_ordering(self, renderer, item_first, expected):
         """Test that item_first flag controls prompt concatenation order."""
-        mock_engine = _create_mock_engine()
+        mock_engine = _create_mock_engine(renderer)
         serving = _create_serving(mock_engine)
 
         request = GenerativeScoringRequest(
@@ -304,7 +300,7 @@ class TestPromptBuilding:
             item_first=item_first,
         )
         engine_inputs, _ = await serving._build_prompts(
-            request, MagicMock(), max_model_len=4096
+            request, renderer.get_tokenizer(), max_model_len=4096
         )
 
         for i, exp in enumerate(expected):
@@ -316,8 +312,7 @@ class TestPromptBuilding:
     async def test_text_tokenization_preserves_tokens(
         self, renderer, item_first, text_kind
     ):
-        mock_engine = _create_mock_engine()
-        mock_engine.renderer = renderer
+        mock_engine = _create_mock_engine(renderer)
         serving = _create_serving(mock_engine)
         tokenizer = renderer.get_tokenizer()
         max_model_len = 16
@@ -356,8 +351,7 @@ class TestPromptBuilding:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("text_part", ["query", "item"])
     async def test_text_tokenization_yields(self, renderer, text_part):
-        mock_engine = _create_mock_engine()
-        mock_engine.renderer = renderer
+        mock_engine = _create_mock_engine(renderer)
         serving = _create_serving(mock_engine)
         request = GenerativeScoringRequest(
             query="hello" if text_part == "query" else [100],
@@ -385,9 +379,9 @@ class TestGeneration:
         ],
         ids=["text", "token_ids"],
     )
-    async def test_successful_generation(self, cache_salt, query, items):
+    async def test_successful_generation(self, renderer, cache_salt, query, items):
         """Test scoring succeeds and preserves cache_salt for every item."""
-        mock_engine = _create_mock_engine()
+        mock_engine = _create_mock_engine(renderer)
         serving = _create_serving(mock_engine)
 
         mock_logprobs = {1234: -0.5, 5678: -2.0, 100: -3.0}
@@ -425,9 +419,9 @@ class TestGeneration:
 
     @pytest.mark.asyncio
     async def test_missing_read_returns_server_error_without_traceback(
-        self, monkeypatch
+        self, renderer, monkeypatch
     ):
-        mock_engine = _create_mock_engine()
+        mock_engine = _create_mock_engine(renderer)
         serving = _create_serving(mock_engine)
 
         async def mock_generate(*args, **kwargs):
