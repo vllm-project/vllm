@@ -154,3 +154,26 @@ def test_dummy_batch_publishes_nothing_without_gpu_timings_or_stats(records, sta
     EngineCoreProc.execute_dummy_batch(engine)
 
     assert engine.output_queue.empty()
+
+
+def test_idle_state_is_reported_when_it_changes():
+    counts = (0, 0)
+    engine = make_fake_engine()
+    engine.scheduler = SimpleNamespace(
+        make_stats=SchedulerStats, get_request_counts=lambda: counts
+    )
+    engine.output_queue = queue.Queue()
+    engine._idle_counts = None
+
+    def report(idle: bool) -> list[bool | None]:
+        EngineCoreProc._report_idle(engine, idle)
+        sent = [outputs for _, outputs in engine.output_queue.queue]
+        engine.output_queue.queue.clear()
+        return [outputs.scheduler_stats.engine_idle for outputs in sent]
+
+    assert report(True) == [True]
+    assert report(True) == []
+    # A stopped engine can still get requests, such as while it is paused.
+    counts = (0, 1)
+    assert report(True) == [True]
+    assert report(False) == [False]

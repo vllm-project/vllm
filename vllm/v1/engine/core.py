@@ -1361,6 +1361,8 @@ class EngineCoreProc(EngineCore):
 
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
     addresses: EngineZmqAddresses
+    # Request counts of the idle state last reported; None while not idle.
+    _idle_counts: tuple[int, int] | None = None
 
     @instrument(span_name="EngineCoreProc init")
     def __init__(
@@ -1865,6 +1867,7 @@ class EngineCoreProc(EngineCore):
         while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
+            self._report_idle(True)
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
                 with self.aborts_queue.mutex:
@@ -1889,6 +1892,23 @@ class EngineCoreProc(EngineCore):
         while not self.input_queue.empty():
             req = self.input_queue.get_nowait()
             self._handle_client_request(*req)
+
+        if self._idle_counts is not None and self.has_work():
+            self._report_idle(False)
+
+    def _report_idle(self, idle: bool) -> None:
+        """Send stat loggers the scheduler stats when the engine stops or
+        resumes stepping, and when its request counts change while stopped."""
+        counts = self.scheduler.get_request_counts() if idle else None
+        if counts == self._idle_counts:
+            return
+        self._idle_counts = counts
+        if (
+            self.vllm_config.observability_config.enable_logging_iteration_details
+            and (stats := self.scheduler.make_stats()) is not None
+        ):
+            stats.engine_idle = idle
+            self.output_queue.put_nowait((0, EngineCoreOutputs(scheduler_stats=stats)))
 
     def execute_dummy_batch(self) -> None:
         records = self.model_executor.execute_dummy_batch()
