@@ -4,7 +4,7 @@ import tempfile
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from itertools import count
+from itertools import accumulate, count
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import Mock
 
@@ -825,3 +825,61 @@ def remote_stage(
             xfer_side_handles=dict(xfer_side_handles or {}),
         )
     }
+
+
+class FakeKeyProber:
+    """A Mooncake `KeyProber` over a fake store's per-key `batch_is_exist` /
+    `batch_probe_key`, so tests can keep asserting on keys."""
+
+    def __init__(self, store: Any, groups: Sequence[Sequence[str]], hash_len: int):
+        self.store = store
+        self.groups = groups
+        self.hash_len = hash_len
+
+    def keys(
+        self, hashes: bytes | memoryview, indices: Sequence[np.ndarray]
+    ) -> list[list[str]]:
+        """Each group's keys, in the prober's result order."""
+        blob = bytes(hashes)
+        n = self.hash_len
+        return [
+            [
+                template.replace("{hash}", blob[i * n : (i + 1) * n].hex())
+                for i in group_indices.tolist()
+                for template in templates
+            ]
+            for templates, group_indices in zip(self.groups, indices, strict=True)
+        ]
+
+    def _run(
+        self,
+        per_key: Callable[[list[str]], list[int]],
+        hashes: bytes | memoryview,
+        indices: Sequence[np.ndarray],
+    ) -> list[bytes]:
+        """One per-key call over every group's keys, as the prober makes."""
+        group_keys = self.keys(hashes, indices)
+        all_keys = [key for keys in group_keys for key in keys]
+        codes = (
+            bytes(0xFF if r < 0 else r for r in per_key(all_keys)) if all_keys else b""
+        )
+        ends = accumulate(len(keys) for keys in group_keys)
+        return [codes[end - len(keys) : end] for keys, end in zip(group_keys, ends)]
+
+    def is_exist(
+        self, hashes: bytes | memoryview, indices: Sequence[np.ndarray]
+    ) -> list[bytes]:
+        return self._run(self.store.batch_is_exist, hashes, indices)
+
+    def probe(
+        self, hashes: bytes | memoryview, indices: Sequence[np.ndarray]
+    ) -> list[bytes]:
+        return self._run(self.store.batch_probe_key, hashes, indices)
+
+
+def serve_key_probers(store: Any) -> Any:
+    """Give a fake Mooncake store `create_key_prober`."""
+    store.create_key_prober = lambda groups, hash_len: FakeKeyProber(
+        store, groups, hash_len
+    )
+    return store

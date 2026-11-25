@@ -28,7 +28,10 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     mamba_layer,
     sliding_window_layer,
 )
-from tests.v1.kv_connector.unit.utils import create_model_runner_output
+from tests.v1.kv_connector.unit.utils import (
+    create_model_runner_output,
+    serve_key_probers,
+)
 from vllm.distributed import mooncake_store
 from vllm.distributed.kv_events import KVEventAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -3545,7 +3548,7 @@ def test_pp_stages_write_distinct_keys_with_pcp(tmp_path, monkeypatch):
 def test_hybrid_lookup_uses_each_pp_stage_schema(
     tmp_path, monkeypatch, tp_size, missing_group
 ):
-    store = MagicMock()
+    store = serve_key_probers(MagicMock())
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
     _patch_worker_runtime(monkeypatch, tp_size=tp_size)
@@ -4596,13 +4599,14 @@ def _make_bare_worker(
     worker = object.__new__(mooncake_store_worker.MooncakeStoreWorker)
     worker.cache_config = MagicMock()
     worker.cache_config.num_gpu_blocks = num_gpu_blocks
-    worker.store = MagicMock()
+    worker.store = serve_key_probers(MagicMock())
     worker.store_service = mooncake_store_worker.MooncakeStoreService(worker.store)
     worker.store.register_buffer.return_value = 0
     worker.kv_role = kv_role
     worker.can_put = kv_role in ("kv_producer", "kv_both") or save_decode_cache
     worker._capacity_only = False
     worker._selective_lease = None
+    worker._key_probers = {}
     worker.block_size = block_size
     worker._is_hma_required = False
     worker.tp_rank = 0
@@ -5394,7 +5398,7 @@ def test_lookup_plan_recovers_tail_key_after_multi_chunk_convergence():
         enable_partial_hash_hits=True,
     )
     _refresh_group_tp_replication_factors(worker)
-    hashes = [BlockHash(f"h{i}".encode()) for i in range(12)]
+    hashes = [BlockHash(f"h{i:02d}".encode()) for i in range(12)]
     present = {
         (0, bytes(hashes[3])),
         (0, bytes(hashes[7])),
@@ -5511,7 +5515,7 @@ def test_lookup_checks_all_potential_swa_hit_boundaries():
 
     result = worker.lookup(
         96,
-        [f"h{i}".encode() for i in range(12)],
+        [f"h{i:02d}".encode() for i in range(12)],
     )
 
     assert result.hit_length == 32
@@ -5519,16 +5523,15 @@ def test_lookup_checks_all_potential_swa_hit_boundaries():
     assert len(keys) == 6
     swa_keys = [key for key in keys if "@group:1@" in key]
     assert swa_keys == [
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6833",
-        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6837",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@683033",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@683037",
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@683131",
     ]
 
 
-def test_lookup_applies_swa_mask_before_accessing_hashes():
-    """Lookup must apply the sparse SWA mask before touching group hashes, so
-    false-mask chunks pay neither the hash access nor the key-construction cost.
-    """
+def test_lookup_probes_only_unmasked_swa_chunks():
+    """Lookup applies the sparse SWA mask before probing, so false-mask chunks
+    cost no key."""
     from vllm.v1.kv_cache_interface import (
         AttentionSpec,
     )
@@ -5562,21 +5565,25 @@ def test_lookup_applies_swa_mask_before_accessing_hashes():
     )
     _refresh_group_tp_replication_factors(worker)
 
-    block_hashes = _RecordingBlockHashes([f"h{i}".encode() for i in range(12)])
-    accessed_before_rpc: list[int] = []
+    worker.store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
 
-    def exists(keys):
-        accessed_before_rpc.extend(block_hashes.accessed)
-        return [0] * len(keys)
-
-    worker.store.batch_is_exist.side_effect = exists
-
-    worker.lookup(96, block_hashes)
+    worker.lookup(96, [f"h{i:02d}".encode() for i in range(12)])
 
     # Full-attention chunks (compact hashes at 3, 7, 11) plus only the reachable
-    # SWA boundary tails (chunks 3, 7, 11) are hash-accessed. Every masked SWA
-    # chunk in between is skipped before both the hash access and key build.
-    assert accessed_before_rpc == [3, 7, 11, 3, 7, 11]
+    # SWA boundary tails (chunks 3, 7, 11) are probed.
+    keys = worker.store.batch_is_exist.call_args.args[0]
+    probed = [
+        (key.split("@group:")[1][0], bytes.fromhex(key.rsplit("@", 1)[1]).decode())
+        for key in keys
+    ]
+    assert probed == [
+        ("0", "h03"),
+        ("0", "h07"),
+        ("0", "h11"),
+        ("1", "h03"),
+        ("1", "h07"),
+        ("1", "h11"),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -6398,13 +6405,13 @@ def test_worker_get_kv_connector_stats_resets_after_read():
     assert worker.get_kv_connector_stats() is None
 
 
-@pytest.mark.parametrize("results", [[1, 1], [-900, -900], [1, -901], []])
+@pytest.mark.parametrize("results", [[1, 1], [-900, -900], [1, -901]])
 def test_lookup_records_results_and_failure_status(results):
     worker = _make_bare_worker()
     worker.store.batch_is_exist.return_value = results
     result = worker.lookup(33, [b"a0", b"a1"])
     stats = worker.get_kv_connector_stats()
-    failed = len(results) != 2 or any(value < 0 for value in results)
+    failed = any(value < 0 for value in results)
     if failed:
         assert result is None
         assert stats.data["lookup_exists"][0]["status"] != "ok"

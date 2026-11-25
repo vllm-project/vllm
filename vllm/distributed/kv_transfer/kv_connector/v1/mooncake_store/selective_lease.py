@@ -2,17 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Selective read leases for Mooncake store prefix lookups.
 
-`batch_is_exist` leases every key it finds, so a lookup renews every stored
+`KeyProber.is_exist` leases every key it finds, so a lookup renews every stored
 key of the prompt, including keys a load of the hit skips, such as blocks
 outside a sliding window or states at earlier block boundaries. With
 `VLLM_MOONCAKE_STORE_SELECTIVE_LEASE` the lookup probes lease-free
-(`batch_probe_key`) and leases only the keys the hit will load.
+(`KeyProber.probe`) and leases only the keys the hit will load.
 """
 
 import time
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol, cast
 
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (  # noqa: E501
+    LoadablePairs,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  # noqa: E501
     ChunkedTokenDatabase,
     MooncakeLookupResult,
@@ -63,34 +66,20 @@ class SelectiveLookupLease:
         lookup_key_prefixes: Sequence[Sequence[str]],
         record_operation: _RecordOperation,
     ):
-        self._check_supported(store)
         self.store = store
         self.token_dbs = token_dbs
         self.kv_cache_groups = kv_cache_groups
         self.lookup_key_prefixes = lookup_key_prefixes
         self.record_operation = record_operation
 
-    @staticmethod
-    def _check_supported(store: Any) -> None:
-        if not callable(getattr(store, "batch_probe_key", None)):
-            raise RuntimeError(
-                "VLLM_MOONCAKE_STORE_SELECTIVE_LEASE requires "
-                "MooncakeDistributedStore.batch_probe_key, which the installed "
-                "Mooncake version does not provide."
-            )
-
-    def probe(self, keys: list[str]) -> list[int]:
-        """Existence of `keys`, without granting a lease."""
-        return self.store.batch_probe_key(keys)
-
     def lease_hit(
         self,
         block_hashes: Sequence[BlockHash],
         hit: MooncakeLookupResult,
         load_masks: tuple[list[bool], ...],
-        exists_set: set[tuple[int, bytes]],
+        exists_set: LoadablePairs,
         longest_hit: Callable[
-            [set[tuple[int, bytes]]],
+            [LoadablePairs],
             tuple[MooncakeLookupResult, tuple[list[bool], ...]],
         ],
     ) -> MooncakeLookupResult:

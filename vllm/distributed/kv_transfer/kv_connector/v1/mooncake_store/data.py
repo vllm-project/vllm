@@ -40,6 +40,14 @@ class BlobBlockHashes(Sequence[BlockHash]):
         self._hash_len = hash_len
         self._n = len(blob) // hash_len if hash_len else 0
 
+    @property
+    def blob(self) -> memoryview:
+        return self._blob
+
+    @property
+    def hash_len(self) -> int:
+        return self._hash_len
+
     def __len__(self) -> int:
         return self._n
 

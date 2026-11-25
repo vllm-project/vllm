@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """External-store cache-hit coordinator for MooncakeStoreConnector."""
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
+
+import numpy as np
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -30,13 +32,65 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+class LoadablePairs:
+    """`(group, hash)` pairs a lookup found loadable, kept as one boolean array
+    per group over the request's hashes instead of one set entry per stored key.
+    """
+
+    def __init__(
+        self, blob: memoryview, hash_len: int, loadable: dict[int, np.ndarray]
+    ) -> None:
+        self._blob = blob
+        self._hash_len = hash_len
+        self._loadable = loadable
+        # Built on first use: each hash's position, and per group-id
+        # combination whether every group can load the hash at each position.
+        self._index: dict[bytes, int] | None = None
+        self._hits: dict[tuple[int, ...], list[bool]] = {}
+
+    def _positions(self) -> dict[bytes, int]:
+        if self._index is None:
+            hashes = np.frombuffer(self._blob, dtype=f"V{self._hash_len}").tolist()
+            self._index = dict(zip(hashes, range(len(hashes))))
+        return self._index
+
+    def contains_all(self, group_ids: Sequence[int], block_hash: bytes) -> bool:
+        """Whether every group in `group_ids` can load `block_hash`."""
+        index = self._index if self._index is not None else self._positions()
+        i = index.get(block_hash)
+        if i is None:
+            return False
+        key = tuple(group_ids)
+        hits = self._hits.get(key)
+        if hits is None:
+            arrays = [self._loadable.get(g) for g in key]
+            hits = self._hits[key] = (
+                [False] * (len(self._blob) // self._hash_len)
+                if any(a is None for a in arrays)
+                else np.logical_and.reduce(arrays).tolist()
+            )
+        return hits[i]
+
+    def __contains__(self, pair: tuple[int, bytes]) -> bool:
+        return self.contains_all((pair[0],), pair[1])
+
+    def __sub__(self, pairs: Iterable[tuple[int, bytes]]) -> "LoadablePairs":
+        """These pairs without `pairs`, e.g. keys evicted since the probe."""
+        index = self._positions()
+        loadable = {g: a.copy() for g, a in self._loadable.items()}
+        for group_id, block_hash in pairs:
+            if group_id in loadable and block_hash in index:
+                loadable[group_id][index[block_hash]] = False
+        return LoadablePairs(self._blob, self._hash_len, loadable)
+
+
 class ExternalCachedBlockPool:
     """Duck-typed BlockPool backed by a `(group_id, hash)` exists set."""
 
     def __init__(
         self,
         hash_block_size: int,
-        exists: set[tuple[int, bytes]] | None = None,
+        exists: LoadablePairs | set[tuple[int, bytes]] | None = None,
     ) -> None:
         # ``exists=None`` is used on the recv side where hit_length is already
         # determined and we just want each spec's manager to apply its own mask.
@@ -56,9 +110,11 @@ class ExternalCachedBlockPool:
         if self._exists is None:
             return [self._present_block] * len(group_ids)
         h = bytes(block_hash)
-        if all((g, h) in self._exists for g in group_ids):
-            return [self._present_block] * len(group_ids)
-        return None
+        if isinstance(self._exists, LoadablePairs):
+            hit = self._exists.contains_all(group_ids, h)
+        else:
+            hit = all((g, h) in self._exists for g in group_ids)
+        return [self._present_block] * len(group_ids) if hit else None
 
     def contains(self, group_id: int, block_hash: BlockHash) -> bool:
         """Return whether a group has a loadable key for this hash."""

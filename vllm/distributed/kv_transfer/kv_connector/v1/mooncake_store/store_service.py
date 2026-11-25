@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import queue
-from collections.abc import Callable
 from typing import Any
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import ReqMeta
@@ -53,11 +52,3 @@ class MooncakeStoreService:
         return (
             results if self._validate_results(results, len(keys)) else [-1] * len(keys)
         )
-
-    def lookup_exists(
-        self, keys: list[str], exists_fn: Callable[[list[str]], list[int]]
-    ) -> list[int]:
-        results = exists_fn(keys)
-        if not self._validate_results(results, len(keys)):
-            results = [-1] * len(keys)
-        return results
