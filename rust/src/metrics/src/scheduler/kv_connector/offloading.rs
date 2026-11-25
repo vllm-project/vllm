@@ -64,6 +64,12 @@ const LOOKUP_SYNC_DELAY_BUCKETS: &[f64] = &[
 const LOOKUP_ASYNC_DELAY_BUCKETS: &[f64] = &[
     0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0,
 ];
+const DEFERRED_RELEASE_HOLD_BUCKETS: &[f64] = &[
+    0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0,
+];
+const PROMOTION_LATENCY_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+];
 const CPU_ALLOCATION_SIZE_BUCKETS: &[f64] = &[
     1.0, 4.0, 16.0, 64.0, 256.0, 1024.0, 4096.0, 16384.0, 65536.0, 262144.0,
 ];
@@ -180,6 +186,152 @@ const DEFINITIONS: &[Definition] = &[
         name: "vllm:kv_offload_stores_skipped",
         help: "Number of KV offload stores skipped because the reuse threshold was not reached",
         labels: &[],
+        kind: Kind::Counter,
+    },
+    // `TieringOffloadingSpec.build_metric_definitions`, on top of the CPU
+    // spec's. Secondary tiers may add their own families, which are not here.
+    Definition {
+        name: "vllm:kv_offload_tiering_lookup_sync_delay_seconds",
+        help: "Histogram of blocking time spent in a per-chunk tier lookup that resolved as a \
+               hit or miss, labeled by tier, in seconds",
+        labels: &["tier"],
+        kind: Kind::Histogram(LOOKUP_SYNC_DELAY_BUCKETS),
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_lookup_async_delay_seconds",
+        help: "Histogram of wall-clock time from a per-chunk tier lookup first returning \
+               retry until that same tier lookup resolves as a hit or miss, labeled by tier, \
+               in seconds",
+        labels: &["tier"],
+        kind: Kind::Histogram(LOOKUP_ASYNC_DELAY_BUCKETS),
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_read_bytes",
+        help: "Total bytes read from secondary tiers into the primary tier, labeled by tier",
+        labels: &["tier"],
+        kind: Kind::Counter,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_read_time",
+        help: "Total time spent reading from secondary tiers into the primary tier, in \
+               seconds, labeled by tier. Tiers that do not report per-job transfer time have \
+               no series here. Use vllm:kv_offload_tiering_promotion_latency_seconds for \
+               tier-independent promotion timing",
+        labels: &["tier"],
+        kind: Kind::Counter,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_write_bytes",
+        help: "Total bytes written from the primary tier to secondary tiers, labeled by tier",
+        labels: &["tier"],
+        kind: Kind::Counter,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_write_time",
+        help: "Total time spent writing from the primary tier to secondary tiers, in seconds, \
+               labeled by tier. Tiers that do not report per-job transfer time have no series \
+               here",
+        labels: &["tier"],
+        kind: Kind::Counter,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_promotion_job_failures",
+        help: "Number of failed secondary-tier promotion jobs, labeled by tier",
+        labels: &["tier"],
+        kind: Kind::Counter,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_cascade_job_failures",
+        help: "Number of failed secondary-tier cascade jobs, labeled by tier",
+        labels: &["tier"],
+        kind: Kind::Counter,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_chunk_queries",
+        help: "Number of chunk lookup queries sent to a tier, labeled by tier",
+        labels: &["tier"],
+        kind: Kind::Counter,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_chunk_hits",
+        help: "Number of chunk lookup hits in a tier, labeled by tier",
+        labels: &["tier"],
+        kind: Kind::Counter,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_promotion_allocation_failures",
+        help: "Number of promotion attempts that failed because the primary tier could not \
+               allocate space",
+        labels: &[],
+        kind: Kind::Counter,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_primary_write_usage_perc",
+        help: "Current fraction of primary-tier space used by writes from secondary tiers, \
+               labeled by tier",
+        labels: &["tier"],
+        kind: Kind::Gauge,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_primary_read_usage_perc",
+        help: "Current fraction of primary-tier space used by reads to secondary tiers, \
+               labeled by tier",
+        labels: &["tier"],
+        kind: Kind::Gauge,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_active_promotion_jobs",
+        help: "Number of active secondary-tier promotion jobs, labeled by tier",
+        labels: &["tier"],
+        kind: Kind::Gauge,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_active_cascade_jobs",
+        help: "Number of active secondary-tier cascade jobs, labeled by tier",
+        labels: &["tier"],
+        kind: Kind::Gauge,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_deferred_release_chunks",
+        help: "Number of primary-tier chunks of failed promotions whose release to the free \
+               pool is deferred until the tier confirms its I/O can no longer write to them, \
+               labeled by tier",
+        labels: &["tier"],
+        kind: Kind::Gauge,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_deferred_release_hold_seconds",
+        help: "Histogram of how long a failed promotion's primary-tier chunks were held \
+               before their deferred release completed, observed at release, labeled by tier, \
+               in seconds",
+        labels: &["tier"],
+        kind: Kind::Histogram(DEFERRED_RELEASE_HOLD_BUCKETS),
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_promotion_latency_seconds",
+        help: "Histogram of per-job latency for secondary-tier promotion attempts, measured \
+               from job creation until the tiering manager observes completion so that tier \
+               queueing is included, labeled by tier and result, in seconds. Includes failed \
+               attempts",
+        labels: &["tier", "result"],
+        kind: Kind::Histogram(PROMOTION_LATENCY_BUCKETS),
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_backpressure_store_latency_ema",
+        help: "Exponential moving average of store latency for back-pressure detection, in s/MiB",
+        labels: &["tier"],
+        kind: Kind::Gauge,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_backpressure_stores_dropped",
+        help: "Number of store operations dropped due to back-pressure on a secondary tier",
+        labels: &["tier"],
+        kind: Kind::Counter,
+    },
+    Definition {
+        name: "vllm:kv_offload_tiering_backpressure_blocks_dropped",
+        help: "Number of blocks dropped due to back-pressure on a secondary tier",
+        labels: &["tier"],
         kind: Kind::Counter,
     },
 ];
@@ -439,6 +591,18 @@ mod tests {
                     "vllm:kv_offload_cpu_cache_usage_perc".to_string(),
                     value(usage),
                 ),
+                // `TieringOffloadingSpec` families, labeled by tier.
+                (
+                    "vllm:kv_offload_tiering_chunk_hits".to_string(),
+                    BTreeMap::from([(vec!["1:kvcr".to_string()], OffloadingSample::Value(3.0))]),
+                ),
+                (
+                    "vllm:kv_offload_tiering_promotion_latency_seconds".to_string(),
+                    BTreeMap::from([(
+                        vec!["1:kvcr".to_string(), "success".to_string()],
+                        OffloadingSample::Observations(vec![0.02]),
+                    )]),
+                ),
                 // Wrong label count for an unlabeled family.
                 (
                     "vllm:kv_offload_allocation_failure".to_string(),
@@ -474,6 +638,9 @@ mod tests {
             vllm:kv_offload_store_size_count{model_name="model",engine="0"} 4
             vllm:kv_offload_store_size_sum{model_name="model",engine="0"} 10000000.0
             vllm:kv_offload_store_time_total{model_name="model",engine="0"} 0.5
+            vllm:kv_offload_tiering_chunk_hits_total{model_name="model",engine="0",tier="1:kvcr"} 6.0
+            vllm:kv_offload_tiering_promotion_latency_seconds_count{model_name="model",engine="0",tier="1:kvcr",result="success"} 2
+            vllm:kv_offload_tiering_promotion_latency_seconds_sum{model_name="model",engine="0",tier="1:kvcr",result="success"} 0.04
             vllm:kv_offload_total_bytes_total{model_name="model",engine="0",transfer_type="CPU_to_GPU"} 8192.0
             vllm:kv_offload_total_time_total{model_name="model",engine="0",transfer_type="GPU_to_CPU"} 0.5"#]].assert_eq(&kv_offload_series());
     }
