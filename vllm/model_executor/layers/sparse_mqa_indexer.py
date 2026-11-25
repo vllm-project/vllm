@@ -126,7 +126,12 @@ class SparseMQAIndexer(nn.Module):
         self.topk_indices_buffer = topk_indices_buffer
         self.candidate_blocks = candidate_blocks
         self.candidate_block_size = candidate_block_size
-        self.use_fp4_cache = dsa_indexer_uses_fp4(get_current_vllm_config())
+        vllm_config = get_current_vllm_config()
+        self.use_fp4_cache = dsa_indexer_uses_fp4(vllm_config)
+        indexer_overlap.init_candidate_stream(
+            not vllm_config.parallel_config.use_ubatching
+            and vllm_config.speculative_config is None
+        )
 
     def _reserve_workspaces(self, device: torch.device) -> None:
         """Profiling run: claim the K-gather workspace and the peak sparse

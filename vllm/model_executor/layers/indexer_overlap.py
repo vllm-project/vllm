@@ -149,10 +149,12 @@ _expanded: Any = None
 
 
 def init_candidate_stream(allowed: bool) -> None:
-    """Create the candidate stream at model construction if `allowed` (not with
-    micro-batching, whose threads would share it, nor speculative decoding)."""
+    """Create the candidate stream with the first candidate reader, if `allowed`
+    (not with micro-batching, whose threads would share it, nor speculative
+    decoding). A pipeline stage without readers has none, so its candidate
+    source never defers."""
     global _candidates
-    if envs.VLLM_INDEXER_OVERLAP and allowed:
+    if envs.VLLM_INDEXER_OVERLAP and allowed and _candidates is None:
         _candidates = CandidateStream()
 
 

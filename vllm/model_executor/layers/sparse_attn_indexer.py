@@ -1467,11 +1467,6 @@ class SparseAttnIndexer(CustomOp):
         # than threading them through per-step metadata.
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
-        if candidate_write:
-            indexer_overlap.init_candidate_stream(
-                not parallel_config.use_ubatching
-                and vllm_config.speculative_config is None
-            )
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
         get_indexer_topk(self.topk_backend)
         self.logits_dtype = STR_DTYPE_TO_TORCH_DTYPE[
