@@ -186,9 +186,21 @@ class _RemoteStage:
     byte_ranges: list[dict[int, list[tuple[int, int, int]]]] = field(
         default_factory=list
     )
-    # Per remote TP rank, for each range moved with it:
-    # (cache group, local region, local and remote first desc id).
-    desc_starts: dict[int, np.ndarray] = field(default_factory=dict)
+    # Per remote TP rank and cache group, the local and remote first desc id
+    # of each range moved at the group's blocks: block `b` of a range is desc
+    # `start + b`. int32, as NIXL takes the ids. A desc list holds one desc
+    # per block of each byte range, back to back. E.g. FA group 0 over 2
+    # layers of 1000 blocks, then SSM group 1 over 1 layer's conv and ssm
+    # views (each a range of its own) of 100 state blocks:
+    #   descs: | L0 0..999 | L1 0..999 | conv 0..99 | ssm 0..99 |
+    #   desc_starts[rank] = {0: [0, 1000], 1: [2000, 2100]}
+    # so a request's block_ids [[7, 8], [4]] read descs
+    #   group 0: [0, 1000][:, None] + [7, 8] -> [7, 8, 1007, 1008]
+    #   group 1: [2000, 2100][:, None] + [4] -> [2004, 2104]
+    # in one add per group, with nothing computed per request.
+    desc_starts: dict[int, dict[int, tuple[np.ndarray, np.ndarray]]] = field(
+        default_factory=dict
+    )
     # Local desc list covering this stage's byte ranges (shared via
     # `_local_desc_lists` when another stage moves the same ranges).
     local_descs: _LocalDescs | None = None
@@ -420,27 +432,27 @@ class NixlBaseConnectorWorker:
         local cache group.
 
         Each byte range moved with the remote rank moves its cache group's
-        blocks, one desc per block.
+        blocks, one desc per block, from the start fixed at handshake: one
+        broadcast add per group.
         """
         starts = stage.desc_starts[remote_rank]
         local_ids: list[np.ndarray] = []
         remote_ids: list[np.ndarray] = []
-        for group in np.unique(starts[:, 0]).tolist():
-            local_blocks = np.asarray(local_block_ids[group], dtype=np.int64)
-            if not local_blocks.size:
+        for group, local_blocks in enumerate(local_block_ids):
+            if not len(local_blocks) or group not in starts:
                 continue
-            remote_blocks = np.asarray(remote_block_ids[group], dtype=np.int64)
-            rows = starts[starts[:, 0] == group]
-            local_ids.append((rows[:, 2, None] + local_blocks).ravel())
-            remote_ids.append((rows[:, 3, None] + remote_blocks).ravel())
+            local_starts, remote_starts = starts[group]
+            # NIXL takes int32 ids without a conversion copy.
+            local_blocks = np.asarray(local_blocks, dtype=np.int32)
+            remote_blocks = np.asarray(remote_block_ids[group], dtype=np.int32)
+            local_ids.append((local_starts[:, None] + local_blocks).ravel())
+            remote_ids.append((remote_starts[:, None] + remote_blocks).ravel())
+        if len(local_ids) == 1:
+            return local_ids[0], remote_ids[0]
         if not local_ids:
             empty = np.array([], dtype=np.int32)
             return empty, empty
-        # NIXL takes int32 ids without a conversion copy.
-        return (
-            np.concatenate(local_ids).astype(np.int32),
-            np.concatenate(remote_ids).astype(np.int32),
-        )
+        return np.concatenate(local_ids), np.concatenate(remote_ids)
 
     def _set_region_layers(self, region_layers: list[list[str]]) -> None:
         self.region_members: list[list[str]] = region_layers
@@ -1761,15 +1773,15 @@ class NixlBaseConnectorWorker:
         # a rank holds next to each other, and the pages that the layers of a
         # cache group hold back to back in a block-outermost block, which
         # then moves as one desc, not one per layer.
-        # (remote rank, cache group, local region, local and remote byte range)
-        # of every range moved; the local list holds every rank's.
+        # (remote rank, cache group, local and remote byte range) of every
+        # range moved; the local list holds every rank's.
         xfers = [
-            (rank, group, ours[0], (*ours, n, ratio), (*theirs, n, split))
+            (rank, group, (*ours, n, ratio), (*theirs, n, split))
             for (rank, group, (ratio, split), _), ranges in moved.items()
             for _, _, n, ours, theirs in coalesce_byte_ranges(ranges)
         ]
 
-        local_ranges = tuple(xfer[3] for xfer in xfers)
+        local_ranges = tuple(xfer[2] for xfer in xfers)
         if local_ranges not in self._local_desc_lists:
             descs, starts, row_regions = self._byte_range_descs(
                 list(local_ranges), local_regions, self.device_id
@@ -1808,16 +1820,19 @@ class NixlBaseConnectorWorker:
 
         rank_xfers = [xfer for xfer in xfers if xfer[0] == remote_tp_rank]
         descs, remote_starts, _ = self._byte_range_descs(
-            [xfer[4] for xfer in rank_xfers], remote_regions, nixl_agent_meta.device_id
+            [xfer[3] for xfer in rank_xfers], remote_regions, nixl_agent_meta.device_id
         )
-        starts = np.array(
-            [
-                (group, local, local_descs.starts[local_range], remote_starts[rr])
-                for _, group, local, local_range, rr in rank_xfers
-            ],
-            dtype=np.int64,
-        ).reshape(-1, 4)
-        stage.desc_starts[remote_tp_rank] = starts
+        # Per cache group, the first desc id of each of its ranges on each
+        # side, so a request's desc ids are one add away from its block ids.
+        starts_by_group: dict[int, list[tuple[int, int]]] = defaultdict(list)
+        for _, group, local_range, remote_range in rank_xfers:
+            starts_by_group[group].append(
+                (local_descs.starts[local_range], remote_starts[remote_range])
+            )
+        rank_starts = stage.desc_starts[remote_tp_rank] = {}
+        for group, starts in starts_by_group.items():
+            local_ids, remote_ids = np.array(starts, dtype=np.int32).T.copy()
+            rank_starts[group] = (local_ids, remote_ids)
         paired_mem_types = {remote_mem_types[remote] for remote in pairs.remote}
         if len(paired_mem_types) != 1:
             raise NotImplementedError(
