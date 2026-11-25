@@ -7,6 +7,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.kernels.linear import (
+    MPLinearLayerConfig,
+    choose_mp_linear_kernel,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.online.lm_head import (
     quantized_lm_head_copy,
@@ -20,6 +24,7 @@ from vllm.model_executor.model_loader.reload import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
 from vllm.v1.worker.gpu_worker import Worker
 
 # Not a multiple of the vocab padding, so the head has padded rows.
@@ -32,8 +37,31 @@ requires_nvfp4 = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="nvfp4 needs a CUDA W4A16 kernel"
 )
 NVFP4 = pytest.param("nvfp4", marks=requires_nvfp4)
+
+
+def _int4_kernel_available() -> bool:
+    config = MPLinearLayerConfig(
+        full_weight_shape=(HIDDEN, VOCAB),
+        partition_weight_shape=(HIDDEN, -(-VOCAB // 64) * 64),
+        weight_type=scalar_types.uint4,
+        act_type=torch.bfloat16,
+        group_size=32,
+        zero_points=True,
+    )
+    try:
+        choose_mp_linear_kernel(config)
+    except (ValueError, RuntimeError):
+        return False
+    return torch.cuda.is_available()
+
+
 # Runs on any platform with a uint4 g32 zero-point MP kernel (RDNA on ROCm).
-INT4 = "int4_per_group_32_asym"
+requires_int4_kernel = pytest.mark.skipif(
+    not _int4_kernel_available(),
+    reason="No mixed-precision linear kernel for uint4 g32 with zero points",
+)
+INT4_NAME = "int4_per_group_32_asym"
+INT4 = pytest.param(INT4_NAME, marks=requires_int4_kernel)
 
 
 def _target_head(monkeypatch, seed: int = 0) -> ParallelLMHead:
@@ -59,7 +87,7 @@ def _tensors(module: torch.nn.Module) -> dict[str, torch.Tensor]:
     [
         ("fp8", 0.05, 0.9),
         pytest.param("nvfp4", 0.15, 0.75, marks=requires_nvfp4),
-        (INT4, 0.12, 0.7),
+        pytest.param(INT4_NAME, 0.12, 0.7, marks=requires_int4_kernel),
     ],
 )
 def test_tracks_bf16_head_through_logits_processor(
@@ -86,13 +114,14 @@ def test_tracks_bf16_head_through_logits_processor(
 
 
 @requires_cuda
+@requires_int4_kernel
 def test_copy_runs_source_head_past_kernel_fast_rows(
     default_vllm_config, dist_init, monkeypatch
 ):
     """Past the rows its kernel serves fast, the copy computes with the source
     head instead, so a large draft batch is never slower than without it."""
     head = _target_head(monkeypatch)
-    draft_head = quantized_lm_head_copy(head, INT4)
+    draft_head = quantized_lm_head_copy(head, INT4_NAME)
     max_rows: int | None = getattr(draft_head.quant_method, "max_rows", None)
     if max_rows is None:
         pytest.skip("this platform's int4 kernel has no row cutoff")
