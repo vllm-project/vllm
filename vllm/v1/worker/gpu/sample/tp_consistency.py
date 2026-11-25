@@ -6,17 +6,10 @@ Every TP rank samples on the same all-gathered logits and feeds its own sampled
 token into the next step; only TP rank 0's tokens reach the user, and nothing
 compares the ranks afterwards. So all TP ranks must pick the same sampler backend
 and start from the same random state, or they silently continue on different
-tokens. Both checks below run once, when the sampler is built.
+tokens. The check below runs once, when the sampler is built.
 """
 
-from collections.abc import Callable
 from typing import Any
-
-import torch
-
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
 
 
 def _tp_cpu_group() -> Any | None:
@@ -34,36 +27,26 @@ def _tp_cpu_group() -> Any | None:
     return group.cpu_group if group.world_size > 1 else None
 
 
-def all_tp_ranks_agree(local: bool) -> bool:
-    """True only if `local` is True on every TP rank (a collective on the TP group)."""
+def agree_on_sampling(
+    config: dict[str, Any], supported: dict[str, bool]
+) -> dict[str, bool]:
+    """Compare the sampling config across TP ranks and agree on fused samplers.
+
+    One collective on the TP group: raise if `config` differs between ranks, and
+    return each entry of `supported` as True only if every rank supports it."""
     group = _tp_cpu_group()
     if group is None:
-        return local
+        return dict(supported)
     import torch.distributed as dist
 
-    flag = torch.tensor([int(local)], dtype=torch.int32)
-    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=group)
-    return bool(flag.item())
-
-
-def check_sampling_config(make_config: Callable[[], dict[str, Any]]) -> None:
-    """Raise if TP ranks were configured to sample differently (a collective).
-
-    `make_config` is only called when there are TP ranks to compare."""
-    group = _tp_cpu_group()
-    if group is None:
-        return
-    import torch.distributed as dist
-
-    config = make_config()
-
-    gathered: list[dict[str, Any] | None] = [None] * dist.get_world_size(group)
-    dist.all_gather_object(gathered, config, group=group)
-    keys = sorted({k for c in gathered if c is not None for k in c})
+    gathered: list[Any] = [None] * dist.get_world_size(group)
+    dist.all_gather_object(gathered, (config, supported), group=group)
+    configs = [c for c, _ in gathered]
+    keys = sorted({k for c in configs for k in c})
     differing = {
-        k: [None if c is None else c.get(k) for c in gathered]
+        k: [c.get(k) for c in configs]
         for k in keys
-        if len({repr(None if c is None else c.get(k)) for c in gathered}) > 1
+        if len({repr(c.get(k)) for c in configs}) > 1
     }
     if differing:
         detail = "; ".join(f"{k} per TP rank = {v}" for k, v in differing.items())
@@ -73,3 +56,4 @@ def check_sampling_config(make_config: Callable[[], dict[str, Any]]) -> None:
             "they would silently diverge from the tokens returned to the user. Start "
             "every node with the same sampling arguments (for example --seed)."
         )
+    return {k: all(s.get(k, False) for _, s in gathered) for k in supported}

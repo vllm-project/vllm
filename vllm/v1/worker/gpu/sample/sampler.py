@@ -37,8 +37,7 @@ from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 from vllm.v1.worker.gpu.sample.tp_consistency import (
-    all_tp_ranks_agree,
-    check_sampling_config,
+    agree_on_sampling,
 )
 from vllm.v1.worker.gpu.sample.trace_replay import TraceReplayState
 from vllm.v1.worker.gpu.states import RequestState
@@ -46,27 +45,16 @@ from vllm.v1.worker.gpu.states import RequestState
 logger = init_logger(__name__)
 
 
-def _agreed_support(eligible: bool, supported: Callable[[], bool], name: str) -> bool:
-    """Whether every TP rank can use a fused sampler. Local errors (an explicit
-    opt-in that cannot be honored) are raised after the collective, so the other
-    ranks do not wait on a rank that has already failed."""
-    local, error = False, None
-    if eligible:
-        try:
-            local = supported()
-        except RuntimeError as e:
-            error = e
-    agreed = all_tp_ranks_agree(local)
-    if error is not None:
-        raise error
-    if local and not agreed:
-        logger.warning(
-            "%s top-p/top-k sampling is unavailable on another tensor-parallel "
-            "rank; every rank uses the fallback sampler so they draw the same "
-            "tokens.",
-            name,
-        )
-    return agreed
+def _local_support(eligible: bool, supported: Callable[[], bool]):
+    """(available here, error to raise after the TP collective). An explicit
+    opt-in that cannot be honored is raised only after this rank has voted, so
+    the other ranks do not wait on a rank that has already failed."""
+    if not eligible:
+        return False, None
+    try:
+        return supported(), None
+    except RuntimeError as e:
+        return False, e
 
 
 class Sampler:
@@ -118,29 +106,41 @@ class Sampler:
         self.may_mask_logits = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
-        # TP ranks feed their own sampled tokens into the next step, so they must
-        # pick the same backend: use a fused sampler only if every rank can.
-        self.use_flashinfer = _agreed_support(
-            not return_sampling_mask, flashinfer_sampler_supported, "FlashInfer"
-        )
-        # The XPU kernel draws fp32 exponential noise, so it can't honor fp64.
-        self.use_xpu_sampler = _agreed_support(
-            not return_sampling_mask and not use_fp64_gumbel,
-            xpu_sampler_supported,
-            "XPU",
-        )
-        check_sampling_config(
-            lambda: {
+        # TP ranks feed their own sampled tokens into the next step: they must be
+        # configured alike and use a fused sampler only if every rank can.
+        fused = {
+            "FlashInfer": _local_support(
+                not return_sampling_mask, flashinfer_sampler_supported
+            ),
+            # The XPU kernel draws fp32 exponential noise, so it can't honor fp64.
+            "XPU": _local_support(
+                not return_sampling_mask and not use_fp64_gumbel,
+                xpu_sampler_supported,
+            ),
+        }
+        agreed = agree_on_sampling(
+            {
                 "seed": vllm_config.model_config.seed,
                 "data_parallel_index": vllm_config.parallel_config.data_parallel_index,
                 "logprobs_mode": logprobs_mode,
                 "use_fp64_gumbel": use_fp64_gumbel,
                 # Replay overwrites sampled tokens with trace tokens on this rank.
                 "enable_trace_replay": enable_trace_replay,
-                "use_flashinfer": self.use_flashinfer,
-                "use_xpu_sampler": self.use_xpu_sampler,
-            }
+            },
+            {name: local for name, (local, _) in fused.items()},
         )
+        for name, (local, error) in fused.items():
+            if error is not None:
+                raise error
+            if local and not agreed[name]:
+                logger.warning(
+                    "%s top-p/top-k sampling is unavailable on another "
+                    "tensor-parallel rank; every rank uses the fallback sampler so "
+                    "they draw the same tokens.",
+                    name,
+                )
+        self.use_flashinfer = agreed["FlashInfer"]
+        self.use_xpu_sampler = agreed["XPU"]
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         needs_processing = self.sampling_states.add_request(req_idx, sampling_params)
