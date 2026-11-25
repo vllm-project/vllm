@@ -110,6 +110,7 @@ impl Error {
             | Self::Llm(LlmError::MmEmbedsExceedEncoderCache { .. })
             | Self::Llm(LlmError::InvalidMultimodalInput { .. })
             | Self::Llm(LlmError::RemoteInvalidRequest { .. })
+            | Self::Llm(LlmError::UntrustedRemotePrefillCachedTokens)
             | Self::Llm(LlmError::EngineCoreClient(
                 EngineCoreError::InvalidDataParallelRank { .. },
             ))
@@ -134,6 +135,7 @@ impl Error {
     pub fn param(&self) -> Option<&'static str> {
         match self {
             Self::PromptTooLong { .. } | Self::PromptFillsContext { .. } => Some("input_tokens"),
+            Self::Llm(LlmError::UntrustedRemotePrefillCachedTokens) => Some("kv_transfer_params"),
             Self::Llm(LlmError::PromptLogprobsUnsupported { parameter }) => Some(parameter),
             _ => None,
         }

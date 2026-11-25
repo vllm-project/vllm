@@ -21,6 +21,25 @@ from vllm.sampling_params import StructuredOutputsParams
 class TestResponsesRequestSamplingParams:
     """Test that ResponsesRequest correctly maps parameters to SamplingParams."""
 
+    @pytest.mark.parametrize("cached", [999999, 5])
+    def test_remote_cache_accounting_requires_trusted_backend(
+        self, cached, monkeypatch
+    ):
+        monkeypatch.delenv("VLLM_TRUST_REMOTE_PREFILL_CACHED_TOKENS", raising=False)
+        params = {
+            "kv_transfer_params": {
+                "do_remote_prefill": True,
+                "remote_prefill_cached_tokens": cached,
+            }
+        }
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            **params,
+        )
+        with pytest.raises(VLLMValidationError, match="trusted P/D backend"):
+            request.to_sampling_params(default_max_tokens=10)
+
     def test_basic_sampling_params(self):
         """Test basic sampling parameters are correctly mapped."""
         request = ResponsesRequest(
