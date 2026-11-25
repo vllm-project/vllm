@@ -9,7 +9,6 @@ Integration tests for NCCL and IPC weight transfer between processes using Ray.
 import builtins
 import importlib
 import importlib.util
-import json
 import math
 import pickle
 import runpy
@@ -25,6 +24,7 @@ import pytest
 import ray
 import safetensors.torch
 import torch
+from huggingface_hub import save_torch_state_dict
 from torch.multiprocessing.reductions import reduce_tensor
 
 from vllm.config.load import LoadConfig
@@ -1390,18 +1390,10 @@ _SPARSE_DISK_MODEL_CONFIG = SimpleNamespace(
 
 def _write_sparse_disk_checkpoint(folder, weights=_SPARSE_DISK_BASE):
     """A two-shard checkpoint with an index, in three dtypes."""
-    shards = {
-        "model-00001-of-00002.safetensors": ["a", "c", "rows", "norm"],
-        "model-00002-of-00002.safetensors": ["b", "cols", "unused", "split", "scale"],
-    }
     folder.mkdir()
-    weight_map: dict[str, str] = {}
-    for file, names in shards.items():
-        safetensors.torch.save_file({n: weights[n] for n in names}, folder / file)
-        weight_map |= dict.fromkeys(names, file)
-    (folder / "model.safetensors.index.json").write_text(
-        json.dumps({"weight_map": weight_map})
-    )
+    save_torch_state_dict(dict(weights), folder, max_shard_size=80)
+    assert len(list(folder.glob("model-*-of-00002.safetensors"))) == 2
+    assert (folder / "model.safetensors.index.json").exists()
 
 
 def _read_sparse_disk_checkpoint(folder):
@@ -1467,12 +1459,9 @@ def _bits(model):
 def _dense_patch(weights, versions):
     """The weights after writing every patch of `versions`, in order."""
     weights = {name: t.clone() for name, t in weights.items()}
-    int_views = {1: torch.uint8, 2: torch.int16, 4: torch.int32}
     for patches in versions:
         for patch in patches:
-            view = int_views[patch.values.element_size()]
-            flat = weights[patch.name].view(-1).view(view)
-            flat[patch.indices.long()] = patch.values.view(view)
+            weights[patch.name].view(-1)[patch.indices.long()] = patch.values
     return weights
 
 
@@ -1566,7 +1555,8 @@ def test_sparse_disk_updates_equal_a_cold_start_on_the_patched_checkpoint_cpu(
 ):
     """The trainer's sends, a reload after the weights were lost, and servers
     started later from the startup or a newer checkpoint all end bit for bit as a
-    cold start on the densely patched checkpoint."""
+    cold start on the densely patched checkpoint. A re-init with another base
+    version and an update older than the model are refused."""
     checkpoint, patch_dir, server = _sparse_disk
     base = _read_sparse_disk_checkpoint(checkpoint)
     expected = _bits(_sparse_disk_model(_dense_patch(base, _SPARSE_DISK_VERSIONS)))
@@ -1575,6 +1565,8 @@ def test_sparse_disk_updates_equal_a_cold_start_on_the_patched_checkpoint_cpu(
         p.data.fill_(0)  # as level 2 sleep discards them
     server.catch_up(2)
     assert _bits(server.model) == expected
+    with pytest.raises(FileExistsError):  # each version is written once
+        save_sparse_patches(_SPARSE_DISK_VERSIONS[1], patch_dir, 2)
     with pytest.raises(ValueError, match="started from version 0"):
         server.init_weight_transfer_engine(
             {"patch_dir": str(patch_dir), "base_version": 2}

@@ -15,14 +15,12 @@ storage, through its own service; this backend needs only a shared directory.
 
 ## Usage
 
-The inference side only selects the backend:
-
-```python
-llm = LLM(model=model_path, weight_transfer_config=WeightTransferConfig(backend="sparse_disk"))
-```
+The inference side only selects the backend; `VLLM_SERVER_DEV_MODE=1` exposes
+the HTTP weight-transfer endpoints:
 
 ```bash
-vllm serve my-model --weight-transfer-config '{"backend": "sparse_disk"}'
+VLLM_SERVER_DEV_MODE=1 vllm serve my-model \
+    --weight-transfer-config '{"backend": "sparse_disk"}'
 ```
 
 The trainer passes patches in checkpoint coordinates, as for
@@ -42,7 +40,7 @@ engine = WeightTransferTrainerFactory.trainer_init(
         patch_dir="/shared/run-42/patches",   # every inference host reads this path
         rank=0,
     ),
-    client=HTTPVLLMWeightSyncClient("http://localhost:8000"),  # or RayVLLMWeightSyncClient(llm)
+    client=HTTPVLLMWeightSyncClient("http://localhost:8000"),
 )
 engine.send_weights()     # once, before serving: builds the host copies
 
@@ -74,13 +72,13 @@ patch_dir, version)` and drive the client with `{"version": version}`.
   size divided by the tensor-parallel size per worker, for every server. That
   update also reads the checkpoint, so send it before serving (the
   `send_weights()` above, at `base_version`). Later updates apply the new files
-  and copy the worker's part into the model. Applying takes time in proportion
-  to the patch size and maps the patch on the worker's device, in chunks sized
-  to its free memory, at least 2^20 elements. Pinned host memory cannot be
-  swapped or reclaimed; a tensor that is not sharded, or that the load plan
+  and copy the worker's part into the model. Applying maps the patch on the
+  worker's device, in chunks sized to its free memory. Pinned host memory cannot
+  be swapped or reclaimed; a tensor that is not sharded, or that the load plan
   leaves to `load_weights`, is held whole by every worker.
-- **Names.** Patches name checkpoint tensors. A patch of a tensor the model
-  does not load, such as an alias the loader skips, is checked and ignored.
+- **Names.** Patches name checkpoint tensors, as the default loader yields
+  them. A patch of a tensor the model does not load, such as a tied alias, is
+  checked and ignored.
 
 ## Versions and Recovery
 
@@ -94,26 +92,20 @@ patch_dir, version)` and drive the client with `{"version": version}`.
 - Sending the last update again reloads the copy, for example after a failed
   update or a level 2 sleep.
 - Every worker checks the whole file before writing any of it, so a file with a
-  bad patch is refused by every worker and leaves every copy at the last
-  version; the model stays mid-update until an update succeeds, so keep
-  generation paused until then. On tensor-parallel servers, restart the server
-  after any failed update: the next request currently gets the failed update's
-  error back. An apply that fails partway discards the copy, which the next
-  update rebuilds.
-- Only a file that every worker refused, with an error naming the file, may be
-  corrected under the same version: delete it and write it again with
-  `save_sparse_patches`. After any other failed update, keep the file and send
-  the update again (after the restart, on tensor-parallel servers); workers that
-  already applied it only reload.
-- If the first update fails (for example, the load plan cannot be built), the
-  server stays mid-update and needs a new update that succeeds; a model whose
-  loads cannot be planned needs another backend.
+  bad patch is refused by every worker, with an error naming the file, and
+  leaves every copy at the last version. Only such a file may be corrected
+  under the same version: delete it and write it again with
+  `save_sparse_patches`; after any other failed update, keep the file. Either
+  way the model stays mid-update, so keep generation paused and send an update
+  that succeeds. On tensor-parallel servers, restart the server first: the next
+  request currently gets the failed update's error back. An apply that fails
+  partway discards the copy, which the next update rebuilds.
 - Versions only move forward. To go back, restart the servers from a full
   checkpoint and use a new `patch_dir`.
 
 ## Limitations
 
-- Needs the default loader reading safetensors on the host (not
+- Needs the default loader reading the checkpoint on the host (not
   `fastsafetensors` or `instanttensor`), no secondary weight sources, and a load
   plan: direct reload, without EPLB or online quantization. Other
   configurations are refused at `init_weight_transfer_engine`; a model whose

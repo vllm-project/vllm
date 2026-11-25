@@ -121,8 +121,9 @@ def save_sparse_patches(
         ]
     data = save(tensors, {"format": _FORMAT, "patches": json.dumps(entries)})
     # Created exclusively and written in place, as `save_file` may rename a
-    # temporary file, which object-store mounts cannot do. A version is applied
-    # only after this returns, and a file cut short by a crash fails to open.
+    # temporary file, which object-store mounts cannot do; opened outside the
+    # try, so a published version is never removed. A version is applied only
+    # after this returns, and a file cut short by a crash fails to open.
     path = patch_file(patch_dir, version)
     f = open(path, "xb")  # noqa: SIM115
     try:
@@ -130,7 +131,7 @@ def save_sparse_patches(
             f.write(data)
     except BaseException:
         with contextlib.suppress(OSError):
-            path.unlink(missing_ok=True)
+            path.unlink()
         raise
     return path
 
@@ -180,7 +181,6 @@ class SparseDiskWeightTransferEngine(
     ) -> None:
         super().__init__(config, vllm_config, device, model)
         self._init_info: SparseDiskWeightTransferInitInfo | None = None
-        self._files: list[str] = []
         self._copy: _HostCopy | None = None
         # The version the model holds; it outlives the copy.
         self._loaded = 0
@@ -213,21 +213,9 @@ class SparseDiskWeightTransferEngine(
             )
         if getattr(self.model, "secondary_weights", ()):
             raise ValueError("sparse_disk does not support secondary weight sources")
-        _, files, use_safetensors, _ = loader._prepare_weights(
-            self.model_config.model,
-            None,
-            self.model_config.revision,
-            fall_back_to_pt=getattr(self.model, "fall_back_to_pt_during_load", True),
-            allow_patterns_overrides=getattr(
-                self.model, "allow_patterns_overrides", None
-            ),
-        )
-        if not use_safetensors:
-            raise ValueError("sparse_disk needs a safetensors checkpoint")
         check_plannable(self.model)
         self.shutdown()
         self._init_info = init_info
-        self._files = files
 
     def start_weight_update(self) -> None:
         from vllm.model_executor.model_loader.reload import start_reload
@@ -266,10 +254,12 @@ class SparseDiskWeightTransferEngine(
                 except (ValueError, SafetensorError) as e:
                     raise ValueError(f"{path}: {e}") from e
                 try:
-                    copy.write(writes)
+                    for dtype, positions, values in writes:  # bit for bit
+                        copy.buffers[dtype].view(values.dtype)[positions] = values
                 except BaseException:
                     self.shutdown()  # partly written: rebuilt at the next update
                     raise
+                del writes  # before the next file is mapped
                 copy.version += 1
                 logger.info("Applied %s in %.2f s", path, time.perf_counter() - started)
         if self.device.type != "cpu":
@@ -283,10 +273,6 @@ class SparseDiskWeightTransferEngine(
         for ptr in self._copy.registered if self._copy else ():
             host_unregister(ptr)
         self._copy = None
-
-
-# (buffer dtype, positions in it, values as same-size integers)
-_Write = tuple[torch.dtype, torch.Tensor, torch.Tensor]
 
 
 class _HostCopy:
@@ -305,18 +291,13 @@ class _HostCopy:
         self.device = device = engine.device
         model, model_config = engine.model, engine.model_config
         loader = get_model_loader(engine.vllm_config.load_config)
-        # every checkpoint tensor, to check patch files against
-        self.catalog: dict[str, tuple[tuple[int, ...], torch.dtype]] = {}
-        for file in engine._files:
-            with safe_open(file, framework="pt") as f:
-                for name in f.keys():  # noqa: SIM118
-                    t = f.get_tensor(name)  # a view of the mapped file
-                    self.catalog[name] = (tuple(t.shape), t.dtype)
         # what the default loader feeds the model, as at the cold start
         meta = [
             ParamMeta(n, t.dtype, tuple(t.shape))
             for n, t in loader.get_all_weights(model_config, model)
         ]
+        # every one of them, to check patch files against
+        self.catalog = {m.name: (m.shape, m.dtype) for m in meta}
         self.plan = plan_loads(model, meta)
         # name -> [(box, offset into its dtype's buffer)]
         self.parts: dict[str, list[tuple[Box, int]]] = {}
@@ -344,7 +325,7 @@ class _HostCopy:
         self.registered = [
             b.data_ptr()
             for b in self.buffers.values()
-            if pin and b.nbytes and host_register(b.data_ptr(), b.nbytes)
+            if pin and host_register(b.data_ptr(), b.nbytes)
         ]
         logger.info(
             "Built the host copy of %d tensors (%.2f GiB, %s) in %.1f s",
@@ -384,9 +365,10 @@ class _HostCopy:
             torch.tensor(bases, dtype=torch.long, device=self.device).T,
         )
 
-    def map(self, f: Any) -> list[_Write]:
+    def map(self, f: Any) -> list[tuple[torch.dtype, torch.Tensor, torch.Tensor]]:
         """Check every patch of the open file `f` against the checkpoint and
-        find where its values land in this copy, without touching it."""
+        find where its values land in this copy, without touching it: (buffer
+        dtype, positions in it, values as same-size integers)."""
         metadata = f.metadata() or {}
         if metadata.get("format") != _FORMAT:
             raise ValueError(f"not a {_FORMAT} patch file")
@@ -473,11 +455,6 @@ class _HostCopy:
                     stride *= b_d - a_d
                 chosen = selected.nonzero().view(-1)
                 yield position[chosen].cpu(), src[chosen].cpu()
-
-    def write(self, writes: list[_Write]) -> None:
-        """Write the mapped values over the copy, bit for bit."""
-        for dtype, positions, values in writes:
-            self.buffers[dtype].view(values.dtype)[positions] = values
 
     def load(self, model: torch.nn.Module) -> None:
         """Copy the whole part into the model and report it loaded."""
@@ -578,12 +555,11 @@ class SparseDiskTrainerWeightTransferEngine(
             )
         return engine
 
-    def publish(self, patches: Iterable[SparseWeightPatch]) -> int:
-        """Write the next version's patches and return the version."""
+    def publish(self, patches: Iterable[SparseWeightPatch]) -> None:
+        """Write the next version's patches."""
         if self.is_sender:
             save_sparse_patches(patches, self.patch_dir, self.version + 1)
             self.version += 1
-        return self.version
 
     def send_weights(self) -> None:
         """Update the inference side to the last published version."""
