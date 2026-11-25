@@ -157,14 +157,10 @@ def init_candidate_stream(allowed: bool) -> None:
         _candidates = CandidateStream()
 
 
-def candidate_defer_allowed(metadata: Any) -> bool:
-    """Whether the candidate source may defer: a FULL CUDA graph capture whose
-    consumers read the sparse decode rows."""
-    return (
-        _candidates is not None
-        and getattr(metadata, "sparse_decode", None) is not None
-        and full_cuda_graph_capture()
-    )
+def candidate_defer_allowed() -> bool:
+    """Whether the candidate source may defer: its readers created the candidate
+    stream, and a FULL CUDA graph is being captured."""
+    return _candidates is not None and full_cuda_graph_capture()
 
 
 def defer_candidates(work: Callable[[], None], keep: tuple) -> None:

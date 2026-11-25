@@ -1216,15 +1216,7 @@ def sparse_attn_indexer(
                 logits_dtype,
             )
             q = (padded_q_quant_cast, padded_q_scale)
-            # One query row per request over the whole context on this rank:
-            # what the deferred path takes.
-            whole_rows = (
-                dcp_world_size == 1
-                and decode_metadata.global_seq_lens is None
-                and not needs_padded_path
-                and next_n == 1
-            )
-            if whole_rows and indexer_overlap.consume_deferred_topk_request():
+            if indexer_overlap.consume_deferred_topk_request():
                 # Defer the stock scan and top-k below (VLLM_INDEXER_OVERLAP).
                 def stock_scan_topk() -> None:
                     scores = fp8_fp4_paged_mqa_logits(
@@ -1280,9 +1272,7 @@ def sparse_attn_indexer(
             row_repeat = next_n if vis.numel() != num_rows else 1
             vis = vis[:num_rows]
             decode_candidates = candidate_blocks[:num_rows]
-            if candidate_write and indexer_overlap.candidate_defer_allowed(
-                attn_metadata_narrowed
-            ):
+            if candidate_write and indexer_overlap.candidate_defer_allowed():
                 # Defer the candidate selection and the first consumer's block-id
                 # expansion to the candidate stream (VLLM_INDEXER_OVERLAP).
                 def select_and_expand() -> None:
