@@ -4,6 +4,7 @@ import asyncio
 import os
 import socket
 import time
+import uuid
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any
@@ -990,7 +991,8 @@ class AsyncLLM(EngineClient):
         hook runs to free any pre-admission KV-transfer resources (e.g. NIXL
         prefill blocks pinned on the P node)."""
         request = EngineCoreRequest(
-            request_id=request_id,
+            request_id=f"kv-cleanup-{uuid.uuid4().hex}",
+            external_req_id=request_id,
             prompt_token_ids=[0],
             mm_features=None,
             sampling_params=SamplingParams(

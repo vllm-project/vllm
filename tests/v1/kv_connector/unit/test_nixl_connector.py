@@ -348,14 +348,16 @@ def test_prompt_less_than_block_size():
     assert len(scheduler_output.scheduled_new_reqs) == 0
 
 
-def test_abort_immediately_remote_prefill_enqueues_empty_recv():
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("kv_connector", ["NixlConnector", "NixlPushConnector"])
+def test_abort_immediately_remote_prefill_enqueues_empty_recv(kv_connector):
     """A remote-prefill request added with abort_immediately=True should
     be added to the scheduler's waiting queue then immediately aborted, so the
     NIXL connector's request_finished hook enqueues an empty recv to notify
     the prefill instance to free its blocks."""
-    from vllm.v1.request import RequestStatus
-
-    scheduler = create_scheduler(create_vllm_config())
+    scheduler = create_scheduler(create_vllm_config(kv_connector=kv_connector))
+    live_request = create_request(request_id=1, num_tokens=10)
+    scheduler.add_request(live_request)
 
     request = create_request(request_id=42, num_tokens=10, do_remote_prefill=True)
     assert request.kv_transfer_params is not None
@@ -373,6 +375,9 @@ def test_abort_immediately_remote_prefill_enqueues_empty_recv():
     assert req_meta.local_block_ids == []
     assert req_meta.remote is not None
     assert req_meta.remote.request_id == f"prefill-{42}"
+    assert [req.req_id for req in scheduler_output.scheduled_new_reqs] == [
+        live_request.request_id
+    ]
     # do_remote_prefill is consumed by request_finished to prevent re-issuing.
     assert request.kv_transfer_params["do_remote_prefill"] is False
     # The scheduler is not waiting on this recv -- the request is already gone
