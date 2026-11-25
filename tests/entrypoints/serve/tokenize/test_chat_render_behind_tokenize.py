@@ -29,7 +29,11 @@ CHAT_DELAY_S = 0.3
 
 @pytest.fixture(scope="module")
 def server():
-    env_dict = {"VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT": str(RENDER_TIMEOUT_S)}
+    env_dict = {
+        "VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT": str(RENDER_TIMEOUT_S),
+        # TOKENIZE_PROMPT is longer than the default /tokenize limit.
+        "VLLM_MAX_TOKENIZE_TOKENS": "0",
+    }
     # One worker, so that the tokenization requests queue in front of the chat
     # render (the async renderer has 4 workers by default).
     server_args = ["--enforce-eager", "--renderer-num-workers", "1"]
