@@ -23,7 +23,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from dataclasses import replace
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
@@ -203,12 +203,16 @@ from vllm.v1.worker.utils import (
 )
 from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 
+if TYPE_CHECKING:
+    from vllm.models.deepseek_v41.common.engram import EngramHostPrefetch
+
 logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
+        self.engram_prefetch: EngramHostPrefetch | None = None
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
@@ -455,6 +459,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             load_dummy_weights,
                         )
                     self.speculator.free_unused_weights(self.model)
+            engram_config = self.vllm_config.engram_config
+            if engram_config is not None and engram_config.host_prefetch_threads:
+                from vllm.models.deepseek_v41.common.engram import EngramHostPrefetch
+
+                max_prefill_graph_tokens = (
+                    0
+                    if self.compilation_config.cudagraph_mode.mixed_mode()
+                    == CUDAGraphMode.NONE
+                    else (
+                        self.compilation_config.max_prefill_cudagraph_capture_tokens
+                        if self.compilation_config.max_prefill_cudagraph_capture_tokens
+                        is not None
+                        else (self.compilation_config.max_cudagraph_capture_size or 0)
+                    )
+                )
+                self.engram_prefetch = EngramHostPrefetch(
+                    self.model,
+                    engram_config.host_prefetch_threads,
+                    max_prefill_graph_tokens,
+                )
         time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory
@@ -1873,6 +1897,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        if self.engram_prefetch is not None:
+            self.engram_prefetch.begin_step(None if dummy_run else scheduler_output)
         if not dummy_run:
             self.draft_tokens_handler.begin_step(scheduler_output)
             # Update the request states.
@@ -1905,6 +1931,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         batch_req_state, uniform_tok_count = self.gather_batch_req_state(
             scheduler_output, dummy_run
         )
+        if batch_req_state is not None and self.engram_prefetch is not None:
+            self.engram_prefetch.submit(
+                batch_req_state, self.req_states.num_computed_tokens_np
+            )
         if batch_req_state is not None:
             num_toks = batch_req_state.num_tokens
             if not batch_req_state.decode_graph_eligible:
@@ -2549,9 +2579,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
+    def drain_background_work(self) -> None:
+        """Finish background writes to device memory before it is released."""
+        if self.engram_prefetch is not None:
+            self.engram_prefetch.drain()
+
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if self.engram_prefetch is not None:
+            self.engram_prefetch.close()
+            self.engram_prefetch = None
         torch.accelerator.synchronize()
         if current_platform.is_rocm():
             # RCCL's ncclCommAbort waits for live graphs that captured the comm:

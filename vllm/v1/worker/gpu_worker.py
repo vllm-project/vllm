@@ -361,7 +361,7 @@ class Worker(WorkerBase):
     def sleep(self, level: int = 1) -> None:
         if loader := _bound_model_loader(self.model_runner):
             loader.on_sleep(level)
-
+        self.model_runner.drain_background_work()
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
         # Level 2 keeps everything the weight update doesn't rewrite.
@@ -417,6 +417,7 @@ class Worker(WorkerBase):
             loader.on_wake_up(tags)
 
     def discard(self, tags: tuple[str, ...]) -> None:
+        self.model_runner.drain_background_work()
         if has_kv_transfer_group() and "kv_cache" in tags:
             get_kv_transfer_group().unregister_kv_caches()
         # Outside the allocator pool, like in sleep.
