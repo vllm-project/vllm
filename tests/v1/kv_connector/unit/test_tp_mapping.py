@@ -29,6 +29,9 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.validation import (
+    validate_csa_linear_tp_layout,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
 )
@@ -526,13 +529,8 @@ def test_padded_state_page_moves_without_its_padding():
     ],
 )
 def test_csa_linear_tp_layout_boundary(total_kv_heads, local_tp, remote_tp, compatible):
-    worker = object.__new__(NixlConnectorWorker)
-    worker.world_size = local_tp
-    worker._is_csa_linear = True
-    worker.transfer_topo = SimpleNamespace(total_num_kv_heads=total_kv_heads)
-
     if compatible:
-        worker._validate_csa_linear_tp_layout(remote_tp)
+        validate_csa_linear_tp_layout(local_tp, remote_tp, total_kv_heads)
     else:
         with pytest.raises(ValueError, match="KV-head sharding boundary"):
-            worker._validate_csa_linear_tp_layout(remote_tp)
+            validate_csa_linear_tp_layout(local_tp, remote_tp, total_kv_heads)

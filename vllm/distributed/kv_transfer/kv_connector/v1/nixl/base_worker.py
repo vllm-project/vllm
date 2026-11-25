@@ -68,6 +68,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_representative_spec_type,
     zmq_ctx,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.validation import (
+    check_remote_pp_supported,
+    validate_csa_linear_tp_layout,
+    validate_push_block_sizes,
+    validate_remote_agent_handshake,
+    validate_remote_parallel_config,
+)
 from vllm.distributed.nixl_utils import (
     NixlWrapper,
     check_nixl_version,
@@ -941,45 +948,6 @@ class NixlBaseConnectorWorker:
             self.block_size = kernel_block_size
             self.num_blocks *= self._physical_blocks_per_logical_kv_block
 
-    def _validate_remote_parallel_config(
-        self, agent_metadata: NixlAgentMetadata
-    ) -> None:
-        local_pcp_size = self.pcp_size
-        local_dcp_size = self.dcp_size
-        remote_pcp_size = agent_metadata.pcp_size
-        remote_dcp_size = agent_metadata.dcp_size
-        if remote_pcp_size > 1 and remote_dcp_size not in (1, remote_pcp_size):
-            raise NotImplementedError(
-                "Remote NixlConnector PCP+DCP does not span the full PCP group. "
-                f"Remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
-            )
-        if (local_pcp_size > 1 and local_dcp_size == 1 and remote_dcp_size > 1) or (
-            remote_pcp_size > 1 and remote_dcp_size == 1 and local_dcp_size > 1
-        ):
-            raise NotImplementedError(
-                "Replicated PCP cannot be paired with a DCP-sharded NIXL peer. "
-                f"Local PCP/DCP={local_pcp_size}/{local_dcp_size}; "
-                f"remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
-            )
-
-    def _validate_csa_linear_tp_layout(self, remote_tp_size: int) -> None:
-        """Reject P/D pairs whose main-KV pages have different head layouts.
-
-        A rank at TP < total KV heads holds several heads per page, while a
-        rank at TP >= total KV heads holds exactly one (replicated beyond
-        that). CSA-linear pages are shared tensors that transfer as whole
-        block units, so endpoints on opposite sides of that boundary lay
-        them out differently and cannot exchange them.
-        """
-        assert self.transfer_topo is not None
-        total_kv_heads = self.transfer_topo.total_num_kv_heads
-        if (self.world_size < total_kv_heads) != (remote_tp_size < total_kv_heads):
-            raise ValueError(
-                "CSA-linear NIXL requires both endpoints on the same side of "
-                f"the KV-head sharding boundary ({total_kv_heads} KV heads): "
-                f"got local TP {self.world_size}, remote TP {remote_tp_size}."
-            )
-
     def _nixl_handshake(
         self,
         host: str,
@@ -992,7 +960,10 @@ class NixlBaseConnectorWorker:
     ) -> tuple[dict[tuple[int, int], str], float]:
         """Do a NIXL handshake with a remote instance."""
         if self._is_csa_linear:
-            self._validate_csa_linear_tp_layout(remote_tp_size)
+            assert self.transfer_topo is not None
+            validate_csa_linear_tp_layout(
+                self.world_size, remote_tp_size, self.transfer_topo.total_num_kv_heads
+            )
 
         # the first time we connect to a remote agent.
         # be careful, the handshake happens in a background thread.
@@ -1105,7 +1076,9 @@ class NixlBaseConnectorWorker:
                         f"Failed to decode NixlAgentMetadata. Error: {e}"
                     ) from e
 
-                self._validate_remote_parallel_config(metadata)
+                validate_remote_parallel_config(self.pcp_size, self.dcp_size, metadata)
+                if self._TRANSFER_MODE == "push":
+                    validate_push_block_sizes(self, metadata)
 
                 # Ensure engine id matches.
                 if metadata.engine_id != expected_engine_id:
@@ -1995,7 +1968,7 @@ class NixlBaseConnectorWorker:
                     "prefill TP yet"
                 )
         if remote_pp_size > 1:
-            self._check_remote_pp_supported(nixl_agent_meta)
+            check_remote_pp_supported(self, nixl_agent_meta)
         pairs = self._pair_regions(nixl_agent_meta, remote_pp_stage=remote_pp_size > 1)
         if remote_pp_size > 1 and not pairs.groups_match:
             raise NotImplementedError(
@@ -2035,8 +2008,8 @@ class NixlBaseConnectorWorker:
         self.kv_caches_base_addr[engine_id][remote_tp_rank] = (
             nixl_agent_meta.kv_caches_base_addr
         )
-        self._validate_remote_agent_handshake(
-            nixl_agent_meta, remote_tp_size, remote_dcp_size
+        validate_remote_agent_handshake(
+            self, nixl_agent_meta, remote_tp_size, remote_dcp_size
         )
 
         # The byte ranges of each block moved with each remote rank, per the
@@ -2156,180 +2129,6 @@ class NixlBaseConnectorWorker:
         """The only stage of a remote engine that runs PP=1."""
         (stage,) = self._remote_stages[engine_id].values()
         return stage
-
-    def _check_remote_pp_supported(self, nixl_agent_meta: NixlAgentMetadata) -> None:
-        """Refuse layouts that per-stage pulls from a pipeline-parallel producer
-        do not support. Under HMA a stage may hold no layer of a cache group (a
-        draft's group on the stages before the last); it then has no pair of
-        that group, so its reads skip the group."""
-        if (
-            self._has_packed_cache
-            or KVCacheLayout[nixl_agent_meta.kv_cache_layout].is_block_outermost
-        ):
-            raise NotImplementedError(
-                "NixlConnector (pull) does not support PP with packed KV cache layouts "
-                f"(local {self.kv_cache_layout}, "
-                f"remote {nixl_agent_meta.kv_cache_layout}). "
-                "Use supported non-packed layouts on both endpoints; "
-                "NixlPushConnector has separate packed PP restrictions."
-            )
-        if (
-            self.pp_size > 1
-            or self._has_mamba
-            or (self._is_hma_required and (self.use_mla or self._is_csa_linear))
-            or self.dcp_size > 1
-            or nixl_agent_meta.dcp_size > 1
-            or self._mixed_mem_types
-        ):
-            raise NotImplementedError(
-                "Pulling KV from a pipeline-parallel producer requires a PP=1 "
-                "consumer without Mamba, DCP or mixed-memory KV caches, and HMA "
-                "only for attention KV without MLA or CSA-linear caches."
-            )
-
-    def _validate_remote_agent_handshake(
-        self,
-        nixl_agent_meta: NixlAgentMetadata,
-        remote_tp_size: int,
-        remote_dcp_size: int = 1,
-    ):
-        """Validate the remote agent handshake metadata ensuring the
-        invariants hold true."""
-        remote_engine_id = nixl_agent_meta.engine_id
-
-        assert self.transfer_topo is not None
-        remote_info = self.transfer_topo.get_engine_info(remote_engine_id)
-        assert remote_info.remote_tp_size == remote_tp_size
-        assert remote_info.remote_dcp_size == remote_dcp_size
-        # DCP sizes must divide one another; this is what keeps the
-        # read-slicing math in pull_worker a closed form.
-        assert (
-            self.dcp_size % remote_dcp_size == 0 or remote_dcp_size % self.dcp_size == 0
-        ), (
-            f"DCP sizes must divide one another: local={self.dcp_size}, "
-            f"remote={remote_dcp_size} (engine {remote_engine_id})."
-        )
-        if self._has_mamba and self.dcp_size != remote_dcp_size:
-            raise RuntimeError(
-                "Hybrid MLA+Mamba NIXL transfers require matching DCP sizes, "
-                f"got local={self.dcp_size}, remote={remote_dcp_size}."
-            )
-        if self._dcp_replicated_groups and (
-            self.dcp_size > 1 or (remote_dcp_size > 1 and self._TRANSFER_MODE != "pull")
-        ):
-            raise NotImplementedError(
-                "NIXL with a DCP-replicated MLA draft cache only supports "
-                "pulling from a DCP prefill into a non-DCP decode: "
-                f"local DCP={self.dcp_size}, remote DCP={remote_dcp_size}, "
-                f"transfer_mode={self._TRANSFER_MODE}."
-            )
-
-        block_size_ratio = self.transfer_topo.block_size_ratio(
-            nixl_agent_meta.block_size
-        )
-        remote_physical_per_logical = max(
-            nixl_agent_meta.physical_blocks_per_group, default=1
-        )
-        if (
-            (self.dcp_size > 1 or remote_dcp_size > 1)
-            and not all(
-                stage.pairs.groups_match
-                for stage in self._remote_stages[remote_engine_id].values()
-            )
-            and (
-                self._physical_blocks_per_logical_kv_block != 1
-                or remote_physical_per_logical != 1
-            )
-        ):
-            raise NotImplementedError(
-                "DCP region pulls require matching logical and physical block sizes"
-            )
-        if (
-            self._has_mamba
-            and remote_physical_per_logical
-            != self._physical_blocks_per_logical_kv_block
-            and self.vllm_config.cache_config.enable_prefix_caching
-        ):
-            raise RuntimeError(
-                "Prefix caching with heterogeneous physical_blocks_per_logical "
-                "is not supported for Mamba hybrid models. "
-                f"Local: {self._physical_blocks_per_logical_kv_block}, "
-                f"Remote: {remote_physical_per_logical}. "
-                "Disable prefix caching with --disable-prefix-caching."
-            )
-
-        if block_size_ratio != 1:
-            # Heterogeneous block sizes transfer at remote-block granularity;
-            # the untransferred tail of the last local attention block is
-            # zeroed in the receive post-process, and mamba state pages
-            # transfer 1:1 (never sub-split).
-            assert not self.use_host_buffer, (
-                "Heterogeneous block sizes are not supported with host buffer"
-            )
-        kv_cache_layout = self.transfer_kv_cache_layout
-        # The layout orders a block's heads and tokens, which a single head
-        # (e.g. MLA's latent) does not distinguish.
-        multi_head = any(
-            isinstance(spec, AttentionSpec) and spec.num_heads > 1
-            for spec in self._layer_specs.values()
-        )
-        if multi_head and nixl_agent_meta.kv_cache_layout != kv_cache_layout:
-            if (
-                self.kv_transfer_config.enable_permute_local_kv
-                and nixl_agent_meta.kv_cache_layout == "LBHNC"
-                and kv_cache_layout == "LBNHC"
-            ):
-                logger.info(
-                    "Remote is LBHNC and local is LBNHC, enabled additional permute "
-                    "on local device KV."
-                )
-                assert not self._is_hma_required, (
-                    "HMA does not support block size post processing"
-                )
-                self.enable_permute_local_kv = True
-            else:
-                raise RuntimeError(
-                    "Heterogeneous TP expects same kv_cache_layout (local "
-                    f"{kv_cache_layout}, remote {nixl_agent_meta.kv_cache_layout}). "
-                    "Or enable experimental feature to receive LBHNC into a local "
-                    "LBNHC cache by setting 'enable_permute_local_kv'=True "
-                    "in --kv-transfer-config."
-                )
-        # if remote_agent used attn is not same as local,
-        # hint heterogenuous attn post process
-        if (
-            nixl_agent_meta.attn_backend_name != self.backend_name
-            and self.backend_name in ["CPU_ATTN"]
-        ):
-            if self._is_hma_required:
-                raise RuntimeError(
-                    "heterogeneous attn post process is not supported with HMA"
-                )
-            logger.info(
-                "[Experimental] CPU_ATTN backend is used, "
-                "hint heterogeneous attn post process"
-            )
-            self.enable_heterogeneous_attn_post_process = True
-
-        # Block lengths are checked against the specs in _tp_byte_ranges.
-        # TP workers that handhshake with same remote have same #blocks.
-        assert self.dst_num_blocks[remote_engine_id] == nixl_agent_meta.num_blocks
-        num_remote_regions = len(nixl_agent_meta.kv_caches_base_addr)
-        if nixl_agent_meta.region_num_blocks is not None:
-            assert len(nixl_agent_meta.region_num_blocks) == num_remote_regions
-        assert len(nixl_agent_meta.block_strides) == num_remote_regions
-        assert all(
-            stride >= block_len
-            for stride, block_len in zip(
-                nixl_agent_meta.block_strides,
-                nixl_agent_meta.block_lens,
-                strict=True,
-            )
-        )
-        if nixl_agent_meta.region_group_ids is not None:
-            assert len(nixl_agent_meta.region_group_ids) == num_remote_regions
-        if nixl_agent_meta.region_mem_types is not None:
-            assert len(nixl_agent_meta.region_mem_types) == num_remote_regions
 
     def sync_recved_kv_to_device(self, req_id: str, meta: ReqMeta):
         """Copy recved kv from host buffer to device."""

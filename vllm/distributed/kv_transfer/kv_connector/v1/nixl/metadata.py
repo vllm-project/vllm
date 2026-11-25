@@ -139,7 +139,7 @@ def _get_speculative_compatibility_factors(
 
     # Note: the draft attention_backend is intentionally not hashed. Its only
     # transfer-relevant effect is the KV block layout/size, which is validated
-    # per region at runtime in _validate_remote_agent_handshake. The connector
+    # per region at runtime in validate_remote_agent_handshake. The connector
     # only sees the raw override here (usually None = auto-select), never the
     # resolved backend, so hashing it would cause false mismatches without
     # catching anything the runtime layout check misses.
@@ -179,7 +179,7 @@ def compute_nixl_compatibility_hash(
     pull connector must never complete a handshake with each other.
 
     Note: Factors like tensor_parallel_size, block_size, and kv_cache_layout
-    are validated at runtime in _validate_remote_agent_handshake and are not
+    are validated at runtime in validate_remote_agent_handshake and are not
     included in this hash to support heterogeneous deployments.
 
     Note - the set of factors are likely to evolve significantly over
