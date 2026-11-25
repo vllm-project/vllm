@@ -3257,7 +3257,8 @@ def test_fused_kv_insert_split(num_tokens: int, kv_block_size: int):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm stream coverage")
-def test_v41_rocm_csa2_full_pipeline(monkeypatch):
+@pytest.mark.parametrize("projects", [False, True])
+def test_v41_rocm_csa2_full_pipeline(monkeypatch, projects):
     """_forward_csa2_full: one fork, then K write and q-side after the join.
 
     The default chain must run first on the current stream, the compressor
@@ -3312,15 +3313,20 @@ def test_v41_rocm_csa2_full_pipeline(monkeypatch):
         streams["produce_k"] = torch.cuda.current_stream()
         index_cache.fill_(7)
 
-    def forward_q(qr_, qr_scale, indexer_weights, positions_, rotary_emb):
+    def forward_q(
+        qr_, qr_scale, indexer_weights, positions_, rotary_emb, hidden_states_
+    ):
         order.append("forward_q")
         streams["forward_q"] = torch.cuda.current_stream()
+        assert hidden_states_ is hidden_states
+        assert indexer_weights is (None if projects else weights)
         return index_q, index_q_scale, index_weights_out
 
     indexer = SimpleNamespace(
         weights_proj=weights_proj,
         _produce_k=produce_k,
         forward_q=forward_q,
+        projects_weights=lambda hidden_states_: projects,
     )
     rotary = SimpleNamespace(cos_sin_cache=torch.randn(32, 64, device="cuda"))
     aux_streams = [torch.cuda.Stream(), torch.cuda.Stream()]
@@ -3372,7 +3378,7 @@ def test_v41_rocm_csa2_full_pipeline(monkeypatch):
         "wq_b",
         "qnorm_insert",
         "compressor",
-        "weights_proj",
+        *([] if projects else ["weights_proj"]),
         "produce_k",
         "forward_q",
     ]
@@ -3380,11 +3386,13 @@ def test_v41_rocm_csa2_full_pipeline(monkeypatch):
     for name in ("wq_b", "qnorm_insert", "produce_k", "forward_q"):
         assert streams[name] == current, name
     assert streams["compressor"] == aux_streams[0]
-    assert streams["weights_proj"] == aux_streams[1]
+    if not projects:
+        assert streams["weights_proj"] == aux_streams[1]
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm stream coverage")
-def test_v41_rocm_csa2_reindex_pipeline():
+@pytest.mark.parametrize("projects", [False, True])
+def test_v41_rocm_csa2_reindex_pipeline(projects):
     """_forward_csa2_reindex: serial projections, then SWA q path vs q-side."""
     from vllm.forward_context import ForwardContext, override_forward_context
     from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
@@ -3405,12 +3413,27 @@ def test_v41_rocm_csa2_reindex_pipeline():
     order: list[str] = []
     streams: dict[str, torch.cuda.Stream] = {}
 
-    def forward_q(qr_, qr_scale, indexer_weights_, positions_, rotary_emb):
+    def forward_q(
+        qr_, qr_scale, indexer_weights_, positions_, rotary_emb, hidden_states_
+    ):
         order.append("forward_q")
         streams["forward_q"] = torch.cuda.current_stream()
+        assert hidden_states_ is hidden_states
+        assert indexer_weights_ is (None if projects else indexer_weights)
         return index_q, index_q_scale, index_weights_out
 
-    indexer = SimpleNamespace(forward_q=forward_q)
+    def input_projections(hidden_states_):
+        order.append("input_projections")
+        return qr_kv, None, indexer_weights
+
+    def fused_wqa_wkv_gemm(hidden_states_):
+        order.append("wqa_wkv")
+        return qr_kv
+
+    indexer = SimpleNamespace(
+        forward_q=forward_q,
+        projects_weights=lambda hidden_states_: projects,
+    )
     rotary = SimpleNamespace(cos_sin_cache=torch.randn(32, 64, device="cuda"))
     aux0 = torch.cuda.Stream()
 
@@ -3431,11 +3454,8 @@ def test_v41_rocm_csa2_reindex_pipeline():
         indexer_rotary_emb=rotary,
         n_local_heads=1,
         head_dim=512,
-        _run_parallel_input_projections=lambda hidden_states_: (
-            qr_kv,
-            None,
-            indexer_weights,
-        ),
+        _run_parallel_input_projections=input_projections,
+        _fused_wqa_wkv_gemm=fused_wqa_wkv_gemm,
         _split_qkv_and_norm=lambda qr_kv_: (qr, None, kv),
         _wq_b_proj=wq_b,
         _fused_qnorm_rope_kv_insert=qnorm_insert,
@@ -3456,15 +3476,21 @@ def test_v41_rocm_csa2_reindex_pipeline():
     assert torch.equal(index_q_scale_out, index_q_scale)
     assert torch.equal(index_weights_out_out, index_weights_out)
 
-    assert order == ["wq_b", "qnorm_insert", "forward_q"]
+    assert order == [
+        "wqa_wkv" if projects else "input_projections",
+        "wq_b",
+        "qnorm_insert",
+        "forward_q",
+    ]
     current = torch.cuda.current_stream()
     for name in ("wq_b", "qnorm_insert"):
         assert streams[name] == current, name
     assert streams["forward_q"] == aux0
 
 
+@pytest.mark.parametrize("from_hidden", [False, True])
 @pytest.mark.parametrize("quant_tuple", [False, True])
-def test_v41_indexer_forward_q(quant_tuple):
+def test_v41_indexer_forward_q(quant_tuple, from_hidden):
     """forward_q runs wq_b then the fused RoPE/quant and unpacks both shapes."""
     from unittest.mock import patch
 
@@ -3475,6 +3501,13 @@ def test_v41_indexer_forward_q(quant_tuple):
     q = torch.randn(num_tokens, n_head * head_dim)
     positions = torch.arange(num_tokens)
     indexer_weights = torch.randn(num_tokens, n_head)
+    hidden = torch.randn(num_tokens, 64)
+    projected: list[torch.Tensor] = []
+
+    def weights_proj(hidden_states):
+        projected.append(hidden_states)
+        return indexer_weights, None
+
     rotary = SimpleNamespace(cos_sin_cache=torch.randn(32, 64))
     fake = SimpleNamespace(
         n_head=n_head,
@@ -3483,6 +3516,7 @@ def test_v41_indexer_forward_q(quant_tuple):
         use_fp4_kv=False,
         indexer_weights_dtype=torch.float32,
         _wq_b_proj=lambda qr_, qr_scale: q,
+        weights_proj=weights_proj,
     )
     q_quant = torch.randn(num_tokens, n_head, head_dim)
     q_scale = torch.randn(num_tokens, n_head)
@@ -3499,7 +3533,13 @@ def test_v41_indexer_forward_q(quant_tuple):
         return_value=fused_return,
     ) as mock_fused:
         result = DeepseekV4Indexer.forward_q(
-            fake, qr, None, indexer_weights, positions, rotary
+            fake,
+            qr,
+            None,
+            None if from_hidden else indexer_weights,
+            positions,
+            rotary,
+            hidden if from_hidden else None,
         )
 
     assert torch.equal(result[0], expected[0])
@@ -3507,6 +3547,7 @@ def test_v41_indexer_forward_q(quant_tuple):
     if expected[1] is not None:
         assert torch.equal(result[1], expected[1])
     assert torch.equal(result[2], expected[2])
+    assert [h is hidden for h in projected] == ([True] if from_hidden else [])
     args = mock_fused.call_args.args
     assert args[0] is positions
     torch.testing.assert_close(args[1], q.view(-1, n_head, head_dim))

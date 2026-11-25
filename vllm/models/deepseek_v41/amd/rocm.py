@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
@@ -74,6 +75,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 )
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
     rocm_mxfp4_indexer_k_store,
+    rocm_mxfp4_indexer_q_projects_weights,
     rocm_mxfp4_indexer_q_quant,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec
@@ -585,7 +587,7 @@ class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
     """The indexer on aiter's paged MXFP4 cache: its K store and Q quant write
     in the order aiter's MQA-logits kernel reads, and its layers score with it.
     `_produce_k` and `forward_q` mirror `DeepseekV4Indexer`'s except for
-    those two calls."""
+    those two calls, and the Q quant can also compute the head weights."""
 
     mqa_cls = RocmSparseMQAIndexer
     attn_cls = RocmSparseAttnIndexer
@@ -615,14 +617,26 @@ class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
             num_heads=self.n_head,
         )
 
+    def projects_weights(self, hidden_states: torch.Tensor) -> bool:
+        return not isinstance(
+            self.weights_proj, BaseLayerWithLoRA
+        ) and rocm_mxfp4_indexer_q_projects_weights(
+            hidden_states, cast(torch.Tensor, self.weights_proj.weight)
+        )
+
     def forward_q(
         self,
         qr: torch.Tensor | QuantizedActivation,
         qr_scale: torch.Tensor | None,
-        indexer_weights: torch.Tensor,
+        indexer_weights: torch.Tensor | None,
         positions: torch.Tensor,
         rotary_emb: torch.nn.Module,
+        hidden_states: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        if indexer_weights is None:
+            assert hidden_states is not None
+            if not self.projects_weights(hidden_states):
+                indexer_weights, _ = self.weights_proj(hidden_states)
         q = self._wq_b_proj(qr, qr_scale).view(-1, self.n_head, self.head_dim)
         (q, q_scale), weights = rocm_mxfp4_indexer_q_quant(
             positions,
@@ -633,6 +647,8 @@ class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
             self.n_head**-0.5,
             use_fp4=self.use_fp4_kv,
             weights_out_dtype=self.indexer_weights_dtype,
+            hidden_states=hidden_states,
+            weights_proj=cast(torch.Tensor, self.weights_proj.weight),
         )
         return q, q_scale, weights
 
@@ -896,10 +912,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
         Each fork/join is a HIP event pair per side stream on ROCm, so the
         base three-fork pipeline is expensive there; the compressor chain and
-        the indexer weights projection run fully in parallel with the default
-        chain. The indexer K write and q-side stay serial after the join:
-        `wk` consumes the aux-0 latent and the q-side's wq_b consumes the
-        default-stream qr.
+        the indexer weights projection (unless the Q quant computes the
+        weights) run fully in parallel with the default chain. The indexer K
+        write and q-side stay serial after the join: `wk` consumes the aux-0
+        latent and the q-side's wq_b consumes the default-stream qr.
         """
         attn_metadata = get_forward_context().attn_metadata
         compressor = self.compressor
@@ -934,9 +950,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             weights, _ = indexer.weights_proj(hidden_states)
             return weights
 
+        projects = indexer.projects_weights(hidden_states)
         (q, qr, qr_scale, kv), (latent, indexer_weights) = execute_in_parallel(
             default_chain,
-            [compressor_chain, indexer_weights_chain],
+            [compressor_chain, None if projects else indexer_weights_chain],
             self.ln_events[0],
             self.ln_events[1:3],
             aux_streams[:2],
@@ -946,7 +963,12 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
         indexer._produce_k(latent, positions, self.indexer_rotary_emb)
         index_q, index_q_scale, index_weights_out = indexer.forward_q(
-            qr, qr_scale, indexer_weights, positions, self.indexer_rotary_emb
+            qr,
+            qr_scale,
+            indexer_weights,
+            positions,
+            self.indexer_rotary_emb,
+            hidden_states,
         )
         return q, kv, index_q, index_q_scale, index_weights_out
 
@@ -969,8 +991,13 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         attn_metadata = get_forward_context().attn_metadata
         # Serial on these layers via the _run_parallel_input_projections
         # override: qr must sit on the default stream before the fork.
-        qr_kv, _, indexer_weights = self._run_parallel_input_projections(hidden_states)
-        assert indexer_weights is not None
+        if indexer.projects_weights(hidden_states):
+            qr_kv, indexer_weights = self._fused_wqa_wkv_gemm(hidden_states), None
+        else:
+            qr_kv, _, indexer_weights = self._run_parallel_input_projections(
+                hidden_states
+            )
+            assert indexer_weights is not None
         qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
 
         def swa_q_chain():
@@ -981,7 +1008,12 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
         def indexer_q_chain():
             return indexer.forward_q(
-                qr, qr_scale, indexer_weights, positions, self.indexer_rotary_emb
+                qr,
+                qr_scale,
+                indexer_weights,
+                positions,
+                self.indexer_rotary_emb,
+                hidden_states,
             )
 
         aux_streams = self.aux_stream_list
