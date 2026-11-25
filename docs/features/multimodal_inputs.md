@@ -15,11 +15,10 @@ This page teaches you how to pass multi-modal inputs to [multi-modal models](../
 
 ## Audio and Video File Formats
 
-The Python media loaders accept self-contained audio and video files, including
-HTTP URLs, base64 data URLs, and allowed local files. They reject FFmpeg concat
-scripts, HLS playlists (`#EXTM3U`), SDP stream descriptions, and XML manifests
-because these formats can open additional files or network connections while
-decoding. Upload the media itself instead of a playlist or stream description.
+Pass audio and video files to the Python media loaders via HTTP URLs, base64
+data URLs, or allowed local files. The loaders check for and reject FFmpeg
+concat scripts, HLS playlists (`#EXTM3U`), SDP stream descriptions, and XML
+manifests. Upload the media file directly.
 Enabling `--allowed-local-media-path` does not enable these reference formats.
 
 ## GLM-5.3-Flash
@@ -893,7 +892,10 @@ backends are supported:
 
 The two CPU backends are ultimately backed by FFmpeg. `torchcodec` lets you
 choose which FFmpeg version is used while `opencv` relies on whichever
-FFmpeg build it was linked against.
+FFmpeg build it was linked against. The `torchcodec` video backend requires
+TorchCodec 0.17 or newer for its decoder-level restriction on opening
+additional resources. The other video backends rely on the reference-format
+checks described above.
 
 Select the backend by passing the `backend` parameter via `--media-io-kwargs`:
 

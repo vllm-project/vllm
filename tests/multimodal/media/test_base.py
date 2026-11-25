@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from vllm.multimodal import media_utils
 from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.media_utils import validate_media_bytes, validate_media_source
 
@@ -53,6 +54,44 @@ def test_binary_media_metadata_is_not_a_reference_description(tmp_path):
     source.seek(8)
     validate_media_source(source)
     assert source.tell() == 8
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b" " * 17 + b"\xef\xbb\xbf" + b" " * 19 + b"#EXTM3U\n",
+        b"session name\r" + b"c=IN IP4 ",
+        b"\xef\xbb\xbf  c=IN IP6 ",
+    ],
+)
+def test_media_file_recognizes_signatures_at_read_boundaries(
+    tmp_path, monkeypatch, data
+):
+    path = tmp_path / "media"
+    path.write_bytes(data)
+    monkeypatch.setattr(media_utils, "_HEADER_READ_BYTES", 8)
+
+    with pytest.raises(ValueError, match="playlists and stream descriptions"):
+        validate_media_source(path)
+
+
+def test_media_file_stops_scanning_after_first_nul(monkeypatch):
+    read_cap = 8
+    prefix = b"padding " * 128
+    source = BytesIO(prefix + b"\x00#EXTM3U\n" + b"suffix" * 64)
+    monkeypatch.setattr(media_utils, "_HEADER_READ_BYTES", read_cap)
+
+    media_utils._validate_media_file(source)
+
+    assert source.tell() == len(prefix) + read_cap
+
+
+def test_media_file_chunk_edge_is_not_a_line_boundary(tmp_path, monkeypatch):
+    path = tmp_path / "media"
+    path.write_bytes(b"padding c=IN IP4 more\nc=IN IP4suffix")
+    monkeypatch.setattr(media_utils, "_HEADER_READ_BYTES", 8)
+
+    validate_media_source(path)
 
 
 def test_media_with_bytes_pickle_roundtrip():

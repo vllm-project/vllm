@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from io import BytesIO
+from io import BufferedReader, BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -394,6 +394,43 @@ def test_ffmpeg_audio_stream_and_path_decode_identically(
     file_audio, file_rate = loader(path, sr=None)
     assert file_rate == buffer_rate
     np.testing.assert_array_equal(file_audio, buffer_audio)
+
+
+def test_pyav_audio_decoder_forbids_secondary_io(tmp_path):
+    path = tmp_path / "audio.wav"
+    sf.write(path, np.zeros(800, dtype=np.float32), 8000)
+
+    with patch.object(
+        audio_module.av, "open", wraps=audio_module.av.open
+    ) as open_audio:
+        samples, sample_rate = load_audio_pyav(path, sr=None)
+
+    assert samples.size == 800
+    assert sample_rate == 8000
+    source = open_audio.call_args.args[0]
+    assert isinstance(source, BufferedReader)
+    assert source.closed
+    options = open_audio.call_args.kwargs
+    assert options["container_options"]["protocol_whitelist"] == ""
+    with pytest.raises(ValueError, match="Audio must be self-contained"):
+        options["io_open"]("secondary", 0, {})
+
+
+def test_torchcodec_audio_uses_isolated_file_like_input(tmp_path):
+    pytest.importorskip("torchcodec", minversion="0.17")
+    path = tmp_path / "audio.wav"
+    sf.write(path, np.zeros(800, dtype=np.float32), 8000)
+
+    with patch.object(
+        audio_module, "AudioDecoder", wraps=audio_module.AudioDecoder
+    ) as open_audio:
+        samples, sample_rate = load_audio_torchcodec(path, sr=None)
+
+    assert samples.size == 800
+    assert sample_rate == 8000
+    source = open_audio.call_args.args[0]
+    assert isinstance(source, BufferedReader)
+    assert source.closed
 
 
 def test_load_audio_default_preserves_vorbis_length(dummy_audio_bytes):
