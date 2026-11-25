@@ -205,6 +205,7 @@ mod tests {
 
     use futures::{FutureExt as _, StreamExt as _};
     use tonic::Request;
+    use tonic::server::NamedService;
     use tonic_health::pb::HealthCheckRequest;
     use tonic_health::pb::health_server::Health as _;
     use tonic_health::server::HealthService;
@@ -215,6 +216,13 @@ mod tests {
     /// engine signals, which must outlive the test: a closed channel reads as
     /// an engine failure.
     async fn monitor() -> (HealthMonitor, HealthService, [watch::Sender<bool>; 2]) {
+        monitor_serving_control(true).await
+    }
+
+    /// Like [`monitor`], with `vllm.Control` served only when `serves_control`.
+    async fn monitor_serving_control(
+        serves_control: bool,
+    ) -> (HealthMonitor, HealthService, [watch::Sender<bool>; 2]) {
         let (reporter, _) = tonic_health::server::health_reporter();
         let health = HealthService::from_health_reporter(reporter.clone());
         let (liveness_tx, liveness) = watch::channel(true);
@@ -223,7 +231,7 @@ mod tests {
             liveness,
             readiness,
         };
-        let monitor = HealthMonitor::register(reporter, engine, true).await;
+        let monitor = HealthMonitor::register(reporter, engine, serves_control).await;
         (monitor, health, [liveness_tx, readiness_tx])
     }
 
@@ -235,6 +243,22 @@ mod tests {
         });
         let response = health.check(request).now_or_never().expect("uncontended read");
         response.is_ok_and(|response| response.get_ref().status == ServingStatus::Serving as i32)
+    }
+
+    #[tokio::test]
+    async fn control_health_is_published_only_when_served() {
+        for serves_control in [true, false] {
+            let (_monitor, health, _engine) = monitor_serving_control(serves_control).await;
+            let request = Request::new(HealthCheckRequest {
+                service: <ControlGrpcService as NamedService>::NAME.to_string(),
+            });
+            let status = health.check(request).await.map(|response| response.get_ref().status);
+            if serves_control {
+                assert_eq!(status.unwrap(), ServingStatus::Serving as i32);
+            } else {
+                assert_eq!(status.unwrap_err().code(), tonic::Code::NotFound);
+            }
+        }
     }
 
     #[tokio::test]

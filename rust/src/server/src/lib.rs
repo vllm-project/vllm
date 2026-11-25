@@ -15,6 +15,8 @@ mod model_names;
 mod render;
 mod routes;
 mod runtime;
+#[cfg(test)]
+mod serve_tests;
 mod server_info;
 mod state;
 mod tls;

@@ -12341,7 +12341,7 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
 /// that cannot take requests right now.
 struct UnavailableLlm {
     info: LlmInfo,
-    health: tokio::sync::watch::Sender<bool>,
+    health: Arc<tokio::sync::watch::Sender<bool>>,
     readiness: tokio::sync::watch::Sender<bool>,
 }
 
@@ -12363,9 +12363,14 @@ impl UnavailableLlm {
                     enable_expert_parallel: false,
                 },
             },
-            health: tokio::sync::watch::channel(true).0,
+            health: Arc::new(tokio::sync::watch::channel(true).0),
             readiness: tokio::sync::watch::channel(false).0,
         }
+    }
+
+    /// The sender of the health this `Llm` reports.
+    fn health(&self) -> Arc<tokio::sync::watch::Sender<bool>> {
+        self.health.clone()
     }
 }
 
@@ -12405,8 +12410,9 @@ impl Llm for UnavailableLlm {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn llm_without_engine_core_serves_generation_routes_only() {
-    let chat =
-        ChatLlm::from_shared_backend(UnavailableLlm::new(), Arc::new(FakeChatBackend::new()));
+    let llm = UnavailableLlm::new();
+    let health = llm.health();
+    let chat = ChatLlm::from_shared_backend(llm, Arc::new(FakeChatBackend::new()));
     let mut app = build_router_with_gates(
         Arc::new(AppState::new(vec!["test-model".to_string()], chat)),
         RouteGates {
@@ -12453,6 +12459,25 @@ async fn llm_without_engine_core_serves_generation_routes_only() {
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let (status, body) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "test-model",
+            "messages": [{ "role": "user", "content": "hello" }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+    // `/health` follows the `Llm`.
+    health.send_replace(false);
+    let response = app
+        .clone()
+        .call(Request::builder().uri("/health").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
