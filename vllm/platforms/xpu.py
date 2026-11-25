@@ -4,9 +4,10 @@
 import contextlib
 import ctypes
 import os
+import uuid
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -22,6 +23,7 @@ from vllm.v1.attention.backends.registry import (
     register_backend,
 )
 
+from . import interface as platform_interface
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
@@ -115,7 +117,7 @@ def get_mem_info_wrapper(
 torch.accelerator.get_memory_info = get_mem_info_wrapper
 
 
-class XPUPlatform(Platform):
+class XPUPlatformBase(Platform):
     _enum = PlatformEnum.XPU
     device_name: str = "xpu"
     device_type: str = "xpu"
@@ -726,216 +728,308 @@ class XPUPlatform(Platform):
     def use_custom_op_collectives(cls) -> bool:
         return True
 
+
+def _decode_c_str(raw: bytes | str) -> str:
+    if isinstance(raw, bytes):
+        return raw.split(b"\x00", 1)[0].decode("utf-8", errors="replace").strip()
+    return raw.strip()
+
+
+# Level Zero Sysman (pyzes) utils.
+# Note that Sysman enumerates all physical devices regardless of
+# `ZE_AFFINITY_MASK`. The major benefit of using pyzes is that it queries
+# device properties, memory, and topology without initializing a SYCL/XPU
+# runtime context.
+class ZesXPUPlatform(XPUPlatformBase):
     @classmethod
-    def _load_libze(cls) -> ctypes.CDLL | None:
-        for lib_name in ("libze_loader.so.1", "libze_loader.so"):
-            try:
-                return ctypes.CDLL(lib_name)
-            except OSError:
-                continue
-        return None
-
-    @classmethod
-    def _get_level_zero_pci_bdfs(
-        cls,
-    ) -> tuple[dict[bytes, str], list[str]] | None:
-        """Query Level Zero for GPU UUID -> PCI BDF mapping and ordered BDFs."""
-        libze = cls._load_libze()
-        if libze is None:
-            return None
-
-        ze_pci_get = getattr(libze, "zeDevicePciGetPropertiesExt", None)
-        if ze_pci_get is None:
-            return None
-
-        ze_result_success = 0
-        ze_init_flag_gpu_only = 1
-        ze_structure_type_device_properties = 0x3
-        ze_structure_type_pci_ext_properties = 0x10008
-        ze_device_type_gpu = 1
-
-        class _ZeDeviceProperties(ctypes.Structure):
-            _fields_ = [
-                ("stype", ctypes.c_uint32),
-                ("pNext", ctypes.c_void_p),
-                ("type", ctypes.c_uint32),
-                ("vendorId", ctypes.c_uint32),
-                ("deviceId", ctypes.c_uint32),
-                ("flags", ctypes.c_uint32),
-                ("subdeviceId", ctypes.c_uint32),
-                ("coreClockRate", ctypes.c_uint32),
-                ("maxMemAllocSize", ctypes.c_uint64),
-                ("maxHardwareContexts", ctypes.c_uint32),
-                ("maxCommandQueuePriority", ctypes.c_uint32),
-                ("numThreadsPerEU", ctypes.c_uint32),
-                ("physicalEUSimdWidth", ctypes.c_uint32),
-                ("numEUsPerSubslice", ctypes.c_uint32),
-                ("numSubslicesPerSlice", ctypes.c_uint32),
-                ("numSlices", ctypes.c_uint32),
-                ("timerResolution", ctypes.c_uint64),
-                ("timestampValidBits", ctypes.c_uint32),
-                ("kernelTimestampValidBits", ctypes.c_uint32),
-                ("uuid", ctypes.c_ubyte * 16),
-                ("name", ctypes.c_char * 256),
-            ]
-
-        class _ZePciAddressExt(ctypes.Structure):
-            _fields_ = [
-                ("domain", ctypes.c_uint32),
-                ("bus", ctypes.c_uint32),
-                ("device", ctypes.c_uint32),
-                ("function", ctypes.c_uint32),
-            ]
-
-        class _ZePciSpeedExt(ctypes.Structure):
-            _fields_ = [
-                ("genVersion", ctypes.c_int32),
-                ("width", ctypes.c_int32),
-                ("maxBandwidth", ctypes.c_int64),
-            ]
-
-        class _ZePciExtProperties(ctypes.Structure):
-            _fields_ = [
-                ("stype", ctypes.c_uint32),
-                ("pNext", ctypes.c_void_p),
-                ("address", _ZePciAddressExt),
-                ("maxSpeed", _ZePciSpeedExt),
-            ]
-
-        libze.zeInit.argtypes = [ctypes.c_uint32]
-        libze.zeInit.restype = ctypes.c_uint32
-        libze.zeDriverGet.argtypes = [
-            ctypes.POINTER(ctypes.c_uint32),
-            ctypes.POINTER(ctypes.c_void_p),
-        ]
-        libze.zeDriverGet.restype = ctypes.c_uint32
-        libze.zeDeviceGet.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_uint32),
-            ctypes.POINTER(ctypes.c_void_p),
-        ]
-        libze.zeDeviceGet.restype = ctypes.c_uint32
-        libze.zeDeviceGetSubDevices.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_uint32),
-            ctypes.POINTER(ctypes.c_void_p),
-        ]
-        libze.zeDeviceGetSubDevices.restype = ctypes.c_uint32
-        libze.zeDeviceGetProperties.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(_ZeDeviceProperties),
-        ]
-        libze.zeDeviceGetProperties.restype = ctypes.c_uint32
-        ze_pci_get.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(_ZePciExtProperties),
-        ]
-        ze_pci_get.restype = ctypes.c_uint32
-
-        if libze.zeInit(ze_init_flag_gpu_only) != ze_result_success:
-            return None
-
+    def _get_zes_drivers(cls) -> list[Any]:
         driver_count = ctypes.c_uint32(0)
-        if libze.zeDriverGet(ctypes.byref(driver_count), None) != ze_result_success:
-            return None
-        if driver_count.value == 0:
-            return None
+        if (
+            pyzes.zesDriverGet(ctypes.byref(driver_count), None)
+            != pyzes.ZE_RESULT_SUCCESS
+            or driver_count.value == 0
+        ):
+            return []
+        drivers = (pyzes.zes_driver_handle_t * driver_count.value)()
+        if (
+            pyzes.zesDriverGet(ctypes.byref(driver_count), drivers)
+            != pyzes.ZE_RESULT_SUCCESS
+        ):
+            return []
+        return list(drivers)
 
-        drivers = (ctypes.c_void_p * driver_count.value)()
-        if libze.zeDriverGet(ctypes.byref(driver_count), drivers) != ze_result_success:
-            return None
+    @classmethod
+    def _get_zes_device_properties(cls, handle: Any) -> Any:
+        props = pyzes.zes_device_properties_t()
+        props.stype = pyzes.ZES_STRUCTURE_TYPE_DEVICE_PROPERTIES
+        props.pNext = None
+        if (
+            pyzes.zesDeviceGetProperties(handle, ctypes.byref(props))
+            != pyzes.ZE_RESULT_SUCCESS
+        ):
+            raise RuntimeError("zesDeviceGetProperties failed")
+        return props
 
-        def _query_pci_bdf(handle: ctypes.c_void_p) -> str | None:
-            pci_props = _ZePciExtProperties(
-                stype=ze_structure_type_pci_ext_properties,
-            )
-            if ze_pci_get(handle, ctypes.byref(pci_props)) != ze_result_success:
-                return None
-            addr = pci_props.address
-            return (
-                f"{addr.domain:04x}:{addr.bus:02x}:{addr.device:02x}.{addr.function:x}"
-            )
-
-        uuid_to_bdf: dict[bytes, str] = {}
-        ordered_bdfs: list[str] = []
-
-        for drv in drivers:
+    @classmethod
+    def _get_zes_gpu_handles(cls) -> list[Any]:
+        handles: list[Any] = []
+        for driver in cls._get_zes_drivers():
             dev_count = ctypes.c_uint32(0)
             if (
-                libze.zeDeviceGet(drv, ctypes.byref(dev_count), None)
-                != ze_result_success
+                pyzes.zesDeviceGet(driver, ctypes.byref(dev_count), None)
+                != pyzes.ZE_RESULT_SUCCESS
                 or dev_count.value == 0
             ):
                 continue
-            devs = (ctypes.c_void_p * dev_count.value)()
+            devs = (pyzes.zes_device_handle_t * dev_count.value)()
             if (
-                libze.zeDeviceGet(drv, ctypes.byref(dev_count), devs)
-                != ze_result_success
+                pyzes.zesDeviceGet(driver, ctypes.byref(dev_count), devs)
+                != pyzes.ZE_RESULT_SUCCESS
+            ):
+                continue
+            for dev in devs:
+                try:
+                    props = cls._get_zes_device_properties(dev)
+                except RuntimeError:
+                    continue
+                if props.core.type == pyzes.ZE_DEVICE_TYPE_GPU:
+                    handles.append(dev)
+        return handles
+
+    @classmethod
+    def _get_zes_pci_bdf(cls, handle: Any) -> str | None:
+        pci_props = pyzes.zes_pci_properties_t()
+        pci_props.stype = pyzes.ZES_STRUCTURE_TYPE_PCI_PROPERTIES
+        pci_props.pNext = None
+        if (
+            pyzes.zesDevicePciGetProperties(handle, ctypes.byref(pci_props))
+            != pyzes.ZE_RESULT_SUCCESS
+        ):
+            return None
+        addr = pci_props.address
+        return f"{addr.domain:04x}:{addr.bus:02x}:{addr.device:02x}.{addr.function:x}"
+
+    @classmethod
+    def _get_physical_zes_devices(cls) -> list[tuple[Any, int | None]]:
+        """Enumerate physical (handle, subdevice_id) entries for current hierarchy."""
+        root_handles = cls._get_zes_gpu_handles()
+        hierarchy = os.environ.get("ZE_FLAT_DEVICE_HIERARCHY", "").upper()
+        if hierarchy == "COMPOSITE":
+            return [(h, None) for h in root_handles]
+
+        devices: list[tuple[Any, int | None]] = []
+        for handle in root_handles:
+            try:
+                props = cls._get_zes_device_properties(handle)
+                num_subdevices = int(props.numSubdevices)
+            except RuntimeError:
+                num_subdevices = 0
+            if num_subdevices > 0:
+                for sub_id in range(num_subdevices):
+                    devices.append((handle, sub_id))
+            else:
+                devices.append((handle, None))
+        return devices
+
+    @classmethod
+    def _get_visible_zes_devices(cls) -> list[tuple[Any, int | None]]:
+        """Return visible (handle, subdevice_id) entries honoring ZE_AFFINITY_MASK."""
+        root_handles = cls._get_zes_gpu_handles()
+        physical_devices = cls._get_physical_zes_devices()
+        mask = os.environ.get(cls.device_control_env_var, "").strip()
+        if not mask:
+            return physical_devices
+
+        visible: list[tuple[Any, int | None]] = []
+        for token in (t.strip() for t in mask.split(",") if t.strip()):
+            if "." in token:
+                root_str, sub_str = token.split(".", 1)
+                root_idx = int(root_str)
+                sub_idx = int(sub_str)
+                visible.append((root_handles[root_idx], sub_idx))
+            elif "-" in token:
+                start_str, end_str = token.split("-", 1)
+                for idx in range(int(start_str), int(end_str) + 1):
+                    visible.append(physical_devices[idx])
+            else:
+                idx = cls.device_control_id_to_physical_device_id(token)
+                visible.append(physical_devices[idx])
+        return visible
+
+    @classmethod
+    def _resolve_zes_device(cls, device_id: int) -> tuple[Any, int | None]:
+        if platform_interface._assigned_physical_gpu_ids is not None:
+            physical_id = cls.device_id_to_physical_device_id(device_id)
+            return cls._get_physical_zes_devices()[physical_id]
+        return cls._get_visible_zes_devices()[device_id]
+
+    @classmethod
+    def device_control_id_to_physical_device_id(cls, device_id: str) -> int:
+        try:
+            return int(device_id)
+        except ValueError:
+            pass
+        if "." in device_id:
+            return int(device_id.split(".", 1)[0])
+
+        raw_uuid = uuid.UUID(device_id).bytes
+        zes_uuid = pyzes.zes_uuid_t()
+        for i, b in enumerate(raw_uuid):
+            zes_uuid.id[i] = b
+
+        handles = cls._get_zes_gpu_handles()
+        handle_ptrs = [ctypes.cast(h, ctypes.c_void_p).value for h in handles]
+        for driver in cls._get_zes_drivers():
+            dev_handle = pyzes.zes_device_handle_t()
+            on_subdevice = pyzes.ze_bool_t(0)
+            subdevice_id = ctypes.c_uint32(0)
+            res = pyzes.zesDriverGetDeviceByUuidExp(
+                driver,
+                zes_uuid,
+                ctypes.byref(dev_handle),
+                ctypes.byref(on_subdevice),
+                ctypes.byref(subdevice_id),
+            )
+            if res == pyzes.ZE_RESULT_SUCCESS:
+                ptr = ctypes.cast(dev_handle, ctypes.c_void_p).value
+                if ptr in handle_ptrs:
+                    return handle_ptrs.index(ptr)
+        raise ValueError(f"Could not resolve XPU device_id {device_id!r} via pyzes")
+
+    @classmethod
+    def device_count(cls) -> int:
+        return len(cls._get_visible_zes_devices())
+
+    @classmethod
+    def get_device_name(cls, device_id: int = 0) -> str:
+        handle, _ = cls._resolve_zes_device(device_id)
+        props = cls._get_zes_device_properties(handle)
+        return _decode_c_str(props.core.name) or _decode_c_str(props.modelName)
+
+    @classmethod
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        handle, subdevice_id = cls._resolve_zes_device(device_id)
+        if subdevice_id is not None:
+            sub_count = ctypes.c_uint32(0)
+            if (
+                pyzes.zesDeviceGetSubDevicePropertiesExp(
+                    handle, ctypes.byref(sub_count), None
+                )
+                == pyzes.ZE_RESULT_SUCCESS
+                and sub_count.value > 0
+            ):
+                sub_props = (pyzes.zes_subdevice_exp_properties_t * sub_count.value)()
+                for p in sub_props:
+                    p.stype = pyzes.ZES_STRUCTURE_TYPE_SUBDEVICE_EXP_PROPERTIES
+                    p.pNext = None
+                if (
+                    pyzes.zesDeviceGetSubDevicePropertiesExp(
+                        handle, ctypes.byref(sub_count), sub_props
+                    )
+                    == pyzes.ZE_RESULT_SUCCESS
+                ):
+                    for p in sub_props:
+                        if p.subdeviceId == subdevice_id:
+                            return str(uuid.UUID(bytes=bytes(p.uuid.id)))
+
+        props = cls._get_zes_device_properties(handle)
+        return str(uuid.UUID(bytes=bytes(props.core.uuid.id)))
+
+    @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        handle, subdevice_id = cls._resolve_zes_device(device_id)
+        mem_count = ctypes.c_uint32(0)
+        if (
+            pyzes.zesDeviceEnumMemoryModules(handle, ctypes.byref(mem_count), None)
+            != pyzes.ZE_RESULT_SUCCESS
+            or mem_count.value == 0
+        ):
+            return super().get_device_total_memory(device_id)
+
+        mem_handles = (pyzes.zes_mem_handle_t * mem_count.value)()
+        if (
+            pyzes.zesDeviceEnumMemoryModules(
+                handle, ctypes.byref(mem_count), mem_handles
+            )
+            != pyzes.ZE_RESULT_SUCCESS
+        ):
+            return super().get_device_total_memory(device_id)
+
+        total_bytes = 0
+        for mem_handle in mem_handles:
+            mem_props = pyzes.zes_mem_properties_t()
+            mem_props.stype = pyzes.ZES_STRUCTURE_TYPE_MEM_PROPERTIES
+            mem_props.pNext = None
+            if (
+                pyzes.zesMemoryGetProperties(mem_handle, ctypes.byref(mem_props))
+                != pyzes.ZE_RESULT_SUCCESS
+            ):
+                continue
+            if mem_props.location != pyzes.ZES_MEM_LOC_DEVICE:
+                continue
+            if (
+                subdevice_id is not None
+                and mem_props.onSubdevice
+                and mem_props.subdeviceId != subdevice_id
             ):
                 continue
 
-            for dev in devs:
-                dev_props = _ZeDeviceProperties(
-                    stype=ze_structure_type_device_properties,
-                )
-                if (
-                    libze.zeDeviceGetProperties(dev, ctypes.byref(dev_props))
-                    != ze_result_success
-                    or dev_props.type != ze_device_type_gpu
-                ):
-                    continue
+            mem_state = pyzes.zes_mem_state_t()
+            mem_state.stype = pyzes.ZES_STRUCTURE_TYPE_MEM_STATE
+            mem_state.pNext = None
+            if (
+                pyzes.zesMemoryGetState(mem_handle, ctypes.byref(mem_state))
+                == pyzes.ZE_RESULT_SUCCESS
+                and mem_state.size > 0
+            ):
+                total_bytes += int(mem_state.size)
+            elif mem_props.physicalSize > 0:
+                total_bytes += int(mem_props.physicalSize)
 
-                bdf = _query_pci_bdf(dev)
-                if bdf is not None:
-                    uuid_to_bdf[bytes(dev_props.uuid)] = bdf
-                    ordered_bdfs.append(bdf)
-
-                sub_count = ctypes.c_uint32(0)
-                if (
-                    libze.zeDeviceGetSubDevices(dev, ctypes.byref(sub_count), None)
-                    == ze_result_success
-                    and sub_count.value > 0
-                ):
-                    sub_devs = (ctypes.c_void_p * sub_count.value)()
-                    if (
-                        libze.zeDeviceGetSubDevices(
-                            dev, ctypes.byref(sub_count), sub_devs
-                        )
-                        == ze_result_success
-                    ):
-                        for sub_dev in sub_devs:
-                            sub_props = _ZeDeviceProperties(
-                                stype=ze_structure_type_device_properties,
-                            )
-                            if (
-                                libze.zeDeviceGetProperties(
-                                    sub_dev, ctypes.byref(sub_props)
-                                )
-                                != ze_result_success
-                            ):
-                                continue
-                            sub_bdf = _query_pci_bdf(sub_dev) or bdf
-                            if sub_bdf is not None:
-                                uuid_to_bdf[bytes(sub_props.uuid)] = sub_bdf
-
-        return uuid_to_bdf, ordered_bdfs
+        if total_bytes > 0:
+            return total_bytes
+        return super().get_device_total_memory(device_id)
 
     @classmethod
-    def _get_numa_node_for_pci_bdf(cls, bdf: str) -> int | None:
-        numa_node_path = Path(f"/sys/bus/pci/devices/{bdf}/numa_node")
-        try:
-            numa_node = int(numa_node_path.read_text().strip())
-        except (OSError, ValueError):
-            return None
-        return numa_node if numa_node >= 0 else None
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        handle, _ = cls._resolve_zes_device(device_id)
+        props = cls._get_zes_device_properties(handle)
+        core = props.core
+        eus = (
+            int(core.numSlices)
+            * int(core.numSubslicesPerSlice)
+            * int(core.numEUsPerSubslice)
+        )
+        if eus > 0:
+            return eus
+        return super().num_compute_units(device_id)
+
+    @classmethod
+    def get_all_gpu_pci_bus_ids(cls) -> dict[int, str]:
+        """Query pyzes for physical GPU index -> PCI bus ID mapping."""
+        out: dict[int, str] = {}
+        for idx, handle in enumerate(cls._get_zes_gpu_handles()):
+            bdf = cls._get_zes_pci_bdf(handle)
+            if bdf is not None:
+                out[idx] = bdf
+        if not out:
+            raise RuntimeError("pyzes returned no GPU PCI bus ID rows")
+        return out
 
     @classmethod
     def get_device_numa_node(cls, device_id: int = 0) -> int | None:
         """Get the NUMA node ID for a visible XPU device."""
-        numa_nodes = cls.get_all_device_numa_nodes()
-        if numa_nodes is None or not (0 <= device_id < len(numa_nodes)):
+        try:
+            handle, _ = cls._resolve_zes_device(device_id)
+            bdf = cls._get_zes_pci_bdf(handle)
+            if bdf is None:
+                return None
+            numa_node_path = Path(f"/sys/bus/pci/devices/{bdf}/numa_node")
+            numa_node = int(numa_node_path.read_text().strip())
+            return numa_node if numa_node >= 0 else None
+        except Exception as e:
+            logger.warning("Failed to get NUMA node for XPU %d: %s", device_id, e)
             return None
-        return numa_nodes[device_id]
 
     @classmethod
     def get_all_device_numa_nodes(cls) -> list[int] | None:
@@ -944,41 +1038,14 @@ class XPUPlatform(Platform):
             device_count = cls.device_count()
             if device_count <= 0:
                 return None
-
-            lz_result = cls._get_level_zero_pci_bdfs()
-            if lz_result is None:
-                logger.warning(
-                    "Could not query XPU PCI topology via Level Zero, "
-                    "disabling automatic NUMA binding"
-                )
-                return None
-            uuid_to_bdf, ordered_bdfs = lz_result
-
             numa_nodes: list[int] = []
             for device_id in range(device_count):
-                bdf: str | None = None
-                props = torch.xpu.get_device_properties(device_id)
-                uuid_obj = getattr(props, "uuid", None)
-                if uuid_obj is not None:
-                    uuid_bytes = bytes(uuid_obj.bytes)
-                    bdf = uuid_to_bdf.get(uuid_bytes)
-                if bdf is None and device_id < len(ordered_bdfs):
-                    bdf = ordered_bdfs[device_id]
-                if bdf is None:
-                    logger.warning(
-                        "Could not detect PCI address for XPU %d, "
-                        "disabling automatic NUMA binding",
-                        device_id,
-                    )
-                    return None
-
-                numa_node = cls._get_numa_node_for_pci_bdf(bdf)
+                numa_node = cls.get_device_numa_node(device_id)
                 if numa_node is None:
                     logger.warning(
-                        "Could not detect NUMA node for XPU %d (PCI %s), "
+                        "Could not detect NUMA node for XPU %d, "
                         "disabling automatic NUMA binding",
                         device_id,
-                        bdf,
                     )
                     return None
                 numa_nodes.append(numa_node)
@@ -986,3 +1053,33 @@ class XPUPlatform(Platform):
         except Exception as e:
             logger.warning("Failed to get NUMA nodes for XPUs: %s", e)
             return None
+
+
+class NonZesXPUPlatform(XPUPlatformBase):
+    @classmethod
+    def get_device_numa_node(cls, device_id: int = 0) -> int | None:
+        return None
+
+    @classmethod
+    def get_all_device_numa_nodes(cls) -> list[int] | None:
+        return None
+
+
+# Autodetect either pyzes-enabled or non-pyzes XPU platform
+# based on whether Level Zero Sysman (pyzes) is available.
+zes_available = False
+try:
+    import pyzes
+
+    if pyzes.zesInit(0) == pyzes.ZE_RESULT_SUCCESS:
+        _driver_count = ctypes.c_uint32(0)
+        if (
+            pyzes.zesDriverGet(ctypes.byref(_driver_count), None)
+            == pyzes.ZE_RESULT_SUCCESS
+            and _driver_count.value > 0
+        ):
+            zes_available = True
+except Exception:
+    zes_available = False
+
+XPUPlatform = ZesXPUPlatform if zes_available else NonZesXPUPlatform
