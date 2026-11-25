@@ -244,6 +244,36 @@ class SchedulerConfig:
     already-admitted prompt, so a long prompt can take up to N times as many
     steps to finish prefilling."""
 
+    prefill_hold_ttft_target: float | None = Field(default=None, gt=0)
+    """Hold prefills while running decodes, with this TTFT target in seconds
+    (5 is a reasonable start). None (the default) disables it.
+
+    Every step that prefills slows the decodes running in it. With this set,
+    prefills are held using an online non-negative step-cost model
+    (`F + a * M + b * S`, reducing to `F + a * M` on a single engine) and
+    Online Ski-Rental against the amortizable waste. With DP attention + EP all
+    ranks step in lockstep, so a prefill on any rank slows the step for all of
+    them; there, all ranks hold or release together. A request is held only
+    while it can still meet the target given the releases it needs; a waiting
+    request that has already missed the target is held at most this long at a
+    time.
+
+    Every request weighs the same: with the "priority" `policy`, a
+    high-priority request is held as long as any other. With MoE data
+    parallelism, enabling this performs a per-step DP CPU all-reduce
+    (overriding `dp_sync_interval`), which may add latency on high-latency
+    multi-node networks with very short decode steps. The step cost model is
+    calibrated for text prefills; multimodal vision encoder time is not modeled
+    separately. Cannot be combined with `prefill_schedule_interval`. Has no
+    effect on the prefill-only and decode-only instances of disaggregated
+    serving."""
+
+    prefill_hold_ttft_weight: float = Field(default=1.0, gt=0)
+    """Weight of waiting requests' TTFT against running decodes' stall time for
+    `prefill_hold_ttft_target`. At 1.0 (the default), the hold targets
+    end-to-end latency. Higher values hold less (favouring TTFT, including at
+    low arrival rates); lower values hold longer (favouring ITL)."""
+
     cache_aware_admission_window: int = Field(default=0, ge=0)
     """Look-ahead window for cache-aware admission. Within the first N waiting
     requests, those whose prefix is already in the KV cache are admitted ahead
@@ -358,6 +388,8 @@ class SchedulerConfig:
             "scheduler_reserve_full_isl",
             "watermark",
             "prefill_schedule_interval",
+            "prefill_hold_ttft_target",
+            "prefill_hold_ttft_weight",
             "async_scheduling",
             "stream_interval",
         }
@@ -388,6 +420,15 @@ class SchedulerConfig:
             logger.info_once(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
                 self.max_num_batched_tokens,
+            )
+
+        if (
+            self.prefill_hold_ttft_target is not None
+            and self.prefill_schedule_interval > 1
+        ):
+            raise ValueError(
+                "prefill_hold_ttft_target cannot be combined with "
+                "prefill_schedule_interval > 1."
             )
 
         self.verify_max_model_len(max_model_len)

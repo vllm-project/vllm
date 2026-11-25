@@ -13,6 +13,7 @@ steps:
   - vllm/distributed
   - vllm/v1/attention/ops/cp_common.py
   - "!vllm/distributed/kv_transfer/"
+  - vllm/config/parallel.py
   - tests/distributed
   commands:
   - pytest -v -s distributed/test_localization.py
