@@ -39,6 +39,13 @@ triton_w4a16_skinny_fmt_gemm = hybrid_module.triton_w4a16_skinny_fmt_gemm
 _select_skinny_gfx1151_config = hybrid_module._select_skinny_gfx1151_config
 
 
+def test_max_fast_rows_matches_dispatch_limit(monkeypatch):
+    """The lm_head fallback must use the kernel's current row limit."""
+    monkeypatch.setattr(hybrid_module, "_on_gfx115x", lambda: True)
+    monkeypatch.setattr(hybrid_module, "_max_skinny_batch_size", lambda: 8)
+    assert RDNAHybridW4A16LinearKernel.max_fast_rows(None) == 8
+
+
 # ---------------------------------------------------------------------------
 # Reference implementation
 # ---------------------------------------------------------------------------

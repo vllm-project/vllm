@@ -847,11 +847,12 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
 
     @classmethod
     def max_fast_rows(cls, c: MPLinearLayerConfig) -> int | None:
-        # The rows `_rdna_hybrid_w4a16_apply_impl` sends to the HIP skinny GEMM.
+        # Keep this cutoff identical to `_rdna_hybrid_w4a16_apply_impl`.
+        max_rows = _max_skinny_batch_size()
         if _on_gfx115x():
-            return MAX_SKINNY_BATCH_SIZE
+            return max_rows
         K = c.partition_weight_shape[0]
-        return min(MAX_SKINNY_BATCH_SIZE, MEDIUM_SKINNY_LIMIT_ELEMENTS // K)
+        return min(max_rows, MEDIUM_SKINNY_LIMIT_ELEMENTS // K)
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
