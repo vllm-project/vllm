@@ -232,6 +232,14 @@ class EPLBConfig:
       on CUDA, falls back to "torch_gloo")
     """
 
+    min_rearrange_gain: float = Field(default=0.05, ge=0.0, lt=1.0)
+    """ROCm, synchronous EPLB only: skip a rearrangement when the proposed
+    placement lowers the rank load imbalance (max / mean over the load window,
+    summed over all MoE layers) by less than this fraction. Summed over a window
+    and all layers, real traffic is usually within a few percent of balanced
+    (each layer's hot ranks differ), so the default skips most rearrangements.
+    Set to 0 to always apply the new placement."""
+
     enable_migration_batching: bool = False
     """Schedule expert migrations in batches where each rank communicates with
     at most one peer. This reduces per-rank network contention at the cost of
