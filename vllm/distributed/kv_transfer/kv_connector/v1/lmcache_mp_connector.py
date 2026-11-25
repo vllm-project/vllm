@@ -5,7 +5,8 @@
 Synced from `lmcache/integration/vllm/lmcache_mp_connector.py` at LMCache
 v0.5.8. Apart from changes for vLLM's linters, it differs only in passing the
 KV cache groups, not the `KVCacheConfig`, to
-`VllmConfig.adjust_dcp_kv_cache_interleave_size`.
+`VllmConfig.adjust_dcp_kv_cache_interleave_size`, and in not reading
+`CachedRequestData.resumed_req_ids`, which this vLLM no longer has.
 
 `LMCacheMPConnector` at the bottom of this module prefers the connector the
 installed `lmcache` package ships and falls back to this one.
@@ -193,32 +194,15 @@ def _convert_kv_event_hash(block_hash: bytes | int | None) -> bytes | int | None
 
 # Helper functions
 def _has_preemption_reqs(scheduler_output: SchedulerOutput) -> bool:
-    """Return whether the scheduler output contains preemption-related requests.
-
-    Checks for the presence of resumed or preempted requests in the
-    scheduler output.
-
-    A preemption is detected if:
-    - `scheduled_cached_reqs.resumed_req_ids`: Requests resumed from
-      preemption this step.
-    - `scheduler_output.preempted_req_ids`: Requests preempted this step.
+    """Return whether any request was preempted this step.
 
     Args:
         scheduler_output: The vLLM scheduler output for this step.
 
     Returns:
-        True if preemption-related requests exist, False otherwise.
+        True if `scheduler_output.preempted_req_ids` is non-empty.
 
     """
-    cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
-
-    # Primary signal: requests resumed from preemption this step.
-    resumed_ids = getattr(cached_reqs, "resumed_req_ids", None)
-    if resumed_ids:
-        logger.warning("<preempted> by resumed requests: %s", resumed_ids)
-        return True
-
-    # Primary signal: requests preempted this step.
     preempted_ids = getattr(scheduler_output, "preempted_req_ids", None)
     if preempted_ids:
         logger.warning("<preempted> by preempted requests: %s", preempted_ids)
@@ -2039,17 +2023,14 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1, SupportsHMA):
         lmcache_tokens_per_chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
-        # vLLM MRV2 readmits resumed requests as full new requests.
-        resumed_ids = getattr(cached_reqs, "resumed_req_ids", ())
         for idx, request_id in enumerate(cached_reqs.req_ids):
             request_tracker = self._get_request_tracker(request_id)
 
             # Update block ids
             new_block_ids = cached_reqs.new_block_ids[idx] or ()
-            if request_id not in resumed_ids:
-                request_tracker.append_block_ids(
-                    new_block_ids, self._mamba_relocation_window
-                )
+            request_tracker.append_block_ids(
+                new_block_ids, self._mamba_relocation_window
+            )
 
             # Use the incremental num_scheduled_tokens to
             # stay consistent with _process_new_requests.
