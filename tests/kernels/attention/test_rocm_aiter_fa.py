@@ -1364,3 +1364,96 @@ def test_aiter_fa_metadata_build_does_not_sync(sliding_window):
     if sliding_window is not None:
         assert chunks.swa_metadata is not None
         assert chunks.swa_metadata.swa_total_tokens == 32 + (16 - 1) + 1
+
+
+@pytest.mark.parametrize("sliding_window", [None, 16])
+def test_aiter_fa_metadata_build_spec_decode_rows_stay_decodes(sliding_window):
+    """With speculative decoding, a verification row of 1 + num_speculative_tokens
+    tokens is a decode, and its overstated CPU bound must not reach the extend
+    or prefill lengths. The reorder threshold comes from the speculative config,
+    so a row of this length is only a decode when the config is set."""
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_standard_kv_cache_spec,
+        create_vllm_config,
+    )
+    from vllm.config import SpeculativeConfig, set_current_vllm_config
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionBackend,
+        AiterFlashAttentionMetadataBuilder,
+    )
+
+    _assert_aiter_supported()
+    num_speculative_tokens = 3
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B",
+        dtype="bfloat16",
+        max_num_batched_tokens=1024,
+    )
+    # ngram needs no draft model; the threshold becomes 1 + num_speculative_tokens.
+    config.speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=num_speculative_tokens,
+    )
+    num_heads = config.model_config.get_num_attention_heads(config.parallel_config)
+    num_kv_heads = config.model_config.get_num_kv_heads(config.parallel_config)
+    head_size = config.model_config.get_head_size()
+    with set_current_vllm_config(config):
+        Attention(
+            num_heads,
+            head_size,
+            head_size**-0.5,
+            num_kv_heads,
+            cache_config=config.cache_config,
+            per_layer_sliding_window=sliding_window,
+            prefix="layer",
+            attn_backend=AiterFlashAttentionBackend,
+        )
+        builder = AiterFlashAttentionMetadataBuilder(
+            create_standard_kv_cache_spec(config),
+            ["layer"],
+            config,
+            torch.device("cuda"),
+        )
+    assert builder.reorder_batch_threshold == 1 + num_speculative_tokens
+    # One verification row (1 + 3 drafts), one extend over cached context and
+    # one prefill.
+    batch_spec = BatchSpec(
+        seq_lens=[48, 80, 24],
+        query_lens=[1 + num_speculative_tokens, 32, 24],
+    )
+    common = create_common_attn_metadata(
+        batch_spec, BLOCK_SIZE, torch.device("cuda"), max_block_idx=32
+    )
+    # Async speculative decoding overstates the CPU bound on verification rows.
+    assert common.seq_lens_cpu_upper_bound is not None
+    common.seq_lens_cpu_upper_bound[0] += 100
+
+    # Fails the test if build() blocks the CPU waiting on queued GPU work.
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        metadata = builder.build(0, common)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+
+    # The verification row stays a decode; it is not split off as an extend.
+    assert (metadata.num_decodes, metadata.num_extends, metadata.num_prefills) == (
+        1,
+        1,
+        1,
+    )
+    assert metadata.decode_metadata is not None
+    assert metadata.decode_metadata.max_query_len == 1 + num_speculative_tokens
+    # The overstated decode bound did not leak into the extend or prefill rows.
+    assert metadata.extend_metadata is not None
+    assert metadata.prefill_metadata is not None
+    assert metadata.extend_metadata.max_seq_len == 80
+    assert metadata.prefill_metadata.max_seq_len == 24
+    # The extend row gathers its 80 - 32 cached tokens, exactly.
+    chunks = metadata.extend_metadata.chunk_context_metadata
+    assert chunks.total_token_per_batch == [48]
+    if sliding_window is not None:
+        assert chunks.swa_metadata is not None
+        assert chunks.swa_metadata.swa_total_tokens == 32 + (16 - 1) + 1
