@@ -521,10 +521,17 @@ class Qwen4ExpModel(nn.Module):
             self._mtp_hidden_buffer = None
 
     def process_weights_after_loading(self) -> None:
-        for buffer in (self.topk_indices_buffer, self._mtp_hidden_buffer):
+        buffers = (self.topk_indices_buffer, self._mtp_hidden_buffer)
+        if all(buffer is None or not buffer.is_meta for buffer in buffers):
+            return
+        # A PP stage may have no resident weights. Pinned PLE tables live on CPU.
+        device = next((p.device for p in self.parameters() if p.is_cuda), None)
+        if device is None:
+            return
+        for buffer in buffers:
             if buffer is not None and buffer.is_meta:
                 torch.utils.swap_tensors(
-                    buffer, torch.empty_like(buffer, device="cuda")
+                    buffer, torch.empty_like(buffer, device=device)
                 )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -1084,7 +1091,7 @@ class Qwen4ExpForConditionalGeneration(
     def process_weights_after_loading(self) -> None:
         if self.use_deepstack and self.deepstack_input_embeds[0].is_meta:
             self.deepstack_input_embeds = [
-                torch.zeros_like(embed, device="cuda")
+                torch.zeros_like(embed, device=self.visual.device)
                 for embed in self.deepstack_input_embeds
             ]
 
