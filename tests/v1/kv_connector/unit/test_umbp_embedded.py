@@ -880,10 +880,12 @@ def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, load_fail
     runtime = install_memory_runtime(monkeypatch)
     kv_cache_config = _kv_cache_config()
     (group,) = kv_cache_config.kv_cache_groups
+    spec = group.kv_cache_specs["layer2"]
+    assert isinstance(spec, AttentionSpec)
     # Mixed precision makes core zero new blocks.
     mixed_specs = {
         "layer1": group.kv_cache_specs["layer1"],
-        "layer2": replace(group.kv_cache_specs["layer2"], dtype=torch.bfloat16),
+        "layer2": replace(spec, dtype=torch.bfloat16),
     }
     kv_cache_config = replace(
         kv_cache_config, kv_cache_groups=[replace(group, kv_cache_specs=mixed_specs)]
