@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import heapq
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
 
 from typing_extensions import override
 
@@ -14,13 +13,6 @@ from vllm.v1.kv_offload.cpu.policies.base import (
 )
 
 _HeapEntry = tuple[tuple[int, int], OffloadKey]
-
-
-@dataclass(slots=True)
-class _RequestRank:
-    owner: object
-    cache_generation: int
-    rank: int
 
 
 class LRUCachePolicy(CachePolicy):
@@ -46,19 +38,15 @@ class LRUCachePolicy(CachePolicy):
         self._evictable: set[OffloadKey] = set()
         self._heap: list[_HeapEntry] = []
         self._next_rank = 0
-        self._cache_generation = 0
+        # Provisional rank of each unfinished request, by req_id.
+        self._request_ranks: dict[str, int] = {}
 
     def _get_request_rank(self, req_context: ReqContext) -> int:
-        state = req_context.get_state(_RequestRank)
-        if (
-            state is None
-            or state.owner is not self
-            or state.cache_generation != self._cache_generation
-        ):
+        rank = self._request_ranks.get(req_context.req_id)
+        if rank is None:
             self._next_rank += 1
-            state = _RequestRank(self, self._cache_generation, self._next_rank)
-            req_context.set_state(state)
-        return state.rank
+            rank = self._request_ranks[req_context.req_id] = self._next_rank
+        return rank
 
     def _assign_new_rank(self, key: OffloadKey) -> bool:
         if key not in self.chunks:
@@ -156,6 +144,7 @@ class LRUCachePolicy(CachePolicy):
         req_context: ReqContext,
     ) -> None:
         del insertion_only_keys, reused_keys
+        self._request_ranks.pop(req_context.req_id, None)
         self._update_recency(reversed(order_request_keys(key_groups, req_context)))
 
     @override
@@ -165,7 +154,7 @@ class LRUCachePolicy(CachePolicy):
         self._evictable.clear()
         self._heap.clear()
         self._next_rank = 0
-        self._cache_generation += 1
+        self._request_ranks.clear()
 
     @override
     def evict(

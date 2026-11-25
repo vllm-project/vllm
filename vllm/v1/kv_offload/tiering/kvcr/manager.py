@@ -599,7 +599,10 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             positions = job.req_context._offload_key_positions
             end_token = max((positions.get(key, -1) for key in job.keys), default=-1)
             # Preserve ordering across requests, which may share prefix keys.
-            if completed_prefixes and completed_prefixes[-1][0] is job.req_context:
+            if (
+                completed_prefixes
+                and completed_prefixes[-1][0].req_id == job.req_context.req_id
+            ):
                 end_token = max(end_token, completed_prefixes.pop()[1])
             completed_prefixes.append((job.req_context, end_token))
             results.append(

@@ -1581,6 +1581,22 @@ def test_store_threshold_counts_a_key_once_per_request(store_threshold: int):
     assert manager.counts[cold] == 2
 
 
+def test_store_threshold_counts_again_for_a_reused_request_id():
+    """A finished request's per-request state is gone, so a later request
+    with the same id counts its offers again."""
+    manager = make_cpu_manager(num_chunks=4, store_threshold=2)
+    key = to_key(1)
+    first = make_req_context("req")
+    manager.prepare_store([key], first, trigger=StoreTrigger.ON_COMPUTE)
+    manager.on_request_finished(first)
+
+    output = manager.prepare_store(
+        [key], make_req_context("req"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert output.keys_to_store == [key]
+
+
 def test_evictable_cache_chunk_count(monkeypatch):
     """Verifies _num_evictable_cache_chunks is maintained correctly through the
     full store/load lifecycle, eviction, failed stores, concurrent loads,
@@ -2344,6 +2360,29 @@ def test_arc_request_finishing_after_reset_ignores_pre_reset_chunks():
     assert manager.lookup(other_key, other) is LookupResult.HIT
 
 
+def test_arc_reused_request_id_starts_with_clean_running_state():
+    manager = make_cpu_manager(num_chunks=2, cache_policy="arc")
+    first_key, second_key = to_keys([1, 2])
+    first = make_req_context("req")
+    first.set_offload_key_position(first_key, 16)
+    assert (
+        manager.prepare_store([first_key], first, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([first_key], first, trigger=StoreTrigger.ON_COMPUTE)
+    manager.on_request_finished(first)
+
+    second = make_req_context("req")
+    second.set_offload_key_position(second_key, 32)
+    assert (
+        manager.prepare_store([second_key], second, trigger=StoreTrigger.ON_COMPUTE)
+        is not None
+    )
+    manager.complete_store([second_key], second, trigger=StoreTrigger.ON_COMPUTE)
+    manager.on_request_finished(second)
+    assert manager.lookup(second_key, second) is LookupResult.HIT
+
+
 def test_lru_failed_store_retry_preserves_prefix_order():
     manager = make_cpu_manager(num_chunks=2)
     ctx = make_req_context("retry")
@@ -2397,6 +2436,36 @@ def test_lru_reset_discards_unfinished_request_recency():
     )
     assert output is not None
     assert output.evicted_keys == [other_key]
+
+
+def test_lru_reused_request_id_gets_a_new_rank():
+    manager = make_cpu_manager(num_chunks=2)
+    first = make_req_context("req")
+    old_key, finished_key, running_key = to_keys([1, 2, 3])
+    for ctx, key in ((first, old_key), (make_req_context("other"), finished_key)):
+        ctx.set_offload_key_position(key, 16)
+        assert (
+            manager.prepare_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        manager.complete_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE)
+        manager.on_request_finished(ctx)
+
+    # Still running, so it ranks newer than the finished request.
+    running = make_req_context("req")
+    running.set_offload_key_position(running_key, 16)
+    output = manager.prepare_store(
+        [running_key], running, trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert output.evicted_keys == [old_key]
+    manager.complete_store([running_key], running, trigger=StoreTrigger.ON_COMPUTE)
+
+    output = manager.prepare_store(
+        [to_key(4)], make_req_context("new"), trigger=StoreTrigger.ON_COMPUTE
+    )
+    assert output is not None
+    assert output.evicted_keys == [finished_key]
 
 
 def test_older_lru_request_does_not_demote_a_newer_shared_access():
