@@ -47,6 +47,7 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import copy_weight_, set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import is_flashinfer_cutedsl_bf16_gemm_supported
 
 logger = init_logger(__name__)
 
@@ -176,6 +177,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
         linear_backend = (
             config.kernel_config.linear_backend if config is not None else "auto"
         )
+        # auto: FlashInfer CuTe-DSL for BF16 GEMMs with M <= 32, torch above.
+        if linear_backend == "auto" and is_flashinfer_cutedsl_bf16_gemm_supported():
+            linear_backend = "flashinfer_cutedsl"
         self._gemm_impl = dispatch_unquantized_gemm(linear_backend)
 
     def create_weights(
