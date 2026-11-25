@@ -8,9 +8,11 @@ import pytest
 import torch
 from PIL import Image
 
+from vllm.config import SchedulerConfig, VllmConfig
 from vllm.model_executor.models.minicpmv import MiniCPMVProcessingInfo
 from vllm.model_executor.models.minicpmv4_6 import MiniCPMV4_6ProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.parse import ImageSize
 
 from ...utils import build_model_context
@@ -207,32 +209,47 @@ def test_minicpmv4_6_image_budget_covers_largest_image(
     assert _padded_patches(dummy, "image") >= _padded_patches(processed, "image")
 
 
-def test_minicpmv4_6_video_budget_covers_largest_frames():
+@pytest.mark.parametrize(
+    ("max_num_batched_tokens", "encoder_budget"), [(2048, 11520), (16384, 16384)]
+)
+def test_minicpmv4_6_video_profile_covers_largest_scheduled_video(
+    max_num_batched_tokens: int, encoder_budget: int
+):
+    max_model_len = 32768
     ctx = build_model_context(
         "openbmb/MiniCPM-V-4_6",
+        model_config_kwargs={"max_model_len": max_model_len},
         limit_mm_per_prompt={"image": 0, "video": 1},
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-    info = processor.info
-    assert isinstance(info, MiniCPMV4_6ProcessingInfo)
-    seq_len = ctx.model_config.max_model_len
-    max_tokens = info.get_mm_max_tokens_per_item(
-        seq_len=seq_len, mm_counts={"video": 1}
+    scheduler_config = SchedulerConfig(
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max_num_batched_tokens,
+        is_encoder_decoder=False,
     )
-    assert max_tokens is not None
-    budget = max_tokens["video"]
-    num_frames = info.get_num_frames_with_most_features(seq_len, 1)
-    dummy = processor.get_dummy_mm_inputs({"video": 1})
+    budget = MultiModalBudget(
+        VllmConfig(model_config=ctx.model_config, scheduler_config=scheduler_config),
+        MULTIMODAL_REGISTRY,
+        enable_cache=False,
+    )
+    processor = budget.processor
+    assert isinstance(processor.info, MiniCPMV4_6ProcessingInfo)
+    profiled = 0
+    for _, item in budget.get_dummy_encoder_profile_inputs():
+        num_slices, _, patch, width = item.get_data()["video_pixel_values"].shape
+        profiled += num_slices * width // patch
 
-    assert budget == num_frames * 720
-    assert sum(p.get_num_embeds() for p in dummy["mm_placeholders"]["video"]) <= budget
-    assert _num_video_embeds(processor, _video_item(num_frames, 1265, 1112)) == budget
-    thin_frames = budget // _num_video_embeds(processor, _video_item(1, 7566, 266))
-    for frames, width, height in ((num_frames, 1265, 1112), (thin_frames, 7566, 266)):
+    assert budget.mm_max_toks_per_item["video"] == _num_video_embeds(
+        processor, _video_item(16, 1265, 1112)
+    )
+    assert budget.get_encoder_budget() == encoder_budget
+    thin_frames = encoder_budget // _num_video_embeds(
+        processor, _video_item(1, 7566, 266)
+    )
+    for frames, width, height in ((16, 1265, 1112), (thin_frames, 7566, 266)):
         video = _process_video(processor, _video_item(frames, width, height))
         num_embeds = sum(p.get_num_embeds() for p in video["mm_placeholders"]["video"])
-        assert num_embeds <= budget
-        assert _padded_patches(dummy, "video") >= _padded_patches(video, "video")
+        assert num_embeds <= encoder_budget
+        assert profiled >= _padded_patches(video, "video")
 
 
 @pytest.mark.parametrize(

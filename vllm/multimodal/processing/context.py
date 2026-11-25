@@ -810,3 +810,10 @@ class BaseProcessingInfo:
 
         """
         return None
+
+    def get_dummy_seq_len(
+        self,
+        seq_len: int,
+        max_encoder_tokens: int | None = None,
+    ) -> int:
+        return seq_len

@@ -774,7 +774,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
                 seq_len // num_videos, _MAX_FRAMES_PER_VIDEO, [canvas]
             )
         video_options = self.ctx.get_mm_config().limit_per_prompt.get("video")
-        max_tokens = self.get_max_video_tokens(seq_len, mm_counts)
+        max_tokens = seq_len // num_videos
         sizes = [*self._hinted_video_sizes_by_tokens.values()]
         if self._get_size_hint("video") == (None, None):
             sizes += self._get_thin_sizes("video")
@@ -784,6 +784,15 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             sizes,
             padded=True,
         )
+
+    def get_dummy_seq_len(
+        self,
+        seq_len: int,
+        max_encoder_tokens: int | None = None,
+    ) -> int:
+        if max_encoder_tokens is None:
+            max_encoder_tokens = self.get_max_video_tokens(seq_len, {"video": 1})
+        return min(seq_len, max_encoder_tokens)
 
     def get_max_video_tokens(
         self,

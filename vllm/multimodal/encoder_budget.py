@@ -204,10 +204,14 @@ class MultiModalBudget:
         if max_items_per_batch is None:
             max_items_per_batch = self.mm_max_items_per_batch[modality]
 
+        num_profile_items = max(self.mm_max_items_per_batch[modality], 1)
         # Don't use `max_items_per_batch` here to avoid redundant computation
         dummy_mm_inputs = self.processor.get_dummy_mm_inputs(
             mm_counts={modality: 1},
             cache=self.cache,
+            seq_len=self.processor.info.get_dummy_seq_len(
+                self.max_model_len, self.get_encoder_budget() // num_profile_items
+            ),
         )
         dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
 
