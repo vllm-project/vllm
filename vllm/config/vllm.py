@@ -3874,11 +3874,6 @@ class VllmConfig:
                 "SM100-class, uses the HMMA kernel, which supports only MTP with "
                 f"3 or 7 speculative tokens; got {self.num_speculative_tokens}"
             )
-        if self.mamba_config.enable_stochastic_rounding:
-            raise ValueError(
-                "FlashInfer GDN ReplaySSM does not support "
-                "--enable-mamba-cache-stochastic-rounding"
-            )
         # Replay rings and cursors are not part of the pipeline, microbatch, or
         # KV-connector state handoff.
         if self.parallel_config.pipeline_parallel_size > 1:

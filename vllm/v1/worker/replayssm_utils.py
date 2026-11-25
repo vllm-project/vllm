@@ -83,7 +83,6 @@ def initialize_replayssm_ring_trackers(
             name
             for name, layer in zip(names, layers)
             if layer.use_flashinfer_replayssm
-            and layer.mamba_type == MambaAttentionBackendEnum.MAMBA2
             and layer.mamba_config.enable_stochastic_rounding
         )
     _bind_replayssm_rand_seeds(forward_context, seeded)

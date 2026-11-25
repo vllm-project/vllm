@@ -47,6 +47,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             if self.speculative_config
             else 0
         )
+        self.mamba_config = vllm_config.mamba_config
         self.use_replayssm = vllm_config.is_gdn_replayssm_enabled()
         # GDN ReplaySSM always runs on FlashInfer with runner-committed trackers.
         self.use_flashinfer_replayssm = self.use_replayssm
@@ -65,6 +66,10 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             )
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
+        # Stochastic-rounding seed slot, and on the first seeded layer the whole
+        # buffer it refreshes each step; bound by initialize_replayssm_ring_trackers().
+        self._replayssm_rand_seed: torch.Tensor | None = None
+        self._replayssm_rand_seeds: torch.Tensor | None = None
         # Writes the step's replay cursors; initialize_replayssm_ring_trackers()
         # keeps this only on the first layer of each cache group.
         self._plans_replayssm_decode = True

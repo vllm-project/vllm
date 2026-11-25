@@ -182,6 +182,8 @@ def run_gdn_replayssm(
     head_v_dim: int,
     offsets: torch.Tensor | None = None,
     uniform_query_length: int | None = None,
+    rand_seed: torch.Tensor | None = None,
+    philox_rounds: int = 10,
 ) -> torch.Tensor:
     """Run one FlashInfer decode step over the replay rows.
 
@@ -189,6 +191,9 @@ def run_gdn_replayssm(
     step. Returns the outputs of real tokens in `output_indices` order. The
     kernel reads the committed cursors but does not publish them; vLLM commits
     the accepted tokens once per model step, after every layer runs.
+
+    With `rand_seed` (a one-element int64 CUDA tensor read on the device),
+    flush rows round the folded FP16 state stochastically with Philox.
     """
     uniform = uniform_query_length == executed_width
     packed_qkv = pack_replayssm_rows(
@@ -261,5 +266,8 @@ def run_gdn_replayssm(
         # tokens would exceed the logical window.
         flush_min=GDN_REPLAYSSM_LOGICAL_WINDOW + 1 - executed_width,
         restart_hist_on_flush=False,
+        stochastic_rounding=None if rand_seed is None else "philox",
+        rand_seed=rand_seed,
+        philox_rounds=philox_rounds,
     )
     return output.flatten(0, 1).index_select(0, output_indices)
