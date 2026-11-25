@@ -233,8 +233,7 @@ guide: |
   - **Gated Residual:** four residual branches dynamically control cross-layer reads
     and writes.
   - **N-gram Embedding:** a 51B lookup memory adds capacity with little per-token
-    compute and can be asynchronously offloaded to host memory. (note that offload
-    currently only runs on Nvidia devices)
+    compute and can be asynchronously offloaded to host memory.
   - **MTP:** the built-in Multi-Token Prediction module supports speculative decoding.
 
   The checkpoint natively supports 262,144 tokens. Qwen reports that QSA reaches up
