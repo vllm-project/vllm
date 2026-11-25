@@ -1112,6 +1112,7 @@ def _whole_row_draft_worker(
         block_size=_ROW_BLOCK, kv_role="kv_producer" if pp_stage else "kv_both"
     )
     vllm_config.cache_config.enable_prefix_caching = False
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
     if pp_stage:
         vllm_config.parallel_config.pipeline_parallel_size = pp_stage[1]
