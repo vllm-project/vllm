@@ -32,6 +32,9 @@ class SimpleCPUOffloadMetadata(KVConnectorMetadata):
     store_event: int = INVALID_JOB_ID
     store_gpu_blocks: list[int] = field(default_factory=list)
     store_cpu_blocks: list[int] = field(default_factory=list)
+    # Lazy mode: this step's forward may overwrite the first this many store
+    # blocks; the rest are destinations of this step's loads.
+    num_forward_store_blocks: int = 0
 
     # Whether any requests were preempted this step and need flush pending transfers.
     need_flush: bool = False

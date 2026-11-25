@@ -308,7 +308,10 @@ def test_lazy_store_saves_blocks_before_the_step_writes_them():
     try:
         gpu[1].fill_(7)
         metadata = SimpleCPUOffloadMetadata(
-            store_event=0, store_gpu_blocks=[1], store_cpu_blocks=[2]
+            store_event=0,
+            store_gpu_blocks=[1],
+            store_cpu_blocks=[2],
+            num_forward_store_blocks=1,
         )
         worker.handle_preemptions(metadata)
         worker.bind_connector_metadata(metadata)
