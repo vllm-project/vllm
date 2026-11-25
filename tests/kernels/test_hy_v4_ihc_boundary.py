@@ -218,3 +218,44 @@ def test_fp8_out_matches_separate_quant(num_tokens, hidden_size, with_post):
     assert s.shape == ref_s.shape and s.stride() == ref_s.stride()
     assert torch.equal(q.view(torch.uint8), ref_q.view(torch.uint8))
     assert torch.equal(s, ref_s)
+
+
+@pytest.mark.parametrize("num_tokens", [1, 8, 1024])
+@pytest.mark.parametrize("hidden_size", [2816, 3072])
+def test_layers_run_post_and_head_on_the_boundary(
+    default_vllm_config, dist_init, num_tokens, hidden_size
+):
+    """A lone post step and the last post with the head and final norm run on
+    the boundary op, matching the unfused layers. The head gate is loaded in
+    place after construction, as the weight loader does."""
+    from vllm.model_executor.layers.layernorm import RMSNorm
+    from vllm.models.hy_v4.nvidia.hc import HYV4HCHeadLayer, HYV4HCLayer
+    from vllm.transformers_utils.configs.hy_v4 import HYV4Config
+
+    config = HYV4Config(hidden_size=hidden_size)
+    xa, residual, post, *_ = _inputs(num_tokens, hidden_size, offset_views=False)
+    with torch.device("cuda"):
+        layer = HYV4HCLayer(config, 0)
+        head = HYV4HCHeadLayer(
+            config, hidden_size, hc_mult=HC, hc_eps=config.hc_eps
+        ).cuda()
+        norm = RMSNorm(hidden_size, config.rms_norm_eps).to(torch.bfloat16)
+    assert layer.fused_post and head.packed_gate is not None
+    with torch.no_grad():
+        head.hc_head_fn.weight.copy_(torch.randn_like(head.hc_head_fn.weight) * 6e-3)
+        head.hc_head_scale.fill_(0.5)
+        head.hc_head_base.copy_(torch.randn_like(head.hc_head_base) * 0.5)
+        norm.weight.copy_(1 + 0.1 * torch.randn_like(norm.weight))
+
+    new_residual = layer.post(xa, residual, post)
+    # One FMA, as in `test_boundary_matches_reference`: within one BF16 step.
+    exact = post.double()[:, :, None] * xa.double()[:, None, :] + residual.double()
+    one_step = exact.to(torch.bfloat16).double().abs() * 2.0**-7
+    assert ((new_residual.double() - exact).abs() <= one_step).all()
+
+    hidden = head.fused_post(xa, residual, post, norm)
+    assert hidden is not None
+    ref = _rms_norm(head(new_residual), norm.weight, norm.variance_epsilon)
+    diff = (hidden.float() - ref.float()).abs()
+    one_flip = (diff > 0).sum() <= 1 and (diff <= ref.float().abs() * 2.0**-7).all()
+    assert diff.norm() / ref.float().norm() < 2e-4 or one_flip
