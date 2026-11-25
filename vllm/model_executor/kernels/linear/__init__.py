@@ -688,7 +688,7 @@ def _with_xpu_fp8_preference(
 ) -> dict[PlatformEnum, list[type[_KernelT]]]:
     """Xe3p computes FP8 natively and prefers W8A8. Other XPUs have no FP8
     compute units and run faster weight-only, so they prefer W8A16 (no
-    activation quantization). Returns ``possible_kernels`` unchanged when
+    activation quantization). Returns `possible_kernels` unchanged when
     --linear-backend is set, and falls back along the list if the preferred
     kernel cannot be used.
     """
