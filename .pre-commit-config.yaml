@@ -42,7 +42,7 @@ repos:
   - id: shellcheck
     args: ["-s", "bash", "--format=gcc", "--rcfile=tools/pre_commit/.shellcheckrc"]
 - repo: https://github.com/astral-sh/ty-pre-commit
-  rev: adf4d7a4e31d08d5f724660646c3f10e0084348d  # frozen: v0.0.101
+  rev: 85bff61a55f10dcc0a58fff7f9ee5bf83d1dc419  # frozen: v0.0.110
   hooks:
   - id: ty
     args: [--no-project] # Don't build vLLM to resolve its dynamic dependencies
