@@ -507,6 +507,99 @@ def test_offloaded_block_is_taught_in_its_own_group():
     assert consumer.state() == reference.state()
 
 
+def test_block_is_taught_in_each_cache_spec_that_stated_it():
+    """A window group can state a block's tokens before a full attention
+    group in the same batch. A consumer that drops the window group's kind
+    still learns the block from the full attention group, so a child stored
+    after the snapshot resolves its parent."""
+
+    def spec(event, group):
+        kind = "sliding_window" if group == 1 else "full_attention"
+        event.group_idx, event.kv_cache_spec_kind = group, kind
+        return event
+
+    history = [
+        [spec(stored([1, 2]), 1), spec(stored([1, 2]), 0)],
+        [
+            spec(stored([1, 2], medium="CPU"), 1),
+            spec(stored([1, 2], medium="CPU"), 0),
+        ],
+        [
+            BlockRemoved(block_hashes=[1, 2], medium="GPU", group_idx=0),
+            BlockRemoved(block_hashes=[1, 2], medium="GPU", group_idx=1),
+        ],
+    ]
+    tail = [spec(stored([3], parent=2), 0)]
+    reference, snap = RouterModel(ignored_groups={1}), KVCacheSnapshot()
+    for events in history:
+        reference.apply(events)
+        snap.apply(events)
+    reference.apply(tail)
+    consumer = RouterModel(ignored_groups={1})
+    consumer.apply(wire(snap.export()))
+    consumer.apply(tail)
+    assert consumer.state() == reference.state()
+    # A consumer of every group gets the same residency.
+    assert counts(wire(snap.export())) == counts(e for b in history for e in b)
+
+
+def test_window_group_naming_a_block_does_not_conflict():
+    """A sliding window group with smaller blocks can name a block's hash for
+    a token span of its own that happens to be one of its blocks. Inputs
+    differ only across cache specs there, so the block keeps the inputs its
+    own spec stated and the window store adds residency."""
+    full = stored([1, 2], group=0)
+    full.kv_cache_spec_kind = "full_attention"
+    window = BlockStored(
+        block_hashes=[2],
+        parent_block_hash=7,
+        token_ids=[90, 91],
+        block_size=2,
+        lora_id=None,
+        lora_name=None,
+        medium="GPU",
+        group_idx=1,
+        kv_cache_spec_kind="sliding_window",
+        kv_cache_spec_sliding_window=4,
+    )
+    snap = KVCacheSnapshot()
+    snap.apply([full])
+    snap.apply([window])
+    assert counts(wire(snap.export())) == counts([full, window])
+    tail = [stored([3], parent=2, group=0)]
+    reference = RouterModel(ignored_groups={1})
+    reference.apply([full, window, *tail])
+    consumer = RouterModel(ignored_groups={1})
+    consumer.apply(wire(snap.export()))
+    consumer.apply(tail)
+    assert consumer.state() == reference.state()
+
+
+def test_residency_stores_name_their_group_kind():
+    """Groups of one cache spec teach a block once. The other groups only get
+    token-less residency stores, which carry the group's kind so a joining
+    consumer that learns kinds from stores can classify them."""
+    history = []
+    for group in (0, 1):
+        event = stored([1, 2], group=group)
+        event.kv_cache_spec_kind = "full_attention"
+        history.append(event)
+    snap = KVCacheSnapshot()
+    snap.apply(history)
+    exported = wire(snap.export())
+    assert counts(exported) == counts(history)
+    kinds = {
+        (e.group_idx, bool(e.token_ids), e.kv_cache_spec_kind)
+        for e in exported
+        if isinstance(e, BlockStored)
+    }
+    assert kinds == {
+        (0, True, "full_attention"),
+        (0, False, "full_attention"),
+        (1, False, "full_attention"),
+    }
+
+
 def cache_history(
     seed,
     steps=300,

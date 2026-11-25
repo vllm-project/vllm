@@ -24,11 +24,13 @@ its last residency ends, because an offload store can complete after its GPU
 copy was evicted.
 
 Snapshots are best effort. A block cannot be rebuilt when no store taught its
-tokens: a token-less offload store that lands after the block's record left,
-or a store that skips blocks (sliding window, Mamba) for a hash no other store
-taught. A hash restated with other inputs, as by KV cache groups with
-different block sizes, cannot be rebuilt either. The export leaves such blocks
-and their descendants out, and routers learn them when they are stored again.
+tokens: a token-less offload store that lands after the block's record left, or
+a store that skips blocks (sliding window, Mamba) for a hash no other store
+taught. A hash restated with other inputs by groups of one cache spec, as by KV
+cache groups with different block sizes, cannot be rebuilt either. A group of
+another cache spec only adds residency to the inputs first stated. The export
+leaves such blocks and their descendants out, and routers learn them when they
+are stored again.
 
 Any recorder error, including a full input queue or an exceeded limit, stops
 the recorder: it logs, frees its state, and answers every request as
@@ -102,6 +104,9 @@ class _Record(msgspec.Struct, gc=False):  # type: ignore[call-arg]
     death: int = 0
     # The hash was restated with other inputs.
     conflict: bool = False
+    # One group of each other cache spec that stated the same inputs. The
+    # block is taught in each, as a consumer may index only some kinds.
+    spec_groups: tuple[int | None, ...] = ()
 
 
 class KVCacheSnapshot:
@@ -234,16 +239,32 @@ class KVCacheSnapshot:
                     and record.lookahead != ahead
                 )
             ):
-                # One record per hash cannot hold two sets of inputs.
-                record.conflict = True
+                # One record per hash cannot hold two sets of inputs. A group
+                # of another cache spec (a sliding window with smaller blocks)
+                # can name the hash for a span of its own, which only adds
+                # residency.
+                if self._stated_spec(record, event.group_idx):
+                    record.conflict = True
             else:
                 if extra is not None and not record.extra_known:
                     record.extra_key = extra_key
                     record.extra_known = True
                 if ahead is not None and record.lookahead is None:
                     record.lookahead = ahead
+                self._add_spec_group(record, event.group_idx)
             self._add_live((scope, h))
             parent = h
+
+    def _stated_spec(self, record: _Record, group: int | None) -> bool:
+        """Whether a group of this group's cache spec stated the inputs."""
+        spec = self._groups.get(group)
+        return any(
+            spec == self._groups.get(g) for g in (record.group, *record.spec_groups)
+        )
+
+    def _add_spec_group(self, record: _Record, group: int | None) -> None:
+        if not self._stated_spec(record, group):
+            record.spec_groups += (group,)
 
     def _new_record(self, h: ExternalBlockHash, group: int | None) -> _Record:
         if len(self._records) >= self.max_blocks:
@@ -338,15 +359,16 @@ class KVCacheSnapshot:
     ) -> Iterator[BlockStored | BlockRemoved]:
         """Teach every retained block, clear the dead, then set live residency.
 
-        Each rebuildable block is stored once with its tokens, parents first,
-        in its group: a live scope of that group if there is one, else the
-        group's GPU scope. Dead blocks are removed again. Token-less stores then bring
-        every live scope to its exact count, and a last removal drops the
-        teaching store of each live block. The consumer counts references per
-        scope and hash, so that removal never evicts, a live block keeps its
-        engine hash resolvable throughout, and a dead block the consumer keys
-        like a live one is removed before the live residency is set. Blocks
-        that cannot be rebuilt, and their descendants, are left out.
+        Each rebuildable block is stored with its tokens, parents first, once
+        per cache spec that stated them, in a group of that spec: a live scope
+        of the group if there is one, else the group's GPU scope. Dead blocks
+        are removed again. Token-less stores then bring every live scope to its
+        exact count, and a last removal drops the teaching store of each live
+        block. The consumer counts references per scope and hash, so that
+        removal never evicts, a live block keeps its engine hash resolvable
+        throughout, and a dead block the consumer keys like a live one is
+        removed before the live residency is set. Blocks that cannot be
+        rebuilt, and their descendants, are left out.
         """
         # Most blocks have one child, so only branch points allocate a list.
         first_child: dict[ExternalBlockHash, ExternalBlockHash] = {}
@@ -359,37 +381,40 @@ class KVCacheSnapshot:
                 first_child[record.parent] = h
             else:
                 more_children.setdefault(record.parent, []).append(h)
-        # A block is taught in its own group, where its tokens were stated: a
-        # consumer can ignore stores of other groups (sliding window, Mamba).
-        # A live scope of that group is preferred, else the group's GPU scope.
-        live_scope: dict[ExternalBlockHash, _Scope] = {}
+        # A block is taught only in groups whose stores stated its tokens, as
+        # a consumer can ignore the stores of a group's kind (sliding window,
+        # Mamba).
+        live_scope: dict[tuple[ExternalBlockHash, int | None], _Scope] = {}
         for live_key in self._live:
-            h = live_key[1]
-            if live_key[0][1] == self._records[h].group:
-                live_scope.setdefault(h, live_key[0])
+            h, group = live_key[1], live_key[0][1]
+            record = self._records[h]
+            if group == record.group or group in record.spec_groups:
+                live_scope.setdefault((h, group), live_key[0])
         live = {h for _, h in self._live}
 
         def buildable(h: ExternalBlockHash) -> bool:
             record = self._records[h]
             return bool(record.tokens) and not record.conflict
 
-        def scope(h: ExternalBlockHash) -> _Scope:
-            return live_scope.get(h) or (MEDIUM_GPU, self._records[h].group, None, None)
+        def scopes(h: ExternalBlockHash) -> tuple[_Scope, ...]:
+            record = self._records[h]
+            return tuple(
+                live_scope.get((h, group)) or (MEDIUM_GPU, group, None, None)
+                for group in (record.group, *record.spec_groups)
+            )
 
         def attrs(h: ExternalBlockHash) -> tuple:
             record = self._records[h]
             return (
-                scope(h),
+                scopes(h),
                 record.block_size,
                 record.lora_id,
                 record.lora_name,
                 record.lookahead is None,
             )
 
-        def segment(blocks: list[ExternalBlockHash]) -> BlockStored:
+        def segments(blocks: list[ExternalBlockHash]) -> Iterator[BlockStored]:
             first = self._records[blocks[0]]
-            medium, group, locality, ownership = scope(blocks[0])
-            kind, window = self._groups.get(group, (None, None))
             tokens = array("I")
             extra: list[Any] = []
             lookahead: list[list[int]] | None = None if first.lookahead is None else []
@@ -399,27 +424,31 @@ class KVCacheSnapshot:
                 extra.append(record.extra_key)
                 if lookahead is not None:
                     lookahead.append(list(record.lookahead or ()))
-            return BlockStored(
-                block_hashes=blocks,
-                parent_block_hash=first.parent,
-                token_ids=tokens.tolist(),
-                block_size=first.block_size,
-                lora_id=first.lora_id,
-                medium=medium,
-                lora_name=first.lora_name,
-                extra_keys=extra,
-                group_idx=group,
-                kv_cache_spec_kind=kind,
-                kv_cache_spec_sliding_window=window,
-                locality=locality,
-                ownership=ownership,
-                lookahead_token_ids=lookahead,
-            )
+            token_ids = tokens.tolist()
+            for medium, group, locality, ownership in scopes(blocks[0]):
+                kind, window = self._groups.get(group, (None, None))
+                yield BlockStored(
+                    block_hashes=blocks,
+                    parent_block_hash=first.parent,
+                    token_ids=token_ids,
+                    block_size=first.block_size,
+                    lora_id=first.lora_id,
+                    medium=medium,
+                    lora_name=first.lora_name,
+                    extra_keys=extra,
+                    group_idx=group,
+                    kv_cache_spec_kind=kind,
+                    kv_cache_spec_sliding_window=window,
+                    locality=locality,
+                    ownership=ownership,
+                    lookahead_token_ids=lookahead,
+                )
 
         def removals(hashes: Iterator[ExternalBlockHash]) -> Iterator[BlockRemoved]:
             scoped: dict[_Scope, list[ExternalBlockHash]] = {}
             for h in hashes:
-                scoped.setdefault(scope(h), []).append(h)
+                for scope in scopes(h):
+                    scoped.setdefault(scope, []).append(h)
             for (medium, group, locality, ownership), blocks in scoped.items():
                 for start in range(0, len(blocks), max_blocks_per_event):
                     yield BlockRemoved(
@@ -453,7 +482,7 @@ class KVCacheSnapshot:
                     break
                 blocks.append(child)
                 h = child
-            yield segment(blocks)
+            yield from segments(blocks)
 
         yield from removals(h for h in included if h not in live)
 
@@ -463,12 +492,14 @@ class KVCacheSnapshot:
             if h in included:
                 refs.setdefault(live_scope_key, []).append((h, count))
         for (medium, group, locality, ownership), owed in refs.items():
+            kind, window = self._groups.get(group, (None, None))
             round_ = 0
             while owed:
                 hashes = [h for h, _ in owed]
                 for start in range(0, len(hashes), max_blocks_per_event):
                     # The shape of an offloading placeholder store: the
-                    # consumer resolves each hash and its group's kind.
+                    # consumer resolves each hash. The group's kind lets a
+                    # consumer that has not seen the group classify it.
                     yield BlockStored(
                         block_hashes=hashes[start : start + max_blocks_per_event],
                         parent_block_hash=None,
@@ -478,6 +509,8 @@ class KVCacheSnapshot:
                         medium=medium,
                         lora_name=None,
                         group_idx=group,
+                        kv_cache_spec_kind=kind,
+                        kv_cache_spec_sliding_window=window,
                         locality=locality,
                         ownership=ownership,
                     )
