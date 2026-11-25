@@ -683,6 +683,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
 
 class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Metadata]):
     supports_shardq: ClassVar[bool] = True
+    uses_index_group: ClassVar[bool] = False
 
     def __init__(
         self,
