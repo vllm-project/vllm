@@ -34,10 +34,7 @@ from vllm.config.compilation import (
 from vllm.config.utils import replace
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import (
-    _is_torch_equal_or_newer,
-    is_torch_equal,
-)
+from vllm.utils.torch_utils import _is_torch_equal_or_newer
 
 from ..utils import create_new_process_for_each_test
 
@@ -61,29 +58,6 @@ def test_version():
     assert _is_torch_equal_or_newer("2.8.0", "2.8.0.dev")
     assert _is_torch_equal_or_newer("2.8.1", "2.8.0.dev")
     assert not _is_torch_equal_or_newer("2.7.1", "2.8.0.dev")
-
-
-def test_get_raw_stream_patch():
-    """Test that get_raw_stream patch is applied only for torch 2.9.0 or 2.9.1."""
-    import builtins
-
-    # Check if get_raw_stream exists in builtins
-    has_patch = hasattr(builtins, "get_raw_stream")
-
-    # Import torch to get actual version
-
-    is_torch_2_9 = is_torch_equal("2.9.0") or is_torch_equal("2.9.1")
-
-    if is_torch_2_9:
-        # For torch 2.9.x, the patch should be applied
-        assert has_patch, "get_raw_stream should be patched for torch 2.9.x"
-        # Verify it's callable (it should be the _cuda_getCurrentRawStream function)
-        get_raw_stream = builtins.get_raw_stream  # type: ignore[attr-defined]
-        assert callable(get_raw_stream)
-        # Verify it's the correct function from torch._C
-        from torch._C import _cuda_getCurrentRawStream
-
-        assert get_raw_stream is _cuda_getCurrentRawStream
 
 
 # Inductor can initialize CUDA even for CPU inputs.
@@ -1683,42 +1657,6 @@ def test_compile_sizes_post_init():
     assert sorted(config.compile_sizes) == [3, 5, 7]
 
 
-def test_inductor_asserts_default_disabled(monkeypatch):
-    """Test that inductor runtime asserts are disabled by default
-    (INFO logging level) on torch < 2.12."""
-    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "INFO")
-
-    import importlib
-
-    import vllm.envs
-
-    importlib.reload(vllm.envs)
-
-    config = CompilationConfig()
-    if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
-        assert config.inductor_compile_config.get("size_asserts") is False
-        assert config.inductor_compile_config.get("alignment_asserts") is False
-        assert config.inductor_compile_config.get("scalar_asserts") is False
-
-
-def test_inductor_asserts_enabled_in_debug(monkeypatch):
-    """Test that VLLM_LOGGING_LEVEL=DEBUG enables inductor runtime asserts
-    on torch < 2.12."""
-    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "DEBUG")
-
-    import importlib
-
-    import vllm.envs
-
-    importlib.reload(vllm.envs)
-
-    config = CompilationConfig()
-    if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
-        assert config.inductor_compile_config.get("size_asserts") is True
-        assert config.inductor_compile_config.get("alignment_asserts") is True
-        assert config.inductor_compile_config.get("scalar_asserts") is True
-
-
 def test_get_inductor_factors_includes_configs():
     """Changing inductor or functorch config must change the cache key factors."""
     from torch._functorch import config as functorch_config
@@ -1735,25 +1673,6 @@ def test_get_inductor_factors_includes_configs():
     with functorch_config.patch("donated_buffer", not functorch_config.donated_buffer):
         patched = get_inductor_factors()
     assert baseline != patched, "functorch config change was not reflected"
-
-
-def test_inductor_asserts_user_override(monkeypatch):
-    """Test that explicit inductor_compile_config overrides the
-    debug-logging default."""
-    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "INFO")
-
-    import importlib
-
-    import vllm.envs
-
-    importlib.reload(vllm.envs)
-
-    config = CompilationConfig(
-        inductor_compile_config={"size_asserts": True},
-    )
-    assert config.inductor_compile_config.get("size_asserts") is True
-    if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
-        assert config.inductor_compile_config.get("alignment_asserts") is False
 
 
 @pytest.mark.parametrize("deterministic", [False, True])
@@ -1798,14 +1717,8 @@ def test_combo_kernel_explicit_settings_preserved(deterministic, overrides):
         assert config.inductor_compile_config.get(key) == overrides.get(key)
 
 
-@pytest.mark.parametrize("is_cpu,torch_version", [(True, "2.13.0"), (False, "2.8.0")])
-def test_combo_kernel_defaults_require_supported_platform_and_torch(
-    is_cpu, torch_version
-):
-    with (
-        patch("vllm.config.compilation.current_platform.is_cpu", return_value=is_cpu),
-        patch("torch.__version__", torch_version),
-    ):
+def test_combo_kernel_defaults_disabled_on_cpu():
+    with patch("vllm.config.compilation.current_platform.is_cpu", return_value=True):
         config = CompilationConfig()
 
     assert "combo_kernels" not in config.inductor_compile_config

@@ -58,6 +58,7 @@ pub use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
+pub use vllm_llm::AdmissionLimits;
 use vllm_llm::EngineCoreLlm;
 pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
@@ -176,7 +177,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let llm = EngineCoreLlm::new(client)
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
         .with_request_id_randomization(!config.disable_request_id_randomization)
-        .with_stream_interval(config.stream_interval);
+        .with_stream_interval(config.stream_interval)
+        .with_admission_limits(config.admission_limits);
     let text = TextLlm::new(llm, text_backend)
         .with_served_model_name(metrics_model_name)
         .with_max_logprobs(config.max_logprobs)
@@ -281,6 +283,7 @@ where
             .map(tls::build_grpc_server_config)
             .transpose()
             .context("invalid gRPC TLS configuration")?;
+        let message_limit = state.api_server_options.request_body_limit_bytes.unwrap_or(usize::MAX);
         let (health_reporter, health_service) = health_reporter();
         let engine_health = grpc::EngineHealth::subscribe(state.llm());
         let health_monitor = grpc::HealthMonitor::register(health_reporter, engine_health).await;
@@ -288,13 +291,13 @@ where
             grpc::ControlServiceImpl::new(state.clone())
                 .with_engine_shutdown(config.manages_engine.then(|| shutdown.clone())),
         )
-        .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+        .max_decoding_message_size(message_limit);
         let inference_service =
             grpc::InferenceGrpcService::new(grpc::InferenceServiceImpl::new(state.clone()))
-                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+                .max_decoding_message_size(message_limit);
         let render_service =
             grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state.clone()))
-                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+                .max_decoding_message_size(message_limit);
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))

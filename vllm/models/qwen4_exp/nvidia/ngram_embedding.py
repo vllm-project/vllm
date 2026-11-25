@@ -24,6 +24,7 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
+from vllm.utils.platform_utils import is_uva_available
 
 from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
@@ -36,6 +37,10 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
 from ..common.ops.ple import ple_ngram_ids
+from .host_staged_embedding import (
+    Qwen4ExpPLEHostMemoryEmbedding,
+    Qwen4ExpPLEHostStagedEmbedding,
+)
 
 logger = init_logger(__name__)
 
@@ -56,6 +61,8 @@ __all__ = [
     "Qwen4ExpPLEEmbeddingMethod",
     "Qwen4ExpPLEDiskOffloadEmbedding",
     "Qwen4ExpPLEFp8EmbeddingMethod",
+    "Qwen4ExpPLEHostMemoryEmbedding",
+    "Qwen4ExpPLEHostStagedEmbedding",
     "Qwen4ExpPLENvFp4EmbeddingMethod",
     "Qwen4ExpPLEPinnedHostEmbedding",
     "Qwen4ExpPLEUnquantizedEmbeddingMethod",
@@ -75,39 +82,19 @@ def _maps_entry(ptr: int) -> tuple[str, int]:
     return "", 0
 
 
-class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
+class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEHostStagedEmbedding):
     """PLE rows read on the host from the checkpoint shard files.
 
-    No table is allocated. Each step, `stage_checkpoint_rows` reads the rows
-    of that step's n-gram ids from the safetensors files and copies them to
-    fixed device buffers, which the forward reads, so CUDA graphs replay it.
+    No table is allocated; the rows stay in the safetensors files.
     Every ETP rank stages full rows, so no ETP reduction is needed.
     """
 
-    def __init__(
-        self,
-        num_embeddings: int,
-        embedding_dim: int,
-        *,
-        params_dtype: torch.dtype,
-        padding_size: int,
-        prefix: str,
-        embedding_method: Qwen4ExpPLEEmbeddingMethod,
-        num_ngram_heads: int = 1,
-        max_total_tokens: int = 0,
-        data_parallel_rank: int = 0,
-        reduce_results: bool = True,
-    ) -> None:
-        super().__init__(
-            num_embeddings,
-            embedding_dim,
-            params_dtype=params_dtype,
-            padding_size=padding_size,
-            prefix=prefix,
-            embedding_method=embedding_method,
-            data_parallel_rank=data_parallel_rank,
-            reduce_results=reduce_results,
-        )
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._distinct_rows = {
+            name: torch.empty_like(host).view(torch.uint8).flatten(0, 1)
+            for name, (_, host) in self._planes.items()
+        }
         vllm_config = get_current_vllm_config()
         self._dummy = vllm_config.load_config.load_format == "dummy"
         engram_config = vllm_config.engram_config
@@ -121,36 +108,12 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
             engram_config.disk_offload_queue_depth if engram_config else 1
         )
         self._overlap = bool(engram_config and engram_config.disk_offload_overlap)
-        # NVFP4 rows are packed E2M1 bytes plus a separate plane of block scales.
-        self._nvfp4 = isinstance(embedding_method, Qwen4ExpPLENvFp4EmbeddingMethod)
-        device, pin = self.weight.device, self.weight.is_cuda
-        rows = (max_total_tokens, num_ngram_heads)
-        self._host_ids = torch.empty(
-            rows, dtype=torch.long, device="cpu", pin_memory=pin
-        )
-        # Per plane: device staging, pinned host rows (written only after the
-        # step's stream sync, so after the previous H2D) and distinct-row bytes.
-        self._planes: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
-        for name in ("weight", "weight_scale") if self._nvfp4 else ("weight",):
-            plane = getattr(self, name)
-            shape, dtype = (*rows, plane.shape[1]), plane.dtype
-            host = torch.empty(shape, dtype=dtype, device="cpu", pin_memory=pin)
-            self._planes[name] = (
-                torch.zeros(shape, dtype=dtype, device=device),
-                host,
-                torch.empty_like(host).view(torch.uint8).flatten(0, 1),
-            )
-        if self._nvfp4:
-            self._output = torch.zeros(
-                (*rows, embedding_dim), dtype=params_dtype, device=device
-            )
-            self._row_ids = torch.arange(rows[0] * rows[1], device=device)
         if self._overlap:
             # The next chunk's ids and distinct rows, read by the overlap thread.
             self._next_ids = torch.empty_like(self._host_ids)
             self._next_rows = {
                 name: torch.empty_like(rows)
-                for name, (_, _, rows) in self._planes.items()
+                for name, rows in self._distinct_rows.items()
             }
             self._next_read: tuple[Future, torch.Tensor] | None = None
         self._shards: dict[str, dict[int, torch.Tensor]] = {n: {} for n in self._planes}
@@ -256,11 +219,8 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
             self._reader_threads,
         )
 
-    def copy_ids_to_host(self, ids: torch.Tensor) -> None:
-        self._host_ids[: ids.shape[0]].copy_(ids, non_blocking=True)
-
     def copy_next_ids_to_host(self, ids: torch.Tensor) -> None:
-        self._next_ids[: ids.shape[0]].copy_(ids, non_blocking=True)
+        self._copy(self._next_ids[: ids.shape[0]], ids)
 
     def _distinct_ids(
         self, ids: torch.Tensor
@@ -272,37 +232,31 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
         shard = ids // self._shard_size
         return ids, inverse, shard, ids - shard * self._shard_size
 
-    def stage_rows(self, num_tokens: int) -> None:
-        """Read the rows of `_host_ids[:num_tokens]` and copy them to staging."""
+    def _gather_host_rows(self, ids: torch.Tensor) -> None:
         predicted = self._take_next_read() if self._overlap else None
+        num_tokens = ids.shape[0]
         if not self._fds:
-            for _, host, _ in self._planes.values():
+            for _, host in self._planes.values():
                 host[:num_tokens].view(torch.uint8).zero_()
-        else:
-            ids, inverse, shard, local = self._distinct_ids(
-                self._host_ids[:num_tokens].flatten()
-            )
-            hit = None
-            if predicted is not None and predicted.numel():
-                pos = torch.searchsorted(predicted, ids).clamp_(
-                    max=predicted.numel() - 1
-                )
-                hit = predicted[pos] == ids
-                miss = (~hit).nonzero().flatten()
-            for name, (_, host, rows) in self._planes.items():
-                rows = rows[: ids.numel()]
-                if hit is None:
-                    self._read_rows(name, shard, local, rows)
-                else:
-                    rows[hit] = self._next_rows[name][pos[hit]]
-                    if miss.numel():
-                        missed = rows.new_empty(miss.numel(), rows.shape[1])
-                        self._read_rows(name, shard[miss], local[miss], missed)
-                        rows[miss] = missed
-                out = host[:num_tokens].flatten(0, 1).view(torch.uint8)
-                torch.index_select(rows, 0, inverse, out=out)
-        for staging, host, _ in self._planes.values():
-            staging[:num_tokens].copy_(host[:num_tokens], non_blocking=True)
+            return
+        ids, inverse, shard, local = self._distinct_ids(ids.flatten())
+        hit = None
+        if predicted is not None and predicted.numel():
+            pos = torch.searchsorted(predicted, ids).clamp_(max=predicted.numel() - 1)
+            hit = predicted[pos] == ids
+            miss = (~hit).nonzero().flatten()
+        for name, (_, host) in self._planes.items():
+            rows = self._distinct_rows[name][: ids.numel()]
+            if hit is None:
+                self._read_rows(name, shard, local, rows)
+            else:
+                rows[hit] = self._next_rows[name][pos[hit]]
+                if miss.numel():
+                    missed = rows.new_empty(miss.numel(), rows.shape[1])
+                    self._read_rows(name, shard[miss], local[miss], missed)
+                    rows[miss] = missed
+            out = host[:num_tokens].flatten(0, 1).view(torch.uint8)
+            torch.index_select(rows, 0, inverse, out=out)
 
     def start_next_read(self, num_tokens: int) -> None:
         """Read the rows of `_next_ids[:num_tokens]` on the overlap thread.
@@ -384,33 +338,6 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
                     f"PLE shard file {os.readlink(f'/proc/self/fd/{fd}')} is "
                     f"truncated at offset {offset}"
                 )
-
-    def staged_rows(self, num_tokens: int) -> torch.Tensor:
-        """Return this step's staged rows, decoded if they are NVFP4."""
-        weight, *scale = (
-            staging[:num_tokens] for staging, _, _ in self._planes.values()
-        )
-        if not self._nvfp4:
-            return weight.flatten(-2)
-        num_rows = weight.shape[0] * weight.shape[1]
-        output = self._output[:num_tokens]
-        # Staged rows are compact, so the i-th staged row has id i.
-        Qwen4ExpPLENvFp4EmbeddingMethod.decode_rows(
-            weight,
-            scale[0],
-            self.weight_scale_2,
-            self._row_ids[:num_rows],
-            output,
-            0,
-            num_rows,
-        )
-        return output.flatten(-2)
-
-    def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
-        return None
-
-    def finalize_prefetch(self, total_tokens: int) -> torch.Tensor:
-        raise RuntimeError("PLE disk offload does not support prefetch")
 
 
 class Qwen4ExpPLEPoolEmbedding(Qwen4ExpPLEDeviceEmbedding, WeightReloadValidator):
@@ -652,7 +579,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         engram_config = get_current_vllm_config().engram_config
-        embedding_cls = (
+        embedding_cls: type[Qwen4ExpPLEEmbedding] = (
             Qwen4ExpPLEPoolEmbedding
             if engram_config is not None and engram_config.peer_group_size
             else Qwen4ExpPLEDiskOffloadEmbedding
@@ -665,6 +592,14 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             if engram_config is not None and engram_config.cpu_offload
             else Qwen4ExpPLEDeviceEmbedding
         )
+        if (
+            issubclass(embedding_cls, Qwen4ExpPLEPinnedHostEmbedding)
+            and not is_uva_available()
+        ):
+            logger.info_once(
+                "UVA is unavailable; staging the CPU-offloaded PLE rows from host RAM."
+            )
+            embedding_cls = Qwen4ExpPLEHostMemoryEmbedding
         # A TP reduce-scatter covers all vocabulary owners only when ETP=TP.
         # Disk-offload ranks hold full rows, so they only shard tokens.
         self.use_reduce_scatter = (
@@ -836,7 +771,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         if embedding.supports_prefetch:
             # Prefetch contains full tokens even when hidden states are sharded.
             embeddings = embedding.finalize_prefetch(total_tokens=input_ids.shape[0])
-        elif isinstance(embedding, Qwen4ExpPLEDiskOffloadEmbedding):
+        elif isinstance(embedding, Qwen4ExpPLEHostStagedEmbedding):
             embeddings = embedding.staged_rows(input_ids.shape[0])
         else:
             ngram_ids = self.compute_ngram_ids(
@@ -965,14 +900,14 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         return loaded
 
 
-def stage_checkpoint_rows(
-    modules: list[tuple[Qwen4ExpNGramEmbedding, Qwen4ExpPLEDiskOffloadEmbedding]],
+def stage_host_rows(
+    modules: list[tuple[Qwen4ExpNGramEmbedding, Qwen4ExpPLEHostStagedEmbedding]],
     input_ids: torch.Tensor,
     query_start_loc: torch.Tensor,
     ngram_context: torch.Tensor,
     next_chunk: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> None:
-    """Stage disk-offload PLE rows for one step behind one stream sync.
+    """Stage host-side PLE rows for one step behind one stream sync.
 
     The ids hash this step's tokens, which the previous step samples on the
     GPU, so the host read has to wait for them. `next_chunk` holds the
@@ -984,7 +919,9 @@ def stage_checkpoint_rows(
     for module, embedding in modules:
         ids = module.compute_ngram_ids(input_ids, query_start_loc, ngram_context)
         embedding.copy_ids_to_host(ids)
-        if next_chunk is not None:
+        if next_chunk is not None and isinstance(
+            embedding, Qwen4ExpPLEDiskOffloadEmbedding
+        ):
             embedding.copy_next_ids_to_host(module.compute_ngram_ids(*next_chunk))
     if input_ids.device.type != "cpu":
         with gpu_sync_allowed():
@@ -993,4 +930,5 @@ def stage_checkpoint_rows(
         embedding.stage_rows(num_tokens)
     if next_chunk is not None:
         for _, embedding in modules:
-            embedding.start_next_read(next_chunk[0].shape[0])
+            if isinstance(embedding, Qwen4ExpPLEDiskOffloadEmbedding):
+                embedding.start_next_read(next_chunk[0].shape[0])

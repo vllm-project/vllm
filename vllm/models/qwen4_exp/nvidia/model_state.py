@@ -16,8 +16,8 @@ from vllm.v1.worker.gpu.states import RequestState
 
 from .ngram_embedding import (
     Qwen4ExpNGramEmbedding,
-    Qwen4ExpPLEDiskOffloadEmbedding,
-    stage_checkpoint_rows,
+    Qwen4ExpPLEHostStagedEmbedding,
+    stage_host_rows,
 )
 
 
@@ -62,16 +62,18 @@ class Qwen4ExpModelState(MambaHybridModelState):
             dtype=torch.int32,
             device=self.device,
         )
-        self.disk_offload_modules = [
+        self.host_staged_modules = [
             (module, module.ngram_embedding)
             for module in model.modules()
             if isinstance(module, Qwen4ExpNGramEmbedding)
-            and isinstance(module.ngram_embedding, Qwen4ExpPLEDiskOffloadEmbedding)
+            and isinstance(module.ngram_embedding, Qwen4ExpPLEHostStagedEmbedding)
         ]
         engram_config = vllm_config.engram_config
+        # Only disk offload reads rows ahead; host memory is gathered in place.
         self.disk_offload_overlap = bool(
-            self.disk_offload_modules
+            self.host_staged_modules
             and engram_config
+            and engram_config.disk_offload
             and engram_config.disk_offload_overlap
         )
 
@@ -166,14 +168,14 @@ class Qwen4ExpModelState(MambaHybridModelState):
         # Represent unused capacity as trailing zero-length requests.
         query_start_loc[num_reqs_padded + 1 :].copy_(input_batch.query_start_loc[-1])
         ngram_context = self._prepare_ngram_context(input_batch, req_states)
-        if self.disk_offload_modules:
+        if self.host_staged_modules:
             next_chunk = (
                 self._predict_next_chunk(input_batch, req_states)
                 if self.disk_offload_overlap
                 else None
             )
-            stage_checkpoint_rows(
-                self.disk_offload_modules,
+            stage_host_rows(
+                self.host_staged_modules,
                 input_batch.input_ids,
                 query_start_loc,
                 ngram_context,
