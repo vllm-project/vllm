@@ -51,6 +51,10 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
 )
+from vllm.model_executor.model_loader.gpu_staging import (
+    gpu_staged_safetensors_file,
+    release_gpu_staging,
+)
 from vllm.model_executor.utils import copy_weight_
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
@@ -1066,8 +1070,14 @@ def safetensors_weights_iterator(
     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
     shuffle_safetensors_files: bool = False,
+    gpu_staging: bool = False,
+    is_unused_weight: Callable[[str], bool] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files.
+
+    With *gpu_staging*, tensors are read with pread and yielded as GPU
+    tensors (see gpu_staging.py); tensors that *is_unused_weight* accepts are
+    then not read at all.
 
     When *local_expert_ids* is provided, expert weights not belonging to
     this rank are skipped **before** reading from disk, which drastically
@@ -1189,6 +1199,14 @@ def safetensors_weights_iterator(
                     unflatten_tensor_state_dict(state_dict, metadata)
                 )
             yield from unflattened_state_dict.items()
+        elif gpu_staging:
+            yield from gpu_staged_safetensors_file(
+                st_file,
+                lambda name: (
+                    should_skip_weight(name, local_expert_ids)
+                    or (is_unused_weight is not None and is_unused_weight(name))
+                ),
+            )
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
@@ -1196,6 +1214,8 @@ def safetensors_weights_iterator(
                         continue
                     param = f.get_tensor(name)
                     yield name, param
+    if gpu_staging:
+        release_gpu_staging()
 
 
 def multi_thread_safetensors_weights_iterator(
