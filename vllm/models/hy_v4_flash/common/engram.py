@@ -19,7 +19,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.hy_v4_flash.nvidia.engram_ops import (
+from vllm.models.hy_v4_flash.common.engram_ops import (
     gated_update,
     lookup_norm,
     ngram_hashes,

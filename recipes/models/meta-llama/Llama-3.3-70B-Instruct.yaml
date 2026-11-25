@@ -4,7 +4,7 @@ meta:
   provider: "Meta"
   description: "Llama 3.3 70B dense model with NVIDIA FP8/FP4 quantized variants for Hopper and Blackwell GPUs"
   date_added: 2025-08-06
-  date_updated: 2026-09-22
+  date_updated: 2026-11-24
   tasks:
     - text
   performance_headline: ""
@@ -143,7 +143,6 @@ hardware_overrides:
     extra_args:
       - "--block-size"
       - "64"
-      - "--enforce-eager"
       - "--no-enable-prefix-caching"
       - "--disable-sliding-window"
       - "--max-model-len"
@@ -271,7 +270,6 @@ guide: |
     meta-llama/Llama-3.3-70B-Instruct \
     --tensor-parallel-size 4 \
     --block-size 64 \
-    --enforce-eager \
     --no-enable-prefix-caching \
     --disable-sliding-window \
     --max-model-len 9472 \
