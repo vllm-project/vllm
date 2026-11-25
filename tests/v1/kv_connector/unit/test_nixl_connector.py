@@ -32,6 +32,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm import LLM
 from vllm.config import KVTransferConfig, VllmConfig, set_current_vllm_config
+from vllm.config.attention import HiSparseConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineTransferInfo,
     KVOutputAggregator,
@@ -5492,6 +5493,30 @@ def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init)
         (
             mock_logger.warning_once.assert_not_called(),
             (f"kv_role={role!r} should not emit deprecation warning"),
+        )
+
+
+@pytest.mark.cpu_test
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_bidirectional_rejects_hisparse_without_eager_host_mirror(
+    default_vllm_config, dist_init
+):
+    """A HiSparse decoder's tail rows are host-durable at finish only when
+    every forward mirrors them."""
+    block_size = maybe_update_block_size(16)
+    config = create_vllm_config(kv_role="kv_consumer", block_size=block_size)
+    assert config.kv_transfer_config is not None
+    config.kv_transfer_config.kv_connector_extra_config["bidirectional_kv_xfer"] = True
+    config.attention_config.hisparse_config = HiSparseConfig(eager_host_mirror=False)
+
+    with pytest.raises(NotImplementedError, match="eager_host_mirror"):
+        NixlConnector(
+            config,
+            KVConnectorRole.SCHEDULER,
+            make_kv_cache_config(block_size=block_size),
         )
 
 
