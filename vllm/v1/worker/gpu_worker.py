@@ -33,6 +33,10 @@ from vllm.distributed import (
     init_distributed_environment,
     set_custom_all_reduce,
 )
+from vllm.distributed.device_communicators.cuda_wrapper import (
+    CudaRTLibrary,
+    cudaLimitStackSize,
+)
 from vllm.distributed.ec_transfer import (
     ensure_ec_transfer_initialized,
     ensure_ec_transfer_shutdown,
@@ -472,17 +476,10 @@ class Worker(WorkerBase):
 
     @contextmanager
     def _scoped_cuda_stack_limit(self):
-        """Restore the CUDA thread stack size on exit. A kernel that raised it
-        keeps limit x threads x SMs of device memory until it goes down."""
+        """Restore the CUDA stack limit on exit: a raised limit holds device memory."""
         if not current_platform.is_cuda():
             yield
             return
-
-        from vllm.distributed.device_communicators.cuda_wrapper import (
-            CudaRTLibrary,
-            cudaLimitStackSize,
-        )
-
         cudart = CudaRTLibrary()
         limit = cudart.cudaDeviceGetLimit(cudaLimitStackSize)
         try:
@@ -793,7 +790,6 @@ class Worker(WorkerBase):
             # limit are never split, so they stay releasable. Exits before
             # memory_profiling measures, restoring the original limit.
             self._scoped_allocator_max_split(max_split_size_mb=_MAX_SPLIT_SIZE_MB),
-            # Exits before memory_profiling measures.
             self._scoped_cuda_stack_limit(),
             set_current_vllm_config(self.vllm_config),
         ):

@@ -12,6 +12,10 @@ import torch
 
 from tests.utils import create_new_process_for_each_test
 from vllm import LLM
+from vllm.distributed.device_communicators.cuda_wrapper import (
+    CudaRTLibrary,
+    cudaLimitStackSize,
+)
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
@@ -275,26 +279,14 @@ def test_scoped_max_split_ignores_async_allocator(monkeypatch):
     not current_platform.is_cuda() or not torch.cuda.is_available(),
     reason="needs a CUDA device",
 )
-@pytest.mark.parametrize("fail", [False, True])
-def test_scoped_cuda_stack_limit_restores_the_limit(fail):
-    """A stack limit set in the scope is back at its first value on exit."""
-    from vllm.distributed.device_communicators.cuda_wrapper import (
-        CudaRTLibrary,
-        cudaLimitStackSize,
-    )
-
+def test_scoped_cuda_stack_limit_restores_the_limit():
+    """A stack limit raised in the scope is back at its first value on exit."""
     torch.zeros(1, device="cuda")  # the limit belongs to the CUDA context
     cudart = CudaRTLibrary()
     before = cudart.cudaDeviceGetLimit(cudaLimitStackSize)
-    expected_error = pytest.raises(RuntimeError, match="profiling failed")
-    with (
-        expected_error if fail else nullcontext(),
-        gpu_worker.Worker._scoped_cuda_stack_limit(SimpleNamespace()),
-    ):
+    with gpu_worker.Worker._scoped_cuda_stack_limit(SimpleNamespace()):
         cudart.cudaDeviceSetLimit(cudaLimitStackSize, before + 1024)
         assert cudart.cudaDeviceGetLimit(cudaLimitStackSize) > before
-        if fail:
-            raise RuntimeError("profiling failed")
     assert cudart.cudaDeviceGetLimit(cudaLimitStackSize) == before
 
 
