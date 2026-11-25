@@ -3337,8 +3337,10 @@ class rocm_aiter_ops:
             return False
 
         if cls.is_gfx942_dsa_decode_top_k_enabled():
-            # On MI325X, rows of at most k run up to 4.4us slower than in-tree,
-            # and longer rows 2.2x faster on geometric mean.
+            # On MI325X, rows longer than k run 2.2x faster than in-tree on
+            # geometric mean. Rows of at most k run up to 4.4us slower than an
+            # in-tree kernel that skips the split for them, and faster than one
+            # that splits them.
             return (
                 compress_ratio == 1
                 and not is_prefill
