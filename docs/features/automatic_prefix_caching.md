@@ -38,7 +38,7 @@ With prefix caching enabled, vLLM automatically deprioritizes superseded Mamba c
 
 - **Eviction order**: `uncached -> deprioritized (FIFO) -> normal LRU cached`. Deprioritized blocks keep their prefix hashes while free blocks remain and are only evicted ahead of normal LRU-cached blocks under memory pressure.
 - **One-turn fallback protection**: when a finished request advances a conversation's cached Mamba tip, the immediate predecessor (`t-1`) stays in normal LRU to shield against small tail rollbacks (such as tool retries), while states two or more turns behind (`t-2` and older) are deprioritized.
-- **Shared-prefix protection**: shared-prefix junctions and fork points still referenced as a fallback by another cached branch keep normal LRU priority.
+- **Shared-prefix protection**: shared-prefix junctions and multi-branch fork points keep normal LRU priority.
 
 ### FlashInfer ReplaySSM
 

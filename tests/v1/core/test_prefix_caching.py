@@ -7361,9 +7361,8 @@ def test_mamba_deprioritize_preempted_request_keeps_old_state():
 
 
 def test_mamba_deprioritize_preserves_shared_fork_fallback():
-    """A cached fork state (A -> B and A -> C) stays in normal LRU while any
-    sibling branch still depends on it as its one-turn fallback, and is
-    deprioritized once all branches advance past it."""
+    """A cached fork state (A -> B and A -> C) is treated as a shared branch
+    point and keeps normal LRU order when either branch advances."""
     block_size = 16
     manager = make_kv_cache_manager(
         _make_hybrid_kv_cache_config(block_size, 80, ["full", "mamba"]),
@@ -7385,10 +7384,13 @@ def test_mamba_deprioritize_preserves_shared_fork_fallback():
     branch_c = make_request("c", [1] * 40 + [3] * 40, block_size, sha256)
     assert _run_mamba_finished_request(manager, branch_c, [64, 80]) == 32
 
-    # Advancing branch_b -> d must NOT deprioritize root_a while branch_c
-    # still relies on root_a as its immediate fallback.
+    # Advancing both branches past b and c must keep shared fork root_a in
+    # normal LRU (behind older's blocks), while later turns on a linear branch
+    # still deprioritize their own superseded states.
     branch_d = make_request("d", [1] * 40 + [2] * 40 + [4] * 40, block_size, sha256)
     assert _run_mamba_finished_request(manager, branch_d, [112, 120]) == 80
+    branch_e = make_request("e", [1] * 40 + [3] * 40 + [5] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, branch_e, [112, 120]) == 80
 
     pool = manager.block_pool
     free_blocks = pool.free_block_queue.get_all_free_blocks()
@@ -7397,13 +7399,14 @@ def test_mamba_deprioritize_preserves_shared_fork_fallback():
     assert a_block is not None and older_block is not None
     assert free_blocks.index(a_block[0]) > free_blocks.index(older_block[0])
 
-    # Once branch_c -> e also advances, no branch relies on root_a, so root_a
-    # is deprioritized ahead of older's blocks.
-    branch_e = make_request("e", [1] * 40 + [3] * 40 + [5] * 40, block_size, sha256)
-    assert _run_mamba_finished_request(manager, branch_e, [112, 120]) == 80
+    # Advancing branch_d -> f (linear chain b -> d -> f) deprioritizes b.
+    branch_f = make_request(
+        "f", [1] * 40 + [2] * 40 + [4] * 40 + [6] * 40, block_size, sha256
+    )
+    assert _run_mamba_finished_request(manager, branch_f, [144, 160]) == 112
     num_uncached = sum(
         b.block_hash is None for b in pool.free_block_queue.get_all_free_blocks()
     )
     pool.get_new_blocks(num_uncached + 1)
-    assert pool.get_cached_block(root_a.block_hashes[1], [1]) is None
-    assert pool.get_cached_block(older.block_hashes[1], [1]) is not None
+    assert pool.get_cached_block(branch_b.block_hashes[4], [1]) is None
+    assert pool.get_cached_block(root_a.block_hashes[1], [1]) is not None

@@ -747,7 +747,7 @@ class KVCacheManager:
         if not self.coordinator.reset_prefix_cache():
             return False
         for manager in self._mamba_deprioritize_managers:
-            manager.reset_superseded_state_tracking()
+            manager._tips.clear()
         self._prefix_hit_tokens.clear()
         if self.collect_stats:
             assert self.prefix_cache_stats is not None

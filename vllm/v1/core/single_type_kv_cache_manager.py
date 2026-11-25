@@ -1930,15 +1930,13 @@ class MambaManager(SingleTypeKVCacheManager):
             self.enable_caching and self.retention_interval is not None
         )
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
-        # Deepest cached state hash left by finished requests and its immediate
-        # predecessor on the same prefix chain. Keeping one predecessor in
-        # normal LRU shields against small tail rollbacks (e.g. tool retries)
-        # while deprioritizing states two or more turns behind. `_prev_tip_refcnt`
-        # tracks how many retained tips point to each predecessor so shared fork
-        # points stay in normal LRU until no branch relies on them.
-        self._tip_hashes: set[BlockHashWithGroupId] = set()
-        self._prev_tip: dict[BlockHashWithGroupId, BlockHashWithGroupId] = {}
-        self._prev_tip_refcnt: dict[BlockHashWithGroupId, int] = {}
+        # Tracks cached Mamba tips on each conversation chain:
+        #   - None: leaf tip with no tracked predecessor
+        #   - BlockHashWithGroupId: leaf tip whose t-1 fallback is that hash
+        #   - True: t-1 fallback (already extended once)
+        # Shared-prefix junctions and multi-branch fork points are removed from
+        # this dict so they keep normal LRU order.
+        self._tips: dict[BlockHashWithGroupId, BlockHashWithGroupId | bool | None] = {}
         if self.prefix_caching:
             # Mapping from request ID to the index of the block
             # allocated in the previous step
@@ -2465,35 +2463,6 @@ class MambaManager(SingleTypeKVCacheManager):
             ]
         return super().pop_blocks_for_free(request_id)
 
-    def reset_superseded_state_tracking(self) -> None:
-        self._tip_hashes.clear()
-        self._prev_tip.clear()
-        self._prev_tip_refcnt.clear()
-
-    def _set_prev_tip(
-        self, tip: BlockHashWithGroupId, prev: BlockHashWithGroupId
-    ) -> None:
-        old_prev = self._prev_tip.get(tip)
-        if old_prev == prev:
-            return
-        if old_prev is not None:
-            self._dec_prev_tip_refcnt(old_prev)
-        self._prev_tip[tip] = prev
-        self._prev_tip_refcnt[prev] = self._prev_tip_refcnt.get(prev, 0) + 1
-
-    def _pop_prev_tip(self, tip: BlockHashWithGroupId) -> BlockHashWithGroupId | None:
-        prev = self._prev_tip.pop(tip, None)
-        if prev is not None:
-            self._dec_prev_tip_refcnt(prev)
-        return prev
-
-    def _dec_prev_tip_refcnt(self, prev: BlockHashWithGroupId) -> None:
-        cnt = self._prev_tip_refcnt.get(prev, 0) - 1
-        if cnt > 0:
-            self._prev_tip_refcnt[prev] = cnt
-        else:
-            self._prev_tip_refcnt.pop(prev, None)
-
     def deprioritize_superseded_states(self, request: Request, hit_tokens: int) -> None:
         """Deprioritize earlier Mamba tip states superseded by a finished
         request.
@@ -2501,10 +2470,10 @@ class MambaManager(SingleTypeKVCacheManager):
         A tip is the deepest cached Mamba state a finished request left on its
         prompt. When a request extends past a previous tip, the immediate
         predecessor is retained in normal LRU as a one-turn rollback fallback,
-        and any older tips along the chain (not still needed as a fallback by
-        another cached branch) are deprioritized (evicted after uncached blocks
-        but before normal LRU-cached blocks, keeping their hashes until reused).
-        Shared-prefix junction states keep normal LRU order.
+        and any older state along the chain is deprioritized (evicted after
+        uncached blocks but before normal LRU-cached blocks, keeping its hash
+        until reused). Shared-prefix junctions and multi-branch fork points are
+        removed from tracking so they keep normal LRU order.
         """
         block_pool = self.block_pool
         get_cached_block = block_pool.cached_block_hash_to_block.get_one_block
@@ -2531,52 +2500,57 @@ class MambaManager(SingleTypeKVCacheManager):
                 tip, tip_idx = key, idx
                 if hit_idx < 0:
                     break
-            elif idx != junction_idx and key in self._tip_hashes:
+            elif idx != junction_idx and key in self._tips:
                 old_tips.append(key)
         if tip is None:
             return
+
+        new_prev: BlockHashWithGroupId | None = None
         if old_tips:
             immediate = old_tips[0]
-            self._set_prev_tip(tip, immediate)
-            stale_keys = [
-                key for key in old_tips[1:] if key not in self._prev_tip_refcnt
-            ]
-            cur = self._pop_prev_tip(immediate)
-            while cur is not None:
-                if cur in self._prev_tip_refcnt:
-                    break
-                if cur in self._tip_hashes:
-                    stale_keys.append(cur)
-                cur = self._pop_prev_tip(cur)
-            to_deprioritize: list[KVCacheBlock] = []
-            for key in stale_keys:
-                self._tip_hashes.discard(key)
-                self._pop_prev_tip(key)
-                block = get_cached_block(key)
-                if block is not None:
-                    to_deprioritize.append(block)
-            if to_deprioritize:
-                block_pool.deprioritize_blocks(to_deprioritize, defer=True)
+            prev = self._tips[immediate]
+            if prev is True:
+                # Shared fork point (already extended by another branch):
+                # remove from tracking so it stays in normal LRU.
+                self._tips.pop(immediate)
+            else:
+                self._tips[immediate] = True
+                new_prev = immediate
+                stale: list[BlockHashWithGroupId] = []
+                if isinstance(prev, bytes) and prev in self._tips:
+                    stale.append(prev)
+                for key in old_tips[1:]:
+                    if key != prev and self._tips.get(key) is not True:
+                        stale.append(key)
+                to_deprioritize: list[KVCacheBlock] = []
+                for key in stale:
+                    ancestor = self._tips.pop(key, None)
+                    block = get_cached_block(key)
+                    if block is not None:
+                        to_deprioritize.append(block)
+                    if isinstance(ancestor, bytes) and ancestor in self._tips:
+                        self._tips.pop(ancestor, None)
+                        ancestor_block = get_cached_block(ancestor)
+                        if ancestor_block is not None:
+                            to_deprioritize.append(ancestor_block)
+                if to_deprioritize:
+                    block_pool.deprioritize_blocks(to_deprioritize, defer=True)
+
         if 0 <= junction_idx < len(block_hashes):
-            junction_key = make_block_hash_with_group_id(
-                block_hashes[junction_idx], self.kv_cache_group_id
+            self._tips.pop(
+                make_block_hash_with_group_id(
+                    block_hashes[junction_idx], self.kv_cache_group_id
+                ),
+                None,
             )
-            self._tip_hashes.discard(junction_key)
-            self._pop_prev_tip(junction_key)
         if tip_idx != junction_idx:
-            self._tip_hashes.add(tip)
-        if len(self._tip_hashes) > block_pool.num_gpu_blocks:
-            self._tip_hashes = {
-                key for key in self._tip_hashes if get_cached_block(key) is not None
+            self._tips[tip] = new_prev
+        if len(self._tips) > block_pool.num_gpu_blocks:
+            self._tips = {
+                key: val
+                for key, val in self._tips.items()
+                if get_cached_block(key) is not None
             }
-            self._prev_tip = {
-                key: prev
-                for key, prev in self._prev_tip.items()
-                if key in self._tip_hashes and prev in self._tip_hashes
-            }
-            self._prev_tip_refcnt = {}
-            for prev in self._prev_tip.values():
-                self._prev_tip_refcnt[prev] = self._prev_tip_refcnt.get(prev, 0) + 1
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """Get the number of tokens whose mamba state are not needed anymore. Mamba only
