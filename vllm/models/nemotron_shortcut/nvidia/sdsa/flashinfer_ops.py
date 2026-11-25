@@ -55,10 +55,17 @@ def missing_requirements() -> tuple[str, ...]:
 
 
 @functools.cache
-def has_nvfp4_kv_gather() -> bool:
-    """FlashInfer gathers packed NVFP4 K/V to FP8, as the core needs for an
-    NVFP4 KV cache."""
-    return not _missing({"flashinfer.sdsa.token_sparse": ("gather_nvfp4_kv_cache",)})
+def has_nvfp4_kv_conversion() -> bool:
+    """FlashInfer converts packed NVFP4 K/V to FP8 by key position, as the core
+    needs for an NVFP4 KV cache (flashinfer-ai/flashinfer#9527)."""
+    return not _missing(
+        {
+            "flashinfer.sdsa.token_sparse": (
+                "compact_nvfp4_kv_cache",
+                "gather_nvfp4_kv_cache_by_position",
+            )
+        }
+    )
 
 
 def check_requirements() -> None:

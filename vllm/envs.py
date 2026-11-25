@@ -2613,6 +2613,15 @@ def compile_factors() -> dict[str, object]:
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
         "VLLM_SKIP_VERSION_SUFFIX",
+        # Install-time switches, like VLLM_SKIP_VERSION_SUFFIX above.
+        "VLLM_USE_PRECOMPILED",
+        "VLLM_USE_PRECOMPILED_RUST",
+        "VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX",
+        # Frontend selection: the Python and Rust frontends drive the same
+        # engine graphs.
+        "VLLM_USE_RUST_FRONTEND",
+        "VLLM_USE_RUST_BENCH",
+        "VLLM_RUST_FRONTEND_PATH",
         "FORCE_COLOR",
         "VLLM_REQUEST_BODY_LOG_LEVEL",
         # Where Engram host tables live; the GPU views and graphs are the same.

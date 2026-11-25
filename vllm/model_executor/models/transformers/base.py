@@ -1096,13 +1096,16 @@ class Base(
         """Drop weights matching `_keys_to_ignore_on_load_unexpected`.
 
         Transformers merges these up without prefixes, so a match is only dropped if
-        it has nowhere to go. Parameters are read at load time, after fusers and
-        pipeline parallelism have renamed or removed them."""
+        it has nowhere to go. Like Transformers, the patterns match renamed keys.
+        Parameters are read at load time, after fusers and pipeline parallelism have
+        renamed or removed them."""
         pattern = re.compile("|".join(self.model._keys_to_ignore_on_load_unexpected))
         expected = {name for name, _ in named_state(self)}
-        map_name = self.hf_to_vllm_mapper.map_name
+        mapper = self.hf_to_vllm_mapper
+        renamer = WeightsMapper(orig_to_new_renaming=mapper.orig_to_new_renaming)
         for name, weight in weights:
-            if not pattern.search(name) or map_name(name) in expected:
+            renamed = renamer.map_name(name) or name
+            if not pattern.search(renamed) or mapper.map_name(name) in expected:
                 yield name, weight
 
     @staticmethod
