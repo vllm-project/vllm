@@ -24,6 +24,8 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+from vllm.model_executor.models.vision import is_vit_use_data_parallel
+from vllm.models.hy_v4.weight_utils import HYV4_PACKED_MODULES_MAPPING
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.transformers_utils.processors.hy_v4 import (
@@ -37,8 +39,7 @@ from .mm_preprocess import (
     HYV4VLMultiModalProcessor,
     HYV4VLProcessingInfo,
 )
-from .model import HYV4ForCausalLM
-from .vision import HYV4VisionTransformer
+from .vision import HYV4VisionTransformer, run_dp_sharded_hyv4_vision_tower
 from .vl_cudagraph import HYV4VLEncoderCudaGraphMixin
 
 
@@ -72,10 +73,11 @@ class HYV4VLForConditionalGeneration(
     """HYV4 VL composition using the platform-selected HYV4 text model."""
 
     supports_mm_device_do_normalize = True
+    supports_encoder_tp_data = True
     language_model_architecture = "HYV4ForCausalLM"
 
     packed_modules_mapping = {
-        **HYV4ForCausalLM.packed_modules_mapping,
+        **HYV4_PACKED_MODULES_MAPPING,
         "qkv": ["q_proj", "k_proj", "v_proj"],
     }
     hf_to_vllm_mapper = WeightsMapper(
@@ -104,6 +106,9 @@ class HYV4VLForConditionalGeneration(
         self.model_config = vllm_config.model_config
         self.config = vllm_config.model_config.hf_config
         self.multimodal_config = vllm_config.model_config.get_multimodal_config()
+        self.use_data_parallel = is_vit_use_data_parallel(
+            self.config.vision_config.num_attention_heads
+        )
         enabled = any(
             self.multimodal_config.get_limit_per_prompt(m) for m in ("image", "video")
         )
@@ -182,7 +187,7 @@ class HYV4VLForConditionalGeneration(
             or kwargs.get("video_embeds") is not None
         ):
             raise ValueError("HYV4 VL does not support precomputed visual embeddings")
-        outputs = []
+        outputs: list[torch.Tensor] = []
         parsers = {
             "pixel_values": ("image", self._parse_and_validate_image_input),
             "pixel_values_videos": ("video", self._parse_and_validate_video_input),
@@ -202,7 +207,15 @@ class HYV4VLForConditionalGeneration(
                 vision_token_count(g, self.config.vision_config, modality)
                 for g in grids
             ]
-            embeds = self.visual(mm_input[key], grids)
+            if self.use_data_parallel:
+                # Whole items are sharded across the TP group and the
+                # per-item embeddings gathered back on every rank; the tower
+                # weights are replicated in this mode (disable_tp usage).
+                embeds = run_dp_sharded_hyv4_vision_tower(
+                    self.visual, mm_input[key], grids, modality
+                )
+            else:
+                embeds = self.visual(mm_input[key], grids)
             for embedding, count in zip(embeds, counts, strict=True):
                 if embedding.shape != (count, self.config.text_config.hidden_size):
                     raise ValueError(
