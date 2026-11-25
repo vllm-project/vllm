@@ -46,6 +46,18 @@ pub enum Error {
     /// The request cannot be taken now; retrying later may succeed.
     #[error("unavailable: {message}")]
     Unavailable { message: String },
+    /// Admitting the request would exceed `--max-num-queued-reqs`.
+    #[error(
+        "The engine is currently busy and cannot accept new requests. Please try again later \
+         or on a different instance."
+    )]
+    QueueFull,
+    /// The prefill backlog has reached `--max-num-queued-tokens`.
+    #[error(
+        "The engine has reached its prefill token backlog limit. Please try again later or on \
+         a different instance."
+    )]
+    PrefillBacklogFull,
     /// A remote implementation rejected the request as invalid.
     #[error("{message}")]
     RemoteInvalidRequest { message: String },
