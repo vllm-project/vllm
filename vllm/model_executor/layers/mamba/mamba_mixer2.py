@@ -22,6 +22,9 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.linear_attention.conv1d.decode.base import (
+    Conv1dDecodeKernel,
+)
 from vllm.model_executor.layers.linear_attention.conv1d.decode.selector import (
     select_conv1d_decode_kernel,
 )
@@ -267,6 +270,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
     ssu_kernel: type[MambaSSUKernel]
     conv_prefill_kernel: type[Conv1dPrefillKernel]
+    conv_decode_kernel: type[Conv1dDecodeKernel]
 
     def __init__(
         self,
@@ -553,8 +557,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         if model_config is None:
             self.ssd_kernel = select_mamba2_ssd_kernel(vllm_config, None)
-            self.conv_prefill_kernel = select_conv1d_prefill_kernel(vllm_config, None)
-            self.conv_decode_kernel = select_conv1d_decode_kernel(vllm_config, None)
+            self.conv_prefill_kernel = select_conv1d_prefill_kernel(
+                vllm_config, None, width=conv_kernel_size, activation=activation
+            )
+            self.conv_decode_kernel = select_conv1d_decode_kernel(
+                vllm_config, None, width=conv_kernel_size, activation=activation
+            )
         else:
             layer_config = self.get_kv_cache_config(vllm_config)
             assert layer_config is not None
@@ -563,8 +571,27 @@ class MambaMixer2(MambaBase, PluggableLayer):
             assert isinstance(params, MambaManager.Params)
             self.ssd_kernel = select_mamba2_ssd_kernel(vllm_config, spec)
             self.ssu_kernel = select_mamba_ssu_kernel(vllm_config, spec)
-            self.conv_prefill_kernel = select_conv1d_prefill_kernel(vllm_config, spec)
-            self.conv_decode_kernel = select_conv1d_decode_kernel(vllm_config, spec)
+            self.conv_prefill_kernel = select_conv1d_prefill_kernel(
+                vllm_config, spec, width=conv_kernel_size, activation=activation
+            )
+            self.conv_decode_kernel = select_conv1d_decode_kernel(
+                vllm_config, spec, width=conv_kernel_size, activation=activation
+            )
+            dim_first = is_conv_state_dim_first()
+            conv_dim, conv_state_len = spec.shapes[0][:: 1 if dim_first else -1]
+            conv_bias = self.conv1d.bias
+            self.conv_prefill_kernel.register_warmup(
+                dim=conv_dim,
+                state_len=conv_state_len,
+                dim_first=dim_first,
+                x_row_stride=self.in_proj.output_size_per_partition,
+                weight_dtype=self.conv1d.weight.dtype,
+                bias_dtype=None if conv_bias is None else conv_bias.dtype,
+                max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
+                max_num_batched_tokens=(
+                    vllm_config.scheduler_config.max_num_batched_tokens
+                ),
+            )
             num_heads, head_dim, state_size = spec.shapes[1]
             self.ssd_kernel.register_warmup(
                 num_heads=num_heads,

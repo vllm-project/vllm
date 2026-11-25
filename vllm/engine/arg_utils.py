@@ -815,6 +815,8 @@ class EngineArgs:
     mamba_backend: MambaBackendEnum | None = MambaConfig.backend
     mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
     mamba_prefill_backend: MambaBackendEnum | None = MambaConfig.prefill_backend
+    conv1d_prefill_backend: MambaBackendEnum | None = MambaConfig.conv1d_prefill_backend
+    conv1d_decode_backend: MambaBackendEnum | None = MambaConfig.conv1d_decode_backend
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
     )
@@ -1122,6 +1124,12 @@ class EngineArgs:
         )
         mamba_group.add_argument(
             "--mamba-prefill-backend", **mamba_kwargs["prefill_backend"]
+        )
+        mamba_group.add_argument(
+            "--conv1d-prefill-backend", **mamba_kwargs["conv1d_prefill_backend"]
+        )
+        mamba_group.add_argument(
+            "--conv1d-decode-backend", **mamba_kwargs["conv1d_decode_backend"]
         )
         mamba_group.add_argument(
             "--enable-mamba-cache-stochastic-rounding",
@@ -2813,6 +2821,13 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             mamba_config.prefill_backend = MambaBackendEnum(self.mamba_prefill_backend)
+        for field in ("conv1d_prefill_backend", "conv1d_decode_backend"):
+            if (value := getattr(self, field)) is not None:
+                if getattr(mamba_config, field) is not None:
+                    raise ValueError(
+                        f"{field} and mamba_config.{field} are mutually exclusive"
+                    )
+                setattr(mamba_config, field, MambaBackendEnum(value))
         if self.enable_mamba_cache_stochastic_rounding:
             mamba_config.enable_stochastic_rounding = (
                 self.enable_mamba_cache_stochastic_rounding

@@ -14,6 +14,9 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.linear_attention.conv1d.decode.base import (
+    Conv1dDecodeKernel,
+)
 from vllm.model_executor.layers.linear_attention.conv1d.decode.selector import (
     select_conv1d_decode_kernel,
 )
@@ -45,6 +48,7 @@ class ShortConv(MambaBase, PluggableLayer):
     # --8<-- [end:short_conv]
 
     conv_prefill_kernel: type[Conv1dPrefillKernel]
+    conv_decode_kernel: type[Conv1dDecodeKernel]
 
     def __init__(
         self,
@@ -110,8 +114,29 @@ class ShortConv(MambaBase, PluggableLayer):
             assert layer_config is not None
             assert isinstance(layer_config.spec, MambaSpec)
             spec = layer_config.spec
-        self.conv_prefill_kernel = select_conv1d_prefill_kernel(vllm_config, spec)
-        self.conv_decode_kernel = select_conv1d_decode_kernel(vllm_config, spec)
+        self.conv_prefill_kernel = select_conv1d_prefill_kernel(
+            vllm_config, spec, width=self.L_cache, activation=None
+        )
+        self.conv_decode_kernel = select_conv1d_decode_kernel(
+            vllm_config, spec, width=self.L_cache, activation=None
+        )
+        if spec is not None:
+            dim_first = is_conv_state_dim_first()
+            conv_dim, conv_state_len = spec.shapes[0][:: 1 if dim_first else -1]
+            conv_bias = self.conv.bias
+            self.conv_prefill_kernel.register_warmup(
+                dim=conv_dim,
+                state_len=conv_state_len,
+                dim_first=dim_first,
+                # The kernel convolves B * x, a new (tokens, dim) tensor.
+                x_row_stride=conv_dim,
+                weight_dtype=self.conv.weight.dtype,
+                bias_dtype=None if conv_bias is None else conv_bias.dtype,
+                max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
+                max_num_batched_tokens=(
+                    vllm_config.scheduler_config.max_num_batched_tokens
+                ),
+            )
 
     def forward(
         self,

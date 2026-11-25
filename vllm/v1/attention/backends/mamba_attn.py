@@ -86,6 +86,10 @@ class BaseMambaAttentionMetadata:
     replayssm_scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
     # Contiguous cache-slot indices shared by all ReplaySSM tracker layers.
     replayssm_state_indices_d: torch.Tensor | None = None
+    # Contiguous conv-state slots for FlashInfer's conv1d: the prefill rows'
+    # when state_indices_tensor_p is strided, and the decode rows'.
+    conv_state_indices_p: torch.Tensor | None = None
+    conv_state_indices_d: torch.Tensor | None = None
 
     def replayssm_step_slots(
         self,
@@ -161,10 +165,18 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.conv_prefill_kernel = _shared_kernel(
             [layer.conv_prefill_kernel for layer in layers]
         )
-        # The decode kernel's persistent buffers, which it slices each step.
+        self.conv_decode_kernel = _shared_kernel(
+            [layer.conv_decode_kernel for layer in layers]
+        )
+        # The decode kernels' persistent buffers, which they slice each step.
         self.ssu_buffers: SSUBuffers | None = None
         if self.ssu_kernel is not None:
             self.ssu_buffers = self.ssu_kernel.allocate_buffers(
+                vllm_config, kv_cache_spec, self.decode_cudagraph_max_bs, device
+            )
+        self.conv_decode_buffers: torch.Tensor | None = None
+        if self.conv_decode_kernel is not None:
+            self.conv_decode_buffers = self.conv_decode_kernel.allocate_buffers(
                 vllm_config, kv_cache_spec, self.decode_cudagraph_max_bs, device
             )
 
@@ -543,6 +555,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         if self.ssu_kernel is not None and num_decode_rows > 0:
             metadata = self.ssu_kernel.prepare_metadata(
                 self.ssu_buffers, metadata, num_decode_rows, padded
+            )
+        if self.conv_decode_kernel is not None and num_decode_rows > 0:
+            metadata = self.conv_decode_kernel.prepare_metadata(
+                self.conv_decode_buffers, metadata, num_decode_rows, padded
             )
         return metadata
 

@@ -18,6 +18,9 @@ from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import KVCacheLayerConfig, MambaSpec
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.linear_attention.conv1d.decode.base import (
+        Conv1dDecodeKernel,
+    )
     from vllm.model_executor.layers.linear_attention.conv1d.prefill.base import (
         Conv1dPrefillKernel,
     )
@@ -43,6 +46,7 @@ class MambaBase(AttentionLayerBase):
     # inputs for; None for those it doesn't run.
     ssu_kernel: "type[MambaSSUKernel] | None" = None
     conv_prefill_kernel: "type[Conv1dPrefillKernel] | None" = None
+    conv_decode_kernel: "type[Conv1dDecodeKernel] | None" = None
 
     @property
     def step_lifecycle_owner(self) -> "type[StepLifecycleOwner] | None":

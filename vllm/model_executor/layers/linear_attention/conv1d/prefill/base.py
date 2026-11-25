@@ -19,6 +19,24 @@ class Conv1dPrefillKernel(LinearAttnKernel):
     conv state and writing back the state at its end."""
 
     @classmethod
+    def register_warmup(
+        cls,
+        *,
+        dim: int,
+        state_len: int,
+        dim_first: bool,
+        x_row_stride: int,
+        weight_dtype: torch.dtype,
+        bias_dtype: torch.dtype | None,
+        max_num_seqs: int,
+        max_num_batched_tokens: int,
+    ) -> None:
+        """Register the JIT warmup of this kernel's launches for a layer of this
+        geometry (per TP rank): `dim` channels, a conv state of `state_len`
+        positions stored dim-first or not, and inputs whose rows are
+        `x_row_stride` elements apart."""
+
+    @classmethod
     def prepare_metadata(cls, metadata: M, query_start_loc_p_cpu: torch.Tensor) -> M:
         """Add the prefill tensors this kernel reads."""
         return metadata

@@ -65,7 +65,23 @@ class MambaConfig:
     FlashInfer's fused SSD scan (SM10x). A backend that can't run fails at
     startup. None selects automatically: Triton on GPUs, "cpu" on CPU."""
 
-    @field_validator("backend", "prefill_backend", mode="before")
+    conv1d_prefill_backend: MambaBackendEnum | None = None
+    """Kernel backend for the causal conv1d of prefills, in the layers that
+    select one (Mamba2, ShortConv). "flashinfer" runs FlashInfer's
+    width-4 SiLU conv1d (SM100/SM103, BF16). A backend that can't run fails at
+    startup. None selects automatically: Triton on GPUs, "cpu" on CPU."""
+
+    conv1d_decode_backend: MambaBackendEnum | None = None
+    """Kernel backend for the causal conv1d of decodes, as
+    `conv1d_prefill_backend` is for prefills."""
+
+    @field_validator(
+        "backend",
+        "prefill_backend",
+        "conv1d_prefill_backend",
+        "conv1d_decode_backend",
+        mode="before",
+    )
     @classmethod
     def validate_backend_before(cls, value: Any) -> Any:
         """Enable parsing of the backend enum fields from strings."""

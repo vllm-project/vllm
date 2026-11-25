@@ -25,7 +25,8 @@ logger = init_logger(__name__)
 class LinearAttnSelectorConfig:
     """What kernels are selected by, extracted from the engine config like
     `AttentionSelectorConfig`: the platform, the layer's KV cache spec and the
-    activation dtype (None when unknown), and the requested features."""
+    activation dtype (None when unknown), the requested features, and for the
+    conv1d kernels, the layer's conv width and activation."""
 
     platform: PlatformEnum
     device_capability: DeviceCapability | None
@@ -38,6 +39,8 @@ class LinearAttnSelectorConfig:
     num_speculative_tokens: int = 0
     use_pipeline_parallel: bool = False
     use_prefix_caching: bool = False
+    conv_width: int | None = None
+    conv_activation: str | None = None
 
     @classmethod
     def from_current_platform(
