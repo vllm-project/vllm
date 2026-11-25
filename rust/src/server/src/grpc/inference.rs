@@ -359,6 +359,7 @@ async fn generate_stream_responses(
                         token_ids,
                         logprobs,
                         sampling_mask: delta_sampling_mask,
+                        ..
                     },
                 finished,
             }) => {
@@ -425,6 +426,22 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn llm_errors_map_to_status_codes() {
+        let code = |error| text_error_to_status(vllm_text::Error::Llm(error)).code();
+        let message = "no engine can take the request".to_string();
+        assert_eq!(
+            code(vllm_llm::Error::Unavailable {
+                message: message.clone()
+            }),
+            tonic::Code::Unavailable
+        );
+        assert_eq!(
+            code(vllm_llm::Error::RemoteInvalidRequest { message }),
+            tonic::Code::InvalidArgument
+        );
+    }
+
     /// The terminal output carries the sampling-mask rows of every update, and
     /// earlier outputs none.
     #[tokio::test]
@@ -432,6 +449,7 @@ mod tests {
         let delta = |token_id: u32, finished: Option<Finished>| DecodedTextEvent::TextDelta {
             decoded: DecodedText::default(),
             sampled: SampledDelta {
+                timestamp: 0.0,
                 token_ids: vec![token_id],
                 logprobs: None,
                 sampling_mask: Some(SamplingMask {

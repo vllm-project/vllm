@@ -18,6 +18,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
     EmbeddedRuntime,
     UMBPRuntimeConfig,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.embedded import (
+    _MoriWorkerHandle,
+)
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -52,6 +55,7 @@ def test_mori_embedded_dram_eviction_and_restore(socket_dir, bulk_load):
         ),
     )
     try:
+        assert isinstance(worker, _MoriWorkerHandle)
         source = torch.empty((1, object_size), dtype=torch.uint8, device="cuda")
         destination = torch.zeros_like(source)
         worker.register_buffers({"layer0": source, "destination": destination})
