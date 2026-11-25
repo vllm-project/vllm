@@ -21,6 +21,7 @@ use crate::lora::{
     LoadLoraError, LoadedLora, LoraDisabledError, LoraManager, LoraModelResolution, UnloadLoraError,
 };
 use crate::model_names::ServedModelNames;
+use crate::routes::decisions::NextTokenReads;
 use crate::runtime::build_request_runtime;
 use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
 
@@ -66,6 +67,8 @@ pub struct AppState {
     /// Whether the `Llm` is an [`EngineCoreLlm`] the server connected itself,
     /// so routes and services that drive its engine-core client are served.
     has_engine_core_client: bool,
+    /// How `/v1/decisions` reads the model, when it serves the endpoint.
+    decisions: Option<Arc<NextTokenReads>>,
 }
 
 impl AppState {
@@ -97,6 +100,7 @@ impl AppState {
             request_runtime: OnceLock::new(),
             profiler: None,
             has_engine_core_client: false,
+            decisions: None,
         }
     }
 
@@ -104,6 +108,17 @@ impl AppState {
     pub fn with_api_server_options(mut self, options: ApiServerOptions) -> Self {
         self.api_server_options = options;
         self
+    }
+
+    /// Serve `/v1/decisions` with these reads.
+    pub(crate) fn with_decisions(mut self, decisions: Option<NextTokenReads>) -> Self {
+        self.decisions = decisions.map(Arc::new);
+        self
+    }
+
+    /// How `/v1/decisions` reads the model, when it serves the endpoint.
+    pub(crate) fn decisions(&self) -> Option<&Arc<NextTokenReads>> {
+        self.decisions.as_ref()
     }
 
     /// Set the `system_fingerprint` of chat and completion responses.

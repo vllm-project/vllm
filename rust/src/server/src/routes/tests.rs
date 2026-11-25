@@ -75,6 +75,7 @@ use crate::model_names::ServedModelNames;
 use crate::render::RenderState;
 use crate::state::AppState;
 
+mod decisions;
 mod responses;
 
 fn request_output(
@@ -463,6 +464,8 @@ struct FakeChatBackend {
     /// A model's own renderer replacing the fake chat format.
     chat_renderer: Option<DynChatRenderer>,
     parsers: ResolvedParsers,
+    /// A tokenizer replacing [`fake_chat_tokenizer`].
+    tokenizer: Option<Arc<TestTokenizer>>,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -520,6 +523,7 @@ impl FakeChatBackend {
             skip_tokenizer_init: false,
             chat_renderer: None,
             parsers,
+            tokenizer: None,
         }
     }
 
@@ -564,6 +568,9 @@ impl TextBackend for FakeChatBackend {
     fn tokenizer(&self) -> DynTokenizer {
         if self.skip_tokenizer_init {
             return Arc::new(UnavailableTokenizer::new(1024));
+        }
+        if let Some(tokenizer) = &self.tokenizer {
+            return tokenizer.clone();
         }
         Arc::new(fake_chat_tokenizer())
     }

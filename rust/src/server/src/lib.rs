@@ -36,8 +36,8 @@ use axum::http::Request;
 pub use config::{
     AccessLogConfig, ApiServerOptions, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
     DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
-    DefaultMmLoras, EngineCoreConfig, HttpListenerMode, LoraModulePath, OutputLogConfig,
-    OutputLogging, ServerConfig, TlsConfig,
+    DecisionsReadStrategy, DefaultMmLoras, EngineCoreConfig, HttpListenerMode, LoraModulePath,
+    OutputLogConfig, OutputLogging, ServerConfig, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
 use hyper::body::Incoming;
@@ -68,6 +68,7 @@ use vllm_text::TextLlm;
 
 use crate::listener::{Listener, ListenerAddr, MaybeTlsListener};
 use crate::routes::build_router;
+use crate::routes::decisions::NextTokenReads;
 use crate::server_info::ServerInfoSnapshot;
 use crate::state::AppState;
 
@@ -187,13 +188,21 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
         )
         .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
 
+    let decisions = match config.api_server_options.decisions_read_strategy {
+        Some(DecisionsReadStrategy::NextToken) => (NextTokenReads::probe(&chat))
+            .inspect_err(|error| warn!("/v1/systemone and /v1/decisions are off: {error}"))
+            .ok(),
+        None => None,
+    };
+
     let mut state = AppState::new(served_model_names, chat)
         .with_model_path(config.model.clone())
         .with_api_server_options(config.api_server_options)
         .with_api_keys(config.api_keys.clone())
         .with_cors(config.cors.clone())
         .with_access_log(config.access_log.clone())
-        .with_system_fingerprint(system_fingerprint);
+        .with_system_fingerprint(system_fingerprint)
+        .with_decisions(decisions);
     if let Some((engine_core, server_info)) = &engine_core {
         state = (state.with_engine_core_client())
             .with_server_info(server_info.clone())

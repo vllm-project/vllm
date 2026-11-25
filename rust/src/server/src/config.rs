@@ -111,6 +111,17 @@ pub struct ApiServerOptions {
     /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`, default 16384).
     #[educe(Default(expression = DEFAULT_MAX_N_SEQUENCES))]
     pub max_n_sequences: i64,
+    /// How `/v1/decisions` reads the model. Without one, it answers 501.
+    pub decisions_read_strategy: Option<DecisionsReadStrategy>,
+}
+
+/// The Decisions API read strategies the Rust frontend implements. The Python
+/// launcher chooses one with Python's `select_read_strategy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum DecisionsReadStrategy {
+    /// Python's `NextTokenStrategy`: each question is one request, read from
+    /// the logprobs of the option labels as the reply's first token.
+    NextToken,
 }
 
 /// Which generated outputs to log, like Python's `--enable-log-outputs` and

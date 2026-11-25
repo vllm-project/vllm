@@ -298,6 +298,28 @@ _RUST_FRONTEND_ENV_ARGS = {
 }
 
 
+def _rust_decisions_read_strategy(model_config: "ModelConfig | None") -> str | None:
+    """The Decisions API read strategy the Rust frontend serves for this model.
+
+    Python's `select_read_strategy` stays the one table of supported
+    architectures. The Rust frontend implements `NextTokenStrategy` only;
+    without a strategy it does not serve `/v1/decisions`.
+    """
+    if model_config is None or getattr(model_config, "runner_type", None) != "generate":
+        return None
+    from vllm.entrypoints.openai.decisions.strategies import (
+        NextTokenStrategy,
+        select_read_strategy,
+    )
+
+    try:
+        strategy = select_read_strategy(model_config, ("generate",))
+    except ValueError:
+        return None
+    # Its subclasses read with other prompts or canvases.
+    return "next_token" if strategy is NextTokenStrategy else None
+
+
 class RustFrontendProcessManager:
     """Manages a single Rust frontend subprocess.
 
@@ -374,6 +396,9 @@ class RustFrontendProcessManager:
         model_tag = getattr(args, "model_tag", None) or getattr(args, "model", None)
         if model_tag is not None:
             args_dict["model_tag"] = model_tag
+
+        if (strategy := _rust_decisions_read_strategy(model_config)) is not None:
+            args_dict["decisions_read_strategy"] = strategy
 
         # Object storage models (s3://, gs://, az://) have their config and
         # tokenizer pulled into a local directory, which the Rust frontend can
