@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from vllm.multimodal.utils import strip_covered_mm_data
 from vllm.utils.gc_utils import untrack_long_lists
+from vllm.v1.metrics.iteration_workload import ScheduledWorkload
 
 if TYPE_CHECKING:
     import numpy as np
@@ -201,6 +202,8 @@ class IterationDetails:
     num_decode_tokens: int = 0
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
+    # Only with --enable-logging-iteration-details.
+    scheduled_workload: ScheduledWorkload | None = None
 
     # Temporary aliases for existing EngineCore and worker profiler consumers.
     @property
