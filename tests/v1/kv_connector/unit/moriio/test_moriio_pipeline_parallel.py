@@ -46,12 +46,13 @@ HANDSHAKE_PORT = 6301
 def _moriio_config(pp_rank, pp_size, tp_rank, tp_size, dp_rank=0, dp_size=1):
     vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
+            kv_role="kv_producer",
             kv_connector_extra_config={
                 "host_ip": "127.0.0.1",
                 "http_port": 8000,
                 "handshake_port": HANDSHAKE_PORT,
                 "notify_port": NOTIFY_PORT,
-            }
+            },
         ),
         parallel_config=SimpleNamespace(
             data_parallel_rank=dp_rank,
@@ -125,6 +126,7 @@ def _decode_scheduler(*, send: bool = False) -> _DecodeScheduler:
     scheduler.paths = {}
     scheduler.notified = []
     scheduler.released = []
+    scheduler._write_recv_timeout = None
     if not send:
         scheduler.send_notify_block = (  # type: ignore[method-assign]
             lambda **kwargs: scheduler.notified.append(kwargs)
