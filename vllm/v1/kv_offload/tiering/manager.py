@@ -1011,10 +1011,8 @@ class TieringOffloadingManager(OffloadingManager):
 
         Returns:
             True if promotion was scheduled or already in flight.
-            False,
-             - if the request's promotion demand this step exceeds primary tier
-               availability. or,
-             - if the request failed promotion once already.
+            False if the request's promotion demand this step exceeds primary
+            tier availability or if promotion already failed for the request.
 
         """
         if key in self._inflight_promotion_keys:
