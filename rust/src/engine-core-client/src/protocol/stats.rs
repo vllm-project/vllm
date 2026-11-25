@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 pub use vllm_metrics::{
     BaseCacheStats, CachedTokensBySource, CudagraphStats, DebugPerfStats, KvCacheEvictionEvent,
     KvConnectorStats, KvFetchReqsByStage, MooncakeRecord, MooncakeStats, MooncakeTransferStats,
-    MultiConnectorStats, NixlStats, PerfStats, PrefixCacheStats, SimpleCpuOffloadData,
-    SimpleCpuOffloadStats, SpecDecodingStats, UmbpOperationCounts, UmbpStats,
+    MultiConnectorStats, NixlStats, OffloadingSample, OffloadingStats, PerfStats, PrefixCacheStats,
+    SimpleCpuOffloadData, SimpleCpuOffloadStats, SpecDecodingStats, UmbpOperationCounts, UmbpStats,
 };
 
 use super::OpaqueValue;
