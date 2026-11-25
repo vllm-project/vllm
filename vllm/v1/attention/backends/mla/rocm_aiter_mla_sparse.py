@@ -51,6 +51,10 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 logger = init_logger(__name__)
 
+# Max heads per program on the bf16 / fp8_ds_mla path of AITER's Triton
+# sparse_mla_fwd (aiter sparse_mla.py).
+AITER_SPARSE_MLA_HEAD_TILE = 16
+
 
 @triton.jit
 def _pack_valid_rows(
@@ -715,6 +719,8 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.paged_kv_indptr = torch.zeros(
             [max_num_batched_tokens + 1], dtype=torch.int32, device=device
         )
+        if self.use_shardq:
+            self._shardq_kv_indptr = torch.zeros_like(self.paged_kv_indptr)
 
         # ----- Persistent MLA metadata buffers -----
         # The aiter sparse decode kernel supports a "persistent" path that
@@ -971,7 +977,30 @@ class ROCMAiterMLASparseMetadataBuilder(
         metadata.reduce_indptr = reduce_indptr
         metadata.reduce_final_map = reduce_final_map
         metadata.reduce_partial_map = reduce_partial_map
+        if metadata.shardq is not None and not dcp:
+            self._build_shardq_metadata(metadata)
         return metadata
+
+    def _build_shardq_metadata(self, metadata: ROCMAiterMLASparseMetadata) -> None:
+        """Narrows the paged KV fields to this rank's ShardQ tokens."""
+        assert metadata.shardq is not None and metadata.paged_kv_indptr is not None
+        shard = metadata.shardq.attn_metadata
+        assert isinstance(shard, ROCMAiterMLASparseMetadata)
+        num_decode_tokens = metadata.shardq.num_decode_tokens
+        rows = metadata.shardq.local_token_ids + num_decode_tokens
+        num_rows = rows.shape[0]
+        indptr = self._shardq_kv_indptr[: num_rows + 1]
+        torch.cumsum(metadata.paged_kv_indptr.diff()[rows], dim=0, out=indptr[1:])
+        # Past the decode tokens' entries, which the decode call remaps.
+        start = num_decode_tokens * self.topk_tokens
+        shard.paged_kv_indices = self.paged_kv_indices[
+            start : start + num_rows * self.topk_tokens
+        ]
+        shard.paged_kv_indptr = indptr
+        shard.qo_indptr = self.qo_indptr[: num_rows + 1]
+        shard.paged_kv_last_page_len = self.paged_kv_last_page_len[:num_rows]
+        shard.num_actual_tokens = num_rows
+        shard.attn_out_dtype = self.model_dtype
 
 
 # Take from
@@ -1116,6 +1145,25 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     "using the default sparse MLA path instead.",
                     reason,
                 )
+        # ShardQ queries carry every rank's heads; only Triton takes any count.
+        self.use_shardq = self.use_shardq and (
+            kv_cache_dtype == "fp8_ds_mla" or self.use_aiter_sparse_mla
+        )
+        # Below this tile, ShardQ's all-head query covers more heads per KV
+        # read; at or above it, ShardQ only adds the exchange. Per-tensor fp8
+        # tiles wider and is unmeasured, so it stays off there too.
+        if self.use_shardq and self.num_heads >= AITER_SPARSE_MLA_HEAD_TILE:
+            logger.info_once(
+                "Disabling sparse MLA ShardQ: %d local heads already fill "
+                "AITER's %d-head tile, so ShardQ adds only exchange cost.",
+                self.num_heads,
+                AITER_SPARSE_MLA_HEAD_TILE,
+            )
+            self.use_shardq = False
+
+    def _attn_sink(self, q: torch.Tensor) -> torch.Tensor | None:
+        """Returns the sinks for the heads of `q`."""
+        return self.sinks
 
     def _aiter_sparse_mla_unsupported_reason(
         self, vllm_config: VllmConfig
@@ -1421,22 +1469,24 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         """
         num_actual_tokens = attn_metadata.num_actual_tokens
         output = torch.empty(
-            [q.shape[0], self.num_heads, self.kv_lora_rank],
+            [q.shape[0], q.shape[1], self.kv_lora_rank],
             dtype=attn_metadata.attn_out_dtype,
             device=q.device,
         )
+        q = q[:num_actual_tokens]
+        assert attn_metadata.paged_kv_indptr is not None
         rocm_aiter_ops.triton_sparse_mla_fwd(
-            q[:num_actual_tokens],
+            q,
             kv_c_and_k_pe_cache.view(-1, 1, 1, q.shape[-1]),
             output[:num_actual_tokens],
             self.scale,
-            attn_metadata.paged_kv_indptr,
+            attn_metadata.paged_kv_indptr[: q.shape[0] + 1],
             attn_metadata.paged_kv_indices,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
             q_scale=layer._q_scale,
             kv_scale=layer._k_scale,
-            attn_sink=self.sinks,
+            attn_sink=self._attn_sink(q),
             # triton_convert_req_index_to_global_index writes 0, never -1,
             # for an invalid top-k entry, so no slot in the stream is negative.
             has_invalid=False,
@@ -1562,8 +1612,10 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         ):
             # Get topk indices
             assert self.topk_indices_buffer is not None
+            topk_start = attn_metadata.topk_start
             topk_indices = fit_kpool_indices_to_aiter(
-                self.topk_indices_buffer[:num_actual_toks], attn_metadata.topk_tokens
+                self.topk_indices_buffer[topk_start : topk_start + num_actual_toks],
+                attn_metadata.topk_tokens,
             )
 
             triton_convert_req_index_to_global_index(
@@ -1586,6 +1638,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 raise NotImplementedError(
                     f"fp8_ds_mla sparse MLA requires a bf16 query, got {q.dtype}"
                 )
+            assert attn_metadata.paged_kv_indptr is not None
             output = torch.empty(
                 [q.shape[0], q.shape[1], self.kv_lora_rank],
                 dtype=attn_metadata.attn_out_dtype,
@@ -1600,7 +1653,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(1),
                 output,
                 self.scale,
-                attn_metadata.paged_kv_indptr,
+                attn_metadata.paged_kv_indptr[: q.shape[0] + 1],
                 attn_metadata.paged_kv_indices,
                 kv_lora_rank=self.kv_lora_rank,
                 qk_rope_head_dim=self.qk_rope_head_dim,
@@ -1608,7 +1661,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 # for an invalid top-k entry, so no slot in the stream is
                 # negative.
                 has_invalid=False,
-                attn_sink=self.sinks,
+                attn_sink=self._attn_sink(q),
             )
             return output, None
 

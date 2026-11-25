@@ -192,6 +192,7 @@ def _sparse_mla_case(
     metadata = SimpleNamespace(
         num_actual_tokens=num_tokens,
         topk_tokens=width,
+        topk_start=0,
         req_id_per_token=torch.tensor(req_ids, dtype=torch.int32, device=DEVICE),
         block_table=block_table.int().to(DEVICE),
         block_size=BLOCK_SIZE,
@@ -408,7 +409,7 @@ def test_amd_sink_backend_is_rocm_sparse_mla(
     with set_default_torch_dtype(torch.bfloat16):
         backend = _amd_attention(num_local_heads)._resolve_sink_backend(kv_cache_dtype)
 
-    assert backend is ROCMAiterMLASparseBackend
+    assert issubclass(backend, ROCMAiterMLASparseBackend)
     assert backend.supports_sink()
 
 

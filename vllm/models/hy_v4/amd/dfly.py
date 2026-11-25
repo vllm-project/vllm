@@ -196,7 +196,7 @@ class HYV4DFlyAttention(HYV4MLAAttention):
         self, kv_cache_dtype: str
     ) -> type[AttentionBackend] | None:
         backend = super()._resolve_sink_backend(kv_cache_dtype)
-        if backend is not ROCMAiterMLASparseBackend:
+        if backend is None or not issubclass(backend, ROCMAiterMLASparseBackend):
             name = backend.get_name() if backend is not None else None
             raise NotImplementedError(
                 "HYV4 DFly on ROCm requires the ROCM_AITER_MLA_SPARSE draft "

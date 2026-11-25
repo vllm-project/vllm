@@ -611,11 +611,15 @@ steps:
       - vllm/v1/attention/backends/mla/rocm_aiter_mla_sparse.py
       - vllm/v1/attention/backends/mla/indexer.py
       - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+      - vllm/v1/attention/ops/shardq.py
       - vllm/v1/worker/gpu/spec_decode/dfly/
+      - vllm/config/attention.py
       - vllm/distributed/
       - vllm/_aiter_ops.py
+      - tests/models/hy_v4/test_shardq_sinks.py
       - tests/models/test_hyv4_rocm.py
       commands:
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s models/hy_v4/test_shardq_sinks.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)'
 
 - label: ":nvidia: (H100) [Nightly] Distributed Features"
