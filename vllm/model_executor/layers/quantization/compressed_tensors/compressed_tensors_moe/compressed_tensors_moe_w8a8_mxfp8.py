@@ -141,6 +141,7 @@ class CompressedTensorsW8A8Mxfp8MoEMethod(CompressedTensorsMoEMethod):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
             self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(
