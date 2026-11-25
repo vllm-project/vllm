@@ -1390,11 +1390,10 @@ class _ModelRegistry:
         architecture: str,
         model_config: ModelConfig,
     ) -> str | None:
-        if (
-            architecture in _TRANSFORMERS_BACKEND_MODELS
-            or architecture in _TRANSFORMERS_SUPPORTED_MODELS
-        ):
+        if architecture in _TRANSFORMERS_BACKEND_MODELS:
             return architecture
+        if supported := _TRANSFORMERS_SUPPORTED_MODELS.get(architecture):
+            return supported[1]
 
         if not model_config.trust_remote_code:
             # `architectures` may name a class that Transformers doesn't have, so use
