@@ -418,9 +418,6 @@ pub struct ServerConfig {
     #[serde(skip_serializing)]
     #[educe(Debug(method(fmt_redacted_api_keys)))]
     pub api_keys: Vec<String>,
-    /// Replacement bucket bounds for the core histogram families
-    /// (`--custom-histogram-buckets`); empty keeps the defaults.
-    pub custom_histogram_buckets: CustomHistogramBuckets,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
     /// Keep the API server running after the LLM becomes permanently unhealthy
@@ -461,6 +458,12 @@ pub struct EngineCoreConfig {
     /// Interval between periodic stats logs (`VLLM_LOG_STATS_INTERVAL`,
     /// default 10s), or `None` to never log while still recording stats.
     pub log_stats_interval: Option<Duration>,
+    /// Replacement bucket bounds for the request and scheduler histogram
+    /// families (`--custom-histogram-buckets`); empty keeps the defaults. The
+    /// buckets are process-wide and fixed when the first `EngineCoreLlm` is
+    /// built, so an embedder that builds its own sets them with
+    /// `METRICS.set_custom_histogram_buckets` before that.
+    pub custom_histogram_buckets: CustomHistogramBuckets,
     /// Keep external request IDs as engine-core request IDs instead of adding
     /// a random suffix (`VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`).
     pub disable_request_id_randomization: bool,

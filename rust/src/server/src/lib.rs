@@ -114,9 +114,6 @@ fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Ve
 /// [`Llm`]. When the server drives engine-core itself, connect to it here and
 /// load any static LoRA adapters from `--lora-modules`.
 async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppState>> {
-    // Fix the histogram buckets before the engine connection records metrics.
-    METRICS.set_custom_histogram_buckets(config.custom_histogram_buckets.clone());
-
     // If no served names are specified, fall back to the backend model path so
     // that the API always has at least one valid model ID. Use the same primary
     // public name for frontend-side metrics labels.
@@ -235,6 +232,8 @@ async fn connect_engine_core(
         "resolved coordinator mode"
     );
 
+    // Fix the histogram buckets before the engine connection records metrics.
+    METRICS.set_custom_histogram_buckets(engine_core.custom_histogram_buckets.clone());
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         transport_mode: engine_core.transport_mode.clone(),
         coordinator_mode,

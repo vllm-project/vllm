@@ -3168,8 +3168,8 @@ fn custom_histogram_buckets_reach_frontend_config() {
     let frontend_config = args.into_config();
 
     assert_eq!(
-        serve_config.server.custom_histogram_buckets,
-        frontend_config.server.custom_histogram_buckets
+        serve_config.engine_core.custom_histogram_buckets,
+        frontend_config.engine_core.custom_histogram_buckets
     );
     expect![[r#"
         CustomHistogramBuckets(
@@ -3181,7 +3181,7 @@ fn custom_histogram_buckets_reach_frontend_config() {
             },
         )
     "#]]
-    .assert_debug_eq(&serve_config.server.custom_histogram_buckets);
+    .assert_debug_eq(&serve_config.engine_core.custom_histogram_buckets);
 
     let error = Cli::try_parse_from([
         "vllm-rs",
@@ -3921,9 +3921,6 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 tls: None,
                 root_path: None,
                 api_keys: [],
-                custom_histogram_buckets: CustomHistogramBuckets(
-                    {},
-                ),
                 shutdown_timeout: 0ns,
                 keep_alive_on_engine_death: false,
                 keep_alive_timeout: 5s,
@@ -3954,6 +3951,9 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 disable_log_stats: false,
                 log_stats_interval: Some(
                     10s,
+                ),
+                custom_histogram_buckets: CustomHistogramBuckets(
+                    {},
                 ),
                 disable_request_id_randomization: false,
                 manages_engine: true,
@@ -4074,9 +4074,6 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 tls: None,
                 root_path: None,
                 api_keys: [],
-                custom_histogram_buckets: CustomHistogramBuckets(
-                    {},
-                ),
                 shutdown_timeout: 0ns,
                 keep_alive_on_engine_death: false,
                 keep_alive_timeout: 5s,
@@ -4103,6 +4100,9 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 disable_log_stats: false,
                 log_stats_interval: Some(
                     10s,
+                ),
+                custom_histogram_buckets: CustomHistogramBuckets(
+                    {},
                 ),
                 disable_request_id_randomization: false,
                 manages_engine: true,
@@ -4333,9 +4333,6 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 tls: None,
                 root_path: None,
                 api_keys: [],
-                custom_histogram_buckets: CustomHistogramBuckets(
-                    {},
-                ),
                 shutdown_timeout: 0ns,
                 keep_alive_on_engine_death: false,
                 keep_alive_timeout: 5s,
@@ -4362,6 +4359,9 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 disable_log_stats: false,
                 log_stats_interval: Some(
                     10s,
+                ),
+                custom_histogram_buckets: CustomHistogramBuckets(
+                    {},
                 ),
                 disable_request_id_randomization: false,
                 manages_engine: false,
