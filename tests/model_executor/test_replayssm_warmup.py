@@ -154,7 +154,7 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(layout):
             new_kv_cache_group(["layers.0.mixer", "layers.1.mixer"], spec),
             new_kv_cache_group(["layers.2.mixer"], spec),
         ],
-        5 * (2 * spec.page_size_bytes + 16),
+        num_blocks=5,
     )
     pages = allocate_kv_cache(kv_config, torch.device("cpu"), layout)
     mixers = []

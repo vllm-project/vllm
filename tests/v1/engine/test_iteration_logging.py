@@ -9,6 +9,7 @@ import pytest
 from vllm.v1.core.sched.output import IterationDetails
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
+from vllm.v1.metrics.iteration_workload import ScheduledWorkload
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 
 
@@ -62,15 +63,23 @@ def test_untimed_iteration_details_have_no_elapsed_time():
 
 def test_untimed_iteration_details_copy_the_scheduled_counts():
     engine = make_fake_engine()
+    workload = ScheduledWorkload(sum_decode_kv_tokens=7)
     scheduler_output = SimpleNamespace(
         total_num_scheduled_tokens=11,
-        iteration_details=IterationDetails(1, 8, 2, 3, 4, 5),
+        iteration_details=IterationDetails(1, 8, 2, 3, 4, 5, workload),
     )
 
     iteration_details = EngineCore._untimed_iteration_details(engine, scheduler_output)
 
     assert iteration_details == SchedulerIterationDetails(
-        0, 1, 8, 2, 3, num_encoder_inputs=4, num_encoder_output_tokens=5
+        0,
+        1,
+        8,
+        2,
+        3,
+        num_encoder_inputs=4,
+        num_encoder_output_tokens=5,
+        scheduled_workload=workload,
     )
 
 

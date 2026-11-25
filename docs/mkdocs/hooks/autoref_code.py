@@ -105,9 +105,9 @@ def _build_index() -> dict[str, str]:
         # Skip internal/private modules
         if any(part.startswith("_") and part != "__init__" for part in filepath.parts):
             continue
-        # Skip third-party vendored code
+        # Skip vendored code and packages excluded from the API reference
         rel = filepath.relative_to(VLLM_DIR)
-        if rel.parts and rel.parts[0] in ("third_party", "vllm_flash_attn"):
+        if rel.parts and rel.parts[0] in ("third_party", "vllm_flash_attn", "models"):
             continue
 
         module_depth = len(filepath.relative_to(ROOT_DIR).parts)

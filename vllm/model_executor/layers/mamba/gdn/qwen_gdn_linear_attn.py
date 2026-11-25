@@ -57,6 +57,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
+from vllm.model_executor.layers.mamba.ops.gdn_prefill_conv import (
+    gdn_prefill_conv,
+    gdn_prefill_conv_supported,
+)
 from vllm.model_executor.layers.mamba.ops.hip_gdn_chunk import (
     chunk_gdn_hip_fwd,
     is_hip_gdn_available,
@@ -2070,7 +2074,40 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 1.2: Process the remaining part
         conv_input_non_spec = mixed_qkv_non_spec
-        if attn_metadata.num_prefills > 0:
+        prefill_post_conv = None
+        if (
+            attn_metadata.num_prefills > 0
+            and attn_metadata.num_decodes == 0
+            and self.conv1d.bias is None
+            and self.activation in ("silu", "swish")
+            and gdn_prefill_conv_supported(
+                mixed_qkv, conv_weights, conv_state, self.head_k_dim, self.head_v_dim
+            )
+        ):
+            # Pure prefill: conv + post-conv prep in one kernel.
+            assert mixed_qkv_non_spec is not None
+            if spec_sequence_masks is not None:
+                a_non_spec = a.index_select(0, non_spec_token_indx)
+                b_non_spec = b.index_select(0, non_spec_token_indx)
+            else:
+                a_non_spec, b_non_spec = a, b
+            prefill_post_conv = gdn_prefill_conv(
+                mixed_qkv_non_spec,
+                conv_weights,
+                conv_state,
+                query_start_loc=non_spec_query_start_loc,
+                cache_indices=non_spec_state_indices_tensor,
+                has_initial_state=has_initial_state,
+                a=a_non_spec,
+                b=b_non_spec,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                num_k_heads=self.num_k_heads // self.tp_size,
+                head_dim=self.head_k_dim,
+                output_g_exp=self.gdn_prefill_backend == "flashinfer",
+                beta_scale=self.beta_scale,
+            )
+        elif attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
@@ -2113,44 +2150,46 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_decode_tokens = attn_metadata.num_decode_tokens
 
         if attn_metadata.num_prefills > 0:
-            assert mixed_qkv_non_spec is not None, (
-                "mixed_qkv_non_spec must be provided for prefill path"
-            )
-            if spec_sequence_masks is not None:
-                a_non_spec = a.index_select(0, non_spec_token_indx)
-                b_non_spec = b.index_select(0, non_spec_token_indx)
-            else:
-                a_non_spec = a
-                b_non_spec = b
+            if prefill_post_conv is None:
+                assert mixed_qkv_non_spec is not None, (
+                    "mixed_qkv_non_spec must be provided for prefill path"
+                )
+                if spec_sequence_masks is not None:
+                    a_non_spec = a.index_select(0, non_spec_token_indx)
+                    b_non_spec = b.index_select(0, non_spec_token_indx)
+                else:
+                    a_non_spec = a
+                    b_non_spec = b
 
-            if split_non_spec:
-                conv_output_prefill = mixed_qkv_non_spec[num_decode_tokens:]
-                a_prefill = a_non_spec[num_decode_tokens:]
-                b_prefill = b_non_spec[num_decode_tokens:]
-            else:
-                conv_output_prefill = mixed_qkv_non_spec
-                a_prefill = a_non_spec
-                b_prefill = b_non_spec
+                if split_non_spec:
+                    conv_output_prefill = mixed_qkv_non_spec[num_decode_tokens:]
+                    a_prefill = a_non_spec[num_decode_tokens:]
+                    b_prefill = b_non_spec[num_decode_tokens:]
+                else:
+                    conv_output_prefill = mixed_qkv_non_spec
+                    a_prefill = a_non_spec
+                    b_prefill = b_non_spec
 
+                prefill_post_conv = fused_post_conv_prep(
+                    conv_output=conv_output_prefill,
+                    a=a_prefill,
+                    b=b_prefill,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    num_k_heads=self.num_k_heads // self.tp_size,
+                    head_k_dim=self.head_k_dim,
+                    head_v_dim=self.head_v_dim,
+                    apply_l2norm=True,
+                    output_g_exp=self.gdn_prefill_backend == "flashinfer",
+                    beta_scale=self.beta_scale,
+                )
             (
                 query_non_spec,
                 key_non_spec,
                 value_non_spec,
                 g_non_spec,
                 beta_non_spec,
-            ) = fused_post_conv_prep(
-                conv_output=conv_output_prefill,
-                a=a_prefill,
-                b=b_prefill,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                num_k_heads=self.num_k_heads // self.tp_size,
-                head_k_dim=self.head_k_dim,
-                head_v_dim=self.head_v_dim,
-                apply_l2norm=True,
-                output_g_exp=self.gdn_prefill_backend == "flashinfer",
-                beta_scale=self.beta_scale,
-            )
+            ) = prefill_post_conv
             query_non_spec = query_non_spec.unsqueeze(0)
             key_non_spec = key_non_spec.unsqueeze(0)
             value_non_spec = value_non_spec.unsqueeze(0)
