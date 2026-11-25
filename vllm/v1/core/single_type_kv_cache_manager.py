@@ -4,7 +4,7 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
@@ -238,6 +238,7 @@ class SingleTypeKVCacheManager(ABC):
         # data for preempted ones.
         self.num_cached_block: dict[str, int] = {}
 
+        self.storage_retention_starts: dict[str, int] = {}
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
         # ``CacheConfig.enable_mamba_shared_prefix_checkpoint``, narrowed and set
@@ -342,7 +343,9 @@ class SingleTypeKVCacheManager(ABC):
                 num_required_blocks - max(num_req_blocks, num_unbacked_blocks), 0
             )
 
-        num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
+        num_skipped_tokens = self.get_num_storage_skipped_tokens(
+            request_id, total_computed_tokens
+        )
         num_local_computed_blocks = len(new_computed_blocks) + num_req_blocks
         # Number of whole blocks that are skipped by the attention window.
         # If nothing is skipped, this is 0.
@@ -401,7 +404,9 @@ class SingleTypeKVCacheManager(ABC):
         num_total_computed_tokens = (
             num_local_computed_tokens + num_external_computed_tokens
         )
-        num_skipped_tokens = self.get_num_skipped_tokens(num_total_computed_tokens)
+        num_skipped_tokens = self.get_num_storage_skipped_tokens(
+            request_id, num_total_computed_tokens
+        )
         num_skipped_blocks = num_skipped_tokens // self.block_size
         if num_skipped_blocks > 0:
             # It is possible that all new computed blocks are skipped when
@@ -459,7 +464,9 @@ class SingleTypeKVCacheManager(ABC):
         num_total_computed_tokens = (
             num_local_computed_tokens + num_external_computed_tokens
         )
-        num_skipped_tokens = self.get_num_skipped_tokens(num_total_computed_tokens)
+        num_skipped_tokens = self.get_num_storage_skipped_tokens(
+            request_id, num_total_computed_tokens
+        )
         if num_skipped_tokens > 0:
             # Some external computed tokens may be skipped too.
             num_external_computed_tokens = min(
@@ -719,6 +726,7 @@ class SingleTypeKVCacheManager(ABC):
         """
         # Default to [] in case a request is freed (aborted) before alloc.
         req_blocks = self.req_to_blocks.pop(request_id, [])
+        self.storage_retention_starts.pop(request_id, None)
         self.num_cached_block.pop(request_id, None)
         self._partial_hit_reqs.pop(request_id, None)
         return trim_null_head(req_blocks)
@@ -833,7 +841,9 @@ class SingleTypeKVCacheManager(ABC):
         """
         del num_prompt_tokens
         # Remove the blocks that will be skipped during attention computation.
-        num_skipped_tokens = self.get_num_skipped_tokens(processed_computed_tokens)
+        num_skipped_tokens = self.get_num_storage_skipped_tokens(
+            request_id, processed_computed_tokens
+        )
         if num_skipped_tokens <= 0:
             # This indicates that ALL tokens are inside attention window.
             # Thus we do not need to free any blocks outside attention window.
@@ -848,6 +858,11 @@ class SingleTypeKVCacheManager(ABC):
         # this request.
         num_skipped_blocks = min(num_skipped_blocks, len(blocks))
         self._remove_blocks_in_range(request_id, 0, num_skipped_blocks)
+
+    def get_num_storage_skipped_tokens(self, request_id: str, computed: int) -> int:
+        skipped = self.get_num_skipped_tokens(computed)
+        start = self.storage_retention_starts.get(request_id)
+        return skipped if start is None else min(skipped, start * self.block_size)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """Get the number of tokens that will be skipped for attention computation.
@@ -1069,6 +1084,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         spec decoding, which can re-prefill the last
         num_spec_prefill_tokens - 1 tokens from the end of the sequence and so
         must delay freeing/caching of blocks."""
+        storage_retention_tokens: int = field(default=0, repr=False, kw_only=True)
+        """Storage planning allowance shared by sizing and admission, in tokens.
+
+        Excluded from repr because attention and KV compatibility are unchanged.
+        """
         bounded_replay: bool = False
         """DeepSeek-V4.1: replay the window instead of prefix caching it."""
         rebuilt_by_replay: bool = False
@@ -1115,6 +1135,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             params.sliding_window
             - 1
             + params.extra_retained_tokens
+            + params.storage_retention_tokens
             + max_in_flight_tokens,
             max_model_len,
         )

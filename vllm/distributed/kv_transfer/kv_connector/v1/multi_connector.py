@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -727,6 +727,23 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
     def has_pending_push_work(self) -> bool:
         return any(c.has_pending_push_work() for c in self._connectors)
+
+    @classmethod
+    def get_kv_cache_storage_allowance(
+        cls, vllm_config: "VllmConfig", layers: dict[str, "KVCacheLayerConfig"]
+    ) -> dict[str, int] | None:
+        allowance = None
+        for connector_cls, temp_config in cls._get_connector_classes_and_configs(
+            vllm_config
+        ):
+            child = connector_cls.get_kv_cache_storage_allowance(temp_config, layers)
+            if child is not None:
+                if allowance is not None:
+                    raise ValueError(
+                        "Only one storage-retention connector may be configured"
+                    )
+                allowance = child
+        return allowance
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

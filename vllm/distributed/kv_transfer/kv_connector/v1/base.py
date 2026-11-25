@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
     from vllm.v1.request import Request
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
@@ -761,6 +761,17 @@ class KVConnectorBase_V1(ABC):
         The callback only requests a step. Pool mutations must still run on
         the scheduler thread. In-process engines are driven by their caller
         and do not register a callback.
+        """
+        return None
+
+    @classmethod
+    def get_kv_cache_storage_allowance(
+        cls, vllm_config: "VllmConfig", layers: dict[str, "KVCacheLayerConfig"]
+    ) -> dict[str, int] | None:
+        """Return extra storage tokens by layer, or None for no allowance.
+
+        This runs before connector construction and cache grouping. An enabled
+        provider may return an empty mapping when no layer needs extra storage.
         """
         return None
 

@@ -10,6 +10,9 @@ from functools import reduce
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    get_kv_connector_storage_allowance,
+)
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
@@ -1531,6 +1534,16 @@ def get_global_kv_cache_groups(
                     "The KV cache configs for the same layer are different "
                     "across workers. This is not supported yet."
                 )
+
+    allowance = get_kv_connector_storage_allowance(vllm_config, merged_layer_configs)
+    for name, tokens in (allowance or {}).items():
+        layer = merged_layer_configs[name]
+        merged_layer_configs[name] = replace(
+            layer,
+            manager_config=layer.manager_config.replace_params(
+                storage_retention_tokens=tokens
+            ),
+        )
 
     # When speculating with more than 1 speculative module (e.g. multi-layered MTP)
     # tag every sliding window with how many extra tokens to retain in the window.
