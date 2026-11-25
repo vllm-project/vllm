@@ -23,13 +23,16 @@ requires_sm90 = pytest.mark.skipif(
     not _sm90, reason="Inkling2 attention requires Hopper or Blackwell"
 )
 _is_rocm = current_platform.is_rocm()
-_gfx950 = _is_rocm and current_platform.is_device_capability(95)
+_gfx950 = _is_rocm and (
+    current_platform.is_device_capability(94)
+    or current_platform.is_device_capability(95)
+)
 requires_rocm = pytest.mark.skipif(
-    not _gfx950, reason="ROCm Triton attention requires gfx950"
+    not _gfx950, reason="ROCm Triton attention requires gfx942 or gfx950"
 )
 requires_rel_attention = pytest.mark.skipif(
     not (_sm90 or _gfx950),
-    reason="Inkling2 attention requires Hopper, Blackwell or gfx950",
+    reason="Inkling2 attention requires Hopper, Blackwell, gfx942 or gfx950",
 )
 
 HEAD_DIM = 128
@@ -631,7 +634,8 @@ def test_inkling2_decode_graph_replays_smaller_batch(is_local, num_splits):
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() or _gfx950), reason="requires CUDA or gfx950"
+    not (current_platform.is_cuda() or _gfx950),
+    reason="requires CUDA, gfx942 or gfx950",
 )
 @pytest.mark.parametrize("num_tokens", [1, 300])
 def test_gate_sink(num_tokens):

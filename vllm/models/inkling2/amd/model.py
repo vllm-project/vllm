@@ -325,12 +325,12 @@ class Inkling2ForConditionalGeneration(
         quant_config = vllm_config.quant_config
         assert quant_config is None or isinstance(quant_config, Inkling2QuantConfig)
         assert vllm_config.parallel_config.pipeline_parallel_size == 1
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import on_gfx942, on_gfx950
 
-        if not on_gfx950():
+        if not (on_gfx942() or on_gfx950()):
             raise ValueError(
-                "Inkling2 on ROCm requires gfx950 (CDNA4, MI350 series): its "
-                "kernels are written and validated for that architecture only"
+                "Inkling2 on ROCm requires gfx942 (CDNA3, MI300 series) or "
+                "gfx950 (CDNA4, MI350 series)"
             )
         if config.text_config.loop_config is not None:
             raise ValueError(

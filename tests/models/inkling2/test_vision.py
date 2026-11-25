@@ -22,8 +22,14 @@ _PROCESSOR_CLIP_STD = _vision._PROCESSOR_CLIP_STD
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available()
     or torch.cuda.get_device_capability()[0] not in (9, 10, 12)
-    or (current_platform.is_rocm() and not current_platform.is_device_capability(95)),
-    reason="needs a Hopper or Blackwell GPU, or gfx950",
+    or (
+        current_platform.is_rocm()
+        and not (
+            current_platform.is_device_capability(94)
+            or current_platform.is_device_capability(95)
+        )
+    ),
+    reason="needs a Hopper or Blackwell GPU, or gfx942 or gfx950",
 )
 
 CONFIG = {

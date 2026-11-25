@@ -16,10 +16,16 @@ if not (
     current_platform.is_device_capability_family(100)
     or current_platform.is_device_capability(90)
     or current_platform.is_device_capability_family(120)
-    or (_is_rocm and current_platform.is_device_capability(95))
+    or (
+        _is_rocm
+        and (
+            current_platform.is_device_capability(94)
+            or current_platform.is_device_capability(95)
+        )
+    )
 ):
     pytest.skip(
-        "Inkling2 requires Hopper, Blackwell or gfx950", allow_module_level=True
+        "Inkling2 requires Hopper, Blackwell, gfx942 or gfx950", allow_module_level=True
     )
 
 from vllm.models.inkling2 import (  # noqa: E402

@@ -750,14 +750,14 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     [examples/generate/multimodal/granite_docling_density_router_online.py](../../examples/generate/multimodal/granite_docling_density_router_online.py).
 
 !!! note
-    On ROCm, `Inkling2ForConditionalGeneration` requires CDNA4 (MI350 series) and a
-    checkpoint whose routed experts are all MXFP8, such as
+    On ROCm, `Inkling2ForConditionalGeneration` requires CDNA3 (MI300 series) or CDNA4
+    (MI350 series) and a checkpoint whose routed experts are all MXFP8, such as
     `thinkingmachines/Inkling-2-Small-MXFP8`: the NVFP4 experts of
     `thinkingmachines/Inkling-2-Small` run on CUDA only. It is validated at
-    `--tensor-parallel-size 4` on MI355X, with DSpark speculative decoding enabled by
-    the same `--speculative-config` as on CUDA. LoRA, `--enable-return-routed-experts`
-    and Inkling 2 Mini (`Inkling2LoopForConditionalGeneration`) are not supported on
-    ROCm.
+    `--tensor-parallel-size 4` on MI355X and `--tensor-parallel-size 8` on MI300X, with
+    DSpark speculative decoding enabled by the same `--speculative-config` as on CUDA.
+    LoRA, `--enable-return-routed-experts` and Inkling 2 Mini
+    (`Inkling2LoopForConditionalGeneration`) are not supported on ROCm.
 
 !!! note
     For `InternVLChatModel`, only InternVL2.5 with Qwen2.5 text backbone (`OpenGVLab/InternVL2.5-1B` etc.), InternVL3 and InternVL3.5 have video inputs support currently.

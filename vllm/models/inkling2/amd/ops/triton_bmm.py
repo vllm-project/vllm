@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton MXFP8 batched expert GEMMs (`tl.dot_scaled`: gfx950's scaled MFMA)
+"""Triton MXFP8 batched expert GEMMs (`tl.dot_scaled`, gfx942 and gfx950)
 for the Inkling2 MoE.
 
 The GEMMs read expert-sorted activation rows whose expert segments are padded
@@ -99,6 +99,12 @@ def _mxfp8_bmm_kernel(
     tl.store(out_ptrs, acc.to(tl.bfloat16), row_mask)
 
 
+def _gfx950_lds() -> bool:
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
 def bmm(
     act: torch.Tensor,
     act_scale: torch.Tensor,
@@ -141,6 +147,8 @@ def bmm(
         BN=bn,
         BK=bk,
         num_warps=8 if bm == 128 and bk == 256 else 4,
-        num_stages=2,
+        # Two stages of these tiles need 66,560 B of LDS. gfx950 has 160 KB;
+        # gfx942 has 64 KB, so it pipelines one stage.
+        num_stages=2 if _gfx950_lds() else 1,
     )
     return out

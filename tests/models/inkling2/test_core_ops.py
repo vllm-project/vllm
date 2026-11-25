@@ -25,8 +25,14 @@ _is_rocm = current_platform.is_rocm()
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available()
-    or (_is_rocm and not current_platform.is_device_capability(95)),
-    reason="needs CUDA or gfx950",
+    or (
+        _is_rocm
+        and not (
+            current_platform.is_device_capability(94)
+            or current_platform.is_device_capability(95)
+        )
+    ),
+    reason="needs CUDA, gfx942 or gfx950",
 )
 
 DEVICE = "cuda"

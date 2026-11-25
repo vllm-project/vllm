@@ -5,15 +5,15 @@ meta:
   provider: "Thinking Machines Lab"
   description: "MXFP8 checkpoint of Inkling 2 Small, the multimodal (text and image in, text out) MoE from Thinking Machines Lab with 594B total and 17B active parameters, up to 1M context, and a bundled DSpark speculator."
   date_added: 2026-11-20
-  date_updated: 2026-11-23
+  date_updated: 2026-11-25
   tasks:
     - multimodal
   related_recipes:
     - thinkingmachines/Inkling-2-Small
   hardware:
     h200: verified
-    mi300x: unsupported
-    mi325x: unsupported
+    mi300x: verified
+    mi325x: supported
     mi350x: supported
     mi355x: verified
 
@@ -60,14 +60,18 @@ variants:
     vram_minimum_gb: 747
     tp:
       amd: 4
+      mi300x: 8
+      mi325x: 8
     # Blackwell and gfx950 run the experts as native MXFP8; Hopper as W8A16
-    # (Humming GEMMs).
+    # (Humming GEMMs); gfx942 as the same Triton MXFP8 GEMM, with operands
+    # converted to BF16 before the matrix multiply.
     supported_hardware:
       - h200
       - arch:sm100
       - arch:sm103
+      - arch:gfx942
       - arch:gfx950
-    description: "All routed experts in MXFP8; attention, routers, attention-residual queries and the LM head in BF16/FP32. ~623 GB on disk including the DSpark draft. Blackwell and AMD gfx950 quantize expert activations to MXFP8; Hopper keeps them in BF16 (W8A16)."
+    description: "All routed experts in MXFP8; attention, routers, attention-residual queries and the LM head in BF16/FP32. ~623 GB on disk including the DSpark draft. Blackwell and AMD (gfx942, gfx950) quantize expert activations to MXFP8; Hopper keeps them in BF16 (W8A16). gfx942 (MI300X, MI325X) has no MXFP8 matrix instructions, so the same grouped GEMM converts its operands to BF16 before the matrix multiply."
 
 compatible_strategies:
   - single_node_tp
@@ -106,10 +110,24 @@ strategy_overrides:
           - "256"
       amd:
         extra_args:
-          - "--max-model-len"
-          - "1048576"
           - "--max-num-seqs"
           - "256"
+      mi350x:
+        extra_args:
+          - "--max-model-len"
+          - "1048576"
+      mi355x:
+        extra_args:
+          - "--max-model-len"
+          - "1048576"
+      mi300x:
+        extra_args:
+          - "--max-model-len"
+          - "131072"
+      mi325x:
+        extra_args:
+          - "--max-model-len"
+          - "131072"
   # --no-numa-bind works around a headless-node startup crash with vLLM's
   # default NUMA binding.
   multi_node_tp:
@@ -125,7 +143,7 @@ strategy_overrides:
 notes:
   - title: "Multi-node TP is not validated on AMD"
     when: { hardware: [amd], strategies: [multi_node_tp] }
-    body: "Only TP4 on one MI355X node has been run. Four MI355X or MI350X GPUs hold the checkpoint, so one node is enough."
+    body: "Only single-node runs have been validated: TP4 on MI355X and TP8 on MI300X. Four MI355X or MI350X GPUs hold the checkpoint, and eight MI300X GPUs hold it with room for a 128K-token context."
 
 troubleshooting:
   - title: "AssertionError: Executable was changed during NUMA binding context"
@@ -151,16 +169,22 @@ guide: |
   ## Configurations
 
   The checkpoint needs about 750 GB, so it runs at TP8 (TP8 attention with EP8 experts): one
-  8-GPU H200, B200 or B300 node, or two GB200 or GB300 trays. On AMD, four 288 GB GPUs are
-  enough: TP4 attention with EP4 experts.
+  8-GPU H200, B200 or B300 node, or two GB200 or GB300 trays. On MI350X and MI355X, four
+  288 GB GPUs are enough: TP4 attention with EP4 experts. On MI300X and MI325X it runs at TP8
+  as well.
 
   - **H200, TP8:** contexts up to 524,288 tokens. With the command above (DSpark and the
     reasoning parser), GSM8K is 0.972-0.974 (0-shot, chat) with a DSpark acceptance length of 4.5.
   - **Blackwell, TP8:** the full 1,048,576-token context.
   - **MI355X, TP4:** the full 1,048,576-token context; the KV cache holds 1.9M tokens with
     DSpark. MI350X is the same gfx950 architecture and is supported.
+  - **MI300X, TP8:** contexts up to 131,072 tokens (the KV cache holds 226K tokens with
+    DSpark; needle-in-a-haystack passes at 120K). MI325X is the same gfx942 architecture and is
+    supported.
 
-  On Hopper, the experts run as W8A16 GEMMs with BF16 activations.
+  On Hopper, the experts run as W8A16 GEMMs with BF16 activations. On MI300X, the Triton GEMM
+  converts the MXFP8 operands to BF16 before the matrix multiply, because gfx942 has no MXFP8
+  matrix instructions.
 
   ## References
 
