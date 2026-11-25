@@ -68,6 +68,7 @@ def memory_description(
         {},
         instance_id=domain.instance_id or instance,
         kv_compatibility_id=domain.compatibility_id,
+        role=domain.role,
         hash_settings=hashlib.sha256(
             repr(
                 (
@@ -121,6 +122,10 @@ def validated_members(
         ):
             raise ValueError(
                 "Peer instance identity or prefix hash settings differ across ranks"
+            )
+        if member.role != local.role:
+            raise ValueError(
+                "Peer roles differ across ranks; use one role per instance"
             )
     return members
 
@@ -441,7 +446,9 @@ class PeerWorker:
                         copies.append((s, d, n + length))
                     else:
                         copies.append((source_ptr, target_ptr, length))
-            self._stats.inc("worker_copy_bytes", num_bytes, transport="ipc")
+            self._stats.inc(
+                "worker_copy_bytes", num_bytes, transport="ipc", owner_role=remote.role
+            )
         synchronous = [job.grant for job in meta.jobs if job.grant.lease_s is None]
         if synchronous:
             assert self._mover is not None

@@ -32,6 +32,8 @@ class Replica {
   std::vector<Peer> peers_;
   std::unique_ptr<std::atomic<uint64_t>[]> generations_;
   std::unique_ptr<std::atomic<uint64_t>[]> windows_;
+  std::unique_ptr<std::atomic<uint64_t>[]> capacities_;
+  std::unique_ptr<std::atomic<bool>[]> ready_;
   ThreadError error_;
   std::atomic<bool> stop_{false};
   std::thread thread_;
@@ -95,6 +97,8 @@ class Replica {
       clear(id);
       generations_[id].store(0, std::memory_order_release);
       windows_[id].store(0, std::memory_order_release);
+      ready_[id].store(false, std::memory_order_release);
+      capacities_[id].store(0, std::memory_order_release);
       return false;
     }
     if (!frame.snapshot &&
@@ -110,6 +114,8 @@ class Replica {
     }
     peer.sequence = frame.seq;
     peer.has_snapshot = true;
+    ready_[id].store(true, std::memory_order_release);
+    capacities_[id].store(frame.capacity, std::memory_order_release);
     windows_[id].store(frame.window, std::memory_order_release);
     generations_[id].store(frame.generation, std::memory_order_release);
     return true;
@@ -222,7 +228,9 @@ class Replica {
   Replica(const char* const* endpoints, const uint64_t* epochs,
           const uint64_t* key_caps, size_t n, const Key* credential)
       : generations_(new std::atomic<uint64_t>[n] {}),
-        windows_(new std::atomic<uint64_t>[n] {}) {
+        windows_(new std::atomic<uint64_t>[n] {}),
+        capacities_(new std::atomic<uint64_t>[n] {}),
+        ready_(new std::atomic<bool>[n] {}) {
     for (size_t i = 0; i < n; ++i) {
       Peer peer;
       peer.endpoint = subscription_endpoint(endpoints[i]);
@@ -270,6 +278,31 @@ class Replica {
       if (owners)
         for (auto peer : *owners) out[i * peers_.size() + peer] = 1;
     }
+  }
+  bool try_query_any(const uint64_t* keys, size_t n, uint8_t* out) {
+    std::shared_lock<std::shared_mutex> snapshot(snapshot_mutex_,
+                                                 std::try_to_lock);
+    if (!snapshot.owns_lock()) return false;
+    for (size_t peer = 0; peer < peers_.size(); ++peer)
+      if (!ready_[peer].load(std::memory_order_acquire)) return false;
+    std::fill(out, out + n, 0);
+    for (size_t i = 0; i < n; ++i) {
+      auto& shard = shards_[mix(keys[i]) % shards_.size()];
+      std::shared_lock<std::shared_mutex> lock(shard.mutex, std::try_to_lock);
+      if (!lock.owns_lock()) return false;
+      if (peers_.size() <= 64) {
+        auto* owners = shard.bitmap.find(keys[i]);
+        out[i] = owners && *owners;
+      } else {
+        auto* owners = shard.table.find(keys[i]);
+        out[i] = owners && !owners->empty();
+      }
+    }
+    return true;
+  }
+  uint64_t capacity(size_t peer) const {
+    if (peer >= peers_.size()) throw std::out_of_range("peer index");
+    return capacities_[peer].load(std::memory_order_acquire);
   }
 };
 }  // namespace vllm::peer_l1

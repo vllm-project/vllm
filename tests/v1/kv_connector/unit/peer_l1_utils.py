@@ -290,6 +290,9 @@ def adaptive_peer(scheduler_resources):
                 free + 1,
                 ((),),
                 {},
+                role=config.kv_transfer_config.kv_connector_extra_config.get(
+                    "role", "full"
+                ),
             )
             peer.handshake(PeerHandshake([member], credential=base.domain.credential))
             channel = NativeOwnerChannel(member.endpoint, 19, 91, peer._cleanup)
@@ -348,6 +351,7 @@ def tcp_members(unused_tcp_port_factory, clock):
             endpoint=None,
             window=10,
             lease_ms=1000,
+            protected_cap=None,
         ):
             for _ in range(100):
                 selected = endpoint or f"tcp://127.0.0.1:{unused_tcp_port_factory()}"
@@ -362,6 +366,7 @@ def tcp_members(unused_tcp_port_factory, clock):
                         credential=auth,
                         lease_ms=lease_ms,
                         clock=clock,
+                        protected_cap=protected_cap,
                     )
                     break
                 except RuntimeError as error:
@@ -431,6 +436,8 @@ def async_scheduler(scheduler_resources, tcp_members, monkeypatch):
             *,
             flash=False,
             ipc_tokens=0,
+            remote_role="full",
+            remote_cap=None,
             remote_tokens=1024,
             prompt_tokens=1024,
             num_blocks=None,
@@ -445,7 +452,10 @@ def async_scheduler(scheduler_resources, tcp_members, monkeypatch):
                     scheduler_config=config.scheduler_config,
                     kv_transfer_config=config.kv_transfer_config,
                 )
-            remote, member = create(window=512, lease_ms=30000)
+            remote, member = create(
+                window=512, lease_ms=30000, protected_cap=remote_cap
+            )
+            member = replace_member(member, role=remote_role)
             publish([(remote, member)])
             prepared, local = create(epoch=911, window=512, lease_ms=30000)
             prepared.close()
@@ -538,6 +548,9 @@ def async_scheduler(scheduler_resources, tcp_members, monkeypatch):
             )
 
             def matched():
+                if remote_cap is not None and remote.pending():
+                    remote.deferred_rows()
+                    remote.absorb(free_blocks=128)
                 return connector.get_num_new_matched_tokens(request, 0) == expected
 
             wait_until(matched)

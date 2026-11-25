@@ -192,13 +192,19 @@ class AsyncReceives:
                     )
                 if self.stats is not None:
                     self.stats.inc("worker_rdma_reads", int(read.submitted))
+                    role = (
+                        read.job.memory.role if read.job.memory is not None else "full"
+                    )
                     self.stats.inc(
                         "worker_copy_bytes",
                         read.num_bytes,
                         transport="rdma",
+                        owner_role=role,
                     )
                     if failed:
-                        self.stats.inc("worker_rdma_failures", reason=reason)
+                        self.stats.inc(
+                            "worker_rdma_failures", reason=reason, owner_role=role
+                        )
                 if not drained:
                     self.quarantined[identity] = tuple(
                         sorted({target for _, _, target in read.job.blocks})

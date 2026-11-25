@@ -152,6 +152,7 @@ class PeerL1Connector(KVConnectorBase_V1, SupportsHMA):
             raise ValueError("Peer L1 requires kv_role=kv_both")
         if (
             domain.instance_id
+            and domain.role != "decode"
             and self._kv_transfer_config.kv_load_failure_policy != "recompute"
         ):
             raise ValueError(
@@ -207,6 +208,10 @@ class PeerL1Connector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         assert self._scheduler is not None
         self._scheduler.allocated(request, blocks, num_external_tokens)
+
+    def on_new_request(self, request: Request) -> None:
+        assert self._scheduler is not None
+        self._scheduler.new_request(request)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

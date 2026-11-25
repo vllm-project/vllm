@@ -85,6 +85,7 @@ Options belong in `kv_connector_extra_config`:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
+| `role` | `full` | `decode` only publishes and orders cache rows. |
 | `instance_id` | Empty | Explicit cross-instance identity; omit for same-instance IPC. |
 | `kv_compatibility_id` | Empty | Shared identifier for compatible model/KV semantics. |
 | `control_host` | Empty | Advertised reachable numeric IP for cross-instance control. |
@@ -92,6 +93,7 @@ Options belong in `kv_connector_extra_config`:
 | `peer_seeds` | `[]` | At most 128 `tcp://` discovery endpoints. |
 | `shared_secret_env` | Empty | Inherited environment variable containing the shared secret; required with `control_host`. A named variable must be nonempty. |
 | `rdma_transport` | Automatic | Registered name, currently `mori`; exactly one available implementation is required when omitted. |
+| `protected_cap_blocks` | Derived for decode | Limit on unique externally protected decode rows plus admission reserve. Defaults to twice the longest model-context prefix row bound, capped at 65536. Zero disables new decode grants; ignored in `full` role. |
 | `read_timeout_s` | `1.0` | Finite positive transfer budget from first possible post, within half the grant lease. |
 
 Unknown keys are rejected, including plain-text `shared_secret`. Supply secrets
@@ -111,11 +113,13 @@ Committed IPC grants remain pinned until completion or cancellation.
 Queueing, session setup and the step fence share the original half-lease bound;
 the transfer timeout does not extend the lease.
 
-Sleep mode is unsupported. For PD deployments, configure sharing
+Sleep mode is unsupported. For PD deployments, the default `full` role belongs
 on the prefill instance using `MultiConnector [PD connector, PeerL1Connector]`.
 MultiConnector selects the first positive hit; any child that requests waiting
 makes the whole lookup wait. An unselected peer grant is cancelled.
-Other prefix sources, such as offloading or LMCache, remain unsupported: each request loads
+The [decode owner role](peer_l1_decode_lending.md) also lends cached KV from a
+decode instance without competing with PD for request loads. Other prefix
+sources, such as offloading or LMCache, remain unsupported: each request loads
 from only one child.
 The RDMA mover has one I/O thread, so a slow source can delay other reads.
 Quarantine is a safety mechanism, not an admission guarantee: already submitted
@@ -128,18 +132,22 @@ Metrics use the `vllm:peer_l1_` prefix and vLLM's per-engine labels:
 | Family | Type | Additional labels |
 | --- | --- | --- |
 | `reader_lookups_total` | Counter | None |
-| `reader_tokens_total` | Counter | `transport` |
+| `reader_tokens_total` | Counter | `transport`, `owner_role` |
 | `reader_granted_rows_total` | Counter | None |
-| `reader_truncations_total` | Counter | `reason`: `window`, `pin_cap` |
+| `reader_truncations_total` | Counter | `reason`: `window`, `pin_cap`, `protected_cap` |
 | `reader_deadline_fallbacks_total` | Counter | None |
-| `worker_copy_bytes_total` | Counter | `transport` |
+| `worker_copy_bytes_total` | Counter | `transport`, `owner_role` |
 | `worker_rdma_reads_total` | Counter | None |
-| `worker_rdma_failures_total` | Counter | `reason` |
+| `worker_rdma_failures_total` | Counter | `reason`, `owner_role` |
 | `reader_quarantine_refs` | Gauge | None |
 | `reader_rdma_quarantine_disabled` | Gauge | None |
+| `owner_protected_blocks` | Gauge | None |
+| `owner_protected_high_water` | Gauge | None |
+| `decode_gate_open` | Gauge | None |
 | `owner_rejections_total` | Counter | `reason`, `stage` |
+| `decode_order_rows_total` | Counter | `action`: `front`, `retired`, `scanned` |
 
-`transport` is `ipc` or `rdma`.
+`transport` is `ipc` or `rdma`; `owner_role` is `full` or `decode`.
 Token counts describe selected peer prefixes; copy bytes describe submitted work,
 including failed RDMA receives. Neither is a successful-restore count.
 RDMA failure reasons are `deadline_before_post`, `deadline_after_post`,
@@ -147,8 +155,8 @@ RDMA failure reasons are `deadline_before_post`, `deadline_after_post`,
 Each failed receive is counted once. The first owner/reason failure logs at
 INFO, with repeats limited to one per minute.
 Owner rejection stages are `immediate` and `deferred`. Immediate reasons are
-`window` and `cap`; deferred reasons are `frozen`,
-`lease_expiry`, `missing_key`, `cap` and `budget`.
+`window`, `cap`, `protected_cap` and `gate`; deferred reasons are `frozen`,
+`lease_expiry`, `missing_key`, `cap`, `budget` and `gate`.
 No request ID or peer identity is used as a metric label.
 
 ## Security

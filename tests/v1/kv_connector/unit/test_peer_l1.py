@@ -784,7 +784,7 @@ def test_peer_stats_survive_msgpack_and_reach_prometheus():
     from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
     stats = PeerL1Stats()
-    stats.inc("worker_copy_bytes", 3072, transport="ipc")
+    stats.inc("worker_copy_bytes", 3072, transport="ipc", owner_role="full")
     output = EngineCoreOutputs(
         scheduler_stats=SchedulerStats(kv_connector_stats=stats.clone_and_reset().data)
     )
@@ -810,6 +810,7 @@ def test_peer_stats_survive_msgpack_and_reach_prometheus():
                     "model_name": "test",
                     "engine": "0",
                     "transport": "ipc",
+                    "owner_role": "full",
                 },
             )
             == 3072
@@ -1718,6 +1719,7 @@ def test_quarantine_budget_stops_rdma_but_preserves_ipc_and_recovers_on_drain(
         (True, "instance_id"),
         (True, "restart_group"),
         (False, "kv_compatibility_id"),
+        (False, "role"),
     ],
 )
 def test_dp_identity_agrees_with_rank_suffixed_engine_ids(
@@ -1758,7 +1760,9 @@ def test_dp_identity_agrees_with_rank_suffixed_engine_ids(
             memory_description(config, base.cache, Domain.from_options(options), rank)
         )
     if field is not None:
-        members[1] = replace(members[1], **{field: "different"})
+        members[1] = replace(
+            members[1], **{field: "decode" if field == "role" else "different"}
+        )
         with pytest.raises(ValueError):
             validated_members(members, rank=0, implicit=not explicit)
         return
@@ -2021,11 +2025,11 @@ def test_native_replica_rejects_frame_above_peer_bound(snapshot):
         while len(request) < 80:
             request.extend(peer.recv(80 - len(request)))
         if not snapshot:
-            peer.sendall(struct.pack("<7Q", 0x4C31535542534336, 37, 0, 0, 1, 1, 10))
+            peer.sendall(struct.pack("<8Q", 0x4C31535542534336, 37, 0, 0, 1, 1, 10, 64))
             wait_until(lambda: replica.generation(0) == 1)
         n = 129 if snapshot else 4097
         frame = struct.pack(
-            "<7Q",
+            "<8Q",
             0x4C31535542534336,
             37,
             0 if snapshot else n,
@@ -2033,6 +2037,7 @@ def test_native_replica_rejects_frame_above_peer_bound(snapshot):
             int(snapshot),
             2,
             10,
+            64,
         )
         events = b"".join(struct.pack("<3Q", i + 1, short_key, 1) for i in range(n))
         with suppress(BrokenPipeError):
@@ -2048,7 +2053,7 @@ def test_native_replica_rejects_frame_above_peer_bound(snapshot):
         while len(request) < 80:
             request.extend(peer.recv(80 - len(request)))
         peer.sendall(
-            struct.pack("<7Q", 0x4C31535542534336, 37, 0, 128, 1, 3, 10)
+            struct.pack("<8Q", 0x4C31535542534336, 37, 0, 128, 1, 3, 10, 64)
             + struct.pack("<3Q", 0, short_key, 1) * 128
         )
         wait_until(lambda: replica.generation(0) == 3)

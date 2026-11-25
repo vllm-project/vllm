@@ -46,8 +46,8 @@ def test_peer_worker_restores_prefix_on_another_dp_rank():
                     ).items():
                         counters[engine_idx, name] += value
                     if (
-                        counters[1, "reader_tokens,ipc"] > 0
-                        and counters[1, "worker_copy_bytes,ipc"] > 0
+                        counters[1, "reader_tokens,ipc,full"] > 0
+                        and counters[1, "worker_copy_bytes,ipc,full"] > 0
                     ):
                         restored.set()
 

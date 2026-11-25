@@ -34,6 +34,7 @@ class PeerMemory:
     rdma: bytes = field(default=b"", repr=False)
     rdma_transport: str = ""
     lease_s: float = 1.0
+    role: str = "full"
 
 
 @dataclass

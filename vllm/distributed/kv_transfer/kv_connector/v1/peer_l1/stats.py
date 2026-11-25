@@ -24,8 +24,10 @@ RDMA_FAILURE_REASONS = (
     "owner_changed",
     "cancelled",
 )
+OWNER_ROLES = ("full", "decode")
 TRANSPORT_LABELS: dict[str, tuple[str, ...]] = {
     "transport": ("ipc", "rdma"),
+    "owner_role": OWNER_ROLES,
 }
 # Label vocabularies are closed; peer identities never enter the payload.
 COUNTERS: Definitions = {
@@ -35,7 +37,7 @@ COUNTERS: Definitions = {
     "reader_truncations": (
         "Candidate plans shortened by a row limit.",
         {
-            "reason": ("window", "pin_cap"),
+            "reason": ("window", "pin_cap", "protected_cap"),
         },
     ),
     "reader_deadline_fallbacks": ("Requests falling back at the busy deadline.", {}),
@@ -45,6 +47,7 @@ COUNTERS: Definitions = {
         "Failed asynchronous receive requests.",
         {
             "reason": RDMA_FAILURE_REASONS,
+            "owner_role": OWNER_ROLES,
         },
     ),
     "owner_rejections": (
@@ -53,6 +56,8 @@ COUNTERS: Definitions = {
             "reason": (
                 "window",
                 "cap",
+                "protected_cap",
+                "gate",
                 "frozen",
                 "lease_expiry",
                 "missing_key",
@@ -61,10 +66,19 @@ COUNTERS: Definitions = {
             "stage": ("immediate", "deferred"),
         },
     ),
+    "decode_order_rows": (
+        "Decode eviction-order maintenance rows.",
+        {
+            "action": ("front", "retired", "scanned"),
+        },
+    ),
 }
 GAUGES: Definitions = {
     "reader_quarantine_refs": ("Target row references held for uncertain DMA.", {}),
     "reader_rdma_quarantine_disabled": ("RDMA selection disabled by quarantine.", {}),
+    "owner_protected_blocks": ("Protected rows plus admission reserve.", {}),
+    "owner_protected_high_water": ("Lifetime maximum protected rows plus reserve.", {}),
+    "decode_gate_open": ("Whether decode load gates allow new acquires.", {}),
 }
 
 

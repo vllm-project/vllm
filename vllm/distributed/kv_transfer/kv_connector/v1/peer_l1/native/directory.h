@@ -88,6 +88,7 @@ class FlatMap {
 struct Row {
   uint64_t pins = 0;
   bool absorbed = false, withheld = false, window = false, dirty = false;
+  bool budgeted = false, budget_pending = false;
   std::vector<Key> aliases;
 };
 }  // namespace vllm::peer_l1

@@ -7,6 +7,7 @@
 ## Prefix cache sharing
 
 - [Peer L1 sharing across DP GPU caches](peer_l1_share.md)
+    - [Decode instance cache lending](peer_l1_decode_lending.md)
 
 ## Compatibility Matrix
 

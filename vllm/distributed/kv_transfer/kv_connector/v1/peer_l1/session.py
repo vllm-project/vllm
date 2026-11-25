@@ -56,6 +56,10 @@ class OwnerDeferred(OwnerBusy):
         self.acquired_before = acquired_before
 
 
+class OwnerGated(Exception):
+    """The decode owner is not accepting new readers."""
+
+
 class NativeOwnerChannel:
     """Issue scheduler-thread RPCs for one owner epoch and reader identity.
 
@@ -109,7 +113,7 @@ class NativeOwnerChannel:
     ) -> Grant | None:
         """Pin every key or return no grant; never authorize a partial copy.
 
-        Busy and deferred replies raise the corresponding owner status.
+        Busy, deferred and gated replies raise the corresponding owner status.
         Deferred retries must reuse sequence and original acquisition time.
         """
         started = time.monotonic() if acquired_before is None else acquired_before
@@ -131,9 +135,11 @@ class NativeOwnerChannel:
             )
         )
         n, out = self._rpc(op, seq, keys)
-        # ABI: [-3 - generation, detail]; detail -1 = queued,
+        # ABI: [-3 - generation, detail]; detail -2 = gated, -1 = queued,
         # nonnegative = busy with the advertised immediate window.
         if n == 2 and out[0] <= -3:
+            if out[1] == -2:
+                raise OwnerGated()
             if out[1] == -1:
                 raise OwnerDeferred(-3 - int(out[0]), seq, started)
             raise OwnerBusy(-3 - int(out[0]), int(out[1]))

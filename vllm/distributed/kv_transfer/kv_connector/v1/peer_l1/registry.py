@@ -42,7 +42,9 @@ class Domain:
     port: int = 0
     seeds: tuple[str, ...] = ()
     credential: bytes = field(default=b"", repr=False)
+    role: str = "full"
     rdma_transport: str | None = None
+    protected_cap_blocks: int | None = None
     lease_ms: int = RDMA_LEASE_MS
     timeout_s: float = 1.0
     min_gain_pages: int = MIN_GAIN_PAGES
@@ -51,6 +53,7 @@ class Domain:
     def from_options(cls, options: dict[str, Any]) -> "Domain":
         """Validate public options and read the configured inherited secret."""
         allowed = {
+            "role",
             "instance_id",
             "kv_compatibility_id",
             "control_host",
@@ -58,6 +61,7 @@ class Domain:
             "peer_seeds",
             "shared_secret_env",
             "rdma_transport",
+            "protected_cap_blocks",
             "read_timeout_s",
         }
         unknown = options.keys() - allowed
@@ -78,9 +82,19 @@ class Domain:
             port=int(options.get("control_port", 0)),
             seeds=tuple(options.get("peer_seeds", ())),
             credential=hashlib.sha256(secret.encode()).digest() if secret else b"",
+            role=str(options.get("role", "full")),
             rdma_transport=options.get("rdma_transport"),
+            protected_cap_blocks=(
+                int(options["protected_cap_blocks"])
+                if "protected_cap_blocks" in options
+                else None
+            ),
             timeout_s=float(options.get("read_timeout_s", 1.0)),
         )
+        if result.role not in ("full", "decode"):
+            raise ValueError("Peer L1 role must be full or decode")
+        if result.protected_cap_blocks is not None and result.protected_cap_blocks < 0:
+            raise ValueError("Peer L1 protected_cap_blocks must be nonnegative")
         if not math.isfinite(result.timeout_s) or result.timeout_s <= 0:
             raise ValueError("Peer L1 read_timeout_s must be finite and positive")
         if result.rdma_transport is not None:
@@ -152,6 +166,8 @@ def compatible(local: PeerMemory, remote: PeerMemory) -> bool:
         return False
     return bool(
         local.kv_compatibility_id
+        and remote.role in ("full", "decode")
+        and (local.role != "decode" or remote.role == "full")
         and local.kv_compatibility_id == remote.kv_compatibility_id
         and local.compatibility == remote.compatibility
         and local.hash_settings == remote.hash_settings
@@ -398,3 +414,15 @@ class CandidateReplicas:
 
     def query(self, keys: list[bytes]) -> np.ndarray:
         return np.concatenate((self.local.query(keys), self.remote.query(keys)), axis=1)
+
+    def capacity(self, peer: int) -> int:
+        return (
+            self.local.capacity(peer)
+            if peer < self.local_count
+            else self.remote.capacity(peer - self.local_count)
+        )
+
+    def try_query_any(self, keys: list[bytes]) -> np.ndarray | None:
+        local = self.local.try_query_any(keys)
+        remote = self.remote.try_query_any(keys)
+        return None if local is None or remote is None else local | remote

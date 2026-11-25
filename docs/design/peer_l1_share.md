@@ -12,13 +12,14 @@ falling back to computation when no read can be safely authorized or completed.
 | `PeerL1Connector` / `PeerScheduler` | Each rank's engine scheduler process, scheduler thread | Match prefixes, acquire source grants, allocate targets through the KV manager, publish completed rows and reconcile pool references. |
 | `PeerWorker` / `LoadStoreMover` | Each rank's GPU worker process, model execution thread and copy stream | Import IPC mappings, enqueue copies, fence KV writers and report completion. |
 | `NativeOwner` / native `Owner` | Scheduler process, native RPC and subscription threads | Validate exact keys and epochs, grant source pins and serve placement updates under an owner mutex. Native threads serve while Python holds the GIL; GPU completion callbacks also enqueue cleanup without entering Python. |
-| `PlacementReplica` | Scheduler process, native subscription thread with scheduler-thread queries | Maintain advisory placement, generation and window hints. |
+| `PlacementReplica` | Scheduler process, native subscription thread with scheduler-thread queries | Maintain advisory placement, generation and capacity hints. |
 | `Resolver` | Scheduler process, Python discovery thread | Validate compatible cross-instance membership and replace placement replicas away from request ingress. |
 | `RdmaReadMover` / `PeerReadTransport` | GPU worker process, startup registration and dedicated RDMA I/O thread | Register backing memory, open remote sessions, post reads and distinguish completion from DMA drain. |
 | `CleanupQueue` | Scheduler and GPU worker processes, native sender thread | Retry grant releases; GPU callbacks only enqueue preallocated nodes. |
 
-Each rank can be both a source and a reader. All pool mutation stays on the
-scheduler thread. Source pins belong
+Each rank can be both a source and a reader in the default `full` role. A
+[decode owner](peer_l1_decode_lending.md) only lends its cache; PD still loads its
+requests. All pool mutation stays on the scheduler thread. Source pins belong
 to the native owner; an **absorb** reconciles those pins with physical block-pool
 references between allocations.
 
@@ -126,6 +127,10 @@ step only; all pool operations stay on the scheduler thread. Uncommitted entries
 survive until an eligible absorb or reader cancellation. A late reader consumes
 a decided result before applying its busy deadline to an undecided result.
 
+Decode admission uses a shared protected-row budget and a separate gate for new
+acquires; see [shared admission budget](peer_l1_decode_lending.md#shared-admission-budget).
+These controls never revoke an existing grant.
+
 ## 3. Allocation and pool protection
 
 The native owner can grant rows between scheduler steps. A retired pinned free
@@ -144,6 +149,10 @@ its pool reference before the local reference can be freed.
 At absorb, the window is bounded by 16384 rows and free headroom. It need not
 reserve the configured maximum in a busy pool. Owner pins never block eviction
 or force the owner to wait for a reader.
+
+Decode eviction preferences use the pool's optional ordering policy independently
+of the lease guard. See [free-row ordering](peer_l1_decode_lending.md#free-row-ordering)
+for the pressure gate, empty-row bound and candidate lifecycle.
 
 ## 4. Copy and read transport
 

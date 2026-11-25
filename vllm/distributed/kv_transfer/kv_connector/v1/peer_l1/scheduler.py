@@ -16,6 +16,7 @@ import numpy as np
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.lookup import ExternalKVCacheLookup
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
@@ -26,12 +27,16 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
     resolve_kv_cache_block_sizes,
 )
-from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_reusable_prefix_length
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 from .data import CopyJob, PeerHandshake, PeerMemory, PeerMetadata, PeerWorkerMetadata
+from .decode import DecodeCacheOrder
 from .native import CleanupQueue, NativeOwner, PlacementReplica
 from .registry import IPC_LEASE_MS, CandidateReplicas, Domain, Manifest, Resolver
 from .session import (
@@ -39,6 +44,7 @@ from .session import (
     NativeOwnerChannel,
     OwnerBusy,
     OwnerDeferred,
+    OwnerGated,
     peer_key,
 )
 from .stats import PeerL1Stats
@@ -52,6 +58,7 @@ BUSY_TIMEOUT_S = 1.0
 RDMA_COOLDOWN_S = 1.0
 RDMA_COOLDOWN_MAX_S = 30.0
 RDMA_QUARANTINE_FRACTION = 1 / 16
+ORDER_SCAN_BLOCKS = 256
 
 
 @dataclass
@@ -115,6 +122,8 @@ class PeerScheduler:
             if domain is not None
             else Domain.from_options(transfer.kv_connector_extra_config)
         )
+        self.role = self.domain.role
+        self.decode_only = self.role == "decode"
         self.rank = config.parallel_config.data_parallel_rank
         self.window, self.pin_cap = window, pin_cap
         self.timeout = RPC_TIMEOUT_MS
@@ -123,6 +132,34 @@ class PeerScheduler:
             raise ValueError("Peer L1 window and pin cap must be positive")
         self.step = 0
         self._stats = PeerL1Stats()
+        max_prefix_rows = 0
+        if self.decode_only:
+            assert config.model_config is not None
+            for group_id in supported:
+                group = cache.kv_cache_groups[group_id]
+                rows = cdiv(config.model_config.max_model_len, group.block_size)
+                params = group.manager_config.params
+                if isinstance(params, SlidingWindowManager.Params):
+                    rows = min(
+                        rows, 2 * cdiv(params.sliding_window - 1, group.block_size)
+                    )
+                max_prefix_rows += rows
+        self.protected_cap = (
+            (
+                self.domain.protected_cap_blocks
+                if self.domain.protected_cap_blocks is not None
+                else min(self.pin_cap, max(1, 2 * max_prefix_rows))
+            )
+            if self.decode_only
+            else None
+        )
+        self.decode_min_free = max(1, min(256, cache.num_blocks // 100))
+        self.decode_max_running = config.scheduler_config.max_num_seqs
+        self.decode_max_waiting = 0
+        self._decode_requests: dict[str, Request] = {}
+        self._decode_maintenance = False
+        self._engine_wakeup: Callable[[], None] | None = None
+        self._decode_order: DecodeCacheOrder | None = None
         self._reserve = 0
         self._published: memoryview | None = None
         self._pending: dict[int, dict[BlockHashWithGroupId, int]] = {}
@@ -176,7 +213,7 @@ class PeerScheduler:
         )
 
     def bind(self, manager: KVCacheManager) -> None:
-        """Install the exclusive lease guard."""
+        """Install the exclusive lease guard and optional decode eviction policy."""
         pool = manager.block_pool
         if pool.lease_guard is not None:
             raise ValueError(
@@ -184,6 +221,41 @@ class PeerScheduler:
             )
         self._manager, self._pool = manager, pool
         pool.lease_guard = self
+        if self.decode_only:
+            self._decode_order = DecodeCacheOrder(
+                pool, self._prefill_copies, self._stats, ORDER_SCAN_BLOCKS
+            )
+            pool.eviction_order_policy = self._decode_order
+
+    def new_request(self, request: Request) -> None:
+        if self.decode_only:
+            self._decode_requests[request.request_id] = request
+            self._update_decode_gate()
+
+    def _update_decode_gate(self) -> None:
+        if not self.decode_only or self._owner is None:
+            return
+        assert self._pool is not None
+        running = sum(
+            r.status == RequestStatus.RUNNING for r in self._decode_requests.values()
+        )
+        waiting = sum(
+            r.status in (RequestStatus.WAITING, RequestStatus.PREEMPTED)
+            and not (r.kv_transfer_params or {}).get("do_remote_prefill")
+            for r in self._decode_requests.values()
+        )
+        open = (
+            self._pool.get_num_free_blocks() >= self.decode_min_free
+            and running <= self.decode_max_running
+            and waiting <= self.decode_max_waiting
+        )
+        self._owner.set_gate(open)
+        self._stats.gauge("decode_gate_open", int(open))
+
+    def _prefill_copies(self, keys: list[bytes]) -> np.ndarray | None:
+        if self._replica is None:
+            return np.zeros(len(keys), dtype=np.uint8)
+        return self._replica.try_query_any(keys)
 
     def handshake(self, metadata: PeerHandshake) -> None:
         """Start native services after the worker supplies memory and credentials."""
@@ -203,6 +275,8 @@ class PeerScheduler:
         self._reserve = min(
             self.window, self._pool.free_block_queue.num_free_blocks // 9
         )
+        if self.protected_cap is not None:
+            self._reserve = min(self._reserve, self.protected_cap // 2)
         self._owner = NativeOwner(
             local.endpoint,
             local.epoch,
@@ -210,11 +284,17 @@ class PeerScheduler:
             window=self.window,
             pin_cap=self.pin_cap,
             initial_window=self._reserve,
+            protected_cap=self.protected_cap,
             lease_ms=self.domain.lease_ms if self.domain.instance_id else IPC_LEASE_MS,
             credential=self.domain.credential,
         )
         self._published = self._owner.published_rows
-        peers = [member for member in metadata.members if member.rank != self.rank]
+        peers = [
+            member
+            for member in metadata.members
+            if member.rank != self.rank
+            and (not self.decode_only or member.role == "full")
+        ]
         self._ranks = [member.rank for member in peers]
         self._local_count = len(peers)
         self._local_replica = PlacementReplica(
@@ -296,6 +376,7 @@ class PeerScheduler:
 
         The callback must enqueue engine work without accessing the block pool.
         """
+        self._engine_wakeup = callback
         assert self._owner is not None
         fd = self._owner.wake_fd
 
@@ -322,6 +403,8 @@ class PeerScheduler:
         num_tokens: int | None,
     ) -> None:
         """Stage a full-block alias until the worker reports its writes complete."""
+        if self._decode_order is not None:
+            self._decode_order.forget(block)
         group = get_group_id(key)
         if (
             group not in self.supported
@@ -337,6 +420,8 @@ class PeerScheduler:
         Adopt a pool reference for pinned in-use rows before local free, or
         withhold pinned free rows from allocation until a later absorb.
         """
+        if self._decode_order is not None:
+            self._decode_order.forget(block)
         self._pending.pop(block.block_id, None)
         # Only this scheduler changes publication flags, so the unlocked zero
         # check is safe. Nonzero rows still require locked retirement for RPC pins.
@@ -380,9 +465,15 @@ class PeerScheduler:
             assert self._pool is not None
             clear = ready and not len(self._pool.cached_block_hash_to_block)
             self._owner.thaw(clear=clear)
+            if clear and self._decode_order is not None:
+                self._decode_order.reset()
 
     def pending(self) -> bool:
-        return bool(self._pending or (self._owner and self._owner.pending()))
+        return bool(
+            self._decode_maintenance
+            or self._pending
+            or (self._owner and self._owner.pending())
+        )
 
     def _local(self, block_hash: BlockHash, group: int, local_tokens: int) -> bool:
         assert self._manager is not None
@@ -414,10 +505,12 @@ class PeerScheduler:
         positions: tuple[tuple[int, int], ...],
     ) -> tuple[int, bool]:
         self._decision(request, limit - local_tokens, length - local_tokens)
+        source = self._peer_memory.get(self._ranks[peer])
         self._stats.inc(
             "reader_tokens",
             length - local_tokens,
             transport="ipc" if grant.lease_s is None else "rdma",
+            owner_role=source.role if source is not None else "full",
         )
         self._stats.inc("reader_granted_rows", len(grant.rows))
         self._busy.pop(request.request_id, None)
@@ -499,6 +592,8 @@ class PeerScheduler:
         Each owner RPC can block for `self.timeout` milliseconds; one lookup
         may contact multiple peers. A selected grant pins all requested rows.
         """
+        if self.decode_only:
+            return 0, False
         self._adopt_remotes()
         self._stats.inc("reader_lookups")
         saved = self._reads.get(request.request_id)
@@ -652,8 +747,18 @@ class PeerScheduler:
                     remote[pair] = replica.query([identity(h, group)])[0]
                 return bool(remote[pair][peer_index])
 
+            source = self._peer_memory.get(self._ranks[peer])
+            decode_source = source is not None and source.role == "decode"
             advertised_window = replica.window(peer)
             row_limit = min(self.window, self.pin_cap)
+            capacity_limited = False
+            if decode_source:
+                capacity = replica.capacity(peer)
+                if capacity == 0:
+                    fallback_reason = "owner_capacity"
+                    continue
+                capacity_limited = capacity < row_limit
+                row_limit = min(row_limit, capacity)
             length = self._full_budget(bounds[peer], local_tokens, row_limit)
             requested_positions = None
             budget_truncated = length < bounds[peer]
@@ -681,7 +786,11 @@ class PeerScheduler:
                 requested_positions is not None
                 and requested_positions > granted_positions
             ):
-                reason = "window" if self.window <= self.pin_cap else "pin_cap"
+                reason = (
+                    "protected_cap"
+                    if capacity_limited
+                    else ("window" if self.window <= self.pin_cap else "pin_cap")
+                )
                 fallback_reason = reason
                 self._stats.inc("reader_truncations", reason=reason)
                 logger.debug(
@@ -708,7 +817,8 @@ class PeerScheduler:
                 try:
                     grant = self._channels[peer].acquire_exact(
                         keys,
-                        defer=selected is None and len(keys) > advertised_window,
+                        defer=selected is None
+                        and (len(keys) > advertised_window or decode_source),
                     )
                 except OwnerDeferred as deferred:
                     if waiting is None:
@@ -726,6 +836,9 @@ class PeerScheduler:
                         deferred.acquired_before,
                     )
                     return None, False
+                except OwnerGated:
+                    fallback_reason = "gate"
+                    continue
                 except OwnerBusy as busy:
                     if waiting is None:
                         waiting = _Busy(monotonic() + self.busy_timeout, {})
@@ -811,6 +924,7 @@ class PeerScheduler:
         self._adopt_remotes()
         if self._owner is not None:
             assert self._pool is not None
+            self._update_decode_gate()
             touch, free, withheld = self._owner.absorb(
                 free_blocks=self._pool.free_block_queue.num_free_blocks,
                 in_use_rows=[
@@ -825,7 +939,8 @@ class PeerScheduler:
             physical_free = self._pool.free_block_queue.num_free_blocks
             owner_stats = self._owner.absorb_stats()
             if (
-                min(self.window, physical_free // 9)
+                self.decode_only
+                or min(self.window, physical_free // 9)
                 > owner_stats["owner_effective_window"]
             ):
                 self._owner.complete_absorb(physical_free)
@@ -840,6 +955,10 @@ class PeerScheduler:
                     self._stats.gauge(family, value)
                 elif kind != "internal":
                     raise ValueError(f"Unknown peer L1 stat kind: {kind}")
+        if self._decode_order is not None:
+            self._decode_order.finish_step()
+            self._update_decode_gate()
+            self._decode_maintenance = False
         self.step += 1
         return PeerMetadata(self.step, tuple(jobs))
 
@@ -916,6 +1035,11 @@ class PeerScheduler:
 
     def finished(self, request_id: str) -> None:
         """Cancel unsubmitted grants; submitted copies keep their cleanup state."""
+        self._decode_requests.pop(request_id, None)
+        if self.decode_only:
+            self._decode_maintenance = True
+            if self._engine_wakeup is not None:
+                self._engine_wakeup()
         self._rdma_admissions.pop(request_id, None)
         waiting = self._busy.pop(request_id, None)
         self._cancel_queued(waiting)
@@ -940,3 +1064,5 @@ class PeerScheduler:
             self._owner.close()
         if self._pool is not None:
             self._pool.lease_guard = None
+            if self.decode_only:
+                self._pool.eviction_order_policy = None
