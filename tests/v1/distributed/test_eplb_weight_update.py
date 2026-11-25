@@ -27,6 +27,8 @@ pytestmark = multi_gpu_marks(num_gpus=2)
 
 def test_expert_parallel_without_eplb_accepts_weight_updates(vllm_runner, monkeypatch):
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    # Direct reload rejects a session that delivers no weights.
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     with vllm_runner(MODEL, **ENGINE_KWARGS) as runner:
         llm = runner.llm
         sampling_params = SamplingParams(temperature=0, max_tokens=8, ignore_eos=True)

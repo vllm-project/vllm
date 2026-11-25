@@ -286,6 +286,9 @@ class FreeKVCacheBlockQueue:
         # in the queue has prev and next blocks.
         self.fake_free_list_head = KVCacheBlock(block_id=-1)
         self.fake_free_list_tail = KVCacheBlock(block_id=-1)
+        # First block inserted via append/append_n (the cached/evict-last tail).
+        # Maintained so middle-tier blocks can be spliced before it in O(1).
+        self._cached_head: KVCacheBlock | None = None
         if self.num_free_blocks > 0:
             # Connect fake_head and fake_tail to the first and last block
             # respectively.
@@ -328,6 +331,11 @@ class FreeKVCacheBlockQueue:
         head.next_free_block = next_block
         next_block.prev_free_block = head
 
+        if first_block is self._cached_head:
+            self._cached_head = (
+                next_block if next_block is not self.fake_free_list_tail else None
+            )
+
         # Remove the block from the linked list.
         first_block.prev_free_block = first_block.next_free_block = None
 
@@ -358,6 +366,10 @@ class FreeKVCacheBlockQueue:
             if next_block is not None:
                 self.fake_free_list_head.next_free_block = next_block
                 next_block.prev_free_block = self.fake_free_list_head
+            if curr_block is self._cached_head:
+                self._cached_head = (
+                    next_block if next_block is not self.fake_free_list_tail else None
+                )
             return [curr_block]
 
         # Pop n blocks from the head of the list
@@ -376,6 +388,10 @@ class FreeKVCacheBlockQueue:
             # the new first block.
             self.fake_free_list_head.next_free_block = curr_block
             curr_block.prev_free_block = self.fake_free_list_head
+        if self._cached_head is not None and self._cached_head.prev_free_block is None:
+            self._cached_head = (
+                curr_block if curr_block is not self.fake_free_list_tail else None
+            )
         return ret
 
     def remove(self, block: KVCacheBlock) -> None:
@@ -396,6 +412,11 @@ class FreeKVCacheBlockQueue:
         prev_block.next_free_block = next_block
         # Link the next block to the previous block.
         next_block.prev_free_block = prev_block
+
+        if block is self._cached_head:
+            self._cached_head = (
+                next_block if next_block is not self.fake_free_list_tail else None
+            )
 
         # Remove the block from the linked list.
         block.prev_free_block = block.next_free_block = None
@@ -422,6 +443,9 @@ class FreeKVCacheBlockQueue:
         # Connect the fake tail after the new block.
         block.next_free_block = tail
         tail.prev_free_block = block
+
+        if self._cached_head is None:
+            self._cached_head = block
 
         self.num_free_blocks += 1
 
@@ -471,7 +495,33 @@ class FreeKVCacheBlockQueue:
         last_block.next_free_block = tail
         tail.prev_free_block = last_block
 
+        if self._cached_head is None:
+            self._cached_head = blocks[0]
+
         self.num_free_blocks += len(blocks)
+
+    def insert_before_cached(self, blocks: list[KVCacheBlock]) -> None:
+        """Insert blocks right before the first appended block (or at the tail
+        if none exist), preserving FIFO order among inserted blocks."""
+        if not blocks:
+            return
+        target = (
+            self._cached_head
+            if self._cached_head is not None
+            else self.fake_free_list_tail
+        )
+        prev_block = target.prev_free_block
+        assert prev_block is not None
+        for block in blocks:
+            block.prev_free_block = prev_block
+            prev_block.next_free_block = block
+            prev_block = block
+        prev_block.next_free_block = target
+        target.prev_free_block = prev_block
+        self.num_free_blocks += len(blocks)
+
+    def reset_cached_head(self) -> None:
+        self._cached_head = None
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
@@ -738,14 +788,36 @@ def is_mamba_group(group: KVCacheGroup) -> bool:
     return issubclass(group.manager_cls, MambaManager)
 
 
-def is_mamba_align_group(group: KVCacheGroup) -> bool:
-    """Whether `group` holds Mamba state cached in "align" mode."""
+def is_mamba_prefix_caching_group(group: KVCacheGroup) -> bool:
+    """Whether `group` holds Mamba state with prefix caching enabled."""
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
     config = group.manager_config
     return (
         isinstance(config.params, MambaManager.Params)
-        and config.params.mamba_cache_mode == "align"
+        and config.params.enable_prefix_caching
+    )
+
+
+def _unsupported_fine_grained_managers(
+    kv_cache_groups: Sequence[KVCacheGroup],
+    hash_block_size: int,
+    dcp_world_size: int,
+    manager_classes: Sequence[type["SingleTypeKVCacheManager"]] | None = None,
+) -> list[str]:
+    classes = (
+        manager_classes
+        if manager_classes is not None
+        else [group.manager_cls for group in kv_cache_groups]
+    )
+    return sorted(
+        {
+            manager_cls.__name__
+            for group, manager_cls in zip(kv_cache_groups, classes)
+            if group.prefix_cacheable
+            and not manager_cls.supports_fine_grained_hash_lookup
+            and resolve_dcp_kv_block_size(group, dcp_world_size) != hash_block_size
+        }
     )
 
 
@@ -761,7 +833,7 @@ def partial_hash_hits_enabled(
     prefix-cacheable group to support fine-grained lookups.
     """
     if not any(
-        is_mamba_align_group(group)
+        is_mamba_prefix_caching_group(group)
         and (
             (dcp_world_size == 1 and group.block_size > hash_block_size)
             or (dcp_world_size > 1 and group.block_size >= hash_block_size)
@@ -771,33 +843,17 @@ def partial_hash_hits_enabled(
         return False
     if manager_classes is None:
         return True
-    unsupported_managers = {
-        manager_cls.__name__
-        for group, manager_cls in zip(kv_cache_groups, manager_classes)
-        if group.prefix_cacheable
-        and not manager_cls.supports_fine_grained_hash_lookup
-        and resolve_dcp_kv_block_size(group, dcp_world_size) != hash_block_size
-    }
+    unsupported_managers = _unsupported_fine_grained_managers(
+        kv_cache_groups, hash_block_size, dcp_world_size, manager_classes
+    )
     if unsupported_managers:
         logger.warning_once(
             "Disabling fine-grained prefix-cache hits because these KV "
             "cache managers require block-aligned lookups: %s.",
-            ", ".join(sorted(unsupported_managers)),
+            ", ".join(unsupported_managers),
         )
         return False
     return True
-
-
-def eagle_proof_margin(
-    block_size: int, hash_block_size: int, fine_grained_lookup: bool
-) -> int:
-    """Tokens an EAGLE group matches past a cache hit before dropping them.
-
-    Fine-grained lookups drop one hash unit; others drop one cache block.
-    """
-    if fine_grained_lookup and block_size > hash_block_size:
-        return hash_block_size
-    return block_size
 
 
 def resolve_kv_cache_block_sizes(
@@ -817,8 +873,10 @@ def resolve_kv_cache_block_sizes(
       active. Multiple groups:
       `cache_config.prefix_match_unit` override if set, else the GCD of
       group block sizes; every group's block size must be divisible by it.
+      An explicit override is also rejected if prefix-cache hits would fall
+      back to `scheduler_block_size` instead of landing on it.
       Returns the scheduler block size (i.e. disables finer hashing) if block
-      hashing is inactive or a mamba group is not using cache mode "align".
+      hashing is inactive, or prefix caching is off for a mamba group.
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
@@ -857,11 +915,12 @@ def resolve_kv_cache_block_sizes(
     if not (cache_config.enable_prefix_caching or connector_enabled):
         return scheduler_block_size, scheduler_block_size
 
-    # Mamba groups outside align mode break divisibility; back off to the
-    # scheduler block size. Read the mode from the resolved group spec because
-    # its block size may have been updated independently of cache_config.
+    # Mamba groups without prefix caching break divisibility; back off to the
+    # scheduler block size. Read the flag from the resolved group because its
+    # block size may have been updated independently of cache_config.
     if any(
-        is_mamba_group(group) and not is_mamba_align_group(group) for group in groups
+        is_mamba_group(group) and not is_mamba_prefix_caching_group(group)
+        for group in groups
     ):
         return scheduler_block_size, scheduler_block_size
 
@@ -879,6 +938,36 @@ def resolve_kv_cache_block_sizes(
             f"Got group block sizes={group_block_sizes}, "
             f"prefix-cacheable={hashing_sizes}."
         )
+    has_mamba_partial_hits = partial_hash_hits_enabled(groups, hash_block_size, dcp)
+    unsupported_managers = (
+        _unsupported_fine_grained_managers(groups, hash_block_size, dcp)
+        if has_mamba_partial_hits
+        else []
+    )
+    cache_hit_alignment = (
+        hash_block_size
+        if has_mamba_partial_hits and not unsupported_managers
+        else scheduler_block_size
+    )
+    if (
+        cache_config.enable_prefix_caching
+        and requested is not None
+        and cache_hit_alignment != requested
+    ):
+        if unsupported_managers:
+            raise ValueError(
+                f"Invalid prefix_match_unit={requested}; partial cache hits "
+                "would be disabled because these KV cache managers require "
+                f"block-aligned lookups: {', '.join(unsupported_managers)}. "
+                f"Got group block sizes={group_block_sizes}."
+            )
+        if not connector_enabled:
+            raise ValueError(
+                f"Invalid prefix_match_unit={requested}; prefix-cache hits "
+                "for this layout land on the scheduler block size "
+                f"({scheduler_block_size}). Unset it or set it to "
+                f"{scheduler_block_size}."
+            )
     prefix_alignments = {
         spec.tokens_per_state
         for group in groups
@@ -886,11 +975,6 @@ def resolve_kv_cache_block_sizes(
         for spec in group.kv_cache_specs.values()
         if isinstance(spec.tokens_per_state, int) and spec.tokens_per_state > 1
     }
-    cache_hit_alignment = (
-        hash_block_size
-        if partial_hash_hits_enabled(groups, hash_block_size, dcp)
-        else scheduler_block_size
-    )
     if any(cache_hit_alignment % alignment for alignment in prefix_alignments):
         raise ValueError(
             f"Invalid prefix_match_unit={hash_block_size}; prefix-cache boundaries "
