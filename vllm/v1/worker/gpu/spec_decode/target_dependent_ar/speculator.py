@@ -44,8 +44,8 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
     def has_draft_kv_cache(self) -> bool:
         """Whether draft prefill needs to populate a draft-owned KV cache.
 
-        Gemma 4's assistant reads the target model's KV cache, so it can skip
-        its prefill forward on steps that request no draft tokens.
+        Drafters that reuse the target model's KV cache for all attention can
+        skip their prefill forward on steps that request no draft tokens.
         """
         return any(
             layer_name in self.draft_attn_layer_names
