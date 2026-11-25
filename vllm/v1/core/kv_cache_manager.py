@@ -819,9 +819,9 @@ class KVCacheManager:
     def estimate_cached_tokens(self, request: Request) -> int:
         """Estimate the number of tokens cached by the request."""
         cached_tokens: int | None = None
-        for group, blocks in zip(
+        for group, manager in zip(
             self.kv_cache_config.kv_cache_groups,
-            self.get_blocks(request.request_id).blocks,
+            self.coordinator.single_type_managers,
         ):
             if not group.prefix_cacheable:
                 continue
@@ -829,13 +829,7 @@ class KVCacheManager:
                 # Cross-attention groups are not prefix cached.
                 continue
 
-            # Coverage grows along the block table: the last hashed block has the most.
-            group_cached_tokens = 0
-            for block in reversed(blocks):
-                if block.block_hash_num_tokens:
-                    group_cached_tokens = block.block_hash_num_tokens
-                    break
-
+            group_cached_tokens = manager.estimate_cached_tokens(request.request_id)
             cached_tokens = (
                 group_cached_tokens
                 if cached_tokens is None

@@ -521,6 +521,28 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     assert moved[0].block_hash_num_tokens == 6
 
 
+def test_estimate_cached_tokens_keeps_partial_tail_moved_to_cow():
+    """The owner's partial tail stays counted after its cache entry moves to
+    the CoW copy, which happens before `created_cache_tokens` is finalized."""
+    hash_block_size = 2
+    manager = make_full_mamba_manager(dcp_world_size=1, hash_block_size=hash_block_size)
+
+    request = make_request("0", [0, 0, 1, 1, 2, 2, 3], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
+    assert num_computed == 0
+    assert manager.allocate_slots(request, 6, num_computed, computed_blocks) is not None
+    assert manager.estimate_cached_tokens(request) == 6
+
+    # The last prompt chunk moves the mamba entry off the request's block.
+    request.num_computed_tokens = 6
+    assert manager.allocate_slots(request, 1) is not None
+    assert manager.get_blocks("0").blocks[1][1].block_hash is None
+    assert manager.estimate_cached_tokens(request) == 6
+
+    manager.free(request)
+    assert manager.estimate_cached_tokens(request) == 0
+
+
 def test_partial_hit_then_internal_checkpoint_uses_distinct_mamba_blocks():
     hash_block_size = 2
     mamba_block_size = 4
