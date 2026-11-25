@@ -19,7 +19,6 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     OffloadPolicy,
     ReqContext,
-    RequestOffloadingContext,
     ScheduleEndContext,
     StoreTrigger,
     make_offload_key,
@@ -33,6 +32,7 @@ from vllm.v1.kv_offload.tiering.backpressure import (
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
+    SecondaryTierRequestContext,
     TieringOffloadingMetrics,
     TransferJob,
 )
@@ -123,8 +123,8 @@ class DelayedSecondaryTierManager(SecondaryTierManager):
 
     def on_new_request(self, req_context):
         if self._request_policy is not None:
-            return RequestOffloadingContext(policy=self._request_policy)
-        return RequestOffloadingContext()
+            return SecondaryTierRequestContext(policy=self._request_policy)
+        return SecondaryTierRequestContext()
 
     def drain_jobs(self):
         self.release_jobs()
@@ -245,6 +245,13 @@ class TestIdleDecay:
         bp._last_update = time.monotonic()
         bp.reset()
         assert bp._last_update == 0.0
+
+    def test_update_ignores_jobs_that_wrote_nothing(self):
+        """A store that wrote nothing is not a latency sample."""
+        bp = self._make_detector()
+        bp.update(time.monotonic() - 1.0, 0)
+        assert bp._completions == 0
+        assert bp.store_latency_ema == 0.0
 
 
 class TestBackpressure:

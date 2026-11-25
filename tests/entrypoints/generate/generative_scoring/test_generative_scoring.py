@@ -37,12 +37,12 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"
