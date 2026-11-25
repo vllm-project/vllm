@@ -415,7 +415,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
     ) -> M:
-        """Compute metadata common to both Mamba1 and Mamba2."""
+        """Compute metadata common to all Mamba-like backends."""
         num_reqs = common_attn_metadata.num_reqs
 
         # Treat multi-token queries as decode requests when
