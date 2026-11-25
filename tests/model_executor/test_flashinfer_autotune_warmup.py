@@ -819,8 +819,10 @@ def test_autotune_cache_key_normalizes_kv_init_fields():
 def test_autotune_cache_key_separates_moe_routed_tuning_under_dp(monkeypatch):
     """DP runs with MoE padding skip tune the precomputed-routing TRT-LLM MoE
     ops instead of the logits ops; a cache tuned without them must not hit and
-    skip tuning. Other configs, models without such a layer, and routing
-    simulator runs (which keep the logits ops) keep their key."""
+    skip tuning. Without DP, without padding skip, or under a routing
+    simulator (which keeps the logits ops), a model with such a layer keys
+    like one without. The variables are part of the key themselves, so each
+    comparison holds them fixed."""
     from vllm.config import ParallelConfig, VllmConfig
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
     from vllm.model_executor.warmup.flashinfer_autotune_cache import (
@@ -840,11 +842,11 @@ def test_autotune_cache_key_separates_moe_routed_tuning_under_dp(monkeypatch):
             SimpleNamespace(vllm_config=config, get_model=lambda: model)
         )
 
-    assert key(1, "1", routed=True) == key(1, "0", routed=True)
-    assert key(2, "1", routed=True) != key(2, "0", routed=True)
-    assert key(2, "1", routed=False) == key(2, "0", routed=False)
+    assert key(2, "1", routed=True) != key(2, "1", routed=False)
+    assert key(1, "1", routed=True) == key(1, "1", routed=False)
+    assert key(2, "0", routed=True) == key(2, "0", routed=False)
     sim = "uniform_random"
-    assert key(2, "1", routed=True, sim=sim) == key(2, "0", routed=True, sim=sim)
+    assert key(2, "1", routed=True, sim=sim) == key(2, "1", routed=False, sim=sim)
 
 
 def test_flashinfer_autotune_cache_hash_covers_flashinfer_and_the_environment(
