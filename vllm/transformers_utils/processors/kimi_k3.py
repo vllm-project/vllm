@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
+import regex as re
 import torch
 from PIL import Image
 from transformers import BaseImageProcessor, BatchFeature, TensorType
@@ -14,6 +15,8 @@ from vllm.tokenizers.hf import HfTokenizer
 from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
     navit_resize_image,
 )
+
+KIMI_K3_VIDEO_PLACEHOLDER = "<|kimi_video_placeholder|>"
 
 # Without a checkpoint `max_num_frames_each_video`, the patch budget alone lets
 # a tiny video keep ~160K frames. 768 (as in Qwen3-VL) only binds below 360p.
@@ -132,18 +135,22 @@ def encode_k3_text_prompt(
     *,
     add_special_tokens: bool = True,
 ) -> list[int]:
-    """Tokenize a text prompt, encoding each image placeholder on its own.
+    """Tokenize a text prompt, encoding each image or video placeholder on its own.
 
-    The placeholder is made of ordinary tokens. Encoded together with the
-    surrounding text, its first and last tokens can merge with their
+    The placeholders are made of ordinary tokens. Encoded together with the
+    surrounding text, their first and last tokens can merge with their
     neighbours, and the placeholder is then not found in the token ids.
     """
-    placeholder_ids = tokenizer.encode(image_placeholder, add_special_tokens=False)
+    placeholder_ids = {
+        placeholder: tokenizer.encode(placeholder, add_special_tokens=False)
+        for placeholder in (image_placeholder, KIMI_K3_VIDEO_PLACEHOLDER)
+    }
+    pattern = "|".join(map(re.escape, placeholder_ids))
     token_ids: list[int] = []
-    for i, segment in enumerate(text.split(image_placeholder)):
-        if i > 0:
-            token_ids += placeholder_ids
-        if segment:
+    for segment in re.split(f"({pattern})", text):
+        if segment in placeholder_ids:
+            token_ids += placeholder_ids[segment]
+        elif segment:
             token_ids += tokenizer.encode(
                 segment, add_special_tokens=add_special_tokens
             )

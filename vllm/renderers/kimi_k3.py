@@ -20,7 +20,10 @@ from vllm.renderers.chat_utils.chat_message import (
     parse_chat_message_content_mm_part,
 )
 from vllm.tokenizers.hf import HfTokenizer, ThreadSafeHFTokenizerMixin
-from vllm.transformers_utils.processors.kimi_k3 import encode_k3_text_prompt
+from vllm.transformers_utils.processors.kimi_k3 import (
+    KIMI_K3_VIDEO_PLACEHOLDER,
+    encode_k3_text_prompt,
+)
 from vllm.utils.async_utils import make_async
 
 from .hf import BaseHfRenderer
@@ -110,7 +113,8 @@ def _keep_k3_content_parts(
 
     The encoder renders and tokenizes each part in order with no separator.
     Parsing joins the text parts of a tool message with newlines, so those are
-    taken from the request instead.
+    taken from the request instead. The encoder has no video part, so a video
+    becomes a text part holding its placeholder.
     """
     for request_message, message in zip(messages, conversation, strict=True):
         content = message.get("content")
@@ -125,6 +129,8 @@ def _keep_k3_content_parts(
             message["content"] = [  # type: ignore[typeddict-item]
                 {"type": "text", "text": part["name"]}
                 if part["type"] == "tool_reference"
+                else {"type": "text", "text": KIMI_K3_VIDEO_PLACEHOLDER}
+                if part["type"] == "video"
                 else part
                 for part in content
             ]

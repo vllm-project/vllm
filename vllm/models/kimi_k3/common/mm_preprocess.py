@@ -52,6 +52,7 @@ from vllm.multimodal.video import (
 from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.transformers_utils.processor import cached_get_image_processor
 from vllm.transformers_utils.processors.kimi_k3 import (
+    KIMI_K3_VIDEO_PLACEHOLDER,
     KimiK3Processor,
     encode_k3_text_prompt,
     format_kimi_k3_timestamp,
@@ -68,8 +69,6 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
-
-KIMI_K3_VIDEO_PLACEHOLDER = "<|kimi_video_placeholder|>"
 
 
 @VIDEO_LOADER_REGISTRY.register("kimi_k3")

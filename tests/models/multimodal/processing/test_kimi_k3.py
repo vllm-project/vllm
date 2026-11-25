@@ -29,6 +29,7 @@ from vllm.platforms import current_platform
 from vllm.renderers import ChatParams, renderer_from_config
 from vllm.renderers.chat_utils.item_tracker import _get_embeds_data
 from vllm.transformers_utils.processors.kimi_k3 import (
+    KIMI_K3_VIDEO_PLACEHOLDER,
     get_kimi_k3_frame_resize,
     get_kimi_k3_max_video_frames,
     get_kimi_k3_max_video_tokens,
@@ -448,9 +449,8 @@ def test_video_prompt_and_inputs(k3_processor):
     rng = np.random.default_rng(0)
     frames = rng.integers(0, 256, (12, 112, 84, 3), dtype=np.uint8)
     metadata = {"fps": 4.0, "total_num_frames": 12, "frames_indices": list(range(12))}
-    prompt = k3_processor.dummy_inputs.get_dummy_text({"video": 1})
     out = k3_processor(
-        prompt,
+        f"Describe {KIMI_K3_VIDEO_PLACEHOLDER}\nbriefly.",
         mm_items=k3_processor.info.parse_mm_data({"video": [(frames, metadata)]}),
     )
 
