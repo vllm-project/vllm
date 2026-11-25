@@ -170,6 +170,7 @@ def triton_attn_wrapper(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    sequence_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
     from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 
@@ -187,13 +188,15 @@ def triton_attn_wrapper(
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = torch.empty_like(q, memory_format=torch.contiguous_format)
+    if sequence_lengths is None:
+        sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
     context_attention_fwd(
         q,
         k,
         v,
         output,
         b_start_loc=cu_seqlens[:-1],
-        b_seq_len=cu_seqlens[1:] - cu_seqlens[:-1],
+        b_seq_len=sequence_lengths,
         max_input_len=max_seqlen,
         is_causal=False,
         sliding_window_q=None,
@@ -213,6 +216,7 @@ def triton_attn_wrapper_fake(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    sequence_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(q, memory_format=torch.contiguous_format)
 
@@ -232,6 +236,7 @@ def vit_triton_attn_wrapper(
     scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
+    sequence_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.triton_attn_wrapper(
         q,
@@ -241,6 +246,7 @@ def vit_triton_attn_wrapper(
         scale,
         cu_seqlens,
         max_seqlen,
+        sequence_lengths,
     )
 
 

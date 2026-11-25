@@ -121,7 +121,7 @@ CONFIG_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "num_attention_groups",  # Step3p5
     ),
     "num_experts": (
-        "num_experts",  # Jamba
+        "num_experts",  # Qwen3-MoE
         "moe_num_experts",  # Dbrx
         "n_routed_experts",  # DeepSeek
         "num_local_experts",  # Mixtral
@@ -252,8 +252,6 @@ _ARCHITECTURE_TO_MODEL_TYPE: dict[str, str] = {
 # Checkpoints whose served model is nested in `thinker_config`
 _THINKER_MODEL_TYPES: set[str] = {"qwen3_asr", "qwen2_5_omni", "qwen3_omni_moe"}
 
-_PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
-
 # Model types whose checkpoints carry shared RoPE parameters alongside the
 # per-layer-type dicts. Since transformers 5.17, `validate_rope` treats every
 # top-level value of such a dict as a layer's parameters and raises on the
@@ -341,37 +339,6 @@ def _install_hf_config_validator(
         stack.extend(cls.__subclasses__())
 
 
-def _patch_hf_transformers_validate_rope():
-    """Transformers v5 moved the ignore_keys option from the method signature of
-    validate_rope and replaced it with the ignore_keys_at_rope_validation parameter
-    in the PreTrainedConfig class. This is a patch to make older versions of
-    validate_rope() with the ignore_keys parameter work with newer versions of
-    hf transformers (from v5 onwards)
-    """
-    if hasattr(PreTrainedConfig.validate_rope, "__vllm_patched__"):
-        return
-
-    _original_validate_rope = PreTrainedConfig.validate_rope
-
-    @wraps(_original_validate_rope)
-    def patched_validate_rope(self, *args, **kwargs):
-        ignore_keys_param = kwargs.pop("ignore_keys", None)
-        original_ignore_keys = self.ignore_keys_at_rope_validation
-        if ignore_keys_param is not None:
-            logger.warning(
-                "validate_rope() was called with the legacy 'ignore_keys' "
-                "argument; use 'ignore_keys_at_rope_validation' instead"
-            )
-        self.ignore_keys_at_rope_validation = original_ignore_keys or ignore_keys_param
-        result = _original_validate_rope(self, *args, **kwargs)
-        return result
-
-    patched_validate_rope.__vllm_patched__ = True  # type: ignore[attr-defined]
-    _install_hf_config_validator(
-        "validate_rope", patched_validate_rope, _original_validate_rope
-    )
-
-
 def _patch_hf_transformers_nested_rope_validation() -> None:
     """Drop shared entries sitting alongside a nested `rope_parameters` dict.
 
@@ -448,9 +415,6 @@ class HFConfigParser(ConfigParserBase):
                 dummy_config = PreTrainedConfig(**dummy_kwargs)
                 dummy_model_type = hf_overrides(dummy_config).model_type
                 model_type = dummy_model_type.removeprefix("dummy_")
-
-        if model_type in _PATCH_HF_VALIDATE_ROPE:
-            _patch_hf_transformers_validate_rope()
 
         if model_type in _PATCH_HF_NESTED_ROPE_VALIDATION:
             _patch_hf_transformers_nested_rope_validation()
