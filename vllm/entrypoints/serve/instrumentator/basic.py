@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from vllm.config.kv_events import KVEventsConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.logger import init_logger
@@ -58,6 +61,21 @@ async def show_version():
 
 @router.get("/kv_event_sources")
 async def kv_event_sources(raw_request: Request):
-    """KV-event publisher config per DP rank; empty on render-only servers."""
+    """KV-event publisher config per DP rank; empty on render-only servers.
+
+    A rank whose connector serves peer lookups also carries a `peer_lookup`
+    object. Other ranks have exactly the keys of the publisher config.
+    """
     client: EngineClient | None = raw_request.app.state.engine_client
-    return client.get_kv_event_sources() if client is not None else {}
+    if client is None:
+        return {}
+    sources = {
+        rank: dataclasses.asdict(config)
+        for rank, config in client.get_kv_event_sources().items()
+    }
+    for rank, info in client.get_peer_lookup_infos().items():
+        # A rank without KV events still gets an entry, so the peer lookup
+        # record is reachable; its event source is the disabled default.
+        entry = sources.setdefault(rank, dataclasses.asdict(KVEventsConfig()))
+        entry["peer_lookup"] = dataclasses.asdict(info)
+    return sources

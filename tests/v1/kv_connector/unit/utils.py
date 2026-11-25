@@ -601,6 +601,21 @@ def make_kv_cache_config(
     )
 
 
+def _disable_peer_lookup(sched) -> None:
+    """Peer lookup state read by build_connector_meta, update_connector_output
+    and has_pending_push_work, set up as in an engine without peer lookup."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
+        PeerLookupChannel,
+        PeerLookupStats,
+    )
+
+    sched._peer_pins = None
+    sched._lookup = PeerLookupChannel()
+    sched._lookup_client = None
+    sched._peer_endpoints = {}
+    sched.peer_lookup_stats = PeerLookupStats()
+
+
 def make_nixl_scheduler(
     has_mamba: bool = False,
     is_hma_required: bool = False,
@@ -620,6 +635,7 @@ def make_nixl_scheduler(
     )
 
     sched = object.__new__(NixlConnectorScheduler)
+    sched._handshake_payloads = {}
     sched._has_mamba = has_mamba
     sched._bounded_replay = bounded_replay
     sched._is_hma_required = is_hma_required
@@ -657,6 +673,7 @@ def make_nixl_scheduler(
         sched.side_channel_port = 5555
         sched.blocks_per_sw = []
         sched.is_bidirectional_kv_xfer_enabled = False
+        _disable_peer_lookup(sched)
     return sched
 
 
@@ -734,6 +751,7 @@ def make_nixl_push_scheduler(
     sched._new_heartbeat_reqs = set()
     sched.blocks_per_sw = []
 
+    _disable_peer_lookup(sched)
     return sched
 
 

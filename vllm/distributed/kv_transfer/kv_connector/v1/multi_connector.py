@@ -336,6 +336,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for connector in self._connectors:
             connector.bind_kv_cache_manager(kv_cache_manager)
 
+    def set_engine_wakeup(self, callback: Callable[[], None]) -> None:
+        for c in self._connectors:
+            c.set_engine_wakeup(callback)
+
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         for c in self._connectors:
             c.bind_gpu_block_pool(gpu_block_pool)

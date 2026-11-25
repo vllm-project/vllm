@@ -107,6 +107,28 @@ class PrefixHashConfig:
 
 
 @dataclass(slots=True)
+class PeerLookupInfo:
+    """How a peer reaches one engine rank to look up and pin a KV prefix.
+
+    Reported on `/kv_event_sources` so a router can address the rank. Field
+    names are part of that JSON contract.
+    """
+
+    enabled: bool
+    engine_id: str
+    side_channel_host: str
+    side_channel_port: int
+    # The values a consumer must put in `kv_transfer_params`.
+    tp_size: int
+    dcp_size: int
+    pp_size: int
+    connector: str
+    connector_version: str
+    # Layout compatibility hash that `PeerPinServer` checks on each lookup.
+    layout_fingerprint: str
+
+
+@dataclass(slots=True)
 class EngineCoreReadyResponse:
     """Sent from EngineCore to each frontend at the end of engine startup.
 
@@ -159,6 +181,8 @@ class EngineCoreReadyResponse:
     # hashing failed) and whether expert parallelism is enabled.
     config_hash: str | None = None
     enable_expert_parallel: bool = False
+    # Set when the KV connector serves peer lookups (see PeerLookupInfo).
+    peer_lookup: PeerLookupInfo | None = None
     # Whether the engine computes prompt logprobs, for frontends without a
     # VllmConfig (the Rust frontend). False under --kv-sharing-fast-prefill,
     # which skips prompt tokens in some layers.

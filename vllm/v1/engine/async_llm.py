@@ -54,7 +54,12 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.v1.engine import CheckpointState, EngineCoreRequest, PauseMode
+from vllm.v1.engine import (
+    CheckpointState,
+    EngineCoreRequest,
+    PauseMode,
+    PeerLookupInfo,
+)
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -1476,3 +1481,6 @@ class AsyncLLM(EngineClient):
 
     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
         return self.engine_core.get_kv_event_sources()
+
+    def get_peer_lookup_infos(self) -> dict[int, PeerLookupInfo]:
+        return self.engine_core.get_peer_lookup_infos()

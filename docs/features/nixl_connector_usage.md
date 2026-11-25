@@ -357,6 +357,19 @@ python benchmarks/multi_turn/benchmark_serving_multi_turn.py \
 
     We currently assume the router is able to detect such mismatch across turns. See [#43094](https://github.com/vllm-project/vllm/issues/43094). 
 
+## Peer Prefix Lookup
+
+A router can send a request to a less busy engine and have it fetch the prefix KV from the engine that already caches it. The consumer asks the producer over the NIXL side channel to pin the longest cached prefix by block hash. The producer replies with the block ids without computing anything, and the consumer pulls them and computes the rest.
+
+Enable it on the producer with `peer_lookup` in `kv_connector_extra_config`. It is off by default and works in pull mode only:
+
+```bash
+vllm serve Qwen/Qwen3-8B \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"peer_lookup":true}}'
+```
+
+A producer that serves lookups reports a `peer_lookup` record (side-channel address and identity) on `GET /kv_event_sources`, which a router uses to find it. A request takes the peer path when its `kv_transfer_params` set both `peer_lookup` and `do_remote_prefill`. See [NIXL Peer Prefix Lookup and Pin](../design/nixl_peer_lookup_pin.md) for the protocol, the tuning settings and the limits.
+
 ## Multi-Instance Setup
 
 ### Multiple Prefiller Instances on Different Machines

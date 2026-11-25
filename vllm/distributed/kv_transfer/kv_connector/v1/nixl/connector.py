@@ -12,6 +12,7 @@ and worker classes; the connector classes here only forward calls.
 * `NixlConnector` – backward-compatible alias for `NixlPullConnector`.
 """
 
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -63,13 +64,15 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_events import KVCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
         NixlBaseConnectorScheduler,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         NixlBaseConnectorWorker,
     )
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+    from vllm.v1.engine import PeerLookupInfo
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -259,6 +262,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
 
+    def get_peer_lookup_info(self) -> "PeerLookupInfo | None":
+        if self.connector_scheduler is None:
+            return None
+        return self.connector_scheduler.get_peer_lookup_info()
+
     ############################################################
     # Worker Side Methods
     ############################################################
@@ -339,6 +347,22 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         if self.connector_worker.use_host_buffer and self.connector_worker.copy_blocks:
             self.connector_worker.save_kv_to_host(self._connector_metadata)
+
+    def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
+        super().bind_kv_cache_manager(kv_cache_manager)
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.bind_kv_cache_manager(kv_cache_manager)
+
+    def set_engine_wakeup(self, callback: Callable[[], None]) -> None:
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.set_engine_wakeup(callback)
+
+    def take_events(self) -> Iterable["KVCacheEvent"]:
+        # The core calls this exactly once per update_from_output, i.e. once
+        # per scheduled step, in order: use it as the step-processed tick.
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.on_step_processed()
+        return super().take_events()
 
     def has_pending_push_work(self) -> bool:
         if self.connector_scheduler is not None:

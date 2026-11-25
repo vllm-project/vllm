@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import enum
 import itertools
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, overload
 
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
@@ -11,10 +12,16 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
+    UnitaryKVCacheCoordinator,
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    KVCacheBlock,
+    KVCacheBlockCopy,
+    trim_null_head,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     FullAttentionManager,
@@ -24,6 +31,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheSpecKind,
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -128,6 +136,49 @@ class KVCacheBlocks:
         return KVCacheBlocks(tuple(() for _ in range(len(self.blocks))))
 
 
+class PrefixPinMiss(enum.Enum):
+    """Why `KVCacheManager.lookup_and_pin` stopped before the last hash."""
+
+    NONE = "none"  # Every requested block was pinned.
+    NOT_CACHED = "not_cached"  # The first missing hash was never cached here.
+    EVICTED = "evicted"  # The first missing hash was evicted recently.
+    REFUSED = "refused"  # Cached, but pinning it would cross a block budget.
+    UNSUPPORTED = "unsupported"  # This cache layout cannot be pinned by hash.
+
+
+@dataclass(eq=False)
+class PrefixPin:
+    """Blocks of a cached prefix held for a reader that is not a request.
+
+    The blocks stay allocated, so they cannot be evicted or handed to another
+    request, until `KVCacheManager.release_pin`. Two caveats for a caller
+    that exposes them to a reader outside this engine:
+
+    - A block is cached when the step that computes it is scheduled, not when
+      that step finishes. With async scheduling, batch N is scheduled while
+      batch N-1 runs, so its blocks are cached (and their KV events sent when
+      N-1 finishes) before N has run. Expose the block ids only after every
+      step scheduled before the pin has finished on the device.
+    - A block whose KV load failed can be recomputed in place or invalidated
+      while pinned. `KVCacheManager.pins_holding` finds the pins to revoke.
+
+    Treat `blocks` as read-only.
+    """
+
+    # Per KV cache group, the pinned blocks in prefix order.
+    blocks: tuple[list[KVCacheBlock], ...]
+    num_tokens: int
+    miss: PrefixPinMiss
+    released: bool = field(default=False, init=False)
+
+    @property
+    def num_blocks(self) -> int:
+        return sum(len(group) for group in self.blocks)
+
+    def get_block_ids(self) -> list[list[int]]:
+        return [[block.block_id for block in group] for group in self.blocks]
+
+
 class KVCacheManager:
     def __init__(
         self,
@@ -223,6 +274,20 @@ class KVCacheManager:
         self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
+        coordinator = self.coordinator
+        self._supports_prefix_pinning = (
+            isinstance(coordinator, UnitaryKVCacheCoordinator)
+            and get_kv_cache_kind(
+                kv_cache_config.kv_cache_groups[0].manager_config,
+                kv_cache_config.kv_cache_groups[0].distinct_specs,
+            )
+            in (KVCacheSpecKind.FULL_ATTENTION, KVCacheSpecKind.MLA_ATTENTION)
+            and type(coordinator.single_type_managers[0]) is FullAttentionManager
+            and coordinator.dcp_world_size == 1
+        )
+        # Live lookup_and_pin results, so they can be found and revoked.
+        self._pins: set[PrefixPin] = set()
+        self._num_pinned_blocks = 0
 
     @property
     def usage(self) -> float:
@@ -691,6 +756,130 @@ class KVCacheManager:
         """
         self.coordinator.free(request)
 
+    def supports_prefix_pinning(self) -> bool:
+        """Whether `lookup_and_pin` can pin prefixes of this cache layout.
+
+        Only a single full-attention group without context parallelism: there a
+        prefix of N full blocks is exactly the KV of the first N blocks'
+        tokens. Sliding-window and Mamba groups keep a different state per
+        position, and DCP/PCP shard blocks across ranks.
+        """
+        return self._supports_prefix_pinning
+
+    @property
+    def num_pinned_blocks(self) -> int:
+        """Blocks held by live pins, counted once per pin that holds them."""
+        return self._num_pinned_blocks
+
+    def lookup_and_pin(
+        self,
+        block_hashes: Sequence[BlockHash],
+        max_blocks: int | None = None,
+        min_free_blocks: int = 0,
+    ) -> PrefixPin:
+        """Pin the longest cached run of `block_hashes` from the start.
+
+        Unlike `get_computed_blocks` this serves a reader outside this engine,
+        so nothing is scheduled or computed, the hit is not capped below the
+        last token and no block is dropped for EAGLE: the reader recomputes
+        what it needs. Call only from the scheduler thread, and eventually
+        `release_pin` the result, even when it pins nothing.
+
+        Args:
+            block_hashes: Prefix-cache hashes of consecutive full blocks,
+                starting at the first block, chained as `Request.block_hashes`.
+            max_blocks: Pin at most this many blocks; the hit stops there.
+            min_free_blocks: Refuse (pin nothing) if the pin would leave fewer
+                free blocks than this, e.g. the admission watermark.
+
+        Returns:
+            The pin, its hit length in tokens, and why it stopped short.
+
+        """
+        empty: tuple[list[KVCacheBlock], ...] = tuple(
+            [] for _ in range(self.num_kv_cache_groups)
+        )
+        if not self._supports_prefix_pinning:
+            return PrefixPin(empty, 0, PrefixPinMiss.UNSUPPORTED)
+        coordinator = self.coordinator
+        assert isinstance(coordinator, UnitaryKVCacheCoordinator)
+        hashes = list(block_hashes)
+        capped = max_blocks is not None and max_blocks < len(hashes)
+        if capped:
+            hashes = hashes[:max_blocks]
+        hit_blocks, num_tokens = coordinator.single_type_managers[
+            0
+        ].find_longest_cache_hit(
+            block_hashes=hashes,
+            max_length=len(hashes) * coordinator.block_size,
+            kv_cache_group_ids=[0],
+            block_pool=self.block_pool,
+            block_size=coordinator.group_block_size,
+            manager_config=coordinator.manager_config,
+            alignment_tokens=coordinator.block_size,
+        )
+        blocks = tuple(list(group) for group in hit_blocks)
+        num_hit = len(blocks[0])
+
+        # Blocks with no other holder leave the free queue when touched.
+        num_taken = sum(block.ref_cnt == 0 for block in blocks[0])
+        if (
+            num_taken
+            and self.block_pool.get_num_free_blocks() - num_taken < min_free_blocks
+        ):
+            return PrefixPin(empty, 0, PrefixPinMiss.REFUSED)
+
+        if num_hit == len(hashes):
+            miss = PrefixPinMiss.REFUSED if capped else PrefixPinMiss.NONE
+        elif self.block_pool.was_evicted(hashes[num_hit], kv_cache_group_id=0):
+            miss = PrefixPinMiss.EVICTED
+        else:
+            miss = PrefixPinMiss.NOT_CACHED
+        pin = PrefixPin(blocks, num_tokens, miss)
+        for group in blocks:
+            self.block_pool.touch(group)
+        self._pins.add(pin)
+        self._num_pinned_blocks += pin.num_blocks
+        return pin
+
+    def release_pin(self, pin: PrefixPin) -> None:
+        """Release the blocks of a `lookup_and_pin` result. Idempotent."""
+        if pin.released:
+            return
+        pin.released = True
+        if pin in self._pins:
+            self._pins.discard(pin)
+            self._num_pinned_blocks -= pin.num_blocks
+        for group in pin.blocks:
+            # Tail blocks first, so they are evicted first, as in ``free``.
+            self.block_pool.free_blocks(reversed(group))
+
+    def pins_holding(self, block_ids: set[int]) -> list[PrefixPin]:
+        """Live pins that hold any of `block_ids`, e.g. blocks whose KV load
+        failed. The caller revokes them and tells their readers."""
+        return [
+            pin
+            for pin in self._pins
+            if any(b.block_id in block_ids for group in pin.blocks for b in group)
+        ]
+
+    def release_all_pins(self) -> list[PrefixPin]:
+        """Release every live pin, e.g. before a prefix cache reset or sleep.
+
+        Returns the released pins so the caller can tell their readers.
+
+        Only safe when no peer can still be reading the pinned blocks: they go
+        back to the free queue and can be overwritten under a NIXL read in
+        flight. Nothing calls this for that reason. While pins are live the
+        pinned blocks are not free, so `reset_prefix_cache` returns False, and
+        the scheduler's reset with `reset_running_requests=True` (pause, sleep,
+        checkpoint prepare) raises; see docs/design/nixl_peer_lookup_pin.md.
+        """
+        pins = list(self._pins)
+        for pin in pins:
+            self.release_pin(pin)
+        return pins
+
     def remove_skipped_blocks(
         self,
         request_id: str,
@@ -741,7 +930,7 @@ class KVCacheManager:
 
         Returns:
             bool: True if the prefix cache is successfully reset,
-            False otherwise.
+            False otherwise, e.g. while requests or live peer pins hold blocks.
 
         """
         if not self.coordinator.reset_prefix_cache():

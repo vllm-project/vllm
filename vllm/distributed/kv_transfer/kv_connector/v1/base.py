@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+    from vllm.v1.engine import PeerLookupInfo
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -539,6 +540,30 @@ class KVConnectorBase_V1(ABC):
     # ==============================
     # Scheduler-side methods
     # ==============================
+
+    def get_peer_lookup_info(self) -> "PeerLookupInfo | None":
+        """Describe how peers reach this engine rank for a KV prefix lookup.
+
+        Returns:
+            PeerLookupInfo: the record reported on `/kv_event_sources`.
+            None if the connector does not serve peer lookups (the default).
+
+        """
+        return None
+
+    def set_engine_wakeup(self, callback: Callable[[], None]) -> None:
+        """Receive a callback that wakes the engine's busy loop when it is idle.
+
+        The engine passes a thread-safe callback. Connectors with background
+        threads that create scheduler work (for example a listener that queues
+        requests for the scheduler to serve) call it after queuing, together
+        with `has_pending_push_work` returning True. The in-process
+        (non-busy-loop) engine core passes none; such work is then picked up on
+        its next step.
+
+        Default: no-op.
+        """
+        return None
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
         """Bind the scheduler's cache manager after it has been constructed."""

@@ -25,8 +25,8 @@ use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, Zmq
 use crate::metrics::SchedulerStatsRecorder;
 use crate::mock_engine::{MockEngineConfig, default_ready_response};
 use crate::protocol::handshake::{
-    EngineCoreReadyResponse, HandshakeInitMessage, HandshakeParallelConfig, PrefixHashConfig,
-    ReadyMessage,
+    EngineCoreReadyResponse, HandshakeInitMessage, HandshakeParallelConfig, PeerLookupInfo,
+    PrefixHashConfig, ReadyMessage,
 };
 use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use crate::protocol::logprobs::MaybeWireLogprobs;
@@ -4386,6 +4386,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         rmp_serde::from_slice(&hex::decode(ready_response_hex).unwrap()).unwrap();
     let mut legacy_ready = serde_json::to_value(&ready_response).unwrap();
     legacy_ready.as_object_mut().unwrap().remove("effective_attention_block_size");
+    legacy_ready.as_object_mut().unwrap().remove("peer_lookup");
     legacy_ready.as_object_mut().unwrap().remove("supports_prompt_logprobs");
     legacy_ready.as_object_mut().unwrap().remove("allow_missing_mm_embeddings");
     legacy_ready.as_object_mut().unwrap().remove("max_mm_embeds_per_request");
@@ -4393,6 +4394,29 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy_ready).unwrap()).unwrap();
     assert!(legacy_ready.effective_attention_block_size.is_none());
     assert!(legacy_ready.supports_prompt_logprobs);
+    // An engine that does not serve peer lookups omits the record.
+    assert!(legacy_ready.peer_lookup.is_none());
+    // An explicit `None` (msgspec encodes it as nil) decodes the same way.
+    let mut nil_peer_lookup = serde_json::to_value(&ready_response).unwrap();
+    nil_peer_lookup["peer_lookup"] = serde_json::Value::Null;
+    let nil_peer_lookup: EngineCoreReadyResponse =
+        rmp_serde::from_slice(&rmp_serde::to_vec_named(&nil_peer_lookup).unwrap()).unwrap();
+    assert!(nil_peer_lookup.peer_lookup.is_none());
+    assert_eq!(
+        ready_response.peer_lookup,
+        Some(PeerLookupInfo {
+            enabled: true,
+            engine_id: "engine-a".to_string(),
+            side_channel_host: "10.0.0.2".to_string(),
+            side_channel_port: 5600,
+            tp_size: 2,
+            dcp_size: 1,
+            pp_size: 1,
+            connector: "NixlConnector".to_string(),
+            connector_version: "17".to_string(),
+            layout_fingerprint: "abc123".to_string(),
+        })
+    );
     assert!(!legacy_ready.allow_missing_mm_embeddings);
     assert!(legacy_ready.max_mm_embeds_per_request.is_none());
     assert!(ready_response.supports_lora);

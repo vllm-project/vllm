@@ -37,6 +37,26 @@ pub struct KvEventsConfig {
     pub topic: String,
 }
 
+/// How a peer reaches one engine rank to look up and pin a KV prefix, reported
+/// only when the engine's KV connector serves peer lookups.
+///
+/// Original Python definition (`PeerLookupInfo`):
+/// <https://github.com/vllm-project/vllm/blob/main/vllm/v1/engine/__init__.py>
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerLookupInfo {
+    pub enabled: bool,
+    pub engine_id: String,
+    pub side_channel_host: String,
+    pub side_channel_port: u16,
+    pub tp_size: u32,
+    pub dcp_size: u32,
+    pub pp_size: u32,
+    pub connector: String,
+    pub connector_version: String,
+    /// Layout compatibility hash that peers must match.
+    pub layout_fingerprint: String,
+}
+
 /// What the frontend needs to compute prompt block hashes itself, reported
 /// only when the engine hashes request blocks.
 ///
@@ -145,6 +165,9 @@ pub struct EngineCoreReadyResponse {
     /// Whether expert parallelism is enabled.
     #[serde(default)]
     pub enable_expert_parallel: bool,
+    /// How peers reach this engine for a KV prefix lookup, if it serves them.
+    #[serde(default)]
+    pub peer_lookup: Option<PeerLookupInfo>,
     /// Whether the engine computes prompt logprobs. `false` under
     /// `--kv-sharing-fast-prefill`, which skips prompt tokens in some layers.
     #[serde(default = "supports_prompt_logprobs_default")]

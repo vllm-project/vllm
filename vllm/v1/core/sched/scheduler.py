@@ -3501,11 +3501,19 @@ class Scheduler(SchedulerInterface):
 
         reset_successful = self.kv_cache_manager.reset_prefix_cache()
         if reset_running_requests and not reset_successful:
+            num_pinned = self.kv_cache_manager.num_pinned_blocks
             raise RuntimeError(
                 "Failed to reset KV cache even when all the running requests are "
                 "preempted and moved to the waiting queue. This is likely due to "
                 "the presence of running requests waiting for remote KV transfer, "
                 "which is not supported yet."
+                + (
+                    f" {num_pinned} blocks are also pinned for peer prefix "
+                    "lookups; they are released when the peer's read finishes "
+                    "or its lease expires."
+                    if num_pinned
+                    else ""
+                )
             )
 
         if reset_connector:

@@ -2,9 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base scheduler-side logic for the NIXL connector."""
 
+import contextlib
+import os
+import queue
 import threading
 import time
-from dataclasses import replace
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -23,10 +28,22 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
+    LOOKUP_PIN_MSG,
+    NIXL_CONNECTOR_VERSION,
     HeartbeatInfo,
+    LookupPinReply,
+    LookupPinRequest,
     NixlConnectorMetadata,
     NixlHandshakePayload,
+    PeerMissReason,
     ReqId,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.peer_lookup_client import (
+    PeerLookupClient,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.peer_pins import (
+    PeerPinServer,
+    miss_reply,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
 from vllm.logger import init_logger
@@ -42,12 +59,105 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+    from vllm.v1.engine import PeerLookupInfo
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+_LISTENER_POLL_MS = 1000
+
+
+@dataclass
+class PeerLookupStats:
+    """Consumer-side peer lookup counters (scheduler thread only)."""
+
+    lookups: int = 0
+    full_hits: int = 0
+    partial_hits: int = 0
+    # PeerMissReason values, plus the local reasons "timeout", "bad_reply",
+    # "send_failed", "closed", "local_precondition", "peer_unsupported" (the
+    # peer's capability probe says it does not serve lookups, so none was sent)
+    # and "lookup_id_mismatch".
+    misses: dict[str, int] = field(default_factory=dict)
+    # Lookups cancelled because the request went away.
+    cancelled: int = 0
+    # Hits that load nothing (the local hit covers them, or the load is below
+    # the recompute threshold): A's pin is freed by a notify-only recv.
+    notify_only_releases: int = 0
+    # Pins whose lookup was cancelled, released on the peer / left to expire.
+    orphans_released: int = 0
+    orphans_unreleased: int = 0
+
+    def record_miss(self, reason: str) -> None:
+        self.misses[reason] = self.misses.get(reason, 0) + 1
+
+
+@dataclass(frozen=True)
+class PeerEndpoint:
+    """What the worker needs to handshake with a peer, from request params."""
+
+    engine_id: EngineId
+    tp_size: int | None
+    dcp_size: int = 1
+    pp_size: int = 1
+
+
+class PeerLookupChannel:
+    """Hand-off between the side-channel listener thread and the scheduler.
+
+    The listener puts decoded lookups on `inbox`; the scheduler thread serves
+    them and puts `(identity, reply)` on `outbox`, then calls `wake` so the
+    listener, which owns the ROUTER socket, sends them. Nothing here touches
+    the block pool or the pin server.
+    """
+
+    def __init__(self) -> None:
+        self.inbox: queue.Queue[tuple[bytes, LookupPinRequest]] = queue.Queue()
+        self.outbox: queue.Queue[tuple[bytes, LookupPinReply]] = queue.Queue()
+        # Whether this engine answers lookups at all.
+        self.enabled = False
+        # Thread-safe callback that wakes an idle engine loop.
+        self.wakeup: Callable[[], None] | None = None
+        self.wake_r, self.wake_w = os.pipe()
+        os.set_blocking(self.wake_r, False)
+        os.set_blocking(self.wake_w, False)
+        self._closed = False
+
+    def wake(self) -> None:
+        """Tell the listener that the outbox has replies."""
+        try:
+            os.write(self.wake_w, b"\x01")
+        except BlockingIOError:
+            pass  # The pipe is full, so a wake-up is already pending.
+        except OSError:
+            pass  # Closed during shutdown.
+
+    def drain_wake_pipe(self) -> None:
+        try:
+            while os.read(self.wake_r, 4096):
+                pass
+        except (BlockingIOError, OSError):
+            pass
+
+    def notify_engine(self) -> None:
+        callback = self.wakeup
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:
+            logger.warning("Engine wake-up callback failed", exc_info=True)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for fd in (self.wake_r, self.wake_w):
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
 
 class NixlBaseConnectorScheduler:
@@ -57,6 +167,10 @@ class NixlBaseConnectorScheduler:
     # pull (READ) producer from a push (WRITE) one. Overridden by the push
     # scheduler.
     _TRANSFER_MODE: str = "pull"
+
+    # Class-level defaults so a scheduler built without __init__ can shut down.
+    _lookup_client: PeerLookupClient | None = None
+    _peer_lookup_timeout: float = 2.0
 
     def __init__(
         self,
@@ -115,6 +229,9 @@ class NixlBaseConnectorScheduler:
         self._stop_event = threading.Event()
         # Payloads the listener serves; a republish after a wake-up updates them.
         self._handshake_data: dict[tuple[int, int], bytes] = {}
+        # The payloads as given, so they can be re-encoded once lookups can be
+        # served (see bind_kv_cache_manager).
+        self._handshake_payloads: dict[tuple[int, int], Any] = {}
         self._registration_generation = 0
 
         # Requests that need to start recv/send.
@@ -173,6 +290,39 @@ class NixlBaseConnectorScheduler:
             )
         )
 
+        # Peer prefix lookup-and-pin (pull mode only): lets other engines ask
+        # whether this one caches a prefix and pin it for a remote read.
+        extra = vllm_config.kv_transfer_config.get_from_extra_config
+        self._peer_lookup_enabled = bool(extra("peer_lookup", False))
+        if (
+            self._peer_lookup_enabled
+            and vllm_config.parallel_config.prefill_context_parallel_size > 1
+        ):
+            # Pins and peer reads are only implemented for an unsharded
+            # layout; PCP splits KV across ranks.
+            logger.warning(
+                "Peer prefix lookup does not support prefill context "
+                "parallelism; it is disabled on this engine."
+            )
+            self._peer_lookup_enabled = False
+        self._peer_pin_max_fraction = float(extra("peer_pin_max_fraction", 0.25))
+        self._peer_pin_min_free_fraction = float(
+            extra("peer_pin_min_free_fraction", 0.05)
+        )
+        self._peer_pin_serve_timeout = float(extra("peer_lookup_serve_timeout", 5.0))
+        self._peer_lookup_timeout = float(extra("peer_lookup_timeout", 2.0))
+        self._lookup_client: PeerLookupClient | None = None
+        self.peer_lookup_stats = PeerLookupStats()
+        # (host, port) of a peer's side channel -> how to reach its engine; filled
+        # when a lookup is submitted, used to release pins of cancelled lookups.
+        self._peer_endpoints: dict[tuple[str, int], PeerEndpoint] = {}
+        self._peer_pins: PeerPinServer | None = None
+        self._compatibility_hash: str | None = None
+        self._lookup = PeerLookupChannel()
+        self._lookup.enabled = (
+            self._peer_lookup_enabled and self._TRANSFER_MODE == "pull"
+        )
+
         # Bi-directional KV transfer feature supports KV block
         # transfers from D node to P node
         self.is_bidirectional_kv_xfer_enabled = (
@@ -195,11 +345,138 @@ class NixlBaseConnectorScheduler:
                 self.decoder_kv_blocks_ttl,
             )
 
+    def get_peer_lookup_info(self) -> "PeerLookupInfo | None":
+        """How peers reach this rank for a lookup, or None if it serves none.
+
+        None unless lookups are served (`peer_lookup` set, pull mode) and the
+        layout hash is known: a peer cannot validate an empty fingerprint. The
+        hash is set by `set_xfer_handshake_metadata` during engine setup, before
+        the ready message that carries this record is built.
+        """
+        if not self._lookup.enabled or not self._compatibility_hash:
+            return None
+        from vllm.v1.engine import PeerLookupInfo
+
+        parallel_config = self.vllm_config.parallel_config
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        assert kv_transfer_config is not None and kv_transfer_config.kv_connector
+        return PeerLookupInfo(
+            enabled=True,
+            engine_id=self.engine_id,
+            side_channel_host=self.side_channel_host,
+            side_channel_port=self.side_channel_port,
+            # Same values pull_scheduler puts in the kv_transfer_params it
+            # exports, which is what a consumer must send back.
+            tp_size=self.transfer_tp_size,
+            dcp_size=parallel_config.decode_context_parallel_size,
+            pp_size=parallel_config.pipeline_parallel_size,
+            connector=kv_transfer_config.kv_connector,
+            connector_version=str(NIXL_CONNECTOR_VERSION),
+            layout_fingerprint=self._compatibility_hash,
+        )
+
+    def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
+        """Create the peer pin server once the scheduler's cache manager exists."""
+        if not self._peer_lookup_enabled or self._TRANSFER_MODE != "pull":
+            return
+        if not kv_cache_manager.supports_prefix_pinning():
+            logger.info(
+                "Peer prefix lookup is enabled but this KV cache layout cannot "
+                "pin prefixes by hash; every lookup will be refused."
+            )
+        self._peer_pins = PeerPinServer(
+            kv_cache_manager,
+            block_size=self.block_size,
+            hash_algo=self.vllm_config.cache_config.prefix_caching_hash_algo,
+            lease_duration=self._kv_lease_duration,
+            max_pinned_fraction=self._peer_pin_max_fraction,
+            min_free_fraction=self._peer_pin_min_free_fraction,
+            max_pending_seconds=self._peer_pin_serve_timeout,
+        )
+        if self._compatibility_hash is not None:
+            self._peer_pins.set_compatibility_hash(self._compatibility_hash)
+        if self._handshake_payloads:
+            # The handshake metadata came first: re-encode it now that whether
+            # lookups can be served is known.
+            self.set_xfer_handshake_metadata(self._handshake_payloads)
+
+    def _serves_peer_lookups(self) -> bool:
+        """What the handshake payload advertises: lookups are enabled and a bound
+        cache manager can actually pin and hash the way peers need. An engine that
+        would refuse every lookup must not attract them."""
+        return (
+            self._lookup.enabled
+            and self._peer_pins is not None
+            and self._peer_pins.can_serve()
+        )
+
+    def on_step_processed(self) -> None:
+        """One scheduled step's output has been processed."""
+        if self._peer_pins is not None:
+            self._peer_pins.on_step_processed()
+
+    def serve_peer_lookup(self, token: Any, request: LookupPinRequest) -> None:
+        """Scheduler thread only. The reply comes from take_peer_lookup_replies."""
+        assert self._peer_pins is not None
+        self._peer_pins.serve(token, request)
+
+    def take_peer_lookup_replies(self) -> list[tuple[Any, LookupPinReply]]:
+        if self._peer_pins is None:
+            return []
+        return self._peer_pins.take_ready_replies()
+
+    def set_engine_wakeup(self, callback: Callable[[], None]) -> None:
+        """Store the thread-safe callback that wakes an idle engine loop."""
+        self._lookup.wakeup = callback
+
+    def _drain_peer_lookups(self) -> None:
+        """Serve the lookups the listener queued. Scheduler thread only."""
+        inbox = self._lookup.inbox
+        while True:
+            try:
+                identity, request = inbox.get_nowait()
+            except queue.Empty:
+                return
+            if self._peer_pins is None:
+                # Defensive: lookups are enabled but no cache manager is bound.
+                # In production the scheduler binds before the engine core starts
+                # the listener, so this is not expected; if it happens it is
+                # transient, unlike a disabled engine, which answers
+                # IDENTITY_MISMATCH for good. A layout that cannot pin is
+                # answered IDENTITY_MISMATCH by the pin server instead.
+                self._lookup.outbox.put(
+                    (
+                        identity,
+                        miss_reply(PeerMissReason.PIN_REFUSED, request.lookup_id),
+                    )
+                )
+                self._lookup.wake()
+                continue
+            self.serve_peer_lookup(identity, request)
+
+    def _flush_peer_lookup_replies(self) -> None:
+        """Hand ready replies to the listener. Scheduler thread only."""
+        replies = self.take_peer_lookup_replies()
+        for identity, reply in replies:
+            self._lookup.outbox.put((identity, reply))
+        if replies:
+            self._lookup.wake()
+
+    def _get_lookup_client(self) -> PeerLookupClient:
+        """The consumer-side lookup client, created on first use."""
+        if self._lookup_client is None:
+            self._lookup_client = PeerLookupClient(self._peer_lookup_timeout)
+        return self._lookup_client
+
     def shutdown(self):
+        if self._lookup_client is not None:
+            self._lookup_client.close()
+            self._lookup_client = None
         self._stop_event.set()
         if self._nixl_handshake_listener_t is not None:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
+        self._lookup.close()
 
     def on_new_request(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
@@ -211,6 +488,10 @@ class NixlBaseConnectorScheduler:
         # effectively disabled for Bidirectional KV transfer.
         if params is None or not params.get("do_remote_prefill"):
             return
+        self._register_heartbeat(request.request_id, params)
+
+    def _register_heartbeat(self, req_id: ReqId, params: dict[str, Any]) -> None:
+        """Start lease-renewal heartbeats for the remote blocks named in `params`."""
         # Only track if all required remote fields are present.
         remote_engine_id = params.get("remote_engine_id")
         remote_request_id = params.get("remote_request_id")
@@ -242,7 +523,7 @@ class NixlBaseConnectorScheduler:
         extension = params.get("remote_lease_extension")
         if expiry is not None and extension:
             info.leases[remote_request_id] = (expiry, extension)
-        self._heartbeat_req_engine[request.request_id] = (
+        self._heartbeat_req_engine[req_id] = (
             remote_engine_id,
             remote_request_id,
         )
@@ -319,11 +600,21 @@ class NixlBaseConnectorScheduler:
                     "NixlConnectorScheduler expects NixlHandshakePayload for "
                     "handshake metadata."
                 )
+            # Advertise whether this engine serves lookups: the consumer's
+            # capability probe reads it from the GET_META reply.
+            self._handshake_payloads[(pp_rank, tp_rank)] = rank_metadata
+            serves = self._serves_peer_lookups()
+            if rank_metadata.peer_lookup != serves:
+                rank_metadata = replace(rank_metadata, peer_lookup=serves)
             encoded = encoder.encode(rank_metadata)
             if self._handshake_data.get((pp_rank, tp_rank)) != encoded:
                 # Peers must handshake again to load the changed registration.
                 self._registration_generation += 1
             self._handshake_data[(pp_rank, tp_rank)] = encoded
+            # All ranks share the compatibility hash.
+            self._compatibility_hash = rank_metadata.compatibility_hash
+            if self._peer_pins is not None:
+                self._peer_pins.set_compatibility_hash(rank_metadata.compatibility_hash)
             logger.debug(
                 "PP rank %d, TP rank %d: encoded NixlHandshakePayload size: %s bytes",
                 pp_rank,
@@ -342,6 +633,7 @@ class NixlBaseConnectorScheduler:
                     self._stop_event,
                     self.side_channel_host,
                     self.side_channel_port,
+                    self._lookup,
                 ),
                 daemon=True,
                 name="nixl_handshake_listener",
@@ -356,41 +648,137 @@ class NixlBaseConnectorScheduler:
         stop_event: threading.Event,
         host: str,
         port: int,
+        lookup: PeerLookupChannel | None = None,
     ):
-        """Background thread for getting new NIXL handshakes."""
+        """Background thread for NIXL handshakes and peer prefix lookups.
+
+        Two messages arrive on the ROUTER socket, both msgpack:
+
+        - `(GET_META_MSG, pp_rank, tp_rank)`: answered with the handshake
+          payload and this process's clock, unchanged.
+        - `(LOOKUP_PIN_MSG, <encoded LookupPinRequest>)`: handed to the
+          scheduler thread through `lookup.inbox`; the reply comes back
+          through `lookup.outbox` and is sent from here as
+          `(identity, b"", <encoded LookupPinReply>)`.
+
+        This thread owns the socket and never touches the block pool or the
+        pin server. A malformed or unknown message is logged and skipped: it
+        must not end the thread.
+
+        NIXL_CONNECTOR_VERSION is deliberately not bumped for the lookup
+        message, since a bump would fail the handshake of every mixed-version
+        pair, stock P/D included. Listeners of this version skip unknown
+        messages, but an older engine does not: its listener decodes every
+        frame as `(msg, pp_rank, tp_rank)` outside any try, so a
+        `LOOKUP_PIN_MSG` 2-tuple raises and ends the thread for good, which
+        also breaks that engine's ordinary P/D handshakes. A consumer must
+        therefore never send a lookup unprobed. It first sends
+        `GET_META_MSG`, which every engine answers, and sends the lookup only
+        if the payload's `peer_lookup` is set (see PeerLookupClient). An engine
+        started without `peer_lookup`, or an older one, never advertises it.
+        """
         # NOTE(rob): this is a simple implementation. We will move
         # to a better approach via HTTP endpoint soon.
 
-        # Listen for new requests for metadata.
         path = make_zmq_path("tcp", host, port)
         logger.debug("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:
-            sock.setsockopt(zmq.RCVTIMEO, 1000)
+            poller = zmq.Poller()
+            poller.register(sock, zmq.POLLIN)
+            if lookup is not None:
+                poller.register(lookup.wake_r, zmq.POLLIN)
             ready_event.set()
-            while True:
+            while not stop_event.is_set():
                 try:
-                    identity, _, msg = sock.recv_multipart()
-                except zmq.Again:
+                    events = dict(poller.poll(_LISTENER_POLL_MS))
+                except zmq.ZMQError:
                     if stop_event.is_set():
                         break
+                    logger.warning("Connection listener poll failed", exc_info=True)
+                    time.sleep(0.01)
                     continue
-                # Decode (GET_META_MSG, pp_rank, tp_rank).
-                msg, target_pp_rank, target_tp_rank = msgspec.msgpack.decode(msg)
-                logger.debug(
-                    "Received message for pp rank %s, tp rank %s",
-                    target_pp_rank,
-                    target_tp_rank,
-                )
-                if msg != GET_META_MSG:
-                    logger.warning("Connection listener got unexpected message %s", msg)
-                # Echo our perf_counter so P can estimate the clock offset.
-                # perf_counter is only comparable within a process, so this
-                # listener must run in the same process that stamps the block
-                # expiry deadline (`_reqs_need_send`).
-                ts = msgspec.msgpack.encode(time.perf_counter())
+                if lookup is not None and lookup.wake_r in events:
+                    lookup.drain_wake_pipe()
+                if lookup is not None:
+                    # Always, not only on a wake-up: a reply is never stranded.
+                    NixlBaseConnectorScheduler._send_lookup_replies(sock, lookup)
+                if sock not in events:
+                    continue
+                while True:
+                    try:
+                        frames = sock.recv_multipart(flags=zmq.NOBLOCK)
+                    except zmq.Again:
+                        break
+                    try:
+                        NixlBaseConnectorScheduler._handle_listener_message(
+                            sock, frames, encoded_data, lookup
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Connection listener dropped a bad message", exc_info=True
+                        )
+
+    @staticmethod
+    def _send_lookup_replies(sock: zmq.Socket, lookup: PeerLookupChannel) -> None:
+        while True:
+            try:
+                identity, reply = lookup.outbox.get_nowait()
+            except queue.Empty:
+                return
+            try:
                 sock.send_multipart(
-                    (identity, b"", encoded_data[(target_pp_rank, target_tp_rank)], ts)
+                    (identity, b"", msgspec.msgpack.encode(reply)), flags=zmq.NOBLOCK
                 )
+            except zmq.ZMQError:
+                logger.warning("Could not send a peer lookup reply", exc_info=True)
+
+    @staticmethod
+    def _handle_listener_message(
+        sock: zmq.Socket,
+        frames: list[bytes],
+        encoded_data: dict[tuple[int, int], Any],
+        lookup: PeerLookupChannel | None,
+    ) -> None:
+        if len(frames) != 3:
+            logger.warning("Connection listener got %d frames, expected 3", len(frames))
+            return
+        identity, _, raw = frames
+        decoded = msgspec.msgpack.decode(raw)
+        msg = decoded[0]
+        if msg == GET_META_MSG:
+            _, target_pp_rank, target_tp_rank = decoded
+            logger.debug(
+                "Received message for pp rank %s, tp rank %s",
+                target_pp_rank,
+                target_tp_rank,
+            )
+            # Echo our perf_counter so P can estimate the clock offset.
+            # perf_counter is only comparable within a process, so this
+            # listener must run in the same process that stamps the block
+            # expiry deadline (`_reqs_need_send`).
+            ts = msgspec.msgpack.encode(time.perf_counter())
+            sock.send_multipart(
+                (identity, b"", encoded_data[(target_pp_rank, target_tp_rank)], ts)
+            )
+        elif msg == LOOKUP_PIN_MSG:
+            request = msgspec.msgpack.decode(decoded[1], type=LookupPinRequest)
+            if lookup is None or not lookup.enabled:
+                sock.send_multipart(
+                    (
+                        identity,
+                        b"",
+                        msgspec.msgpack.encode(
+                            miss_reply(
+                                PeerMissReason.IDENTITY_MISMATCH, request.lookup_id
+                            )
+                        ),
+                    )
+                )
+                return
+            lookup.inbox.put((identity, request))
+            lookup.notify_engine()
+        else:
+            logger.warning("Connection listener got unexpected message %s", msg)
 
     def _prefill_backoff(self) -> int:
         """Trailing prompt tokens the prefiller must not compute; the decoder
@@ -497,6 +885,12 @@ class NixlBaseConnectorScheduler:
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         meta = NixlConnectorMetadata()
+        # Serve before the step is counted: the allocations of the schedule
+        # that is calling us already happened, and a fence of this step covers
+        # the blocks it just cached.
+        self._drain_peer_lookups()
+        if self._peer_pins is not None:
+            self._peer_pins.on_step_scheduled()
 
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (
@@ -514,8 +908,20 @@ class NixlBaseConnectorScheduler:
                 awaiting_kvs=awaiting_kvs,
             )
 
+        self._release_orphaned_pins(meta)
+
         if self.use_host_buffer:
             self._build_save_meta(meta, scheduler_output)
+
+        if self._peer_pins is not None:
+            # Ship pins together with the step that carries their reply, as a
+            # finished prefill's send; the worker only tracks ids in both.
+            new_sends = self._peer_pins.take_new_sends()
+            self._reqs_need_send.update(new_sends)
+            self._reqs_in_batch.update(new_sends)
+        # After the ships above, so a reply leaves in the step that carries its
+        # pin's id to the worker.
+        self._flush_peer_lookup_replies()
 
         meta.reqs_to_send = self._reqs_need_send
         # Clock reference for reqs_to_send: deadlines above are in this
@@ -552,13 +958,70 @@ class NixlBaseConnectorScheduler:
 
         return meta
 
+    def _release_orphaned_pins(self, meta: NixlConnectorMetadata) -> None:
+        """Free the pins of lookups that were cancelled before their hit arrived.
+
+        Each is released with a notify-only recv, the same message a consumer
+        sends when its local prefix hit already covers the remote blocks: the
+        worker handshakes with the peer if needed and sends `"<pin_id>:<n>"`.
+        It never reports the recv back, because it has neither local blocks nor
+        `awaiting_kvs` and so no entry in the worker's recv metadata. A pin
+        that cannot be released this way is left to its lease.
+        """
+        if self._lookup_client is None:
+            return
+        stats = self.peer_lookup_stats
+        for host, port, reply in self._lookup_client.take_orphaned_pins():
+            endpoint = self._peer_endpoints.get((host, port))
+            if endpoint is None or endpoint.tp_size is None:
+                # Without the peer's TP size a handshake could be built wrong.
+                stats.orphans_unreleased += 1
+                logger.warning(
+                    "Peer pin %s on %s:%s is orphaned and cannot be released "
+                    "(peer topology unknown); it expires with its lease.",
+                    reply.remote_request_id,
+                    host,
+                    port,
+                )
+                continue
+            stats.orphans_released += 1
+            meta.add_new_req_to_recv(
+                request_id=f"peer-release-{uuid.uuid4().hex}",
+                local_block_ids=[],
+                kv_transfer_params=dict(
+                    remote_block_ids=reply.remote_block_ids,
+                    remote_engine_id=endpoint.engine_id,
+                    remote_request_id=reply.remote_request_id,
+                    remote_host=host,
+                    remote_port=port,
+                    tp_size=endpoint.tp_size,
+                    dcp_size=endpoint.dcp_size,
+                    pp_size=endpoint.pp_size,
+                ),
+                awaiting_kvs=False,
+            )
+
     def update_connector_output(self, connector_output: "KVConnectorOutput") -> None:
         """Stop heartbeating for requests whose KV transfer completed."""
+        if self._peer_pins is not None:
+            # Pin ids are not requests: keep them from the scheduler's loop.
+            if connector_output.finished_sending:
+                connector_output.finished_sending = self._peer_pins.on_finished_sending(
+                    set(connector_output.finished_sending)
+                )
+            self._peer_pins.on_invalid_blocks(connector_output.invalid_block_ids)
         for req_id in connector_output.finished_recving or ():
             self._stop_heartbeat(req_id)
 
     def has_pending_push_work(self) -> bool:
-        return False
+        # A queued lookup, a held pin or an unsent reply all need further steps
+        # (and so an idle engine must not sleep on them).
+        return (
+            not self._lookup.inbox.empty()
+            or not self._lookup.outbox.empty()
+            or (self._peer_pins is not None and self._peer_pins.has_pending_work())
+            or (self._lookup_client is not None and self._lookup_client.has_in_flight())
+        )
 
     ############################################################
     # Abstract methods that subclasses must implement
@@ -566,7 +1029,7 @@ class NixlBaseConnectorScheduler:
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
-    ) -> tuple[int, bool]:
+    ) -> tuple[int | None, bool]:
         raise NotImplementedError
 
     def update_state_after_alloc(
