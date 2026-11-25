@@ -324,8 +324,8 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 
 ## KVServe compression
 
-Install a KVServe build that exposes the versioned compression runtime and
-`kvserve_v1.integrations.mooncake_store`. Select the pipeline under
+Install the [pinned KVServe API v2 runtime](mooncake_connector_usage.md#optional-kv-compression).
+Select the pipeline under
 `kv_connector_extra_config.compression` before starting the worker:
 
 ```json

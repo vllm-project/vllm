@@ -49,11 +49,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.compression.tokens im
     suffix_token_counts,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.session_ipc import (
+    CompressChunkJob,
     ConsumerMetadata,
     ConsumerRequest,
-    DecodeChunkJob,
+    DecompressChunkJob,
     DrainSlotsJob,
-    EncodeChunkJob,
     EngineStop,
     EngineToHelper,
     FinalEvent,
@@ -167,9 +167,6 @@ class _SessionService:
 
         # Consumer state
         self._receiver_slots: asyncio.Queue[int] | None = None
-        self._slot_payload: list[int] = []
-        self._slot_aux: list[int] = []
-        self._slot_tail: list[int] = []
         self._agents: dict[str, dict[int, dict[int, str]]] = {}
         self._remote_tp_sizes: dict[str, int] = {}
         self._bootstrap_pending: dict[str, asyncio.Event] = {}
@@ -333,7 +330,7 @@ class _SessionService:
     async def _start_producer(self) -> None:
         assert self._zmq is not None
         self._sender_slots = asyncio.Queue()
-        for slot_id in range(len(self._init.slot_addresses)):
+        for slot_id in range(len(self._init.slot_buffers)):
             self._sender_slots.put_nowait(slot_id)
         self._router = self._zmq.socket(zmq.ROUTER)
         self._side_channel_port = self._router.bind_to_random_port(
@@ -576,8 +573,6 @@ class _SessionService:
         if session is None:
             return CompressionChunkReady(
                 chunk_id=request.chunk_id,
-                data_bytes=0,
-                payload_bytes=0,
                 error="Unknown or completed compression session.",
             )
         if (
@@ -587,8 +582,6 @@ class _SessionService:
         ):
             return CompressionChunkReady(
                 request.chunk_id,
-                0,
-                0,
                 error="Invalid or duplicate compression chunk",
             )
         session.seen_chunks.add(request.chunk_id)
@@ -617,7 +610,7 @@ class _SessionService:
                 request.chunk_id,
                 session.logical_block_count,
             )
-            job = EncodeChunkJob(
+            job = CompressChunkJob(
                 job_id=self._alloc_job(),
                 transfer_id=request.transfer_id,
                 d_req_id=request.d_req_id,
@@ -627,9 +620,7 @@ class _SessionService:
                 local_block_ids=block_ids,
                 valid_tokens_by_group=tokens,
                 remote_session=session.remote_session,
-                payload_addr=request.payload_addr,
-                aux_addr=request.aux_addr,
-                tail_addr=request.tail_addr,
+                buffers=request.buffers,
             )
             job_submitted = True
             result = await self._submit(job)
@@ -644,8 +635,8 @@ class _SessionService:
                 self._complete_producer_session(identity, session)
             return CompressionChunkReady(
                 chunk_id=request.chunk_id,
-                data_bytes=result.u8_bytes,
-                payload_bytes=result.codec_bytes,
+                lengths=result.lengths,
+                descriptor=result.descriptor,
             )
         except Exception as exc:
             session.state = "FAILED"
@@ -657,8 +648,6 @@ class _SessionService:
             )
             return CompressionChunkReady(
                 chunk_id=request.chunk_id,
-                data_bytes=0,
-                payload_bytes=0,
                 error=str(exc),
             )
         finally:
@@ -966,7 +955,7 @@ class _SessionService:
 
         owned: set[int] = set()
         inflight: dict[int, int] = {}
-        decode_tasks: set[asyncio.Task] = set()
+        decompress_tasks: set[asyncio.Task] = set()
         issue_task: asyncio.Task | None = None
         recv_task: asyncio.Task | None = None
         session_error: BaseException | None = None
@@ -1004,9 +993,7 @@ class _SessionService:
                             transfer_id=request.transfer_id,
                             d_req_id=request.d_req_id,
                             chunk_id=chunk_id,
-                            payload_addr=self._slot_payload[slot_id],
-                            aux_addr=self._slot_aux[slot_id],
-                            tail_addr=self._slot_tail[slot_id],
+                            buffers=self._init.slot_buffers[slot_id],
                             nonce=nonce,
                         )
                         await sock.send(self._encoder.encode(pull))
@@ -1017,9 +1004,9 @@ class _SessionService:
                 issue_task = asyncio.create_task(issue_all())
                 recv_task = asyncio.create_task(recv_one())
                 received_chunks: set[int] = set()
-                decoded_count = 0
-                while decoded_count < total_chunks:
-                    wait_set = set(decode_tasks)
+                decompressed_count = 0
+                while decompressed_count < total_chunks:
+                    wait_set = set(decompress_tasks)
                     wait_set.add(recv_task)
                     if issue_task is not None:
                         wait_set.add(issue_task)
@@ -1052,7 +1039,7 @@ class _SessionService:
                             ready.chunk_id,
                             logical_block_count,
                         )
-                        job = DecodeChunkJob(
+                        job = DecompressChunkJob(
                             job_id=self._alloc_job(),
                             transfer_id=request.transfer_id,
                             d_req_id=request.d_req_id,
@@ -1061,27 +1048,27 @@ class _SessionService:
                             slot_id=slot_id,
                             local_block_ids=block_ids,
                             valid_tokens_by_group=tokens,
-                            codec_bytes=ready.codec_bytes,
-                            u8_bytes=ready.u8_bytes,
+                            lengths=ready.lengths,
+                            descriptor=ready.descriptor,
                         )
                         task = asyncio.create_task(
-                            self._decode_and_release(job, slot_id, owned)
+                            self._decompress_and_release(job, slot_id, owned)
                         )
-                        decode_tasks.add(task)
+                        decompress_tasks.add(task)
                     if finished_issue is not None and finished_issue in done:
                         finished_issue.result()
                         issue_task = None
                     for task in done:
                         if task is old_recv or task is finished_issue:
                             continue
-                        if task in decode_tasks:
-                            decode_tasks.discard(task)
+                        if task in decompress_tasks:
+                            decompress_tasks.discard(task)
                             task.result()
-                            decoded_count += 1
+                            decompressed_count += 1
                 await _cancel_tasks(recv_task)
                 recv_task = None
-                if decode_tasks:
-                    await asyncio.gather(*tuple(decode_tasks))
+                if decompress_tasks:
+                    await asyncio.gather(*tuple(decompress_tasks))
             return set()
         except (Exception, asyncio.CancelledError) as exc:
             session_error = exc
@@ -1107,9 +1094,9 @@ class _SessionService:
             return self._all_blocks(request.local_block_ids)
         finally:
             await _cancel_tasks(issue_task, recv_task)
-            if decode_tasks:
+            if decompress_tasks:
                 results = await asyncio.gather(
-                    *tuple(decode_tasks), return_exceptions=True
+                    *tuple(decompress_tasks), return_exceptions=True
                 )
                 for result in results:
                     if isinstance(result, BaseException) and session_error is None:
@@ -1137,8 +1124,8 @@ class _SessionService:
                     )
             sock.close(linger=0)
 
-    async def _decode_and_release(
-        self, job: DecodeChunkJob, slot_id: int, owned: set[int]
+    async def _decompress_and_release(
+        self, job: DecompressChunkJob, slot_id: int, owned: set[int]
     ) -> None:
         assert self._receiver_slots is not None
         result = await self._submit(job)
@@ -1183,12 +1170,8 @@ class _SessionService:
             await self._start_producer()
         if self._init.needs_receiver:
             self._receiver_slots = asyncio.Queue()
-            for slot_id in range(len(self._init.slot_addresses)):
+            for slot_id in range(len(self._init.slot_buffers)):
                 self._receiver_slots.put_nowait(slot_id)
-            for address in self._init.slot_addresses:
-                self._slot_payload.append(address.payload)
-                self._slot_aux.append(address.aux)
-                self._slot_tail.append(address.tail)
         self._to_engine(HelperReady(side_channel_port=self._side_channel_port))
         heartbeat = asyncio.create_task(self._heartbeat())
         self._tasks.add(heartbeat)
@@ -1389,8 +1372,8 @@ class SessionProcess:
                 message,
                 (
                     OpenProducerJob,
-                    EncodeChunkJob,
-                    DecodeChunkJob,
+                    CompressChunkJob,
+                    DecompressChunkJob,
                     DrainSlotsJob,
                 ),
             ):

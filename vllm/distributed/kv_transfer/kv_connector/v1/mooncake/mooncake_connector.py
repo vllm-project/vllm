@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import IntEnum
 from itertools import groupby
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final
 
 import msgspec
 import numpy as np
@@ -42,6 +42,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
     KVConnectorWorkerMemoryPlan,
     SupportsHMA,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.compression import (
+    BufferSpan,
+    CompressedChunk,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -82,6 +86,7 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
+from vllm.utils.vmm_driver import CudaVmmDriver, get_vmm_driver
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -102,27 +107,29 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.worker.utils import select_common_block_size
 
-from .compression.adapter import create_worker_runtime, get_compression_config
+from .compression.adapter import (
+    create_chunk_io,
+    create_worker_runtime,
+    get_compression_config,
+)
 from .compression.protocol import (
-    KVPart,
     MooncakeXferMetadata,
     ReqId,
     TransferId,
 )
 from .compression.tokens import suffix_token_counts
 from .session_ipc import (
+    CompressChunkJob,
     ConsumerMetadata,
     ConsumerRequest,
-    DecodeChunkJob,
+    DecompressChunkJob,
     DrainSlotsJob,
-    EncodeChunkJob,
     InitMessage,
     JobDone,
     OpenProducerJob,
     ProducerAnnouncement,
     ProducerMetadata,
     ProducerPublish,
-    SlotAddresses,
     validate_session_process_mode,
 )
 from .session_process import SessionProcess
@@ -1504,19 +1511,6 @@ class MooncakeConnectorWorker:
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
-        # nvidia-peermem cannot pin VMM-backed memory; the transfer engine must
-        # register the extensible KV cache through DMA-BUF. Read at
-        # engine.initialize(), so settle it before constructing the engine.
-        if (
-            vllm_config.cache_config.enable_extensible_kv_cache
-            and os.environ.setdefault("WITH_NVIDIA_PEERMEM", "0") != "0"
-        ):
-            raise RuntimeError(
-                "WITH_NVIDIA_PEERMEM=1 is incompatible with the extensible KV "
-                "cache: nvidia-peermem cannot register VMM-backed memory. "
-                "Unset it to use Mooncake's DMA-BUF registration, or disable "
-                "the extensible KV cache."
-            )
         # Capture device BEFORE TransferEngine init — MNNVL's NVLink allocator
         # may change the current CUDA device during engine.initialize().
         self.device_id = torch.accelerator.current_device_index()
@@ -1539,6 +1533,22 @@ class MooncakeConnectorWorker:
             "mooncake_protocol", "rdma"
         )
         self._bound_raw_submissions = protocol == "tcp"
+        if vllm_config.cache_config.enable_extensible_kv_cache:
+            # Default to DMA-BUF before initializing the transfer engine.
+            use_peermem = os.environ.setdefault("WITH_NVIDIA_PEERMEM", "0") != "0"
+            if protocol == "rdma" and use_peermem:
+                driver = get_vmm_driver()
+                if not (
+                    isinstance(driver, CudaVmmDriver)
+                    and driver.supports_gpudirect_rdma_with_vmm(self.device_id)
+                ):
+                    raise RuntimeError(
+                        "Mooncake's nvidia-peermem registration with the "
+                        "extensible KV cache requires GPUDirect RDMA support "
+                        f"for CUDA VMM on device {self.device_id}. "
+                        "Unset WITH_NVIDIA_PEERMEM to use DMA-BUF, or disable "
+                        "the extensible KV cache."
+                    )
         device_name = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "device_name", ""
         )
@@ -3706,6 +3716,7 @@ class MooncakeConnectorWorker:
         assert self.compression is not None
         bootstrap_host, bootstrap_port = get_mooncake_bootstrap_addr(self.vllm_config)
         needs_sender = not self.is_kv_consumer
+        self._chunk_io = create_chunk_io(self.compression)
         init = InitMessage(
             needs_sender=needs_sender,
             needs_receiver=not self.is_kv_producer,
@@ -3720,13 +3731,9 @@ class MooncakeConnectorWorker:
             rpc_port=self.rpc_port,
             bootstrap_host=bootstrap_host,
             bootstrap_port=bootstrap_port,
-            slot_addresses=[
-                SlotAddresses(
-                    payload=slot.arena_a.data_ptr(),
-                    aux=slot.aux.data_ptr(),
-                    tail=slot.raw_tail.data_ptr() if slot.raw_tail is not None else 0,
-                )
-                for slot in self.compression.slots
+            slot_buffers=[
+                self._chunk_io.slot_buffers(slot_id)
+                for slot_id in range(self.compression.config.slot_count)
             ],
             kv_caches_base_addr=self.kv_caches_base_addr,
             block_lens=self.block_len_per_layer,
@@ -3739,7 +3746,7 @@ class MooncakeConnectorWorker:
             ],
             registered_row_offsets=self.region_row_offsets,
             abort_timeout_s=float(envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT),
-            compression_profile=self.compression.wire_profile,
+            compression_profile=f"buffers-v1:{self._chunk_io.wire_profile}",
             logical_blocks_per_chunk=self.compression.config.logical_blocks_per_chunk,
             fa_group_block_sizes=self._compression_block_sizes(),
         )
@@ -3793,51 +3800,39 @@ class MooncakeConnectorWorker:
 
     def _send_compressed_blocks(
         self,
-        encoded,
+        chunk: CompressedChunk,
         remote_session: str,
-        source_payload_addr: int,
-        source_aux_addr: int,
-        destination_payload_addr: int,
-        destination_aux_addr: int,
-        destination_tail_addr: int,
-        aux_bytes: int,
-    ) -> int:
-        encoded.event.synchronize()
-        codec_bytes = encoded.codec_bytes
-        tail_bytes = encoded.raw_tail_bytes
-        source_addrs = [source_payload_addr] if codec_bytes else []
-        destination_addrs = [destination_payload_addr] if codec_bytes else []
-        lengths = [codec_bytes] if codec_bytes else []
-        if aux_bytes:
-            source_addrs.append(source_aux_addr)
-            destination_addrs.append(destination_aux_addr)
-            lengths.append(aux_bytes)
-        if tail_bytes:
-            source_addrs.append(encoded.raw_tail_addr)
-            destination_addrs.append(destination_tail_addr)
-            lengths.append(tail_bytes)
-        error = self._send_blocks(
-            remote_session,
-            np.asarray(source_addrs, dtype=np.uint64),
-            np.asarray(destination_addrs, dtype=np.uint64),
-            np.asarray(lengths, dtype=np.uint64),
-        )
-        if error is not None:
-            raise RuntimeError(
-                "Mooncake compressed transfer failed: "
-                f"remote={remote_session} error={error} "
-                f"codec_bytes={codec_bytes} aux_bytes={aux_bytes} "
-                f"tail_bytes={tail_bytes}"
+        remote_buffers: tuple[BufferSpan, ...],
+    ) -> None:
+        if len(chunk.buffers) != len(remote_buffers):
+            raise ValueError("Compressed buffer count differs between peers")
+        sources, destinations, lengths = [], [], []
+        for (source, length), (destination, capacity) in zip(
+            chunk.buffers, remote_buffers, strict=True
+        ):
+            if not 0 <= length <= capacity or (length and not (source and destination)):
+                raise ValueError("Compressed buffer exceeds the peer slot capacity")
+            if length:
+                sources.append(source)
+                destinations.append(destination)
+                lengths.append(length)
+        if lengths:
+            error = self._send_blocks(
+                remote_session,
+                np.asarray(sources, dtype=np.uint64),
+                np.asarray(destinations, dtype=np.uint64),
+                np.asarray(lengths, dtype=np.uint64),
             )
-        return codec_bytes
+            if error is not None:
+                raise RuntimeError(f"Mooncake compressed transfer failed: {error}")
 
     def _session_process_execute(self, job) -> JobDone:
         if isinstance(job, OpenProducerJob):
             return self._session_job_open_producer(job)
-        if isinstance(job, EncodeChunkJob):
-            return self._session_job_encode_chunk(job)
-        if isinstance(job, DecodeChunkJob):
-            return self._session_job_decode_chunk(job)
+        if isinstance(job, CompressChunkJob):
+            return self._session_job_compress_chunk(job)
+        if isinstance(job, DecompressChunkJob):
+            return self._session_job_decompress_chunk(job)
         if isinstance(job, DrainSlotsJob):
             return self._session_job_drain_slots(job)
         raise ValueError(f"Unsupported session job {type(job).__name__}")
@@ -3919,45 +3914,29 @@ class MooncakeConnectorWorker:
             valid_tokens_by_group=valid_tokens_by_group,
         )
 
-    def _session_job_encode_chunk(self, job: EncodeChunkJob) -> JobDone:
-        assert self.compression is not None
-        kv_part = cast(KVPart, job.chunk_id % 2)
-        encoded = self.compression.encode(
+    def _session_job_compress_chunk(self, job: CompressChunkJob) -> JobDone:
+        plan = self._chunk_io.plan(
             job.slot_id,
             job.local_block_ids,
-            kv_part,
-            valid_tokens_by_group=job.valid_tokens_by_group,
+            job.chunk_id % 2,
+            job.valid_tokens_by_group,
         )
-        aux_bytes = self.compression.aux_bytes(kv_part, job.valid_tokens_by_group)
-        slot = self.compression.slots[job.slot_id]
-        codec_bytes = self._send_compressed_blocks(
-            encoded,
-            job.remote_session,
-            slot.arena_a.data_ptr(),
-            slot.aux.data_ptr(),
-            job.payload_addr,
-            job.aux_addr,
-            job.tail_addr,
-            aux_bytes,
-        )
+        chunk = self._chunk_io.compress(plan)
+        self._send_compressed_blocks(chunk, job.remote_session, job.buffers)
         return JobDone(
             job_id=job.job_id,
-            u8_bytes=encoded.u8_bytes,
-            codec_bytes=codec_bytes,
+            lengths=tuple(length for _, length in chunk.buffers),
+            descriptor=chunk.descriptor,
         )
 
-    def _session_job_decode_chunk(self, job: DecodeChunkJob) -> JobDone:
-        assert self.compression is not None
-        kv_part = cast(KVPart, job.chunk_id % 2)
-        event = self.compression.decode(
+    def _session_job_decompress_chunk(self, job: DecompressChunkJob) -> JobDone:
+        plan = self._chunk_io.plan(
             job.slot_id,
             job.local_block_ids,
-            kv_part,
-            job.codec_bytes,
-            job.u8_bytes,
-            valid_tokens_by_group=job.valid_tokens_by_group,
+            job.chunk_id % 2,
+            job.valid_tokens_by_group,
         )
-        event.synchronize()
+        self._chunk_io.decompress(plan, job.lengths, job.descriptor).synchronize()
         return JobDone(job_id=job.job_id)
 
     def _session_job_drain_slots(self, job: DrainSlotsJob) -> JobDone:

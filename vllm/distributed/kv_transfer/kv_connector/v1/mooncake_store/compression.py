@@ -110,7 +110,7 @@ class CompressedStore:
     def _save(
         self, slot: int, key: str, block: int, part: int, replicate: Any
     ) -> tuple[int, int]:
-        value = self.codec.encode_for_store(
+        value = self.codec.compress_for_store(
             slot,
             key,
             [[block]],
@@ -144,8 +144,8 @@ class CompressedStore:
         )
         if result != [header.nbytes]:
             raise RuntimeError(f"Mooncake manifest GET failed: {result}")
-        manifest = self.codec.decode_header(slot)
-        value = self.codec.payload_read_plan(slot, key, part, manifest)
+        descriptor = self.codec.read_descriptor(slot)
+        value = self.codec.payload_read_plan(slot, key, part, descriptor)
         sizes = [buffer.nbytes for buffer in value.buffers]
         result = self.store.batch_get_into_multi_buffers(
             [value.key],
@@ -154,9 +154,9 @@ class CompressedStore:
         )
         if result != [sum(sizes)]:
             raise RuntimeError(f"Mooncake payload GET failed: {result}")
-        self.codec.decode_from_store(
+        self.codec.decompress_from_store(
             slot,
-            manifest,
+            descriptor,
             [[block]],
             part,
             valid_tokens_by_group={0: self.block_size},

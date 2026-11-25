@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Literal
 
 import msgspec
 
+from vllm.distributed.kv_transfer.kv_connector.v1.compression import BufferSpan
+
 if TYPE_CHECKING:
     from zmq.asyncio import Socket
 
@@ -65,9 +67,7 @@ class CompressionChunkPull(  # type: ignore[call-arg]
     transfer_id: TransferId
     d_req_id: ReqId
     chunk_id: int
-    payload_addr: int
-    aux_addr: int
-    tail_addr: int
+    buffers: tuple[BufferSpan, ...]
     nonce: str = ""
 
 
@@ -75,17 +75,9 @@ class CompressionChunkReady(  # type: ignore[call-arg]
     msgspec.Struct, tag=True, frozen=True
 ):
     chunk_id: int
-    data_bytes: int
-    payload_bytes: int
+    lengths: tuple[int, ...] = ()
+    descriptor: bytes = b""
     error: str | None = None
-
-    @property
-    def u8_bytes(self) -> int:
-        return self.data_bytes
-
-    @property
-    def codec_bytes(self) -> int:
-        return self.payload_bytes
 
 
 class CompressionAbort(  # type: ignore[call-arg]
