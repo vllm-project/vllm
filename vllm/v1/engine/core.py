@@ -1436,6 +1436,9 @@ class EngineCoreProc(EngineCore):
                 executor_fail_callback,
                 internal_dp_balancing,
             )
+            if vllm_config.observability_config.enable_logging_iteration_details:
+                # Report the first time the engine has no work.
+                self._idle_state_callbacks.append(EngineCoreProc._report_idle)
 
             # Initialize fault tolerance settings.
             self.enable_fault_tolerance = (
@@ -1867,7 +1870,6 @@ class EngineCoreProc(EngineCore):
         while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
-            self._report_idle(True)
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
                 with self.aborts_queue.mutex:
@@ -1896,16 +1898,14 @@ class EngineCoreProc(EngineCore):
         if self._reported_idle and self.has_work():
             self._report_idle(False)
 
-    def _report_idle(self, idle: bool) -> None:
+    def _report_idle(self, idle: bool = True) -> None:
         """Send stat loggers the scheduler stats when the engine stops or
         resumes stepping."""
-        if idle == self._reported_idle:
-            return
         self._reported_idle = idle
-        if (
-            self.vllm_config.observability_config.enable_logging_iteration_details
-            and (stats := self.scheduler.make_stats()) is not None
-        ):
+        if not idle:
+            # Report the next time the engine stops.
+            self._idle_state_callbacks.append(EngineCoreProc._report_idle)
+        if (stats := self.scheduler.make_stats()) is not None:
             stats.engine_idle = idle
             self.output_queue.put_nowait((0, EngineCoreOutputs(scheduler_stats=stats)))
 
