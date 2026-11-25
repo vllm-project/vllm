@@ -370,11 +370,17 @@ impl ClientInner {
             .into_typed_result::<Option<JsonMap<String, JsonValue>>>("fault_tolerance_status")
         {
             Ok(Some(status)) => {
+                let healthy = status.get("status").and_then(JsonValue::as_str) == Some("healthy");
                 let snapshot = {
                     let mut guard = self.ft_engine_status.lock();
                     guard.insert(engine_index, status);
                     self.build_ft_status_snapshot(&guard)
                 };
+                // Withdraw gRPC readiness while the engine is not healthy, so
+                // load balancers stop routing to it; liveness is unaffected.
+                if self.enable_fault_tolerance && engine_index == self.ft_primary_rank {
+                    self.readiness.set_faulted(!healthy);
+                }
                 self.ft_status_tx.send_replace(snapshot);
                 trace!(engine_index, "updated cached fault-tolerance engine status");
             }

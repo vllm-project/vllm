@@ -19,7 +19,8 @@ pub(crate) const LIVENESS_SERVICE: &str = "liveness";
 
 /// Health service for readiness probes. Like `vllm.Inference`, it reports
 /// whether the engines can accept and process new requests, and
-/// `NOT_SERVING` on shutdown or engine failure.
+/// `NOT_SERVING` on shutdown or engine failure. With fault tolerance enabled,
+/// it also reports `NOT_SERVING` while the engine is not `healthy`.
 pub(crate) const READINESS_SERVICE: &str = "readiness";
 
 /// The [`Llm`] signals that the gRPC health services follow.

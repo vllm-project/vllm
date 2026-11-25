@@ -4650,15 +4650,60 @@ fn mm_processor_kwargs_reach_frontend_engine_and_render() {
 }
 
 #[test]
-fn fault_tolerance_flags_reach_frontend_and_engine_and_require_external_lb() {
+fn serve_rejects_fault_tolerance() {
     use thiserror_ext::AsReport as _;
-    // 1. `vllm-rs serve` with `--enable-fault-tolerance` and external LB mode.
+    // The managed engine starts without the external-LB flags Python's fault
+    // tolerance requires, so `vllm-rs serve` rejects it in every DP LB mode.
+    let dp_lb_modes: &[&[&str]] = &[
+        &[],
+        &[
+            "--data-parallel-external-lb",
+            "--data-parallel-size",
+            "2",
+            "--data-parallel-rank",
+            "0",
+            "--data-parallel-rpc-port",
+            "13345",
+        ],
+        &[
+            "--data-parallel-size",
+            "2",
+            "--data-parallel-rank",
+            "1",
+            "--data-parallel-rpc-port",
+            "13345",
+        ],
+    ];
+    let ft_flags: &[&[&str]] = &[
+        &["--enable-fault-tolerance"],
+        // Forwarded to Python, where it implicitly enables fault tolerance.
+        &["--fault-tolerance-config.engine-recovery-timeout-sec", "30"],
+    ];
+    for dp_lb in dp_lb_modes {
+        for ft in ft_flags {
+            let mut argv = vec!["vllm-rs", "serve", "Qwen/Qwen3-0.6B"];
+            argv.extend_from_slice(ft);
+            argv.extend_from_slice(dp_lb);
+            let cli = Cli::try_parse_from(&argv).unwrap();
+            let Command::Serve(args) = cli.command else {
+                panic!("expected serve args");
+            };
+            assert!(args.effective_enable_fault_tolerance(), "{argv:?}");
+            let err = args.validate().unwrap_err();
+            assert!(
+                err.to_report_string()
+                    .contains("Fault tolerance is not supported by `vllm-rs serve` yet"),
+                "unexpected error for {argv:?}: {}",
+                err.to_report_string()
+            );
+        }
+    }
+
+    // Without fault tolerance, external LB mode still validates.
     let cli = Cli::try_parse_from([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--enable-fault-tolerance",
-        "--data-parallel-external-lb",
         "--data-parallel-size",
         "2",
         "--data-parallel-rank",
@@ -4670,64 +4715,16 @@ fn fault_tolerance_flags_reach_frontend_and_engine_and_require_external_lb() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    args.validate().expect("external LB mode should validate");
-    let topo = topology(&args);
-    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topo);
-    assert!(config.server.api_server_options.enable_fault_tolerance);
-    config.server.validate().expect("server config should validate");
-    config
-        .engine_core
-        .validate(&config.server)
-        .expect("single-engine frontend config should validate");
-    let engine = args.to_managed_engine_config(5555, &topo, None);
-    assert!(engine.python_args.iter().any(|arg| arg == "--enable-fault-tolerance"));
-
-    // 2. `vllm-rs serve` with `--enable-fault-tolerance` without external LB fails validation.
-    let cli = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--enable-fault-tolerance",
-    ])
-    .unwrap();
-    let Command::Serve(args) = cli.command else {
-        panic!("expected serve args");
-    };
-    let err = args.validate().unwrap_err();
-    assert!(
-        err.to_report_string()
-            .contains("Fault tolerance requires external load balancer mode"),
-        "unexpected error: {}",
-        err.to_report_string()
-    );
-
-    // 3. `--fault-tolerance-config` forwarded to Python implicitly enables FT on frontend.
-    let cli = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--fault-tolerance-config.engine-recovery-timeout-sec",
-        "30",
-        "--data-parallel-external-lb",
-        "--data-parallel-size",
-        "2",
-        "--data-parallel-rank",
-        "1",
-        "--data-parallel-rpc-port",
-        "13345",
-    ])
-    .unwrap();
-    let Command::Serve(args) = cli.command else {
-        panic!("expected serve args");
-    };
-    assert!(args.effective_enable_fault_tolerance());
     args.validate().unwrap();
-    let topo = topology(&args);
-    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topo);
-    assert!(config.server.api_server_options.enable_fault_tolerance);
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    assert!(!engine.python_args.iter().any(|arg| arg == "--enable-fault-tolerance"));
+}
 
-    // 4. `vllm-rs frontend` accepts `enable_fault_tolerance: true` via `--args-json`
-    //    and rejects `engine_count > 1` during config validation.
+#[test]
+fn frontend_fault_tolerance_requires_single_engine() {
+    use thiserror_ext::AsReport as _;
+    // `vllm-rs frontend` accepts `enable_fault_tolerance: true` via `--args-json`
+    // and rejects `engine_count > 1` during config validation.
     let cli = Cli::try_parse_from([
         "vllm-rs",
         "frontend",

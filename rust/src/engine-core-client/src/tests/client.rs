@@ -4923,13 +4923,17 @@ async fn fault_tolerance_status_pushes_and_recovery_lifecycle() {
     );
 
     let mut status_rx = client.subscribe_fault_tolerance_status();
+    let readiness_rx = client.subscribe_readiness();
+    assert!(*readiness_rx.borrow());
 
-    // 1. Push diagnosing -> faulted
+    // 1. Push diagnosing -> faulted, readiness withdrawn, liveness unchanged
     push_stage_tx
         .send(serde_json::json!({"id": 0, "status": "diagnosing"}))
         .unwrap();
     timeout(Duration::from_secs(2), status_rx.changed()).await.unwrap().unwrap();
     assert!(client.is_faulted());
+    assert!(!*readiness_rx.borrow());
+    assert!(client.is_healthy());
     assert_eq!(
         serde_json::to_value(client.fault_tolerance_status()).unwrap(),
         serde_json::json!({
@@ -5028,6 +5032,7 @@ async fn fault_tolerance_status_pushes_and_recovery_lifecycle() {
     );
     // Healthy status push replaced the entry and cleared ft_state/last_ft_request_id.
     assert!(!client.is_faulted());
+    assert!(*readiness_rx.borrow());
     assert_eq!(
         serde_json::to_value(client.fault_tolerance_status()).unwrap(),
         serde_json::json!({

@@ -38,6 +38,7 @@ use vllm_engine_core_client::mock_engine::{
 };
 use vllm_engine_core_client::protocol::decode_value;
 use vllm_engine_core_client::protocol::dtype::{ModelDtype, TensorDtype};
+use vllm_engine_core_client::protocol::fault_tolerance::FT_STATUS_CALL_ID;
 use vllm_engine_core_client::protocol::handshake::{EngineCoreReadyResponse, KvEventsConfig};
 use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmField, MmFieldElem, MmKwargValue,
@@ -440,6 +441,35 @@ async fn setup_grpc_service_with_engine_script<F>(
 where
     F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
 {
+    setup_grpc_service_with_client_config(
+        engine_id,
+        ready,
+        backend,
+        engine_shutdown,
+        |config| config,
+        script,
+    )
+    .await
+}
+
+/// Like [`setup_grpc_service_with_engine_script`], with `configure` applied to
+/// the engine-core client config before connecting.
+async fn setup_grpc_service_with_client_config<F>(
+    engine_id: impl Into<EngineId>,
+    ready: EngineCoreReadyResponse,
+    backend: Arc<dyn ChatTextBackend>,
+    engine_shutdown: Option<tokio_util::sync::CancellationToken>,
+    configure: impl FnOnce(EngineCoreClientConfig) -> EngineCoreClientConfig,
+    script: F,
+) -> (
+    InferenceServer<InferenceServiceImpl>,
+    ControlServer<ControlServiceImpl>,
+    EngineHealth,
+    MockEngineTask,
+)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = engine_id.into();
@@ -451,14 +481,14 @@ where
         script,
     ));
 
-    let client = EngineCoreClient::connect(
+    let client = EngineCoreClient::connect(configure(
         EngineCoreClientConfig::new_single(handshake_address)
             .with_model_name("test-model")
             .with_local_input_output_addresses(
                 Some(ipc.input_endpoint()),
                 Some(ipc.output_endpoint()),
             ),
-    )
+    ))
     .await
     .expect("connect client");
     let llm = EngineCoreLlm::new(client);
@@ -3052,6 +3082,158 @@ async fn grpc_pause_withdraws_readiness_but_not_liveness() {
         );
     }
 
+    server_task.abort();
+}
+
+/// Push an unsolicited fault-tolerance status for engine 0, as the Python
+/// `EngineCoreSentinel` does.
+async fn push_ft_status(push: &mut PushSocket, status: &str) {
+    send_outputs(
+        push,
+        UtilityCallOutput {
+            output: UtilityOutput {
+                call_id: FT_STATUS_CALL_ID.into(),
+                failure_message: None,
+                result: Some(UtilityResultEnvelope::without_type_info(Value::Map(vec![
+                    (Value::from("id"), Value::from(0)),
+                    (Value::from("status"), Value::from(status)),
+                ]))),
+            },
+            ..Default::default()
+        }
+        .into(),
+    )
+    .await;
+}
+
+fn unary_text_request(request_id: &str) -> pb::GenerateRequest {
+    pb::GenerateRequest {
+        request_id: request_id.to_string(),
+        model: "test-model".to_string(),
+        prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+        stopping: Some(pb::StoppingCriteria {
+            max_new_tokens: 10,
+            ..Default::default()
+        }),
+        response: Some(pb::ResponseOptions {
+            output_text: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_fault_withdraws_readiness_and_rejects_requests_until_healthy() {
+    let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel::<&'static str>();
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_client_config(
+            EngineId::from_engine_index(0),
+            default_ready_response(),
+            Arc::new(FakeTextBackend::default()),
+            None,
+            |config| config.with_fault_tolerance(true),
+            move |dealer, push| {
+                boxed_test_future(async move {
+                    while let Some(status) = status_rx.recv().await {
+                        push_ft_status(push, status).await;
+                        if status == "healthy" {
+                            break;
+                        }
+                    }
+                    // Only the request sent after recovery reaches the engine.
+                    let add = recv_engine_message(dealer).await;
+                    let request = decode_add_request(&add);
+                    assert!(
+                        request.request_id.starts_with("ft-after-recovery"),
+                        "unexpected request {}",
+                        request.request_id
+                    );
+                    send_outputs(
+                        push,
+                        engine_outputs_for_request(
+                            &request.request_id,
+                            default_stream_output_specs(),
+                        ),
+                    )
+                    .await;
+                })
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut inference_client = InferenceClient::new(channel.clone());
+    let mut health_client = HealthClient::new(channel);
+    let mut readiness_streams = Vec::new();
+    for service in ["readiness", "vllm.Inference"] {
+        let mut stream = health_client
+            .watch(HealthCheckRequest {
+                service: service.to_string(),
+            })
+            .await
+            .expect("start health watch")
+            .into_inner();
+        assert_eq!(
+            next_health_status(&mut stream).await,
+            HealthServingStatus::Serving
+        );
+        readiness_streams.push(stream);
+    }
+
+    status_tx.send("unhealthy").unwrap();
+    for stream in &mut readiness_streams {
+        assert_eq!(
+            next_health_status(stream).await,
+            HealthServingStatus::NotServing
+        );
+    }
+    for service in ["liveness", ""] {
+        let status = health_client
+            .check(HealthCheckRequest {
+                service: service.to_string(),
+            })
+            .await
+            .expect("check health")
+            .into_inner()
+            .status;
+        assert_eq!(
+            status,
+            HealthServingStatus::Serving as i32,
+            "a fault must not fail {service:?}"
+        );
+    }
+
+    let status = inference_client
+        .generate(unary_text_request("ft-while-faulted"))
+        .await
+        .expect_err("faulted engine must reject new requests");
+    assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+
+    // Only a `healthy` push restores readiness.
+    status_tx.send("dead").unwrap();
+    status_tx.send("healthy").unwrap();
+    for stream in &mut readiness_streams {
+        assert_eq!(
+            next_health_status(stream).await,
+            HealthServingStatus::Serving
+        );
+    }
+
+    let response = inference_client
+        .generate(unary_text_request("ft-after-recovery"))
+        .await
+        .expect("generate after recovery")
+        .into_inner();
+    assert_eq!(response.outputs.expect("outputs present").text, "hi");
+
+    engine_task.await.expect("mock engine task");
     server_task.abort();
 }
 

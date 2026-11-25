@@ -1605,12 +1605,12 @@ impl ServeArgs {
 
     /// Validate `vllm-rs serve` arguments before spawning the managed engine.
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.effective_enable_fault_tolerance()
-            && !self.data_parallel_lb.data_parallel_external_lb
-            && self.data_parallel_lb.data_parallel_rank.is_none()
-        {
+        // The managed engine is launched as a `--headless` DP node without the
+        // external-LB flags, which Python's fault tolerance requires, so it
+        // would refuse to start.
+        if self.effective_enable_fault_tolerance() {
             anyhow::bail!(
-                "Fault tolerance requires external load balancer mode (--data-parallel-external-lb or --data-parallel-rank). Internal load balancer and single-rank modes are not supported."
+                "Fault tolerance is not supported by `vllm-rs serve` yet: the managed engine runs without external load balancer mode. Launch with `vllm serve --enable-fault-tolerance --data-parallel-rank <RANK>` and `VLLM_USE_RUST_FRONTEND=1` instead."
             );
         }
         Ok(())
@@ -1644,9 +1644,7 @@ impl ServeArgs {
             port,
         });
 
-        let mut runtime = self.runtime.clone();
-        runtime.enable_fault_tolerance = self.effective_enable_fault_tolerance();
-        runtime.into_managed_config(
+        self.runtime.clone().into_managed_config(
             listener_mode,
             grpc_listener_mode,
             handshake_address,
@@ -1684,9 +1682,6 @@ impl ServeArgs {
 
         let mut managed_engine = self.managed_engine.clone();
         managed_engine.python_args.extend(self.runtime.model_args().python_args());
-        if self.runtime.enable_fault_tolerance {
-            managed_engine.python_args.push("--enable-fault-tolerance".to_string());
-        }
         if let Some(logging_config) = self.runtime.logging_config_json() {
             managed_engine
                 .python_args

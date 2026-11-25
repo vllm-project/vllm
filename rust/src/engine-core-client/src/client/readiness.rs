@@ -9,6 +9,10 @@
 //! again since only they know what the call left behind. Readiness therefore
 //! becomes `true` only from an engine answer.
 //!
+//! With fault tolerance enabled, readiness is also withdrawn while the
+//! engine's status push reports anything but `healthy`, until the next
+//! `healthy` push.
+//!
 //! Withdrawing readiness publishes `false`, which the gRPC `readiness` and
 //! `vllm.Inference` health services report as `NOT_SERVING`, the same
 //! withdrawal the server publishes on shutdown.
@@ -40,13 +44,16 @@ struct ReadinessState {
     /// Advanced whenever a control call ends, so an answer that may predate
     /// the call is discarded.
     epoch: u64,
+    /// Whether fault tolerance reports the engine as not `healthy`;
+    /// readiness stays withdrawn until a `healthy` status push.
+    faulted: bool,
 }
 
 impl ReadinessState {
     /// Readiness to publish, or `None` to keep the published value until the
     /// engines answer.
     fn ready(&self) -> Option<bool> {
-        if self.withdrawals > 0 {
+        if self.withdrawals > 0 || self.faulted {
             Some(false)
         } else {
             self.engines_ready
@@ -73,6 +80,7 @@ impl Readiness {
                 withdrawals: 0,
                 engines_ready: Some(true),
                 epoch: 0,
+                faulted: false,
             }),
             tx: watch::Sender::new(true),
             ask: Notify::new(),
@@ -114,6 +122,15 @@ impl Readiness {
     pub fn start(&self, ready: bool) {
         let mut state = self.state.lock();
         state.engines_ready = Some(ready);
+        self.publish(&state);
+    }
+
+    /// Record whether fault tolerance reports the engine as not `healthy`.
+    /// Readiness is withdrawn while faulted; once cleared, the engines' latest
+    /// answer is published again.
+    pub fn set_faulted(&self, faulted: bool) {
+        let mut state = self.state.lock();
+        state.faulted = faulted;
         self.publish(&state);
     }
 
@@ -230,6 +247,33 @@ mod tests {
 
         drop(pause);
         assert!(!*published.borrow());
+        let epoch = readiness.pending_ask().unwrap();
+        readiness.answer(epoch, true);
+        assert!(*published.borrow());
+    }
+
+    #[test]
+    fn fault_withdraws_readiness_until_cleared() {
+        let readiness = Arc::new(Readiness::new());
+        let published = readiness.subscribe();
+
+        readiness.set_faulted(true);
+        assert!(!*published.borrow());
+        // An engine answer does not override the fault.
+        drop(readiness.recheck_after_call());
+        let epoch = readiness.pending_ask().unwrap();
+        readiness.answer(epoch, true);
+        assert!(!*published.borrow());
+
+        readiness.set_faulted(false);
+        assert!(*published.borrow());
+
+        // Clearing the fault keeps a pause withdrawn.
+        let pause = readiness.withdraw_until_recheck();
+        readiness.set_faulted(true);
+        readiness.set_faulted(false);
+        assert!(!*published.borrow());
+        drop(pause);
         let epoch = readiness.pending_ask().unwrap();
         readiness.answer(epoch, true);
         assert!(*published.borrow());
