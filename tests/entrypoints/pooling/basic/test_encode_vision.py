@@ -52,13 +52,9 @@ def _format_chatml_prompt(body: str, instruction: str = DEFAULT_INSTRUCTION) -> 
 def _prompt(
     text: str | None = TEXT,
     img: object | None = None,
-    *,
-    include_image_placeholder: bool = False,
 ) -> dict | str:
     """Build a Qwen3-VL prompt with explicit vision placeholders when needed."""
     parts: list[str] = []
-    if include_image_placeholder or img is not None:
-        parts.append(IMAGE_PLACEHOLDER)
     if text is not None:
         parts.append(text)
     formatted = _format_chatml_prompt("".join(parts))

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for EmbedIOProcessor."""
 
-import contextlib
 from typing import cast, get_args
 
 import pytest
@@ -632,8 +631,6 @@ def _make_embed_serve_context(
 
 
 class TestEmbedPromptExtrasAndCache:
-    """`EmbedIOProcessor` handling of `prompt_extras` and cache options."""
-
     def test_context_preserves_mm_and_cache_prompt_extras(self):
         # Verify context holds explicit cache and multimodal extras as passed.
         extras = {
@@ -663,7 +660,7 @@ class TestEmbedRequestCacheSaltValidation:
         "bad_salt", ["", "s" * 129, "a@b", "a/b", "a\\b", "a\x00b"]
     )
     def test_invalid_cache_salt_rejected(self, bad_salt: str):
-        with contextlib.suppress(ValidationError, VLLMValidationError):
+        with pytest.raises(ValidationError, VLLMValidationError):
             TypeAdapter(EmbeddingRequest).validate_python(
                 {"model": "test", "input": "hello", "cache_salt": bad_salt}
             )
