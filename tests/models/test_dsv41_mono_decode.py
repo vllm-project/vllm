@@ -983,13 +983,15 @@ def test_rocm_attention_takes_the_gfx942_indexer_with_the_flag(
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm attention")
-def test_rocm_attention_keeps_wo_a_on_the_checkpoint_quant_on_cdna3(
-    default_vllm_config, dist_init, monkeypatch
+@pytest.mark.parametrize("cdna_version", [3, 4])
+def test_rocm_attention_wo_a_with_online_quant(
+    default_vllm_config, dist_init, monkeypatch, cdna_version
 ):
     """With online quantization (`--quantization-config`) of the MXFP8
     checkpoint, CDNA3 builds wo_a on the checkpoint's method, since its
-    einsum path reads the MXFP8 weight itself. The other layers keep the
-    online quantization."""
+    einsum path reads the MXFP8 weight itself; the other layers keep the
+    online quantization. CDNA4's wo_a BMM reads the MXFP8 block scales too,
+    so a requantized wo_a is refused."""
     import vllm.platforms.rocm as rocm_platform
     from vllm.config.model import ModelConfig
     from vllm.config.quantization import _ONLINE_SHORTHANDS
@@ -1003,7 +1005,7 @@ def test_rocm_attention_keeps_wo_a_on_the_checkpoint_quant_on_cdna3(
         _mxfp8_linear_method_cls,
     )
 
-    monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: 3)
+    monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna_version)
     default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
     quant_config = DeepseekV4FP8Config.from_config(
         {
@@ -1030,8 +1032,12 @@ def test_rocm_attention_keeps_wo_a_on_the_checkpoint_quant_on_cdna3(
         prefix="model.layers.0.attn.wo_a",
     )
 
-    assert type(wo_a.quant_method) is _mxfp8_linear_method_cls()
     assert quant_config.online_quantization_config is online_config
+    if cdna_version == 3:
+        assert type(wo_a.quant_method) is _mxfp8_linear_method_cls()
+    else:
+        with pytest.raises(ValueError, match="not supported on CDNA4"):
+            rocm._refuse_requantized_wo_a_on_cdna4(wo_a)
 
 
 @pytest.mark.parametrize("monokernel", [True, False])

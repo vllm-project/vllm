@@ -689,6 +689,18 @@ class DeepseekV41ROCMAiterSparseSWABackend(DeepseekSparseSWABackend):
         return DeepseekV41ROCMAiterSparseSWAMetadataBuilder
 
 
+def _refuse_requantized_wo_a_on_cdna4(wo_a: torch.nn.Module) -> None:
+    # CDNA4's rocm_mxfp8_wo_a_bmm reads the MXFP8 block scales.
+    from vllm.platforms.rocm import get_cdna_version
+
+    if get_cdna_version() == 4 and getattr(
+        wo_a.quant_method, "requantization_source", None
+    ):
+        raise ValueError(
+            f"Online quantization of {wo_a.prefix} is not supported on CDNA4"
+        )
+
+
 class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     """ROCm sparse MLA attention layer for DeepSeek V4.1."""
 
@@ -713,6 +725,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     def __init__(self, *args, **kwargs):
         vllm_config = args[0] if args else kwargs["vllm_config"]
         super().__init__(*args, **kwargs)
+        _refuse_requantized_wo_a_on_cdna4(self.wo_a)
         # CUDA executes WO_A with a quantized grouped-BMM kernel.  ROCm's
         # correctness path below dequantizes WO_A once and uses torch.einsum,
         # so retain the ordinary MXFP8 linear kernel for post-load processing
