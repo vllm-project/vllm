@@ -271,6 +271,7 @@ def test_dummy_run_requests_fit_in_budget(
     runner.max_num_tokens = max_num_tokens
     runner.max_num_reqs = max_num_reqs
     runner.max_model_len = max_model_len
+    runner.num_speculative_steps = 0
     runner.speculator = None
     if spec is not None:
         num_query_per_req, draft_slots = spec
@@ -290,91 +291,6 @@ def test_dummy_run_requests_fit_in_budget(
     runner._dummy_run(max_num_tokens)
 
     assert scheduled == [expected]
-
-
-@pytest.mark.parametrize(
-    ("allow_skip_drafts", "dp_skip_drafts", "expected_k"),
-    [
-        (True, True, 0),
-        (True, False, None),
-        (False, False, None),
-        (True, None, 0),
-        (False, None, None),
-    ],
-)
-def test_dummy_run_propagates_skip_drafts(
-    monkeypatch,
-    allow_skip_drafts: bool,
-    dp_skip_drafts: bool | None,
-    expected_k: int | None,
-):
-    """`_dummy_run` passes `allow_skip_drafts` into `dummy_scheduler_output`
-    and forwards the synced `skip_drafts` decision to `speculator.propose`."""
-    seen_skip_drafts: list[bool] = []
-    propose_calls: list[int | None] = []
-
-    runner = GPUModelRunner.__new__(GPUModelRunner)
-    runner.max_num_tokens = 16
-    runner.max_num_reqs = 4
-    runner.max_model_len = 16
-    runner.decode_query_len = 2
-    runner.lora_config = None
-    runner.is_first_pp_rank = True
-    runner.is_last_pp_rank = True
-    runner.device = torch.device("cpu")
-    runner.kv_connector = Mock()
-    runner.eplb = Mock()
-    runner.step_timing = Mock()
-    runner.model = Mock()
-    monkeypatch.setattr(runner, "draft_context", contextlib.nullcontext)
-    runner.req_states = SimpleNamespace(
-        last_sampled_tokens=torch.zeros(1, dtype=torch.int32),
-        next_prefill_tokens=torch.zeros(1, dtype=torch.int32),
-    )
-    runner.sampler = SimpleNamespace(
-        sampling_states=SimpleNamespace(
-            temperature=SimpleNamespace(gpu=torch.zeros(1)),
-            seeds=SimpleNamespace(gpu=torch.zeros(1, dtype=torch.int64)),
-        )
-    )
-    runner.speculator = SimpleNamespace(
-        num_query_per_req=1,
-        supports_mm_inputs=False,
-        propose=lambda **kwargs: propose_calls.append(kwargs["num_speculative_tokens"]),
-    )
-    runner.speculative_config = SimpleNamespace(max_num_new_slots_for_drafting=0)
-
-    dp_sync_state = (
-        None if dp_skip_drafts is None else SimpleNamespace(skip_drafts=dp_skip_drafts)
-    )
-    hidden = torch.zeros(2, 4)
-    input_batch = SimpleNamespace(
-        num_reqs=1,
-        num_tokens=2,
-        idx_mapping=torch.zeros(1, dtype=torch.int64),
-        logits_indices=torch.tensor([1]),
-    )
-
-    def fake_execute_model(scheduler_output, **kwargs):
-        seen_skip_drafts.append(scheduler_output.skip_drafts)
-        runner.execute_model_state = SimpleNamespace(
-            input_batch=input_batch,
-            attn_metadata={},
-            slot_mappings_by_layer={},
-            hidden_states=hidden,
-            aux_hidden_states=None,
-            dp_sync_state=dp_sync_state,
-        )
-
-    runner.execute_model = fake_execute_model
-    monkeypatch.setattr(
-        model_runner_module, "get_drafter_hidden_states", lambda model, h: h
-    )
-
-    runner._dummy_run(2, uniform_decode=True, allow_skip_drafts=allow_skip_drafts)
-
-    assert seen_skip_drafts == [allow_skip_drafts]
-    assert propose_calls == [expected_k]
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):

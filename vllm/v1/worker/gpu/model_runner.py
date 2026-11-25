@@ -972,6 +972,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dummy_scheduler_output = SchedulerOutput.make_empty()
         dummy_scheduler_output.total_num_scheduled_tokens = num_tokens
         dummy_scheduler_output.num_scheduled_tokens = num_scheduled_tokens
+        dummy_scheduler_output.num_spec_tokens_to_schedule = self.num_speculative_steps
         dummy_scheduler_output.skip_drafts = allow_skip_drafts
 
         # Disable any use of KVConnector for dummy runs.
@@ -1018,6 +1019,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states = self.execute_model_state.hidden_states
         aux_hidden_states = self.execute_model_state.aux_hidden_states
         dp_sync_state = self.execute_model_state.dp_sync_state
+        num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
         self.execute_model_state = None
 
         self.step_timing.forward_end()
@@ -1025,11 +1027,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # dummy run the eagle speculator's propose to ensure DP/EP sync.
         if self.speculator is not None:
             assert self.sampler is not None
-            skip_drafts = (
-                dp_sync_state.skip_drafts
-                if dp_sync_state is not None
-                else dummy_scheduler_output.skip_drafts
-            )
             self.step_timing.drafter_start()
             mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
             if self.speculator.supports_mm_inputs:
@@ -1065,7 +1062,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     skip_attn_for_dummy_run=skip_attn,
                     mm_inputs=mm_inputs,
                     is_profile=is_profile,
-                    num_speculative_tokens=0 if skip_drafts else None,
+                    num_speculative_tokens=num_spec_tokens,
                 )
             self.step_timing.drafter_end()
 

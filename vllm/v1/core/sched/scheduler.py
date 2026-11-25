@@ -1754,8 +1754,6 @@ class Scheduler(SchedulerInterface):
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
                 len(num_scheduled_tokens)
             ]
-            if num_spec_tokens_to_schedule == 0:
-                drafts_needed = False
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
