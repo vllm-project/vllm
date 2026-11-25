@@ -510,7 +510,7 @@ def validate_kv_cache_layout(
         )
 
 
-def _build_kv_cache_config_from_groups(
+def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroup],
     num_blocks: int,
@@ -589,21 +589,6 @@ def _build_kv_cache_config_from_groups(
         prefix_cache_retention_interval=(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
-    )
-
-
-def get_kv_cache_config_from_groups(
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroup],
-    available_memory: int,
-) -> KVCacheConfig:
-    """Generate the KV cache configuration from the KV cache groups and
-    available memory in bytes."""
-    if not kv_cache_groups:
-        return _build_kv_cache_config_from_groups(vllm_config, kv_cache_groups, 1)
-    bytes_per_block = _pool_bytes_per_block(vllm_config, kv_cache_groups)
-    return _build_kv_cache_config_from_groups(
-        vllm_config, kv_cache_groups, available_memory // bytes_per_block
     )
 
 
@@ -1610,9 +1595,7 @@ class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):
         num_blocks: int,
     ) -> KVCacheConfig:
         """See `KVCacheConfigBuilder.get_kv_cache_config_from_groups`."""
-        return _build_kv_cache_config_from_groups(
-            vllm_config, kv_cache_groups, num_blocks
-        )
+        return get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
 
 
 def shrink_kv_cache_configs(

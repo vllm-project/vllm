@@ -47,7 +47,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.worker import (
     KVCacheStoreSendingThread,
 )
 from vllm.platforms import current_platform
-from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
+from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -493,9 +493,7 @@ def test_store_values_round_trip_every_layout(request, model, layout):
         attention_config=SimpleNamespace(hisparse_config=None),
     )
     try:
-        cfg = DefaultKVCacheConfigBuilder().get_kv_cache_config_from_groups(
-            planner_config, groups, num_blocks
-        )
+        cfg = get_kv_cache_config_from_groups(planner_config, groups, num_blocks)
         kv_caches = allocate_kv_cache(cfg, torch.device("cpu"), layout)
     except (ValueError, AssertionError):
         pytest.skip(f"{layout.name} cannot express {model}")

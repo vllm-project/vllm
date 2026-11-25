@@ -1598,7 +1598,7 @@ def test_dcp_target_allocates_replicated_draft_independently(
     assert widths == [16, 64]
 
     cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        config, groups, available_memory=16 * 1024 * 1024
+        config, groups, num_blocks=128
     )
     scheduler_config = generate_scheduler_kv_cache_config([cache_config])
     assert get_max_concurrency_for_kv_cache_config(config, cache_config) > 0

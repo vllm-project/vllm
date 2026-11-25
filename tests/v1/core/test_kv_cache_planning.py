@@ -132,7 +132,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     monkeypatch.setattr(
         kv_cache_planning, "get_hisparse_host_pool_bytes", lambda _: 2**30
     )
-    cache_config = DefaultKVCacheConfigBuilder().get_kv_cache_config_from_groups(
+    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
         config, get_hisparse_kv_cache_groups(config, specs), num_blocks=7
     )
     assert cache_config.num_blocks == 7
@@ -267,7 +267,7 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(monkeypatch)
         for name in source_names | indexer_names
     }
     layer_configs = resolve_hisparse_specs(config, layer_configs, layers)
-    cache_config = DefaultKVCacheConfigBuilder().get_kv_cache_config_from_groups(
+    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
         config, get_kv_cache_groups(config, layer_configs), num_blocks=7
     )
 
@@ -871,7 +871,7 @@ def test_kv_cache_config_skips_uniform_group_owned_by_other_pp_stage():
         ),
     )
     kv_cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        config, groups, available_memory=2**20
+        config, groups, num_blocks=16
     )
     assert [tensor.layers for tensor in kv_cache_config.kv_cache_tensors] == [
         ["layer2"]
@@ -923,7 +923,7 @@ def test_sparse_mla_preserves_physical_row_addressing(with_draft, indexer_alignm
         del specs["draft"]
     groups = get_kv_cache_groups(config, specs)
     cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        config, groups, available_memory=8 * 1024 * 1024
+        config, groups, num_blocks=16
     )
     caches = allocate_kv_cache(
         cache_config, torch.device("cpu"), KVCacheLayout.BLHNC, [64] * len(groups)
@@ -1502,7 +1502,7 @@ def test_packed_groups_glm5_like_hybrid():
     assert sum(len(g.layer_names) for g in mamba) == 34
 
     kv_cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=2 * 1024**3
+        vllm_config, groups, num_blocks=16
     )
     strides = {t.block_stride for t in kv_cache_config.kv_cache_tensors}
     assert len(strides) == 1
@@ -1645,7 +1645,7 @@ def test_multi_run_layer_compact_strides_place_hoisted_heads():
             new_kv_cache_group(["full.0", "full.1"], full),
             new_kv_cache_group(["swa.0", "swa.1"], swa),
         ],
-        available_memory=4 * page * 8,
+        num_blocks=16,
     )
 
     num_blocks = config.num_blocks
@@ -2450,7 +2450,7 @@ def test_shrink_kv_cache_configs_keeps_tensors_and_checks_fit():
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
     groups = [new_kv_cache_group(["layer.0", "layer.1"], spec)]
     config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 16
+        vllm_config, groups, num_blocks=16
     )
     scheduler_config = generate_scheduler_kv_cache_config([config])
     assert config.num_blocks == 16
@@ -2485,7 +2485,7 @@ def test_finalize_extensible_kv_cache_keeps_measured_count():
     groups = [new_kv_cache_group(["layer.0", "layer.1"], spec)]
     capacity = 1000
     config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=2 * spec.page_size_bytes * capacity
+        vllm_config, groups, num_blocks=capacity
     )
     scheduler_config = generate_scheduler_kv_cache_config([config])
 
@@ -2516,7 +2516,7 @@ def test_finalize_extensible_kv_cache_refits_auto_max_model_len():
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
     groups = [new_kv_cache_group(["layer.0", "layer.1"], spec)]
     config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 32
+        vllm_config, groups, num_blocks=32
     )
     scheduler_config = generate_scheduler_kv_cache_config([config])
 
@@ -2550,7 +2550,7 @@ def test_finalize_extensible_kv_cache_auto_max_model_len_warns_when_short(
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
     groups = [new_kv_cache_group(["layer.0", "layer.1"], spec)]
     config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 32
+        vllm_config, groups, num_blocks=32
     )
     scheduler_config = generate_scheduler_kv_cache_config([config])
 
@@ -2586,7 +2586,7 @@ def test_finalize_extensible_kv_cache_auto_max_model_len_no_room():
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
     groups = [new_kv_cache_group(["layer.0", "layer.1"], spec)]
     config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 32
+        vllm_config, groups, num_blocks=32
     )
     scheduler_config = generate_scheduler_kv_cache_config([config])
 
@@ -2608,7 +2608,7 @@ def test_shrink_kv_cache_configs_leaves_host_resident_tensors():
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
     groups = [new_kv_cache_group(["layer.0", "layer.1"], spec)]
     config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 16
+        vllm_config, groups, num_blocks=16
     )
     host_tensor = KVCacheTensor(
         size=16 * 3000,

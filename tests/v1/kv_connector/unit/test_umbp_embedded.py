@@ -57,7 +57,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
+from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
@@ -178,9 +178,7 @@ def test_every_kv_cache_layout_restores_blocks_exactly(
         ),
         attention_config=SimpleNamespace(hisparse_config=None),
     )
-    config = DefaultKVCacheConfigBuilder().get_kv_cache_config_from_groups(
-        planner_config, groups, num_blocks=4
-    )
+    config = get_kv_cache_config_from_groups(planner_config, groups, num_blocks=4)
     config.kv_cache_layout = layout.name
     kv_caches = allocate_kv_cache(config, torch.device("cpu"), layout)
 
