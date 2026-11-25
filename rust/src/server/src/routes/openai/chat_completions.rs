@@ -276,10 +276,7 @@ async fn collect_chat_completion(
         None
     };
     let prompt_logprobs = if include_prompt_logprobs {
-        Some(prompt_logprobs_to_maps(
-            prompt_logprobs.as_ref(),
-            &prompt_token_ids,
-        )?)
+        Some(prompt_logprobs_to_maps(prompt_logprobs.as_ref()))
     } else {
         None
     };

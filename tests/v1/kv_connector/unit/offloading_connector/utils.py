@@ -66,6 +66,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     PrepareStoreOutput,
     RequestOffloadingContext,
+    StepResult,
     TransferResult,
     make_offload_key,
 )
@@ -223,7 +224,7 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager.lookup.return_value = LookupResult.MISS
         self.manager.prepare_store.return_value.keys_to_retry = []
         self.manager.get_load_source.return_value = CacheHitSource.EXTERNAL_UNSPECIFIED
-        self.manager.get_stats.return_value = None
+        self.manager.on_schedule_end.return_value = StepResult()
         self.manager.config_info.return_value = [{}]
         self.manager.on_new_request.return_value = RequestOffloadingContext()
 

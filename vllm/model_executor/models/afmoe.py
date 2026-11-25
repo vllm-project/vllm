@@ -124,11 +124,17 @@ class AfmoeMoE(nn.Module):
             )
 
         # Router gate
+        router_dtype = (
+            torch.bfloat16
+            if torch.get_default_dtype() == torch.bfloat16
+            and (quant_config is None or quant_config.get_name() == "modelopt_fp4")
+            else torch.float32
+        )
         self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            out_dtype=torch.float32,
-            params_dtype=torch.float32,
+            out_dtype=router_dtype,
+            params_dtype=router_dtype,
             prefix=f"{prefix}.gate",
         )
         self.expert_bias = nn.Parameter(
@@ -184,6 +190,7 @@ class AfmoeMoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         router_logits, _ = self.gate(hidden_states)
+        router_logits = router_logits.float()
 
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
@@ -552,7 +559,10 @@ class AfmoeForCausalLM(
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
-                config.vocab_size, config.hidden_size, quant_config=quant_config
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
         else:
             self.lm_head = PPMissingLayer()

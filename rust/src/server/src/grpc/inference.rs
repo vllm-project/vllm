@@ -393,6 +393,8 @@ pub(super) fn text_error_to_status(error: vllm_text::Error) -> Status {
     let message = error.to_report_string();
     if error.is_request_validation_error() {
         Status::invalid_argument(message)
+    } else if error.is_unavailable() {
+        Status::unavailable(message)
     } else {
         Status::internal(message)
     }
@@ -422,6 +424,22 @@ mod tests {
     use vllm_text::{DecodedText, FinishReason, Finished};
 
     use super::*;
+
+    #[test]
+    fn llm_errors_map_to_status_codes() {
+        let code = |error| text_error_to_status(vllm_text::Error::Llm(error)).code();
+        let message = "no engine can take the request".to_string();
+        assert_eq!(
+            code(vllm_llm::Error::Unavailable {
+                message: message.clone()
+            }),
+            tonic::Code::Unavailable
+        );
+        assert_eq!(
+            code(vllm_llm::Error::RemoteInvalidRequest { message }),
+            tonic::Code::InvalidArgument
+        );
+    }
 
     /// The terminal output carries the sampling-mask rows of every update, and
     /// earlier outputs none.

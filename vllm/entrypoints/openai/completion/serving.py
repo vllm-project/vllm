@@ -66,6 +66,26 @@ def _padded_prompt_logprobs(
     return logprobs + [None] * (num_prompt_tokens - len(logprobs))
 
 
+def _get_echoed_prompt_logprobs(
+    prompt_token_ids: list[int],
+    prompt_logprobs: PromptLogprobs | None,
+    echo_mask: list[bool] | None,
+) -> tuple[list[int], PromptLogprobs]:
+    """Select visible prompt IDs and logprobs without changing engine inputs."""
+    logprobs = _padded_prompt_logprobs(prompt_logprobs, len(prompt_token_ids))
+    if echo_mask is None:
+        return prompt_token_ids, logprobs
+
+    visible_ids: list[int] = []
+    visible_logprobs: PromptLogprobs = []
+    for i, (token_id, logprob) in enumerate(zip(prompt_token_ids, logprobs)):
+        if i < len(echo_mask) and not echo_mask[i]:
+            continue
+        visible_ids.append(token_id)
+        visible_logprobs.append(logprob)
+    return visible_ids, visible_logprobs
+
+
 _PROBE_TEXT = "zZ_vllm_sse_probe_Zz"
 _PROBE_INDEX = 987654321
 _encode_delta_text = json.JSONEncoder(ensure_ascii=False).encode
@@ -325,6 +345,14 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 model_name,
                 tokenizer,
                 request_metadata,
+                prompt_echo_masks=(
+                    [
+                        p.get("prompt_echo_mask") if p["type"] == "token" else None
+                        for p in engine_inputs
+                    ]
+                    if request.echo and request.logprobs is not None
+                    else None
+                ),
             )
 
             if self.enable_log_outputs and self.request_logger:
@@ -425,6 +453,19 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     assert request.max_tokens is not None
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
+                        echo_token_ids = prompt_token_ids
+                        echo_logprobs = None
+                        if request.logprobs is not None:
+                            engine_input = engine_inputs[prompt_idx]
+                            echo_mask = (
+                                engine_input.get("prompt_echo_mask")
+                                if not request.return_token_ids
+                                and engine_input["type"] == "token"
+                                else None
+                            )
+                            echo_token_ids, echo_logprobs = _get_echoed_prompt_logprobs(
+                                prompt_token_ids, prompt_logprobs, echo_mask
+                            )
                         prompt_text = "" if request.return_token_ids else res.prompt
                         if prompt_text is None:
                             prompt_text = self._extract_prompt_text(
@@ -433,26 +474,18 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         if request.max_tokens == 0:
                             # only return the prompt
                             delta_text = prompt_text
-                            delta_token_ids = prompt_token_ids
-                            out_logprobs = (
-                                _padded_prompt_logprobs(
-                                    prompt_logprobs, len(prompt_token_ids)
-                                )
-                                if request.logprobs is not None
-                                else None
-                            )
+                            delta_token_ids = echo_token_ids
+                            out_logprobs = echo_logprobs
                         else:
                             # echo the prompt and first token
                             delta_text = prompt_text + output.text
                             delta_token_ids = [
-                                *prompt_token_ids,
+                                *echo_token_ids,
                                 *output.token_ids,
                             ]
                             out_logprobs = (
                                 [
-                                    *_padded_prompt_logprobs(
-                                        prompt_logprobs, len(prompt_token_ids)
-                                    ),
+                                    *(echo_logprobs or []),
                                     *(output.logprobs or []),
                                 ]
                                 if request.logprobs is not None
@@ -657,6 +690,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
         model_name: str,
         tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
+        *,
+        prompt_echo_masks: list[list[bool] | None] | None = None,
     ) -> CompletionResponse:
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
@@ -664,7 +699,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         kv_transfer_params = None
         ec_transfer_params = None
         last_final_res = None
-        for final_res in final_res_batch:
+        for prompt_idx, final_res in enumerate(final_res_batch):
             last_final_res = final_res
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
@@ -679,30 +714,34 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
                 assert request.max_tokens is not None
                 if request.echo:
+                    echo_token_ids = prompt_token_ids
+                    echo_logprobs = None
+                    if request.logprobs is not None:
+                        echo_mask = (
+                            prompt_echo_masks[prompt_idx]
+                            if not request.return_token_ids
+                            and prompt_echo_masks is not None
+                            else None
+                        )
+                        echo_token_ids, echo_logprobs = _get_echoed_prompt_logprobs(
+                            prompt_token_ids, prompt_logprobs, echo_mask
+                        )
                     if request.return_token_ids:
                         prompt_text = ""
                     assert prompt_text is not None
                     if request.max_tokens == 0:
-                        token_ids = prompt_token_ids
-                        out_logprobs = (
-                            _padded_prompt_logprobs(
-                                prompt_logprobs, len(prompt_token_ids)
-                            )
-                            if request.logprobs is not None
-                            else None
-                        )
+                        token_ids = echo_token_ids
+                        out_logprobs = echo_logprobs
                         output_text = prompt_text
                     else:
-                        token_ids = [*prompt_token_ids, *output.token_ids]
+                        token_ids = [*echo_token_ids, *output.token_ids]
 
                         if request.logprobs is None:
                             out_logprobs = None
                         else:
                             assert output.logprobs is not None
                             out_logprobs = [
-                                *_padded_prompt_logprobs(
-                                    prompt_logprobs, len(prompt_token_ids)
-                                ),
+                                *(echo_logprobs or []),
                                 *output.logprobs,
                             ]
 
