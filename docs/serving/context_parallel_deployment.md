@@ -69,6 +69,18 @@ In short, for decode context parallel, try to increase `-tp` size until you get 
 
 Decode context parallel is supported in vLLM, for both MLA and GQA models. Some attention backends also support the combination of decode context parallel and MTP (multi-token prediction) to further accelerate the decoding phase.
 
+## Sparse MLA Sequence Parallel
+
+DeepSeek-V3.2-style sparse MLA (DSA) models, including GLM-5.1, GLM-5.2 and GLM-5.3, keep one KV cache per TP rank and shard the attention by head. Every rank therefore scores every token with the lightning indexer, and at high TP the sparse attention kernel pads each rank's few heads. `sparse_mla_sequence_parallel` shards these layers by token instead: every step, prefill and decode tokens alike, is padded to `2 * tp` equal chunks, and rank `r` takes chunks `r` and `2 * tp - 1 - r`, a pairing that balances the causal work. Each rank writes every token's KV, then runs the indexer and the sparse attention for its own tokens with all heads, and the attention output returns to head sharding for the output projection. The MoE and MLP layers keep their TP/EP weights. It is off by default:
+
+```bash
+vllm serve zai-org/GLM-5.3 --tensor-parallel-size 8 \
+  --kv-cache-dtype fp8_ds_mla \
+  --attention-config '{"backend": "FLASHMLA_SPARSE", "sparse_mla_sequence_parallel": true}'
+```
+
+It replaces `sparse_mla_shard_q`, which shards only the prefill tokens of long-enough steps. Each rank holds the full query and KV up-projections (`q_b_proj`, `kv_b_proj`), which leaves less memory for the KV cache. It requires CUDA, `FLASHMLA_SPARSE` with the `fp8_ds_mla` KV cache, and no pipeline, data or context parallelism, micro-batching, LoRA, adaptive verification or EAGLE-3-style drafters. MTP drafters are supported and keep head sharding.
+
 ## Technical Discussions
 
 The main discussions happen in the `#sig-context-parallel` channel of [vLLM Slack](https://slack.vllm.ai/).

@@ -485,6 +485,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         index_group_builder: "SparseMLAIndexGroupBuilder | None" = None,
         non_causal_multi_token_decode: bool = False,
         shardq_eligible: bool = False,
+        sequence_parallel: bool = False,
         sliding_window: int | None = None,
         prefill_backend_cls: type[MLAPrefillBackend] | None = None,
         kv_sharing_target_layer_name: str | None = None,
@@ -614,6 +615,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 extra_impl_args["index_group_builder"] = index_group_builder
 
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
+        # Whole-batch sequence parallelism (see
+        # vllm.models.deepseek_v32.sequence_parallel): this rank's tokens with
+        # all heads.
+        self.sequence_parallel = sequence_parallel
+        if sequence_parallel:
+            if not getattr(impl_cls, "supports_sequence_parallel", False):
+                raise ValueError(
+                    "sparse_mla_sequence_parallel requires the FLASHMLA_SPARSE "
+                    f"attention backend, got {self.attn_backend.get_name()}."
+                )
+            extra_impl_args["sequence_parallel"] = True
         impl = impl_cls(
             num_heads=self.num_heads,
             head_size=self.head_size,
@@ -663,6 +675,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Under DCP the indexer gathers this layer's context too.
                 indexer_op.k_cache.shardq_layer_name = self.layer_name
                 self.shardq_index_entry_bytes = indexer_op.k_cache.head_dim
+        if sequence_parallel:
+            # The indexer scores this rank's tokens too.
+            indexer_op = getattr(indexer, "indexer_op", None)
+            if indexer_op is not None:
+                indexer_op.k_cache.sequence_parallel = True
         index_group = getattr(impl, "index_group", None)
         self.hisparse_cache = (
             index_group.cache(cast(Any, impl).index_group_index)
@@ -696,7 +713,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
         self.prefill_backend: MLAPrefillBackend | None
-        if self.impl.is_sparse and not (
+        if sequence_parallel:
+            # Each rank's prefill tokens attend in forward_mqa, like ShardQ's.
+            self.prefill_backend = None
+        elif self.impl.is_sparse and not (
             self.impl.supports_dense_mha_prefill and self.supports_dense_mha_prefill
         ):
             logger.warning_once(

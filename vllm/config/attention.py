@@ -159,6 +159,19 @@ class AttentionConfig:
     1 + num_speculative_tokens tokens) for `sparse_mla_shard_q` to apply. Below
     it the all-to-all exchanges can cost more than they save."""
 
+    sparse_mla_sequence_parallel: bool = False
+    """Under tensor parallelism, split every step's tokens, decodes included,
+    across the TP ranks for DeepSeek-V3.2-style sparse MLA (DSA) models such as
+    GLM-5.x: each rank runs the indexer and the sparse attention for its tokens
+    with all heads over the replicated KV cache, then exchanges the attention
+    output for the TP-sharded output projection. The tokens split zigzag: the
+    step pads to `2 * tp` equal chunks and rank `r` owns chunks `r` and
+    `2 * tp - 1 - r`, which balances causal work. Each rank holds the full
+    query and KV up-projections. Replaces `sparse_mla_shard_q`. Requires CUDA,
+    `FLASHMLA_SPARSE` with the `fp8_ds_mla` KV cache, and no pipeline, data
+    or context parallelism, micro-batching, LoRA, adaptive verification or
+    EAGLE-3-style drafters; MTP drafters keep head sharding."""
+
     minimax_m3_indexer_cp: bool = False
     """MiniMax M3 on ROCm with tensor_parallel_size > 1: score the sparse
     indexer context-parallel at decode. Each rank reads 1/TP of the index

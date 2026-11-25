@@ -431,6 +431,11 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self.use_shardq = any(
             getattr(layers[name], "use_shardq", False) for name in layer_names
         )
+        # Whether these layers attend a rank's whole-batch sequence-parallel
+        # tokens with all heads.
+        self.sequence_parallel = any(
+            getattr(layers[name], "sequence_parallel", False) for name in layer_names
+        )
         # Under DCP, ShardQ steps attend a gathered copy of their context.
         self.dcp_shardq: DcpShardQPlanner | None = None
         if self.use_shardq and self.dcp_world_size > 1:
@@ -921,6 +926,9 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     # Whether forward_mqa also runs a DCP ShardQ step's gathered context
     # (kv_gathered metadata) and is validated.
     supports_dcp_shardq: ClassVar[bool] = False
+    # Whether forward_mqa runs a rank's whole-batch sequence-parallel tokens
+    # with all heads (vllm.models.deepseek_v32.sequence_parallel).
+    supports_sequence_parallel: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -945,6 +953,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         topk_indices_buffer: torch.Tensor | None = None,
         index_group_builder: SparseMLAIndexGroupBuilder | None = None,
         q_pad_num_heads: int | None = None,
+        sequence_parallel: bool = False,
     ) -> None:
         super().__init__(
             num_heads,
@@ -959,6 +968,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             v_head_dim,
             kv_b_proj,
         )
+        self.sequence_parallel = sequence_parallel
 
         self.init_topk_indices_buffer(indexer, topk_indices_buffer)
         self.index_group: SparseMLAIndexGroup | None = None
@@ -1011,6 +1021,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         # The attention layer decides whether to use ShardQ.
         self.use_shardq = (
             self.supports_shardq
+            and not sequence_parallel
             and vllm_config.attention_config.sparse_mla_shard_q
             and vllm_config.attention_config.hisparse_config is None
             and parallel_config.tensor_parallel_size > 1
