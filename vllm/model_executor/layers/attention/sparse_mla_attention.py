@@ -304,6 +304,7 @@ def build_shardq_metadata(
     shardq = ShardQMetadata(
         num_decode_tokens=num_decode_tokens,
         num_tokens_per_rank=split.num_tokens_per_rank.tolist(),
+        sequence_parallel=split.sequence_parallel,
         token_ids=async_tensor_h2d(split.token_ids, device=device),
         rank_offsets=async_tensor_h2d(
             np.r_[0, np.cumsum(split.num_tokens_per_rank)], device=device
@@ -444,6 +445,13 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 kv_cache_spec, mla_layer, self.device
             )
             self.use_shardq = self.dcp_shardq is not None
+        self.use_sp_shardq = (
+            self.use_shardq
+            and self.dcp_world_size == 1
+            and all(
+                getattr(layers[name], "use_sp_shardq", False) for name in layer_names
+            )
+        )
 
     def _init_reorder_batch_threshold(
         self,
@@ -552,7 +560,9 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 decode_max_query_len = int(decode_query_lens_cpu.max().item())
 
         shardq_split = (
-            build_shardq_split(common_attn_metadata, self.vllm_config)
+            build_shardq_split(
+                common_attn_metadata, self.vllm_config, self.use_sp_shardq
+            )
             if self.use_shardq
             else None
         )

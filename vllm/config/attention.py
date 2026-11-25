@@ -150,7 +150,21 @@ class AttentionConfig:
     KV cache, without PCP or HiSparse. Under DCP (on FlashInfer and SM100, with
     the DCP group equal to the TP group), each rank attends a gathered copy of
     its tokens' context instead of the DCP-local cache. A mixed step's decode
-    tokens stay sharded by head (on the DCP path under DCP)."""
+    tokens stay sharded by head in the default mode (on the DCP path under
+    DCP)."""
+
+    sparse_mla_shard_q_mode: Literal["default", "fuse_sp"] = "default"
+    """ShardQ projection and communication mode. "default" uses head-sharded
+    projections followed by query and output all-to-all exchanges. "fuse_sp"
+    keeps contiguous SP input shards through the projections on the NVIDIA
+    DeepSeek-V3.2 / GLM DSA path with `use_sequence_parallel_moe`, PP=1, and
+    DCP=1: Q weights are replicated, compact KV and indexer K inputs are
+    gathered for complete caches, and only the attention output is exchanged.
+    Mixed steps then shard decode rows by token too. This trades additional
+    Q/UK weight memory and less balanced causal indexer work for eliminating
+    the hidden-state all-gather and query all-to-all. Requires
+    `sparse_mla_shard_q=True`; unsupported configurations and ineligible
+    steps retain the default path."""
 
     sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
     """Minimum number of tokens after a step's decodes (requests of at most
