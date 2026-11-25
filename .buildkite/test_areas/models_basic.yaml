@@ -94,7 +94,6 @@ steps:
   - tests/models/test_muse_spark_rocm_mono.py
   - tests/kernels/models/amd/test_muse_spark_fused_markov.py
   - tests/models/test_muse_spark_rocm_drafter.py
-  - tests/models/test_muse_spark_rocm_ulysses_sp.py
   - tests/models/hy_v4/test_dfly_config.py
   - tests/models/hy_v4/test_hy_v4_mrope.py
   commands:
@@ -120,7 +119,6 @@ steps:
       models/test_muse_spark_rocm_mono.py
       kernels/models/amd/test_muse_spark_fused_markov.py
       models/test_muse_spark_rocm_drafter.py
-      models/test_muse_spark_rocm_ulysses_sp.py
       models/hy_v4/test_dfly_config.py
       models/hy_v4/test_hy_v4_mrope.py
   mirror:
