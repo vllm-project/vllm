@@ -13,11 +13,13 @@ from utils import skip_unsupported
 import vllm.model_executor.determinism.batch_invariant as bi
 from vllm.model_executor.determinism.batch_invariant import (
     enable_batch_invariant_mode,
+    linear_batch_invariant,
     matmul_batch_invariant,
     matmul_persistent,
 )
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS,
+    _get_matmul_config,
     _get_tuned_matmul_arch_family,
 )
 from vllm.platforms import current_platform
@@ -134,6 +136,74 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
     batch_output = matmul_batch_invariant(a, b)
 
     assert torch.equal(single_output[0], batch_output[0])
+
+
+@skip_unsupported
+@pytest.mark.parametrize(
+    "n,k,has_bias",
+    [
+        (2048, 1536, True),
+        (1536, 1536, False),
+        (17920, 1536, False),
+        (1536, 8960, False),
+    ],
+)
+def test_qwen25_tuned_linear_batch_invariance(n, k, has_bias):
+    capability = (
+        current_platform.get_device_capability() if current_platform.is_cuda() else None
+    )
+    family = _get_tuned_matmul_arch_family(capability)
+    if family != "blackwell":
+        pytest.skip("Qwen2.5-1.5B projection shapes are tuned for B200")
+
+    assert family is not None
+    shape_config = _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS[family].get((n, k))
+    assert shape_config is not None
+    batch_sizes = {1, 2}
+    for (max_m, config), (_, next_config) in zip(
+        shape_config.m_buckets, shape_config.m_buckets[1:]
+    ):
+        if config != next_config:
+            batch_sizes.update((max_m, max_m + 1))
+    batch_sizes.add(min(shape_config.m_buckets[-1][0], 256))
+
+    torch.manual_seed(42)
+    device = torch.device(DEVICE_TYPE)
+    x = torch.randn((max(batch_sizes) + 1, k), dtype=torch.bfloat16, device=device)
+    weight = torch.randn((n, k), dtype=torch.bfloat16, device=device)
+    bias = torch.randn(n, dtype=torch.bfloat16, device=device) if has_bias else None
+    first = linear_batch_invariant(x[:1], weight, bias)[0]
+    last = linear_batch_invariant(x[-1:], weight, bias)[0]
+    torch.testing.assert_close(
+        first,
+        torch.nn.functional.linear(x[:1], weight, bias)[0],
+        rtol=0.1,
+        atol=0.1,
+    )
+
+    for m in sorted(batch_sizes):
+        expected = next(
+            (config for max_m, config in shape_config.m_buckets if m <= max_m),
+            shape_config.m_buckets[-1][1],
+        )
+        selected = _get_matmul_config(m, n, k, torch.bfloat16, {})
+        assert (
+            selected["BLOCK_SIZE_M"],
+            selected["BLOCK_SIZE_N"],
+            selected["BLOCK_SIZE_K"],
+            selected["num_warps"],
+            selected["num_stages"],
+        ) == (
+            expected.block_m,
+            expected.block_n,
+            shape_config.block_k,
+            expected.num_warps,
+            expected.num_stages,
+        )
+        batch = torch.cat((x[: m - 1], x[-1:]))
+        output = linear_batch_invariant(batch, weight, bias)
+        assert torch.equal(output[0], last if m == 1 else first), f"M={m}"
+        assert torch.equal(output[-1], last), f"M={m}"
 
 
 @pytest.fixture
