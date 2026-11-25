@@ -554,19 +554,18 @@ def _resolve_numactl_args(numactl_args: str) -> str:
     return ""
 
 
-@contextmanager
-def configure_subprocess(
-    vllm_config: "VllmConfig",
-    local_rank: int,
-    dp_local_rank: int | None = None,
-    process_kind: str = "worker",
-):
-    """Temporarily replace the multiprocessing executable with a numactl wrapper."""
-    parallel_config = vllm_config.parallel_config
+def resolve_numa_bind(
+    parallel_config, local_rank: int = 0, dp_local_rank: int | None = None
+) -> bool:
+    """Resolve automatic NUMA binding (`numa_bind=None`) and return the result.
+
+    Resolve once in the launching process; spawned children inherit the
+    result through the pickled config instead of re-checking (a bound
+    EngineCore would fail the unconstrained-affinity check). Callers that
+    decide how to start processes must call this first: `None` can still
+    become `True`.
+    """
     if parallel_config.numa_bind is None:
-        # Resolve once in the launching process; spawned children inherit the
-        # result through the pickled config instead of re-checking (a bound
-        # EngineCore would fail the unconstrained-affinity check).
         parallel_config.numa_bind = _can_auto_bind(
             parallel_config, local_rank, dp_local_rank
         )
@@ -576,7 +575,19 @@ def configure_subprocess(
                 "Automatic NUMA binding unavailable on this host; starting "
                 "unbound. Enable debug logging for the skip reason."
             )
-    if not parallel_config.numa_bind:
+    return bool(parallel_config.numa_bind)
+
+
+@contextmanager
+def configure_subprocess(
+    vllm_config: "VllmConfig",
+    local_rank: int,
+    dp_local_rank: int | None = None,
+    process_kind: str = "worker",
+):
+    """Temporarily replace the multiprocessing executable with a numactl wrapper."""
+    parallel_config = vllm_config.parallel_config
+    if not resolve_numa_bind(parallel_config, local_rank, dp_local_rank):
         yield
         return
 

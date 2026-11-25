@@ -1035,3 +1035,39 @@ def test_auto_numa_checks_cpu_affinity(monkeypatch, affinity):
     assert numa_utils._is_auto_numa_available(
         verbose=False, require_unbound_process=True
     ) is (affinity == [3, 2, 1, 0])
+
+
+def test_auto_numa_bind_disables_concurrent_worker_start(monkeypatch):
+    """With automatic binding (numa_bind=None), the executor must resolve it
+    before choosing concurrent worker start: each worker's configure_subprocess
+    swaps the process-wide multiprocessing executable, so threads would race
+    (#67851)."""
+    from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+
+    _patch_auto_numa(monkeypatch, "spawn", lambda: [0, 0, 1, 1], visible_gpus=4)
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cpu", lambda: False)
+    vllm_config = _make_config(numa_bind=None, tensor_parallel_size=4)
+
+    executor = object.__new__(MultiprocExecutor)
+    executor.parallel_config = vllm_config.parallel_config
+    executor.local_world_size = 4
+
+    assert not executor._can_start_workers_concurrently(inherited_fds=None)
+    assert vllm_config.parallel_config.numa_bind is True
+    assert vllm_config.parallel_config._numa_bind_auto is True
+
+
+def test_unavailable_auto_numa_keeps_concurrent_worker_start(monkeypatch):
+    from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setattr("shutil.which", lambda name: None)  # no numactl
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cpu", lambda: False)
+    vllm_config = _make_config(numa_bind=None, tensor_parallel_size=4)
+
+    executor = object.__new__(MultiprocExecutor)
+    executor.parallel_config = vllm_config.parallel_config
+    executor.local_world_size = 4
+
+    assert executor._can_start_workers_concurrently(inherited_fds=None)
+    assert vllm_config.parallel_config.numa_bind is False

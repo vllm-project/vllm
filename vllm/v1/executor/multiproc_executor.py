@@ -356,7 +356,10 @@ class MultiprocExecutor(Executor):
             inherited_fds is None
             and self.local_world_size > 1
             and not current_platform.is_cpu()
-            and not self.parallel_config.numa_bind
+            # Resolve automatic binding (numa_bind=None) first: it turns on
+            # inside each worker's start otherwise, after this check, and the
+            # threads race on the multiprocessing executable (#67851).
+            and not numa_utils.resolve_numa_bind(self.parallel_config)
         )
 
     def _start_workers_concurrently(
