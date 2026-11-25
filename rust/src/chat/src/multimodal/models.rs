@@ -7,10 +7,15 @@
 //! Both tables are consulted before the `llm-multimodal` registry. Once
 //! `llm-multimodal` supports a model, delete its entry in the same change that
 //! bumps the dependency.
+//!
+//! [`DEFAULT_ITEM_LIMITS`] holds vLLM's own per-model serving defaults, which
+//! stay here whichever crate provides the spec.
 
 use std::sync::LazyLock;
 
 use llm_multimodal::{EncoderInputFormat, ModelMetadata, ModelProcessorSpec, ModelRegistry};
+
+use super::MmModality;
 
 mod hy_v4_vl;
 mod inkling2;
@@ -32,6 +37,35 @@ static SPECS: &[&dyn ModelProcessorSpec] = &[
 const MODEL_TYPE_ALIASES: &[(&str, &str)] = &[
     ("kimi_k31", "kimi_k3"), // Kimi K3.1 ships K3's vision tower and preprocessing unchanged.
 ];
+
+/// `(model_type, modality, item count)` caps per prompt for a modality that
+/// `--limit-mm-per-prompt` gives no count, as Python's
+/// `BaseProcessingInfo.default_mm_limits` does for the same architectures.
+/// Keyed by the checkpoint's `model_type` rather than the resolved spec, which
+/// may also match a model by its path.
+const DEFAULT_ITEM_LIMITS: &[(&str, MmModality, usize)] = &[
+    // Python's `Qwen3VLProcessingInfo` and the subclasses served by the
+    // `qwen3_vl` spec.
+    ("qwen3_vl", MmModality::Video, 32),
+    ("qwen3_vl_moe", MmModality::Video, 32),
+    ("qwen3_5", MmModality::Video, 32),
+    ("qwen3_5_moe", MmModality::Video, 32),
+    ("qwen4_exp", MmModality::Video, 32),
+];
+
+/// The default item cap per prompt for `modality` of a loaded model, if its
+/// architecture has one.
+pub(super) fn default_item_limit(
+    metadata: &ModelMetadata<'_>,
+    modality: MmModality,
+) -> Option<usize> {
+    let model_type = metadata.config_model_type()?;
+    DEFAULT_ITEM_LIMITS
+        .iter()
+        .find_map(|&(default_model_type, default_modality, limit)| {
+            (default_model_type == model_type && default_modality == modality).then_some(limit)
+        })
+}
 
 /// Resolve the model processor spec for one loaded model: a local spec first,
 /// then the `llm-multimodal` registry, through a model type alias if any.

@@ -118,10 +118,6 @@ _TOOL_PARSERS_TO_REGISTER = {
         "internlm2_tool_parser",
         "Internlm2ToolParser",
     ),
-    "jamba": (
-        "jamba_tool_parser",
-        "JambaToolParser",
-    ),
     "lfm2": (
         "lfm2_tool_parser",
         "Lfm2ToolParser",
