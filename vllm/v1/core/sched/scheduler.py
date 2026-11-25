@@ -2284,8 +2284,17 @@ class Scheduler(SchedulerInterface):
                 and self.ec_connector is not None
                 and self.ec_connector.requires_encoder_cache_readmission(request, i)
             )
+            load_from_connector = (
+                not needs_readmission
+                and self.ec_connector is not None
+                and self.ec_connector.has_cache_item(item_identifier)
+            )
+            # External loads need cache space but consume no encoder compute.
             if needs_readmission or not self.encoder_cache_manager.can_allocate(
-                request, i, encoder_compute_budget, num_embeds_to_schedule
+                request,
+                i,
+                num_encoder_embeds if load_from_connector else encoder_compute_budget,
+                num_embeds_to_schedule,
             ):
                 # The encoder cache is full or the encoder budget is exhausted.
                 # NOTE(woosuk): We assume that the encoder input tokens should
@@ -2306,9 +2315,7 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = 0
                 break
 
-            if self.ec_connector is not None and self.ec_connector.has_cache_item(
-                item_identifier
-            ):
+            if load_from_connector:
                 mm_hashes_to_schedule[item_identifier] = num_encoder_embeds
                 external_load_encoder_input.append(i)
                 num_embeds_to_schedule += num_encoder_embeds

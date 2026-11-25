@@ -6862,6 +6862,8 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
     # Create MM request1
     NUM_TOKENS_1 = 50  # NOTE: includes mm tokens
     NUM_ENCODER_TOKENS_1 = 12
+    # The first request uses the whole step's local encoder compute budget.
+    scheduler.max_num_encoder_input_tokens = NUM_ENCODER_TOKENS_1
     mm_hashes_list_1 = [["hash1_1"]]
     mm_positions_1 = [[PlaceholderRange(offset=0, length=NUM_ENCODER_TOKENS_1)]]
 
