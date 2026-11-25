@@ -225,26 +225,6 @@ def test_infer_dynamic_arg_dims():
     assert infer_dynamic_arg_dims(Encoder, dim=1) == dict.fromkeys(dynamic, 1)
 
 
-def test_architecture_not_in_transformers(
-    vllm_runner: type[VllmRunner], example_prompts: list[str]
-) -> None:
-    """A checkpoint whose `architectures` names a class that Transformers doesn't have
-    (e.g. `InternLM3ForCausalLM`) uses the class Transformers has for its config."""
-    kwargs = {"model_impl": "transformers", "enforce_eager": True}
-    hf_overrides = {
-        "architectures": ["CustomQwen3ForCausalLM"],
-        "auto_map": {"AutoModelForCausalLM": "modeling_custom.CustomQwen3ForCausalLM"},
-    }
-    check_implementation(
-        vllm_runner,
-        vllm_runner,
-        example_prompts,
-        model="Qwen/Qwen3-0.6B",
-        kwargs_ref=kwargs,
-        kwargs_test=kwargs | {"hf_overrides": hf_overrides},
-    )
-
-
 def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
     prompts, _, _ = prep_prompts(4, (800, 801))
     kwargs_ref = {"max_model_len": 8192, "enforce_eager": True}

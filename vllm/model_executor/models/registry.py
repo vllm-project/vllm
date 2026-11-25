@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch.nn as nn
 import transformers
+from transformers.models.auto.modeling_auto import MODEL_MAPPING_NAMES
 
 from vllm import envs
 from vllm.config import (
@@ -1392,6 +1393,18 @@ class _ModelRegistry:
         if architecture in _TRANSFORMERS_BACKEND_MODELS:
             return architecture
 
+        # `architectures` may name a class that Transformers doesn't have, so use the
+        # class `AutoModel` builds for the config instead.
+        if (
+            model_config.model_impl == "transformers"
+            and not model_config.trust_remote_code
+        ):
+            if architecture in _TRANSFORMERS_SUPPORTED_MODELS:
+                return architecture
+            model_type = model_config.hf_config.model_type
+            if name := MODEL_MAPPING_NAMES.get(model_type):
+                architecture = name[0] if isinstance(name, tuple) else name
+
         auto_map: dict[str, str] = (
             getattr(model_config.hf_config, "auto_map", None) or dict()
         )
@@ -1417,27 +1430,6 @@ class _ModelRegistry:
                     )
 
         model_module = getattr(transformers, architecture, None)
-
-        # `architectures` may name a class that Transformers doesn't have. Unless the
-        # loop below loads trusted custom code, use the class `AutoModel` builds for
-        # the config instead.
-        loads_custom_model = model_config.trust_remote_code and any(
-            name.startswith("AutoModel") for name in auto_map
-        )
-        if (
-            model_module is None
-            and model_config.model_impl == "transformers"
-            and not loads_custom_model
-        ):
-            model_module = transformers.MODEL_MAPPING.get(
-                type(model_config.hf_config), None
-            )
-            if model_module is not None:
-                logger.info_once(
-                    "Using Transformers' %s for %s.",
-                    model_module.__name__,
-                    architecture,
-                )
 
         if model_module is None:
             for name, module in auto_map.items():

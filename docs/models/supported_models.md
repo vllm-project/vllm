@@ -45,8 +45,6 @@ If the printed type starts with `Transformers...` then it's using the Transforme
 
 If a model has a vLLM implementation but you would prefer to use the Transformers implementation via the Transformers modeling backend, set `model_impl="transformers"` for [offline inference](../serving/offline_inference.md) or `--model-impl transformers` for the [online serving](../serving/online_serving/README.md).
 
-If a checkpoint's `architectures` names a class that Transformers doesn't have, `model_impl="transformers"` uses the model that Transformers' `AutoModel` builds for the checkpoint's config, unless `trust_remote_code=True` and its `auto_map` has an `AutoModel*` entry.
-
 !!! note
     For vision-language models, if you are loading with `dtype="auto"`, vLLM loads the whole model with config's `dtype` if it exists. In contrast the native Transformers will respect the `dtype` attribute of each backbone in the model. That might cause a slight difference in performance.
 
