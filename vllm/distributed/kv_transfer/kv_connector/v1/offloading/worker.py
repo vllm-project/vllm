@@ -124,19 +124,28 @@ class OffloadingConnectorWorker:
                     if isinstance(layer_kv_cache_spec, AttentionSpec)
                     else page
                 )
-                tensors_per_block[layer_name] = (
+                # LHBNC keeps the head dim outside the block dim, so a block is
+                # contiguous only within a head: register one tensor per head.
+                num_heads = 1
+                head_stride_bytes = 0
+                if block_stride_bytes < page:
+                    num_heads = kv_caches[layer_name].shape[1]
+                    head_stride_bytes = kv_caches[layer_name].stride(1) * elem_size
+                    assert block_stride_bytes * num_heads == page
+                tensors_per_block[layer_name] = tuple(
                     torch.tensor([], dtype=torch.int8, device=ref.device).set_(
                         ref.untyped_storage(),
-                        byte_offset,
-                        (num_blocks, page),
+                        byte_offset + head * head_stride_bytes,
+                        (num_blocks, page // num_heads),
                         (block_stride_bytes, 1),
-                    ),
+                    )
+                    for head in range(num_heads)
                 )
-                page_size_bytes[layer_name] = page
+                page_size_bytes[layer_name] = page // num_heads
 
                 if isinstance(layer_kv_cache_spec, AttentionSpec):
                     unpadded_page_size_bytes[layer_name] = (
-                        layer_kv_cache_spec.unpadded_page_size_bytes
+                        layer_kv_cache_spec.unpadded_page_size_bytes // num_heads
                     )
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
                     unpadded_page_size_bytes[layer_name] = replace(
@@ -151,8 +160,8 @@ class OffloadingConnectorWorker:
         packed_layer_name = next(
             (
                 layer_name
-                for layer_name, (tensor,) in tensors_per_block.items()
-                if tensor.stride(0) != tensor.shape[1]
+                for layer_name, tensors in tensors_per_block.items()
+                if tensors[0].stride(0) != tensors[0].shape[1]
             ),
             None,
         )
