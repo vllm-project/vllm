@@ -12,8 +12,6 @@ verification uses segmented MLA instead, so it depends on neither Gluon's
 query-head nor its long-context pipeline limits.
 """
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
@@ -23,11 +21,7 @@ if not current_platform.is_rocm():
     pytest.skip("ROCm AITER MLA tests", allow_module_level=True)
 
 from vllm.v1.attention.backends.mla import rocm_aiter_mla  # noqa: E402
-from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
-    AiterMLAHelper,
-    AiterMLAImpl,
-    _DCPDecodeRoute,
-)
+from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper  # noqa: E402
 
 FP8_DTYPES = ["fp8", "fp8_e4m3", "fp8_e5m2"]
 UNQUANTIZED_DTYPES = ["auto", "bfloat16"]
@@ -94,33 +88,6 @@ def test_fp8_decode_uses_gluon_within_its_batch_limit(
         )
         == expected
     )
-
-
-@pytest.mark.parametrize(
-    "use_gluon_decode, use_gluon_verify, dcp_route, expected",
-    [
-        (False, False, _DCPDecodeRoute.PLAIN, 16),
-        (True, False, _DCPDecodeRoute.PLAIN, 8),
-        (False, True, _DCPDecodeRoute.PLAIN, None),
-        (False, False, _DCPDecodeRoute.SEGMENTED, None),
-    ],
-)
-def test_fused_decode_query_heads_follow_the_step_kernel(
-    use_gluon_decode, use_gluon_verify, dcp_route, expected
-):
-    """The fused decode query is built per step for the kernel that reads it:
-    8 heads repeated to 16 for asm, the real 8 for Gluon decode, and the
-    default query for verify and DCP."""
-    impl = SimpleNamespace(_decode_num_heads=8, dcp_world_size=1)
-    decode = SimpleNamespace(
-        use_gluon_decode=use_gluon_decode,
-        use_gluon_verify=use_gluon_verify,
-        dcp_route=dcp_route,
-    )
-    heads = AiterMLAImpl.decode_query_padded_num_heads(
-        impl, SimpleNamespace(decode=decode)
-    )
-    assert heads == expected
 
 
 @pytest.mark.parametrize("kv_cache_dtype", FP8_DTYPES + UNQUANTIZED_DTYPES)

@@ -1347,7 +1347,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # The impl picks the decode path per batch, so this stays per step.
         if not self.is_aiter_fused_decode_query_enabled:
             return None
-        return self.impl.decode_query_padded_num_heads(attn_metadata)  # type: ignore[attr-defined]
+        return self.impl.decode_query_num_heads(attn_metadata)  # type: ignore[attr-defined]
 
     def _prepare_mqa_query(
         self,

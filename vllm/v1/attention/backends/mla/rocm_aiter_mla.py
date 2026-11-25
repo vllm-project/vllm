@@ -1305,18 +1305,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             else kv_cache_spec.dtype
         )
         # Split rebalance buffers, sized for the largest batch and refilled for
-        # each decode step. The split depends on the whole batch, so batch
-        # invariance keeps the default split.
+        # each decode step.
         self._gluon_kv_split_buffers: tuple[torch.Tensor, torch.Tensor] | None = None
-        if (
-            not envs.VLLM_BATCH_INVARIANT
-            and _gluon_mla_decode_supported()
-            and (
-                self._gluon_fp8_decode_max_batch
-                or (
-                    self._gluon_kv_dtype == torch.bfloat16
-                    and self._decode_num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS
-                )
+        if _gluon_mla_decode_supported() and (
+            self._gluon_fp8_decode_max_batch
+            or (
+                self._gluon_kv_dtype == torch.bfloat16
+                and self._decode_num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS
             )
         ):
             from aiter.ops.triton.gluon.mla_gluon import mla_gluon_split_metadata_info
@@ -3098,9 +3093,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             self.qk_rope_head_dim,
         )
 
-    def decode_query_padded_num_heads(
-        self, attn_metadata: AiterMLAMetadata
-    ) -> int | None:
+    def decode_query_num_heads(self, attn_metadata: AiterMLAMetadata) -> int | None:
         """The head count this step's decode reads: the asm decode's, when it
         pads the query with get_mla_padded_q's head repeat, or the real one for
         Gluon decode. Gluon verify and the DCP routes take the query as is;
@@ -3999,7 +3992,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         assert q.shape[1] in (
             self._decode_num_heads,
-            self.decode_query_padded_num_heads(attn_metadata),
+            self.decode_query_num_heads(attn_metadata),
         ), (
             "ROCM_AITER_MLA decode expected the DCP-gathered query head count "
             f"{self._decode_num_heads} or its padded count, got {q.shape[1]}"

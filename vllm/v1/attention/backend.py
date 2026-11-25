@@ -1090,7 +1090,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         that is otherwise reserved after profiling."""
         return
 
-    def decode_query_padded_num_heads(self, attn_metadata: T) -> int | None:
+    def decode_query_num_heads(self, attn_metadata: T) -> int | None:
         """Head count of the query forward_mqa reads this step, each head
         repeated count // num_heads times, so the caller may hand it that query
         directly; None to keep the default query preparation."""

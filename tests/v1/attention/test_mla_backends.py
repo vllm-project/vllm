@@ -1718,12 +1718,9 @@ def run_attention_backend(
             and decode is not None
             and decode.use_gluon_decode
         ):
-            from vllm import envs
-
             # Gluon decode takes the split rebalance and, on an fp8 cache, the
             # fp8 query, so the comparison below checks both.
-            if not envs.VLLM_BATCH_INVARIANT:
-                assert decode.gluon_kv_split_info is not None
+            assert decode.gluon_kv_split_info is not None
             assert impl.supports_quant_query_input or not is_quantized_kv_cache(
                 kv_cache_dtype
             )
