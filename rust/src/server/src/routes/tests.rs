@@ -2948,6 +2948,41 @@ async fn render_rejects_max_tokens_above_max_model_len() {
     assert_eq!(status, StatusCode::OK, "{json}");
 }
 
+/// Like Python, request validation errors name the offending field in `param`;
+/// cross-field checks Python reports without a field keep `param: null`.
+#[tokio::test]
+async fn render_chat_validation_errors_report_param() {
+    let mut app = test_render_app();
+
+    let mut params = Vec::new();
+    for (field, value) in [
+        ("temperature", json!(-1)),
+        ("top_p", json!(0)),
+        ("max_completion_tokens", json!(0)),
+        ("top_logprobs", json!(2)),
+        ("stream_options", json!({"include_usage": true})),
+        ("min_tokens", json!(8)),
+    ] {
+        let mut body = json!({
+            "model": "render-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": 4,
+        });
+        body[field] = value;
+        let (status, json) = post_json(&mut app, "/v1/chat/completions/render", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {json}");
+        params.push(format!("{field}: {}", json["error"]["param"]));
+    }
+    expect_test::expect![[r#"
+        temperature: "temperature"
+        top_p: "top_p"
+        max_completion_tokens: "max_completion_tokens"
+        top_logprobs: "top_logprobs"
+        stream_options: "stream_options"
+        min_tokens: null"#]]
+    .assert_eq(&params.join("\n"));
+}
+
 /// Python renders an empty user turn, so the render route must accept empty
 /// message content instead of rejecting it.
 #[tokio::test]
