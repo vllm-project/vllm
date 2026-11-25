@@ -125,7 +125,9 @@ class DefaultModelLoader(BaseModelLoader):
             )
         num_threads = extra_config.get("num_threads")
         if num_threads is not None and not (
-            isinstance(num_threads, int) and num_threads > 0
+            isinstance(num_threads, int)
+            and not isinstance(num_threads, bool)
+            and num_threads > 0
         ):
             raise ValueError(
                 f"num_threads must be a positive integer, got {num_threads!r}"
