@@ -1083,6 +1083,10 @@ async fn responses_streaming_emits_ordered_event_sequence() {
     .await;
 
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").and_then(|value| value.to_str().ok()),
+        Some("text/event-stream; charset=utf-8")
+    );
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
