@@ -334,7 +334,9 @@ mod tests {
                 generation_config: Default::default(),
                 override_generation_config: Default::default(),
                 renderer,
-                language_model_only: false,
+                // These fixtures are text configs; a spec-backed model type
+                // (e.g. `kimi_k31`) would otherwise need its media tokens.
+                language_model_only: true,
                 chat_template_content_format: Default::default(),
                 chat_template: chat_template.map(str::to_string),
                 trust_request_chat_template: false,

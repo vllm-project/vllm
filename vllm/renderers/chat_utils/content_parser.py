@@ -13,7 +13,8 @@ from typing_extensions import override
 
 from vllm import envs
 from vllm.config import ModelConfig
-from vllm.exceptions import VLLMValidationError
+from vllm.connections import MediaFetchDeadlineExceededError
+from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.multimodal.utils import get_load_audio_from_video
 from vllm.renderers.embed_utils import (
@@ -192,6 +193,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
+        self._tracker._validate_add("image")
         image = self._connector.fetch_image(image_url) if image_url else None
 
         placeholder = self._tracker.add("image", (image, uuid))
@@ -262,6 +264,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("image", placeholder)
 
     def parse_audio(self, audio_url: str | None, uuid: str | None = None) -> None:
+        self._tracker._validate_add("audio")
         audio = self._connector.fetch_audio(audio_url) if audio_url else None
 
         placeholder = self._tracker.add("audio", (audio, uuid))
@@ -284,6 +287,18 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
+        self._tracker._validate_add("video")
+        audio_url = (
+            video_url
+            if video_url
+            and _loads_audio_from_video(
+                self._tracker.model_config, self._mm_processor_kwargs
+            )
+            else None
+        )
+        if audio_url is not None:
+            self._tracker._validate_add("audio")
+
         video = (
             self._connector.fetch_video(
                 video_url=video_url,
@@ -297,11 +312,13 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         placeholder = self._tracker.add("video", (video, uuid))
         self._add_placeholder("video", placeholder)
 
-        # `load_audio_from_video` is replacing `use_audio_in_video` in Transformers
-        if video_url and _loads_audio_from_video(
-            self._tracker.model_config, self._mm_processor_kwargs
-        ):
-            audio = self._connector.fetch_audio(video_url) if video_url else None
+        if audio_url is not None:
+            try:
+                audio = self._connector.fetch_audio(audio_url)
+            except VLLMUnprocessableEntityError as exc:
+                if isinstance(exc.__cause__, MediaFetchDeadlineExceededError):
+                    exc.parameter = "video_url"
+                raise
             audio_placeholder = self._tracker.add("audio", (audio, uuid))
             self._add_placeholder("audio", audio_placeholder)
 
