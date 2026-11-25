@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Json;
@@ -11,6 +12,7 @@ use serde_json::Value as JsonValue;
 use vllm_metrics::METRICS;
 
 use crate::error::{ApiError, invalid_request};
+use crate::routes::weight_checker::{mismatches, weight_checksums};
 use crate::state::AppState;
 use crate::utils::utility_call_error;
 
@@ -27,6 +29,7 @@ pub(crate) struct UpdateWeightsRequest {
 #[derive(Default, Deserialize)]
 pub(crate) struct FinishWeightUpdateRequest {
     weight_version: Option<String>,
+    baseline: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Deserialize)]
@@ -37,6 +40,15 @@ pub(crate) struct UpdateWeightVersionRequest {
 #[derive(Serialize)]
 pub(crate) struct MessageResponse {
     message: &'static str,
+}
+
+#[derive(Serialize)]
+pub(crate) struct FinishWeightUpdateResponse {
+    message: &'static str,
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
+    matched: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mismatches: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -154,12 +166,12 @@ pub async fn update_weights(
     }))
 }
 
-/// Finish a weight update transaction and optionally set the weight version.
+/// Finish a weight update; with a baseline, also compare the weights against it.
 pub async fn finish_weight_update(
     State(state): State<Arc<AppState>>,
     body: Result<Option<Json<FinishWeightUpdateRequest>>, JsonRejection>,
-) -> Result<Json<MessageResponse>, ApiError> {
-    // HTTPVLLMWeightSyncClient omits the body when no version is supplied.
+) -> Result<Json<FinishWeightUpdateResponse>, ApiError> {
+    // HTTPVLLMWeightSyncClient omits the body when no field is supplied.
     let request = body?.map(|Json(request)| request).unwrap_or_default();
 
     let client = state.engine_core_client();
@@ -174,9 +186,15 @@ pub async fn finish_weight_update(
             .await
             .map_err(|error| utility_call_error("set_weight_version", error))?;
     }
+    let mismatches = match request.baseline {
+        Some(baseline) => Some(mismatches(&weight_checksums(client).await?, &baseline)),
+        None => None,
+    };
 
-    Ok(Json(MessageResponse {
+    Ok(Json(FinishWeightUpdateResponse {
         message: "Weight update finished",
+        matched: mismatches.as_ref().map(Vec::is_empty),
+        mismatches,
     }))
 }
 

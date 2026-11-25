@@ -85,7 +85,7 @@ A 1-D mesh is described over m2n's 2-D mesh with a size-1 second axis. Each
 yielded tensor must match its declared dtype and local shape, and is kept alive
 in stream order until its reshard completes.
 
-See [`examples/rl/rlhf_m2n.py`](../../../examples/rl/rlhf_m2n.py) for a runnable FSDP → TP example.
+See [`examples/rl/rlhf_m2n.py`](../../../../examples/rl/rlhf_m2n.py) for a runnable FSDP → TP example.
 
 ## Limitations
 

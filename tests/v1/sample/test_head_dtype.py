@@ -18,6 +18,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
+from vllm.platforms import current_platform
 
 
 class _FakeLmHead:
@@ -109,24 +110,26 @@ def test_head_dtype_equal_to_model_dtype_uses_quant_method(default_vllm_config):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="Exercises the torch.mm(out_dtype=...) device fast path, "
-    "available on CUDA and ROCm.",
+    "available on CUDA, ROCm and XPU.",
 )
 def test_fp32_head_uses_mm_fast_path_on_device(default_vllm_config):
     # On ROCm, current_platform.is_cuda() is False, so this previously fell
     # through to the cast path (F.linear) instead of torch.mm(out_dtype=...),
     # even though ROCm supports the out_dtype mm via its non-Lt GEMM path.
+    # XPU previously fell through the same way.
     from unittest import mock
 
     vocab_size, hidden_size, num_tokens = 64, 16, 4
     lp = _build_processor(vocab_size)
     lp.head_dtype = torch.float32
 
+    device = current_platform.device_type
     hidden_states = torch.randn(
-        num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+        num_tokens, hidden_size, dtype=torch.bfloat16, device=device
     )
-    weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device=device)
 
     with mock.patch(
         "vllm.model_executor.layers.logits_processor.F.linear"

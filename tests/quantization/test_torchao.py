@@ -398,5 +398,87 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
         assert output
 
 
+def _save_awq_checkpoint(model_name: str, out_dir) -> str:
+    """Quantize `model_name` with torchao AWQ on the tinygemm int4 layout and save
+    it the way torchao safetensors checkpoints are stored."""
+    from safetensors.torch import save_file
+    from torchao.prototype.awq import AWQConfig
+    from torchao.prototype.safetensors.safetensors_support import (
+        flatten_tensor_state_dict,
+    )
+    from torchao.quantization import Int4WeightOnlyConfig, quantize_
+    from transformers import AutoModelForCausalLM, AutoTokenizer, TorchAoConfig
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, dtype=torch.bfloat16, device_map=DEVICE_TYPE
+    )
+    base_config = Int4WeightOnlyConfig(
+        group_size=128, int4_packing_format="tile_packed_to_4d"
+    )
+
+    def is_decoder_linear(module, fqn):
+        return isinstance(module, torch.nn.Linear) and "lm_head" not in fqn
+
+    quantize_(model, AWQConfig(base_config, step="prepare"), is_decoder_linear)
+    calibration = "The capital of France is Paris. def add(a, b): return a + b. " * 8
+    with torch.no_grad():
+        model(**tokenizer(calibration, return_tensors="pt").to(DEVICE_TYPE))
+    quantize_(model, AWQConfig(base_config, step="convert"), is_decoder_linear)
+
+    state_dict = model.state_dict()
+    if model.config.tie_word_embeddings:
+        state_dict.pop("lm_head.weight")
+    tensors, metadata = flatten_tensor_state_dict(state_dict)
+    tensors = {name: t.detach().clone().contiguous() for name, t in tensors.items()}
+    save_file(tensors, f"{out_dir}/model.safetensors", metadata=metadata)
+    model.config.quantization_config = TorchAoConfig(
+        AWQConfig(base_config, step="prepare_for_loading")
+    ).to_dict()
+    model.config.save_pretrained(out_dir)
+    tokenizer.save_pretrained(out_dir)
+    return str(out_dir)
+
+
+@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="tinygemm int4 kernel is CUDA only"
+)
+def test_awq_fused_layers_keep_each_shard_act_pre_scale(
+    tmp_path, hf_runner, vllm_runner, example_prompts, enable_pickle
+):
+    """AWQ gives q/k/v_proj and gate/up_proj their own act_pre_scale. vLLM fuses
+    them into qkv_proj and gate_up_proj, and used to apply the last shard's
+    scale to every shard."""
+    from tests.models.utils import check_logprobs_close
+
+    model_dir = _save_awq_checkpoint("Qwen/Qwen3-0.6B", tmp_path)
+    max_tokens, num_logprobs = 16, 5
+    with hf_runner(
+        model_dir, dtype="bfloat16", model_kwargs={"device_map": DEVICE_TYPE}
+    ) as hf_model:
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
+            example_prompts, max_tokens, num_logprobs
+        )
+    torch._dynamo.reset()
+    with vllm_runner(
+        model_dir, quantization="torchao", dtype="bfloat16", max_model_len=1024
+    ) as llm:
+
+        def max_shards(model):
+            return max(len(getattr(m, "torchao_shards", ())) for m in model.modules())
+
+        assert llm.apply_model(max_shards)[0] > 1
+        vllm_outputs = llm.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs
+        )
+    check_logprobs_close(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

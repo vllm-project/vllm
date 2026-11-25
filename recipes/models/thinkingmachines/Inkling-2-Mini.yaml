@@ -5,7 +5,7 @@ meta:
   provider: "Thinking Machines Lab"
   description: "Looped multimodal (text and image in, text out) MoE from Thinking Machines Lab with 26B total and 3.5B active parameters and up to 1M context: its 12 middle layers run three passes per token, each with its own KV cache and gated messages from the previous pass. Bundles a DSpark speculator."
   date_added: 2026-11-20
-  date_updated: 2026-11-20
+  date_updated: 2026-11-22
   difficulty: intermediate
   tasks:
     - multimodal
@@ -26,11 +26,7 @@ model:
   # Inkling2LoopForConditionalGeneration is not in v0.34.0; the next release at the earliest.
   min_vllm_version: "0.35.0"
   nightly_required: true
-  docker_image: "vllm/vllm-openai:inkling-2-mini"
-  install:
-    docker:
-      note: "Serve from the `vllm/vllm-openai:inkling-2-mini` image; no pip wheel is available yet."
-    pip: false
+  docker_image: "vllm/vllm-openai:nightly"
   architecture: moe
   parameter_count: "26B"
   active_parameters: "3.5B"
@@ -112,7 +108,8 @@ guide: |
 
   ## Runtime
 
-  Use the `vllm/vllm-openai:inkling-2-mini` image until Inkling 2 Mini support is in a vLLM release.
+  Inkling 2 Mini is supported in vLLM main. Use the `vllm/vllm-openai:nightly` image or a
+  nightly wheel until it is in a vLLM release.
 
   ## Configurations
 
