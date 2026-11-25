@@ -11,7 +11,6 @@ import pybase64 as base64
 import pytest
 import torch
 from PIL import Image, features
-from PIL.BlpImagePlugin import BLPFormatError
 
 from vllm.multimodal import image as image_utils
 from vllm.multimodal.hasher import MultiModalHasher
@@ -327,46 +326,22 @@ def test_image_broken_png_rejected():
     assert isinstance(exc_info.value.__cause__, SyntaxError)
 
 
-@pytest.mark.parametrize(
-    ("data", "cause"),
-    [
-        # AVIF without a primary item: the AVIF decoder raises RuntimeError
-        # from Image.open().
-        pytest.param(
-            base64.b64decode(
-                "AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAADrbWV0YQAAAAAAAAAh"
-                "aGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAAAAAAAOAGl0bQAAAAAAAQAAAB5p"
-                "bG9jAAAAAEQAAAEAAQAAAAEAAAETAAAAIwAAAChpaW5mAAAAAAABAAAAGmluZmUC"
-                "AAAAAAEAAGF2MDFDb2xvcgAAAABqaXBycAAAAEtpcGNvAAAAFGlzcGUAAAAAAAAA"
-                "AQAAAAEAAAAQcGl4aQAAAAADCAgIAAAADGF2MUOBAAwAAAAAE2NvbHJuY2x4AAEA"
-                "DQAGgAAAABdpcG1hAAAAAAAAAAEAAQQBAoME"
-            ),
-            RuntimeError,
-            marks=pytest.mark.skipif(
-                not features.check("avif"), reason="Pillow built without AVIF"
-            ),
-        ),
-        # BLP2 header with compression 0, which Pillow does not know:
-        # BLPFormatError, a NotImplementedError and so a RuntimeError, from
-        # image.load().
-        (
-            b"BLP2"
-            + struct.pack("<i", 0)
-            + bytes([1, 0, 0, 0])
-            + struct.pack("<II", 1, 1)
-            + bytes(128 + 1024),
-            BLPFormatError,
-        ),
-    ],
-    ids=["avif-no-primary-item", "blp-unknown-compression"],
-)
-def test_image_decoder_error_rejected(data, cause):
-    """Decoder errors that are neither OSError nor SyntaxError surface as a
-    client-side ValueError instead of HTTP 500 or 501."""
+@pytest.mark.skipif(not features.check("avif"), reason="Pillow built without AVIF")
+def test_image_decoder_error_rejected():
+    """The AVIF decoder's RuntimeError surfaces as a client-side ValueError."""
+    # An AVIF image without a primary item.
+    data = base64.b64decode(
+        "AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAADrbWV0YQAAAAAAAAAh"
+        "aGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAAAAAAAOAGl0bQAAAAAAAQAAAB5p"
+        "bG9jAAAAAEQAAAEAAQAAAAEAAAETAAAAIwAAAChpaW5mAAAAAAABAAAAGmluZmUC"
+        "AAAAAAEAAGF2MDFDb2xvcgAAAABqaXBycAAAAEtpcGNvAAAAFGlzcGUAAAAAAAAA"
+        "AQAAAAEAAAAQcGl4aQAAAAADCAgIAAAADGF2MUOBAAwAAAAAE2NvbHJuY2x4AAEA"
+        "DQAGgAAAABdpcG1hAAAAAAAAAAEAAQQBAoME"
+    )
     image_io = ImageMediaIO()
     with pytest.raises(ValueError, match="Failed to load image") as exc_info:
         image_io.load_bytes(data)
-    assert isinstance(exc_info.value.__cause__, cause)
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
 
 
 def test_image_pixel_limit_disabled(monkeypatch):
@@ -463,9 +438,10 @@ showpage
         image_io.load_base64("image/png", payload)
 
 
-def test_image_media_io_rejects_icns(tmp_path):
-    path = tmp_path / "icon.icns"
-    Image.new("RGB", (128, 128), "blue").save(path)
+@pytest.mark.parametrize(("image_format", "mode"), [("ICNS", "RGB"), ("BLP", "P")])
+def test_image_media_io_rejects_unsupported_format(tmp_path, image_format, mode):
+    path = tmp_path / f"image.{image_format.lower()}"
+    Image.new(mode, (128, 128)).save(path, format=image_format)
     data = path.read_bytes()
     image_io = ImageMediaIO()
 

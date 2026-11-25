@@ -25,6 +25,7 @@ logger = init_logger(__name__)
 # Audited against Pillow's registered open plugins (python -m PIL / Image.OPEN):
 # Allowed: native still-image / raster readers that decode in-process.
 # Denied:
+#   BLP — the container dimensions do not bound the embedded raster decode
 #   EPS — may invoke Ghostscript on untrusted PostScript
 #   ICNS — the decoder does not expose reliable dimensions before loading
 #   WMF — Windows GDI / stub-handler path
@@ -32,7 +33,6 @@ logger = init_logger(__name__)
 #   MPEG — identify-only; not a decodable still image
 ALLOWED_IMAGE_FORMATS: tuple[str, ...] = (
     "AVIF",
-    "BLP",
     "BMP",
     "CUR",
     "DCX",
