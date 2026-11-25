@@ -155,6 +155,9 @@ def _takes_mxfp4_input(linear: nn.Module | None) -> bool:
     requires the AITER kernel on its preshuffled path. Checked per call: the
     path is chosen at weight loading, and LoRA hides the key."""
     kernel = getattr(getattr(linear, "scheme", None), "ocp_mx_linear", None)
+    if kernel is None:
+        # Online MXFP4 (`Mxfp4OnlineLinearMethod`) keeps the kernel on the method.
+        kernel = getattr(getattr(linear, "quant_method", None), "kernel", None)
     return (
         get_input_quant_key(linear) == kMxfp4Dynamic
         and isinstance(kernel, AiterMxfp4LinearKernel)

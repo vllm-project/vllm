@@ -85,7 +85,7 @@ def test_fused_allreduce_rmsnorm_mxfp4_quant_gate(
     assert calls[0]["emit_bf16"] is True and calls[0]["gemma_norm"] is True
 
 
-def _mxfp4_linear(*, use_asm_gemm=True, hadamard=False) -> nn.Module:
+def _mxfp4_linear(*, use_asm_gemm=True, hadamard=False, online=False) -> nn.Module:
     from vllm.model_executor.kernels.linear.mxfp4.aiter import (
         AiterMxfp4LinearKernel,
     )
@@ -94,7 +94,10 @@ def _mxfp4_linear(*, use_asm_gemm=True, hadamard=False) -> nn.Module:
     kernel.use_asm_gemm = use_asm_gemm
     kernel.is_hadamard_fused = hadamard
     linear = nn.Module()
-    linear.scheme = SimpleNamespace(ocp_mx_linear=kernel)
+    if online:
+        linear.quant_method = SimpleNamespace(kernel=kernel)
+    else:
+        linear.scheme = SimpleNamespace(ocp_mx_linear=kernel)
     linear._input_quant_key = kMxfp4Dynamic
     return linear
 
@@ -103,6 +106,9 @@ def _mxfp4_linear(*, use_asm_gemm=True, hadamard=False) -> nn.Module:
     ("linear_kwargs", "declined", "quantized"),
     [
         ({}, False, True),
+        # Online MXFP4 (--quantization-config targets) keeps the kernel on
+        # the quant method rather than a Quark scheme.
+        ({"online": True}, False, True),
         # The fused kernel does not rotate the activation.
         ({"hadamard": True}, False, False),
         # The Triton GEMM reads dynamic_mxfp4_quant's layout.

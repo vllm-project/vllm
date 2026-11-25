@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     mxfp4_round_up_hidden_size_and_intermediate_size,
     select_mxfp4_moe_backend,
 )
+from vllm.model_executor.layers.fusion.quant_activation import expose_input_quant_key
 from vllm.model_executor.layers.quantization.input_hadamard import (
     InputHadamardFusable,
 )
@@ -136,6 +137,7 @@ class Mxfp4OnlineLinearMethod(OnlineLinearBase, InputHadamardFusable):
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
         self.kernel.process_weights_after_loading(layer)
+        expose_input_quant_key(layer, self.kernel)
         self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
