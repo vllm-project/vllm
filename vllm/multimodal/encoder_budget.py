@@ -11,6 +11,7 @@ from vllm.multimodal.cache import (
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.registry import MultiModalRegistry
+from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 
@@ -220,6 +221,38 @@ class MultiModalBudget:
         assert dummy_mm_item is not None, "Item should not already be cached"
 
         return [(modality, dummy_mm_item)] * max_items_per_batch
+
+    def get_dummy_encoder_profile_single_input(
+        self,
+        dummy_mm_inputs: list[tuple[str, MultiModalKwargsItem]],
+    ) -> list[tuple[str, MultiModalKwargsItem]]:
+        if not dummy_mm_inputs:
+            return []
+
+        modality, dummy_mm_item = dummy_mm_inputs[0]
+        num_profile_items = max(self.mm_max_items_per_batch[modality], 1)
+        encoder_budget = self.get_encoder_budget()
+        info = self.processor.info
+        seq_len = info.get_dummy_seq_len(self.max_model_len, encoder_budget)
+        if num_profile_items == 1 or seq_len == info.get_dummy_seq_len(
+            self.max_model_len, encoder_budget // num_profile_items
+        ):
+            return []
+
+        single_item = self.processor.get_dummy_mm_inputs(
+            mm_counts={modality: 1}, seq_len=seq_len
+        )["mm_kwargs"][modality][0]
+        assert single_item is not None
+        shapes = [
+            json_map_leaves(
+                lambda value: getattr(value, "shape", value), item.get_data()
+            )
+            for item in (dummy_mm_item, single_item)
+        ]
+        if shapes[0] == shapes[1]:
+            return []
+
+        return [(modality, single_item)]
 
     def reset_cache(self) -> None:
         if self.cache is not None:

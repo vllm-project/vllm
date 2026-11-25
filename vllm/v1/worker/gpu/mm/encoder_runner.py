@@ -138,6 +138,17 @@ class EncoderRunner:
             dummy_modality,
         )
 
+        if single_input := budget.get_dummy_encoder_profile_single_input(
+            dummy_mm_inputs
+        ):
+            logger.info_once(
+                "Encoder profiling also runs one %s item that fills the budget "
+                "of %s tokens.",
+                dummy_modality,
+                encoder_budget,
+            )
+            self.execute_mm_encoder(single_input)
+
         dummy_encoder_outputs = self.execute_mm_encoder(dummy_mm_inputs)
 
         sanity_check_mm_encoder_outputs(

@@ -971,6 +971,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         if max_width and max_height:
             extra_sizes = (ImageSize(width=max_width, height=max_height), *extra_sizes)
         sizes_by_tokens: dict[int, ImageSize] = {}
+        padded_by_tokens: dict[int, int] = {}
         for size in [*extra_sizes, *sizes] if within_hint else [*sizes, *extra_sizes]:
             size = _fit_aspect_ratio(
                 ImageSize(
@@ -979,12 +980,14 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
                 ),
                 modality,
             )
-            tokens = self.get_num_image_tokens(
-                size,
-                max_slice_nums=max_slice_nums,
-                downsample_mode=downsample_mode,
+            grids, source_tokens, patch_tokens = self._compute_visual_tokens(
+                size, max_slice_nums, downsample_mode=downsample_mode
             )
-            sizes_by_tokens.setdefault(tokens, size)
+            tokens = source_tokens + grids[0] * grids[1] * patch_tokens
+            padded = (1 + grids[0] * grids[1]) * max(source_tokens, patch_tokens)
+            if padded > padded_by_tokens.get(tokens, -1):
+                sizes_by_tokens[tokens] = size
+                padded_by_tokens[tokens] = padded
         return sizes_by_tokens
 
     def get_video_max_slice_num(self) -> int:

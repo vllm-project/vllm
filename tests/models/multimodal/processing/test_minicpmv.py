@@ -237,6 +237,8 @@ def test_minicpmv4_6_image_dummy_ignores_hints_that_keep_the_largest_input(
         (16384, 16384, {}),
         (16384, 16384, {"width": 8192}),
         (16384, 16384, {"height": 11000}),
+        (24576, 24576, {}),
+        (32768, 32768, {}),
     ],
 )
 def test_minicpmv4_6_video_profile_covers_largest_scheduled_video(
@@ -260,12 +262,21 @@ def test_minicpmv4_6_video_profile_covers_largest_scheduled_video(
     )
     processor = budget.processor
     assert isinstance(processor.info, MiniCPMV4_6ProcessingInfo)
-    profiled = 0
-    for _, item in budget.get_dummy_encoder_profile_inputs():
-        pixel_values = item.get_data()["video_pixel_values"]
-        assert isinstance(pixel_values, torch.Tensor)
-        num_slices, _, patch, width = pixel_values.shape
-        profiled += num_slices * width // patch
+
+    def padded_patches(inputs) -> int:
+        total = 0
+        for _, item in inputs:
+            pixel_values = item.get_data()["video_pixel_values"]
+            assert isinstance(pixel_values, torch.Tensor)
+            num_slices, _, patch, width = pixel_values.shape
+            total += num_slices * width // patch
+        return total
+
+    split_input = budget.get_dummy_encoder_profile_inputs()
+    profiled = max(
+        padded_patches(split_input),
+        padded_patches(budget.get_dummy_encoder_profile_single_input(split_input)),
+    )
 
     assert budget.mm_max_toks_per_item["video"] == _num_video_embeds(
         processor, _video_item(16, 1265, 1112)
@@ -279,6 +290,28 @@ def test_minicpmv4_6_video_profile_covers_largest_scheduled_video(
         num_embeds = sum(p.get_num_embeds() for p in video["mm_placeholders"]["video"])
         assert num_embeds <= encoder_budget
         assert profiled >= _padded_patches(video, "video")
+
+
+def test_minicpmv4_6_image_dummy_keeps_most_padded_shape_per_token_count():
+    ctx = build_model_context(
+        "openbmb/MiniCPM-V-4_6",
+        mm_processor_kwargs={"max_slice_nums": 4},
+        limit_mm_per_prompt={"image": 1, "video": 0},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    info = processor.info
+    assert isinstance(info, MiniCPMV4_6ProcessingInfo)
+    dummy = processor.get_dummy_mm_inputs({"image": 1})
+    processed = processor(
+        info.image_pattern,
+        mm_items=info.parse_mm_data({"image": [Image.new("RGB", (54, 10800))]}),
+        hf_processor_mm_kwargs={},
+    )
+
+    assert processed["mm_placeholders"]["image"][0].get_num_embeds() <= (
+        info.get_max_image_tokens()
+    )
+    assert _padded_patches(dummy, "image") >= _padded_patches(processed, "image")
 
 
 @pytest.mark.parametrize(
