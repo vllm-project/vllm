@@ -27,7 +27,7 @@
 #                         ROCm options: TRITON_ATTN, ROCM_ATTN, ROCM_AITER_FA,
 #                                       ROCM_AITER_UNIFIED_ATTN
 #                         NVIDIA options: FLASH_ATTN, FLASHINFER
-#   VLLM_SSM_CONV_STATE_LAYOUT - SSM conv state layout (e.g. "DS" required for Mamba models)
+#   VLLM_SSM_CONV_STATE_LAYOUT - SSM conv state layout ("DS" or "SD"; P and D must match)
 #   VLLM_SERVE_EXTRA_ARGS - comma-separated extra args for vllm serve
 set -ex
 

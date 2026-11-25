@@ -1297,6 +1297,7 @@ def _make_mock_worker_for_desc_ids(
             local_proj_dims=(1, 1, 1),
             conv_dtype_size=2,
             ssm_sizes=(0, 0),
+            dim_first=True,
         )
     worker._compute_desc_ids = NixlConnectorWorker._compute_desc_ids.__get__(
         worker, NixlConnectorWorker

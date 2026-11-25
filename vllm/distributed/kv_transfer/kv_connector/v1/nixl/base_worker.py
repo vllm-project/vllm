@@ -255,8 +255,8 @@ class NixlBaseConnectorWorker:
         num_ssm_regions = 0
         if self._has_mamba:
             assert self._conv_decomp is not None
-            # NIXL regions per SSM layer = conv sub-projections + 1 SSM temporal
-            # (Mamba2/GDN: 3+1=4; Mamba1: 1+1=2).
+            # NIXL regions per SSM layer = conv ranges + 1 SSM temporal; conv
+            # ranges are the sub-projections, once per row in the SD layout.
             ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
             # Count only the regions that actually hold SSM state; must match
             # the descriptors emitted by _build_mamba_local.
@@ -835,8 +835,7 @@ class NixlBaseConnectorWorker:
         # ---- Model state (derived from model config) ----
         mamba_ssm_size = (0, 0)
         # Conv state sub-projection decomposition (None when no Mamba).
-        # The transfer requires DS (dim, state_len) conv layout so that
-        # conv sub-projections are contiguous in memory.
+        # Sub-projections are contiguous per page (DS) or per row (SD).
         self._conv_decomp: MambaConvSplitInfo | None = None
         self._has_mamba = any(
             isinstance(spec, MambaSpec) for spec in self._layer_specs.values()
@@ -866,14 +865,6 @@ class NixlBaseConnectorWorker:
 
         if self._has_mamba:
             assert self._is_hma_required
-            from vllm.model_executor.layers.mamba.mamba_utils import (
-                is_conv_state_dim_first,
-            )
-
-            assert is_conv_state_dim_first(), (
-                "3-read Mamba conv transfer requires DS conv state layout. "
-                "Set VLLM_SSM_CONV_STATE_LAYOUT=DS"
-            )
             mamba_spec = next(
                 spec
                 for spec in self._layer_specs.values()
@@ -883,6 +874,7 @@ class NixlBaseConnectorWorker:
             self._conv_decomp = derive_mamba_conv_split(
                 mamba_spec,
                 vllm_config.parallel_config.tensor_parallel_size,
+                require_dim_first=False,
             )
             mamba_ssm_size = self._conv_decomp.ssm_sizes
         self._mamba_ssm_size = mamba_ssm_size
@@ -2195,7 +2187,9 @@ class NixlBaseConnectorWorker:
 
     def _build_mamba_local(self, base_addresses: list[int]) -> np.ndarray:
         """Build desc regions (conv sub-projections + ssm) per layer for
-        local mamba blocks with DS conv layout, as Nx5 uint64 strided descs.
+        local mamba blocks, as Nx5 uint64 strided descs. In the SD conv layout
+        each row holds every sub-projection, so there is one conv region per
+        row and sub-projection.
 
         A Mamba block interleaves conv and SSM state, which crucially differ in
         size, so the two are indexed as separate sub-regions. Attention blocks
@@ -2655,7 +2649,8 @@ class NixlBaseConnectorWorker:
         so that the whole cache is shared by "tp_ratio" D TP workers.
 
         For Mamba hetero-TP, both tp_ratio > 0 (D_TP > P_TP) and
-        tp_ratio < 0 (P_TP > D_TP) are supported by the 3-read transfer.
+        tp_ratio < 0 (P_TP > D_TP) are supported by the per-sub-projection
+        conv reads, in the DS and SD conv layouts.
         """  # noqa: E501
         engine_id = nixl_agent_meta.engine_id
         # TODO re-evaluate refreshing for scaling/recovery

@@ -403,6 +403,7 @@ steps:
     - vllm/transformers_utils/
     - vllm/utils/
     - vllm/v1/
+    - vllm/models/nemotron_shortcut/nvidia/gdp.py
     - tests/v1
     - tests/watermarking
     - examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py

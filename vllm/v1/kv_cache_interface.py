@@ -559,6 +559,10 @@ class MambaSpec(KVCacheSpec):
     # False: the state is sharded across TP ranks (e.g. GDN). True: every TP
     # rank holds the full state (e.g. the replicated PLE conv state).
     tp_replicated: bool = False
+    # This rank's channel count of each conv sub-projection, in memory order.
+    # KV transfer between different TP sizes cuts the conv state at these
+    # boundaries. None: the connector derives them from `mamba_type`.
+    conv_proj_dims: tuple[int, ...] | None = None
 
     def __post_init__(self):
         super().__post_init__()
