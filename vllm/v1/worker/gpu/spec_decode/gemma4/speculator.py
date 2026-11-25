@@ -46,8 +46,7 @@ def _copy_target_kv_scales(attn: nn.Module, target_attn: nn.Module) -> None:
 
 
 class Gemma4Speculator(TargetDependentARSpeculator):
-    # The assistant reads target KV and keeps no state between proposals.
-    needs_draft_state_sync = False
+    uses_only_target_kv_cache = True
 
     @property
     def advance_draft_positions(self) -> bool:
