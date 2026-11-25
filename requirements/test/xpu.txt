@@ -2596,10 +2596,6 @@ intel-sycl-rt==2026.1.2 \
     #   dpcpp-cpp-rt
     #   oneccl
     #   torch
-interegular==0.3.3 \
-    --hash=sha256:b0c07007d48c89d6d19f7204972d369b2a77222722e126b6aa63aa721dc3b19c \
-    --hash=sha256:d9b697b21b34884711399ba0f0376914b81899ce670032486d0d048344a76600
-    # via lm-format-enforcer
 interface-meta==2.0.1 \
     --hash=sha256:902bd9a95a12f195f15753a1080075d4eca7a2cb934fac7ac03c9e362b50796a \
     --hash=sha256:f38016bef9a4429b6d0792d809be7b65e9781820c674bf7f463999086b6e6323
@@ -3054,12 +3050,6 @@ lm-eval==0.4.12 \
     --hash=sha256:02971ff68284dd14cfa7fce9310a58452c4162e8d413ba96aa7988a0ff9352ef \
     --hash=sha256:45938d7c8024d5eee5c8a0da36abe7cc09c252413c577cf81666f0fcd28b4345
     # via -r requirements/test/xpu.in
-lm-format-enforcer==0.11.3 \
-    --hash=sha256:cf586350875def1ae7a8fba84fcbbfc8371424b6c9d05c1fcba70aa233fbf06f \
-    --hash=sha256:e68081c108719cce284a9bcc889709b26ffb085a1945b5eba3a12cfa96d528da
-    # via
-    #   -c requirements/common.txt
-    #   -r requirements/test/../common.txt
 logistro==2.0.1 \
     --hash=sha256:06ffa127b9fb4ac8b1972ae6b2a9d7fde57598bf5939cd708f43ec5bba2d31eb \
     --hash=sha256:8446affc82bab2577eb02bfcbcae196ae03129287557287b6a070f70c1985047
@@ -4293,7 +4283,6 @@ packaging==26.3 \
     #   huggingface-hub
     #   kaleido
     #   lazy-loader
-    #   lm-format-enforcer
     #   matplotlib
     #   modelscope
     #   optuna
@@ -5055,7 +5044,6 @@ pydantic==2.13.4 \
     #   fastapi
     #   fastapi-cloud-cli
     #   gpt-oss
-    #   lm-format-enforcer
     #   mcp
     #   mcp-types
     #   mistral-common
@@ -5497,7 +5485,6 @@ pyyaml==6.0.3 \
     #   datasets
     #   genai-perf
     #   huggingface-hub
-    #   lm-format-enforcer
     #   optuna
     #   peft
     #   responses
