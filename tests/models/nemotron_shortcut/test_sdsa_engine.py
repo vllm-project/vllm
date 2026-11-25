@@ -85,10 +85,12 @@ def test_sparse_checkpoint_without_indexer_is_rejected(
 ):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     text = make_config(
-        layer_types=["full_attention"],
+        layer_types=["linear_attention", "full_attention"],
         hidden_size=1024,
         num_attention_heads=8,
         head_dim=256,
+        gdp_head_dim=64,
+        gdp_key_head_dim=128,
         index_topk=K,
         max_position_embeddings=1024,
         tie_word_embeddings=False,

@@ -39,9 +39,11 @@ def test_dense_checkpoint_without_index_topk_generates_with_mtp(tmp_path, vllm_r
     from .utils import make_config, save_checkpoint_config
 
     text = make_config(
-        layer_types=["full_attention", "mlp"],
+        layer_types=["linear_attention", "full_attention", "mlp"],
         hidden_size=512,
         head_dim=128,
+        gdp_head_dim=64,
+        gdp_key_head_dim=128,
         num_nextn_predict_layers=1,
         max_position_embeddings=128,
         tie_word_embeddings=False,
@@ -55,8 +57,13 @@ def test_dense_checkpoint_without_index_topk_generates_with_mtp(tmp_path, vllm_r
         load_format="dummy",
         enforce_eager=True,
         skip_tokenizer_init=True,
+        block_size=None,
+        enable_chunked_prefill=True,
         max_model_len=128,
         max_num_seqs=2,
+        kv_cache_memory_bytes=256 * 1024**2,
+        moe_backend="triton",
+        kernel_config={"enable_jit_warmup": False, "enable_flashinfer_autotune": False},
         disable_log_stats=False,
         limit_mm_per_prompt={"image": 0, "video": 0},
         speculative_config={"method": "mtp", "num_speculative_tokens": 2},
