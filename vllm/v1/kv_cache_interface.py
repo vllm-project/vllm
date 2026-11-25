@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from enum import IntEnum, StrEnum
+from enum import IntEnum, StrEnum, unique
 from fractions import Fraction
 from functools import cached_property
 from math import prod
@@ -37,6 +37,7 @@ DS_MLA_STATE_CONTENT_BYTES = {"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}
 # ---------------------------------------------------------------------------
 
 
+@unique
 class KVQuantMode(IntEnum):
     """KV cache quantization mode.
 
@@ -66,7 +67,7 @@ class KVQuantMode(IntEnum):
     # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
     # False). Registered handlers return this when they own kernel selection
     # rather than reusing an upstream kernel path. See KVCacheDTypeHandler.
-    CUSTOM = 12
+    CUSTOM = 15
 
     @property
     def is_per_token_head(self) -> bool:
@@ -587,24 +588,17 @@ class MambaSpec(KVCacheSpec):
         return page_size
 
 
-def get_mamba_prefill_checkpoint_position(
+def get_reusable_prefix_length(
     num_tokens: int,
-    hash_block_size: int,
-    drop_eagle_block: bool,
-    num_hash_lookahead_tokens: int = 0,
+    num_hash_lookahead_tokens: int,
+    alignment_tokens: int = 1,
 ) -> int:
-    """Return the reusable Mamba checkpoint boundary for a prefill."""
-    # Leave tokens for logits recomputation and the checkpoint's hash.
-    # EAGLE's block drop already leaves tokens to recompute.
-    proof_limit = (
-        num_tokens
-        if drop_eagle_block
-        else num_tokens - max(1, num_hash_lookahead_tokens)
-    )
-    checkpoint_position = proof_limit // hash_block_size * hash_block_size
-    if drop_eagle_block:
-        checkpoint_position -= hash_block_size
-    return max(checkpoint_position, 0)
+    """Bound prefix reuse by known tokens, reserving logits and hash lookahead.
+
+    This does not establish that the corresponding KV has been computed or cached.
+    """
+    token_limit = max(0, num_tokens - max(1, num_hash_lookahead_tokens))
+    return token_limit // alignment_tokens * alignment_tokens
 
 
 def is_mamba_prefill_checkpoint_valid(
@@ -699,8 +693,6 @@ class KVCacheGroup:
     block_size: int
     # Whether DCP shards the group's token positions across ranks
     dcp_sharded: bool = False
-    # Whether this group holds draft layers and takes the EAGLE last-block drop.
-    is_eagle_group: bool = False
     # Host groups use the dedicated HiSparse pool; others share the device pool.
     host_resident: bool = False
     # Whether this group is part of the externally transferable KV state.
@@ -780,9 +772,6 @@ class KVCacheGroup:
             self.manager_config, self.block_size, self.dcp_sharded, vllm_config
         )
 
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        return self.max_allocated_blocks_per_request(vllm_config) * self.page_size_bytes
-
     def max_num_blocks_per_req(
         self, vllm_config: VllmConfig, max_len: int | None = None
     ) -> int:
@@ -812,9 +801,6 @@ class PrefixLookupGroup(NamedTuple):
     manager_config: ManagerConfig
     block_size: int
     group_ids: list[int]
-    use_eagle: bool = False
-    """Whether the lookup takes the EAGLE last-block drop, which applies to
-    every member since they are looked up jointly. Set by the coordinator."""
 
     @property
     def manager_cls(self) -> type[SingleTypeKVCacheManager]:
@@ -829,15 +815,21 @@ def prefix_lookup_groups(
     for i, g in enumerate(groups):
         if not g.prefix_cacheable:
             continue
-        # A lookup takes the EAGLE last-block drop if any member does, so only
-        # groups with equal layouts share one. TODO: drop with the EAGLE drop.
-        layout = g.distinct_specs[0] if len(g.distinct_specs) == 1 else i
-        key = (g.manager_config, g.block_size, g.dcp_sharded, layout)
+        key = (g.manager_config, g.block_size, g.dcp_sharded)
         lookup = lookups.setdefault(
             key, PrefixLookupGroup(g.manager_config, g.block_size, [])
         )
         lookup.group_ids.append(i)
     return list(lookups.values())
+
+
+@dataclass(frozen=True, slots=True)
+class KVCacheStage:
+    """The KV cache of one pipeline stage."""
+
+    bytes_per_block: int
+    """Bytes one block takes in the device KV cache of each worker of the
+    stage: the size the engine core plans that worker's `num_blocks` with."""
 
 
 @dataclass
@@ -854,7 +846,7 @@ class KVCacheConfig:
     For models with only one type of attention, there is only one group that
     contains all layers.
     For models with multiple types of attention, there will be multiple groups,
-    see `_get_kv_cache_config_uniform_page_size` for more details.
+    see `_get_kv_cache_groups_uniform_page_size` for more details.
     """
     prefix_cache_retention_interval: int | None = None
     """Resolved retention policy for local prefix-cache checkpoints."""
@@ -875,6 +867,10 @@ class KVCacheConfig:
 
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
+
+    pipeline_stages: tuple[KVCacheStage, ...] = ()
+    """The KV cache of every pipeline stage, by PP rank, resolved by the engine
+    core so that both halves of a KV connector see every stage."""
 
     needs_kv_cache_zeroing: bool = field(init=False)
     """Whether newly allocated attention blocks must be zeroed before use.

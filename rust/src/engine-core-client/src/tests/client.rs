@@ -4218,10 +4218,12 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(multi_connector_stats.mooncake.is_some());
     assert!(multi_connector_stats.umbp.is_some());
     assert!(multi_connector_stats.simple_cpu_offload.is_some());
+    assert!(multi_connector_stats.offloading.is_some());
     assert!(multi_connector_stats.other.contains_key("UnsupportedConnector"));
     let nixl_stats = multi_connector_stats.nixl.as_ref().expect("NIXL stats decode");
     assert_eq!(nixl_stats.num_failed_handshakes, [1]);
     assert_eq!(nixl_stats.num_notifications_after_expiry, [2]);
+    assert_eq!(nixl_stats.num_declined_expired_reads, [1, 1]);
 
     let metrics = vllm_metrics::Metrics::new();
     let recorder = SchedulerStatsRecorder::new(
@@ -4265,12 +4267,18 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         "vllm:nixl_num_notifications_after_expiry_total{model_name=\"test-model\",engine=\"0\"} 2"
     ));
     assert!(rendered_metrics.contains(
+        "vllm:nixl_num_declined_expired_reads_total{model_name=\"test-model\",engine=\"0\"} 2"
+    ));
+    assert!(rendered_metrics.contains(
         "vllm:umbp_transfer_bytes_total{model_name=\"test-model\",engine=\"0\",\
          operation=\"load\"} 8192"
     ));
     assert!(rendered_metrics.contains(
         "vllm:simple_kv_offload_save_outcomes_total{model_name=\"test-model\",engine=\"0\",\
          outcome=\"stored\"} 3"
+    ));
+    assert!(rendered_metrics.contains(
+        "vllm:kv_offload_load_bytes_total{model_name=\"test-model\",engine=\"0\"} 4096.0"
     ));
 
     let simple_cpu_offload_stats: KvConnectorStats =
@@ -4310,13 +4318,52 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     "#]]
     .assert_debug_eq(&simple_cpu_offload_stats.data);
 
-    // Another connector's `types`/`data` payload is not taken for SimpleCPUOffload.
+    // OffloadingConnector shares the `types`/`data` envelope, but is not taken
+    // for SimpleCPUOffload.
     let kv_offload_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(kv_offload_stats_hex).unwrap()).unwrap();
-    assert!(matches!(
-        kv_offload_stats,
-        KvConnectorStats::Multi(stats) if stats.simple_cpu_offload.is_none()
-    ));
+    let KvConnectorStats::Offloading(kv_offload_stats) = kv_offload_stats else {
+        panic!("Python OffloadingConnector stats should decode as Offloading");
+    };
+    expect_test::expect![[r#"
+        OffloadingStats {
+            data: {
+                "vllm:kv_offload_cpu_cache_usage_perc": {
+                    []: Value(
+                        0.5,
+                    ),
+                },
+                "vllm:kv_offload_load_bytes": {
+                    []: Value(
+                        4096.0,
+                    ),
+                },
+                "vllm:kv_offload_load_size": {
+                    []: Observations(
+                        [
+                            4096.0,
+                        ],
+                    ),
+                },
+                "vllm:kv_offload_load_time": {
+                    []: Value(
+                        0.25,
+                    ),
+                },
+            },
+            info: Some(
+                [
+                    {
+                        "cpu_blocks_per_chunk": "4",
+                        "cpu_kv_cache_size_bytes": "1048576",
+                        "cpu_kv_cache_size_tokens": "None",
+                        "cpu_num_chunks": "64",
+                    },
+                ],
+            ),
+        }
+    "#]]
+    .assert_debug_eq(&kv_offload_stats);
 
     let map_keys = |bytes: &[u8]| -> BTreeSet<String> {
         match decode_value(bytes) {
@@ -4341,11 +4388,13 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     legacy_ready.as_object_mut().unwrap().remove("effective_attention_block_size");
     legacy_ready.as_object_mut().unwrap().remove("supports_prompt_logprobs");
     legacy_ready.as_object_mut().unwrap().remove("allow_missing_mm_embeddings");
+    legacy_ready.as_object_mut().unwrap().remove("max_mm_embeds_per_request");
     let legacy_ready: EngineCoreReadyResponse =
         rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy_ready).unwrap()).unwrap();
     assert!(legacy_ready.effective_attention_block_size.is_none());
     assert!(legacy_ready.supports_prompt_logprobs);
     assert!(!legacy_ready.allow_missing_mm_embeddings);
+    assert!(legacy_ready.max_mm_embeds_per_request.is_none());
     assert!(ready_response.supports_lora);
     assert_eq!(ready_response.max_loras, 8);
     assert_eq!(
@@ -4359,6 +4408,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(ready_response.enable_expert_parallel);
     assert!(!ready_response.supports_prompt_logprobs);
     assert!(ready_response.allow_missing_mm_embeddings);
+    assert_eq!(ready_response.max_mm_embeds_per_request, Some(16384));
     assert_eq!(
         ready_response.cache_config_info,
         Some(BTreeMap::from([

@@ -50,6 +50,9 @@ from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
     TritonExperts,
     TritonWNA16Experts,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+    MoEPrepareAndFinalizeNoDPEPModular,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     masked_amax_scale,
     moe_kernel_quantize_input,
@@ -75,6 +78,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
+    kInt8StaticTensorSym,
     quantize_weights,
 )
 from vllm.platforms import current_platform
@@ -733,6 +737,7 @@ def test_host_resident_weights_take_sorted_path(
     """At small batch the naive path reads an expert once per (token, expert)
     pair. Weights read from host memory in place (UVA offloading) must take
     the sorted path instead, with the same output."""
+    from vllm.platforms import current_platform
     from vllm.utils.platform_utils import is_uva_available
     from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
@@ -783,7 +788,46 @@ def test_host_resident_weights_take_sorted_path(
         ref = torch_moe(a, w1.cuda(), w2.cuda(), score, topk)
     assert ref.abs().mean() > 0.1
     torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
-    assert bool(aligned) == host_resident
+    expected_aligned = host_resident or (current_platform.is_integrated_gpu() and m > 1)
+    assert bool(aligned) == expected_aligned
+
+
+@pytest.mark.parametrize("m", [1, 2, 4, 8])
+@pytest.mark.parametrize("is_integrated", [False, True])
+def test_integrated_gpu_expert_assignment(
+    m: int, is_integrated: bool, monkeypatch, workspace_init
+):
+    """Integrated GPUs (such as GB10 / DGX Spark) take the naive path only
+    at batch 1 to avoid repeated weight reads over unified memory.
+    Discrete GPUs preserve the heuristic threshold."""
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(
+        current_platform, "is_integrated_gpu", lambda device_id=0: is_integrated
+    )
+    aligned: list[int] = []
+    align = fused_moe_module.moe_align_block_size
+
+    def counting_align(*args, **kwargs):
+        aligned.append(1)
+        return align(*args, **kwargs)
+
+    monkeypatch.setattr(fused_moe_module, "moe_align_block_size", counting_align)
+
+    set_random_seed(7)
+    e, n, k, topk, dtype = 128, 256, 128, 8, torch.bfloat16
+    a = torch.randn((m, k), device="cuda", dtype=dtype)
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 8
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 8
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
+
+    with set_current_vllm_config(vllm_config):
+        out = fused_moe(a, w1, w2, score, topk, renormalize=False)
+        ref = torch_moe(a, w1, w2, score, topk)
+
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
+    expected_aligned = (m > 1) if is_integrated else (m * topk * 4 > e)
+    assert bool(aligned) == expected_aligned
 
 
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS_SMALL_M)
@@ -2954,3 +2998,98 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
 
     close = torch.isclose(trtllm_output, baseline_output, atol=1e-1, rtol=0.85)
     assert close.float().mean() > 0.925
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("per_out_ch_quant", [False, True])
+@pytest.mark.parametrize("weight_on_input", [False, True])
+def test_static_int8_modular_matches_legacy(
+    workspace_init, dtype, per_out_ch_quant, weight_on_input
+):
+    """Match legacy static scales, bias and router order for both GEMMs."""
+    # TODO: Replace the legacy comparison with a high-precision torch reference
+    # that preserves static quantization and router-weight application order.
+    experts, hidden, tokens = 3, 128, 4
+    moe = make_dummy_moe_config(
+        num_experts=experts, hidden_dim=hidden, intermediate_size=hidden, in_dtype=dtype
+    )
+    rng = torch.Generator(device="cuda").manual_seed(7)
+
+    def weights(rows):
+        return torch.randint(
+            -3,
+            4,
+            (experts, rows, hidden),
+            generator=rng,
+            device="cuda",
+            dtype=torch.int8,
+        )
+
+    def scales(rows, low, high):
+        channels = rows if per_out_ch_quant else 1
+        return torch.linspace(low, high, experts * channels, device="cuda").reshape(
+            experts, channels, 1
+        )
+
+    w1, w2 = weights(2 * hidden), weights(hidden)
+    qc = FusedMoEQuantConfig.make(
+        torch.int8,
+        w1_scale=scales(2 * hidden, 0.002, 0.018),
+        w2_scale=scales(hidden, 0.003, 0.021),
+        a1_scale=torch.tensor(0.035, device="cuda"),
+        a2_scale=torch.tensor(0.02, device="cuda"),
+        w1_bias=torch.linspace(
+            -0.25, 0.25, experts * 2 * hidden, device="cuda"
+        ).reshape(experts, 2 * hidden),
+        w2_bias=torch.linspace(-0.125, 0.125, experts * hidden, device="cuda").reshape(
+            experts, hidden
+        ),
+        per_out_ch_quant=per_out_ch_quant,
+    )
+    kernel = mk.FusedMoEKernel(
+        MoEPrepareAndFinalizeNoDPEPModular(),
+        TritonExperts(moe, qc, activation_key=kInt8StaticTensorSym),
+    )
+    x = torch.randn((tokens, hidden), device="cuda", dtype=dtype, generator=rng)
+    ids = torch.tensor([[0], [2], [1], [2]], device="cuda", dtype=torch.int32)
+    router = torch.tensor([[0.0], [0.37], [0.9], [1.0]], device="cuda")
+
+    def modular(inputs, topk_weights, topk_ids):
+        return kernel.apply(
+            hidden_states=inputs,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=experts,
+            expert_map=None,
+            apply_router_weight_on_input=weight_on_input,
+        )
+
+    with set_current_vllm_config(VllmConfig()):
+        expected = fused_moe_module.fused_experts(
+            x,
+            w1,
+            w2,
+            router,
+            ids,
+            apply_router_weight_on_input=weight_on_input,
+            quant_config=qc,
+        )
+        actual = modular(x, router, ids)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        empty = modular(x[:0], router[:0], ids[:0])
+        assert empty.shape == (0, hidden)
+        assert empty.dtype == dtype
+
+        if dtype == torch.bfloat16 and per_out_ch_quant and weight_on_input:
+            torch.accelerator.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = modular(x, router, ids)
+            graph.replay()
+            torch.testing.assert_close(captured, actual, rtol=0, atol=0)

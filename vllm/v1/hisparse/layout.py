@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections import defaultdict
 from dataclasses import dataclass, replace
 
 from vllm.config import VllmConfig
@@ -402,15 +401,13 @@ def _build_hisparse_kv_cache_tensors(
     *,
     host_resident: bool = False,
 ) -> list[KVCacheTensor]:
+    from vllm.v1.core.kv_cache_planning import _group_layers_by_spec
+
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
     tensors: list[KVCacheTensor] = []
     for group in kv_cache_groups:
-        layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
-        for layer_name, spec in group.kv_cache_specs.items():
-            layers_by_spec[spec].append(layer_name)
-
         byte_offset = 0
-        for spec, layer_names in layers_by_spec.items():
+        for spec, layer_names in _group_layers_by_spec(group).items():
             if isinstance(spec, HiSparsePageSpec):
                 if not layout.is_block_outermost:
                     raise ValueError("HiSparse requires a block-outermost KV layout.")
@@ -446,12 +443,11 @@ def _build_hisparse_kv_cache_tensors(
 def get_hisparse_kv_cache_config(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroup],
-    available_memory: int,
+    num_blocks: int,
     host_budget: int,
 ) -> KVCacheConfig:
     from vllm.v1.core.kv_cache_planning import (
         _get_kv_cache_bytes_per_block,
-        may_override_num_blocks,
         validate_kv_cache_layout,
     )
 
@@ -460,9 +456,6 @@ def get_hisparse_kv_cache_config(
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, device_groups)
     bytes_per_block = _get_kv_cache_bytes_per_block(device_groups, layout)
-    num_blocks = may_override_num_blocks(
-        vllm_config, available_memory // bytes_per_block
-    )
     size = bytes_per_block * num_blocks
     kv_cache_tensors = _build_hisparse_kv_cache_tensors(
         device_groups, num_blocks, size, layout, bytes_per_block

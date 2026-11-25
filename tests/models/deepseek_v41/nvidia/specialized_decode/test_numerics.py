@@ -311,6 +311,7 @@ def _wo_b(rank: int, index: int):
     w = _randn(generator, HIDDEN, WO_B_K, dtype=torch.float32) / WO_B_K**0.5
     w_q, w_s = mxfp8_e4m3_quantize(w.bfloat16(), is_sf_swizzled_layout=False)
     linear = torch.nn.Module()
+    linear.output_size_per_partition = HIDDEN
     linear.weight = torch.nn.Parameter(w_q, requires_grad=False)
     linear.weight_scale = torch.nn.Parameter(
         w_s.view(HIDDEN, WO_B_K // 32), requires_grad=False

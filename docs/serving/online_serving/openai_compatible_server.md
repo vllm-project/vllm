@@ -19,7 +19,7 @@ We currently support the following OpenAI APIs:
 
 - [Completions API](#completions-api) (`/v1/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md).
-    - *Note: `suffix` parameter is not supported.*
+    - *Note: `suffix` parameter is only supported by models with fill-in-the-middle rendering, such as DeepSeek V4.*
 - [Chat Completions API](#chat-api) (`/v1/chat/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md) with a [chat template](../online_serving/README.md#chat-template).
     - *Note: `user` parameter is ignored.*
@@ -175,6 +175,15 @@ The following extra parameters are supported:
 
 `top_logprobs` is a dict keyed by each candidate's decoded text, so candidates that decode to the same string share one entry. This happens with byte-fallback tokens that each hold part of a multi-byte character (Thai, CJK or emoji text), which decode to `""`. The entry keeps the highest logprob among those candidates (on a tie, the token at that position), so `max(top_logprobs[i].values())` is the logprob of the most likely returned candidate. Where `top_logprobs[i]` is not `None`, `top_logprobs[i][tokens[i]] == token_logprobs[i]` holds unless a candidate with the same text is more likely than the token at that position. Set `return_tokens_as_token_ids` to get one entry per candidate, keyed by token ID (`token_id:{id}`).
 
+#### Echo with prompt truncation
+
+`truncate_prompt_tokens` and `truncation_side` are vLLM extensions. In the Python
+Completions API, when `echo=true` and an explicit `truncation_side` causes
+post-tokenization truncation, the echoed text is rebuilt from the retained tokens.
+Tokenizer-added special tokens are omitted from the text and echoed logprobs;
+special tokens supplied in the text are preserved. Model input IDs, prompt-token
+usage and `return_token_ids` responses retain the full truncated token sequence.
+
 ### Chat API
 
 Our Chat API is compatible with [OpenAI's Chat Completions API](https://platform.openai.com/docs/api-reference/chat);
@@ -191,6 +200,12 @@ see our [Multimodal Inputs](../../features/multimodal_inputs.md) guide for more 
 - *Note: `image_url.detail` parameter is not supported.*
 
 Code example: [examples/basic/online_serving/openai_chat_completion_client.py](../../../examples/basic/online_serving/openai_chat_completion_client.py)
+
+`/v1/chat/completions/batch` uses the same `VLLM_MAX_COMPLETION_PROMPTS`
+limit as `/v1/completions`. It accepts up to 1,024 conversations in the outer
+`messages` list by default. Set the variable to a positive integer before
+starting the server to change the limit. Larger batches receive HTTP 400
+before any conversation is preprocessed.
 
 With `--enable-prompt-tokens-details`, `/v1/chat/completions/batch` sums `cached_tokens`, `created_cache_tokens` and per-modality `multimodal_tokens` across conversations in `usage.prompt_tokens_details`; an unreported cache count makes that total `null`, and disabling the flag leaves the details `null`.
 

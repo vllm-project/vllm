@@ -34,14 +34,16 @@ use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_managed_engine::ManagedEngineConfig;
-use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
+use vllm_managed_engine::cli::{
+    ManagedEngineArgs, parse_human_readable_int, repartition_managed_engine_args,
+};
 use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopology};
 use vllm_server::{
-    AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
-    CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, FingerprintMode,
-    HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging, ParserSelection,
-    ReasoningEffort, RenderConfig, RendererSelection,
+    AccessLogConfig, AdmissionLimits, ApiServerOptions, ChatTemplateContentFormatOption, Config,
+    CoordinatorMode, CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT,
+    DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
+    DefaultMmLoras, FingerprintMode, HttpListenerMode, LoraModulePath, OutputLogConfig,
+    OutputLogging, ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 use vllm_tracing::{LogFormatter, LogLevel};
@@ -241,7 +243,7 @@ pub struct RenderArgs {
     /// The maximum number of input items allowed per prompt for each
     /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`); set it
     /// to the engine's `--limit-mm-per-prompt`. Unspecified modalities
-    /// default to 999 items.
+    /// default to the model's default, else 999 items.
     ///
     /// Also accepts the engine's configurable form
     /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); only `count`
@@ -432,6 +434,19 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t = NonZeroU32::MIN)]
     #[serde(default = "default_stream_interval")]
     pub stream_interval: NonZeroU32,
+    /// Maximum number of requests that can be in-flight (waiting or running)
+    /// at the same time. A request with `n` samples counts as `n`. When the
+    /// limit is reached, new requests are rejected with HTTP 503 so the
+    /// client can retry on another instance.
+    #[arg(long)]
+    #[serde(default)]
+    pub max_num_queued_reqs: Option<u64>,
+    /// Maximum total prompt tokens of requests currently in the prefill phase.
+    /// Once the backlog reaches it, new requests are rejected with HTTP 503.
+    /// Accepts human-readable counts such as `32k`, like Python.
+    #[arg(long, value_parser = parse_token_count)]
+    #[serde(default)]
+    pub max_num_queued_tokens: Option<u64>,
     /// Maximum time to wait for active requests to drain during shutdown.
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -489,7 +504,7 @@ pub struct SharedRuntimeArgs {
     /// Also accepts the engine's configurable form
     /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); the extra
     /// profiling options are forwarded to the engine untouched.
-    /// Unspecified modalities default to 999 items.
+    /// Unspecified modalities default to the model's default, else 999 items.
     #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
     #[serde(default)]
     pub limit_mm_per_prompt: MmLimitPerPrompt,
@@ -618,19 +633,6 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_scale_out: Option<bool>,
 
-    /// Enable the `/tokenizer_info` endpoint. May expose chat
-    /// templates and other tokenizer configuration.
-    ///
-    /// The Rust frontend does not implement `/tokenizer_info` yet, so the
-    /// endpoint returns 501.
-    #[arg(
-        long,
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    #[serde(default)]
-    pub enable_tokenizer_info_endpoint: bool,
-
     /// If set to True, only enable the Tokens In<>Out endpoint.
     /// This is intended for use in a Disaggregated Everything setup.
     ///
@@ -696,7 +698,7 @@ pub struct SharedRuntimeArgs {
     /// Seconds between periodic engine statistics logs (default 10). Like
     /// Python, it is set only through `VLLM_LOG_STATS_INTERVAL`.
     #[arg(long, hide = true, env = "VLLM_LOG_STATS_INTERVAL")]
-    #[serde(skip)]
+    #[serde(default)]
     pub log_stats_interval: Option<LogStatsInterval>,
 
     /// Keep external request IDs as engine-core request IDs instead of adding
@@ -710,7 +712,7 @@ pub struct SharedRuntimeArgs {
         value_parser = parse_int_flag,
         default_value = "0"
     )]
-    #[serde(skip)]
+    #[serde(default)]
     pub disable_request_id_randomization: bool,
 
     /// Keep the API server running after the engine becomes permanently
@@ -724,19 +726,20 @@ pub struct SharedRuntimeArgs {
         value_parser = parse_int_flag,
         default_value = "0"
     )]
-    #[serde(skip)]
+    #[serde(default)]
     pub keep_alive_on_engine_death: bool,
 
-    /// Maximum HTTP request body size in bytes (default 32 MiB); `0` removes
-    /// the limit, like the Python frontend, which has none. It is set only
-    /// through `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`.
+    /// Maximum size in bytes of an HTTP request body and of a gRPC request
+    /// message (default 32 MiB); `0` removes the limit, like the Python
+    /// frontend, which has none. It is set only through
+    /// `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`.
     #[arg(
         long,
         hide = true,
         env = "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
         value_parser = parse_byte_count
     )]
-    #[serde(skip)]
+    #[serde(default)]
     pub http_max_request_body_size: Option<usize>,
 
     /// Accept any requested model name, served by the base model unless it
@@ -750,7 +753,7 @@ pub struct SharedRuntimeArgs {
         value_parser = parse_truthy_flag,
         default_value = "0"
     )]
-    #[serde(skip)]
+    #[serde(default)]
     pub skip_model_name_validation: bool,
 
     /// Register the development routes and default `--log-error-stack`. Like
@@ -764,13 +767,26 @@ pub struct SharedRuntimeArgs {
         value_parser = parse_int_flag,
         default_value = "0"
     )]
-    #[serde(skip)]
+    #[serde(default)]
     pub server_dev_mode: bool,
+
+    /// Register the routes that load and unload LoRA adapters at runtime. Like
+    /// Python, it is set only through `VLLM_ALLOW_RUNTIME_LORA_UPDATING`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_ALLOW_RUNTIME_LORA_UPDATING",
+        action = ArgAction::Set,
+        value_parser = parse_truthy_flag,
+        default_value = "0"
+    )]
+    #[serde(default)]
+    pub allow_runtime_lora_updating: bool,
 
     /// Upper bound on a request's `n` (default 16384). Like Python, it is set
     /// only through `VLLM_MAX_N_SEQUENCES`.
     #[arg(long, hide = true, env = "VLLM_MAX_N_SEQUENCES", value_parser = parse_int)]
-    #[serde(skip)]
+    #[serde(default)]
     pub max_n_sequences: Option<i64>,
 
     /// The model name(s) used in the API. If multiple names are provided, the
@@ -984,52 +1000,6 @@ impl SharedRuntimeArgs {
         })
     }
 
-    /// Apply fallback logic for configuration from env variables, using
-    /// `lookup` to read the environment.
-    fn apply_env_fallbacks(
-        &mut self,
-        lookup: impl Fn(&str) -> Option<String>,
-    ) -> Result<(), String> {
-        if self.api_key.is_empty()
-            && let Some(api_key) = lookup("VLLM_API_KEY")
-        {
-            self.api_key.push(api_key);
-        }
-        if let Some(value) = lookup("VLLM_LOG_STATS_INTERVAL") {
-            let interval = value
-                .parse()
-                .map_err(|error| format!("invalid VLLM_LOG_STATS_INTERVAL: {error}"))?;
-            self.log_stats_interval = Some(interval);
-        }
-        if let Some(value) = lookup("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION") {
-            self.disable_request_id_randomization = parse_int_flag(&value).map_err(|error| {
-                format!("invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: {error}")
-            })?;
-        }
-        if let Some(value) = lookup("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH") {
-            self.keep_alive_on_engine_death = parse_int_flag(&value)
-                .map_err(|error| format!("invalid VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: {error}"))?;
-        }
-        if let Some(value) = lookup("VLLM_HTTP_MAX_REQUEST_BODY_SIZE") {
-            let size = parse_byte_count(&value)
-                .map_err(|error| format!("invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: {error}"))?;
-            self.http_max_request_body_size = Some(size);
-        }
-        if let Some(value) = lookup("VLLM_SKIP_MODEL_NAME_VALIDATION") {
-            self.skip_model_name_validation = parse_truthy_flag(&value)?;
-        }
-        if let Some(value) = lookup("VLLM_SERVER_DEV_MODE") {
-            self.server_dev_mode = parse_int_flag(&value)
-                .map_err(|error| format!("invalid VLLM_SERVER_DEV_MODE: {error}"))?;
-        }
-        if let Some(value) = lookup("VLLM_MAX_N_SEQUENCES") {
-            let max_n_sequences = parse_int(&value)
-                .map_err(|error| format!("invalid VLLM_MAX_N_SEQUENCES: {error}"))?;
-            self.max_n_sequences = Some(max_n_sequences);
-        }
-        Ok(())
-    }
-
     /// Build the OpenAI-server config for the Python-bootstrap worker contract.
     ///
     /// The resulting config binds the Python-supplied transport addresses and
@@ -1051,6 +1021,7 @@ impl SharedRuntimeArgs {
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
         let fingerprint_mode = self.fingerprint_mode_config();
+        let admission_limits = self.admission_limits();
         let cors = self.cors_config();
         let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
@@ -1107,6 +1078,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
+            admission_limits,
             api_server_options,
             fingerprint_mode,
             cors,
@@ -1146,6 +1118,7 @@ impl SharedRuntimeArgs {
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
         let fingerprint_mode = self.fingerprint_mode_config();
+        let admission_limits = self.admission_limits();
         let cors = self.cors_config();
         let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
@@ -1201,6 +1174,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             stream_interval: self.stream_interval,
+            admission_limits,
             api_server_options,
             fingerprint_mode,
             cors,
@@ -1248,9 +1222,9 @@ impl SharedRuntimeArgs {
             log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
             enable_scale_out: self.tokens_only
                 || self.enable_scale_out.unwrap_or(self.server_dev_mode),
-            enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             skip_model_name_validation: self.skip_model_name_validation,
             server_dev_mode: self.server_dev_mode,
+            allow_runtime_lora_updating: self.allow_runtime_lora_updating,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
                 .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
             request_body_limit_bytes: match self.http_max_request_body_size {
@@ -1270,6 +1244,13 @@ impl SharedRuntimeArgs {
             FingerprintModeArg::Custom => (self.fingerprint_value.clone())
                 .map_or(FingerprintMode::None, FingerprintMode::Custom),
             FingerprintModeArg::None => FingerprintMode::None,
+        }
+    }
+
+    fn admission_limits(&self) -> AdmissionLimits {
+        AdmissionLimits {
+            max_num_queued_reqs: self.max_num_queued_reqs,
+            max_num_queued_tokens: self.max_num_queued_tokens,
         }
     }
 
@@ -1312,6 +1293,13 @@ fn default_engine_ready_timeout_secs() -> u64 {
 
 fn default_enable_log_deltas() -> bool {
     true
+}
+
+/// Parse a token count written as Python's `human_readable_int`.
+fn parse_token_count(value: &str) -> Result<u64, String> {
+    parse_human_readable_int(value)
+        .and_then(|count| u64::try_from(count).ok())
+        .ok_or_else(|| format!("expected a token count such as 32768 or 32k, got `{value}`"))
 }
 
 fn default_stream_interval() -> NonZeroU32 {
@@ -1365,16 +1353,26 @@ pub struct StructuredOutputsConfig {
 /// Keys are API effort names, so unknown efforts fail at startup.
 type ReasoningEffortMap = HashMap<ReasoningEffort, String>;
 
-/// Parsed `VLLM_LOG_STATS_INTERVAL`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Parsed `VLLM_LOG_STATS_INTERVAL`, deserialized from seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(from = "f64")]
 pub enum LogStatsInterval {
     Every(Duration),
     /// Too long to ever elapse, such as `inf`, which Python sleeps forever on.
     Never,
 }
 
-/// Parse `VLLM_LOG_STATS_INTERVAL` seconds like Python: a non-positive value
-/// falls back to the default, and any positive one is slept on as is.
+/// Interpret seconds like Python: a non-positive value falls back to the
+/// default, and any positive one is slept on as is.
+impl From<f64> for LogStatsInterval {
+    fn from(seconds: f64) -> Self {
+        if seconds.is_nan() || seconds <= 0.0 {
+            return Self::Every(DEFAULT_LOG_STATS_INTERVAL);
+        }
+        Duration::try_from_secs_f64(seconds).map_or(Self::Never, Self::Every)
+    }
+}
+
 impl FromStr for LogStatsInterval {
     type Err = String;
 
@@ -1383,10 +1381,7 @@ impl FromStr for LogStatsInterval {
             .trim()
             .parse()
             .map_err(|_| format!("`{value}` is not a number of seconds"))?;
-        if seconds.is_nan() || seconds <= 0.0 {
-            return Ok(Self::Every(DEFAULT_LOG_STATS_INTERVAL));
-        }
-        Ok(Duration::try_from_secs_f64(seconds).map_or(Self::Never, Self::Every))
+        Ok(seconds.into())
     }
 }
 
@@ -1428,13 +1423,40 @@ fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
 }
 
 fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
-    let mut args: SharedRuntimeArgs =
-        from_json_str(value).map_err(|e| format!("invalid JSON arguments: {e}"))?;
     // --args-json is parsed with serde, so clap's env support does not run for
-    // the Python-supervised frontend path.
-    args.apply_env_fallbacks(|name| std::env::var(name).ok())?;
+    // the Python-supervised frontend path; Python passes the settings it
+    // resolves from the environment instead.
+    let args: SharedRuntimeArgs =
+        from_json_str(value).map_err(|e| format!("invalid JSON arguments: {e}"))?;
     args.unsupported.check()?;
     Ok(args)
+}
+
+/// Parser for `--args-json`. Unlike a function value parser, it reports an
+/// error without echoing the JSON, which holds every non-default argument from
+/// Python and would bury the error.
+#[derive(Clone)]
+struct RuntimeArgsJsonParser;
+
+impl clap::builder::TypedValueParser for RuntimeArgsJsonParser {
+    type Value = SharedRuntimeArgs;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        _arg: Option<&clap::Arg>,
+        value: &OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let error = |message: String| {
+            clap::Error::raw(
+                clap::error::ErrorKind::ValueValidation,
+                format!("{message}\n"),
+            )
+            .with_cmd(cmd)
+        };
+        let value = value.to_str().ok_or_else(|| error("--args-json is not valid UTF-8".into()))?;
+        parse_runtime_args_json(value).map_err(error)
+    }
 }
 
 /// Arguments for running the Rust frontend as a Python-bootstrapped worker.
@@ -1472,7 +1494,7 @@ pub struct FrontendArgs {
     pub data_parallel_size: Option<usize>,
 
     /// Shared frontend arguments as one JSON object.
-    #[arg(long = "args-json", value_parser = parse_runtime_args_json, value_name = "JSON")]
+    #[arg(long = "args-json", value_parser = RuntimeArgsJsonParser, value_name = "JSON")]
     pub runtime: SharedRuntimeArgs,
 }
 
