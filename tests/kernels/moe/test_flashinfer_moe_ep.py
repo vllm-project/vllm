@@ -1595,7 +1595,7 @@ def _nosync_sm120_layer_checks(
                 torch.testing.assert_close(actual, expected, atol=0, rtol=0)
             return
         method = layer.quant_method
-        transformed = method._nosync._mega_layer.get_transformed_weights()
+        transformed = method._nosync._mega_layer._get_transformed_weights()
         assert transformed.scale_layout == "deepgemm"
         for name, parameter in (
             ("w13", layer.w13_weight),
