@@ -922,6 +922,11 @@ def _rocm_aiter_w8a8_gemm_fake(
     return Y
 
 
+# Below this M the preshuffled ASM-path MXFP4 GEMM reads unshuffled per-1x32
+# activation scales; from it on, shuffled ones.
+MXFP4_UNSHUFFLED_SCALES_MAX_M = 32
+
+
 def _rocm_aiter_mxfp4_gemm_dynamic_quant_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -959,12 +964,14 @@ def _rocm_aiter_mxfp4_gemm_dynamic_quant_impl(
         ):
             if x_scales is None:
                 # use hip quant kernel for performance
-                x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=M >= 32, **quant_kwargs)
+                x_q, x_s = per_1x32_f4_quant_hip(
+                    x, shuffle=M >= MXFP4_UNSHUFFLED_SCALES_MAX_M, **quant_kwargs
+                )
             else:
                 x_q = x
                 x_s = x_scales
 
-            if M >= 32:
+            if M >= MXFP4_UNSHUFFLED_SCALES_MAX_M:
                 x_s = x_s.view(torch.uint8).view(x_s.shape[0] // 32, -1)
             else:
                 x_s = x_s[:M, ...].view(torch.uint8)
@@ -2879,6 +2886,43 @@ class rocm_aiter_ops:
         return (
             aiter_ar_comm if isinstance(aiter_ar_comm, AiterCustomAllreduce) else None
         )
+
+    @classmethod
+    def fused_allreduce_rmsnorm_mxfp4_quant(
+        cls,
+        input_: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        epsilon: float,
+        gemma_norm: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """All-reduce `input_` + add `residual` + RMSNorm, with the normed
+        activation also quantized to MXFP4, in one AITER custom all-reduce
+        kernel.
+
+        Returns `(x_q, x_scales, normed, residual_out)`: packed FP4 values,
+        unshuffled per-1x32 E8M0 scales (the layout the preshuffled MXFP4 GEMM
+        reads below `MXFP4_UNSHUFFLED_SCALES_MAX_M`), the normed activation in
+        `input_`'s dtype and the new residual. None when the batch is at or
+        above that M, in batch-invariant mode (the GEMM then skips the
+        preshuffled kernel), or when custom all-reduce or neither fused kernel
+        takes the input.
+        """
+        if (
+            input_.shape[0] >= MXFP4_UNSHUFFLED_SCALES_MAX_M
+            or envs.VLLM_BATCH_INVARIANT
+        ):
+            return None
+        aiter_ar = cls.get_aiter_allreduce()
+        if aiter_ar is None or aiter_ar.disabled:
+            return None
+        out = aiter_ar.fused_ar_rms_mxfp4_quant(
+            input_, residual, weight, epsilon, gemma_norm
+        )
+        if out is None:
+            return None
+        x_q, residual_out, x_scales, normed = out
+        return x_q, x_scales, normed, residual_out
 
     @staticmethod
     def _gdn_triton_kernels_importable() -> bool:

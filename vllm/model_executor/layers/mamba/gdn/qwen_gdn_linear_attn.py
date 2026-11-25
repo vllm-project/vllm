@@ -1404,16 +1404,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def forward_hip(
         self,
         hidden_states: torch.Tensor,
+        qkvz_input: QuantizedActivation | None = None,
     ) -> torch.Tensor:
         """ROCm forward using AITER Triton fused projection+attention when
-        available, otherwise falling back to the generic CUDA path."""
+        available, otherwise falling back to the generic CUDA path.
+        `qkvz_input` as in `forward_cuda`."""
         if (
             GDN_AITER_TRITON_AVAILABLE
             and self.beta_scale == 1.0
             and not self.enable_fused_gdn_spec_decode
         ):
             num_tokens = hidden_states.size(0)
-            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            projected_states_qkvz, _ = self.in_proj_qkvz(
+                hidden_states if qkvz_input is None else qkvz_input
+            )
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
             projected_states_qkvz = projected_states_qkvz.view(num_tokens, -1)
             projected_states_ba = projected_states_ba.view(num_tokens, -1)
@@ -1448,7 +1452,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
             return self._output_projection(core_attn_out, z)
         else:
-            return self.forward_cuda(hidden_states)
+            return self.forward_cuda(hidden_states, qkvz_input)
 
     def forward_cuda(
         self,

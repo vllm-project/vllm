@@ -27,9 +27,10 @@
 Mirrors `../nvidia/model.py` (eager + breakable CUDA graphs) with the ROCm
 counterparts of its fusions: Triton Gemma RMSNorm instead of FlashInfer's, the
 row-parallel all-reduce deferred into AITER's fused all-reduce + Gemma RMSNorm,
-and the fused QK-norm + RoPE + gate kernel. FlashInfer's FP8 / NVFP4 norm-quant
-fusions have no ROCm counterpart here, so the norms emit unquantized
-activations.
+and the fused QK-norm + RoPE + gate kernel. Of FlashInfer's norm-quant
+fusions, only MXFP4 has a ROCm counterpart: at small batches AITER's
+all-reduce + norm kernel also quantizes for an MXFP4 consumer linear. The
+other norms emit unquantized activations.
 """
 
 from collections.abc import Iterable
@@ -54,10 +55,15 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     fused_allreduce_gemma_rms_norm,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
@@ -68,6 +74,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -128,6 +135,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
+from vllm.v1.worker.ubatching import dbo_enabled
 
 from ..common.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
 
@@ -139,6 +147,19 @@ def _fused_gdn_gated_rms_norm(
 ) -> torch.Tensor:
     fused_gdn_gated_rms_norm(out=out, **kwargs)
     return out
+
+
+def _takes_mxfp4_input(linear: nn.Module | None) -> bool:
+    """Whether `linear` reads the MXFP4 activation AITER's fused all-reduce +
+    norm writes. The quant key does not encode the scale layout, so this also
+    requires the AITER kernel on its preshuffled path. Checked per call: the
+    path is chosen at weight loading, and LoRA hides the key."""
+    kernel = getattr(getattr(linear, "scheme", None), "ocp_mx_linear", None)
+    return (
+        get_input_quant_key(linear) == kMxfp4Dynamic
+        and isinstance(kernel, AiterMxfp4LinearKernel)
+        and kernel.supports_quantized_input()
+    )
 
 
 class Qwen3_5RMSNorm(nn.Module):
@@ -182,6 +203,38 @@ class Qwen3_5RMSNorm(nn.Module):
         if self.reduce_inputs:
             return fused_allreduce_gemma_rms_norm(x, residual, self)
         return self(x, residual)
+
+    def forward_fused(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None,
+        linear: nn.Module | None,
+    ) -> tuple[QuantizedActivation | None, torch.Tensor, torch.Tensor]:
+        """`forward_reduced`, with the normed activation also quantized for
+        `linear` inside the all-reduce kernel when `linear` takes MXFP4 and
+        the batch is small enough. Returns the quantized normed activation
+        (or None), the normed activation and the residual."""
+        if (
+            residual is not None
+            and self.reduce_inputs
+            # The fused all-reduce bypasses the microbatch hand-off.
+            and not dbo_enabled("all-reduce-overlap")
+            and _takes_mxfp4_input(linear)
+        ):
+            out = rocm_aiter_ops.fused_allreduce_rmsnorm_mxfp4_quant(
+                x, residual, self.weight, self.variance_epsilon, gemma_norm=True
+            )
+            if out is not None:
+                x_q, x_scales, y, residual = out
+                qa = QuantizedActivation(
+                    data=x_q,
+                    scale=x_scales,
+                    orig_dtype=x.dtype,
+                    orig_shape=x.shape,
+                    quant_key=kMxfp4Dynamic,
+                )
+                return qa, y, residual
+        return None, *self.forward_reduced(x, residual)
 
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
@@ -328,15 +381,24 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             return super().forward(hidden_states, residual, positions, **kwargs)
 
         # Each norm absorbs the preceding row-parallel linear's deferred
-        # all-reduce (reduce_inputs). layer_scale commutes with it.
-        hidden_states, residual = self.input_layernorm.forward_reduced(
-            hidden_states, residual
+        # all-reduce (reduce_inputs) and quantizes for its consumer when it
+        # can. layer_scale commutes with the deferred all-reduce.
+        is_gdn = self.layer_type == "linear_attention"
+        in_proj = self.linear_attn.in_proj_qkvz if is_gdn else self.self_attn.qkv_proj
+        in_proj_input, hidden_states, residual = self.input_layernorm.forward_fused(
+            hidden_states, residual, in_proj
         )
-        if self.layer_type == "linear_attention":
+        if is_gdn and in_proj_input is not None:
+            # GDN's in_proj_ba reads the unquantized normed activation.
+            hidden_states = self.linear_attn.forward_hip(
+                hidden_states, qkvz_input=in_proj_input
+            )
+        elif is_gdn:
             hidden_states = self.linear_attn(hidden_states)
         else:
             hidden_states = self.self_attn(
-                hidden_states=hidden_states, positions=positions
+                hidden_states=hidden_states if in_proj_input is None else in_proj_input,
+                positions=positions,
             )
 
         if self.layer_scale:
@@ -349,10 +411,14 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                     self.attn_layer_scale.to(hidden_states.dtype) + 1
                 )
 
-        hidden_states, residual = self.post_attention_layernorm.forward_reduced(
-            hidden_states, residual
+        # The MoE router needs the unquantized activation.
+        gate_up = self.mlp.gate_up_proj if isinstance(self.mlp, Qwen3NextMLP) else None
+        mlp_input, hidden_states, residual = (
+            self.post_attention_layernorm.forward_fused(
+                hidden_states, residual, gate_up
+            )
         )
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states if mlp_input is None else mlp_input)
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:

@@ -643,6 +643,9 @@ steps:
       - tests/distributed/test_rocm_quick_reduce.py
       - tests/distributed/test_quick_all_reduce.py
       - tests/distributed/test_aiter_rms_fallback.py
+      - tests/distributed/test_aiter_ar_rms_mxfp4_quant.py
+      - vllm/models/qwen3_5/amd/model.py
+      - vllm/model_executor/kernels/linear/mxfp4/aiter.py
       - tests/distributed/test_muse_spark_token_shard.py
       - tests/distributed/test_muse_spark_decode_moe.py
       - vllm/models/muse_spark/amd/model.py
@@ -668,6 +671,7 @@ steps:
       - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
       - pytest -v -s tests/distributed/test_quick_all_reduce.py
       - pytest -v -s tests/distributed/test_aiter_rms_fallback.py
+      - pytest -v -s tests/distributed/test_aiter_ar_rms_mxfp4_quant.py
       - pytest -v -s tests/distributed/test_muse_spark_token_shard.py
       - pytest -v -s tests/distributed/test_muse_spark_decode_moe.py
 

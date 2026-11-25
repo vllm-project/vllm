@@ -6,7 +6,12 @@ import torch
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    as_quantized_activation,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kMxfp4Dynamic,
 )
 from vllm.model_executor.utils import replace_parameter
@@ -122,18 +127,35 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         self.is_hadamard_fused = self.use_asm_gemm and size == 32
         return self.is_hadamard_fused
 
+    def input_quant_key(self) -> QuantKey:
+        # Unshuffled per-1x32 scales, read only by the preshuffled GEMM below
+        # MXFP4_UNSHUFFLED_SCALES_MAX_M: producers must also check
+        # supports_quantized_input and the batch size.
+        return kMxfp4Dynamic
+
+    def supports_quantized_input(self) -> bool:
+        """Whether `apply_weights` can read a `QuantizedActivation` (the
+        preshuffled ASM path, and no input rotation to apply)."""
+        return self.use_asm_gemm and not self.is_hadamard_fused
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        x_scales = None
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            assert self.supports_quantized_input()
+            x, x_scales = qa.data, qa.scale
         y = rocm_aiter_ops.mxfp4_gemm_dynamic_quant(
             x,
             layer.weight,
             layer.weight_scale,
             self.use_asm_gemm,
             self.out_dtype,
+            x_scales=x_scales,
             hadamard_rotate=self.is_hadamard_fused,
         )
         if bias is not None:

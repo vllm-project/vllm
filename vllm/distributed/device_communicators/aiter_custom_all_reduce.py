@@ -164,3 +164,70 @@ class AiterCustomAllreduce:
     @property
     def supports_per_group_quant(self) -> bool:
         return self.build_supports_per_group_quant()
+
+    def mxfp4_fused_ar_rms_stage(self, inp: torch.Tensor) -> bool | None:
+        """Kernel choice for AITER's fused AR+RMSNorm+MXFP4 quant with a bf16
+        side output: True for the one-stage kernel, False for the two-stage
+        kernel, None when neither launcher accepts the shape.
+
+        Mirrors `CudaCommunicator.fused_allreduce_rmsnorm_mxfp4_quant` in
+        aiter/dist/device_communicators/communicator_cuda.py.
+        """
+        if inp.dim() != 2 or inp.dtype not in (torch.bfloat16, torch.float16):
+            return None
+        m, k = inp.shape
+        world_size = self._impl.world_size
+        if k % 32 != 0 or world_size == 6:
+            return None
+        pack_size = 16 // inp.element_size()
+        block_size = k // pack_size
+        if block_size > 1024:
+            return None
+        can_1stage = (
+            m <= 4
+            or (k <= 4096 and m <= 32)
+            or (k <= 6144 and m <= 16)
+            or (k == 8192 and m <= 8)
+        )
+        can_2stage = (
+            block_size % world_size == 0
+            and block_size % 32 == 0
+            and m * k * inp.element_size() <= 512 * 1024
+        )
+        if can_2stage and world_size == 8 and m >= 16 and k <= 6144:
+            can_1stage = False
+        if can_1stage:
+            return True
+        if can_2stage:
+            return False
+        return None
+
+    def fused_ar_rms_mxfp4_quant(
+        self,
+        inp: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+        gemma_norm: bool,
+    ) -> tuple[torch.Tensor, ...] | None:
+        """AITER's fused AR+RMSNorm+MXFP4 quant with a bf16 side output:
+        (quantized activation, residual, per-1x32 scales, normed activation),
+        or None when neither kernel accepts the shape or custom all-reduce
+        declines the input.
+
+        Goes through `custom_fused_ar_rms_mxfp4_quant`, which decides whether
+        a captured input may be registered in place, as `custom_fused_ar_rms`
+        does for the AR+RMSNorm op.
+        """
+        stage = self.mxfp4_fused_ar_rms_stage(inp)
+        if stage is None:
+            return None
+        return self._impl.custom_fused_ar_rms_mxfp4_quant(
+            inp,
+            residual,
+            weight,
+            eps,
+            use_1stage=stage,
+            emit_bf16=True,
+            gemma_norm=gemma_norm,
+        )
