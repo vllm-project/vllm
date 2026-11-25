@@ -2139,10 +2139,12 @@ class TestThinkingConfig:
             max_tokens=4096,
             messages=[{"role": "user", "content": "Hello"}],
             thinking={"type": "enabled", "budget_tokens": 2048},
+            reasoning_end_str="Time to answer.</think>",
         )
 
         result = _convert(request)
         assert result.thinking_token_budget == 2048
+        assert result.reasoning_end_str == "Time to answer.</think>"
         assert result.reasoning_effort is None
 
     @pytest.mark.parametrize(

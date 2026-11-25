@@ -79,6 +79,13 @@ fn reject_unsupported_fields(request: &CompletionRequest) -> Result<(), ApiError
         bail_invalid_request!(param = "length_penalty", "length_penalty is not supported.");
     }
 
+    if request.reasoning_end_str.is_some() {
+        bail_invalid_request!(
+            param = "reasoning_end_str",
+            "reasoning_end_str is not supported."
+        );
+    }
+
     Ok(())
 }
 
@@ -163,6 +170,15 @@ mod tests {
 
         let request = CompletionRequest {
             length_penalty: Some(2.0),
+            ..base_request()
+        };
+        assert!(validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn validate_request_rejects_reasoning_end_str() {
+        let request = CompletionRequest {
+            reasoning_end_str: Some("Time to answer.</think>".to_string()),
             ..base_request()
         };
         assert!(validate_request(&request).is_err());

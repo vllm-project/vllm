@@ -8,6 +8,10 @@ from vllm.config.utils import config
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
 
+MAX_REQUEST_REASONING_END_TOKENS = 128
+"""Maximum number of tokens a per-request `SamplingParams.reasoning_end_str`
+may tokenize to. Bounds the per-request buffer kept by Model Runner V2."""
+
 
 @config
 class ReasoningConfig:

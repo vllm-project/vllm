@@ -403,6 +403,10 @@ pub struct ResponsesRequest {
     pub media_io_kwargs: Option<HashMap<String, Value>>,
     #[serde(default)]
     pub mm_processor_kwargs: Option<HashMap<String, Value>>,
+    /// Per-request override of the string forced when `thinking_token_budget`
+    /// is exhausted. Not supported by this frontend; rejected in validation.
+    #[serde(default)]
+    pub reasoning_end_str: Option<String>,
     /// Return the model's input and output messages on the response.
     #[serde(default)]
     pub enable_response_messages: bool,

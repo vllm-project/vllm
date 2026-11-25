@@ -48,6 +48,9 @@ pub struct GenerateSamplingParams {
     /// Decode token IDs to replay instead of sampling, gated by
     /// `--enable-trace-replay` in Python. Not supported.
     pub trace_decode_token_ids: Option<Vec<u32>>,
+    /// Per-request override of the string forced when `thinking_token_budget`
+    /// is exhausted. Not supported.
+    pub reasoning_end_str: Option<String>,
     /// The supported sampling parameters, lowered to the engine.
     #[serde(flatten)]
     pub inner: SamplingParams,

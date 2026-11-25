@@ -71,6 +71,12 @@ fn reject_unsupported_fields(request: &ChatCompletionRequest) -> Result<(), ApiE
             "mm_processor_kwargs is not supported."
         );
     }
+    if request.reasoning_end_str.is_some() {
+        bail_invalid_request!(
+            param = "reasoning_end_str",
+            "reasoning_end_str is not supported."
+        );
+    }
 
     Ok(())
 }
@@ -198,6 +204,15 @@ mod tests {
 
         let request = ChatCompletionRequest {
             length_penalty: Some(2.0),
+            ..base_request()
+        };
+        assert!(validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn validate_request_rejects_reasoning_end_str() {
+        let request = ChatCompletionRequest {
+            reasoning_end_str: Some("Time to answer.</think>".to_string()),
             ..base_request()
         };
         assert!(validate_request(&request).is_err());

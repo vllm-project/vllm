@@ -74,3 +74,35 @@ def test_completion_request_accepts_minus_one_as_unlimited():
         }
     )
     assert request.thinking_token_budget is None
+
+
+@pytest.mark.parametrize(
+    "request_cls,payload",
+    [
+        (ChatCompletionRequest, {"messages": [{"role": "user", "content": "hi"}]}),
+        (CompletionRequest, {"prompt": "hi"}),
+    ],
+)
+@pytest.mark.parametrize(
+    "use_beam_search,rejected",
+    [(False, False), ("false", False), ("0", False), (True, True)],
+)
+def test_reasoning_end_str_is_rejected_with_beam_search(
+    request_cls, payload, use_beam_search, rejected
+):
+    """Beam search drops the thinking budget; the override must not look applied.
+
+    The check sees `use_beam_search` after coercion, so string falsy values pass.
+    """
+    data = {
+        "model": "qwen",
+        **payload,
+        "use_beam_search": use_beam_search,
+        "thinking_token_budget": 8,
+        "reasoning_end_str": "Time to answer.</think>",
+    }
+    if rejected:
+        with pytest.raises(VLLMValidationError, match="reasoning_end_str"):
+            request_cls.model_validate(data)
+    else:
+        assert request_cls.model_validate(data).use_beam_search is False

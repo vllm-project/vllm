@@ -210,6 +210,10 @@ pub struct CompletionRequest {
     /// to "no budget").
     pub thinking_token_budget: Option<i64>,
 
+    /// Per-request override of the string forced when `thinking_token_budget`
+    /// is exhausted. Not supported by this frontend; rejected in validation.
+    pub reasoning_end_str: Option<String>,
+
     /// Request scheduling priority (lower means earlier; default 0)
     pub priority: Option<i32>,
 

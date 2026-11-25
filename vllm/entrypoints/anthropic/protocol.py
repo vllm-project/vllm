@@ -13,6 +13,7 @@ from vllm.entrypoints.generate.base.protocol import (
     MMPayload,
     resolve_return_mm_kwargs_alias,
 )
+from vllm.sampling_params import ReasoningEndStr
 
 
 class AnthropicError(BaseModel):
@@ -337,6 +338,7 @@ class AnthropicMessagesRequest(BaseModel):
             "sequence can end the response."
         ),
     )
+    reasoning_end_str: ReasoningEndStr = None
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",

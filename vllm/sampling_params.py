@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 import msgspec
 import numpy as np
-from pydantic import BeforeValidator, GetPydanticSchema, StrictInt
+from pydantic import BeforeValidator, Field, GetPydanticSchema, StrictInt
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -88,6 +88,23 @@ def validate_thinking_token_budget(value: int | float | bool | None) -> int | No
 ThinkingTokenBudget = Annotated[
     int | None,
     BeforeValidator(validate_thinking_token_budget),
+]
+
+MAX_REASONING_END_STR_CHARS = 1024
+"""Bound on `reasoning_end_str`, checked before it is tokenized."""
+
+ReasoningEndStr = Annotated[
+    str | None,
+    Field(
+        max_length=MAX_REASONING_END_STR_CHARS,
+        description=(
+            "Per-request override of the server's `reasoning_end_str` "
+            "(`--reasoning-config`): the string forced when "
+            "`thinking_token_budget` is exhausted, e.g. a transition phrase "
+            "followed by the reasoning end marker (e.g. `</think>`), which it "
+            "must end with. Only takes effect with `thinking_token_budget`."
+        ),
+    ),
 ]
 
 
@@ -455,6 +472,13 @@ class SamplingParams(
     """If provided, forces the engine to emit this predetermined sequence of
     token IDs during decoding instead of sampling randomly. Real logprobs are
     still computed. Conflict checking is performed at the engine level."""
+    reasoning_end_str: str | None = None
+    """Per-request override of `ReasoningConfig.reasoning_end_str`: the string
+    forced once `thinking_token_budget` is exhausted, e.g. a transition phrase
+    followed by the reasoning end marker. It must end with the reasoning
+    parser's end marker (e.g. `</think>`). Only takes effect together with
+    `thinking_token_budget`."""
+    _reasoning_end_token_ids: list[int] | None = None
 
     @staticmethod
     def from_optional(
@@ -495,6 +519,7 @@ class SamplingParams(
         routed_experts_prompt_start: int = 0,
         # Debugging / RL-specific parameters.
         trace_decode_token_ids: list[int] | None = None,
+        reasoning_end_str: str | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -540,6 +565,7 @@ class SamplingParams(
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,
             thinking_token_budget=thinking_token_budget,
+            reasoning_end_str=reasoning_end_str,
             include_stop_str_in_output=include_stop_str_in_output,
             ignore_eos=ignore_eos,
             max_tokens=max_tokens,
@@ -670,6 +696,14 @@ class SamplingParams(
         _verify_num_sequences(self.n, "n")
         if self.extra_args:
             self._verify_extra_args()
+        if self.reasoning_end_str is not None and not (
+            0 < len(self.reasoning_end_str) <= MAX_REASONING_END_STR_CHARS
+        ):
+            raise VLLMValidationError(
+                "reasoning_end_str must be a non-empty string of at most "
+                f"{MAX_REASONING_END_STR_CHARS} characters.",
+                parameter="reasoning_end_str",
+            )
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise VLLMValidationError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
@@ -932,6 +966,14 @@ class SamplingParams(
     def bad_words_token_ids(self) -> list[list[int]] | None:
         # For internal use only. Backward compatibility not guaranteed
         return self._bad_words_token_ids
+
+    @property
+    def reasoning_end_token_ids(self) -> list[int] | None:
+        """Token IDs of `reasoning_end_str`, set by the input processor.
+
+        For internal use only. Backward compatibility not guaranteed.
+        """
+        return self._reasoning_end_token_ids
 
     @property
     def num_logprobs(self) -> int | None:
@@ -1458,6 +1500,7 @@ class SamplingParams(
             f"stop_token_ids={self.stop_token_ids}, "
             f"bad_words={self.bad_words}, "
             f"thinking_token_budget={self.thinking_token_budget}, "
+            f"reasoning_end_str={self.reasoning_end_str!r}, "
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "
             f"ignore_eos={self.ignore_eos}, "
             f"max_tokens={self.max_tokens}, "

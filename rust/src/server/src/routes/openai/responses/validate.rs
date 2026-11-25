@@ -101,6 +101,13 @@ fn reject_unsupported_fields(request: &ResponsesRequest) -> Result<(), ApiError>
         );
     }
 
+    if request.reasoning_end_str.is_some() {
+        bail_invalid_request!(
+            param = "reasoning_end_str",
+            "reasoning_end_str is not supported."
+        );
+    }
+
     if request.enable_response_messages {
         bail_invalid_request!(
             param = "enable_response_messages",
@@ -128,6 +135,14 @@ mod tests {
     fn background_true_is_rejected() {
         let mut request = base_request();
         request.background = Some(true);
+        let error = validate_request(&request).unwrap_err();
+        assert!(matches!(error, ApiError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn reasoning_end_str_is_rejected() {
+        let mut request = base_request();
+        request.reasoning_end_str = Some("Time to answer.</think>".to_string());
         let error = validate_request(&request).unwrap_err();
         assert!(matches!(error, ApiError::InvalidRequest { .. }));
     }

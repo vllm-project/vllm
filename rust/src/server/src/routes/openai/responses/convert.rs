@@ -132,6 +132,7 @@ pub(crate) fn prepare_responses_request(
         chat_template_kwargs,
         media_io_kwargs: _,
         mm_processor_kwargs: _,
+        reasoning_end_str: _,
         enable_response_messages: _,
         structured_outputs,
         kv_transfer_params,

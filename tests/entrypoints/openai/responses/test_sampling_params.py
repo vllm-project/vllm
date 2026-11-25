@@ -64,6 +64,7 @@ class TestResponsesRequestSamplingParams:
             ignore_eos=True,
             spaces_between_special_tokens=False,
             thinking_token_budget=128,
+            reasoning_end_str="Time to answer.</think>",
             vllm_xargs={"custom": "value"},
         )
 
@@ -76,6 +77,7 @@ class TestResponsesRequestSamplingParams:
         assert sampling_params.ignore_eos is True
         assert sampling_params.spaces_between_special_tokens is False
         assert sampling_params.thinking_token_budget == 128
+        assert sampling_params.reasoning_end_str == "Time to answer.</think>"
         assert sampling_params.extra_args == {"custom": "value"}
 
     def test_stop_string_conversion(self):

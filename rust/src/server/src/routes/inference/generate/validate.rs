@@ -56,6 +56,13 @@ fn reject_unsupported_fields(request: &GenerateRequest) -> Result<(), ApiError> 
         );
     }
 
+    if request.sampling_params.reasoning_end_str.is_some() {
+        bail_invalid_request!(
+            param = "reasoning_end_str",
+            "reasoning_end_str is not supported."
+        );
+    }
+
     Ok(())
 }
 
@@ -73,6 +80,16 @@ mod tests {
             "sampling_params": {}
         }))
         .expect("parse request")
+    }
+
+    #[test]
+    fn validate_request_rejects_reasoning_end_str() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [11, 22],
+            "sampling_params": {"reasoning_end_str": "Time to answer.</think>"},
+        }))
+        .expect("parse request");
+        assert!(validate_request(&request).is_err());
     }
 
     #[test]

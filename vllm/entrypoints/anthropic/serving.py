@@ -740,6 +740,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
             min_tokens=anthropic_request.min_tokens,
+            reasoning_end_str=anthropic_request.reasoning_end_str,
             watermarking=anthropic_request.watermarking,
             cache_salt=anthropic_request.cache_salt,
             kv_transfer_params=anthropic_request.kv_transfer_params,
