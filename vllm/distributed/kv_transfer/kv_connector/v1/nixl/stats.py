@@ -99,7 +99,7 @@ class NixlKVConnectorStats(KVConnectorStats):
             and len(self.data["num_kv_expired_reqs"]) == 0
             and len(self.data["num_notifications_after_expiry"]) == 0
             and len(self.data["num_declined_expired_reads"]) == 0
-            and len(self.data.get("num_registration_expired", [])) == 0
+            and len(self.data["num_registration_expired"]) == 0
         )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
@@ -126,14 +126,7 @@ class NixlKVConnectorStats(KVConnectorStats):
             "Num KV expired reqs": len(self.data["num_kv_expired_reqs"]),
             "Num notifs after expiry": len(self.data["num_notifications_after_expiry"]),
             "Num declined expired reads": len(self.data["num_declined_expired_reads"]),
-        }
-        # Push-mode-only reliability signals; distinct from the transport
-        # failure/KV-expiry grouping above since neither is a transfer
-        # failure or an autoscaler signal.
-        push_reliability_counts = {
-            "Num registration expired": len(
-                self.data.get("num_registration_expired", [])
-            ),
+            "Num registration expired": len(self.data["num_registration_expired"]),
         }
         if self.num_successful_transfers == 0:
             # Timing / throughput stats only cover successful transfers. If
@@ -149,7 +142,6 @@ class NixlKVConnectorStats(KVConnectorStats):
                 "Throughput (MB/s)": 0,
                 "Avg number of descriptors": 0,
                 **failure_counts,
-                **push_reliability_counts,
             }
 
         xfer_time = np.asarray(self.data["transfer_duration"])
@@ -176,7 +168,6 @@ class NixlKVConnectorStats(KVConnectorStats):
             "Throughput (MB/s)": round(throughput_mb_s.item(), 3),
             "Avg number of descriptors": round(descs.mean().item(), 1),
             **failure_counts,
-            **push_reliability_counts,
         }
 
     @property

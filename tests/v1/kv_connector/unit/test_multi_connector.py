@@ -714,6 +714,7 @@ class TestMultiConnectorStats:
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
                 "num_declined_expired_reads": [],
+                "num_registration_expired": [],
             }
         }
 
@@ -742,6 +743,7 @@ class TestMultiConnectorStats:
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
                 "num_declined_expired_reads": [],
+                "num_registration_expired": [],
             },
             "MockConnector": {"mock_field": [1, 2, 3]},
         }
@@ -775,6 +777,7 @@ class TestMultiConnectorStats:
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
                 "num_declined_expired_reads": [],
+                "num_registration_expired": [],
             },
         }
 
@@ -798,6 +801,7 @@ class TestMultiConnectorStats:
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
                 "num_declined_expired_reads": [],
+                "num_registration_expired": [],
             }
         )
         mock_stats = MockConnectorStats(data={"mock_field": [1, 2, 3]})
@@ -831,6 +835,7 @@ class TestMultiConnectorStats:
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
                 "num_declined_expired_reads": [],
+                "num_registration_expired": [],
             }
         )
 
@@ -866,6 +871,7 @@ class TestMultiConnectorStats:
                 "num_kv_expired_reqs": [],
                 "num_notifications_after_expiry": [],
                 "num_declined_expired_reads": [],
+                "num_registration_expired": [],
             },
             "ExampleConnector": {"some_field": [1, 2, 3]},
         }
@@ -924,6 +930,7 @@ class TestMultiConnectorStats:
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
                         "num_declined_expired_reads": [],
+                        "num_registration_expired": [],
                     }
                 )
             }
@@ -943,6 +950,7 @@ class TestMultiConnectorStats:
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
                         "num_declined_expired_reads": [],
+                        "num_registration_expired": [],
                     }
                 )
             }
@@ -978,6 +986,7 @@ class TestMultiConnectorStats:
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
                         "num_declined_expired_reads": [],
+                        "num_registration_expired": [],
                     }
                 )
             }
@@ -1008,6 +1017,7 @@ class TestMultiConnectorStats:
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
                         "num_declined_expired_reads": [],
+                        "num_registration_expired": [],
                     }
                 )
             }
@@ -1038,6 +1048,7 @@ class TestMultiConnectorStats:
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
                         "num_declined_expired_reads": [],
+                        "num_registration_expired": [],
                     }
                 )
             }
@@ -1071,6 +1082,7 @@ class TestMultiConnectorStats:
                         "num_kv_expired_reqs": [],
                         "num_notifications_after_expiry": [],
                         "num_declined_expired_reads": [],
+                        "num_registration_expired": [],
                     }
                 )
             }
