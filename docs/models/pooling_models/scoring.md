@@ -25,6 +25,13 @@ The score models is designed to compute similarity scores between two input prom
 !!! note
     Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.
 
+Scoring and reranking limit the characters in each query and document before
+tokenization. The limit is the model's context length multiplied by the
+tokenizer's maximum characters per token. For multimodal inputs, text parts
+within each query or document count toward the same limit. Cross-encoders also
+check the combined prompt. Shorten or split inputs that exceed the character
+limit before sending them, even when token truncation is enabled.
+
 ### Score Types
 
 The three supported scoring functions are as illustrated in the figure below.

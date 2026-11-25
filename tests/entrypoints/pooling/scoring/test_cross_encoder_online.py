@@ -9,9 +9,11 @@ import torch.nn.functional as F
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.entrypoints.pooling.scoring.protocol import RerankResponse, ScoreResponse
+from vllm.tokenizers import get_tokenizer
 
 MODEL_NAME = "BAAI/bge-reranker-base"
 DTYPE = "half"
+MAX_MODEL_LEN = 100
 input_text = "This product was excellent and exceeded my expectations"
 input_tokens = [0, 3293, 12996, 509, 40881, 136, 204839, 297, 759, 202702, 2]
 
@@ -29,7 +31,7 @@ TEXTS_2 = [
 
 @pytest.fixture(scope="module")
 def server():
-    args = ["--enforce-eager", "--max-model-len", "100", "--dtype", DTYPE]
+    args = ["--enforce-eager", "--max-model-len", str(MAX_MODEL_LEN), "--dtype", DTYPE]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -363,6 +365,35 @@ async def test_invocations(server: RemoteOpenAIServer):
         assert rerank_result["relevance_score"] == pytest.approx(
             invocations_result["relevance_score"], rel=0.01
         )
+
+
+@pytest.mark.parametrize("endpoint", ["score", "v2/rerank", "invocations"])
+def test_scoring_rejects_overlong_text_with_truncation(server, endpoint):
+    max_chars = MAX_MODEL_LEN * get_tokenizer(MODEL_NAME).max_chars_per_token
+    long_text = "a" * (max_chars + 1)
+    if endpoint == "score":
+        inputs = {
+            "queries": long_text,
+            "documents": TEXTS_2,
+            "max_tokens_per_query": 10,
+        }
+        role = "query"
+    else:
+        inputs = {
+            "query": TEXTS_1[0],
+            "documents": [long_text],
+            "max_tokens_per_doc": 10,
+        }
+        role = "document"
+
+    response = requests.post(
+        server.url_for(endpoint),
+        json={"model": MODEL_NAME, "truncate_prompt_tokens": 50, **inputs},
+    )
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["param"] == "input_text"
+    assert f"Scoring {role} contains" in error["message"]
 
 
 @pytest.mark.asyncio

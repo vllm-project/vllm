@@ -30,7 +30,7 @@ from vllm.entrypoints.pooling.scoring.io_processor import (
     LateInteractionIOProcessor,
     _apply_post_tokenization_to_token_type_ids,
 )
-from vllm.entrypoints.pooling.scoring.types import ScoringData
+from vllm.entrypoints.pooling.scoring.types import ScoreContentPartParam, ScoringData
 from vllm.entrypoints.pooling.scoring.utils import compress_token_type_ids
 from vllm.entrypoints.pooling.types import (
     EncodeCMPLRenderParams,
@@ -38,6 +38,7 @@ from vllm.entrypoints.pooling.types import (
     PoolingEngineInput,
     ScoringRenderParams,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.jina_vl import JinaVLForSequenceClassification
 from vllm.multimodal.utils import encode_image_url
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
@@ -53,6 +54,7 @@ from vllm.renderers.chat_utils.item_tracker import (
 )
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import get_cached_tokenizer
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -106,7 +108,8 @@ def llm_reranker_processor(tmp_path, scoring_tokenizer):
             enforce_eager=True,
         )
     )
-    renderer = HfRenderer(config, TokenizersBackend.from_pretrained(tmp_path))
+    tokenizer = get_cached_tokenizer(TokenizersBackend.from_pretrained(tmp_path))
+    renderer = HfRenderer(config, tokenizer)
     try:
         yield CrossEncoderIOProcessor(config, renderer, ChatTemplateConfig())
     finally:
@@ -193,6 +196,22 @@ def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(
     expected = [1, 3, 5, 6, 2]
     assert uncapped["prompt_token_ids"] == expected
     assert nonbinding["prompt_token_ids"] == expected
+
+
+def test_scoring_rejects_overlong_rendered_prompt(llm_reranker_processor):
+    processor = llm_reranker_processor
+    max_chars = processor.model_config.max_model_len
+    max_chars *= processor.tokenizer.max_chars_per_token
+
+    with pytest.raises(VLLMValidationError, match="Scoring prompt contains"):
+        processor.get_score_prompt(
+            "a",
+            "bc",
+            {},
+            chat_template="{{ instruction }}",
+            chat_template_content_format="string",
+            chat_template_kwargs={"instruction": "a" * (max_chars + 1)},
+        )
 
 
 @pytest.mark.parametrize(
@@ -451,7 +470,8 @@ def multimodal_reranker_processor(tmp_path, request, scoring_tokenizer):
             enforce_eager=True,
         )
     )
-    renderer = HfRenderer(config, TokenizersBackend.from_pretrained(tmp_path))
+    tokenizer = get_cached_tokenizer(TokenizersBackend.from_pretrained(tmp_path))
+    renderer = HfRenderer(config, tokenizer)
     try:
         yield CrossEncoderIOProcessor(
             config,
@@ -486,6 +506,22 @@ def test_scoring_template_keeps_images_distinct_from_literal_placeholder_text(
     assert inputs["prompt_token_ids"] == processor.tokenizer.encode(expected)
     assert inputs["multi_modal_data"]["image"][0].getpixel((0, 0)) == (255, 0, 0)
     assert inputs["multi_modal_uuids"] == {"image": ["document-image"]}
+
+
+def test_scoring_character_limit_counts_all_text_parts(multimodal_reranker_processor):
+    processor = multimodal_reranker_processor
+    max_chars = processor.model_config.max_model_len
+    max_chars *= processor.tokenizer.max_chars_per_token
+    document: list[ScoreContentPartParam] = [
+        {"type": "text", "text": "a" * (max_chars // 2)},
+        {"type": "text", "text": "b" * (max_chars - max_chars // 2)},
+    ]
+
+    assert processor.valid_inputs("a", {"content": document}).data_2 == [document]
+
+    document.append({"type": "text", "text": "b"})
+    with pytest.raises(VLLMValidationError, match="Scoring document contains"):
+        processor.valid_inputs("a", {"content": document})
 
 
 @pytest.mark.parametrize(

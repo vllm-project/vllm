@@ -121,6 +121,17 @@ class ScoringIOProcessor(PoolingIOProcessor):
     def create_pooling_params(self, request):
         return request.to_pooling_params(self.pooling_task)
 
+    def _validate_text_length(self, num_chars: int, role: str) -> None:
+        max_chars = self.model_config.max_model_len * self.tokenizer.max_chars_per_token
+        if num_chars > max_chars:
+            raise VLLMValidationError(
+                f"Scoring {role} contains {num_chars} characters, exceeding "
+                f"the limit of {max_chars}. "
+                "Please reduce the length of the input prompt.",
+                parameter="input_text",
+                value=num_chars,
+            )
+
     def _validate_token_limit(self, value: int, name: str) -> None:
         if value < 0:
             raise ValueError(f"{name} must be a non-negative integer")
@@ -190,6 +201,24 @@ class ScoringIOProcessor(PoolingIOProcessor):
             is_multimodal_model=self.is_multimodal_model,
             architecture=self.architecture,
         )
+        for inputs, role in (
+            (scoring_data.data_1, "query"),
+            (scoring_data.data_2, "document"),
+        ):
+            for data in inputs:
+                if isinstance(data, str):
+                    num_chars = len(data)
+                else:
+                    num_chars = 0
+                    for part in data:
+                        if isinstance(part, str):
+                            num_chars += len(part)
+                        elif part.get("type") == "text":
+                            text = part.get("text")
+                            if isinstance(text, str):
+                                num_chars += len(text)
+                self._validate_text_length(num_chars, role)
+
         return scoring_data
 
     def valid_inputs_online(self, request: AnyPoolingRequest):
@@ -790,8 +819,10 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 if full_prompt is None:
                     raise ValueError("Get empty score template from model")
 
+                self._validate_text_length(len(full_prompt), "prompt")
                 prompt_inputs = tokenizer(full_prompt, **local_kwargs)
             else:
+                self._validate_text_length(len(prompt_1) + len(prompt_2), "prompt")
                 if self.use_sep_token:
                     # cross_encoder models defaults to using separating token.
                     if max_tokens_per_doc > 0 and isinstance(prompt_2, str):
@@ -857,6 +888,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     tokenize=False,
                     **_safe_kwargs,
                 )
+                self._validate_text_length(len(full_prompt), "prompt")
                 prompt_inputs = tokenizer(full_prompt, **encode_kwargs)
             except ChatTemplateResolutionError:
                 conversation, mm_data, mm_uuids = parse_score_messages(
