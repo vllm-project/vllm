@@ -22,6 +22,10 @@ from vllm.config.cache import CacheConfig
 from vllm.config.kernel import KernelConfig
 from vllm.config.model import ModelConfig
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.kernels.linear import MarlinFP8ScaledMMLinearKernel
+from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
+    TorchFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
@@ -42,6 +46,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
 )
+from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
@@ -792,6 +797,48 @@ def test_model_load_and_run(
         set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
     ):
         model(input_ids, positions, None)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and is_quant_method_supported("fp8")),
+    reason="Needs CUDA FP8 support.",
+)
+def test_torch_fp8_linear_falls_back_for_dims_not_divisible_by_16(
+    monkeypatch, dist_init, workspace_init
+) -> None:
+    """torch._scaled_mm on CUDA rejects K or N not divisible by 16, so with the
+    kernels ahead of it disabled, down_proj with K=3080 must run on FP8 Marlin
+    instead of failing in the forward."""
+    monkeypatch.setenv(
+        "VLLM_DISABLED_KERNELS",
+        "FlashInferFP8ScaledMMLinearKernel,CutlassFP8ScaledMMLinearKernel,"
+        "B12xTensorFP8ScaledMMLinearKernel",
+    )
+    model, vllm_config = load_model_without_vllm_runner(
+        "Qwen/Qwen3-0.6B",
+        quantization="fp8",
+        model_config_kwargs={
+            "hf_overrides": {"num_hidden_layers": 1, "intermediate_size": 3080}
+        },
+        model_loader_cls=DummyModelLoader,
+    )
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
+    input_ids = torch.tensor([1, 2, 3, 4], device=DEVICE_TYPE)
+    positions = torch.arange(input_ids.numel(), device=DEVICE_TYPE)
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
+    ):
+        hidden_states = model(input_ids, positions, None)
+
+    assert torch.isfinite(hidden_states).all()
+    mlp = model.model.layers[0].mlp
+    assert isinstance(
+        mlp.gate_up_proj.quant_method.fp8_linear, TorchFP8ScaledMMLinearKernel
+    )
+    assert isinstance(
+        mlp.down_proj.quant_method.fp8_linear, MarlinFP8ScaledMMLinearKernel
+    )
 
 
 @pytest.mark.skipif(
