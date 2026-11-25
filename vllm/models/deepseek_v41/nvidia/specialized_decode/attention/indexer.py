@@ -48,7 +48,7 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     apply_candidate_mask,
     select_candidate_blocks,
 )
-from vllm.model_executor.layers.indexer_overlap import CandidateStream
+from vllm.model_executor.layers.indexer_overlap import CandidateStream, join_candidates
 from vllm.model_executor.layers.indexer_topk import get_indexer_topk
 from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
@@ -477,6 +477,8 @@ class CandidateOverlap(CandidateStream):
         if found is None or found[0].kernel_metadata is not None:
             return
         rows, sparse_block_kv = found
+        # The stock indexer may have deferred writing them (VLLM_INDEXER_OVERLAP).
+        join_candidates()
         schedule = self.defer(lambda: self._expand_and_schedule(rows, sparse_block_kv))
         schedule.record_stream(torch.cuda.current_stream())
         rows.kernel_metadata = schedule
