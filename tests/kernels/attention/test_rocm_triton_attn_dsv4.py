@@ -3227,3 +3227,86 @@ def test_sparse_mla_backend_forward_mqa_fp8_ds_mla_merged_cache() -> None:
 
     err = (output.float() - ref).abs()
     assert err.max().item() < 0.02, f"max abs err {err.max().item()}"
+
+
+@requires_gfx950
+@pytest.mark.parametrize("num_tokens", [1, 7, 512])
+@torch.inference_mode()
+def test_plain_fp8_sparse_mla_fused_q_rope_matches_two_step(
+    num_tokens: int, default_vllm_config
+) -> None:
+    """A raw bf16 q that the kernel rotates and casts to fp8 gives the output
+    of the separate Q RoPE + fp8 cast followed by the same kernel."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.sparse_mla_fuses_q_rope():
+        pytest.skip("the installed aiter sparse MLA has no fused Q RoPE")
+
+    device = torch.device("cuda")
+    set_random_seed(0)
+    num_heads, head_dim, block_size = 64, 512, 64
+    kv_scale = torch.tensor([0.01], dtype=torch.float32, device=device)
+    q_scale = torch.tensor([0.01], dtype=torch.float32, device=device)
+    limits = torch.finfo(torch.float8_e4m3fn)
+
+    def make_kv_cache(num_rows: int) -> torch.Tensor:
+        values = torch.randn(
+            num_rows // block_size, block_size, head_dim, device=device
+        )
+        return (
+            (0.5 * values / kv_scale)
+            .clamp(limits.min, limits.max)
+            .to(torch.float8_e4m3fn)
+        )
+
+    def ragged(keys_per_row: int, num_rows: int) -> tuple[torch.Tensor, torch.Tensor]:
+        indices = torch.rand(num_tokens, num_rows, device=device).argsort(dim=1)
+        indptr = torch.arange(num_tokens + 1, device=device) * keys_per_row
+        return indptr.int(), indices[:, :keys_per_row].reshape(-1).int()
+
+    swa_cache, extra_cache = make_kv_cache(256), make_kv_cache(128)
+    swa_indptr, swa_indices = ragged(32, 256)
+    extra_indptr, extra_indices = ragged(48, 128)
+    sink = torch.randn(num_heads, device=device)
+    rotary_emb = _make_dsv4_rotary(device)
+    positions = torch.randint(0, _ROTARY_CACHE_LEN, (num_tokens,), device=device)
+    q = 0.5 * torch.randn(
+        num_tokens, num_heads, head_dim, dtype=torch.bfloat16, device=device
+    )
+
+    def sparse_mla(q_in: torch.Tensor, **fused_q_rope) -> torch.Tensor:
+        out = torch.empty(q.shape, dtype=torch.bfloat16, device=device)
+        rocm_aiter_ops.triton_sparse_mla_fwd(
+            q_in,
+            swa_cache,
+            out,
+            head_dim**-0.5,
+            swa_indptr,
+            swa_indices,
+            kv_lora_rank=head_dim,
+            qk_rope_head_dim=0,
+            q_scale=q_scale,
+            kv_scale=kv_scale,
+            attn_sink=sink,
+            extra_kv_buffer=extra_cache,
+            extra_kv_indptr=extra_indptr,
+            extra_kv_indices=extra_indices,
+            has_invalid=False,
+            dot_precision="fp8",
+            inv_rope_positions=positions,
+            inv_rope_cos_sin_cache=rotary_emb.cos_sin_cache,
+            **fused_q_rope,
+        )
+        return out
+
+    rotated, _ = rotary_emb.forward_native(positions, q.clone(), None)
+    q_fp8 = (rotated.float() / q_scale).clamp(limits.min, limits.max)
+    expected = sparse_mla(q_fp8.to(torch.float8_e4m3fn))
+    actual = sparse_mla(
+        q,
+        q_rope_positions=positions,
+        q_rope_cos_sin_cache=rotary_emb.cos_sin_cache,
+    )
+
+    assert expected.abs().amax() > 0
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)

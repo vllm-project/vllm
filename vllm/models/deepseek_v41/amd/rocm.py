@@ -7,6 +7,7 @@ from typing import Any, ClassVar, cast
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import (
@@ -110,6 +111,23 @@ def _aiter_sparse_mla_enabled(has_foreign_kv_writer: bool) -> bool:
         )
         return False
     return True
+
+
+def _q_rope_fusion_min_tokens(use_aiter_sparse_mla: bool) -> int | None:
+    """Smallest step whose Q RoPE and fp8 cast move into the aiter kernel.
+
+    Returns None when the fusion is off: a layer without aiter sparse MLA, the
+    kill switch, or an aiter whose sparse MLA does not take a raw bf16 Q.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not (
+        use_aiter_sparse_mla
+        and envs.VLLM_ROCM_FUSE_Q_ROPE
+        and rocm_aiter_ops.sparse_mla_fuses_q_rope()
+    ):
+        return None
+    return envs.VLLM_ROCM_FUSE_Q_ROPE_MIN_TOKENS
 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
@@ -745,6 +763,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             self._has_foreign_kv_writer
         )
         self._plain_fp8_kv = self.kv_cache_torch_dtype == torch.float8_e4m3fn
+        self._q_rope_fusion_min_tokens = (
+            _q_rope_fusion_min_tokens(self._use_aiter_sparse_mla)
+            if self._plain_fp8_kv
+            else None
+        )
         if self._plain_fp8_kv:
             _register_plain_fp8_kv_scales(self, self._use_aiter_sparse_mla)
         if self.compressor is None and self.indexer is None:
@@ -754,6 +777,12 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
+
+    def fuses_q_rope_in_attention(self, num_tokens: int) -> bool:
+        return (
+            self._q_rope_fusion_min_tokens is not None
+            and num_tokens >= self._q_rope_fusion_min_tokens
+        )
 
     def _uses_fp8_ds_mla_layout(self) -> bool:
         return get_current_vllm_config().cache_config.cache_dtype != "fp8_e4m3"
