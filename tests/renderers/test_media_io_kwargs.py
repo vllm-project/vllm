@@ -12,7 +12,7 @@ from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.renderers.base import BaseRenderer
 from vllm.renderers.params import ChatParams
 
-# Sentinel distinguishing "key absent" from an explicit ``None``/``{}``.
+# Sentinel distinguishing "key absent" from an explicit `None`/`{}`.
 _UNSET = object()
 
 DEFAULT_KW = {"image": {"num_frames": 32, "fps": 2}}
@@ -82,7 +82,7 @@ def _make_extras(media_io_kwargs):
 
 
 def _install_merge_spy(monkeypatch):
-    """Record ``(defaults, overrides)`` passed to ``merge_media_io_kwargs``."""
+    """Record `(defaults, overrides)` passed to `merge_media_io_kwargs`."""
     calls = []
 
     def spy(defaults, overrides):
@@ -98,10 +98,10 @@ def _install_merge_spy(monkeypatch):
 # Completion path
 # =========================================================================
 class TestCmplPath:
-    """``render_cmpl`` / ``render_cmpl_async`` contract.
+    """`render_cmpl` / `render_cmpl_async` contract.
 
-    Request-level ``media_io_kwargs`` are merged into every multimodal
-    completion prompt; ``prompt_embeds`` and text-only prompts are left
+    Request-level `media_io_kwargs` are merged into every multimodal
+    completion prompt; `prompt_embeds` and text-only prompts are left
     untouched.  Priority is request > prompt default.
     """
 
@@ -227,11 +227,11 @@ class TestCmplPath:
 # Chat path
 # =========================================================================
 class TestChatPath:
-    """``render_chat`` / ``render_chat_async`` contract.
+    """`render_chat` / `render_chat_async` contract.
 
-    Request-level ``media_io_kwargs`` are merged into ``ChatParams`` before
-    ``render_messages`` runs; the popped key must not reach
-    ``_apply_prompt_extras``.  Priority is request > chat-params default.
+    Request-level `media_io_kwargs` are merged into `ChatParams` before
+    `render_messages` runs; the popped key must not reach
+    `_apply_prompt_extras`.  Priority is request > chat-params default.
     """
 
     @staticmethod
