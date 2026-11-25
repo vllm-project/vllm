@@ -158,8 +158,6 @@ class ConvertWeights:
                 )
             for target, piece in pieces.items():
                 yield first.replace(targets[0], target), piece
-        if pending:
-            raise ValueError(f"Missing some of {sources} for {list(pending)}")
 
 
 VLLM_ATTN_ATTR = "attn"
@@ -463,24 +461,19 @@ class Base(
         """
         orig_to_new_renaming: list[WeightRenaming] = []
         orig_to_new_regex: dict[re.Pattern, str | None] = {}
-        converters: list[WeightConverter] = []
+        weight_converters: list[WeightConverter] = []
 
         for mapping in self._weight_conversions():
             # Handle weights which have been renamed in Transformers
             if isinstance(mapping, WeightRenaming):
                 orig_to_new_renaming.append(mapping)
-            # Handle weights which Transformers splits or concatenates, unless a source
-            # pattern is a wildcard, which can match several tensors per target
+            # Handle weights which Transformers splits or concatenates
             # TODO: Use `isinstance` once the minimum Transformers version is >= 5.22
-            elif (
-                isinstance(mapping, WeightConverter)
-                and all(
-                    type(op).__name__ in ("Chunk", "Split", "Concatenate")
-                    for op in mapping.operations
-                )
-                and not any("*" in source for source in mapping.source_patterns)
+            elif isinstance(mapping, WeightConverter) and all(
+                type(op).__name__ in ("Chunk", "Split", "Concatenate")
+                for op in mapping.operations
             ):
-                converters.append(mapping)
+                weight_converters.append(mapping)
 
         # Standardise base model prefix
         bmp = self.model.base_model_prefix
@@ -515,7 +508,7 @@ class Base(
             orig_to_new_regex=orig_to_new_regex,
         )
         # `Split` reads the sizes of its targets before vLLM's fusions replace them
-        self.weight_converters = [ConvertWeights(c, self) for c in converters]
+        self.weight_converters = [ConvertWeights(c, self) for c in weight_converters]
 
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()
