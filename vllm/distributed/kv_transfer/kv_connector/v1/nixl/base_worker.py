@@ -218,8 +218,22 @@ class _RemoteStage:
     # Number of blocks and cache group of each of the stage's paired regions.
     region_num_blocks: list[int]
     region_group_ids: list[int]
-    # Remote TP rank -> prepped descriptor list of that rank's paired regions.
+    # Remote TP rank -> prepped descriptor list of that rank's paired regions
+    # (only the device regions when the rank also holds DRAM regions).
     xfer_side_handles: dict[int, int] = field(default_factory=dict)
+    # Remote TP rank -> that rank's DRAM regions, for a mixed-memory remote.
+    dram_descs: dict[int, "_MixedMemDescs"] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class _MixedMemDescs:
+    """A descriptor list split across a DRAM and a device prepped list."""
+
+    # Prepped list of the DRAM descriptors.
+    dram_handle: int
+    # Per flat descriptor: whether it is in DRAM, and its index in its list.
+    desc_is_dram: np.ndarray
+    desc_pos: np.ndarray
 
 
 class NixlBaseConnectorWorker:
@@ -950,6 +964,11 @@ class NixlBaseConnectorWorker:
         self._remote_agents: dict[EngineId, dict[tuple[int, int], str]] = defaultdict(
             dict
         )
+        # Agents loaded only to read a shared HiSparse host pool that another
+        # remote rank registered; they get no notifications.
+        self._dram_owner_agents: dict[EngineId, dict[tuple[int, int], str]] = (
+            defaultdict(dict)
+        )
         # Failed reads need a local metadata probe; invalid peers wait for drain.
         self._failed_remote_engines: set[EngineId] = set()
         # Failed reads that NIXL reported as a lost connection. Their metadata
@@ -1353,93 +1372,23 @@ class NixlBaseConnectorWorker:
             for remote_pp_rank, remote_rank in itertools.product(
                 range(remote_pp_size), p_remote_ranks
             ):
-                logger.debug(
-                    "Querying metadata on path: %s at remote pp rank %s, tp rank %s",
-                    path,
-                    remote_pp_rank,
-                    remote_rank,
+                metadata, rtt, offset = self._query_remote_metadata(
+                    sock, path, remote_pp_rank, remote_rank, expected_engine_id
                 )
-
-                # Send query for the request.
-                msg = msgspec.msgpack.encode(
-                    (GET_META_MSG, remote_pp_rank, remote_rank)
-                )
-                # Set receive timeout to 5 seconds to avoid hanging on dead server
-                sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
-                start_time = time.perf_counter()
-                sock.send(msg)
-                reply_parts = sock.recv_multipart()
-                recv_time = time.perf_counter()
-                assert len(reply_parts) == 2
-                handshake_bytes = reply_parts[0]
-
-                remote_perf = msgspec.msgpack.decode(reply_parts[1])
-                rtt = recv_time - start_time
                 if rtt < best_rtt:
                     best_rtt = rtt
-                    best_offset = remote_perf - (start_time + recv_time) / 2
-
-                # Decode handshake payload to get compatibility hash
-                handshake_decoder = msgspec.msgpack.Decoder(NixlHandshakePayload)
-                try:
-                    handshake_payload = handshake_decoder.decode(handshake_bytes)
-                except (msgspec.DecodeError, msgspec.ValidationError) as e:
-                    raise RuntimeError(
-                        f"Failed to decode NixlHandshakePayload. This likely indicates "
-                        f"an incompatibility between connector version. Error: {e}"
-                    ) from e
-
-                got_metadata_time = time.perf_counter()
-                logger.debug(
-                    "NIXL handshake: get metadata took: %s",
-                    got_metadata_time - start_time,
-                )
-
-                # Check compatibility hash BEFORE decoding agent metadata
-                assert self.compat_hash is not None
+                    best_offset = offset
+                dram_owner_meta = None
+                dram_tp_rank = metadata.dram_tp_rank
                 if (
-                    self.enforce_compat_hash
-                    and handshake_payload.compatibility_hash != self.compat_hash
+                    not notif_agents_only
+                    and dram_tp_rank is not None
+                    and dram_tp_rank != remote_rank
                 ):
-                    raise RuntimeError(
-                        f"NIXL compatibility hash mismatch. "
-                        f"Local: {self.compat_hash}, "
-                        f"Remote: {handshake_payload.compatibility_hash}. "
-                        f"Prefill and decode instances have incompatible "
-                        f"configurations. This may be due to: different vLLM versions,"
-                        f" models, dtypes, KV cache layouts, attention backends, etc. "
-                        f"Both instances must use identical configurations."
-                        f"Disable this check using "
-                        f'--kv-transfer-config \'{{"kv_connector_extra_config": '
-                        f'{{"enforce_handshake_compat": false}}}}\''
+                    dram_owner_meta, _, _ = self._query_remote_metadata(
+                        sock, path, remote_pp_rank, dram_tp_rank, expected_engine_id
                     )
-
-                logger.info(
-                    "NIXL compatibility check passed (hash: %s)",
-                    handshake_payload.compatibility_hash,
-                )
-
-                # Decode agent metadata
-                metadata_decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
-                try:
-                    metadata = metadata_decoder.decode(
-                        handshake_payload.agent_metadata_bytes
-                    )
-                except (msgspec.DecodeError, msgspec.ValidationError) as e:
-                    # This should not happen if hash matched
-                    raise RuntimeError(
-                        f"Failed to decode NixlAgentMetadata. Error: {e}"
-                    ) from e
-
-                self._validate_remote_parallel_config(metadata)
-
-                # Ensure engine id matches.
-                if metadata.engine_id != expected_engine_id:
-                    raise RuntimeError(
-                        f"Remote NIXL agent engine ID mismatch. "
-                        f"Expected {expected_engine_id},"
-                        f"received {metadata.engine_id}."
-                    )
+                got_metadata_time = time.perf_counter()
 
                 # Register Remote agent.
                 if notif_agents_only:
@@ -1454,6 +1403,7 @@ class NixlBaseConnectorWorker:
                         metadata.dcp_size,
                         remote_pp_rank=remote_pp_rank,
                         remote_pp_size=remote_pp_size,
+                        dram_owner_meta=dram_owner_meta,
                     )
                 setup_agent_time = time.perf_counter()
                 logger.debug(
@@ -1466,6 +1416,98 @@ class NixlBaseConnectorWorker:
 
         assert best_offset is not None
         return remote_rank_to_agent_name, best_offset
+
+    def _query_remote_metadata(
+        self,
+        sock: zmq.Socket,
+        path: str,
+        remote_pp_rank: int,
+        remote_rank: int,
+        expected_engine_id: str,
+    ) -> tuple[NixlAgentMetadata, float, float]:
+        """Fetch and validate one remote rank's agent metadata.
+
+        Returns the metadata, the query's round-trip time, and the clock
+        offset to the peer it implies.
+        """
+        logger.debug(
+            "Querying metadata on path: %s at remote pp rank %s, tp rank %s",
+            path,
+            remote_pp_rank,
+            remote_rank,
+        )
+
+        # Send query for the request.
+        msg = msgspec.msgpack.encode((GET_META_MSG, remote_pp_rank, remote_rank))
+        # Set receive timeout to 5 seconds to avoid hanging on dead server
+        sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
+        start_time = time.perf_counter()
+        sock.send(msg)
+        reply_parts = sock.recv_multipart()
+        recv_time = time.perf_counter()
+        assert len(reply_parts) == 2
+        handshake_bytes = reply_parts[0]
+
+        remote_perf = msgspec.msgpack.decode(reply_parts[1])
+        rtt = recv_time - start_time
+
+        # Decode handshake payload to get compatibility hash
+        handshake_decoder = msgspec.msgpack.Decoder(NixlHandshakePayload)
+        try:
+            handshake_payload = handshake_decoder.decode(handshake_bytes)
+        except (msgspec.DecodeError, msgspec.ValidationError) as e:
+            raise RuntimeError(
+                f"Failed to decode NixlHandshakePayload. This likely indicates "
+                f"an incompatibility between connector version. Error: {e}"
+            ) from e
+
+        logger.debug(
+            "NIXL handshake: get metadata took: %s",
+            time.perf_counter() - start_time,
+        )
+
+        # Check compatibility hash BEFORE decoding agent metadata
+        assert self.compat_hash is not None
+        if (
+            self.enforce_compat_hash
+            and handshake_payload.compatibility_hash != self.compat_hash
+        ):
+            raise RuntimeError(
+                f"NIXL compatibility hash mismatch. "
+                f"Local: {self.compat_hash}, "
+                f"Remote: {handshake_payload.compatibility_hash}. "
+                f"Prefill and decode instances have incompatible "
+                f"configurations. This may be due to: different vLLM versions,"
+                f" models, dtypes, KV cache layouts, attention backends, etc. "
+                f"Both instances must use identical configurations."
+                f"Disable this check using "
+                f'--kv-transfer-config \'{{"kv_connector_extra_config": '
+                f'{{"enforce_handshake_compat": false}}}}\''
+            )
+
+        logger.info(
+            "NIXL compatibility check passed (hash: %s)",
+            handshake_payload.compatibility_hash,
+        )
+
+        # Decode agent metadata
+        metadata_decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+        try:
+            metadata = metadata_decoder.decode(handshake_payload.agent_metadata_bytes)
+        except (msgspec.DecodeError, msgspec.ValidationError) as e:
+            # This should not happen if hash matched
+            raise RuntimeError(f"Failed to decode NixlAgentMetadata. Error: {e}") from e
+
+        self._validate_remote_parallel_config(metadata)
+
+        # Ensure engine id matches.
+        if metadata.engine_id != expected_engine_id:
+            raise RuntimeError(
+                f"Remote NIXL agent engine ID mismatch. "
+                f"Expected {expected_engine_id},"
+                f"received {metadata.engine_id}."
+            )
+        return metadata, rtt, remote_perf - (start_time + recv_time) / 2
 
     def _add_notif_only_remote_agent(
         self, metadata: NixlAgentMetadata, remote_tp_size: int, remote_dcp_size: int = 1
@@ -2143,6 +2185,7 @@ class NixlBaseConnectorWorker:
             region_group_ids=self.region_group_ids,
             region_names=self.region_names,
             region_mem_types=self.region_mem_types,
+            dram_tp_rank=0 if self._skip_dram_xfer else None,
             dcp_size=self.dcp_size,
             pcp_size=self.pcp_size,
             region_members=self.region_members,
@@ -2395,6 +2438,25 @@ class NixlBaseConnectorWorker:
         counts = strided_descs[:, 4]
         return np.cumsum(counts) - counts
 
+    @classmethod
+    def _split_descs_by_memory(
+        cls, strided_descs: np.ndarray, desc_is_dram: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Split strided descs into a DRAM and a device list, in place.
+
+        Returns each flat desc's index within its own list and which strided
+        descs are DRAM. DRAM descs are moved to CPU device 0, under which
+        DRAM is registered.
+        """
+        assert len(desc_is_dram) == strided_descs[:, 4].sum()
+        desc_pos = np.empty(len(desc_is_dram), dtype=np.int64)
+        for mask in (desc_is_dram, ~desc_is_dram):
+            desc_pos[mask] = np.arange(np.count_nonzero(mask), dtype=np.int64)
+        # A strided desc never spans regions, so its first block decides.
+        strided_is_dram = desc_is_dram[cls._strided_desc_starts(strided_descs)]
+        strided_descs[strided_is_dram, 2] = 0
+        return desc_pos, strided_is_dram
+
     def _build_fa_local(
         self,
         base_addresses: list[int],
@@ -2527,18 +2589,11 @@ class NixlBaseConnectorWorker:
                     )
                 ]
             )
-            assert len(desc_is_dram) == blocks_data[:, 4].sum()
-            desc_pos = np.empty(len(desc_is_dram), dtype=np.int64)
-            dram_idx = np.where(desc_is_dram)[0]
-            vram_idx = np.where(~desc_is_dram)[0]
-            desc_pos[dram_idx] = np.arange(len(dram_idx), dtype=np.int64)
-            desc_pos[vram_idx] = np.arange(len(vram_idx), dtype=np.int64)
+            desc_pos, strided_is_dram = self._split_descs_by_memory(
+                blocks_data, desc_is_dram
+            )
             self._desc_is_dram_by_block_size[block_size] = desc_is_dram
             self._desc_pos_by_block_size[block_size] = desc_pos
-            # DRAM descriptors are registered under CPU device 0.
-            # A strided desc never spans regions, so its first block decides.
-            strided_is_dram = desc_is_dram[self._strided_desc_starts(blocks_data)]
-            blocks_data[strided_is_dram, 2] = 0
             if self._skip_dram_xfer:
                 self._dram_src_handles_by_block_size[block_size] = None
             else:
@@ -2621,9 +2676,13 @@ class NixlBaseConnectorWorker:
         remote_dcp_size: int = 1,
         remote_pp_rank: int = 0,
         remote_pp_size: int = 1,
+        dram_owner_meta: NixlAgentMetadata | None = None,
     ) -> str:
         """Add the remote NIXL agent and prepare the descriptors for reading cache
         blocks from remote.
+
+        `dram_owner_meta` is the metadata of the remote rank that registered
+        this rank's DRAM regions (`dram_tp_rank`), when it is another rank.
 
         A PP-sharded remote registers each stage separately: every stage holds a
         slice of the layers and is read into the local regions holding them.
@@ -2747,9 +2806,11 @@ class NixlBaseConnectorWorker:
                 head_sharded_kv_heads=self._head_sharded_draft_kv_heads,
             )
 
-        remote_agent_name = self.nixl_wrapper.add_remote_agent(
-            nixl_agent_meta.agent_metadata
-        )
+        remote_agent_name = self._dram_owner_agents[engine_id].pop(remote_ranks, None)
+        if remote_agent_name is None:
+            remote_agent_name = self.nixl_wrapper.add_remote_agent(
+                nixl_agent_meta.agent_metadata
+            )
 
         # Create dst descs and xfer side handles. TP workers have same #blocks
         # so we only register once per engine_id.
@@ -2867,18 +2928,101 @@ class NixlBaseConnectorWorker:
             )
             blocks_data = np.concatenate([blocks_data, mamba])
 
-        remote_mem_types = set(
-            nixl_agent_meta.region_mem_types or [self.nixl_memory_type]
-        )
-        if len(remote_mem_types) != 1:
-            raise NotImplementedError(
-                "NIXL pull does not yet support a mixed-memory producer"
+        dram_source = None
+        if dram_owner_meta is not None:
+            assert nixl_agent_meta.dram_tp_rank is not None
+            dram_source = self._dram_owner_source(
+                dram_owner_meta,
+                nixl_agent_meta.dram_tp_rank,
+                remote_pp_rank,
+                pairs,
+                plan,
+                block_size_ratio,
             )
-        stage.xfer_side_handles[remote_tp_rank] = self.nixl_wrapper.prep_xfer_dlist(
-            remote_agent_name, blocks_data, mem_type=remote_mem_types.pop()
+            assert dram_source[1].shape == blocks_data.shape
+        handle, dram_descs = self._prep_remote_xfer_dlists(
+            remote_agent_name,
+            blocks_data,
+            nixl_agent_meta.region_mem_types,
+            stage.region_num_blocks,
+            dram_source,
         )
+        stage.xfer_side_handles[remote_tp_rank] = handle
+        if dram_descs is not None:
+            stage.dram_descs[remote_tp_rank] = dram_descs
 
         return remote_agent_name
+
+    def _dram_owner_source(
+        self,
+        owner_meta: NixlAgentMetadata,
+        owner_tp_rank: int,
+        remote_pp_rank: int,
+        pairs: _RegionPairs,
+        plan: TPMapping,
+        block_size_ratio: int,
+    ) -> tuple[str, np.ndarray]:
+        """Load the agent of the remote rank that registered a shared HiSparse
+        host pool, and build its descriptors for the paired regions."""
+        engine_id = owner_meta.engine_id
+        owner_ranks = (remote_pp_rank, owner_tp_rank)
+        agent_name = self._remote_agents[engine_id].get(
+            owner_ranks
+        ) or self._dram_owner_agents[engine_id].get(owner_ranks)
+        if agent_name is None:
+            agent_name = self.nixl_wrapper.add_remote_agent(owner_meta.agent_metadata)
+            self._dram_owner_agents[engine_id][owner_ranks] = agent_name
+        self._select_remote_regions(owner_meta, pairs.remote_regions)
+        blocks_data = self._build_fa_remote(
+            plan, owner_meta, block_size_ratio, pairs.partner
+        )
+        return agent_name, blocks_data
+
+    def _prep_remote_xfer_dlists(
+        self,
+        remote_agent_name: str,
+        blocks_data: np.ndarray,
+        region_mem_types: list[str] | None,
+        region_num_blocks: list[int],
+        dram_source: tuple[str, np.ndarray] | None = None,
+    ) -> tuple[int, _MixedMemDescs | None]:
+        """Prep a remote rank's descriptors: one list per memory type when
+        it holds both DRAM and device regions (a HiSparse decoder's host MLA
+        KV), else one list. `dram_source` (agent, descriptors) reads the
+        DRAM regions from the rank that registered them instead."""
+        mem_types = region_mem_types or [self.nixl_memory_type]
+        if len(set(mem_types)) == 1:
+            handle = self.nixl_wrapper.prep_xfer_dlist(
+                remote_agent_name, blocks_data, mem_type=mem_types[0]
+            )
+            return handle, None
+        (device_mem_type,) = set(mem_types) - {"DRAM"}
+        assert self.use_mla and not self._has_mamba, (
+            "Mixed-memory remote KV is only supported for MLA models without "
+            "Mamba layers."
+        )
+        desc_is_dram = np.repeat(
+            np.array([t == "DRAM" for t in mem_types]), region_num_blocks
+        )
+        desc_pos, strided_is_dram = self._split_descs_by_memory(
+            blocks_data, desc_is_dram
+        )
+        dram_agent, dram_blocks = dram_source or (remote_agent_name, blocks_data)
+        if dram_source is not None:
+            self._split_descs_by_memory(dram_blocks, desc_is_dram)
+        dram_descs = _MixedMemDescs(
+            dram_handle=self.nixl_wrapper.prep_xfer_dlist(
+                dram_agent, dram_blocks[strided_is_dram], mem_type="DRAM"
+            ),
+            desc_is_dram=desc_is_dram,
+            desc_pos=desc_pos,
+        )
+        handle = self.nixl_wrapper.prep_xfer_dlist(
+            remote_agent_name,
+            blocks_data[~strided_is_dram],
+            mem_type=device_mem_type,
+        )
+        return handle, dram_descs
 
     def _add_remote_stage(
         self,
@@ -4467,13 +4611,16 @@ class NixlBaseConnectorWorker:
         for stage in self._remote_stages.pop(engine_id, {}).values():
             for handle in stage.xfer_side_handles.values():
                 self.nixl_wrapper.release_dlist_handle(handle)
+            for dram_descs in stage.dram_descs.values():
+                self.nixl_wrapper.release_dlist_handle(dram_descs.dram_handle)
         # Pop under the handshake lock; NIXL teardown stays outside it.
         with self._handshake_lock:
             agents = self._remote_agents.pop(engine_id)
+            dram_owner_agents = self._dram_owner_agents.pop(engine_id, {})
             for address, eid in list(self._engine_by_address.items()):
                 if eid == engine_id:
                     del self._engine_by_address[address]
-        for agent_name in agents.values():
+        for agent_name in [*agents.values(), *dram_owner_agents.values()]:
             self.nixl_wrapper.remove_remote_agent(agent_name)
 
         self._failed_remote_engines.discard(engine_id)

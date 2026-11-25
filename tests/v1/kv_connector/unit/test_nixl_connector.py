@@ -32,6 +32,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm import LLM
 from vllm.config import KVTransferConfig, VllmConfig, set_current_vllm_config
+from vllm.config.attention import HiSparseConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineTransferInfo,
     KVOutputAggregator,
@@ -56,6 +57,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlHandshakePayload,
     NixlKVConnectorStats,
     NixlPushConnector,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+    _MixedMemDescs,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     HeartbeatInfo,
@@ -2614,6 +2618,7 @@ def recv_worker():
     worker.enable_permute_local_kv = False
     worker.enable_heterogeneous_attn_post_process = False
     worker.tp_rank = 0
+    worker._mixed_mem_types = False
     worker._skip_dram_xfer = False
     worker._log_failure = MagicMock()  # type: ignore[method-assign]
     worker.xfer_stats = NixlKVConnectorStats()
@@ -2624,6 +2629,7 @@ def recv_worker():
 
 def test_mixed_memory_read_notifies_after_both_transfers_finish(recv_worker):
     worker = recv_worker
+    worker._mixed_mem_types = True
     worker._desc_is_dram_by_block_size = {16: np.array([True, True, False, False])}
     worker._desc_pos_by_block_size = {16: np.array([0, 1, 0, 1])}
     worker._dram_src_handles_by_block_size = {16: 10}
@@ -2674,6 +2680,7 @@ def test_mixed_memory_read_failure_does_not_notify_producer(recv_worker):
 
 def test_hisparse_dram_rank0_only_read_keeps_device_part(recv_worker):
     worker = recv_worker
+    worker._mixed_mem_types = True
     worker.tp_rank = 1
     worker._skip_dram_xfer = True
     worker._desc_is_dram_by_block_size = {16: np.array([True, True, False, False])}
@@ -2708,6 +2715,7 @@ def test_hisparse_dram_rank0_only_read_keeps_device_part(recv_worker):
 def test_hisparse_dram_rank0_only_dram_only_read_completes(recv_worker):
     """With nothing left to read, the request still completes and notifies."""
     worker = recv_worker
+    worker._mixed_mem_types = True
     worker.tp_rank = 1
     worker._skip_dram_xfer = True
     worker._desc_is_dram_by_block_size = {16: np.array([True, True, False, False])}
@@ -2729,6 +2737,124 @@ def test_hisparse_dram_rank0_only_dram_only_read_completes(recv_worker):
     assert worker.get_finished() == (set(), {"request"})
     worker.nixl_wrapper.send_notif.assert_called_once_with(
         "prefill", notif_msg=b"request:1"
+    )
+
+
+def test_mixed_memory_remote_descriptors_split_by_memory_type():
+    """A HiSparse decoder's host MLA regions get their own DRAM list."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker.use_mla = True
+    worker._has_mamba = False
+    worker.nixl_memory_type = "VRAM"
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.prep_xfer_dlist.side_effect = [11, 22]
+    blocks = np.array([[100, 10, 3, 10, 2], [200, 10, 3, 10, 2]], dtype=np.uint64)
+
+    handle, dram_descs = worker._prep_remote_xfer_dlists(
+        "decoder", blocks, ["DRAM", "VRAM"], [2, 2]
+    )
+
+    assert handle == 22
+    assert dram_descs is not None
+    assert dram_descs.dram_handle == 11
+    assert dram_descs.desc_is_dram.tolist() == [True, True, False, False]
+    assert dram_descs.desc_pos.tolist() == [0, 1, 0, 1]
+    dlist_calls = worker.nixl_wrapper.prep_xfer_dlist.call_args_list
+    assert [call.args[0] for call in dlist_calls] == ["decoder", "decoder"]
+    assert [call.kwargs["mem_type"] for call in dlist_calls] == ["DRAM", "VRAM"]
+    assert [call.args[1].tolist() for call in dlist_calls] == [
+        [[100, 10, 0, 10, 2]],
+        [[200, 10, 3, 10, 2]],
+    ]
+
+
+def test_shared_host_pool_dram_descriptors_target_owner_rank():
+    """A TP rank sharing its host pool reads it through the rank that
+    registered it, and its device regions through itself."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker.use_mla = True
+    worker._has_mamba = False
+    worker.nixl_memory_type = "VRAM"
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.prep_xfer_dlist.side_effect = [11, 22]
+    blocks = np.array([[100, 10, 3, 10, 2], [200, 10, 3, 10, 2]], dtype=np.uint64)
+    owner_blocks = np.array([[500, 10, 1, 10, 2], [600, 10, 1, 10, 2]], dtype=np.uint64)
+
+    worker._prep_remote_xfer_dlists(
+        "decoder1", blocks, ["DRAM", "VRAM"], [2, 2], ("decoder0", owner_blocks)
+    )
+
+    dlist_calls = worker.nixl_wrapper.prep_xfer_dlist.call_args_list
+    assert [call.args[0] for call in dlist_calls] == ["decoder0", "decoder1"]
+    assert [call.args[1].tolist() for call in dlist_calls] == [
+        [[500, 10, 0, 10, 2]],
+        [[200, 10, 3, 10, 2]],
+    ]
+
+
+def test_handshake_fetches_shared_host_pool_owner_metadata():
+    """Handshaking with a rank whose host pool another rank registered also
+    fetches that rank's metadata for the DRAM descriptors."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker._is_csa_linear = False
+    worker.use_host_buffer = True
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.handshake_target_ranks.return_value = [1]
+    rank1 = SimpleNamespace(dcp_size=1, dram_tp_rank=0)
+    rank0 = SimpleNamespace(dcp_size=1, dram_tp_rank=None)
+    query = MagicMock(side_effect=[(rank1, 0.1, 0.0), (rank0, 0.1, 0.0)])
+    add_agent = MagicMock(return_value="decoder1")
+
+    with (
+        patch.object(nixl.base_worker, "zmq_ctx"),
+        patch.object(worker, "_query_remote_metadata", query),
+        patch.object(worker, "add_remote_agent", add_agent),
+    ):
+        agents, _ = worker._nixl_handshake("localhost", 1234, 2, "decoder")
+
+    assert agents == {(0, 1): "decoder1"}
+    assert [c.args[3] for c in query.call_args_list] == [1, 0]
+    assert add_agent.call_args.kwargs["dram_owner_meta"] is rank0
+
+
+def test_read_from_mixed_memory_remote_splits_by_remote_memory(recv_worker):
+    """A device-only reader pulls a mixed remote's DRAM and device blocks
+    through the matching remote lists."""
+    worker = recv_worker
+    worker.nixl_wrapper.make_prepped_xfer.side_effect = [101, 102]
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    remote = _MixedMemDescs(
+        dram_handle=40,
+        desc_is_dram=np.array([True, True, False, False]),
+        desc_pos=np.array([0, 1, 0, 1]),
+    )
+
+    worker._read_blocks_mixed(
+        request_id="request",
+        local_block_size_key=16,
+        local_device_handle=20,
+        local_dram_handle=None,
+        remote_xfer_side_handle=30,
+        remote_dram_descs=remote,
+        local_block_descs_ids=np.array([5, 6]),
+        remote_block_descs_ids=np.array([1, 2]),
+        notif_agent="decoder",
+        notif_id=b"request:1",
+    )
+
+    device_read, dram_read = worker.nixl_wrapper.make_prepped_xfer.call_args_list
+    assert dram_read.args[:2] == ("READ", 20)
+    assert dram_read.args[3] == 40
+    np.testing.assert_array_equal(dram_read.args[2], [5])
+    np.testing.assert_array_equal(dram_read.args[4], [1])
+    assert device_read.args[:2] == ("READ", 20)
+    assert device_read.args[3] == 30
+    np.testing.assert_array_equal(device_read.args[2], [6])
+    np.testing.assert_array_equal(device_read.args[4], [0])
+
+    assert worker.get_finished() == (set(), {"request"})
+    worker.nixl_wrapper.send_notif.assert_called_once_with(
+        "decoder", notif_msg=b"request:1"
     )
 
 
@@ -5367,6 +5493,30 @@ def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init)
         (
             mock_logger.warning_once.assert_not_called(),
             (f"kv_role={role!r} should not emit deprecation warning"),
+        )
+
+
+@pytest.mark.cpu_test
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_bidirectional_rejects_hisparse_without_eager_host_mirror(
+    default_vllm_config, dist_init
+):
+    """A HiSparse decoder's tail rows are host-durable at finish only when
+    every forward mirrors them."""
+    block_size = maybe_update_block_size(16)
+    config = create_vllm_config(kv_role="kv_consumer", block_size=block_size)
+    assert config.kv_transfer_config is not None
+    config.kv_transfer_config.kv_connector_extra_config["bidirectional_kv_xfer"] = True
+    config.attention_config.hisparse_config = HiSparseConfig(eager_host_mirror=False)
+
+    with pytest.raises(NotImplementedError, match="eager_host_mirror"):
+        NixlConnector(
+            config,
+            KVConnectorRole.SCHEDULER,
+            make_kv_cache_config(block_size=block_size),
         )
 
 

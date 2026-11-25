@@ -154,6 +154,22 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
                     "Set pipeline_parallel_size=1 or disable bidirectional_kv_xfer."
                 )
 
+        hisparse_config = vllm_config.attention_config.hisparse_config
+        if (
+            hisparse_config is not None
+            and not hisparse_config.eager_host_mirror
+            and vllm_config.kv_transfer_config.get_from_extra_config(
+                "bidirectional_kv_xfer", False
+            )
+        ):
+            raise NotImplementedError(
+                "NIXL bidirectional KV transfer from a HiSparse decoder requires "
+                "eager_host_mirror: without it, decode-written KV reaches the "
+                "host pool only when its page spills, so the prefiller could "
+                "read a stale tail. Enable eager_host_mirror or disable "
+                "bidirectional_kv_xfer."
+            )
+
         self.kv_cache_config = kv_cache_config
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.kv_transfer_config = vllm_config.kv_transfer_config
