@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Compact Qwen3.5 multimodal MoE (35B total / 3B active) with gated delta networks, 256 experts, and 262K context"
   date_added: 2026-04-22
-  date_updated: 2026-10-27
+  date_updated: 2026-11-24
   tasks:
     - multimodal
     - text
@@ -80,6 +80,8 @@ variants:
         extra_args:
           - "--max-model-len"
           - "8192"
+          - "--max-num-seqs"
+          - "32"
       arc_pro_b70:
         extra_args:
           - "--max-model-len"
@@ -126,9 +128,6 @@ hardware_overrides:
     extra_env:
       # Allow cold weight downloads and CPU compilation to finish before startup times out.
       VLLM_ENGINE_READY_TIMEOUT_S: "1800"
-  xpu:
-    extra_args:
-      - "--enforce-eager"
 
 strategy_overrides: {}
 
@@ -139,6 +138,10 @@ notes:
     body: |
       Validated on 4× Intel Arc Pro B60 / B70 (B60 24 GB, B70 32 GB per card) with the official
       vLLM XPU image `vllm/vllm-openai-xpu:latest` with `--max-model-len 8192`.
+      `--max-num-seqs 32` is only needed on B60: XPU graphs need at least
+      `max_num_seqs` Mamba cache blocks, and the KV memory left on 24 GB cards
+      holds only about 50, so the default 256 fails at startup. B70 starts with
+      the default.
 
 troubleshooting:
   - title: "Engine startup times out on CPU"
