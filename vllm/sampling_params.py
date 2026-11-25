@@ -358,7 +358,7 @@ class SamplingParams(
     [num_rows, num_ids] or nested lists; -1 entries (padding) score -inf.
     Row i scores its IDs as predictions of prompt token
     prompt_logprob_start + i + 1, so the last prompt row is excluded.
-    See docs/training/prompt_token_id_logprobs.md."""
+    See docs/training/rollout_artifacts/prompt_token_id_logprobs.md."""
     prompt_logprob_start: int | None = None
     """First causal prompt row to score with prompt_logprobs and
     prompt_logprob_token_ids; defaults to the first row. Earlier prompt
@@ -1334,9 +1334,6 @@ class SamplingParams(
             has_guidance_unsupported_json_features,
             validate_guidance_grammar,
         )
-        from vllm.v1.structured_output.backend_lm_format_enforcer import (
-            validate_structured_output_request_lm_format_enforcer,
-        )
         from vllm.v1.structured_output.backend_outlines import (
             validate_structured_output_request_outlines,
         )
@@ -1372,15 +1369,6 @@ class SamplingParams(
         elif backend == "outlines":
             # outlines backend
             validate_structured_output_request_outlines(self)
-        elif backend == "lm-format-enforcer":
-            # lm format enforcer backend
-            if is_mistral_tokenizer(tokenizer):
-                raise VLLMValidationError(
-                    "Mistral tokenizer is not supported for the 'lm-format-enforcer' "
-                    "structured output backend. Please use ['xgrammar', 'outlines'] "
-                    "backends or tokenizer_mode='hf' instead."
-                )
-            validate_structured_output_request_lm_format_enforcer(self)
         elif (
             backend == "auto"
             and is_mistral_tokenizer(tokenizer)

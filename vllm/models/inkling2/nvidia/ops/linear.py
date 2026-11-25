@@ -10,7 +10,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import is_flashinfer_autotuning
 
 from . import use_sm100_kernels
-from .gemv import sm12x_bf16_gemv, use_sm12x_bf16_gemv
+from .ll_gemm_sm120 import sm12x_bf16_ll_gemm, use_sm12x_bf16_ll_gemm
 
 # Up to this many rows, FlashInfer's CuTe DSL low-M kernels run near HBM
 # bandwidth (cuBLAS is up to 2x slower); larger batches use cuBLAS.
@@ -25,8 +25,8 @@ def linear(
     if out is not None:
         assert x.shape[0] > LOW_M_MAX_TOKENS
         return torch.mm(x, weight.t(), out=out)
-    if use_sm12x_bf16_gemv(x, weight):
-        return sm12x_bf16_gemv(x, weight)
+    if use_sm12x_bf16_ll_gemm(x, weight):
+        return sm12x_bf16_ll_gemm(x, weight)
     # Autotuning would profile the CuTe DSL kernels past their 32-row limit.
     if (
         x.shape[0] > LOW_M_MAX_TOKENS
