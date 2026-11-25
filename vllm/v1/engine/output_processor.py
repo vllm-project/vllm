@@ -198,7 +198,7 @@ class RequestState:
         max_tokens_param: int | None,
         arrival_time: float,
         queue: RequestOutputCollector | None,
-        log_stats: bool,
+        collect_stats: bool,
         stream_interval: int,
         top_p: float | None = None,
         n: int | None = None,
@@ -236,7 +236,9 @@ class RequestState:
         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
-        self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
+        self.stats = (
+            RequestStateStats(arrival_time=arrival_time) if collect_stats else None
+        )
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
@@ -273,6 +275,24 @@ class RequestState:
             self.stats.arrival_time = update.arrival_time
         self.is_prefilling = True
 
+    def observe_prefill(self, output: EngineCoreOutput) -> None:
+        stats = output.prefill_stats
+
+        # The prefill worker's count overrides decode cache hits
+        if self.remote_prefill_cached_tokens is not None:
+            self.num_cached_tokens = self.remote_prefill_cached_tokens
+        elif stats is not None:
+            self.num_cached_tokens = stats.num_cached_tokens
+
+        if stats is None:
+            return
+
+        self.num_cache_creation_tokens = stats.num_cache_creation_tokens
+        if self.parent_req is not None:
+            self.parent_req.observe_prefill(
+                self.num_cached_tokens, self.num_cache_creation_tokens
+            )
+
     @classmethod
     def from_new_request(
         cls,
@@ -282,7 +302,7 @@ class RequestState:
         parent_req: ParentRequest | None,
         request_index: int,
         queue: RequestOutputCollector | None,
-        log_stats: bool,
+        collect_stats: bool,
         stream_interval: int,
     ) -> "RequestState":
         remote_prefill_cached_tokens = None
@@ -344,7 +364,7 @@ class RequestState:
             temperature=temperature,
             arrival_time=request.arrival_time,
             queue=queue,
-            log_stats=log_stats,
+            collect_stats=collect_stats,
             stream_interval=stream_interval,
             stream_input=request.resumable,
             remote_prefill_cached_tokens=remote_prefill_cached_tokens,
@@ -377,6 +397,8 @@ class RequestState:
                 [self._new_pooling_output(pooling_output)],
                 finished,
                 error=error,
+                num_cached_tokens=self.num_cached_tokens,
+                num_cache_creation_tokens=self.num_cache_creation_tokens,
             )
 
         if self.stream_interval > 1:
@@ -403,6 +425,8 @@ class RequestState:
                 self.sent_tokens_offset = self.detokenizer.num_output_tokens()
 
         external_req_id = self.external_req_id
+        num_cached_tokens = self.num_cached_tokens
+        num_cache_creation_tokens = self.num_cache_creation_tokens
 
         output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
 
@@ -413,6 +437,9 @@ class RequestState:
             if not outputs:
                 return None
             external_req_id = self.parent_req.external_req_id
+            if self.parent_req.num_cached_tokens is not None:
+                num_cached_tokens = self.parent_req.num_cached_tokens
+                num_cache_creation_tokens = self.parent_req.num_cache_creation_tokens
 
         return self._new_request_output(
             external_req_id,
@@ -420,6 +447,8 @@ class RequestState:
             finished,
             kv_transfer_params,
             ec_transfer_params,
+            num_cached_tokens=num_cached_tokens,
+            num_cache_creation_tokens=num_cache_creation_tokens,
         )
 
     def _new_request_output(
@@ -430,6 +459,9 @@ class RequestState:
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
         error: RequestError | None = None,
+        *,
+        num_cached_tokens: int,
+        num_cache_creation_tokens: int,
     ) -> RequestOutput | PoolingRequestOutput:
         # If prompt embeds were used, put placeholder prompt token ids
         prompt_token_ids = self.prompt_token_ids
@@ -443,7 +475,7 @@ class RequestState:
             return PoolingRequestOutput(
                 request_id=external_req_id,
                 outputs=first_output,
-                num_cached_tokens=self.num_cached_tokens,
+                num_cached_tokens=num_cached_tokens,
                 prompt_token_ids=prompt_token_ids,
                 finished=finished,
                 error=error,
@@ -470,8 +502,8 @@ class RequestState:
             finished=finished,
             kv_transfer_params=kv_transfer_params,
             ec_transfer_params=ec_transfer_params,
-            num_cached_tokens=self.num_cached_tokens,
-            num_cache_creation_tokens=self.num_cache_creation_tokens,
+            num_cached_tokens=num_cached_tokens,
+            num_cache_creation_tokens=num_cache_creation_tokens,
             metrics=self.stats,
         )
 
@@ -558,18 +590,18 @@ class OutputProcessor:
         self,
         tokenizer: TokenizerLike | None,
         *,
-        log_stats: bool,
+        collect_stats: bool,
         stream_interval: int = 1,
         tracing_enabled: bool = False,
         admission_stats: "SharedAdmissionStats | None" = None,
     ):
-        self.log_stats = log_stats
+        self.collect_stats = collect_stats
         self.tokenizer = tokenizer
         self.stream_interval = stream_interval
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
-        self.lora_states = LoRARequestStates(log_stats)
+        self.lora_states = LoRARequestStates(collect_stats)
         self.tracing_enabled = tracing_enabled
         self.admission_stats = admission_stats
 
@@ -684,7 +716,7 @@ class OutputProcessor:
             parent_req=parent_req,
             request_index=request_index,
             queue=queue,
-            log_stats=self.log_stats,
+            collect_stats=self.collect_stats,
             stream_interval=self.stream_interval,
         )
         self.request_states[request_id] = req_state
@@ -791,15 +823,7 @@ class OutputProcessor:
                 )
 
             if req_state.is_prefilling:
-                if engine_core_output.prefill_stats is not None:
-                    req_state.num_cached_tokens = (
-                        engine_core_output.prefill_stats.num_cached_tokens
-                    )
-                    req_state.num_cache_creation_tokens = (
-                        engine_core_output.prefill_stats.num_cache_creation_tokens
-                    )
-                if req_state.remote_prefill_cached_tokens is not None:
-                    req_state.num_cached_tokens = req_state.remote_prefill_cached_tokens
+                req_state.observe_prefill(engine_core_output)
                 req_state.is_prefilling = False
 
             if engine_core_output.spec_decode_metrics is not None:

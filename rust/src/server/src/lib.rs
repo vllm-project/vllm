@@ -281,6 +281,7 @@ where
             .map(tls::build_grpc_server_config)
             .transpose()
             .context("invalid gRPC TLS configuration")?;
+        let message_limit = state.api_server_options.request_body_limit_bytes.unwrap_or(usize::MAX);
         let (health_reporter, health_service) = health_reporter();
         let engine_health = grpc::EngineHealth::subscribe(state.llm());
         let health_monitor = grpc::HealthMonitor::register(health_reporter, engine_health).await;
@@ -288,13 +289,13 @@ where
             grpc::ControlServiceImpl::new(state.clone())
                 .with_engine_shutdown(config.manages_engine.then(|| shutdown.clone())),
         )
-        .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+        .max_decoding_message_size(message_limit);
         let inference_service =
             grpc::InferenceGrpcService::new(grpc::InferenceServiceImpl::new(state.clone()))
-                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+                .max_decoding_message_size(message_limit);
         let render_service =
             grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state.clone()))
-                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+                .max_decoding_message_size(message_limit);
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
