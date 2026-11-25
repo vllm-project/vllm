@@ -312,28 +312,34 @@ class TestPromptBuilding:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("item_first", [False, True])
-    @pytest.mark.parametrize("text_part", ["query", "item"])
-    async def test_text_tokenization_yields_and_preserves_tokens(
-        self, renderer, item_first, text_part
+    @pytest.mark.parametrize("text_kind", ["spaces", "combining_marks"])
+    async def test_text_tokenization_preserves_tokens(
+        self, renderer, item_first, text_kind
     ):
         mock_engine = _create_mock_engine()
         mock_engine.renderer = renderer
         serving = _create_serving(mock_engine)
         tokenizer = renderer.get_tokenizer()
         max_model_len = 16
-        # Cutting this text at the character bound changes its final token.
-        text = " " * ((max_model_len - 1) * tokenizer.max_chars_per_token) + "hello"
-        query = text if text_part == "query" else [100]
-        item = text if text_part == "item" else [200]
+        if text_kind == "spaces":
+            # A character cut changes the final retained whitespace token.
+            text = " " * ((max_model_len - 1) * tokenizer.max_chars_per_token) + "hello"
+        else:
+            # NFC moves the trailing grave accent to the initial 'a'. A cut
+            # before it changes even the first token, despite extra lookahead.
+            text = (
+                "a"
+                + "\u0315" * (max_model_len * tokenizer.max_chars_per_token)
+                + "\u0300"
+            )
+        query = [100] if item_first else text
+        item = text if item_first else [200]
         request = GenerativeScoringRequest(
             query=query, items=[item], label_token_ids=[500, 501], item_first=item_first
         )
-        callback_ran = asyncio.Event()
-        asyncio.get_running_loop().call_soon(callback_ran.set)
         engine_inputs, _ = await serving._build_prompts(
             request, tokenizer, max_model_len=max_model_len
         )
-        assert callback_ran.is_set(), "Tokenization blocked the event loop"
         query_ids = (
             tokenizer.encode(query, add_special_tokens=request.add_special_tokens)
             if isinstance(query, str)
@@ -346,6 +352,24 @@ class TestPromptBuilding:
         )
         full = item_ids + query_ids if item_first else query_ids + item_ids
         assert engine_inputs[0]["prompt_token_ids"] == full[: max_model_len - 1]  # type: ignore[typeddict-item]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("text_part", ["query", "item"])
+    async def test_text_tokenization_yields(self, renderer, text_part):
+        mock_engine = _create_mock_engine()
+        mock_engine.renderer = renderer
+        serving = _create_serving(mock_engine)
+        request = GenerativeScoringRequest(
+            query="hello" if text_part == "query" else [100],
+            items=["world" if text_part == "item" else [200]],
+            label_token_ids=[500, 501],
+        )
+        callback_ran = asyncio.Event()
+        asyncio.get_running_loop().call_soon(callback_ran.set)
+        await serving._build_prompts(
+            request, renderer.get_tokenizer(), max_model_len=16
+        )
+        assert callback_ran.is_set(), "Tokenization blocked the event loop"
 
 
 class TestGeneration:
