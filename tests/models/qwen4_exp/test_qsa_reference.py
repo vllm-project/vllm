@@ -109,6 +109,50 @@ def test_qsa_hisparse_starts_with_automatic_cache_layout(
         assert len(result.outputs[0].token_ids) == 2
 
 
+@requires_qsa_kernels
+def test_qsa_language_model_only_keeps_mrope(tmp_path, vllm_runner):
+    """Text-only decode must preserve the checkpoint's QSA position layout."""
+    from transformers import Qwen4ExpConfig
+
+    Qwen4ExpConfig(
+        architectures=["Qwen4ExpForConditionalGeneration"],
+        text_config={
+            **_TINY_QSA_TEXT_CONFIG,
+            "vocab_size": 128,
+            "num_hidden_layers": 2,
+            "layer_types": ["linear_attention", "full_attention"],
+            "linear_num_key_heads": 2,
+            "linear_num_value_heads": 4,
+            "output_gate_type": "sigmoid",
+            "moe_intermediate_size": 64,
+            "shared_expert_intermediate_size": 64,
+            "hc_lowrank": 28,
+            "mtp_num_hidden_layers": 0,
+            "rope_parameters": {
+                "rope_type": "default",
+                "mrope_section": [11, 11, 10],
+                "mrope_interleaved": True,
+                "partial_rotary_factor": 1.0,
+            },
+        },
+    ).save_pretrained(tmp_path)
+    with vllm_runner(
+        str(tmp_path),
+        language_model_only=True,
+        skip_tokenizer_init=True,
+        load_format="dummy",
+        dtype="bfloat16",
+        enable_chunked_prefill=True,
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=2,
+        kv_cache_memory_bytes=128 * 1024**2,
+    ) as runner:
+        rope = runner.llm.llm_engine.model_config.hf_text_config.rope_parameters
+        assert rope["mrope_section"] == [11, 11, 10]
+        assert rope["mrope_interleaved"] is True
+
+
 def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
