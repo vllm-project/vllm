@@ -293,6 +293,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         self,
         audio_chunk: np.ndarray,
         request_id: str,
+        data_parallel_rank: int | None = None,
     ) -> str:
         """Auto-detect the spoken language from an audio chunk.
 
@@ -318,6 +319,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             prompt,
             sampling_params,
             request_id,
+            data_parallel_rank=data_parallel_rank,
         )
 
         try:
@@ -346,6 +348,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
+        data_parallel_rank: int | None = None,
     ) -> tuple[list[EngineInput], float, list[float], float]:
         """Returns the engine inputs, the audio duration, the start offset of
         each chunk and the total duration of the chunks sent to the model,
@@ -387,7 +390,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         ):
             # Auto-detect language from the first chunk.
             request.language = await self._detect_language(
-                chunks[0], f"{request_id}-lang_detect"
+                chunks[0],
+                f"{request_id}-lang_detect",
+                data_parallel_rank=data_parallel_rank,
             )
 
         parsed_prompts: list[DictPrompt] = []
@@ -633,6 +638,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         lora_request = self._maybe_get_adapters(request)
 
+        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+
         (
             engine_inputs,
             duration_s,
@@ -642,6 +649,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             request=request,
             audio_data=audio_data,
             request_id=request_id,
+            data_parallel_rank=data_parallel_rank,
         )
 
         separator = asr_inter_chunk_separator(
@@ -721,6 +729,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         request_id=request_id_item,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
+                        data_parallel_rank=data_parallel_rank,
                     )
                 else:
                     generator = self.engine_client.generate(
@@ -729,6 +738,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         request_id_item,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
+                        data_parallel_rank=data_parallel_rank,
                     )
 
                 list_result_generator.append(generator)

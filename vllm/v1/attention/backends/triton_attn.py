@@ -578,15 +578,19 @@ class TritonAttentionImpl(AttentionImpl):
         # is eliminated at Triton compile time, so other platforms see
         # zero cost when TD is off.
         #
-        # ``VLLM_TRITON_USE_TD`` is tri-state:
-        #   - unset (None): auto-select (TD on for XPU, off elsewhere),
-        #   - ``1``: force TD on regardless of platform,
+        # ``VLLM_TRITON_USE_TD``:
+        #   - unset or ``1``: on for XPU, off elsewhere,
         #   - ``0``: force TD off regardless of platform (useful for A/B).
         td_override = envs.VLLM_TRITON_USE_TD
         if td_override is None:
             self.use_td = current_platform.is_xpu()
         else:
-            self.use_td = td_override
+            self.use_td = td_override and current_platform.is_xpu()
+            if td_override and not self.use_td:
+                logger.warning_once(
+                    "VLLM_TRITON_USE_TD=1 is ignored by TRITON_ATTN: its "
+                    "tensor-descriptor path is XPU-only."
+                )
         self._set_kv_ptr_range = current_platform.is_rocm()
 
     def forward(
@@ -874,6 +878,8 @@ class TritonAttentionImpl(AttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        query_out: torch.Tensor | None = None,
+        key_out: torch.Tensor | None = None,
     ):
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
@@ -898,4 +904,6 @@ class TritonAttentionImpl(AttentionImpl):
             layer._v_scale,
             flash_layout,
             is_fp8_kv_cache,
+            query_out=query_out,
+            key_out=key_out,
         )

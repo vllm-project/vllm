@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from vllm.multimodal.utils import strip_covered_mm_data
 from vllm.utils.gc_utils import untrack_long_lists
+from vllm.v1.metrics.iteration_workload import ScheduledWorkload
 
 if TYPE_CHECKING:
     import numpy as np
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
         AuxOutputConnectorMetadata,
     )
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
+    from vllm.distributed.ec_transfer.ec_events import ECCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
@@ -201,6 +203,8 @@ class IterationDetails:
     num_decode_tokens: int = 0
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
+    # Only with --enable-logging-iteration-details.
+    scheduled_workload: ScheduledWorkload | None = None
 
     # Temporary aliases for existing EngineCore and worker profiler consumers.
     @property
@@ -228,7 +232,7 @@ class KVConnectorBlockState:
     req_ids: set[str]
     # Resolve on access to avoid copying tables the connector never reads.
     resolve_block_ids: Callable[[str], tuple[list[int], ...]]
-    # Exact Mamba "align" boundary-state hand-offs.
+    # Exact Mamba boundary-state hand-offs.
     boundary_state_offloads: dict[str, list[tuple[int, int, int]]]
 
     def get_block_ids(self, req_id: str) -> tuple[list[int], ...] | None:
@@ -329,6 +333,11 @@ class SchedulerOutput:
     # drafter can skip proposing them.
     skip_drafts: bool = False
 
+    # Publish these events once this step's worker output is processed, even
+    # when the step schedules no tokens but frees encoder cache entries.
+    encoder_cache_events: "list[ECCacheEvent] | None" = None
+    encoder_cache_epoch: int = 0
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(
@@ -340,6 +349,12 @@ class SchedulerOutput:
             scheduled_encoder_inputs={},
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
+        )
+
+    def shares_requests_with(self, other: "SchedulerOutput") -> bool:
+        """Whether any request is scheduled in both this step and `other`."""
+        return not self.num_scheduled_tokens.keys().isdisjoint(
+            other.num_scheduled_tokens
         )
 
 
