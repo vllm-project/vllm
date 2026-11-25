@@ -1,0 +1,24 @@
+name: Run CI from PR comment
+
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: run-ci-comment-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  run-ci-command:
+    if: >-
+      github.repository_owner == 'vllm-project' &&
+      github.event.issue.pull_request &&
+      (startsWith(github.event.comment.body, '/ci') ||
+      startsWith(github.event.comment.body, '/amd-ci'))
+    uses: vllm-project/vllm/.github/workflows/_reusable-run-ci-command.yml@main
+    secrets: inherit

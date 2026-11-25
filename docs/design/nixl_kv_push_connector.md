@@ -6,6 +6,17 @@ prefill completes. `NixlPushConnector` adds a **push-based** alternative
 in which P writes the KV blocks directly into D's pre-allocated memory
 via `NIXL WRITE`.
 
+Enable push with `"kv_connector": "NixlPushConnector"`. Alternatively, use
+`"kv_connector": "NixlConnector"` and set
+`"kv_connector_extra_config": {"transfer_mode": "push"}`.
+
+For the built-in `NixlConnector`, `transfer_mode` defaults to `"pull"` and accepts
+only `"pull"` or `"push"`; other values raise `ValueError`.
+Explicit `NixlPullConnector` and `NixlPushConnector` names ignore this option.
+`kv_connector_module_path` takes precedence over built-in selection.
+Under `MultiConnector`, set `transfer_mode` in the NIXL child's
+`kv_connector_extra_config`.
+
 This document describes the threading, queues, and scheduling
 interactions specific to the push design. The pull-mode design is
 unchanged; the push connector reuses the same handshake, NIXL agent
@@ -180,6 +191,110 @@ The completion notif sent from P to D after a WRITE is the existing
 `<request_id>:<tp_size>` format used in pull mode (here ``request_id``
 is D's own request id, taken from the registration), so the D-side
 accounting code is unchanged.
+
+## Pipeline parallelism and hybrid KV caches
+
+A peer's KV regions do not line up with the local ones by index under
+pipeline parallelism (PP) or a hybrid (HMA) KV layout:
+
+* a PP-sharded prefiller (**P**) holds only a slice of the model's
+  layers while the `PP=1` decoder (**D**) holds them all, so region
+  counts differ;
+* with HMA, layers of several cache groups can share one region, and
+  which layers share a region can differ between P and D.
+
+Both connectors therefore pair regions **by layer**, for every peer. Each
+worker advertises which layers back each of its NIXL regions in the
+handshake metadata (`NixlAgentMetadata.region_members`). On the
+handshake, `_pair_regions` looks each layer up on both sides and records
+one pair (remote region, local region, cache group) per layer,
+deduplicated; a layer registered as two regions (K and V apart) pairs
+them in order. The remote descriptor list keeps only the remote regions
+that pair, and a transfer reads or writes each pair at its cache group's
+blocks. A region shared by several groups thus transfers once per group
+it holds a layer of, from one descriptor list.
+
+```text
+D (PP=1):  region 0 = [L0, L0.swa]   region 1 = [L1]   region 2 = [L2]
+P stage 1: region 0 = [L2]
+
+pairs (remote, local, group) on P: (2, 0, 0)  ->  D's region 2 only
+```
+
+Region capacities stay per region on both sides, so P and D need not
+allocate the same number of blocks. Physical allocations are still
+registered once, even when multiple layers share them. Mamba/SSM hybrids
+pair the same way: each SSM region's conv and SSM-state descriptors are
+built from the peer region its layers pair with, so P and D may group the
+same layers into regions differently. A layer in different cache groups on
+P and D is refused at the handshake for these models.
+
+Packed MLA caches (block-outermost layouts such as DeepSeek-V4's) store the
+pages of every layer for one block in a single row. A PP stage holds only its
+own layers, so its rows are shorter and each layer sits at a different offset:
+
+```text
+D (PP=1),    block b: | L0 | L1 | L2 | L3 | L4 | L5 |
+P (stage 2), block b: | L3 | L4 | L5 |
+```
+
+`PP=1` packed MLA peers transfer whole rows. They also advertise where each layer's page
+sits in the row (`NixlAgentMetadata.packed_member_layouts`). A PP **push** producer
+registers one region per layer, so it views each of D's rows as one region per
+layer and pairs its pages with those. Page sizes must match; offsets, row
+strides, and block counts may differ. Because PP stages can list the same
+attention backends in a different order, packed push compares the sorted set of
+backend names during the handshake. Pull does not split PP stages' packed rows
+this way. Packed pull PP is rejected on either endpoint, independently of HMA;
+other packed combinations, including dense views that can register strided
+per-layer regions, remain unvalidated for pull PP.
+
+Invariants enforced when pairing:
+
+* for push, the remote D must hold every layer of the local P stage; remote
+  layers owned by other P stages are skipped;
+* for pull from a PP1 peer, the remote must hold every required local layer;
+* for pull from a PP producer, each remote stage holds a subset of the local
+  D's layers. `_add_remote_stage` checks that all stages together hold every
+  required local KV layer exactly once when all stages are known. A missing or
+  duplicated layer fails the handshake instead of leaving stale KV;
+* a remote that does not advertise its layers fails the handshake
+  instead of falling back to pairing by index;
+* a layer must span the same number of regions on both sides;
+* TP ranks within one remote stage must pair the same way; different stages
+  hold different layer subsets, recorded separately in `_remote_stages`;
+* a layer in different cache groups on P and D is refused by push. Each
+  worker advertises every layer's cache group
+  (`NixlAgentMetadata.layer_group_ids`), so this is caught even when the
+  layer's region is shared by several groups.
+
+Decode-side PP is unsupported because completions are counted per
+consumer TP rank. Both connectors therefore require `kv_role="kv_producer"`
+under PP and reject bidirectional transfer, which would make P a receiver.
+Mamba/SSM hybrids are unsupported under PP. Packed PP push
+requires MLA caches and equal P/D block sizes. MLA pages are replicated
+across TP ranks, so producer TP1 to consumer TP2 is supported.
+
+### Pull from pipeline stages
+
+The PP1 decoder handshakes with the source TP ranks it needs in every P stage.
+For each TP `ReadSpec`, it submits READs using that stage's region pairs,
+capacities, descriptor handle and agent. Thus the number of READs depends on
+the TP mapping and the groups with blocks to transfer; it is not always one
+READ per stage. A stage with no blocks to read still receives a completion
+notification, including on a full D prefix-cache hit.
+
+A notification completes the request on its P worker. The P scheduler releases
+the request's blocks only after completion is aggregated across all P TP and
+PP workers; one stage's notification does not independently release its blocks.
+On a READ error, D retains destination blocks and keeps renewing P leases while
+outstanding sibling READs drain. Terminal receive completion, including failure,
+or a request abort stops renewal. Workers missing completion notifications finish
+when their leases expire, after which aggregation permits release. An aborted
+request's destination blocks also remain reserved until outstanding READs drain.
+A READ stuck in `PROC` can keep an unaborted request renewing its P lease;
+lease expiry does not cancel remote DMA. With the `recompute` load failure policy,
+D recomputes locally; this does not retry the network READ.
 
 ## Scheduler-side responsibilities
 

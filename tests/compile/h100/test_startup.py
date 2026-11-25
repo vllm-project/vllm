@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Cold start and warm start tests for vLLM-compile.
 
-Cold start runs in a forked child (must fork before CUDA init) which
+Cold start runs in a separate child process which
 populates on-disk caches and asserts cold-start counters.  Warm start
 then runs in the parent with clean in-memory state but populated caches.
 """
@@ -16,9 +16,8 @@ from torch._dynamo.utils import counters
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from ...utils import fork_new_process_for_each_test
+from ...utils import create_new_process_for_each_test, requires_spawn_multiprocessing
 
 MODEL = "microsoft/Phi-tiny-MoE-instruct"
 
@@ -26,7 +25,6 @@ MODEL = "microsoft/Phi-tiny-MoE-instruct"
 def _run_vllm(vllm_runner):
     with vllm_runner(
         MODEL,
-        trust_remote_code=False,
         max_model_len=256,
         max_num_batched_tokens=1024,
         load_format="dummy",
@@ -54,17 +52,21 @@ def _cold_start(vllm_runner):
     assert counters["aot_autograd"]["autograd_cache_hit"] == 0
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("mega_aot_artifact", ["0", "1"])
 def test_moe_startup(monkeypatch, vllm_runner, fresh_vllm_cache, mega_aot_artifact):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", mega_aot_artifact)
     monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
 
-    # Cold start in a forked child (must fork before CUDA init).
+    # ROCm and XPU cannot fork safely after device discovery.
     # This model has 32 identical transformer layers which produce
     # 33 subgraphs after splitting on attention — only 3 are unique.
-    ctx = mp.get_context("fork")
+    ctx = (
+        mp.get_context("spawn")
+        if requires_spawn_multiprocessing()
+        else mp.get_context("fork")
+    )
     p = ctx.Process(target=_cold_start, args=(vllm_runner,))
     p.start()
     p.join()
@@ -77,10 +79,7 @@ def test_moe_startup(monkeypatch, vllm_runner, fresh_vllm_cache, mega_aot_artifa
         num_compiled_artifacts_saved=0,
     ):
         _run_vllm(vllm_runner)
-    mega_aot_active = envs.VLLM_USE_MEGA_AOT_ARTIFACT and is_torch_equal_or_newer(
-        "2.10.0"
-    )
-    if mega_aot_active:
+    if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
         # MEGA_AOT_ARTIFACT is enabled, so we expect no aot_autograd running on
         # subgraphs.
         assert counters["aot_autograd"]["total"] == 0
@@ -132,27 +131,14 @@ MODEL_SPECS = [
         ),
         id="gpt_oss_120b",
     ),
-    # NOTE: DeepSeek-V3.2 requires sparse MLA (index_topk) which needs
-    # Hopper+ GPUs. This test must run on H100 (see pytorch.yaml).
-    pytest.param(
-        ModelStartupSpec(
-            model="deepseek-ai/DeepSeek-V3.2",
-            hf_overrides=_SMALL_MOE_OVERRIDES,
-            cold_artifacts_saved=9,
-            # https://github.com/vllm-project/vllm/issues/38051
-            warm_artifacts_saved=0 if is_torch_equal_or_newer("2.12.0") else 9,
-            warm_artifacts_loaded=9 if is_torch_equal_or_newer("2.12.0") else 0,
-        ),
-        id="deepseek_v3.2",
-    ),
     pytest.param(
         ModelStartupSpec(
             model="moonshotai/Kimi-K2.5",
             hf_overrides={"text_config": _SMALL_MOE_OVERRIDES},
             cold_artifacts_saved=4,
             # https://github.com/vllm-project/vllm/issues/38051
-            warm_artifacts_saved=0 if is_torch_equal_or_newer("2.12.0") else 4,
-            warm_artifacts_loaded=4 if is_torch_equal_or_newer("2.12.0") else 0,
+            warm_artifacts_saved=0,
+            warm_artifacts_loaded=4,
         ),
         id="kimi_k2.5",
     ),
@@ -182,7 +168,6 @@ MODEL_SPECS = [
 def _run_model(vllm_runner, spec: ModelStartupSpec):
     with vllm_runner(
         spec.model,
-        trust_remote_code=True,
         max_model_len=256,
         max_num_batched_tokens=1024,
         block_size=64,
@@ -236,13 +221,17 @@ def _cold_start_model(vllm_runner, spec: ModelStartupSpec):
 
 
 @pytest.mark.parametrize("spec", MODEL_SPECS)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_model_startup(monkeypatch, vllm_runner, fresh_vllm_cache, spec):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
 
-    # Cold start in a forked child (must fork before CUDA init).
-    ctx = mp.get_context("fork")
+    # ROCm and XPU cannot fork safely after device discovery.
+    ctx = (
+        mp.get_context("spawn")
+        if requires_spawn_multiprocessing()
+        else mp.get_context("fork")
+    )
     p = ctx.Process(target=_cold_start_model, args=(vllm_runner, spec))
     p.start()
     p.join()

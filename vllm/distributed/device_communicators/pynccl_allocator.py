@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import atexit
 import contextlib
+import logging
 import tempfile
 from typing import Any
 
 import torch
-from packaging import version
 from torch.cuda.memory import CUDAPluggableAllocator
 from torch.utils.cpp_extension import load_inline
 
@@ -83,7 +83,7 @@ def compile_nccl_allocator():
             cpp_sources=nccl_allocator_source,
             with_cuda=True,
             extra_ldflags=ldflags,
-            verbose=envs.VLLM_LOGGING_LEVEL == "DEBUG",
+            verbose=logger.isEnabledFor(logging.DEBUG),
             is_python_module=False,
             build_directory=out_dir,
             extra_include_paths=nccl_include_paths,
@@ -142,7 +142,6 @@ class nccl_symm_mem_context:
             or pynccl_comm.world_size == 1
             or not current_platform.is_cuda()
             or get_nccl_mem_pool() is None
-            or version.parse(torch.__version__) < version.parse("2.8.0.a0")
         )
         if self.disabled:
             self.pynccl_comm: PyNcclCommunicator | None = None

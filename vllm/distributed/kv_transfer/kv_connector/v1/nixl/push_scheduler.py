@@ -4,19 +4,19 @@
 
 In push mode, scheduler-side responsibilities are:
 
-* D side (decode): on ``update_state_after_alloc``, stash registration data
+* D side (decode): on `update_state_after_alloc`, stash registration data
   (D's identity + locally allocated block IDs) into
-  ``_push_pending_registrations``. The D worker drains it from
-  ``meta.push_registrations`` next step and sends a NIXL notification to the
+  `_push_pending_registrations`. The D worker drains it from
+  `meta.push_registrations` next step and sends a NIXL notification to the
   P worker (no scheduler-level networking).
-* P side (prefill): on ``request_finished``, stash the finished block IDs
-  into ``_finished_request_blocks`` for the lease, and into
-  ``_newly_finished_push_blocks`` so the P worker picks them up via
-  ``meta.push_finished_blocks`` and matches against any D registrations
+* P side (prefill): on `request_finished`, stash the finished block IDs
+  into `_finished_request_blocks` for the lease, and into
+  `_newly_finished_push_blocks` so the P worker picks them up via
+  `meta.push_finished_blocks` and matches against any D registrations
   it already received via NIXL notifications.
-* Both sides: ``has_pending_push_work`` keeps the engine main loop stepping
-  while pushes are in flight. ``update_connector_output`` cleans up
-  ``_finished_request_blocks`` once the WRITE completes.
+* Both sides: `has_pending_push_work` keeps the engine main loop stepping
+  while pushes are in flight. `update_connector_output` cleans up
+  `_finished_request_blocks` once the WRITE completes.
 
 A soft per-registration watchdog on the D scheduler fails requests that have
 been registered but not fulfilled within a configurable timeout.
@@ -56,9 +56,11 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
 
     All P2P communication is deferred to the worker level via NIXL
     notifications. The scheduler communicates with workers only through
-    the standard ``build_connector_meta`` / ``update_connector_output``
+    the standard `build_connector_meta` / `update_connector_output`
     hooks.
     """
+
+    _TRANSFER_MODE: str = "push"
 
     def __init__(
         self,
@@ -121,16 +123,13 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             if count > 0:
                 return count, True
 
-        if params is not None and params.get("do_remote_decode") and self._has_mamba:
-            self._truncate_mamba_request_for_prefill(request)
-
         return 0, False
 
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         """In push mode, D stores registration data for the worker to send
-        to P via NIXL notification (deferred to ``build_connector_meta``).
+        to P via NIXL notification (deferred to `build_connector_meta`).
         """
         params = request.kv_transfer_params
         logger.debug(
@@ -170,7 +169,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             request.request_id,
         )
         local_block_ids: BlockIds = blocks.get_unhashed_block_ids_all_groups()
-        local_block_ids = self.get_sw_clipped_blocks(local_block_ids)
+        local_block_ids = self.get_exchange_clipped_blocks(local_block_ids)
 
         # ``remote_*`` fields are P's coordinates (from D's perspective).
         # ``decode_*`` fields are D's own info that P needs for the
@@ -199,7 +198,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # ReqMeta without a KeyError — the actual remote block IDs are
         # learned by P over the NIXL handshake at WRITE time.
         params["remote_block_ids"] = ()
-        self._reqs_need_recv[request.request_id] = (request, local_block_ids)
+        self._reqs_need_recv[request.request_id] = (request, local_block_ids, (), False)
 
         # Mark as processed so a re-entry (e.g. preemption + reschedule)
         # doesn't re-stage the registration.
@@ -241,7 +240,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # recv so the worker emits a notif that lets P free them.
             # Seed remote_block_ids so add_new_req_to_recv won't KeyError.
             params["remote_block_ids"] = ()
-            self._reqs_need_recv[request.request_id] = (request, [])
+            self._reqs_need_recv[request.request_id] = (request, [], (), False)
             params["do_remote_prefill"] = False
             return False, None
 
@@ -271,7 +270,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 time.perf_counter() + self._kv_lease_duration
             )
 
-            block_ids = self.get_sw_clipped_blocks(block_ids)
+            block_ids = self.get_exchange_clipped_blocks(block_ids)
             remote_num_tokens = request.num_computed_tokens
 
             # Store finished blocks for worker-level matching with D
@@ -287,9 +286,11 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             remote_request_id=request.request_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
-            tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            tp_size=self.transfer_tp_size,
+            dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
+            transfer_mode=self._TRANSFER_MODE,
         )
 
     def build_connector_meta(

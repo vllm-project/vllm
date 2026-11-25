@@ -8,6 +8,7 @@ import torch
 
 from vllm.lora.utils import get_supported_lora_modules
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+from vllm.models.inkling.amd import moe as amd_moe
 from vllm.models.inkling.nvidia import moe
 from vllm.models.inkling.nvidia.model import _TmlForCausalLMBase
 from vllm.platforms import current_platform
@@ -104,7 +105,7 @@ def test_inkling_mapper_maps_modelopt_exclusions() -> None:
     )
 
     quant_config.apply_vllm_mapper(
-        _TmlForCausalLMBase.hf_to_vllm_mapper.get_unstacked_mapper()
+        _TmlForCausalLMBase.hf_to_vllm_mapper.get_rename_mapper()
     )
 
     assert quant_config.is_layer_excluded("model.layers.2.mlp.experts")
@@ -187,6 +188,32 @@ def test_moe_loads_compressed_tensors_global_scale(
     assert loaded == [f"experts.routed_experts.{projection}_{scale_kind}_global_scale"]
 
 
+@pytest.mark.parametrize(("projection", "checkpoint_rows"), [("w13", 8), ("w2", 4)])
+def test_moe_loads_channelwise_scale_for_tp(
+    projection: str, checkpoint_rows: int
+) -> None:
+    param = torch.nn.Parameter(torch.empty(2, 4, 1))
+    experts = SimpleNamespace(
+        **{f"{projection}_weight_scale": param},
+        moe_config=SimpleNamespace(moe_parallel_config=SimpleNamespace(tp_rank=1)),
+    )
+    layer = SimpleNamespace(
+        experts=SimpleNamespace(routed_experts=experts),
+        _local_expert_slots=lambda: {0: 0, 2: 1},
+    )
+    checkpoint_scale = torch.arange(3 * checkpoint_rows).reshape(3, checkpoint_rows, 1)
+
+    loaded = moe.InklingMoE.load_expert_weight(
+        layer, f"experts.{projection}_weight_scale", checkpoint_scale
+    )
+
+    expected = checkpoint_scale[[0, 2]]
+    if projection == "w13":
+        expected = expected[:, 4:].reshape(2, 2, 2, 1).transpose(1, 2).flatten(1, 2)
+    torch.testing.assert_close(param, expected.float())
+    assert loaded == [f"experts.routed_experts.{projection}_weight_scale"]
+
+
 def test_sink_down_projection_is_packed_during_load(monkeypatch) -> None:
     monkeypatch.setattr(moe, "get_tensor_model_parallel_world_size", lambda: 2)
     monkeypatch.setattr(moe, "get_tensor_model_parallel_rank", lambda: 1)
@@ -199,11 +226,14 @@ def test_sink_down_projection_is_packed_during_load(monkeypatch) -> None:
     torch.testing.assert_close(sink.w2_weight, expected)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
+)
 def test_sink_packed_weight_forward_matches_expert_sum(monkeypatch) -> None:
-    monkeypatch.setattr(moe, "get_tensor_model_parallel_world_size", lambda: 2)
-    monkeypatch.setattr(moe, "get_tensor_model_parallel_rank", lambda: 1)
-    sink = moe.InklingSinkExperts(n_experts=2, d_model=3, d_mlp=8).to(
+    sink_moe = amd_moe if current_platform.is_rocm() else moe
+    monkeypatch.setattr(sink_moe, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(sink_moe, "get_tensor_model_parallel_rank", lambda: 1)
+    sink = sink_moe.InklingSinkExperts(n_experts=2, d_model=3, d_mlp=8).to(
         device="cuda", dtype=torch.bfloat16
     )
     torch.manual_seed(1)

@@ -20,36 +20,37 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.sequence import IntermediateTensors
+
+from .base import Base
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
-class LegacyMixin:
+class LegacyMixin(Base):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-        # Skip unsupported/unwanted output embeddings layers
-        self.skip_prefixes.extend(
-            [
-                "model.lm_head.",
-                "model.predictions.",
-                "model.qa_outputs.",
-                "model.embeddings_project.",
-                "model.discriminator_predictions.",
-            ]
+        self.hf_to_vllm_mapper |= WeightsMapper(
+            # Drop unsupported/unwanted output embeddings layers.
+            orig_to_new_prefix={
+                "model.lm_head.": None,
+                "model.predictions.": None,
+                "model.qa_outputs.": None,
+                "model.embeddings_project.": None,
+                "model.discriminator_predictions.": None,
+            },
+            orig_to_new_substr={
+                # Some encoder models have the position_ids buffer in the checkpoint.
+                # vLLM always passes position_ids as an argument, so drop the buffer.
+                "position_ids": None,
+                # Some encoder models have the bias of the final classifier layer in
+                # the checkpoint. vLLM does not use this bias, so drop it.
+                "score.bias": None,
+            },
         )
-
-        # Some encoder models have the position_ids buffer in the checkpoint.
-        # vLLM will always pass position_ids as an argument, so we skip loading
-        # the buffer if it exists
-        self.skip_substrs.append("position_ids")
-
-        # Some encoder models have the bias of the final classifier layer
-        # in the checkpoint. vLLM does not use this bias, so we skip loading
-        # it if it exists
-        self.skip_substrs.append("score.bias")
 
         # roberta-like models an extra padding in positions.
         # FIXME(Isotr0py): This is quite hacky for roberta edge case,
@@ -63,6 +64,7 @@ class LegacyMixin:
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
         if self.is_roberta:
             # RoBERTa positions start at padding_idx + 1.
@@ -74,4 +76,5 @@ class LegacyMixin:
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
+            **kwargs,
         )

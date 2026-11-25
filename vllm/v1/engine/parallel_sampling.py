@@ -33,6 +33,12 @@ class ParentRequest:
     # To efficiently obtain child sampling params
     cached_child_sampling_params: SamplingParams | None
 
+    # RequestOutput covers all samples, so keep the prefill stats of the child
+    # with the fewest cached tokens. FinishedRequestStats records each child's
+    # own count.
+    num_cached_tokens: int | None
+    num_cache_creation_tokens: int
+
     def __init__(self, request: EngineCoreRequest) -> None:
         assert request.external_req_id is not None
         sampling_params = request.params
@@ -48,12 +54,14 @@ class ParentRequest:
         )
         self.max_num_generation_tokens = 0
         self.cached_child_sampling_params = None
+        self.num_cached_tokens = None
+        self.num_cache_creation_tokens = 0
 
     def _get_child_sampling_params(
         self,
         index: int,
     ) -> SamplingParams:
-        """Efficiently obtain child `sampling_params`
+        """Efficiently obtain child `sampling_params`.
 
         If `sampling_params.seed` is not `None` then
         each child request requires a unique clone of
@@ -64,6 +72,7 @@ class ParentRequest:
 
         Returns:
           Child `sampling_params` instance.
+
         """
         seed = self.sampling_params.seed
         if self.cached_child_sampling_params:
@@ -88,6 +97,7 @@ class ParentRequest:
 
         Returns:
           (request ID, sampling_params) tuple
+
         """
         child_req_id = f"{index}_{self.request_id}"
         self.child_requests.add(child_req_id)
@@ -124,6 +134,13 @@ class ParentRequest:
 
         finished = not self.child_requests
         return outputs, finished
+
+    def observe_prefill(
+        self, num_cached_tokens: int, num_cache_creation_tokens: int
+    ) -> None:
+        if self.num_cached_tokens is None or num_cached_tokens < self.num_cached_tokens:
+            self.num_cached_tokens = num_cached_tokens
+            self.num_cache_creation_tokens = num_cache_creation_tokens
 
     def observe_num_generation_tokens(self, num_generation_tokens: int):
         self.max_num_generation_tokens = max(

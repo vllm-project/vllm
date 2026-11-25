@@ -12,19 +12,24 @@ import argparse
 import json
 import multiprocessing
 import os
+import shlex
 import shutil
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from pathlib import Path
+from subprocess import TimeoutExpired
 from typing import Any, NamedTuple
 
 import numpy as np
+import requests
 from tqdm import tqdm
 
 from vllm.benchmarks.lib.utils import (
     convert_to_pytorch_benchmark_format,
     write_to_json,
 )
+from vllm.benchmarks.sweep.server import ServerProcess
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -52,6 +57,10 @@ class MetricStats(NamedTuple):
 _BASE_METRICS = [
     MetricDesc("total_startup_time", "startup", "Startup time"),
     MetricDesc("compilation_time", "compilation", "Compilation time"),
+]
+_SERVE_METRICS = [
+    MetricDesc("ready_time", "ready", "Launch to ready"),
+    MetricDesc("first_token_time", "first_token", "Launch to first token"),
 ]
 _ENCODER_METRIC = MetricDesc(
     "encoder_compilation_time",
@@ -107,8 +116,7 @@ def _metric_to_json(m: MetricStats) -> dict[str, Any]:
 
 @contextmanager
 def cold_startup():
-    """
-    Context manager to measure cold startup time:
+    """Context manager to measure cold startup time:
     1. Uses a temporary directory for vLLM cache to avoid any pollution
        between cold startup iterations.
     2. Uses inductor's fresh_cache to clear torch.compile caches.
@@ -132,8 +140,7 @@ def cold_startup():
 
 
 def run_startup_in_subprocess(engine_args, result_queue):
-    """
-    Run LLM startup in a subprocess and return timing metrics via a queue.
+    """Run LLM startup in a subprocess and return timing metrics via a queue.
     This ensures complete isolation between iterations.
     """
     try:
@@ -191,6 +198,193 @@ def save_to_pytorch_benchmark_format(
             write_to_json(f"{base_name}.{m.key}.pytorch.json", records)
 
 
+def _read_completion(
+    server: ServerProcess,
+    row: dict[str, Any],
+    reference: tuple[str, str, list[int] | None] | None,
+) -> tuple[str, str, list[int] | None]:
+    session = server.http
+    url = server.server_address
+    with session.get(url + "/v1/models", timeout=30) as response:
+        response.raise_for_status()
+        try:
+            model = response.json()["data"][0]["id"]
+        except (KeyError, TypeError, IndexError) as exc:
+            raise ValueError("Expected /v1/models to list a model ID") from exc
+        if not isinstance(model, str):
+            raise ValueError("Expected a string model ID")
+
+    payload = {
+        "model": model,
+        "prompt": "The capital of France is",
+        "stream": True,
+        "temperature": 0,
+        "max_tokens": 8,
+        "return_token_ids": True,
+    }
+    text: list[str] = []
+    ids: list[int] | None = None
+    finish = None
+    with session.post(
+        url + "/v1/completions", json=payload, stream=True, timeout=300
+    ) as response:
+        response.raise_for_status()
+        # Do not wait for a full buffer before timestamping a short SSE frame.
+        for line in response.iter_lines(chunk_size=1):
+            arrival = time.monotonic()
+            if not line.startswith(b"data:"):
+                continue
+            data = line[5:].strip()
+            if data == b"[DONE]":
+                if not text or finish not in ("stop", "length"):
+                    break
+                output = model, "".join(text), ids
+                if reference is not None and output != reference:
+                    raise ValueError("Completion differs from the reference")
+                row["verified"] = True
+                return output
+            frame = json.loads(data)
+            if not isinstance(frame, dict):
+                raise ValueError("Expected a JSON object in completion stream")
+            if "error" in frame:
+                raise ValueError(f"Completion failed: {frame['error']}")
+            choices = frame.get("choices")
+            if not isinstance(choices, list):
+                raise ValueError("Expected a list of completion choices")
+
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    raise ValueError(
+                        "Expected a JSON object for each completion choice"
+                    )
+                index = choice.get("index")
+                if type(index) is not int or index != 0 or finish is not None:
+                    raise ValueError("Unexpected completion choice")
+                chunk = choice.get("text")
+                if not isinstance(chunk, str):
+                    raise ValueError("Expected text in completion choice")
+                if chunk:
+                    row.setdefault("first_token_time", arrival - server.launch_time)
+                    text.append(chunk)
+
+                token_ids = choice.get("token_ids")
+                if token_ids is not None:
+                    if not isinstance(token_ids, list) or not all(
+                        type(token) is int for token in token_ids
+                    ):
+                        raise ValueError("Expected integer completion token IDs")
+                    if ids is None:
+                        ids = []
+                    ids.extend(token_ids)
+                finish = choice.get("finish_reason")
+    raise ValueError("Incomplete completion stream")
+
+
+def _bench_server(args: argparse.Namespace) -> None:
+    defaults = EngineArgs.add_cli_args(FlexibleArgumentParser()).parse_args([])
+    overrides = [
+        name
+        for name, default in vars(defaults).items()
+        if getattr(args, name) != default
+    ]
+    if overrides:
+        flags = ", ".join("--" + name.replace("_", "-") for name in overrides)
+        raise ValueError(f"Put {flags} inside --serve-cmd")
+    cmd = shlex.split(args.serve_cmd)
+    timeout = args.server_ready_timeout
+    if not cmd or timeout <= 0:
+        raise ValueError("Expected a command and a positive readiness timeout")
+    log_dir = None
+    results: dict[str, Any] = {}
+    metrics = []
+    reference = None
+    failed = False
+    stop_launching = False
+    for phase, count in (
+        ("cold", args.num_iters_cold),
+        ("warmup", args.num_iters_warmup),
+        ("warm", args.num_iters_warm),
+    ):
+        rows = []
+        for _ in range(count):
+            if stop_launching:
+                break
+            row: dict[str, Any] = {"verified": False}
+            rows.append(row)
+            try:
+                if args.output_json and log_dir is None:
+                    output_path = Path(args.output_json)
+                    log_dir = Path(
+                        tempfile.mkdtemp(
+                            prefix=f"{output_path.stem}-logs-", dir=output_path.parent
+                        )
+                    )
+                log_path = log_dir / f"{phase}-{len(rows)}.log" if log_dir else None
+                with (
+                    cold_startup() if phase == "cold" else nullcontext(),
+                    log_path.open("wb") if log_path else nullcontext() as log,
+                    requests.Session() as session,
+                ):
+                    if log_path:
+                        row["server_log"] = str(log_path)
+                    session.trust_env = False
+                    server = ServerProcess(cmd, [], show_stdout=True, session=session)
+                    if server.is_server_ready(timeout=1.0):
+                        raise RuntimeError(f"{server.server_address} already answers")
+                    server.start(log=log, dev_mode=False)
+                    try:
+                        server.wait_until_ready(
+                            timeout, poll_interval=0.05, request_timeout=1.0
+                        )
+                        row["ready_time"] = time.monotonic() - server.launch_time
+                        try:
+                            reference = _read_completion(server, row, reference)
+                        except (requests.RequestException, ValueError, KeyError) as exc:
+                            row["error"] = str(exc)
+                    finally:
+                        if server.stop(grace_period=30):
+                            row["forced_kill"] = True
+                            raise RuntimeError("Server required SIGKILL")
+                        if server.is_server_ready(timeout=1.0):
+                            raise RuntimeError("Address still answers after shutdown")
+            except (
+                OSError,
+                RuntimeError,
+                ValueError,
+                TimeoutExpired,
+                KeyboardInterrupt,
+            ) as exc:
+                row["verified"] = False
+                row["error"] = str(exc) or type(exc).__name__
+                stop_launching = True
+            if not row["verified"]:
+                failed = True
+                print(f"{phase} {len(rows)} unverified: {row}")
+
+        verified = [row for row in rows if row["verified"]]
+        results[f"{phase}_iterations"] = rows
+        results[f"{phase}_verified_starts"] = len(verified)
+        if verified and phase != "warmup":
+            phase_metrics = [
+                _compute_metric(phase, m, verified) for m in _SERVE_METRICS
+            ]
+            metrics.extend(phase_metrics)
+            _print_phase(f"{phase.upper()} STARTUP", phase_metrics)
+        print(f"{phase.capitalize()} verified starts: {len(verified)}/{len(rows)}")
+
+    if args.output_json:
+        for metric in metrics:
+            results.update(_metric_to_json(metric))
+        with open(args.output_json, "w") as f:
+            json.dump(results, f, indent=4)
+        if reference:
+            export_args = argparse.Namespace(**vars(args))
+            export_args.model = reference[0]
+            save_to_pytorch_benchmark_format(export_args, metrics)
+    if failed:
+        raise SystemExit(1)
+
+
 def add_cli_args(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--num-iters-cold",
@@ -217,11 +411,28 @@ def add_cli_args(parser: FlexibleArgumentParser):
         help="Path to save the startup time results in JSON format.",
     )
 
+    parser.add_argument(
+        "--serve-cmd",
+        help="Time a server command from launch to readiness and to the first "
+        "non-empty text in a streamed completion. Put all engine arguments inside "
+        "the quoted command. A start verifies when its completed response matches "
+        "the first completed start in text and token IDs (when returned).",
+    )
+    parser.add_argument(
+        "--server-ready-timeout",
+        type=int,
+        default=1800,
+        help="Seconds to wait for the server started by --serve-cmd to become ready. "
+        "A server that exits is reported at once.",
+    )
     parser = EngineArgs.add_cli_args(parser)
     return parser
 
 
 def main(args: argparse.Namespace):
+    if args.serve_cmd:
+        return _bench_server(args)
+
     # Set multiprocessing start method to 'spawn' for clean process isolation
     # This ensures each subprocess starts fresh without inheriting state
     multiprocessing.set_start_method("spawn", force=True)
@@ -229,11 +440,9 @@ def main(args: argparse.Namespace):
     engine_args = EngineArgs.from_cli_args(args)
 
     def create_llm_and_measure_startup():
-        """
-        Create LLM instance in a subprocess and measure startup time.
+        """Create LLM instance in a subprocess and measure startup time.
         Returns timing metrics, using subprocess for complete isolation.
         """
-
         # Create a queue for inter-process communication
         result_queue: multiprocessing.Queue[Any] = multiprocessing.Queue()
         process = multiprocessing.Process(
@@ -264,7 +473,7 @@ def main(args: argparse.Namespace):
     # Collect cold startup iterations
     print("Measuring cold startup time...\n")
     cold_iterations = []
-    for i in tqdm(range(args.num_iters_cold), desc="Cold startup iterations"):
+    for _ in tqdm(range(args.num_iters_cold), desc="Cold startup iterations"):
         with cold_startup():
             cold_iterations.append(create_llm_and_measure_startup())
 
@@ -276,7 +485,7 @@ def main(args: argparse.Namespace):
     # Collect warm startup iterations
     print("\nMeasuring warm startup time...\n")
     warm_iterations = []
-    for i in tqdm(range(args.num_iters_warm), desc="Warm startup iterations"):
+    for _ in tqdm(range(args.num_iters_warm), desc="Warm startup iterations"):
         warm_iterations.append(create_llm_and_measure_startup())
 
     # Determine if encoder compilation occurred in any iteration

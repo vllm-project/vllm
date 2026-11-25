@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -8,20 +8,23 @@ import torch.nn as nn
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import Attention
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import (
+    PIN_MEMORY,
+    STR_DTYPE_TO_TORCH_DTYPE,
+    async_tensor_h2d,
+)
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionType,
     CommonAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    EncoderOnlyAttentionSpec,
-    KVCacheConfig,
-)
+from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
+from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -30,11 +33,14 @@ class EncoderOnlyModelState(DefaultModelState):
 
     Encoder attention needs no KV cache: it runs full, bidirectional
     self-attention over each request's tokens in a single forward. Such layers
-    return no ``get_kv_cache_spec`` and therefore never enter
-    ``kv_cache_config.kv_cache_groups``, so the KV-backed attention path never
+    return no `get_kv_cache_config` and therefore never enter
+    `kv_cache_config.kv_cache_groups`, so the KV-backed attention path never
     builds their metadata. We build their (non-causal) metadata here, keeping
     the normal KV-backed path untouched.
     """
+
+    # The V2 pooling path is not wired for prompt embeds.
+    supports_prompt_embeds = False
 
     def __init__(
         self,
@@ -72,7 +78,7 @@ class EncoderOnlyModelState(DefaultModelState):
             )
             group = groups.get(key)
             if group is None:
-                spec = EncoderOnlyAttentionSpec(
+                spec = AttentionSpec(
                     block_size=cache_config.block_size,
                     num_kv_heads=layer.num_kv_heads,
                     head_size=layer.head_size,
@@ -95,6 +101,55 @@ class EncoderOnlyModelState(DefaultModelState):
         self._dummy_slot_mapping = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=device
         )
+        self.token_type_ids: dict[str, torch.Tensor] = {}
+
+    def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        super().add_request(req_index, new_req_data)
+        pooling_params = new_req_data.pooling_params
+        if pooling_params is None or pooling_params.extra_kwargs is None:
+            return
+
+        token_type_range = pooling_params.extra_kwargs.get("compressed_token_type_ids")
+        if token_type_range is not None:
+            assert new_req_data.prompt_token_ids is not None
+            token_type_start, token_type_end = token_type_range
+            positions = torch.arange(
+                len(new_req_data.prompt_token_ids), dtype=torch.int32
+            )
+            self.token_type_ids[new_req_data.req_id] = (
+                (positions >= token_type_start) & (positions < token_type_end)
+            ).to(torch.int32)
+
+    def remove_request(self, req_id: str) -> None:
+        super().remove_request(req_id)
+        self.token_type_ids.pop(req_id, None)
+
+    def prepare_inputs(
+        self, input_batch: InputBatch, req_states: RequestState
+    ) -> dict[str, torch.Tensor | None]:
+        model_inputs = super().prepare_inputs(input_batch, req_states)
+        if not self.token_type_ids:
+            return model_inputs
+
+        token_type_ids_cpu = torch.zeros(
+            input_batch.num_tokens_after_padding,
+            dtype=torch.int32,
+            pin_memory=PIN_MEMORY,
+        )
+        offset = 0
+        for i, req_id in enumerate(input_batch.req_ids):
+            num_tokens = int(input_batch.num_scheduled_tokens[i])
+            request_token_type_ids = self.token_type_ids.get(req_id)
+            if request_token_type_ids is not None:
+                start = int(input_batch.num_computed_tokens_np[i])
+                token_type_ids_cpu[offset : offset + num_tokens].copy_(
+                    request_token_type_ids[start : start + num_tokens]
+                )
+            offset += num_tokens
+        model_inputs["token_type_ids"] = async_tensor_h2d(
+            token_type_ids_cpu, device=self.device
+        )
+        return model_inputs
 
     def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
         # Encoder groups are built here rather than in init_attn_backend, so
@@ -104,7 +159,7 @@ class EncoderOnlyModelState(DefaultModelState):
         for group in self.encoder_attn_groups:
             builder = group.get_metadata_builder(0)
             cg_support = builder.get_cudagraph_support(
-                self.vllm_config, cast(AttentionSpec, group.kv_cache_spec)
+                self.vllm_config, group.kv_cache_spec
             )
             if cg_support.value < support.value:
                 support = cg_support
@@ -120,7 +175,10 @@ class EncoderOnlyModelState(DefaultModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
+        model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
+        assert ubatch_idx == 0, "DBO is not supported"
         attn_metadata = super().prepare_attn(
             input_batch,
             cudagraph_mode,
@@ -129,6 +187,7 @@ class EncoderOnlyModelState(DefaultModelState):
             attn_groups,
             kv_cache_config,
             for_capture,
+            model_specific_attn_metadata=model_specific_attn_metadata,
         )
         attn_metadata.update(
             self._build_encoder_attn_metadata(input_batch, cudagraph_mode, for_capture)
@@ -136,10 +195,7 @@ class EncoderOnlyModelState(DefaultModelState):
         return attn_metadata
 
     def _build_encoder_attn_metadata(
-        self,
-        input_batch: InputBatch,
-        cudagraph_mode: CUDAGraphMode,
-        for_capture: bool,
+        self, input_batch: InputBatch, cudagraph_mode: CUDAGraphMode, for_capture: bool
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
@@ -147,7 +203,10 @@ class EncoderOnlyModelState(DefaultModelState):
         else:
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
-        max_query_len = int(input_batch.num_scheduled_tokens.max())
+        # Use the promised max_query_len so FULL graphs don't bake in the dummy's.
+        max_query_len = input_batch.max_query_len or int(
+            input_batch.num_scheduled_tokens.max()
+        )
         if for_capture:
             max_seq_len = self.max_model_len
         else:

@@ -6,8 +6,8 @@ INT4 packs two 4-bit values per cache byte, pre-rotates with a single RHT,
 and hides a 4-bit zero-point in the scale's low mantissa bits — too
 different from the core kernel to share it. Owns the whole mode: nibble
 pack/unpack, the reshape (write) kernel, the split-dot attention (read)
-kernel, the RHT transform, and the public ``reshape_and_cache_int4`` /
-``unified_attention_int4`` entry points.
+kernel, the RHT transform, and the public `reshape_and_cache_int4` /
+`unified_attention_int4` entry points.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
@@ -30,7 +31,10 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
     softmax_step,
     store_segm_reduce_scalars,
 )
-from vllm.v1.attention.ops.triton_unified_attention import reduce_segments
+from vllm.v1.attention.ops.triton_unified_attention import (
+    kv_tile_alignment,
+    reduce_segments,
+)
 
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
@@ -383,9 +387,25 @@ def _attn_packed(
     # 2 → INT4 nibble pair (asymmetric + zp).  The packed KV cache stores
     # one byte per ``packed_offs``, holding PACKING_FACTOR values.
     PACKING_FACTOR: tl.constexpr,
+    # K/V alignment and offset of V from K (kv_tile_alignment).
+    v_cache_delta: tl.int64,
+    K_ALIGN: tl.constexpr,
+    V_ALIGN: tl.constexpr,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
+    # Strides as visible multiples of the alignment found by kv_tile_alignment,
+    # and V addressed from K, let the K/V tile loads compile to vector loads.
+    if K_ALIGN > 1:
+        stride_k_cache_0 = stride_k_cache_0 // K_ALIGN * K_ALIGN
+        stride_k_cache_1 = stride_k_cache_1 // K_ALIGN * K_ALIGN
+        stride_k_cache_2 = stride_k_cache_2 // K_ALIGN * K_ALIGN
+    if V_ALIGN > 1:
+        value_cache_ptr = key_cache_ptr + v_cache_delta // V_ALIGN * V_ALIGN
+        stride_v_cache_0 = stride_v_cache_0 // V_ALIGN * V_ALIGN
+        stride_v_cache_1 = stride_v_cache_1 // V_ALIGN * V_ALIGN
+        stride_v_cache_2 = stride_v_cache_2 // V_ALIGN * V_ALIGN
+
     # Shared prologue: sequence lookup, q-block bounds, early returns.
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -693,11 +713,11 @@ def _launch_packed_attn(
     softmax_segm_expsum,
     packing_factor: int,
 ):
-    """Launch ``_attn_packed`` for one of the sub-byte modes.
+    """Launch `_attn_packed` for one of the sub-byte modes.
 
     Handles 2D-vs-3D dispatch, placeholder pointers for the unused side
-    of that split, and the trailing ``reduce_segments`` pass.  Writes
-    into ``out`` (directly for 2D; via the segm buffers for 3D).
+    of that split, and the trailing `reduce_segments` pass.  Writes
+    into `out` (directly for 2D; via the segm buffers for 3D).
     """
     import vllm.envs as envs
     from vllm.v1.attention.ops.triton_unified_attention import _get_tile_size
@@ -759,6 +779,8 @@ def _launch_packed_attn(
     else:
         grid = (total_num_q_blocks, num_kv_heads)
         tile_size = TILE_SIZE_PREFILL
+
+    k_align, v_align, v_cache_delta = kv_tile_alignment(k_cache, v_cache)
 
     _attn_packed[grid](
         output_ptr=out,
@@ -822,6 +844,9 @@ def _launch_packed_attn(
         USE_FP8=output_scale is not None,
         IS_3D=use_3d,
         PACKING_FACTOR=packing_factor,
+        v_cache_delta=v_cache_delta,
+        K_ALIGN=k_align,
+        V_ALIGN=v_align,
     )
 
     if use_3d:
@@ -908,14 +933,15 @@ def unified_attention_int4(
 ) -> None:
     """Paged attention over the INT4 packed cache, writing into *out*.
 
-    The forward RHT has norm ``sqrt(head_size)``, so ``softmax_scale`` is
-    divided by ``head_size`` and the inverse RHT divides the output by
-    ``head_size`` as well.
+    The forward RHT has norm `sqrt(b)` for `b` the largest power-of-two
+    divisor of `head_size` (`b == head_size` for power-of-two sizes), so
+    `softmax_scale` is divided by `b` and the inverse RHT divides the output
+    by `b` as well.
     """
     q_orig_dtype = q.dtype
     q = single_rht(q.float()).to(q_orig_dtype)
-    head_size = q.shape[2]
-    softmax_scale = softmax_scale / head_size
+    rht_norm = largest_power_of_2_divisor(q.shape[2])
+    softmax_scale = softmax_scale / rht_norm
 
     _launch_packed_attn(
         q=q,
@@ -945,7 +971,7 @@ def unified_attention_int4(
         packing_factor=_INT4_PACKING_FACTOR,
     )
 
-    out_f = single_rht(out.float(), inverse=True) / head_size
+    out_f = single_rht(out.float(), inverse=True) / rht_norm
     out.copy_(out_f.to(q_orig_dtype))
 
 
@@ -1134,11 +1160,20 @@ def _get_rht_signs(d: int, round_idx: int, device: torch.device) -> torch.Tensor
         gen = torch.Generator(device="cpu")
         gen.manual_seed(0x9E3779B9 + round_idx * 0x517CC1B7)
         signs = (
-            2.0 * torch.bernoulli(torch.full((d,), 0.5, device="cpu"), generator=gen)
+            2.0
+            * torch.bernoulli(
+                torch.full((d,), 0.5, dtype=torch.float32, device="cpu"),
+                generator=gen,
+            )
             - 1.0
         )
         _RHT_SIGNS_CACHE[key] = signs.to(device)
     return _RHT_SIGNS_CACHE[key]
+
+
+def init_rht_signs(head_size: int, device: torch.device) -> None:
+    """Pre-build the `single_rht` signs so no forward takes the H2D miss."""
+    _get_rht_signs(largest_power_of_2_divisor(head_size), 0, device)
 
 
 def single_rht(x: torch.Tensor, inverse: bool = False) -> torch.Tensor:
@@ -1148,6 +1183,16 @@ def single_rht(x: torch.Tensor, inverse: bool = False) -> torch.Tensor:
     before asymmetric quantization.
     """
     d = x.shape[-1]
+    block = largest_power_of_2_divisor(d)
+    if block < d:
+        # H is only defined for power-of-two rows, so apply it
+        # block-diagonally: H_b inside each of the d / b blocks, for b the
+        # largest power-of-two divisor of d.  That keeps H @ H.T = b * I
+        # without padding the row, hence the norm is sqrt(b), not sqrt(d).
+        lead = x.shape[:-1]
+        return single_rht(x.reshape(*lead, d // block, block), inverse).reshape(
+            *lead, d
+        )
     d1 = _get_rht_signs(d, 0, x.device)
     if inverse:
         return fast_hadamard_transform(x) * d1

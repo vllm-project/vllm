@@ -1,0 +1,12 @@
+name: Record CI approval
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions: {}
+
+jobs:
+  approved:
+    if: github.repository_owner == 'vllm-project' && github.event.review.state == 'approved'
+    uses: vllm-project/vllm/.github/workflows/_reusable-record-ci-approval.yml@main

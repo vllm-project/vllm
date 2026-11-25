@@ -50,7 +50,27 @@ def reformat(text: str) -> str:
     return text
 
 
-def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
+def _enable_deterministic_lora_shrink(monkeypatch: pytest.MonkeyPatch) -> None:
+    if not current_platform.is_rocm():
+        return
+
+    # These tests assert exact greedy outputs. Force the Triton LoRA shrink
+    # kernel to use SPLIT_K=1 so it stores the complete reduction directly
+    # instead of accumulating split-K partial results with atomic_add.
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    # The kernel configuration reads VLLM_BATCH_INVARIANT at import time.
+    # Spawn the engine process so it observes this setting even if the LoRA
+    # Triton utilities were already imported during test collection.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+
+def generate_and_test(
+    llm: vllm.LLM,
+    lora_path: str,
+    lora_id: int,
+    *,
+    is_3d_lora_weight: bool = False,
+) -> None:
     prompts = [
         PROMPT_TEMPLATE.format(
             context="Give the average number of working horses on farms with more than 5000 total horses."  # noqa: E501
@@ -66,7 +86,11 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
     outputs = llm.generate(
         prompts,
         sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None,
+        lora_request=LoRARequest(
+            str(lora_id), lora_id, lora_path, is_3d_lora_weight=is_3d_lora_weight
+        )
+        if lora_id
+        else None,
     )
     # Print the outputs.
     generated_texts: list[str] = []
@@ -103,11 +127,15 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
 )
 @pytest.mark.parametrize("specialize_active_lora", [True, False])
 def test_gpt_oss_lora(
+    vllm_runner,
     gptoss20b_lora_files,
     mxfp4_use_marlin,
     specialize_active_lora,
+    monkeypatch: pytest.MonkeyPatch,
 ):
-    llm = vllm.LLM(
+    _enable_deterministic_lora_shrink(monkeypatch)
+
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
@@ -121,10 +149,10 @@ def test_gpt_oss_lora(
         compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
             cudagraph_specialize_lora=False,
         ),
-    )
-
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, gptoss20b_lora_files, lora_id=1)
+        generate_and_test(runner.llm, gptoss20b_lora_files, lora_id=2)
 
 
 @multi_gpu_test(num_gpus=2)
@@ -143,11 +171,15 @@ def test_gpt_oss_lora(
     ],
 )
 def test_gpt_oss_lora_tp2(
+    vllm_runner,
     gptoss20b_lora_files,
     fully_sharded_loras,
     mxfp4_use_marlin,
+    monkeypatch: pytest.MonkeyPatch,
 ):
-    llm = vllm.LLM(
+    _enable_deterministic_lora_shrink(monkeypatch)
+
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
@@ -163,7 +195,36 @@ def test_gpt_oss_lora_tp2(
         compilation_config=vllm.config.CompilationConfig(
             cudagraph_specialize_lora=False,
         ),
-    )
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(runner.llm, gptoss20b_lora_files, lora_id=1)
+        generate_and_test(runner.llm, gptoss20b_lora_files, lora_id=2)
 
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+
+def test_gpt_oss_lora_mixed_moe_format(
+    vllm_runner,
+    gptoss20b_lora_files,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _enable_deterministic_lora_shrink(monkeypatch)
+
+    with vllm_runner(
+        MODEL_PATH,
+        max_model_len=1024,
+        enable_lora=True,
+        enable_mixed_moe_lora_format=True,
+        max_loras=2,
+        max_lora_rank=8,
+        max_num_seqs=2,
+        max_num_batched_tokens=2048,
+        compilation_config=vllm.config.CompilationConfig(
+            cudagraph_specialize_lora=False,
+        ),
+        enable_chunked_prefill=None,
+    ) as runner:
+        generate_and_test(
+            runner.llm, gptoss20b_lora_files, lora_id=1, is_3d_lora_weight=True
+        )
+        generate_and_test(
+            runner.llm, gptoss20b_lora_files, lora_id=2, is_3d_lora_weight=True
+        )

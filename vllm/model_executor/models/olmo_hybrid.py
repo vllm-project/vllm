@@ -143,6 +143,7 @@ class OlmoHybridAttention(nn.Module):
             rope_parameters["rope_theta"] is not None
         )
 
+        self.rotary_emb: nn.Module | None
         if self._use_rope:
             self.rotary_emb = get_rope(
                 self.head_dim,
@@ -183,6 +184,7 @@ class OlmoHybridAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self._apply_qk_norm(q, k)
         if self._use_rope:
+            assert self.rotary_emb is not None
             q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -273,11 +275,7 @@ class OlmoHybridDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
 
-            attn_output = torch.empty_like(hidden_states)
-            self.linear_attn(
-                hidden_states=hidden_states,
-                output=attn_output,
-            )
+            attn_output = self.linear_attn(hidden_states)
             hidden_states = residual + attn_output
 
             residual = hidden_states
@@ -300,20 +298,26 @@ class OlmoHybridDecoderLayer(nn.Module):
 @support_torch_compile
 class OlmoHybridModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            ".linear_attn.b_proj": ".linear_attn.in_proj_ba.b_proj",
+            ".linear_attn.a_proj": ".linear_attn.in_proj_ba.a_proj",
+            ".linear_attn.o_norm": ".linear_attn.norm",
+            ".linear_attn.o_proj": ".linear_attn.out_proj",
+        },
         orig_to_new_stacked={
             ".self_attn.q_proj": (".self_attn.qkv_proj", "q"),
             ".self_attn.k_proj": (".self_attn.qkv_proj", "k"),
             ".self_attn.v_proj": (".self_attn.qkv_proj", "v"),
-            ".linear_attn.q_proj": (".linear_attn.in_proj_qkvg", 0),
-            ".linear_attn.k_proj": (".linear_attn.in_proj_qkvg", 1),
-            ".linear_attn.v_proj": (".linear_attn.in_proj_qkvg", 2),
-            ".linear_attn.g_proj": (".linear_attn.in_proj_qkvg", 3),
+            ".linear_attn.q_proj": (".linear_attn.in_proj_qkvz", 0),
+            ".linear_attn.k_proj": (".linear_attn.in_proj_qkvz", 1),
+            ".linear_attn.v_proj": (".linear_attn.in_proj_qkvz", 2),
+            ".linear_attn.g_proj": (".linear_attn.in_proj_qkvz", 3),
             ".q_conv1d": (".conv1d", 0),
             ".k_conv1d": (".conv1d", 1),
             ".v_conv1d": (".conv1d", 2),
             ".gate_proj": (".gate_up_proj", 0),
             ".up_proj": (".gate_up_proj", 1),
-        }
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -383,7 +387,7 @@ class OlmoHybridForCausalLM(
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
-        "in_proj_qkvg": ["q_proj", "k_proj", "v_proj", "g_proj"],
+        "in_proj_qkvz": ["q_proj", "k_proj", "v_proj", "g_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -397,15 +401,14 @@ class OlmoHybridForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
         if config.tie_word_embeddings:
-            self.lm_head = self.model.embed_tokens
-        else:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=vllm_config.quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
@@ -475,10 +478,5 @@ class OlmoHybridForCausalLM(
         return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(
-                ["lm_head.weight"] if self.config.tie_word_embeddings else None
-            ),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

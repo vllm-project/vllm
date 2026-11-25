@@ -3,23 +3,55 @@ job_dirs:
   - ".buildkite/image_build"
   - ".buildkite/test_areas"
   - ".buildkite/hardware_tests"
+# Every step whose test commands are plain pytest is split into shards from
+# recorded test timings. A step opts out with `automatic_shard: false`.
+automatic_shard_default: true
 run_all_patterns:
   - "docker/Dockerfile"
-  - "CMakeLists.txt"
   - "requirements/common.txt"
   - "requirements/cuda.txt"
   - "requirements/kv_connectors.txt"
   - "requirements/build/cuda.txt"
   - "requirements/test/cuda.txt"
   - "setup.py"
-  - "csrc/"
   - "cmake/"
+  - ".buildkite/check-torch-abi.py"
+# Run every AMD step (ci-selector does not pick AMD steps). csrc/ and
+# CMakeLists.txt are also built for ROCm.
+amd_run_all_patterns:
+  - "csrc/"
+  - "CMakeLists.txt"
+  - "cmake/hipify.py"
+  - "docker/Dockerfile.rocm$"
+  - "docker/docker-bake-rocm.hcl"
+  - ".buildkite/scripts/rocm/build.sh"
+  - "requirements/rocm.txt"
+  - "requirements/test/rocm.txt"
+  - "tools/vllm-rocm/therock_wheels.py"
+# Separate from run_all_exclude_patterns, which skips AMD files like csrc/rocm/.
+amd_run_all_exclude_patterns:
+  - "csrc/cpu/"
 run_all_exclude_patterns:
   - "docker/Dockerfile."
   - "csrc/cpu/"
   - "csrc/rocm/"
   - "cmake/hipify.py"
   - "cmake/cpu_extension.cmake"
+# run_all_patterns matches that only the CUDA build reads (the cmake files only
+# when VLLM_GPU_LANG is CUDA): they run every CUDA step but not every AMD step.
+cuda_only_run_all_patterns:
+  - "docker/Dockerfile$"
+  - "requirements/cuda.txt"
+  - "requirements/kv_connectors.txt"
+  - "requirements/build/cuda.txt"
+  - "requirements/test/cuda.txt"
+  - "cmake/external_projects/deepgemm.cmake"
+  - "cmake/external_projects/deepselect.cmake"
+  - "cmake/external_projects/flashkda.cmake"
+  - "cmake/external_projects/flashmla.cmake"
+  - "cmake/external_projects/fmha_sm100.cmake"
+  - "cmake/external_projects/tml_fa4.cmake"
+  - "cmake/external_projects/vllm_flash_attn.cmake"
 registries: public.ecr.aws/q9t5s3a7
 repositories:
   main: "vllm-ci-postmerge-repo"

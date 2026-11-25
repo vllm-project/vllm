@@ -5,25 +5,28 @@
 
 The checkpoint layout is:
 
-* ``model.whisper_encoder.*``: Whisper-medium encoder weights.
-* ``model.vq_adaptor.*``: 4x time-merge projector.
-* ``model.language_model.*``: Qwen3-0.6B decoder weights.
+* `model.whisper_encoder.*`: Whisper-medium encoder weights.
+* `model.vq_adaptor.*`: 4x time-merge projector.
+* `model.language_model.*`: Qwen3-0.6B decoder weights.
 """
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import Annotated, Any, Literal, TypeAlias
 
+import regex as re
 import torch
 from torch import nn
 from transformers import BatchFeature
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TextPrompt
 from vllm.model_executor.models.interfaces import (
+    DiarizedTranscriptionSegment,
     MultiModalEmbeddings,
+    StreamingDiarizedTranscriptParser,
     SupportsMultiModal,
     SupportsPP,
     SupportsTranscription,
@@ -35,6 +38,8 @@ from vllm.model_executor.models.utils import (
     _merge_multimodal_embeddings,
     init_vllm_registered_model,
     maybe_prefix,
+    parse_diarized_speaker,
+    parse_diarized_timestamp,
 )
 from vllm.model_executor.models.whisper import (
     WhisperEncoder,
@@ -60,8 +65,9 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
-from vllm.multimodal.processing.processor import ProcessorInputs
+from vllm.multimodal.processing.processor import HFMultiModalInputs, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -76,15 +82,120 @@ DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT = (
     "（[S01]、[S02]、[S03]…）开头，正文为对应的语音内容，"
     "并在段末标注结束时间戳，以清晰标明该段语音范围。"
 )
+# Appended to the prompt to bias decoding, per the model card's hotword recipe.
+MOSS_HOTWORDS_HINT = "热词提示："
+
+_MOSS_DIARIZED_TOKEN_RE = re.compile(
+    r"\[(?:(?P<timestamp>[0-9.]{1,32})|(?P<speaker>S[0-9]{1,15}))\]"
+)
+_MOSS_DIARIZED_WHITESPACE_RE = re.compile(r"\s*")
+_MOSS_DIARIZED_END_RE = re.compile(r"\[(?P<end>[0-9.]{1,32})\]\s*\Z")
+
+
+class MossStreamingDiarizedParser(StreamingDiarizedTranscriptParser):
+    """Parses `[start][Sxx]text[end]` output, sending each segment once the
+    next segment's header has arrived."""
+
+    def __init__(
+        self, model_cls: type[SupportsTranscription], model_config: ModelConfig
+    ) -> None:
+        super().__init__(model_cls, model_config)
+        self._tail = ""
+        self._header: tuple[float, str] | None = None
+        self._body: list[str] = []
+        self._timestamp: str | None = None
+        self._candidate: list[str] = []
+        self._emitted_segment = False
+
+    def _flush_candidate(self) -> None:
+        self._body.extend(self._candidate)
+        self._candidate.clear()
+        self._timestamp = None
+
+    def _append_text(self, text: str) -> None:
+        if not text:
+            return
+        if self._timestamp is not None and _MOSS_DIARIZED_WHITESPACE_RE.fullmatch(text):
+            # Whitespace belongs to the body if the candidate header is rejected.
+            if self._header is not None:
+                self._candidate.append(text)
+        else:
+            self._flush_candidate()
+            if self._header is not None:
+                self._body.append(text)
+
+    def _finish_segment(self) -> DiarizedTranscriptionSegment | None:
+        if self._header is None:
+            return None
+        start, speaker = self._header
+        body = "".join(self._body)
+        self._body.clear()
+        end_match = _MOSS_DIARIZED_END_RE.search(body)
+        end = parse_diarized_timestamp(end_match["end"]) if end_match else None
+        if end_match is None or end is None or end < start:
+            raise ValueError("Model output did not contain a valid diarized transcript")
+        if segment_text := body[: end_match.start()].strip():
+            self._emitted_segment = True
+            return DiarizedTranscriptionSegment(
+                start=start, end=end, speaker=speaker, text=segment_text
+            )
+        return None
+
+    def process_delta(
+        self, text_delta: str, finished: bool
+    ) -> Iterator[DiarizedTranscriptionSegment]:
+        text = self._tail + text_delta
+        self._tail = ""
+        pos = 0
+        for match in _MOSS_DIARIZED_TOKEN_RE.finditer(text, partial=True):
+            self._append_text(text[pos : match.start()])
+            pos = match.end()
+            if match.partial:
+                # Only an incomplete marker is rescanned, at most 33 characters.
+                self._tail = match[0]
+                break
+            if match["timestamp"] is not None:
+                self._flush_candidate()
+                self._timestamp = match["timestamp"]
+                if self._header is not None:
+                    self._candidate.append(match[0])
+            elif self._timestamp is not None:
+                start = parse_diarized_timestamp(self._timestamp)
+                speaker = parse_diarized_speaker(match["speaker"])
+                if start is not None and speaker is not None:
+                    self._candidate.clear()
+                    self._timestamp = None
+                    segment = self._finish_segment()
+                    self._header = (start, speaker)
+                    if segment is not None:
+                        yield segment
+                else:
+                    self._flush_candidate()
+                    self._append_text(match[0])
+            else:
+                self._append_text(match[0])
+        self._append_text(text[pos:])
+
+        if finished:
+            self._flush_candidate()
+            self._append_text(self._tail)
+            self._tail = ""
+            segment = self._finish_segment()
+            self._header = None
+            if segment is not None:
+                yield segment
+            if not self._emitted_segment:
+                raise ValueError(
+                    "Model output did not contain a valid diarized transcript"
+                )
 
 
 class MossTranscribeDiarizeAudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - c: Audio chunks
-        - m: Mel bins
-        - f: Mel frames
-        - n: Number of audio items
+    """Dimensions:
+    - c: Audio chunks
+    - m: Mel bins
+    - f: Mel frames
+    - n: Number of audio items
     """
 
     type: Literal["audio_features"] = "audio_features"
@@ -104,11 +215,10 @@ class MossTranscribeDiarizeAudioInputs(TensorSchema):
 
 
 class MossTranscribeDiarizeEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - n: Number of audio items
-        - t: Number of audio tokens
-        - h: Hidden size
+    """Dimensions:
+    - n: Number of audio items
+    - t: Number of audio tokens
+    - h: Hidden size
     """
 
     type: Literal["audio_embeds"] = "audio_embeds"
@@ -289,14 +399,14 @@ class MossTranscribeDiarizeWhisperEncoder(WhisperEncoder):
     def forward(
         self,
         input_features: torch.Tensor,
-        audio_feature_lengths: torch.Tensor,
+        audio_feature_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert audio_feature_lengths is not None
         if input_features.numel() == 0:
             return input_features.new_empty((1, 0, self.conv1.out_channels))
         device = self.conv1.weight.device
         dtype = self.conv1.weight.dtype
         input_features = input_features.to(device=device, dtype=dtype)
-        audio_feature_lengths = audio_feature_lengths.to(device=device)
         batch_size = self.max_encoder_batch or input_features.shape[0]
         encoded_parts: list[torch.Tensor] = []
 
@@ -307,8 +417,8 @@ class MossTranscribeDiarizeWhisperEncoder(WhisperEncoder):
 
         hidden = torch.cat(encoded_parts, dim=0)
         chunks = [
-            hidden[idx : idx + 1, : int(token_len.item()) * self.audio_merge_size]
-            for idx, token_len in enumerate(audio_feature_lengths)
+            hidden[idx : idx + 1, : token_len * self.audio_merge_size]
+            for idx, token_len in enumerate(audio_feature_lengths.tolist())
         ]
         return torch.cat(chunks, dim=1)
 
@@ -343,9 +453,12 @@ def _mtd_field_config(
             audio_feature_lengths=MultiModalFieldConfig.flat_from_sizes(
                 "audio",
                 audio_chunk_counts,
+                keep_on_cpu=True,
             ),
-            audio_chunk_counts=MultiModalFieldConfig.batched("audio"),
-            audio_token_lengths=MultiModalFieldConfig.batched("audio"),
+            audio_chunk_counts=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
+            audio_token_lengths=MultiModalFieldConfig.batched(
+                "audio", keep_on_cpu=True
+            ),
         )
     return fields
 
@@ -412,7 +525,7 @@ class MossTranscribeDiarizeDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         if num_audios == 0:
@@ -427,60 +540,63 @@ class MossTranscribeDiarizeDummyInputsBuilder(
             )
         }
 
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
-    ) -> ProcessorInputs:
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
-        num_audios = mm_counts.get("audio", 0)
-        tokenizer = self.info.get_tokenizer()
-        prompt = tokenizer.encode(
-            AUDIO_PLACEHOLDER * num_audios,
-            add_special_tokens=False,
-        ) or tokenizer.encode(
-            "\n",
-            add_special_tokens=False,
-        )
-        return ProcessorInputs(prompt=prompt, mm_data_items=dummy_mm_items)
-
 
 class MossTranscribeDiarizeMultiModalProcessor(
     BaseMultiModalProcessor[MossTranscribeDiarizeProcessingInfo]
 ):
-    def _call_hf_processor(
+    def get_dummy_inputs(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: MultiModalDummyOptions,
+    ) -> ProcessorInputs:
+        builder = self.dummy_inputs
         tokenizer = self.info.get_tokenizer()
-        audios = _get_audios_from_mm_data(mm_data)
-        if not audios:
-            input_ids = tokenizer.encode(
-                prompt,
-                add_special_tokens=tok_kwargs.get("add_special_tokens", False),
+
+        dummy_mm_data = builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
+
+        num_audios = mm_counts.get("audio", 0)
+        if num_audios > 0:
+            prompt = cached_encode(
+                tokenizer,
+                AUDIO_PLACEHOLDER * num_audios,
+                add_special_tokens=False,
             )
-            return BatchFeature({"input_ids": [input_ids]}, tensor_type="pt")
+        else:
+            prompt = cached_encode(
+                tokenizer,
+                "\n",
+                add_special_tokens=False,
+            )
 
-        processed = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
-            dict(text=prompt, audio=audios),
-            dict(**mm_kwargs, **tok_kwargs),
-        )
-        return _add_vllm_audio_metadata(processed, len(audios))
+        return ProcessorInputs(prompt=prompt, mm_data_items=dummy_mm_items)
 
-    def _hf_processor_applies_updates(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _get_hf_mm_inputs(
         self,
-        prompt_text: str,
         mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        if hf_inputs.hf_data:
+            hf_inputs.hf_data["audio"] = _get_audios_from_mm_data(hf_inputs.hf_data)
+
+        return hf_inputs
+
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return mm_items.get_count("audio", strict=False) > 0
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        audios = _get_audios_from_mm_data(mm_data)
+        if audios:
+            processed_data = _add_vllm_audio_metadata(processed_data, len(audios))
+
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -532,7 +648,7 @@ class MossTranscribeDiarizeMultiModalProcessor(
                 raise ValueError("Audio input is too short to produce any tokens.")
             return num_tokens
 
-        def get_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+        def get_replacement(item_idx: int) -> PromptUpdateDetails:
             num_tokens = get_num_tokens(item_idx)
             audio_tokens = processor._audio_span_ids(num_tokens)
             return PromptUpdateDetails.select_token_id(
@@ -543,7 +659,9 @@ class MossTranscribeDiarizeMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=AUDIO_PLACEHOLDER,
+                target=cached_encode(
+                    tokenizer, AUDIO_PLACEHOLDER, add_special_tokens=False
+                ),
                 replacement=get_replacement,
             ),
         ]
@@ -563,6 +681,7 @@ class MossTranscribeDiarizeForConditionalGeneration(
     supports_transcription = True
     supports_transcription_only = True
     supports_segment_timestamp = False
+    supports_diarized_transcription = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -612,9 +731,16 @@ class MossTranscribeDiarizeForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+        if stt_params.task_type != "transcribe":
+            raise ValueError(
+                f'MOSS-Transcribe-Diarize only supports "transcribe", '
+                f"got {stt_params.task_type}"
+            )
         stt_config = stt_params.stt_config
         question = stt_params.request_prompt or DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT
         question = question.strip() or DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT
+        if hotwords := (stt_params.hotwords or "").strip():
+            question += f"{MOSS_HOTWORDS_HINT}{hotwords}"
         prompt = (
             "<|im_start|>system\n"
             "You are a helpful assistant.<|im_end|>\n"
@@ -628,8 +754,23 @@ class MossTranscribeDiarizeForConditionalGeneration(
         )
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
+    def post_process_output(cls, text: str, model_config: ModelConfig) -> str:
         return text.strip()
+
+    @classmethod
+    def parse_diarized_transcript(
+        cls, text: str, model_config: ModelConfig
+    ) -> list[DiarizedTranscriptionSegment]:
+        """Parse MOSS's canonical `[start][Sxx]text[end]` transcript."""
+        try:
+            parser = MossStreamingDiarizedParser(cls, model_config)
+            return list(parser.process_delta(text, finished=True))
+        except ValueError:
+            return []
+
+    @classmethod
+    def get_streaming_diarized_parser_cls(cls) -> type[MossStreamingDiarizedParser]:
+        return MossStreamingDiarizedParser
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

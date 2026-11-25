@@ -10,16 +10,19 @@ from vllm import (
     PoolingRequestOutput,
 )
 from vllm.config import VllmConfig
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateConfig,
-)
+from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
+from vllm.renderers.chat_utils import ChatTemplateConfig
+from vllm.renderers.chat_utils.item_tracker import (
+    MediaRequestBudgets,
+    use_media_request_budgets,
+)
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer
 
-from ..typing import (
+from ..types import (
     AnyOfflineInputsContext,
     AnyRenderParam,
     EncodeChatRenderParams,
@@ -68,7 +71,16 @@ class PoolingIOProcessor:
 
         # Shared thread pool executor for preprocessing
         self._executor: Executor = self.renderer._executor
-        self.render_async = make_async(self.render, executor=self._executor)
+        self.render_async = make_async(
+            self._render_with_media_budgets, executor=self._executor
+        )
+
+    def _render_with_media_budgets(
+        self, render_params: AnyRenderParam, budgets: MediaRequestBudgets
+    ) -> PoolingEngineInput:
+        # Executor threads need the request scope installed explicitly.
+        with use_media_request_budgets(budgets):
+            return self.render(render_params)
 
     #######################################
     # online APIs
@@ -100,7 +112,9 @@ class PoolingIOProcessor:
             )
 
             mm_config = self.model_config.multimodal_config
-            tok_params = request.build_tok_params(self.model_config)
+            chat_tok_params = request.build_tok_params(
+                self.model_config, self.renderer.default_chat_tok_params
+            )
             chat_params = request.build_chat_params(
                 self.chat_template, self.chat_template_content_format
             ).with_defaults(
@@ -120,7 +134,7 @@ class PoolingIOProcessor:
                 EncodeChatRenderParams(
                     conversations=request.messages,
                     chat_params=chat_params,
-                    tok_params=tok_params,
+                    tok_params=chat_tok_params,
                     prompt_extras=ctx.prompt_extras,
                     skip_mm_cache=False,
                     params=params_seq[i],
@@ -145,7 +159,9 @@ class PoolingIOProcessor:
                 )
                 for prompt in prompts_seq
             ]
-            tok_params = request.build_tok_params(model_config)
+            cmpl_tok_params = request.build_tok_params(
+                self.model_config, self.renderer.default_cmpl_tok_params
+            )
 
             params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
             seq_lora_requests = self._lora_request_to_seq(
@@ -156,7 +172,7 @@ class PoolingIOProcessor:
             requests = [
                 EncodeCMPLRenderParams(
                     prompts=parsed_prompts[i],
-                    tok_params=tok_params,
+                    tok_params=cmpl_tok_params,
                     prompt_extras=ctx.prompt_extras,
                     skip_mm_cache=False,
                     params=params_seq[i],
@@ -196,9 +212,8 @@ class PoolingIOProcessor:
             )
             for prompt in prompts_seq
         ]
-        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
-            **(ctx.tokenization_kwargs or {})
-        )
+
+        cmpl_tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
 
         pooling_params: PoolingParams | Sequence[PoolingParams]
         if ctx.pooling_params is None:
@@ -206,18 +221,21 @@ class PoolingIOProcessor:
         else:
             pooling_params = ctx.pooling_params
 
-        params_seq = self._params_to_seq(pooling_params, num_requests)
+        # Clone to avoid modifying the caller's pooling parameters.
+        params_seq = [
+            param.clone() for param in self._params_to_seq(pooling_params, num_requests)
+        ]
 
         for param in params_seq:
             if param.task is None:
                 param.task = pooling_task
             elif pooling_task == "plugin":
-                # `plugin` task uses io_processor.parse_request to verify inputs.
+                # `plugin` task uses io_processor.parse_data to verify inputs.
                 # We actually allow plugin to overwrite pooling_task.
                 pass
             elif param.task != pooling_task:
                 msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
-                raise ValueError(msg)
+                raise VLLMValidationError(msg)
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
@@ -226,7 +244,7 @@ class PoolingIOProcessor:
             for i in range(num_requests):
                 yield EncodeCMPLRenderParams(
                     prompts=parsed_prompts[i],
-                    tok_params=tok_params,
+                    tok_params=cmpl_tok_params,
                     prompt_extras=None,
                     skip_mm_cache=False,
                     params=params_seq[i],
@@ -293,7 +311,7 @@ class PoolingIOProcessor:
                 and chat_template_kwargs.get("chat_template") is not None
             )
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 "Chat template is passed with request, but "
                 "--trust-request-chat-template is not set. "
                 "Refused request with untrusted chat template."
@@ -307,7 +325,7 @@ class PoolingIOProcessor:
     ) -> Sequence[PoolingParams]:
         if isinstance(params, Sequence):
             if len(params) != num_requests:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"The lengths of prompts ({num_requests}) "
                     f"and params ({len(params)}) must be the same."
                 )
@@ -323,7 +341,7 @@ class PoolingIOProcessor:
     ) -> Sequence[LoRARequest | None]:
         if isinstance(lora_request, Sequence):
             if len(lora_request) != num_requests:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"The lengths of prompts ({num_requests}) "
                     f"and lora_request ({len(lora_request)}) must be the same."
                 )

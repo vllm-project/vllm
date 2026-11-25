@@ -8,6 +8,7 @@ use thiserror::Error;
 use thiserror_ext::Macro;
 
 use crate::protocol::utility::UtilityCallId;
+use crate::transport::EngineId;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -38,6 +39,8 @@ pub enum Error {
     ZmqRuntimeTask(#[from] tokio::task::JoinError),
     #[error("engine core reported fatal failure")]
     EngineCoreDead,
+    #[error("engine core {engine_id:?} disconnected")]
+    EngineDisconnected { engine_id: EngineId },
     #[error("startup handshake timed out while waiting for {stage} after {timeout:?}")]
     HandshakeTimeout {
         stage: &'static str,
@@ -49,12 +52,12 @@ pub enum Error {
     UnexpectedHandshakeIdentity { expected: Vec<u8>, actual: Vec<u8> },
     #[error("unexpected startup handshake message: {message}")]
     UnexpectedHandshakeMessage { message: String },
+    #[error("invalid engine-core client configuration: {message}")]
+    InvalidClientConfig { message: String },
     #[error("unexpected non-control output on coordinator path: {message}")]
     UnexpectedCoordinatorOutput { message: String },
     #[error("unexpected output on main dispatcher path: {message}")]
     UnexpectedDispatcherOutput { message: String },
-    #[error("coordinator requires a Python-compatible two-byte engine id, got {engine_id:?}")]
-    UnsupportedCoordinatorEngineId { engine_id: Vec<u8> },
     #[error("unsupported auxiliary frame(s): expected 1 frame, got {frame_count}")]
     UnsupportedAuxFrames { frame_count: usize },
     #[error("external coordinator mode is not implemented yet")]
@@ -64,18 +67,23 @@ pub enum Error {
         context: &'static str,
         field: &'static str,
     },
-    #[error("engine control channel closed unexpectedly: {message}")]
-    ControlClosed { message: String },
     #[error("request `{request_id}` is already in flight")]
     DuplicateRequestId { request_id: String },
-    #[error("data parallel rank {rank} is out of range for {num_engines} engine(s)")]
-    InvalidDataParallelRank { rank: u32, num_engines: u32 },
+    #[error(
+        "data parallel rank {rank} is not connected to this frontend; connected ranks: {connected_ranks:?}"
+    )]
+    InvalidDataParallelRank {
+        rank: u32,
+        connected_ranks: Vec<u32>,
+    },
     #[error("engine-core output dispatcher closed: {message}")]
     DispatcherClosed { message: String },
     #[error("engine-core client is closed: {message}")]
     ClientClosed { message: String },
     #[error("request output stream for `{request_id}` closed unexpectedly")]
     RequestStreamClosed { request_id: String },
+    #[error("profiling session is already active")]
+    ProfileAlreadyActive,
     #[error("utility call `{method}` failed (call_id={call_id}): {message}")]
     UtilityCallFailed {
         method: String,
