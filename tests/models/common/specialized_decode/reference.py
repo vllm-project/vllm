@@ -1,17 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Slow references for the specialized decode tests: plain torch in float64,
-written from the model definitions, never from a vLLM, AITER or Triton kernel.
+"""What the formats a specialized decode uses are defined to do, in float64.
 
-Rounding points a kernel documents are explicit calls here (`bf16_rne`,
-`to_e4m3_rne`, the E8M0 code rules), so a test reproduces them on purpose.
-`tests/models/deepseek_v41/amd/mono/test_primitives.py` proves each rounding
-and code rule bit-exact against the device helpers the kernels use.
+Any model's decode tests can use these: a test names the rule it expects
+(`bf16_rne`, `to_e4m3_rne`, an E8M0 code rule) and compares its kernel against
+it, rather than inheriting whatever rounding some other implementation
+happens to do. `tests/models/deepseek_v41/amd/mono/test_primitives.py` is
+today's only caller, and holds every rule below bit-exact.
 
-This is the formats and rounding half, which is what the primitive tier (T1)
-of #68016 needs. The layer math (RMSNorm, RoPE, MLA, MoE) and the error
-metrics land here next, shared rather than once per model, so that the
-`DecodeNumerics` contract (T2) measures every model the same way."""
+A definition must not be derived from the implementation it checks, nor reach
+for a helper that implementation also reaches for, or a shared bug cancels and
+the test passes. That is about where a definition comes from, not about which
+library writes it down.
+
+Formats are all that the primitive tier (T1) of #68016 needs. The layer math
+and the error metrics land here next, shared rather than once per model, so
+that the `DecodeNumerics` contract (T2) measures every model the same way."""
 
 import torch
 

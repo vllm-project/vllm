@@ -15,7 +15,9 @@ import vllm._cpu_ops as cpu_ops
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.config.kernel import MoEBackend
+from vllm.config.quantization import user_activation_override
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -49,6 +51,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    check_activation_quant_fallback,
+    kInt8Dynamic32Sym,
     pack_quantized_values_into_int32,
 )
 from vllm.platforms import current_platform
@@ -80,6 +84,8 @@ class WNA16MoEBackend(Enum):
     XPU = "XPU"
     EMULATION = "EMULATION"
     RDNA3 = "RDNA3"
+    # Int8 activations per 32 values (kInt8Dynamic32Sym) for up to 64 tokens.
+    RDNA3_INT4_INT8 = "RDNA3_INT4_INT8"
     # No compute backend: requantization sources only dequantize weights.
     NONE = "NONE"
 
@@ -138,6 +144,12 @@ def backend_to_kernel_cls(
         )
 
         return [Rdna3WNA16Experts]
+    elif backend == WNA16MoEBackend.RDNA3_INT4_INT8:
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_int4_int8_moe import (
+            Rdna3Int4Int8Experts,
+        )
+
+        return [Rdna3Int4Int8Experts]
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
@@ -150,7 +162,10 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
         return [WNA16MoEBackend.XPU]
 
     backends = [
-        # Native HIP kernel, gated on gfx1100 by _supports_current_device().
+        # Native HIP kernels, gated on gfx11 / gfx1100 by
+        # _supports_current_device(). RDNA3_INT4_INT8 is only tried for a
+        # kInt8Dynamic32Sym activation request (see _filter_by_activation).
+        WNA16MoEBackend.RDNA3_INT4_INT8,
         WNA16MoEBackend.RDNA3,
         WNA16MoEBackend.FLASHINFER_TRTLLM,
         WNA16MoEBackend.MARLIN,
@@ -235,7 +250,8 @@ def _backend_incompatibility_reason(
         if group_size % 4 != 0:
             return f"group size {group_size} is not a multiple of 4"
 
-    if backend == WNA16MoEBackend.TRITON:
+    # RDNA3_INT4_INT8 falls back to the Triton kernels and shares their layout.
+    if backend in (WNA16MoEBackend.TRITON, WNA16MoEBackend.RDNA3_INT4_INT8):
         if may_have_bias:
             return "expert bias is not supported"
         if isinstance(quant_config, AutoAWQConfig):
@@ -291,12 +307,57 @@ def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
         "flashinfer_trtllm": WNA16MoEBackend.FLASHINFER_TRTLLM,
         "emulation": WNA16MoEBackend.EMULATION,
         "rdna3": WNA16MoEBackend.RDNA3,
+        "rdna3_int4_int8": WNA16MoEBackend.RDNA3_INT4_INT8,
     }
     if backend := mapping.get(runner_backend):
         return backend
     raise ValueError(
         f"moe_backend='{runner_backend}' is not supported for WNA16 MoE. "
         f"Expected one of {list(mapping.keys())}."
+    )
+
+
+def _backend_activation_key(backend: WNA16MoEBackend) -> QuantKey | None:
+    """The activation quantization `backend` runs, None for fp16/bf16."""
+    if backend == WNA16MoEBackend.RDNA3_INT4_INT8:
+        return kInt8Dynamic32Sym
+    return None
+
+
+def _requested_activation_key() -> QuantKey | None:
+    """The MoE activation quantization the deployment requests. WNA16
+    checkpoints are weight-only, so this is the user's
+    `--quantization-config.moe.activation`, or None (fp16/bf16)."""
+    return user_activation_override("moe", get_current_vllm_config_or_none())[0]
+
+
+def _filter_by_activation(
+    backends: list[WNA16MoEBackend],
+    requested_activation_key: QuantKey | None,
+) -> list[WNA16MoEBackend]:
+    """Backends running the requested activation quantization, followed by the
+    fp16/bf16 ones as a fallback, which `_activation_fallback_reason` warns
+    about or forbids. A backend with its own activation key only serves a
+    request for that key."""
+    matching = [
+        b
+        for b in backends
+        if requested_activation_key is not None
+        and _backend_activation_key(b) == requested_activation_key
+    ]
+    bf16 = [b for b in backends if _backend_activation_key(b) is None]
+    return matching + bf16
+
+
+def _activation_fallback_reason(
+    backend: WNA16MoEBackend, requested_activation_key: QuantKey | None
+) -> str | None:
+    """Why VLLM_STRICT_QUANT_SCHEME forbids running the request on `backend`,
+    or None; warns once for an allowed fp16/bf16 fallback."""
+    return check_activation_quant_fallback(
+        f"WNA16 MoE backend '{backend.value}'",
+        requested_activation_key,
+        _backend_activation_key(backend),
     )
 
 
@@ -341,13 +402,15 @@ def select_wna16_moe_backend(
     if source is not None:
         return source
 
-    # WNA16 MoE always runs BF16 activations.
-    oracle = WNA16MoEKernelOracle(config, weight_key, None)
+    # Most backends run fp16/bf16 activations; each is probed with its own key.
+    requested_activation_key = _requested_activation_key()
+    oracle = WNA16MoEKernelOracle(config, weight_key, requested_activation_key)
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_wna16_backend(runner_backend)
+        activation_key = _backend_activation_key(requested_backend)
         reason = _backend_incompatibility_reason(
             requested_backend,
             config,
@@ -356,12 +419,27 @@ def select_wna16_moe_backend(
             may_have_bias,
             allow_tile_padding,
         )
+        if (
+            reason is None
+            and activation_key is not None
+            and requested_activation_key not in (None, activation_key)
+        ):
+            reason = (
+                f"it runs activation={activation_key}, not the requested "
+                f"activation={requested_activation_key}"
+            )
+        if reason is None:
+            reason = _activation_fallback_reason(
+                requested_backend, requested_activation_key
+            )
         if reason is not None:
             raise ValueError(oracle.make_log_unsupported(requested_backend, reason))
-        return oracle.return_or_raise(requested_backend)
+        return oracle.return_or_raise(requested_backend, activation_key=activation_key)
 
     # Select kernels in order of backend.
-    AVAILABLE_BACKENDS = _get_priority_backends()
+    AVAILABLE_BACKENDS = _filter_by_activation(
+        _get_priority_backends(), requested_activation_key
+    )
 
     for backend in AVAILABLE_BACKENDS:
         reason = _backend_incompatibility_reason(
@@ -375,13 +453,21 @@ def select_wna16_moe_backend(
         if reason is not None:
             logger.debug_once(oracle.make_log_unsupported(backend, reason))
             continue
-        kernel_cls, _ = oracle.try_backend(backend)
-        if kernel_cls is not None:
-            logger.debug_once(oracle.make_log_backend(backend))
-            return backend, kernel_cls
+        kernel_cls, _ = oracle.try_backend(
+            backend, activation_key=_backend_activation_key(backend)
+        )
+        if kernel_cls is None:
+            continue
+        reason = _activation_fallback_reason(backend, requested_activation_key)
+        if reason is not None:
+            logger.debug_once(oracle.make_log_unsupported(backend, reason))
+            continue
+        logger.debug_once(oracle.make_log_backend(backend))
+        return backend, kernel_cls
 
     raise NotImplementedError(
-        "No WNA16 MoE backend supports the deployment configuration."
+        "No WNA16 MoE backend supports the deployment configuration "
+        f"(weight_key={weight_key}, activation_key={requested_activation_key})."
     )
 
 
@@ -441,6 +527,9 @@ def make_wna16_moe_kernel(
     from vllm.model_executor.layers.fused_moe.experts.int4_emulation_moe import (
         Int4EmulationTritonExperts,
     )
+    from vllm.model_executor.layers.fused_moe.experts.rdna3_int4_int8_moe import (
+        Rdna3Int4Int8Experts,
+    )
     from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
         Rdna3WNA16Experts,
     )
@@ -465,6 +554,7 @@ def make_wna16_moe_kernel(
         ZentorchExpertsWNA16,
         Int4EmulationTritonExperts,
         Rdna3WNA16Experts,
+        Rdna3Int4Int8Experts,
     )
     if backend == WNA16MoEBackend.HUMMING:
         allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
@@ -1694,7 +1784,7 @@ def convert_to_wna16_moe_kernel_format(
             w13_qzeros,
             w2_qzeros,
         )
-    elif backend == WNA16MoEBackend.TRITON:
+    elif backend in (WNA16MoEBackend.TRITON, WNA16MoEBackend.RDNA3_INT4_INT8):
         # All inputs arrive in canonical N-first format; view as uint8.
         w13_uint8 = w13.contiguous().view(torch.uint8)
         w2_uint8 = w2.contiguous().view(torch.uint8)

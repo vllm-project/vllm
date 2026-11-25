@@ -27,7 +27,7 @@ packages are served from the PyTorch XPU index, so both index URLs are needed.
 To install the wheel built from the latest main branch:
 
 ```bash
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/xpu --extra-index-url https://download.pytorch.org/whl/xpu --index-strategy unsafe-best-match
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/xpu --extra-index-url https://download.pytorch.org/whl/xpu --index-strategy unsafe-best-match --find-links https://vllm-project.github.io/vllm-xpu-kernels/whl/vllm-xpu-kernels/
 ```
 
 #### Install specific revisions
@@ -36,7 +36,7 @@ If you want to access the wheels for previous commits (e.g. to bisect the behavi
 
 ```bash
 export VLLM_COMMIT=730bd35378bf2a5b56b6d3a45be28b3092d26519 # use full commit hash from the main branch
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/xpu --extra-index-url https://download.pytorch.org/whl/xpu --index-strategy unsafe-best-match
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/xpu --extra-index-url https://download.pytorch.org/whl/xpu --index-strategy unsafe-best-match --find-links https://vllm-project.github.io/vllm-xpu-kernels/whl/vllm-xpu-kernels/
 ```
 
 --8<-- [end:pre-built-wheels]
@@ -135,7 +135,7 @@ XPU platform supports **tensor parallel** inference/serving and also supports **
 ```bash
 vllm serve facebook/opt-13b \
      --dtype=bfloat16 \
-     --max_model_len=1024 \
+     --max-model-len=1024 \
      --distributed-executor-backend=mp \
      --pipeline-parallel-size=2 \
      -tp=8

@@ -83,7 +83,6 @@ def producer(k, batch, tp, mla, twoshot=False, kind=None):
     return OprojProducer(k, staged_blocks=0 if tp == 16 else 2, **grouped)
 
 
-@cache
 def compile_oproj(
     kind, k, batch, tp, nb, has_delta, mla, front=False, cap=64, twoshot=False, ahead=0
 ):
@@ -92,40 +91,61 @@ def compile_oproj(
     `twoshot`: the two-shot pair (arguments as `TwoShot.views`). `ahead`: the
     fused kernel also stores the next layer's AttnRes statistics into [ahead, 7168] /
     [ahead, 2] FP32 rows (after the AttnRes rows: next norm, next query, the two
-    rows, next eps)."""
-    box = fake((1 if twoshot else tp, cap, 7168), (cap * 7168, 7168, 1))
-    x, w = fake((batch, k), (k, 1)), fake((7168, k), (k, 1))
-    mc, slot, eps = cutlass.Int64(0), cutlass.Int32(0), cutlass.Float32(1e-6)
-    recv, peers = fake((tp, cap, 7168 // tp)), fake((tp,), None, torch.int64)
+    rows, next eps). Each kind is cached on the arguments it reads, so layers that
+    differ only in the others share one compiled kernel."""
     if kind.startswith("producer"):  # producer_mma / producer_umma: engine A/B
-        kernel = producer(k, batch, tp, mla, twoshot, kind[9:] or None)
-        tail = (recv, peers, slot) if twoshot else (box, mc, slot)
-        return cute.compile(kernel, x, w, *tail, make_fake_stream())
+        return _compile_producer(kind, k, batch, tp, mla, cap, twoshot)
+    if kind == "consumer":  # B64: one 128-thread group per CTA polls every rank
+        groups = 4 if batch <= 32 and not twoshot else 1
+        return _compile_consumer(tp, nb, has_delta, front, cap, twoshot, groups)
+    return _compile_fused(k, batch, tp, nb, has_delta, front, cap, ahead)
+
+
+def _box(tp, cap, twoshot):
+    return fake((1 if twoshot else tp, cap, 7168), (cap * 7168, 7168, 1))
+
+
+def _peers(tp, cap):
+    return fake((tp, cap, 7168 // tp)), fake((tp,), None, torch.int64)
+
+
+def _rows(front):
     row, weight = dynamic_fake(2), fake((7168,), (1,))
     xmoe = fake((1, 4, 7168), (4 * 7168, 7168, 1)) if front else None
     hints = fake((224,), (1,), torch.int32) if front else None
-    rows: tuple = (
-        row,
-        dynamic_fake(3),
-        weight,
-        weight,
-        weight,
-        row,
-        xmoe,
-        hints,
-        eps,
-        eps,
-    )
-    if kind == "consumer":  # B64: one 128-thread group per CTA polls every rank
-        options = dict(has_delta=has_delta)
-        groups = 4 if batch <= 32 and not twoshot else 1
-        kernel = OprojConsumer(nb, groups=groups, twoshot=twoshot, **options)
-        extra = (recv, mc, slot) if twoshot else ()
-        return cute.compile(kernel, box, *rows, *extra, make_fake_stream())
+    eps = cutlass.Float32(1e-6)
+    return (row, dynamic_fake(3), weight, weight, weight, row, xmoe, hints, eps, eps)
+
+
+@cache
+def _compile_producer(kind, k, batch, tp, mla, cap, twoshot):
+    x, w = fake((batch, k), (k, 1)), fake((7168, k), (k, 1))
+    kernel = producer(k, batch, tp, mla, twoshot, kind[9:] or None)
+    if twoshot:
+        tail = (*_peers(tp, cap), cutlass.Int32(0))
+    else:
+        tail = (_box(tp, cap, twoshot), cutlass.Int64(0), cutlass.Int32(0))
+    return cute.compile(kernel, x, w, *tail, make_fake_stream())
+
+
+@cache
+def _compile_consumer(tp, nb, has_delta, front, cap, twoshot, groups):
+    kernel = OprojConsumer(nb, groups=groups, twoshot=twoshot, has_delta=has_delta)
+    extra = (_peers(tp, cap)[0], cutlass.Int64(0), cutlass.Int32(0)) if twoshot else ()
+    box = _box(tp, cap, twoshot)
+    return cute.compile(kernel, box, *_rows(front), *extra, make_fake_stream())
+
+
+@cache
+def _compile_fused(k, batch, tp, nb, has_delta, front, cap, ahead):
+    x, w = fake((batch, k), (k, 1)), fake((7168, k), (k, 1))
     kernel = OprojFused(nb, has_delta=has_delta, ahead=ahead > 0)
+    rows = _rows(front)
     if ahead:
+        weight, eps = fake((7168,), (1,)), cutlass.Float32(1e-6)
         stats = (fake((ahead, n), None, torch.float32) for n in (7168, 2))
         rows += (weight, weight, *stats, eps)
+    box, mc, slot = _box(tp, cap, False), cutlass.Int64(0), cutlass.Int32(0)
     return cute.compile(kernel, x, w, box, mc, slot, *rows, make_fake_stream())
 
 
@@ -186,7 +206,10 @@ class PreparedOproj:
             shape = self.shapes.get(b)
             if shape is None or b > cap or shape[3] == 0:
                 continue
-            self.ahead[b] = compile_oproj("fused", *shape, 64, False, cap)
+            k, batch, tp, nb, delta, mla, publish = shape
+            self.ahead[b] = compile_oproj(
+                "fused", k, batch, tp, nb, delta, mla, publish, 64, False, cap
+            )
         return tuple(sorted(self.ahead))
 
     def run(self, local, prefix, blocks, out):
