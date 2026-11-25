@@ -16,12 +16,12 @@ from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
     create_vllm_config,
+    register_mamba_layers,
 )
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointExporter,
     MambaPrefillCheckpointMetadata,
 )
-from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDAMetadataBuilder
@@ -79,17 +79,16 @@ def _builder(
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
     if num_spec:
         vllm_config.speculative_config = _StubSpeculativeConfig(num_spec)
+    register_mamba_layers(
+        vllm_config,
+        ["layer.0"],
+        KDA_CHECKPOINT_ALIGNMENT if num_prefill_checkpoint_blocks else None,
+    )
     builder = KimiK3ROCmKDAMetadataBuilder(
         kv_cache_spec=MambaSpec(
             block_size=block_size,
             shapes=((16, 64),),
             dtypes=(torch.float16,),
-            mamba_cache_mode=mamba_cache_mode,
-            num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
-            prefill_checkpoint_alignment=(
-                KDA_CHECKPOINT_ALIGNMENT if num_prefill_checkpoint_blocks else None
-            ),
-            num_speculative_blocks=num_spec,
         ),
         layer_names=["layer.0"],
         vllm_config=vllm_config,
@@ -477,12 +476,8 @@ def test_checkpoint_metadata_skips_unaligned_offset() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _spec_for(monkeypatch, **attrs) -> MambaSpec:
-    """Run the layer's `get_kv_cache_spec` over a stubbed base spec."""
-    base = MambaSpec(block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,))
-    monkeypatch.setattr(
-        GatedDeltaNetAttention, "get_kv_cache_spec", lambda self, cfg: base
-    )
+def _checkpoint_alignment_for(**attrs) -> int | None:
+    """Run the layer's `get_kv_cache_checkpoint_alignment`."""
     layer = KimiK3DeltaAttention.__new__(KimiK3DeltaAttention)
     for name, value in dict(
         use_prefill_checkpoint=True,
@@ -493,17 +488,14 @@ def _spec_for(monkeypatch, **attrs) -> MambaSpec:
         setattr(layer, name, attrs.get(name, value))
     vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
     vllm_config.cache_config.mamba_cache_mode = "align"
-    return layer.get_kv_cache_spec(vllm_config)
+    return layer.get_kv_cache_checkpoint_alignment(vllm_config)
 
 
-def test_opt_in_publishes_chunk_walk_alignment(monkeypatch) -> None:
-    # The scheduler learns the kernel's granularity only from the spec, so
-    # reserving a block without publishing the alignment would hash a state
-    # that is never written.
-    spec = _spec_for(monkeypatch)
-
-    assert spec.num_prefill_checkpoint_blocks == 1
-    assert spec.prefill_checkpoint_alignment == KDA_CHECKPOINT_ALIGNMENT
+def test_opt_in_publishes_chunk_walk_alignment() -> None:
+    # The scheduler learns the kernel's granularity only from this alignment,
+    # so reserving a block without publishing it would hash a state that is
+    # never written.
+    assert _checkpoint_alignment_for() == KDA_CHECKPOINT_ALIGNMENT
 
 
 @pytest.mark.parametrize(
@@ -514,36 +506,27 @@ def test_opt_in_publishes_chunk_walk_alignment(monkeypatch) -> None:
         ("use_safe_gate", False),
     ],
 )
-def test_paths_that_cannot_export_stay_opted_out(monkeypatch, attr, value) -> None:
-    spec = _spec_for(monkeypatch, **{attr: value})
-
-    assert spec.num_prefill_checkpoint_blocks == 0
-    assert spec.prefill_checkpoint_alignment is None
+def test_paths_that_cannot_export_stay_opted_out(attr, value) -> None:
+    assert _checkpoint_alignment_for(**{attr: value}) is None
 
 
-def test_gluon_backend_keeps_the_checkpoint(monkeypatch) -> None:
+def test_gluon_backend_keeps_the_checkpoint() -> None:
     # AITER's chunk_kda cannot export the snapshot, but the steps that carry
     # one run on the fused kernel, which this module already requires.
-    spec = _spec_for(monkeypatch, kda_prefill_backend="gluon")
+    alignment = _checkpoint_alignment_for(kda_prefill_backend="gluon")
 
-    assert spec.num_prefill_checkpoint_blocks == 1
-    assert spec.prefill_checkpoint_alignment == KDA_CHECKPOINT_ALIGNMENT
+    assert alignment == KDA_CHECKPOINT_ALIGNMENT
 
 
 def test_gluon_backend_opts_out_without_the_fused_kernel(monkeypatch) -> None:
     import vllm.models.kimi_k3.amd.kda as kda
 
     monkeypatch.setattr(kda, "is_fused_kda_chunk_supported", lambda: False)
-    spec = _spec_for(monkeypatch, kda_prefill_backend="gluon")
 
-    assert spec.num_prefill_checkpoint_blocks == 0
-    assert spec.prefill_checkpoint_alignment is None
+    assert _checkpoint_alignment_for(kda_prefill_backend="gluon") is None
 
 
-def test_speculative_decoding_does_not_opt_out(monkeypatch) -> None:
+def test_speculative_decoding_does_not_opt_out() -> None:
     # num_spec reaches the kernels as a wider conv row and an interleaved
     # batch, both of which the layer handles.
-    spec = _spec_for(monkeypatch, num_spec=8)
-
-    assert spec.num_prefill_checkpoint_blocks == 1
-    assert spec.prefill_checkpoint_alignment == KDA_CHECKPOINT_ALIGNMENT
+    assert _checkpoint_alignment_for(num_spec=8) == KDA_CHECKPOINT_ALIGNMENT

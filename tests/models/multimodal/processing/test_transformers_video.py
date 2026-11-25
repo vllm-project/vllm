@@ -289,7 +289,7 @@ def test_dummy_video_has_the_most_tokens(model_id):
     max_tokens = info.get_max_video_tokens(seq_len, {"video": 1})
     assert placeholder.get_num_embeds() == max_tokens
     # Shrinking the dummy frames must never cost tokens
-    num_frames = info.get_num_frames_with_most_features(seq_len, {"video": 1})
+    num_frames = info.get_num_frames_with_most_features(seq_len, 1)
     (huge_frame_tokens,) = info.get_hf_processor()._get_num_multimodal_tokens(
         video_sizes=[[num_frames, 10_000, 10_000]]
     )["num_video_tokens"]

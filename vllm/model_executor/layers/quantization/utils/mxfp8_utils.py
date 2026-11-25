@@ -117,7 +117,8 @@ def _mxfp8_quant_triton_kernel():
     """Lazily-built Triton kernel: per-32-block E8M0 scale + FP8-E4M3 quant.
 
     Fuses what `_mxfp8_e4m3_quantize_torch` does in several elementwise passes
-    into one launch. Each program handles `[BLOCK_M, 32]` (one MX block).
+    into one launch. Each program handles `[BLOCK_M, BLOCK_K]`, i.e.
+    BLOCK_K / 32 MX blocks of BLOCK_M rows, so rows are read in long runs.
     """
     from vllm.triton_utils import tl, triton
 
@@ -135,23 +136,24 @@ def _mxfp8_quant_triton_kernel():
         ssm,
         ssk,
         BLOCK_M: tl.constexpr,
+        BLOCK_K: tl.constexpr,
         FP8_MAX: tl.constexpr,
         TINY: tl.constexpr,
     ):
-        pid_m = tl.program_id(0)
-        pid_b = tl.program_id(1)  # which 32-element block along K
-        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-        offs_k = pid_b * 32 + tl.arange(0, 32)
-        m_mask = offs_m < M
+        offs_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_k = tl.program_id(1) * BLOCK_K + tl.arange(0, BLOCK_K)
+        offs_b = tl.program_id(1) * (BLOCK_K // 32) + tl.arange(0, BLOCK_K // 32)
+        mask = (offs_m[:, None] < M) & (offs_k[None, :] < K)
         x = tl.load(
             x_ptr + offs_m[:, None] * sxm + offs_k[None, :] * sxk,
-            mask=m_mask[:, None],
+            mask=mask,
             other=0.0,
         ).to(tl.float32)
+        x = tl.reshape(x, (BLOCK_M, BLOCK_K // 32, 32))
         # Mirror _mxfp8_e4m3_quantize_torch: the scale has to put the block amax
         # at the top of the e4m3 range rather than at 1.0, or small elements of
         # the block end up in the subnormals.
-        amax = tl.maximum(tl.max(tl.abs(x), axis=1), TINY)  # [BLOCK_M]
+        amax = tl.maximum(tl.max(tl.abs(x), axis=2), TINY)  # [BLOCK_M, blocks]
         sb = tl.ceil(tl.log2(amax / FP8_MAX)) + 127.0
         sb = tl.minimum(tl.maximum(sb, 0.0), 254.0)
         # Scale by the reciprocal rather than dividing by ``exp2(sb - 127)``:
@@ -161,19 +163,22 @@ def _mxfp8_quant_triton_kernel():
         # reachable sb, and both forms are exact powers of two, so nothing
         # else changes.
         rescale = tl.exp2(127.0 - sb)
-        xq = (x * rescale[:, None]).to(xq_ptr.dtype.element_ty)
+        xq = tl.reshape(x * rescale[:, :, None], (BLOCK_M, BLOCK_K))
         tl.store(
             xq_ptr + offs_m[:, None] * sqm + offs_k[None, :] * sqk,
-            xq,
-            mask=m_mask[:, None],
+            xq.to(xq_ptr.dtype.element_ty),
+            mask=mask,
         )
-        tl.store(s_ptr + offs_m * ssm + pid_b * ssk, sb.to(tl.uint8), mask=m_mask)
+        tl.store(
+            s_ptr + offs_m[:, None] * ssm + offs_b[None, :] * ssk,
+            sb.to(tl.uint8),
+            mask=(offs_m[:, None] < M) & (offs_b[None, :] < K // 32),
+        )
 
     return _kernel
 
 
 _MXFP8_QUANT_KERNEL = None
-_MXFP8_M1_BLOCK_M = {2048: 4, 3072: 4, 6144: 2}
 
 
 def _mxfp8_e4m3_quantize_triton(
@@ -192,8 +197,8 @@ def _mxfp8_e4m3_quantize_triton(
     scales = torch.empty(
         (M, K // MXFP8_BLOCK_SIZE), dtype=MXFP8_SCALE_DTYPE, device=x.device
     )
-    BLOCK_M = _MXFP8_M1_BLOCK_M.get(K, 64) if M == 1 else 64
-    grid = (triton.cdiv(M, BLOCK_M), K // MXFP8_BLOCK_SIZE)
+    BLOCK_M, BLOCK_K = (1 if M == 1 else 4), 512
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(K, BLOCK_K))
     _MXFP8_QUANT_KERNEL[grid](
         x,
         xq,
@@ -207,9 +212,10 @@ def _mxfp8_e4m3_quantize_triton(
         scales.stride(0),
         scales.stride(1),
         BLOCK_M=BLOCK_M,
+        BLOCK_K=BLOCK_K,
         FP8_MAX=float(torch.finfo(MXFP8_VALUE_DTYPE).max),
         TINY=float(torch.finfo(torch.float32).tiny),
-        num_warps=4,
+        num_warps=2,
     )
     return xq, scales
 

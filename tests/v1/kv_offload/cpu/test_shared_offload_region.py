@@ -49,6 +49,8 @@ def _make_region(
     rank: int = 0,
     barrier=None,
     populate_shard: tuple[int, int] | None = None,
+    populate: bool = True,
+    mmap_path: str | None = None,
 ) -> SharedOffloadRegion:
     assert cpu_page_size % PAGE_SIZE == 0
     return SharedOffloadRegion(
@@ -59,6 +61,8 @@ def _make_region(
         cpu_page_size=cpu_page_size,
         barrier=barrier,
         populate_shard=populate_shard,
+        populate=populate,
+        mmap_path=mmap_path,
     )
 
 
@@ -495,6 +499,61 @@ def test_file_has_correct_size(iid):
         assert os.path.getsize(r.mmap_path) == 4 * PAGE_SIZE
 
 
+# ---------------------------------------------------------------------------
+# mmap_path
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def region_dir():
+    """A fresh directory on /dev/shm, the filesystem regions live on."""
+    with tempfile.TemporaryDirectory(prefix="vllm_offload_", dir="/dev/shm") as d:
+        yield d
+
+
+def test_mmap_path_places_every_segment_file(iid, region_dir, monkeypatch):
+    """With mmap_path, every segment file is created there and nothing at the
+    per-engine path, and cleanup removes them all."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    path = os.path.join(region_dir, "region.mmap")
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=3,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        num_segments=3,
+        mmap_path=path,
+    )
+    segments = region._segments
+    try:
+        assert [p for p, _, _ in segments] == [path, f"{path}.1", f"{path}.2"]
+        assert all(os.path.exists(p) for p, _, _ in segments)
+        assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+    finally:
+        region.cleanup()
+    assert not any(os.path.exists(p) for p, _, _ in segments)
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_mmap_path_checks_free_space_where_the_region_lives(
+    iid, region_dir, monkeypatch, relative
+):
+    """The creator checks free space in mmap_path's directory, not /dev/shm;
+    a relative path resolves against the working directory."""
+    check = MagicMock()
+    monkeypatch.setattr(region_module, "check_shm_free_space", check)
+    monkeypatch.chdir(region_dir)
+    path = "region.mmap" if relative else os.path.join(region_dir, "region.mmap")
+    with _region(iid, mmap_path=path):
+        assert os.path.exists(os.path.join(region_dir, "region.mmap"))
+    check.assert_called_once_with(
+        4 * PAGE_SIZE,
+        shm_path=region_dir,
+        allocation_name=f"CPU KV offload shared region in {region_dir}",
+    )
+
+
 def test_madvise_success_selects_madvise_population(iid, monkeypatch):
     """A successful probe must keep using MADV_POPULATE_WRITE — the fallback
     helper must never be invoked on a kernel that accepts the advice.
@@ -561,6 +620,28 @@ def test_populate_shard_prefaults_only_its_share(iid, monkeypatch, shard, expect
     ):
         assert madvise_calls == [(0, PAGE_SIZE), *expected]
         assert barrier.call_count == 2
+
+
+def test_deferred_prefault_fills_worker_slots(iid):
+    with _region(iid, num_chunks=3, num_workers=2, rank=1, populate=False) as r:
+        assert not any(_page_residency(r.mmap_obj, r.total_size_bytes))
+        for offset, length in r.prefault_ranges():
+            r.prefault(offset, length)
+        resident = _page_residency(r.mmap_obj, r.total_size_bytes)
+        for offset, length in r.iter_worker_slot_ranges():
+            first, last = offset // r.page_size, (offset + length - 1) // r.page_size
+            assert all(resident[first : last + 1])
+
+
+def test_deferred_prefault_shard_covers_region_from_its_share(iid):
+    """Workers that share every byte pin all of it, so each pre-faults all of
+    it, starting at its own share."""
+    with _region(iid, num_chunks=3, num_workers=2, populate=False) as r:
+        ranges = r.prefault_ranges((1, 2))
+        assert ranges == [(3 * PAGE_SIZE, 3 * PAGE_SIZE), (0, 3 * PAGE_SIZE)]
+        for offset, length in ranges:
+            r.prefault(offset, length)
+        assert all(_page_residency(r.mmap_obj, r.total_size_bytes))
 
 
 def test_madvise_einval_selects_fallback_for_ranked_region(iid, monkeypatch):
@@ -655,6 +736,27 @@ def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
     with pytest.raises(OSError) as exc_info:
         _make_region(iid)
     assert exc_info.value.errno == errno.EIO
+
+
+def test_madvise_efault_raises_shm_diagnostic():
+    """EFAULT from MADV_POPULATE_WRITE (a full tmpfs) becomes an OSError naming
+    /dev/shm, chained to the original error; EINVAL passes through."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    efault = OSError(errno.EFAULT, "Bad address")
+    with pytest.raises(OSError, match="/dev/shm") as exc_info:
+        sor._madvise_populate_write(
+            SimpleNamespace(madvise=MagicMock(side_effect=efault)), 0, PAGE_SIZE
+        )
+    assert exc_info.value.errno == errno.EFAULT
+    assert exc_info.value.__cause__ is efault
+
+    einval = OSError(errno.EINVAL, "Invalid argument")
+    with pytest.raises(OSError) as einval_info:
+        sor._madvise_populate_write(
+            SimpleNamespace(madvise=MagicMock(side_effect=einval)), 0, PAGE_SIZE
+        )
+    assert einval_info.value is einval
 
 
 def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
@@ -975,6 +1077,22 @@ def test_pin_mmap_region_registers_row_aligned_chunks(
     ]
 
 
+def test_pin_mmap_region_paces_and_caps_chunks(iid, host_register, monkeypatch):
+    """Paced pinning sleeps after each registration for pace x its duration,
+    and max_chunk_bytes caps chunks at whole rows."""
+    register, _ = host_register
+    clock = iter(range(10**6))
+    sleeps: list[float] = []
+    fake_time = SimpleNamespace(
+        monotonic=lambda: next(clock) / 1000, sleep=sleeps.append
+    )
+    monkeypatch.setattr(gpu_worker, "time", fake_time)
+    with _region(iid, num_chunks=5, cpu_page_size=3 * PAGE_SIZE) as region:
+        gpu_worker.pin_mmap_region(region, max_chunk_bytes=4 * PAGE_SIZE, pace=2.0)
+        assert [c.args[1] for c in register.call_args_list] == [3 * PAGE_SIZE] * 5
+        assert sleeps == pytest.approx([0.002] * 5)
+
+
 def test_pin_mmap_region_worker_slot_only_registers_own_slots(
     iid, host_register, monkeypatch
 ):
@@ -1090,6 +1208,47 @@ def test_pin_mmap_region_failure_leaves_region_pageable(iid, host_register, fail
     assert unregister.call_args_list == [
         call(address) for address in reversed(registered)
     ]
+
+
+def test_pin_mmap_region_stop_leaves_region_pageable(iid, host_register):
+    register, unregister = host_register
+    with _region(iid, num_chunks=5, cpu_page_size=3 * PAGE_SIZE) as region:
+        gpu_worker.pin_mmap_region(region, should_stop=lambda: register.call_count == 2)
+        base = region._base.data_ptr()
+        assert not region.is_pinned
+    assert register.call_count == 2
+    assert unregister.call_args_list == [call(base + 6 * PAGE_SIZE), call(base)]
+
+
+@pytest.mark.parametrize("case", ["ready", "pin_fails", "stopped"])
+def test_deferred_host_setup(iid, host_register, monkeypatch, case):
+    """The worker turns ready only after its region is pre-faulted and pinned."""
+    register, _ = host_register
+    register.return_value = case != "pin_fails"
+    monkeypatch.setattr(gpu_worker, "_relax_stream_capture", lambda: None)
+    monkeypatch.setattr(
+        gpu_worker.torch.accelerator, "set_device_index", lambda _: None
+    )
+    with _region(iid, num_chunks=3, num_workers=2, rank=1, populate=False) as region:
+        worker = gpu_worker.CPUOffloadingWorker.__new__(gpu_worker.CPUOffloadingWorker)
+        worker._mmap_region = region
+        worker._defer_host_setup = True
+        worker._device = 0
+        worker._prefault_shard = None
+        worker._pin_memory = True
+        worker._worker_slot_only = True
+        worker._pin_pace = 0.0
+        worker._setup_stop = threading.Event()
+        worker._ready = threading.Event()
+        if case == "stopped":
+            worker._setup_stop.set()
+
+        worker.start_deferred_setup()
+        assert worker._setup_thread is not None
+        worker._setup_thread.join()
+
+        assert worker.is_ready() == region.is_pinned == (case == "ready")
+        assert register.called == (case != "stopped")
 
 
 def test_pin_mmap_region_when_host_register_unsupported_stays_pageable(
@@ -1246,6 +1405,7 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
     mock_close.assert_called_once_with(9999)
     mock_check.assert_called_once_with(
         4 * PAGE_SIZE,
+        shm_path="/dev/shm",
         allocation_name="CPU KV offload shared region in /dev/shm",
     )
 

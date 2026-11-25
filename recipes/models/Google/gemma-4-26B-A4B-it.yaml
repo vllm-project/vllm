@@ -122,9 +122,6 @@ variants:
       rtx_pro_6000:
         extra_env:
           VLLM_USE_V2_MODEL_RUNNER: "1"
-        extra_args:
-        - "--gpu-memory-utilization"
-        - "0.9"
   fp8:
     model_id: "RedHatAI/gemma-4-26B-A4B-it-FP8-dynamic"
     precision: fp8
@@ -144,15 +141,10 @@ variants:
       rtx_pro_6000:
         extra_env:
           VLLM_USE_V2_MODEL_RUNNER: "1"
-        extra_args:
-        - "--gpu-memory-utilization"
-        - "0.9"
       rtx_5090:
         extra_env:
           VLLM_USE_V2_MODEL_RUNNER: "1"
         extra_args:
-        - "--gpu-memory-utilization"
-        - "0.92"
         - "--max-model-len"
         - "131072"
         - "--max-num-seqs"
@@ -177,15 +169,10 @@ variants:
       rtx_pro_6000:
         extra_env:
           VLLM_USE_V2_MODEL_RUNNER: "1"
-        extra_args:
-        - "--gpu-memory-utilization"
-        - "0.9"
       rtx_5090:
         extra_env:
           VLLM_USE_V2_MODEL_RUNNER: "1"
         extra_args:
-        - "--gpu-memory-utilization"
-        - "0.9"
         - "--max-num-batched-tokens"
         - "4096"
         - "--max-num-seqs"
@@ -227,10 +214,7 @@ variants:
         extra_env:
           VLLM_USE_V2_MODEL_RUNNER: "1"
         extra_args:
-          # 252 GB on one GB300 — full context at high utilization and a 64-way
-          # batch.
-          - "--gpu-memory-utilization"
-          - "0.92"
+          # 252 GB on one GB300 — full context and a 64-way batch.
           - "--max-model-len"
           - "262144"
           - "--max-num-seqs"
@@ -245,8 +229,6 @@ variants:
         extra_env:
           VLLM_USE_V2_MODEL_RUNNER: "1"
         extra_args:
-          - "--gpu-memory-utilization"
-          - "0.92"
           - "--max-model-len"
           - "262144"
           - "--max-num-seqs"
@@ -262,8 +244,6 @@ variants:
         extra_args:
           - "--kv-cache-dtype"
           - "fp8"
-          - "--gpu-memory-utilization"
-          - "0.9"
           - "--max-num-batched-tokens"
           - "4096"
           - "--enable-prefix-caching"
@@ -361,8 +341,7 @@ guide: |
   ### 26B MoE on 1x A100/H100 (BF16)
   ```bash
   vllm serve google/gemma-4-26B-A4B-it \
-    --max-model-len 32768 \
-    --gpu-memory-utilization 0.90
+    --max-model-len 32768
   ```
 
   ### Full-Featured Server Launch
@@ -370,7 +349,6 @@ guide: |
   ```bash
   vllm serve google/gemma-4-26B-A4B-it \
     --max-model-len 16384 \
-    --gpu-memory-utilization 0.90 \
     --enable-auto-tool-choice \
     --reasoning-parser gemma4 \
     --tool-call-parser gemma4 \
@@ -389,7 +367,6 @@ guide: |
     vllm/vllm-openai:gemma4-0505-cu129 \
       --model google/gemma-4-26B-A4B-it \
       --max-model-len 32768 \
-      --gpu-memory-utilization 0.90 \
       --host 0.0.0.0 --port 8000
   ```
   Swap `vllm/vllm-openai:gemma4-0505-cu129` for `vllm/vllm-openai:gemma4-0505-cu130` on Blackwell (B200/B300).
@@ -529,7 +506,7 @@ guide: |
   ## Configuration Tips
 
   - Set `--max-model-len` to match your workload.
-  - `--gpu-memory-utilization 0.90-0.95` maximizes KV cache.
+  - On CUDA and ROCm, leave `--gpu-memory-utilization` unset: vLLM sizes the KV cache from the memory free after warmup, and the setting defaults to 1.0. Set it only when the GPU is shared ([details](https://docs.vllm.ai/en/latest/configuration/optimization/#gpu-memory-utilization)).
   - Text-only workloads: `--limit-mm-per-prompt '{"image": 0, "audio": 0}'`.
   - `--async-scheduling` improves throughput.
   - FP8 KV cache (`--kv-cache-dtype fp8`) saves ~50% KV memory.
@@ -561,9 +538,9 @@ guide: |
     and an 8-way batch. Serve from `eugr/spark-vllm:nightly-20260704`: vLLM 0.24
     and the generic nightly both fail on this checkpoint, so the pip tab is
     hidden on this hardware.
-  - **DGX Station (GB300)** — 252 GB on one GPU, so `--gpu-memory-utilization 0.92`
-    with chunked prefill and a 64-way batch.
-  - **RTX PRO 6000** — 96 GB, `--gpu-memory-utilization 0.92` and an 8-way batch.
+  - **DGX Station (GB300)** — 252 GB on one GPU, with chunked prefill and a
+    64-way batch.
+  - **RTX PRO 6000** — 96 GB and an 8-way batch.
 
   All three run the full 262,144-token context, above the 131,072 in
   `config.json`, and pass `"moe_backend":"triton"` in `--speculative-config`

@@ -262,31 +262,44 @@ mod tests {
 
     #[tokio::test]
     async fn audio_pipeline_attributes_stage_timings_to_request() {
+        use std::sync::LazyLock;
+
         use tracing::Instrument as _;
-        use tracing::instrument::WithSubscriber as _;
         use tracing_subscriber::layer::SubscriberExt as _;
+        use vllm_tracing::timing::RequestTimingStats;
 
         use crate::{mm_request_span, mm_timing_layer};
 
+        // Installed globally, like `vllm-bench mm-processor` does: callsite
+        // interest is cached process-wide, so a scoped subscriber misses the
+        // stages whose callsites a concurrent test registers first without it.
+        static TIMINGS: LazyLock<RequestTimingStats> = LazyLock::new(|| {
+            let (layer, timings) = mm_timing_layer();
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer))
+                .expect("install global subscriber");
+            timings
+        });
+        // Multimodal requests of other tests also reach the global layer.
+        const REQUEST_ID: &str = "audio-stage-timings";
+
         let info = qwen3_asr_info();
-        let (layer, timings) = mm_timing_layer();
+        LazyLock::force(&TIMINGS);
         let parts = vec![MediaContentPart::AudioData {
             data: wav_i16_mono(16_000, &[0; 1_600]),
             mime_type: Some("audio/wav".to_string()),
             uuid: Some("audio-1".to_string()),
         }];
-        async {
-            info.prepare_multimodal(parts, &mut vec![AUDIO_PAD_ID], ModelDtype::Float32, None)
-                .instrument(mm_request_span("request-1"))
-                .await
-                .unwrap();
-        }
-        .with_subscriber(tracing_subscriber::registry().with(layer))
-        .await;
+        info.prepare_multimodal(parts, &mut vec![AUDIO_PAD_ID], ModelDtype::Float32, None)
+            .instrument(mm_request_span(REQUEST_ID))
+            .await
+            .unwrap();
 
-        let records = timings.stat();
-        assert_eq!(records.len(), 1);
-        let mut stages = records["request-1"].keys().collect::<Vec<_>>();
+        let mut stages = TIMINGS
+            .stat()
+            .remove(REQUEST_ID)
+            .expect("request timings")
+            .into_keys()
+            .collect::<Vec<_>>();
         stages.sort();
         expect_test::expect![[r#"
             [

@@ -98,7 +98,8 @@ def create_fused_moe_router(
         topk_group: Top-k within each group (for grouped routing)
         scoring_func: Scoring function to use ("softmax" or "sigmoid")
         num_fused_shared_experts: Number of fused shared experts (for ROCm AITER)
-        skip_padding: Whether to invalidate routes for padding rows
+        skip_padding: With ROCm AITER fused MoE, let grouped routing mask
+            padding rows; otherwise it follows VLLM_MOE_SKIP_PADDING
 
     Grouped topk and fused topk bias arguments:
         routed_scaling_factor: Scaling factor for routed weights

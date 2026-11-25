@@ -3,7 +3,6 @@
 """GPU-resident Qwen4Exp position-learning enhancement layers."""
 
 from collections.abc import Sequence
-from dataclasses import replace
 
 import torch
 from torch import nn
@@ -32,7 +31,6 @@ from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionBackend,
     PleShortConvAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 from ..common.ops.ple import ple_conv, ple_gate
 from .ngram_embedding import Qwen4ExpNGramEmbedding
@@ -202,22 +200,18 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
     def get_prefill_checkpoint_alignment(self) -> int | None:
         return 1 if self.cache_config.mamba_cache_mode == "align" else None
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        spec = super().get_kv_cache_spec(vllm_config)
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
         # The scheduler takes internal checkpoints only when every Mamba layer
         # can export them.
         if (
             self.get_prefill_checkpoint_alignment() is None
             or get_mamba_prefill_checkpoint_alignment(vllm_config) is None
-            or not isinstance(spec, MambaSpec)
         ):
-            return spec
+            return None
         grid = get_mamba_prefill_checkpoint_grid(vllm_config)
         # Offsets are multiples of the grid, so the window holds only inputs.
         assert grid >= self.conv_state_len
-        return replace(
-            spec, num_prefill_checkpoint_blocks=1, prefill_checkpoint_alignment=grid
-        )
+        return grid
 
     def _short_conv_dilated_dispatch(
         self,

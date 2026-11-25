@@ -511,3 +511,15 @@ def test_open_final_message_gets_no_generation_prompt(thinking_mode, final):
 def test_continue_final_message_requires_assistant(messages):
     with pytest.raises(ValueError, match="final assistant"):
         render(messages, continue_final_message=True)
+
+
+@pytest.mark.skip_global_cleanup
+def test_deepseek_v41_unknown_role_raises_value_error():
+    # Invalid roles are client errors: they must surface as ValueError
+    # (mapped to HTTP 400 by the OpenAI serving layer), not
+    # NotImplementedError (mapped to HTTP 501).
+    with pytest.raises(ValueError, match="Invalid role: SYSTEM"):
+        encode_messages(
+            [{"role": "SYSTEM", "content": "Hello"}],
+            thinking_mode="chat",
+        )

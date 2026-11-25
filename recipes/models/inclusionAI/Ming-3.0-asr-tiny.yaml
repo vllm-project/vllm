@@ -4,10 +4,12 @@ meta:
   provider: "inclusionAI"
   description: "Chinese, English, and dialect speech recognition with topic, hotword, and dialogue context."
   date_added: 2026-10-26
-  date_updated: 2026-10-27
+  date_updated: 2026-11-09
   tasks:
     - multimodal
   performance_headline: "Context-aware Chinese, English, and dialect ASR; single-GPU serving"
+  hardware:
+    mi355x: verified
 
 model:
   model_id: "inclusionAI/Ming-3.0-asr-tiny"
@@ -50,6 +52,12 @@ variants:
     precision: bf16
     vram_minimum_gb: 22
     description: "BF16 checkpoint; the capacity estimate includes the audio tower and is not a measured minimum."
+    hardware_overrides:
+      amd:
+        docker_image: "vllm/vllm-openai-rocm:nightly"
+        install:
+          pip: false
+          docker: true
 
 compatible_strategies:
   - single_node_tp
@@ -86,6 +94,22 @@ guide: |
   The Context clip illustrates correction of `铜球` to `同囚` with a relevant topic and hotwords. These are sample-specific observations, not a general Context ASR accuracy claim. Audio provenance and licenses are documented in the [official examples](https://github.com/inclusionAI/Ming-3.0-asr/blob/6141e8c552815db724d8df0f72c9d865c547a1ea/examples/cases/README.md).
 
   For accuracy comparisons, keep batch settings and attention backends consistent; greedy transcription outputs can differ across these configurations.
+
+  ## AMD (1x MI355X, BF16)
+
+  The default ROCm backends (`TRITON_MLA` attention, Triton MoE) are used.
+
+  ```bash
+  docker run --device=/dev/kfd --device=/dev/dri --group-add video \
+    --ipc=host --shm-size 16g \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -p 8000:8000 \
+    vllm/vllm-openai-rocm:nightly \
+    inclusionAI/Ming-3.0-asr-tiny \
+    --trust-remote-code \
+    --tensor-parallel-size 1 \
+    --logits-processors vllm.model_executor.models.ming_v3_asr_logits_processor:NoRepeatNGramLogitsProcessor
+  ```
 
   ## Transcription API
 

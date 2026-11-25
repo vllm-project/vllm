@@ -19,7 +19,6 @@ const MAX_DEPTH: usize = 32;
 /// Encoder cache identifiers are supplied by the producer, which must bind
 /// them to the feature content.
 pub(super) fn validate_features(features: &mut [MmFeatureSpec], prompt_len: usize) -> Result<()> {
-    let mut fields = HashMap::new();
     for feature in features.iter() {
         if feature.identifier.is_empty() {
             bail_invalid_preprocessed_multimodal!("feature identifier must be nonempty");
@@ -30,16 +29,6 @@ pub(super) fn validate_features(features: &mut [MmFeatureSpec], prompt_len: usiz
             )
         })?;
         validate_kwargs(data)?;
-        for (key, elem) in data {
-            if let Some(previous) = fields.insert((feature.modality, key), &elem.field)
-                && !same_batching(previous, &elem.field)
-            {
-                bail_invalid_preprocessed_multimodal!(
-                    "incompatible batching for {} field {key:?}",
-                    feature.modality.as_str()
-                );
-            }
-        }
         let position = &feature.mm_position;
         if position.length == 0 || position.offset.checked_add(position.length).is_none() {
             bail_invalid_preprocessed_multimodal!(
@@ -62,9 +51,31 @@ pub(super) fn validate_features(features: &mut [MmFeatureSpec], prompt_len: usiz
                 .map_err(|message| Error::InvalidPreprocessedMultimodal { message })?;
         }
     }
+    validate_batching(features.iter())?;
     // Mirror the Python frontend (`argsort_mm_positions`): features are
     // ordered by their placeholder position in the prompt.
     features.sort_by_key(|feature| feature.mm_position.offset);
+    Ok(())
+}
+
+/// Check that the features of each modality batch every kwargs field the
+/// same way, since the engine combines them into one batch per modality.
+pub(super) fn validate_batching<'a>(
+    features: impl IntoIterator<Item = &'a MmFeatureSpec>,
+) -> Result<()> {
+    let mut fields = HashMap::new();
+    for feature in features {
+        for (key, elem) in feature.data.iter().flatten() {
+            if let Some(previous) = fields.insert((feature.modality, key), &elem.field)
+                && !same_batching(previous, &elem.field)
+            {
+                bail_invalid_preprocessed_multimodal!(
+                    "incompatible batching for {} field {key:?}",
+                    feature.modality.as_str()
+                );
+            }
+        }
+    }
     Ok(())
 }
 

@@ -1,0 +1,186 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+meta:
+  title: "Inkling 2 Small"
+  slug: "inkling-2-small"
+  provider: "Thinking Machines Lab"
+  description: "Multimodal (text and image in, text out) MoE from Thinking Machines Lab with 594B total and 17B active parameters, up to 1M context, attention residuals, relative-bias attention, short convolutions, and a bundled DSpark speculator."
+  date_added: 2026-11-12
+  date_updated: 2026-11-12
+  difficulty: intermediate
+  tasks:
+    - multimodal
+  performance_headline: "~1,100 output tok/s/GPU at 100 tok/s/user (1K in / 1K out) with DSpark on 2× 4 GB200 (TP8)"
+  related_recipes:
+    - thinkingmachines/Inkling
+    - thinkingmachines/Inkling-Small
+  hardware:
+    gb200: verified
+
+model:
+  model_id: "thinkingmachines/Inkling-2-Small"
+  min_vllm_version: "nightly"
+  nightly_required: true
+  docker_image: "vllm/vllm-openai:inkling-2-small"
+  install:
+    docker:
+      note: "Serve from the `vllm/vllm-openai:inkling-2-small` image; no pip wheel is available yet."
+    pip: false
+  architecture: moe
+  parameter_count: "594B"
+  active_parameters: "17B"
+  context_length: 1048576
+  base_args: []
+  base_env: {}
+
+features:
+  reasoning:
+    description: "Parse reasoning output with the Inkling reasoning parser."
+    args:
+      - "--reasoning-parser"
+      - "inkling"
+  tool_calling:
+    description: "Enable auto tool choice with the Inkling tool-call parser."
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "inkling"
+  spec_decoding:
+    description: "DSpark speculative decoding with the draft bundled in the checkpoint: a 5-layer parallel block drafter plus a recurrent head, 7 draft tokens per step. Drafts are sampled from the draft distribution, as in the reference, which raises acceptance at temperature > 0."
+    args:
+      - "--speculative-config"
+      - '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
+
+opt_in_features:
+  - tool_calling
+
+variants:
+  default:
+    precision: nvfp4
+    vram_minimum_gb: 473
+    description: "Routed experts in NVFP4 (layers 0-39) and MXFP8 (layers 40-47) with activations quantized to the same format; attention, routers, attention-residual queries and the LM head in BF16/FP32. ~393 GB on disk including the 3.2 GB DSpark draft."
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides:
+  # One 4-GPU GB200 tray. A 1M-token request does not fit next to the weights
+  # at TP4 (64.5 GiB KV per GPU needed, ~51 GiB free), so cap the context.
+  # Probabilistic DSpark drafting caches 7 x 201K-vocab bf16 logits per
+  # sequence; 256 sequences keep a 262K-token request within the KV cache.
+  single_node_tp:
+    tp: 4
+    hardware_overrides:
+      blackwell:
+        extra_args:
+          - "--max-model-len"
+          - "262144"
+          - "--max-num-seqs"
+          - "256"
+  # Two trays (TP8) serve the full 1M context. --no-numa-bind works around a
+  # headless-node startup crash with vLLM's default NUMA binding.
+  multi_node_tp:
+    hardware_overrides:
+      blackwell:
+        extra_args:
+          - "--max-model-len"
+          - "1048576"
+          - "--no-numa-bind"
+
+troubleshooting:
+  - title: "To serve at least one request with the model's max seq len (1048576), (64.47 GiB KV cache is needed, which is larger than the available KV cache memory"
+    when:
+      strategies: [single_node_tp]
+    body: "A 1M-token request does not fit on one 4-GPU tray. Keep `--max-model-len 262144` at TP4, or use the multi-node TP strategy with 2 nodes (TP8) for the full 1M context."
+  - title: "AssertionError: Executable was changed during NUMA binding context"
+    when:
+      strategies: [multi_node_tp]
+    body: "On the headless node of a multi-node launch, vLLM's default NUMA binding swaps the global multiprocessing executable while workers start from concurrent threads. Launch every node with `--no-numa-bind`."
+
+guide: |
+  ## Overview
+
+  Inkling 2 Small is the next generation of Thinking Machines' [Inkling](https://huggingface.co/thinkingmachines/Inkling)
+  and Inkling-Small: a multimodal Mixture-of-Experts model (text and image in, text out) with
+  594B total and 17B active parameters and up to 1M tokens of context. It ships with a DSpark
+  speculator in the same checkpoint.
+
+  What changed from Inkling:
+
+  - **48 layers** (40 sliding-window + 8 full attention, the same 5:1 pattern) with
+    relative-bias attention instead of RoPE and four short convolutions per layer, as in Inkling.
+  - **Block attention residuals** replace the residual stream: before each sublayer, a learned
+    query mixes the token embedding and the outputs of earlier 6-layer blocks.
+  - **Gated attention output** with a per-token sink.
+  - **384 routed experts, top-8, no shared experts.** Experts are NVFP4 in layers 0-39 and MXFP8
+    in layers 40-47.
+  - **Image encoder:** a 23-layer ViT. No audio input.
+  - **DSpark** speculative decoding (7 tokens per step) instead of 8 chained MTP heads. Its
+    recurrent Markov head is the RNN variant from the DSpark paper.
+
+  Inkling 2 Small runs its MoE expert-parallel across the tensor-parallel group, so TP4 means
+  TP4 attention with EP4 experts, and TP8 means TP8 attention with EP8 experts.
+
+  ## Runtime
+
+  Use the `vllm/vllm-openai:inkling-2-small` image until Inkling 2 Small support is in a vLLM release.
+
+  ## Configurations
+
+  Verified on GB200 with DSpark and the reasoning parser enabled:
+
+  - **One tray, TP4:** contexts up to 262,144 tokens.
+  - **Two trays, TP8:** the full 1,048,576-token context.
+
+  LoRA adapters are supported on the attention projections and the routed experts. Expert
+  adapters need BF16 expert weights; with the NVFP4/MXFP8 experts of this checkpoint, use
+  attention-only adapters.
+
+  Tool calling uses the `inkling` tool-call parser (opt-in above). Its parser is unit-tested;
+  no end-to-end tool-calling benchmark has been run yet.
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+
+  response = client.chat.completions.create(
+      model="thinkingmachines/Inkling-2-Small",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "text", "text": "Describe this image."},
+              {"type": "image_url", "image_url": {"url": "https://example.com/photo.jpg"}},
+          ],
+      }],
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## Benchmarking
+
+  Benchmark through the chat endpoint so the server applies the chat template and the
+  reasoning parser. DSpark acceptance depends on the prompts and the sampling temperature:
+  random-token prompts accept almost nothing, so benchmark on realistic text such as SPEED-Bench.
+  The DSpark arguments above sample drafts probabilistically; with vLLM's default greedy
+  drafting, acceptance at temperature 1.0 is about 15-25% lower.
+
+  ```bash
+  vllm bench serve \
+    --backend openai-chat --endpoint /v1/chat/completions \
+    --model thinkingmachines/Inkling-2-Small \
+    --dataset-name speed_bench --speed-bench-dataset-subset throughput_1k \
+    --speed-bench-output-len 1024 --max-concurrency 16 --num-prompts 64
+  ```
+
+  ## References
+
+  - [Inkling 2 Small announcement](https://thinkingmachines.ai/news/inkling-2-small/)
+  - [Inkling 2 Small on Hugging Face](https://huggingface.co/thinkingmachines/Inkling-2-Small)
+  - [vLLM blog: Inkling 2 Small on vLLM](https://vllm.ai/blog/2026-11-12-inkling2-small)
+  - [Inkling recipe](https://recipes.vllm.ai/thinkingmachines/Inkling)
+  - [DeepSeek DSpark (DeepSpec)](https://github.com/deepseek-ai/DeepSpec)

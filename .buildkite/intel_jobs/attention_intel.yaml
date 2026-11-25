@@ -1,0 +1,39 @@
+group: Attention Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: ":intel: (BMG) V1 Attention"
+  key: v1-attention-intel
+  timeout_in_minutes: 60
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/config/attention.py
+  - vllm/model_executor/layers/dash_attention.py
+  - vllm/model_executor/layers/attention
+  - vllm/v1/attention
+  - vllm/v1/hisparse/
+  - csrc/hisparse_kernels.cu
+  - tests/v1/attention
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v
+      v1/attention/test_deepseek_v4_swa_visible.py
+      v1/attention/test_gdn_aiter_flydsl.py
+      v1/attention/test_indexer_dcp_localize.py
+      v1/attention/test_indexer_deepseek_v4_slot_mapping.py
+      v1/attention/test_mamba_align_block_table.py
+      v1/attention/test_mla_backends.py::test_mock_mla_dcp_fp8_decode_gathers_quantized_query
+      v1/attention/test_sparse_mla_backends.py
+      v1/attention/test_vit_attn_wrappers.py::test_sdpa_output_layout_without_cu_seqlens'

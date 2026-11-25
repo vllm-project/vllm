@@ -59,14 +59,12 @@ def run_rebalance_experts(
 
     # Move the global expert load window to CPU for computation.
     with device_stream(stream):
-        global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
+        eplb_stats.global_expert_load_window = (
+            eplb_stats.global_expert_load_window.cpu()
+        )
     # Compute new expert mappings for the model
     new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
-        global_expert_load_window,
-        eplb_stats.num_replicas,
-        eplb_stats.num_groups,
-        eplb_stats.num_nodes,
-        eplb_stats.num_gpus,
+        eplb_stats,
         physical_to_logical_map_cpu,
     )
     assert new_physical_to_logical_map.device == torch.device("cpu")
@@ -147,6 +145,7 @@ def _transfer_cycle(
         # We sync the rebalanced flag across ranks before each iteration so
         # all ranks make a coordinated decision to continue or stop.
         while layer_idx < num_layers:
+            model_state.worker_progress = 2 * layer_idx
             flag = torch.tensor(
                 [int(model_state.rebalanced)],
                 dtype=torch.int32,
@@ -202,6 +201,7 @@ def _transfer_cycle(
                 transfer_metadata=transfer_metadata,
                 consumed_event=consumed_event,
             )
+            model_state.worker_progress = 2 * layer_idx + 1
             # A fault recovery happened during the transfer, so the main
             # thread will never consume this result. Drop it and abandon
             # the rebalance.

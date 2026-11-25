@@ -56,7 +56,7 @@ def terse_type_name(dt):
     }[dt]
 
 
-@dataclass
+@dataclass(slots=True)
 class BenchmarkTensors:
     w_ref: torch.Tensor
     a: torch.Tensor
@@ -70,7 +70,7 @@ class BenchmarkTensors:
     w_tok_s: torch.Tensor | None
 
 
-@dataclass
+@dataclass(slots=True)
 class TypeConfig:
     act_type: torch.dtype
     weight_type: ScalarType

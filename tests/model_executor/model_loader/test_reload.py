@@ -371,7 +371,7 @@ class _ReloadableAttentionLayer(
     def get_attn_backend(self):
         raise NotImplementedError
 
-    def get_kv_cache_spec(self, vllm_config):
+    def get_kv_cache_config(self, vllm_config):
         return None
 
     def process_weights_after_loading(self) -> None:
@@ -1528,6 +1528,8 @@ def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
         enable_prefix_caching=False,
         max_model_len=64,
         max_num_seqs=1,
+        # Reloading without a pause that empties the KV cache needs headroom.
+        gpu_memory_utilization=CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION,
     ) as llm:
         before = [prompt_logprobs(llm, 0), prompt_logprobs(llm, 1)]
         assert before[0] != before[1]
@@ -1619,6 +1621,8 @@ def test_online_quantize_reload(
         enable_prefix_caching=False,
         max_model_len=16,
         max_num_seqs=1,
+        # Reloading without a pause that empties the KV cache needs headroom.
+        gpu_memory_utilization=CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION,
     ) as llm:
         llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]

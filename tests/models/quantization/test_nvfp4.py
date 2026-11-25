@@ -109,6 +109,7 @@ SM_100_NVFP4_BACKENDS = [
     "flashinfer_trtllm",
     "flashinfer_cutlass",
     "torch",
+    "cutlass",
 ]
 
 
@@ -123,6 +124,7 @@ SM_100_NVFP4_BACKENDS = [
         "flashinfer_trtllm",  # the small seq_len ensures trtllm_8x4_layout backend is used
         "flashinfer_cutlass",
         "torch",
+        "cutlass",
     ],
 )
 def test_nvfp4(vllm_runner, model, eager, backend):

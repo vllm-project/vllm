@@ -7,6 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
+from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
@@ -55,6 +56,8 @@ class NvFp4MoeBackend(Enum):
     HUMMING = "HUMMING"
     EMULATION = "EMULATION"
     FLASHINFER_MOE_EP_CUTEDSL = "FLASHINFER_MOE_EP_CUTEDSL"
+    # No compute backend: requantization sources only dequantize weights.
+    NONE = "NONE"
 
 
 # Backends whose experts quantize the MoE input themselves, with one scale per
@@ -204,11 +207,28 @@ class NvFp4MoEKernelOracle(MoEKernelOracle[NvFp4MoeBackend]):
     """NVFP4 MoE backend selection for one deployment configuration."""
 
     name = "NvFp4"
+    placeholder_backend = NvFp4MoeBackend.NONE
 
     def backend_to_kernel_cls(
         self, backend: NvFp4MoeBackend
     ) -> list[type[mk.FusedMoEExperts]]:
         return backend_to_kernel_cls(backend)
+
+
+def nvfp4_backend_supports_csf_scales(
+    backend: NvFp4MoeBackend, config: FusedMoEConfig, use_a16: bool
+) -> bool:
+    """Whether the backend keeps `csf` checkpoint scales compressed."""
+    kernel_config = get_current_vllm_config().kernel_config
+    if (
+        backend != NvFp4MoeBackend.B12X
+        or _use_a16(backend, use_a16)
+        or kernel_config.b12x_moe_uncompressed_scales
+    ):
+        return False
+    from vllm.model_executor.layers.fused_moe.b12x import B12xExperts
+
+    return B12xExperts.supports_csf_scales(config)
 
 
 def select_nvfp4_moe_backend(
@@ -218,18 +238,12 @@ def select_nvfp4_moe_backend(
 ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
+    Returns `NONE` and a placeholder experts class for requantization sources.
     """
-    from vllm.model_executor.layers.quantization.online.requantization import (
-        is_requantization_source,
-    )
-
-    # TODO: remove and let the oracles have an option to skip init.
-    if is_requantization_source():
-        from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
-            Nvfp4QuantizationEmulationTritonExperts,
-        )
-
-        return NvFp4MoeBackend.EMULATION, Nvfp4QuantizationEmulationTritonExperts
+    # TODO: migrate to oracle base method.
+    source = NvFp4MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
 
     # NOTE: the kernels are selected in the following order.
     # FLASHINFER_B12X is intentionally excluded from auto-selection until
@@ -270,9 +284,6 @@ def select_nvfp4_moe_backend(
     requested_backend = (
         map_nvfp4_backend(runner_backend) if runner_backend != "auto" else None
     )
-    # B12X can run with BF16 activations when the env forces a16.
-    if requested_backend is not None and _use_a16(requested_backend, False):
-        activation_key = None
     oracle = NvFp4MoEKernelOracle(config, weight_key, activation_key)
 
     # Handle explicit moe_backend from user.
@@ -323,6 +334,7 @@ def convert_to_nvfp4_moe_kernel_format(
     is_act_and_mul: bool,
     use_a16: bool = False,
     trtllm_hidden_alignment: int = 256,
+    csf_scales: bool = False,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -360,7 +372,7 @@ def convert_to_nvfp4_moe_kernel_format(
             w2_scale_2=w2_scale_2,
             a2_scale=a2_scale,
             is_act_and_mul=is_act_and_mul,
-            reorder_w13=use_a16,
+            reorder_w13=use_a16 or csf_scales,
         )
     elif nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
         (
@@ -608,6 +620,7 @@ def make_nvfp4_moe_kernel(
     backend: NvFp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     per_token_activation: bool = False,
+    csf_scales: bool = False,
 ) -> mk.FusedMoEKernel:
     # Marlin consumes A16 and must not receive per-token A4 metadata.
     if backend == NvFp4MoeBackend.MARLIN and moe_quant_config.use_nvfp4_w4a16:
@@ -625,6 +638,8 @@ def make_nvfp4_moe_kernel(
                 f"{backend.value}."
             )
         extra_kwargs["per_token_activation"] = True
+    if csf_scales:
+        extra_kwargs["csf_scales"] = True
 
     return make_moe_kernel(
         moe_quant_config,

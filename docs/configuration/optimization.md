@@ -21,8 +21,46 @@ For more information, see the [optimization level documentation](../design/optim
 Beyond the optimization levels, three mechanisms reduce time-to-first-token on repeated boots of the same (model, config, hardware) combination:
 
 - **Reuse the compile cache.** vLLM persists `torch.compile` artifacts under `VLLM_CACHE_ROOT` (default `~/.cache/vllm`), and the cache directory can be copied between machines or baked into a container image; see the [torch.compile design doc](../design/torch_compile.md). Set `VLLM_FORCE_AOT_LOAD=1` to fail loudly instead of silently recompiling when the cache misses (any change to the model, config, relevant `VLLM_*` environment variables, torch build, or GPU model invalidates it).
-- **Skip memory profiling with `--kv-cache-memory`.** On startup, vLLM logs the exact `--kv-cache-memory` value that reproduces the current allocation. Passing it back on the next boot skips the memory-profiling measurement and the CUDA-graph memory estimation pass. Note that this has performance implications: the KV cache is sized to exactly the given value instead of being measured, so a conservative value caps batch concurrency (and therefore throughput), while an optimistic one fails at allocation time. The value is only valid on the same GPU with the same initial free memory; if a boot OOMs after hardware or co-tenant changes, remove the flag to re-profile.
+- **Skip memory profiling with `--kv-cache-memory`.** On startup, vLLM logs the exact `--kv-cache-memory` value that reproduces the current allocation. Passing it back on the next boot skips the memory-profiling measurement and the CUDA-graph memory estimation pass. Note that this has performance implications: the KV cache is sized to exactly the given value instead of being measured, so a conservative value caps batch concurrency (and therefore throughput), while an optimistic one fails at allocation time. The value is only valid on the same GPU with the same initial free memory; if a boot OOMs after hardware or co-tenant changes, remove the flag to re-profile. On CUDA and ROCm, the flag also turns off the extensible KV cache (see [GPU Memory Utilization](#gpu-memory-utilization)), whose measured sizing already skips the CUDA-graph memory estimation pass.
 - **Serve without CUDA graphs using `--enforce-eager`.** Skips both compilation and CUDA-graph capture for the fastest possible startup, at the cost of steady-state decode performance. Useful for development loops and for measuring how much of a boot is compile/capture.
+
+## GPU Memory Utilization
+
+On CUDA and ROCm, vLLM sizes the KV cache from the memory actually free after
+CUDA graph capture and warmup (the extensible KV cache, `--enable-extensible-kv-cache`).
+It keeps the transient memory it measured free, plus a safety margin, so
+`gpu_memory_utilization` defaults to 1.0 there and doesn't need tuning to avoid
+out-of-memory errors. Leave it unset unless you need to leave headroom: an explicit
+value is a hard cap on everything the instance uses, and anything below 1.0 takes
+memory away from the KV cache. vLLM warns at startup when a value above 0.7 keeps
+free memory out of the KV cache.
+
+Set it below 1.0 only to leave memory for something vLLM doesn't measure:
+
+- **Other processes on the same GPU**, such as another vLLM instance, a colocated
+  training process, or an encoder instance, especially ones that allocate memory after
+  vLLM has started. vLLM measures free memory once, after warmup, so it can't see
+  later allocations.
+- **Unified-memory devices**, such as DGX Spark (GB10) or Jetson, where the CPU and
+  the operating system share the same memory.
+- **Weight updates**, for example in reinforcement learning. Weight transfer engines
+  create their communicators and receive buffers (such as the NCCL backend's packed
+  buffers or [sharded RDT](../training/weight_transfer/sharded_rdt.md)'s receive
+  buffers) after the KV cache is sized, and vLLM doesn't reserve memory for them.
+  During a pause that cleared the KV cache, a layer-by-layer update that is short of
+  memory for the weights borrows the cache's memory, but that check doesn't count
+  these buffers.
+- **KV connectors that allocate their own device buffers**, which they do after the
+  KV cache is sized (for example the HF3FS connector's copy buffers).
+
+On other platforms (TPU, XPU, CPU and others), and where vLLM falls back to
+estimate-based sizing, `gpu_memory_utilization` still sets the fraction of device memory
+vLLM uses for weights, activations and the KV cache: it defaults to 0.92, and a higher
+value gives a larger KV cache. vLLM falls back, for example, with
+`--no-enable-extensible-kv-cache`, `--kv-cache-memory` or `--num-gpu-blocks-override`,
+with KV connectors that share or register the KV cache in ways it doesn't support
+(LMCache's multi-process connector; NIXL, Mooncake or MoRIIO on ROCm), and with NIXL
+within a host that has no IMEX channel.
 
 ## Preemption
 
@@ -37,7 +75,7 @@ WARNING 05-09 00:49:33 scheduler.py:1057 Sequence group 0 is preempted by Preemp
 While this mechanism ensures system robustness, preemption and recomputation can adversely affect end-to-end latency.
 If you frequently encounter preemptions, consider the following actions:
 
-- Increase `gpu_memory_utilization`. vLLM pre-allocates GPU cache using this percentage of memory. By increasing utilization, you can provide more KV cache space.
+- Leave `gpu_memory_utilization` unset, or increase it. With the extensible KV cache (the default on CUDA and ROCm) it defaults to 1.0, and a lower value takes memory away from the KV cache; elsewhere it defaults to 0.92 and sets the fraction of device memory vLLM uses. See [GPU Memory Utilization](#gpu-memory-utilization).
 - Decrease `max_num_seqs` or `max_num_batched_tokens`. This reduces the number of concurrent requests in a batch, thereby requiring less KV cache space.
 - Increase `tensor_parallel_size`. This shards model weights across GPUs, allowing each GPU to have more memory available for KV cache. However, increasing this value may cause excessive synchronization overhead.
 - Increase `pipeline_parallel_size`. This distributes model layers across GPUs, reducing the memory needed for model weights on each GPU, indirectly leaving more memory available for KV cache. However, increasing this value may cause latency penalties.

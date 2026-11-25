@@ -74,7 +74,7 @@ def flat_kv_row_view(
 class ConvertReqIndexToGlobalIndexKernel(
     VllmTritonJitKernel["ConvertReqIndexToGlobalIndexKernel.CompileKey"]
 ):
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         block_size: int
         block_stride_rows: int
@@ -235,7 +235,7 @@ class ConvertReqIndexToGlobalIndexKernel(
     # Keep the warmup wrapper interface while exposing a descriptive CUDA symbol.
     kernel = sparse_mla_index_remap_kernel
 
-    def dispatch(  # type: ignore[override]
+    def dispatch(
         self,
         *,
         BLOCK_SIZE: int,
@@ -746,6 +746,81 @@ def triton_filter_and_convert_dcp_index(
 
 
 _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL = ConvertReqIndexToGlobalIndexKernel()
+
+
+@triton.jit
+def _neutralize_dcp_empty_rows_kernel(
+    out_ptr,  # [num_tokens, num_heads, head_dim]
+    lse_ptr,  # [num_tokens, num_heads]
+    topk_ptr,  # int32 [num_tokens, topk]
+    out_stride_t,
+    out_stride_h,
+    out_stride_d,
+    lse_stride_t,
+    lse_stride_h,
+    topk_stride_t,
+    topk_stride_k,
+    num_heads,
+    head_dim,
+    topk,
+    BLOCK_K: tl.constexpr,
+    NUM_HEADS_PADDED: tl.constexpr,
+    HEAD_DIM_PADDED: tl.constexpr,
+):
+    token = tl.program_id(0)
+    k_offsets = tl.arange(0, BLOCK_K)
+    indices = tl.load(
+        topk_ptr + token * topk_stride_t + k_offsets * topk_stride_k,
+        mask=k_offsets < topk,
+        other=-1,
+    )
+    is_empty = tl.max(indices) < 0
+
+    head_offsets = tl.arange(0, NUM_HEADS_PADDED)
+    tl.store(
+        lse_ptr + token * lse_stride_t + head_offsets * lse_stride_h,
+        tl.full([NUM_HEADS_PADDED], float("-inf"), lse_ptr.dtype.element_ty),
+        mask=is_empty & (head_offsets < num_heads),
+    )
+    if is_empty:
+        d_offsets = tl.arange(0, HEAD_DIM_PADDED)
+        d_mask = d_offsets < head_dim
+        zeros = tl.zeros([HEAD_DIM_PADDED], out_ptr.dtype.element_ty)
+        for head in range(num_heads):
+            row_ptr = out_ptr + token * out_stride_t + head * out_stride_h
+            tl.store(row_ptr + d_offsets * out_stride_d, zeros, mask=d_mask)
+
+
+def neutralize_dcp_empty_rows_(
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    topk_indices: torch.Tensor,
+) -> None:
+    """Set out to 0 and lse to -inf on rows where this DCP rank owns no top-k
+    slot (all -1), the identity of the cross-rank LSE merge."""
+    num_tokens, num_heads, head_dim = out.shape
+    assert lse.shape == (num_tokens, num_heads)
+    assert topk_indices.ndim == 2 and topk_indices.shape[0] == num_tokens
+    if num_tokens == 0:
+        return
+    _neutralize_dcp_empty_rows_kernel[(num_tokens,)](
+        out,
+        lse,
+        topk_indices,
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        lse.stride(0),
+        lse.stride(1),
+        topk_indices.stride(0),
+        topk_indices.stride(1),
+        num_heads,
+        head_dim,
+        topk_indices.shape[1],
+        BLOCK_K=triton.next_power_of_2(topk_indices.shape[1]),
+        NUM_HEADS_PADDED=triton.next_power_of_2(num_heads),
+        HEAD_DIM_PADDED=triton.next_power_of_2(head_dim),
+    )
 
 
 @triton.jit(do_not_specialize=["num_tokens"])

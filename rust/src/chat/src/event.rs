@@ -240,7 +240,7 @@ pub enum ChatEvent {
         /// Engine lifecycle times used by frontend response metrics.
         timestamps: RequestTimestamps,
         /// Per-request speculative-decoding statistics emitted by the engine.
-        spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
+        spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
         kv_transfer_params: Option<Box<serde_json::Value>>,

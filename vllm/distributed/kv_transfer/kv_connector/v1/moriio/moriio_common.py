@@ -5,7 +5,7 @@ import math
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -62,7 +62,7 @@ class MoRIIOTransferAck(NamedTuple):
     consumer_tp_size: int = 1
 
 
-@dataclass
+@dataclass(slots=True)
 class WriteTask:
     request_id: ReqId
     transfer_id: TransferId
@@ -84,7 +84,7 @@ class WriteTask:
     retried: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class LayerTransferPlan:
     """Plan for transferring a single layer."""
 
@@ -98,7 +98,7 @@ class LayerTransferPlan:
     use_batch: bool = True
 
 
-@dataclass
+@dataclass(slots=True)
 class RemoteAllocInfo:
     """Information about remote block allocation."""
 
@@ -242,10 +242,12 @@ def get_moriio_mode(kv_transfer_config: KVTransferConfig) -> MoRIIOMode:
 def get_port_offset(
     dp_rank: int,
     tp_rank: int,
-    tp_size: int = 1,
+    tp_size: int,
     pp_rank: int = 0,
     pp_stride: int = 0,
 ) -> int:
+    """Port offset of a worker; tp_size is the TP size of the instance that
+    owns the port, so listeners and senders agree."""
     return pp_rank * pp_stride + dp_rank * tp_size + tp_rank
 
 
@@ -270,6 +272,23 @@ def pod_index(global_dp_rank: int, dp_size_local: int) -> int:
     `dp_size_local == 0` (external-DP sentinel) collapses to a single pod.
     """
     return global_dp_rank // dp_size_local if dp_size_local else 0
+
+
+def fill_remote_pod_from_config(
+    params: dict[str, Any], extra_config: dict, is_producer: bool
+) -> None:
+    """Use serve-config peer hosts when the router did not send them."""
+    hosts = extra_config.get("remote_hosts")
+    dp_local = int(extra_config.get("remote_dp_size_local") or 0)
+    if not hosts or not dp_local or params.get("remote_hosts"):
+        return
+    params["remote_hosts"] = hosts
+    params["remote_dp_size_local"] = dp_local
+    if not is_producer and (
+        "remote_dp_rank" in params
+        or min(int(params.get("remote_dp_size") or 1), dp_local) <= 1
+    ):
+        params.setdefault("is_request_leader", True)
 
 
 def resolve_host_ip(extra_config: dict) -> str:
@@ -304,7 +323,7 @@ def _warn_deprecated_env_vars() -> None:
             )
 
 
-@dataclass
+@dataclass(slots=True)
 class MoRIIOConfig:
     local_ip: str
     local_kv_port: int
@@ -391,7 +410,7 @@ class MoRIIOConfig:
             tp_size, pc.data_parallel_size_local or pc.data_parallel_size
         )
         port_offset = get_port_offset(
-            dp_rank, tp_rank, pp_rank=pp_rank, pp_stride=pp_port_stride
+            dp_rank, tp_rank, tp_size, pp_rank=pp_rank, pp_stride=pp_port_stride
         )
         backend = str(extra_config.get("backend", "rdma")).lower()
         if backend not in ("rdma", "xgmi"):
@@ -550,7 +569,7 @@ def get_peer_zmq_from_request_id(request_id: str, is_producer: bool) -> str | No
     return m.group(1)
 
 
-@dataclass
+@dataclass(slots=True)
 class ReqMeta:
     """Metadata for a single request."""
 
@@ -700,7 +719,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
 
 
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
+def zmq_ctx(socket_type: Any, addr: str) -> Generator[zmq.Socket]:
     """Context manager for a ZMQ socket."""
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
         raise ValueError(f"Unexpected socket type: {socket_type}")

@@ -8,6 +8,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use serde_with::{DeserializeFromStr, SerializeDisplay};
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_tokenizer::DynTokenizer;
 
 use crate::error::Result;
@@ -133,6 +134,11 @@ pub trait TextBackend: Send + Sync {
     /// backends should override it with the resolved model config value.
     fn model_vocab_size(&self) -> usize {
         usize::MAX
+    }
+
+    /// Return the checkpoint dtype declared by the model config, if any.
+    fn config_dtype(&self) -> Option<ModelDtype> {
+        None
     }
 
     /// Return the full tokenizer vocabulary size (Python `len(tokenizer)`).

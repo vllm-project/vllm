@@ -22,6 +22,7 @@ from vllm.model_executor.kernels.linear import (
     init_mxfp4_linear_kernel,
     register_linear_kernel,
 )
+from vllm.model_executor.layers.quantization.utils import quant_utils
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4,
 )
@@ -94,25 +95,31 @@ def test_true_w4a4_kernels_reject_explicit_non_mxfp4_activation(kernel_cls):
 
 @pytest.mark.parametrize("kernel_cls", _WEIGHT_ONLY_KERNELS)
 @pytest.mark.parametrize("activation_quant_key", [None, kMxfp4Dynamic])
+@patch("vllm.model_executor.kernels.linear.current_platform")
 def test_weight_only_kernels_accept_unquantized_or_mxfp4_activation(
-    kernel_cls, activation_quant_key
+    platform_mock, kernel_cls, activation_quant_key
 ):
-    """Marlin/Humming never quantize activations, so an unset activation key,
-    or one that already describes MXFP4-shaped data, is tolerated. When an
-    activation key is explicitly set, a warning must be logged noting that it
-    is ignored, since these kernels are weight-only (A16)."""
-    config = MxFp4LinearLayerConfig(activation_quant_key=activation_quant_key)
-    with patch(f"{kernel_cls.__module__}.logger.warning_once") as warning_once:
-        can_implement, reason = kernel_cls.can_implement(config)
-    assert can_implement, reason
+    """Marlin never quantizes activations, so an unset activation key, or one
+    that already describes MXFP4-shaped data, is tolerated. When an
+    activation key is explicitly set, selection must warn that the kernel runs
+    it unquantized, since these kernels are weight-only (A16)."""
+    platform_mock._enum = PlatformEnum.CUDA
+    with (
+        patch.dict(
+            "vllm.model_executor.kernels.linear._POSSIBLE_MXFP4_KERNELS",
+            {PlatformEnum.CUDA: [kernel_cls]},
+        ),
+        patch.object(kernel_cls, "is_supported", return_value=(True, None)),
+        patch(f"{quant_utils.__name__}.logger.warning_once") as warning_once,
+    ):
+        kernel = init_mxfp4_linear_kernel(activation_quant_key=activation_quant_key)
+    assert isinstance(kernel, kernel_cls)
 
     if activation_quant_key is None:
         warning_once.assert_not_called()
     else:
         warning_once.assert_called_once()
-        message = warning_once.call_args.args[0]
-        assert "the requested activation quantization" in message
-        assert "is ignored" in message
+        assert "activations as unquantized" in warning_once.call_args.args[1]
 
 
 @pytest.mark.parametrize("kernel_cls", _WEIGHT_ONLY_KERNELS)

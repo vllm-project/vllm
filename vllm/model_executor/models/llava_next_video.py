@@ -147,13 +147,11 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        num_videos: int,
     ) -> int:
-        max_videos = mm_counts.get("video", 0)
-
         max_total_frames = self._get_max_video_frames(seq_len)
 
-        return max(max_total_frames // max(max_videos, 1), 1)
+        return max(max_total_frames // max(num_videos, 1), 1)
 
 
 class LlavaNextVideoDummyInputsBuilder(
@@ -175,7 +173,7 @@ class LlavaNextVideoDummyInputsBuilder(
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts
+            seq_len, mm_counts.get("video", 0)
         )
 
         return {

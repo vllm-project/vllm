@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class ReqMeta:
     # Request tokens
     token_ids: torch.Tensor

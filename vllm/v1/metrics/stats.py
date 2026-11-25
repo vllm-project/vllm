@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
 
 
-@dataclass
+@dataclass(slots=True)
 class BaseCacheStats:
     """Stores cache hit statistics."""
 
@@ -117,7 +117,7 @@ class CachingMetrics:
         return self.aggregated_query_hit / self.aggregated_query_total
 
 
-@dataclass
+@dataclass(slots=True)
 class PrefixCacheStats(BaseCacheStats):
     """Stores prefix cache hit statistics.
     - `reset`: Whether `reset_prefix_cache` was invoked.
@@ -170,7 +170,7 @@ class PrefixCacheStats(BaseCacheStats):
                 )
 
 
-@dataclass
+@dataclass(slots=True)
 class MultiModalCacheStats(BaseCacheStats):
     """Stores multi-modal cache hit statistics.
     - `reset`: Whether `reset_mm_cache` was invoked.
@@ -185,7 +185,7 @@ class MultiModalCacheStats(BaseCacheStats):
         self.hits += num_hits
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheEvictionEvent:
     """Single KV cache block eviction sample."""
 
@@ -194,7 +194,7 @@ class KVCacheEvictionEvent:
     reuse_gaps_seconds: tuple[float, ...]
 
 
-@dataclass
+@dataclass(slots=True)
 class SchedulerIterationDetails:
     """Scheduler-side details for one engine iteration."""
 
@@ -219,7 +219,7 @@ KV_FETCH_STAGES = (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -255,7 +255,7 @@ class SchedulerStats:
     perf_stats: PerfStats | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestStateStats:
     """Stats that need to be tracked across delta updates."""
 
@@ -284,7 +284,7 @@ class RequestStateStats:
     is_watermark_skipped: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class FinishedRequestStats:
     """Stats associated with a finished request."""
 
@@ -304,7 +304,7 @@ class FinishedRequestStats:
     num_cached_tokens: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class PrefillStats:
     """Breakdown of a scheduled prefill computation.
 
@@ -346,7 +346,7 @@ class PrefillStats:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestSpecDecodeMetrics:
     """Per-output-sequence speculative-decoding statistics accumulator.
 
@@ -364,11 +364,15 @@ class RequestSpecDecodeMetrics:
             also the histogram's upper bound.
         histogram: Dense counts indexed by accepted draft tokens `j`
             (length `num_spec_tokens + 1`).
-        num_draft_tokens: Total proposed draft tokens, after the
-            grammar-invalidated (`num_invalid_spec_tokens`) adjustment.
+        num_draft_tokens: Total proposed draft tokens, including
+            grammar-invalid ones.
         per_step_accepted: Ordered accepted-draft count per verify step
             (`detailed` only; empty otherwise).
         per_step_drafted: Ordered proposed-draft count per verify step
+            (`detailed` only; empty otherwise).
+        num_verified_tokens: Total draft tokens the target model ran a forward
+            pass on.
+        per_step_verified: Ordered verified-draft count per verify step
             (`detailed` only; empty otherwise).
     """
 
@@ -377,6 +381,8 @@ class RequestSpecDecodeMetrics:
     num_draft_tokens: int = 0
     per_step_accepted: list[int] = field(default_factory=list)
     per_step_drafted: list[int] = field(default_factory=list)
+    num_verified_tokens: int = 0
+    per_step_verified: list[int] = field(default_factory=list)
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "RequestSpecDecodeMetrics":
@@ -386,13 +392,19 @@ class RequestSpecDecodeMetrics:
         )
 
     def observe(
-        self, num_draft_tokens: int, num_accepted: int, detailed: bool = False
+        self,
+        num_draft_tokens: int,
+        num_accepted: int,
+        num_verified_tokens: int,
+        detailed: bool = False,
     ) -> None:
         self.histogram[num_accepted] += 1
         self.num_draft_tokens += num_draft_tokens
+        self.num_verified_tokens += num_verified_tokens
         if detailed:
             self.per_step_accepted.append(num_accepted)
             self.per_step_drafted.append(num_draft_tokens)
+            self.per_step_verified.append(num_verified_tokens)
 
     def to_dict(self) -> dict[str, Any]:
         """Payload matching `SpeculativeDecodingMetrics` for the response.
@@ -415,10 +427,12 @@ class RequestSpecDecodeMetrics:
             "num_accepted_draft_tokens": num_accepted,
             "num_draft_tokens": self.num_draft_tokens,
             "num_spec_tokens": self.num_spec_tokens,
+            "num_verified_draft_tokens": self.num_verified_tokens,
         }
         if self.per_step_accepted:
             result["per_step_accepted"] = self.per_step_accepted
             result["per_step_drafted"] = self.per_step_drafted
+            result["per_step_verified"] = self.per_step_verified
         return result
 
 

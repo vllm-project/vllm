@@ -20,8 +20,12 @@ from safetensors.torch import save_file
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer, GenerationConfig
 
 from vllm import LLM, SamplingParams
+from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
+    FullAttentionManager,
+)
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, FullAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from ....utils import multi_gpu_test
 
@@ -550,19 +554,20 @@ def check_attention_spec_interleaved_rope(
 ):
     """Check that the attention spec is correct."""
     assert isinstance(llm.llm_engine.model_executor, Executor)
-    kv_cache_specs_per_rank = llm.llm_engine.model_executor.get_kv_cache_specs()
+    layer_configs_per_rank = llm.llm_engine.model_executor.get_kv_cache_layer_configs()
     for rank in range(num_ranks):
-        kv_cache_specs = kv_cache_specs_per_rank[rank]
-        assert len(kv_cache_specs.keys()) == num_attention_layers
+        layer_configs = layer_configs_per_rank[rank]
+        assert len(layer_configs.keys()) == num_attention_layers
         for i in range(num_attention_layers):
             if rope_layers[i] == 0:
-                expected_spec = FullAttentionSpec
+                expected_manager = FullAttentionManager
             else:
-                expected_spec = ChunkedLocalAttentionSpec
-            assert isinstance(
-                kv_cache_specs[f"language_model.model.layers.{i}.self_attn.attn"],
-                expected_spec,
-            )
+                expected_manager = ChunkedLocalAttentionManager
+            layer_config = layer_configs[
+                f"language_model.model.layers.{i}.self_attn.attn"
+            ]
+            assert layer_config.manager_cls is expected_manager
+            assert isinstance(layer_config.spec, AttentionSpec)
 
 
 def run_reduced_model(llm: LLM, should_profile: bool = False) -> None:

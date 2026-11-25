@@ -800,8 +800,6 @@ def _discover_mrope_configs(
         if hf_config is None:
             continue
         rope_parameters = getattr(hf_config, "rope_parameters", None)
-        if rope_parameters is None:
-            rope_parameters = getattr(hf_config, "rope_scaling", None)
         if not isinstance(rope_parameters, Mapping):
             continue
         section = rope_parameters.get("mrope_section")

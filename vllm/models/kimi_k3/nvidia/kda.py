@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import replace
 from typing import Literal
 
 import torch
@@ -76,7 +75,6 @@ from vllm.utils.flashinfer import (
     has_flashinfer_recurrent_kda,
 )
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
@@ -121,21 +119,12 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
         output_sizes: list[int],
         replicated_shard_id: int,
         tp_size: int,
-        padding_size: int = 0,
         **kwargs,
     ) -> None:
         self.replicated_shard_id = replicated_shard_id
-        self.padding_size = padding_size
         output_sizes = output_sizes.copy()
         output_sizes[replicated_shard_id] *= tp_size
         super().__init__(input_size, output_sizes, **kwargs)
-        if padding_size:
-            # Exclude padding rows from the load-completion count.
-            set_weight_attrs(
-                self.weight,
-                {"weight_loader_numel": self.weight[:-padding_size].numel()},
-            )
-            self.weight.data[-padding_size:].zero_()
 
     def weight_loader(
         self,
@@ -155,8 +144,6 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = 0
         try:
             super().weight_loader(param, loaded_weight, loaded_shard_id)
-            if self.padding_size and param is self.weight:
-                param.data[-self.padding_size :].zero_()
         finally:
             self.tp_rank = tp_rank
             if param_tp_rank is not None:
@@ -180,8 +167,6 @@ class _KimiGDNMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = 0
         try:
             super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
-            if self.padding_size and param is self.weight:
-                param.data[-self.padding_size :].zero_()
         finally:
             self.tp_rank = tp_rank
             if param_tp_rank is not None:
@@ -655,8 +640,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             else 16
         )
         self.in_proj_padding = -local_output_size % alignment
-        if self.in_proj_padding:
-            in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
         self.in_proj_qkvgfab = _KimiGDNMergedColumnParallelLinear(
             self.hidden_size,
             in_proj_output_sizes,
@@ -841,7 +824,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self._flashinfer_kda_output_spec: tuple[tuple[int, ...], torch.dtype] | None = (
             None
         )
+        self._triton_checkpoint_spec: tuple[tuple[int, ...], torch.dtype] | None = None
         self._checkpoint_exporter: FlashKDAPrefillCheckpointExporter | None = None
+        if kda_prefill_checkpoint_alignment(self.kda_prefill_backend) is not None:
+            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
+                state_len=self.conv_size - 1
+            )
         if self.kda_prefill_backend == "flashkda":
             T = vllm_config.scheduler_config.max_num_batched_tokens
             N = vllm_config.scheduler_config.max_num_seqs
@@ -855,7 +843,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 ((N, H, D, D), self.get_state_dtype()[1]),
                 ((workspace_size,), torch.uint8),
             )
-            self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter()
         elif self.kda_prefill_backend == "flashinfer":
             T = vllm_config.scheduler_config.max_num_batched_tokens
             H, D = self.local_num_heads, self.head_dim
@@ -863,6 +850,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 (1, T, H, D),
                 self.model_config.dtype,
             )
+        elif self.kda_prefill_backend == "triton":
+            N = vllm_config.scheduler_config.max_num_seqs
+            H, D = self.local_num_heads, self.head_dim
+            self._triton_checkpoint_spec = ((N, H, D, D), self.get_state_dtype()[1])
 
         # Profiling skips attention, so reserve its runtime layout before the
         # KV cache is sized. Layers share the manager's grow-only allocation.
@@ -874,6 +865,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             elif self._flashinfer_kda_output_spec is not None:
                 current_workspace_manager().get_simultaneous(
                     self._flashinfer_kda_output_spec
+                )
+            elif self._triton_checkpoint_spec is not None:
+                current_workspace_manager().get_simultaneous(
+                    self._triton_checkpoint_spec
                 )
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
@@ -917,15 +912,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
-        spec = super().get_kv_cache_spec(vllm_config)
-        assert isinstance(spec, MambaSpec)
-        alignment = kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
-        return replace(
-            spec,
-            num_prefill_checkpoint_blocks=int(alignment is not None),
-            prefill_checkpoint_alignment=alignment,
-        )
+    def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
+        return kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
 
     def forward(
         self,
@@ -1476,6 +1464,16 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         seq_order=m.flashinfer_prefill_seq_order,
                     )
                 else:
+                    checkpoint_state = checkpoint_offsets = None
+                    if checkpoint is not None:
+                        assert self._triton_checkpoint_spec is not None
+                        (checkpoint_state,) = (
+                            current_workspace_manager().get_simultaneous(
+                                self._triton_checkpoint_spec
+                            )
+                        )
+                        checkpoint_state = checkpoint_state[: initial_state.shape[0]]
+                        checkpoint_offsets = checkpoint.checkpoint_offsets
                     (
                         core_attn_out_non_spec,
                         last_recurrent_state,
@@ -1493,7 +1491,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         use_qk_l2norm_in_kernel=True,
                         cu_seqlens=non_spec_query_start_loc,
                         out=non_spec_out,
+                        checkpoint_state=checkpoint_state,
+                        checkpoint_offsets=checkpoint_offsets,
                     )
+                    if checkpoint is not None:
+                        assert self._checkpoint_exporter is not None
+                        self._checkpoint_exporter.export(
+                            checkpoint,
+                            raw_qkv=mixed_qkv_ns,
+                            conv_state=conv_state,
+                            recurrent_checkpoint=checkpoint_state,
+                            recurrent_state=recurrent_state,
+                            cu_seqlens=non_spec_query_start_loc,
+                        )
                 recurrent_state[non_spec_state_indices_tensor] = (
                     last_recurrent_state.to(recurrent_state.dtype)
                 )

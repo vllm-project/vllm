@@ -8,15 +8,17 @@ from PIL import Image, ImageDraw, ImageFont
 from tests.models.utils import check_logprobs_close
 from tests.utils import multi_gpu_test
 from vllm.model_executor.models.dots_ocr import DotsVisionTransformer
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.dotsocr import DotsVisionConfig
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 @pytest.mark.core_model
+@pytest.mark.skipif(current_platform.is_cpu(), reason="Requires a GPU")
 @torch.inference_mode()
 def test_dots_ocr_vision_without_host_sync(dist_init):
-    """Catch metadata copies and per-layer scalar reads under strict sync checks."""
+    """Check vision output and guard against host sync where torch supports it."""
     torch.manual_seed(0)
     grid_thw = [[2, 4, 6], [1, 6, 8]]
     config = DotsVisionConfig(
@@ -26,8 +28,10 @@ def test_dots_ocr_vision_without_host_sync(dist_init):
         num_hidden_layers=2,
         num_attention_heads=2,
     )
+    device = torch.device(current_platform.device_type)
+    device_module = getattr(torch, device.type)
     with set_default_torch_dtype(torch.bfloat16):
-        model = DotsVisionTransformer(config).cuda().eval()
+        model = DotsVisionTransformer(config).to(device).eval()
     assert model.attn_backend in {
         AttentionBackendEnum.FLASH_ATTN,
         AttentionBackendEnum.ROCM_AITER_FA,
@@ -37,15 +41,18 @@ def test_dots_ocr_vision_without_host_sync(dist_init):
         parameter.normal_(mean=0, std=0.02)
     num_patches = sum(t * h * w for t, h, w in grid_thw)
     pixels = torch.randn(
-        num_patches, 3 * config.patch_size**2, device="cuda", dtype=model.dtype
+        num_patches, 3 * config.patch_size**2, device=device, dtype=model.dtype
     )
     model(pixels, grid_thw)
-    previous_mode = torch.cuda.get_sync_debug_mode()
-    try:
-        torch.cuda.set_sync_debug_mode("error")
+    if current_platform.is_cuda_alike():
+        previous_mode = device_module.get_sync_debug_mode()
+        try:
+            device_module.set_sync_debug_mode("error")
+            actual = model(pixels, grid_thw)
+        finally:
+            device_module.set_sync_debug_mode(previous_mode)
+    else:
         actual = model(pixels, grid_thw)
-    finally:
-        torch.cuda.set_sync_debug_mode(previous_mode)
 
     assert actual.shape == (
         num_patches // config.spatial_merge_size**2,

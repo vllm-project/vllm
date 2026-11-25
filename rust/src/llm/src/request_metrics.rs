@@ -142,7 +142,7 @@ pub(crate) struct RequestMetricHandles {
 }
 
 /// `vllm:request_success` counters, one per finish reason.
-struct RequestSuccessCounters {
+pub(crate) struct RequestSuccessCounters {
     stop: U64Counter,
     length: U64Counter,
     abort: U64Counter,
@@ -153,7 +153,7 @@ struct RequestSuccessCounters {
 impl RequestSuccessCounters {
     /// Create the series for every finish reason, like Python's
     /// `for reason in FinishReason` loop.
-    fn resolve(model_name: &str, engine: u32) -> Self {
+    pub(crate) fn resolve(model_name: &str, engine: u32) -> Self {
         let counter = |finished_reason| {
             METRICS.request.request_success.get_or_create_owned(&FinishedReasonLabels {
                 model_name: model_name.to_string(),
@@ -179,6 +179,18 @@ impl RequestSuccessCounters {
             FinishReason::Error(_) => &self.error,
             FinishReason::Repetition(_) => &self.repetition,
         }
+    }
+
+    /// Requests finished for any reason, like Python's `finished_requests`.
+    pub(crate) fn total(&self) -> u64 {
+        let Self {
+            stop,
+            length,
+            abort,
+            error,
+            repetition,
+        } = self;
+        [stop, length, abort, error, repetition].iter().map(|c| c.get()).sum()
     }
 }
 

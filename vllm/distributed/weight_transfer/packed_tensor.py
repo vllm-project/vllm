@@ -55,7 +55,7 @@ def unpack_tensor(
     ]
 
 
-@dataclass
+@dataclass(slots=True)
 class PackedChunk:
     """Result of packing tensors into a single contiguous uint8 buffer."""
 
@@ -228,6 +228,8 @@ def packed_nccl_broadcast_consumer(
     ]
     packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
     caller_stream = torch.accelerator.current_stream()
+    for stream in streams:
+        stream.wait_stream(caller_stream)
     prev_received: torch.Event | None = None
     slot_done: list[torch.Event | None] = [None] * num_buffers
 
@@ -299,7 +301,7 @@ def packed_nccl_broadcast_consumer(
 # ── IPC packed transfer ────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class PackedIpcChunk:
     """Metadata and IPC handle for a single packed chunk."""
 

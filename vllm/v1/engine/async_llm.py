@@ -1337,9 +1337,8 @@ class AsyncLLM(EngineClient):
             )
             return
 
-        await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
-
-        # recreate stat loggers
+        # recreate stat loggers before the new engines start: they send
+        # scheduler stats as soon as they come up.
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
             # TODO(rob): fix this after talking with Ray team.
             # This resets all the prometheus metrics since we
@@ -1355,6 +1354,8 @@ class AsyncLLM(EngineClient):
             if hasattr(self, "_logger_ref"):
                 self._logger_ref[0] = self.logger_manager
             self.logger_manager.log_engine_initialized()
+
+        await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
 
         set_scaling_elastic_ep(True)
         if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:

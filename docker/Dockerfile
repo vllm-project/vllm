@@ -923,6 +923,9 @@ RUN chmod 0755 /usr/local/bin/vllm-nonroot-entrypoint.sh
 # Only needed for datacenter/professional GPUs with older drivers.
 # See: https://docs.nvidia.com/deploy/cuda-compatibility/
 ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
+# The final image's compat libraries, which can be newer than torch's CUDA
+# (Rubin: CUDA 13.5 image with cu134 torch).
+ENV VLLM_CUDA_COMPATIBILITY_PATH=/usr/local/cuda/compat
 
 # ============================================================
 # SLOW-CHANGING DEPENDENCIES BELOW
@@ -1160,6 +1163,23 @@ RUN --mount=type=bind,from=hybrid-test-wheels,source=/wheels,target=/tmp/hybrid-
     if ls /tmp/hybrid-test-wheels/*.whl >/dev/null 2>&1; then \
         uv pip install --system --no-deps --offline /tmp/hybrid-test-wheels/*.whl \
         && cp /tmp/hybrid-test-wheels/commits.txt /opt/hybrid-test-deps-commits.txt; \
+    fi
+
+# torchao and conch for the Quantization steps, which put /opt/quantization-deps on
+# PYTHONPATH. Kept out of site-packages so other jobs never see them (see
+# requirements/test/quantization_deps.in): importing torchao initializes CUDA, which
+# breaks tests that fork, and an installed conch changes vLLM's kernel choice.
+COPY requirements/test/quantization_deps_cuda.txt requirements/test/quantization_deps_cuda.txt
+RUN --mount=type=cache,target=/opt/uv/cache \
+    if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
+        # The NCCL UV_OVERRIDE would enter --require-hashes as an unhashed requirement.
+        env -u UV_OVERRIDE uv pip install --python python3 --require-hashes --no-deps \
+            --target /opt/quantization-deps -r requirements/test/quantization_deps_cuda.txt \
+            --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu132; \
+    fi \
+    && if ! python3 -c "import importlib.util, sys; sys.exit(any(importlib.util.find_spec(m) for m in ('torchao', 'conch')))"; then \
+        echo "torchao or conch is importable from the default path; keep them in /opt/quantization-deps only" >&2; \
+        exit 1; \
     fi
 
 # image to run unit testing suite

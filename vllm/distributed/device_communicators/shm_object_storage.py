@@ -435,7 +435,7 @@ class MsgpackSerde(ObjectSerde):
         return obj
 
 
-@dataclass
+@dataclass(slots=True)
 class ShmObjectStorageHandle:
     max_object_size: int
     n_readers: int

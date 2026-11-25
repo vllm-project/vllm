@@ -61,7 +61,8 @@ def run_build(
     tmp_path: Path, mode: str = "ci", existing: tuple[str, ...] = (), **env: str
 ) -> tuple[int, str, list[str]]:
     """build.sh <mode> against fake git, docker and buildkite-agent; returns (status,
-    stderr, calls). `existing` are the image refs the registry already has.
+    stderr, calls). `existing` are the image refs the registry already has, each
+    optionally followed by its digest (`ref sha256:...`).
     FAILURE=bake|missing|upload breaks the kernel symbol map; FAILURE=registry
     makes every registry lookup fail, FAILURE=pushed only lookups of pushed refs,
     FAILURE=appear those of APPEARS refs once they appear, FAILURE=fetch-main and
@@ -115,8 +116,10 @@ case $2 in
       [[ -n $beat ]] && echo "$beat" || exit 1
     elif [[ $3 == inspect ]]; then
       [[ $FAILURE == registry ]] && { echo "503 Service Unavailable" >&2; exit 1; }
-      found=0
-      while read -r ref; do [[ $4 == "$ref"* ]] && found=1; done < "$REGISTRY"
+      found=0 digest=sha256:$(printf '0%.0s' {1..64})
+      while read -r ref d; do
+        [[ $4 == "$ref"* ]] && { found=1; [[ -z $d ]] || digest=$d; }
+      done < "$REGISTRY"
       # Refs starting with APPEARS exist from the APPEAR_AFTER-th lookup of one on
       # (main's build pushing them while this one waits).
       if [[ -n $APPEARS && $4 == "$APPEARS"* ]]; then
@@ -126,10 +129,11 @@ case $2 in
       fi
       [[ $FAILURE == pushed ]] && ((found)) && { echo "503" >&2; exit 1; }
       ((found)) || { echo "$4: not found" >&2; exit 1; }
-      echo "Digest: sha256:$(printf '0%.0s' {1..64})"
+      echo "Digest: $digest"
     else
       echo "create ${@: -1}" >> "$CALLS"
-      echo "$5" >> "$REGISTRY"
+      src=${@: -1}
+      echo "$5 ${src##*@}" >> "$REGISTRY"
     fi ;;
   bake)
     echo "bake ${*:5}" >> "$CALLS"
@@ -417,30 +421,47 @@ def test_a_pr_that_changes_the_stack_builds_it_without_waiting(tmp_path):
     assert len(built_tags(calls, stderr)) == 3
 
 
-def test_only_a_stack_the_build_pushed_can_be_cached(tmp_path):
-    # /ci rocm cache copies rocm-rocm-stack-built: never a stack this PR's CI reused,
-    # since other PRs' CI can push to its tags first.
-    for name, existing in (("built", ()), ("reused", ("rocm/vllm-dev:pr7-",))):
+def test_only_images_the_build_pushed_can_be_cached(tmp_path):
+    # /ci rocm cache copies rocm-rocm-*-built: never an image this PR's CI reused, since
+    # other PRs' CI can push to its tags first, nor one built on a parent it reused (a
+    # retried job whose stack another PR replaced).
+    stack = r"rocm/vllm-dev:pr7-stack-rocm-\w+"
+    pin = r"@sha256:\w+"
+    cases = {
+        "built": [
+            f"stack-built {stack}{pin} {stack}-wheels{pin}",
+            rf"runtime-built rocm/vllm-dev:pr7-runtime-rocm-\w+{pin}",
+            rf"test-deps-built rocm/vllm-dev:pr7-test-deps-rocm-\w+{pin}",
+        ],
+        "stack reused": [],
+        "all reused": [],
+    }
+    existing = {
+        "built": (),
+        "stack reused": ("rocm/vllm-dev:pr7-stack-rocm-",),
+        "all reused": ("rocm/vllm-dev:pr7-",),
+    }
+    for name, expected in cases.items():
         (tmp_path / name).mkdir()
         status, stderr, calls = run_build(
             tmp_path / name,
             "base",
-            existing,
+            existing[name],
             ROCM_CI_REPO="rocm/vllm-dev",
             BUILDKITE_PULL_REQUEST="7",
             CHANGED="docker/Dockerfile.rocm_base",
         )
         assert status == 0, stderr
-        built = [c for c in calls if c.startswith("meta rocm-rocm-stack-built ")]
-        if name == "reused":
-            assert "Reusing rocm/vllm-dev:pr7-stack-rocm-" in stderr
-            assert not built
-            continue
-        stack = r"rocm/vllm-dev:pr7-stack-rocm-\w+"
-        assert re.fullmatch(
-            rf"meta rocm-rocm-stack-built {stack}@sha256:\w+ {stack}-wheels@sha256:\w+",
-            built[0],
-        ), built
+        built = [
+            c.removeprefix("meta rocm-rocm-")
+            for c in calls
+            if re.match(r"meta rocm-rocm-[\w-]+-built ", c) and not c.endswith(" none")
+        ]
+        assert len(built) == len(expected), (name, built)
+        for pattern, line in zip(expected, built):
+            assert re.fullmatch(pattern, line), (name, built)
+        if name == "stack reused":
+            assert "Building runtime" in stderr
 
 
 def test_a_pr_that_changes_requirements_waits_only_for_the_stack(tmp_path):
@@ -577,16 +598,28 @@ PROMOTE_KS = hashlib.sha256(b"layers: zstd-3, mtimes kept\n").hexdigest()[:16]
 PIN = "@sha256:" + "a" * 64
 PR_WHEELS = f"rocm/vllm-dev:pr7-stack-rocm-{PROMOTE_KS}-wheels{PIN}"
 PR_STACK = f"rocm/vllm-dev:pr7-stack-rocm-{PROMOTE_KS}{PIN}"
+# Its Kr: the Ks, then the Dockerfile through the per-commit marker (no listed files).
+_ABOVE_MARKER = (ROOT / "docker/Dockerfile.rocm").read_text().split("\n")
+_ABOVE_MARKER = _ABOVE_MARKER[
+    : next(i for i, line in enumerate(_ABOVE_MARKER) if line.startswith(MARKER)) + 1
+]
+PROMOTE_KR = hashlib.sha256(
+    "\n".join([PROMOTE_KS, *_ABOVE_MARKER, ""]).encode()
+).hexdigest()[:16]
+PR_RUNTIME = f"rocm/vllm-dev:pr7-runtime-rocm-{PROMOTE_KR}{PIN}"
+PR_TEST_DEPS = f"rocm/vllm-dev:pr7-test-deps-rocm-{PROMOTE_KR}{PIN}"
 
 
 def promote(tmp_path: Path, images: list[str], **env: str):
     return run_build(
         tmp_path,
         "promote",
-        ROCM_PROMOTE_PR="7",
-        ROCM_PROMOTE_SHA="a" * 40,
-        ROCM_PROMOTE_IMAGES=" ".join(images),
-        **env,
+        **{
+            "ROCM_PROMOTE_PR": "7",
+            "ROCM_PROMOTE_SHA": "a" * 40,
+            "ROCM_PROMOTE_IMAGES": " ".join(images),
+            **env,
+        },
     )
 
 
@@ -601,6 +634,64 @@ def test_promote_copies_the_stack_pair_the_pr_recorded(tmp_path):
     # -wheels first: the stack tag marks the pair complete.
     assert copied(calls) == [PR_WHEELS, PR_STACK]
     assert not any(call.startswith("bake") for call in calls)
+
+
+def test_promote_copies_the_runtime_and_test_deps_over_the_stack_it_copied(
+    tmp_path,
+):
+    images = [PR_TEST_DEPS, PR_RUNTIME, PR_STACK, PR_WHEELS]
+    status, stderr, calls = promote(tmp_path, images)
+    assert status == 0, stderr
+    assert copied(calls) == [PR_WHEELS, PR_STACK, PR_RUNTIME, PR_TEST_DEPS]
+
+
+@pytest.mark.parametrize(
+    ("existing", "expected"),
+    [
+        ((f"stack-rocm-{PROMOTE_KS}-wheels", f"stack-rocm-{PROMOTE_KS}"), []),
+        ((f"runtime-rocm-{PROMOTE_KR}",), [PR_WHEELS, PR_STACK]),
+    ],
+)
+def test_promote_never_copies_over_an_image_main_built(tmp_path, existing, expected):
+    status, stderr, calls = promote(
+        tmp_path,
+        [PR_WHEELS, PR_STACK, PR_RUNTIME, PR_TEST_DEPS],
+        existing=tuple(f"rocm/vllm-ci:{tag}" for tag in existing),
+    )
+    assert status == 0, stderr
+    assert copied(calls) == expected
+
+
+def test_promote_without_a_request_does_nothing(tmp_path):
+    # Nightlies run it: no builder, no build context, no tag fetch.
+    status, stderr, calls = run_build(tmp_path, "promote", NO_BUILDER="1")
+    assert status == 0, stderr
+    assert "nothing to promote" in stderr
+    assert calls == []
+    assert not (tmp_path / ".rocm-src").exists()
+
+
+def test_promote_finishes_a_chain_an_earlier_attempt_left(tmp_path):
+    # The stack copied, then a registry error on the runtime: the retry must copy
+    # the rest rather than take the stack tags for main's.
+    status, stderr, calls = promote(
+        tmp_path,
+        [PR_WHEELS, PR_STACK, PR_RUNTIME, PR_TEST_DEPS],
+        existing=(
+            f"rocm/vllm-ci:stack-rocm-{PROMOTE_KS}-wheels {PIN[1:]}",
+            f"rocm/vllm-ci:stack-rocm-{PROMOTE_KS} {PIN[1:]}",
+        ),
+    )
+    assert status == 0, stderr
+    assert copied(calls) == [PR_RUNTIME, PR_TEST_DEPS]
+
+
+def test_promote_a_registry_error_on_an_existing_tag_fails_the_step(tmp_path):
+    status, stderr, calls = promote(
+        tmp_path, [PR_WHEELS, PR_STACK, PR_RUNTIME], FAILURE="registry"
+    )
+    assert status == 75, stderr
+    assert not copied(calls)
 
 
 def test_promote_skips_tags_main_already_has(tmp_path):
@@ -623,6 +714,8 @@ def test_promote_skips_tags_main_already_has(tmp_path):
         ([PR_STACK], {}, "recorded no"),
         ([PR_WHEELS, PR_STACK], {"RECIPE_DIFF": "1"}, "another build.sh or bake file"),
         ([PR_WHEELS, PR_STACK], {"ROCM_CI_REPO": "rocm/vllm-dev"}, "only pushes"),
+        ([PR_WHEELS, PR_STACK], {"ROCM_PROMOTE_PR": "7 x"}, "malformed"),
+        ([PR_WHEELS, PR_STACK], {"ROCM_PROMOTE_SHA": "a" * 39}, "malformed"),
     ],
 )
 def test_promote_refuses_what_main_would_not_build(tmp_path, images, env, message):

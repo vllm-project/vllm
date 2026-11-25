@@ -28,6 +28,8 @@ logger = init_logger(__name__)
 
 class W4A8Int8MoeBackend(Enum):
     CPU_INT4 = "CPU_INT4"
+    # No compute backend: requantization sources only dequantize weights.
+    NONE = "NONE"
 
 
 def _get_priority_backends(
@@ -74,6 +76,7 @@ class W4A8Int8MoEKernelOracle(MoEKernelOracle[W4A8Int8MoeBackend]):
     """W4A8 INT8 MoE backend selection for one deployment configuration."""
 
     name = "W4A8 Int8"
+    placeholder_backend = W4A8Int8MoeBackend.NONE
 
     def backend_to_kernel_cls(
         self, backend: W4A8Int8MoeBackend
@@ -94,9 +97,15 @@ def select_w4a8_int8_moe_backend(
         activation_key: Activation quantization key (currently unused for W4A8)
 
     Returns:
-        Tuple of (backend, kernel_class)
+        Tuple of (backend, kernel_class); `NONE` and a placeholder experts class
+        for requantization sources, which have no kernel.
 
     """
+    # TODO: migrate to oracle base method.
+    source = W4A8Int8MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
+
     AVAILABLE_BACKENDS = _get_priority_backends(config)
 
     if not AVAILABLE_BACKENDS:

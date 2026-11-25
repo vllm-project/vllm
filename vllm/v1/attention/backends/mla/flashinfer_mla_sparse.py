@@ -57,6 +57,10 @@ _TRTLLM_GEN_MAX_REQUESTS = 65535
 class _FlashInferMLASparseBackendBase(AttentionBackend):
     """Common metadata for concrete FlashInfer sparse MLA backends."""
 
+    @classmethod
+    def supports_hisparse(cls) -> bool:
+        return True
+
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER_MLA_SPARSE"
@@ -199,6 +203,10 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER_MLA_SPARSE_SM120"
+
+    @classmethod
+    def supports_hisparse(cls) -> bool:
+        return False
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
@@ -1057,12 +1065,12 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
-        kv_rows, block_stride_rows = flat_kv_row_view(
-            kv_cache.view(q.dtype), block_size
-        )
-        # Block sizes and strides have been aligned to 32 rows.
-        kv_cache = kv_rows.view(
-            -1, math.gcd(block_stride_rows, block_size, 64), kv_rows.shape[-1]
+        kv_rows, _ = flat_kv_row_view(kv_cache.view(q.dtype), block_size)
+        # Top-k indices address flat rows, so pages need not follow blocks and
+        # the kernel reads rows past the last whole page.
+        page_rows = math.gcd(block_size, 64)
+        kv_cache = kv_rows[: kv_rows.shape[0] // page_rows * page_rows].view(
+            -1, page_rows, kv_rows.shape[-1]
         )
 
         num_heads = q.shape[1]

@@ -67,7 +67,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class LoadSpec:
     # Number of tokens cached in vLLM
     vllm_cached_tokens: int
@@ -77,7 +77,7 @@ class LoadSpec:
     can_load: bool
 
 
-@dataclass
+@dataclass(slots=True)
 class SaveSpec:
     # Skip already saved tokens
     skip_leading_tokens: int
@@ -85,7 +85,7 @@ class SaveSpec:
     can_save: bool
 
 
-@dataclass
+@dataclass(slots=True)
 class DisaggSpec:
     req_id: str
     receiver_id: str

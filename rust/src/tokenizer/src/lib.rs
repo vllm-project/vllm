@@ -34,6 +34,16 @@ pub trait Tokenizer: Send + Sync {
     /// Decode one token sequence into text.
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String>;
 
+    /// Decode one token ID for per-token metadata, such as logprob token
+    /// strings.
+    ///
+    /// Unlike sequence decoding, this preserves boundary whitespace encoded in
+    /// token pieces when a backend strips it from an isolated token. Special
+    /// tokens keep their spelling.
+    fn decode_token(&self, token_id: u32) -> Result<String> {
+        self.decode(&[token_id], false)
+    }
+
     /// Convert one token string into a token ID, returning `None` if the token
     /// is not in the tokenizer vocabulary.
     fn token_to_id(&self, token: &str) -> Option<u32>;

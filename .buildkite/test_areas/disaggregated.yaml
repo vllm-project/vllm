@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (L4) [Nightly] Distributed NixlConnector PD accuracy"
   key: distributed-nixlconnector-pd-accuracy-4-gpus
+  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 55
@@ -15,13 +16,14 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-    - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
-    - GPU_MEMORY_UTILIZATION=0.6 SLEEP_WAKE=1 bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+    - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+    - pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
   mirror:
     amd:
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI355) Distributed NixlConnector PD accuracy"
+      automatic_shard: true
       dind: false
       device: mi355_4
       timeout_in_minutes: 60
@@ -32,10 +34,12 @@ steps:
         - tests/v1/kv_connector/nixl_integration/
         - vllm/platforms/rocm.py
       commands:
-        - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+        - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+        - ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 - label: ":nvidia: (L4) [Nightly] Distributed FlashInfer NixlConnector PD accuracy"
   key: distributed-flashinfer-nixlconnector-pd-accuracy-4-gpus
+  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 55
@@ -47,12 +51,14 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-    - FLASHINFER=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+    - FLASHINFER=1 pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
   mirror:
     amd:
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI355) Distributed AITER NixlConnector PD accuracy"
+      automatic_shard: true
       dind: false
       device: mi355_4
       num_devices: 4
@@ -75,6 +81,7 @@ steps:
 
 - label: ":nvidia: (L4) [Nightly] Push NixlConnector PP prefill PD accuracy"
   key: push-nixlconnector-pp-prefill-pd-accuracy-4-gpus
+  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 30
@@ -87,12 +94,14 @@ steps:
     - tests/v1/kv_connector/nixl_push_integration/
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-    - bash v1/kv_connector/nixl_push_integration/config_sweep_accuracy_test.sh
+    - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+    - pytest -v -s v1/kv_connector/nixl_push_integration/test_push_accuracy_sweep.py
   mirror:
     amd:
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI300) Push NixlConnector PP prefill PD accuracy"
+      automatic_shard: true
       dind: false
       device: mi300_4
       timeout_in_minutes: 55
@@ -104,10 +113,12 @@ steps:
         - tests/v1/kv_connector/nixl_push_integration/
         - vllm/platforms/rocm.py
       commands:
-        - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_push_integration/config_sweep_accuracy_test.sh
+        - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+        - ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_push_integration/test_push_accuracy_sweep.py
 
 - label: ":nvidia: (L4) [Nightly] DP EP Distributed NixlConnector PD accuracy"
   key: dp-ep-distributed-nixlconnector-pd-accuracy-tests-4-gpus
+  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 30
@@ -119,12 +130,14 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-    - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+    - DP_EP=1 pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
   mirror:
     amd:
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI355) DP EP Distributed NixlConnector PD accuracy"
+      automatic_shard: true
       dind: false
       device: mi355_4
       timeout_in_minutes: 40
@@ -135,10 +148,12 @@ steps:
         - tests/v1/kv_connector/nixl_integration/
         - vllm/platforms/rocm.py
       commands:
-        - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+        - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+        - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 - label: ":nvidia: (L4) [Nightly] CrossLayer KV layout Distributed NixlConnector PD accuracy"
   key: crosslayer-kv-layout-distributed-nixlconnector-pd-accuracy-tests-4-gpus
+  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 55
@@ -150,12 +165,14 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-    - CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+    - CROSS_LAYERS_BLOCKS=True pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
   mirror:
     amd:
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI300) CrossLayer KV layout Distributed NixlConnector PD accuracy"
+      automatic_shard: true
       dind: false
       device: mi300_4
       timeout_in_minutes: 60
@@ -166,10 +183,12 @@ steps:
         - tests/v1/kv_connector/nixl_integration/
         - vllm/platforms/rocm.py
       commands:
-        - CROSS_LAYERS_BLOCKS=True ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+        - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+        - CROSS_LAYERS_BLOCKS=True ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 - label: ":nvidia: (L4) [Nightly] Hybrid SSM NixlConnector PD accuracy"
   key: hybrid-ssm-nixlconnector-pd-accuracy-tests-4-gpus
+  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 60
@@ -181,12 +200,14 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-    - HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+    - HYBRID_SSM=1 pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
   mirror:
     amd:
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI300) Hybrid SSM NixlConnector PD accuracy"
+      automatic_shard: true
       dind: false
       device: mi300_4
       timeout_in_minutes: 80
@@ -197,7 +218,8 @@ steps:
         - tests/v1/kv_connector/nixl_integration/
         - vllm/platforms/rocm.py
       commands:
-        - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+        - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+        - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_sweep.py
 
 # Per-PR core of the nightly-only 4-GPU sweeps above: hetero-TP (both
 # directions), MoE DP-EP decode, push-mode PP prefill, sleep/wake, MLA,
@@ -205,12 +227,10 @@ steps:
 # KV sharing on a 2-GPU pod. TP>1 configs share GPUs between prefill and
 # decode (gpu-memory-utilization 0.35 per engine); TP1/TP1 architecture
 # configs keep one dedicated GPU per side.
-- label: ":nvidia: (L4) NixlConnector PD accuracy core %N"
+- label: ":nvidia: (L4) NixlConnector PD accuracy core"
   key: nixlconnector-pd-accuracy-core-2-gpus
-  # Each config is ~5-9 min of GSM8K bound by L4 KV transfer; 3 shards
-  # keep each job around 20-25 min.
-  parallelism: 3
-  timeout_in_minutes: 45
+  automatic_shard: true
+  timeout_in_minutes: 90
   working_dir: "/vllm-workspace/tests"
   device: l4
   num_devices: 2
@@ -222,10 +242,14 @@ steps:
     - tests/v1/kv_connector/nixl_push_integration/
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-    - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_core_test.sh
+    # Import canary. As `python3 -m pytest` it runs as setup, in every shard,
+    # so a broken NIXL install fails each job in seconds.
+    - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
+    - pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_core_sweep.py
 
 - label: ":nvidia: (L4) NixlConnector PD edge case"
   key: nixlconnector-pd-edge-cases-2-gpus
+  automatic_shard: true
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -239,10 +263,11 @@ steps:
     DECODE_GPU_ID: "1"
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-    - bash v1/kv_connector/nixl_integration/run_edge_case_test.sh
+    - pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_edge_cases
   mirror:
     amd:
       label: ":amd: (MI300) NixlConnector PD edge case"
+      automatic_shard: true
       dind: false
       device: mi300_2
       timeout_in_minutes: 65
@@ -254,10 +279,11 @@ steps:
         - tests/v1/kv_connector/nixl_integration/
         - vllm/platforms/rocm.py
       commands:
-        - PREFILL_GPU_ID=0 DECODE_GPU_ID=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_edge_case_test.sh
+        - PREFILL_GPU_ID=0 DECODE_GPU_ID=1 ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_edge_cases
 
 - label: ":nvidia: (L4) Hybrid SSM NixlConnector PD prefix cache"
   key: hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus
+  automatic_shard: true
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -269,10 +295,11 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-    - bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
+    - pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_mamba_prefix_cache
   mirror:
     amd:
       label: ":amd: (MI355) Hybrid SSM NixlConnector PD prefix cache"
+      automatic_shard: true
       dind: false
       device: mi355_2
       timeout_in_minutes: 25
@@ -285,10 +312,11 @@ steps:
       - tests/v1/kv_connector/nixl_integration/
       - vllm/platforms/rocm.py
       commands:
-      - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
+      - ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_mamba_prefix_cache
 
 - label: ":nvidia: (L4) MultiConnector (Nixl+Offloading) PD accuracy"
   key: multiconnector-nixl-offloading-pd-accuracy-2-gpus
+  automatic_shard: true
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -301,10 +329,11 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-    - bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
+    - pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_multi_connector_accuracy
   mirror:
     amd:
       label: ":amd: (MI355) MultiConnector (Nixl+Offloading) PD accuracy"
+      automatic_shard: true
       dind: false
       device: mi355_2
       timeout_in_minutes: 40
@@ -319,7 +348,7 @@ steps:
       - requirements/test/rocm.txt
       - vllm/platforms/rocm.py
       commands:
-      - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
+      - ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_multi_connector_accuracy
 
 # Disabled until the KV connectors installation is locked.
 # - label: ":nvidia: (A100) NixlConnector PD + Spec Decode acceptance"
@@ -352,6 +381,7 @@ steps:
 
 - label: ":nvidia: (L4) MultiConnector (Nixl+Offloading) PD edge cases"
   key: multiconnector-nixl-offloading-pd-edge-cases-2-gpus
+  automatic_shard: true
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -364,10 +394,11 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-    - bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
+    - pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_multi_connector_edge_cases
   mirror:
     amd:
       label: ":amd: (MI355) MultiConnector (Nixl+Offloading) PD edge cases"
+      automatic_shard: true
       dind: false
       device: mi355_2
       timeout_in_minutes: 25
@@ -381,11 +412,12 @@ steps:
       - tests/v1/kv_connector/nixl_integration/
       - vllm/platforms/rocm.py
       commands:
-      - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
+      - ATTENTION_BACKEND=TRITON_ATTN pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_multi_connector_edge_cases
 
 # P TP 4 - D DPEP 4 test case for DSv4-Flash
 - label: ":nvidia: (H200) [Nightly] DSv4-Flash Disaggregated DP EP"
   key: dsv4-flash-disaggregated
+  automatic_shard: true
   timeout_in_minutes: 60
   device: h200
   optional: true
@@ -407,10 +439,11 @@ steps:
     DECODER_KV_LAYOUT: ""
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-    - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+    - pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_accuracy
   mirror:
     amd:
       label: ":amd: (MI355) DSv4-Flash Disaggregated DP EP"
+      automatic_shard: true
       dind: false
       device: mi355_8
       timeout_in_minutes: 85
@@ -444,10 +477,11 @@ steps:
           VLLM_SERVE_EXTRA_ARGS=--trust-remote-code,--kv-cache-dtype,fp8
           PREFILLER_KV_LAYOUT=
           DECODER_KV_LAYOUT=
-          bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+          pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_accuracy
 
 - label: ":nvidia: (H200) [Nightly] Kimi-Linear-48B-A3B Disaggregated DP EP"
   key: kimi-linear-disaggregated
+  automatic_shard: true
   timeout_in_minutes: 60
   device: h200
   optional: true
@@ -467,10 +501,11 @@ steps:
     VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--max-model-len 32768"
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
-    - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+    - pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_accuracy
   mirror:
     amd:
       label: ":amd: (MI355) Kimi-Linear-48B-A3B Disaggregated DP EP"
+      automatic_shard: true
       dind: false
       device: mi355_4
       num_devices: 4
@@ -487,4 +522,4 @@ steps:
       env:
         VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       commands:
-      - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+      - pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_accuracy

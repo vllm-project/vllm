@@ -125,9 +125,17 @@ def _run_dbo_gsm8k(
         *(extra_args or []),
     ]
 
+    # Single-node test: keep NVSHMEM on NVLink and off host NICs to prevent
+    # intermittent IB transport setup hangs (ibv_modify_qp) across NUMA sockets.
+    env_dict = {
+        "NVSHMEM_REMOTE_TRANSPORT": "none",
+        "NVSHMEM_HCA_LIST": "none",
+    }
+
     with RemoteOpenAIServer(
         MODEL_NAME,
         server_args,
+        env_dict=env_dict,
         max_wait_seconds=600,  # Allow time for model loading with DP+EP
     ) as remote_server:
         # Use host and port directly from RemoteOpenAIServer

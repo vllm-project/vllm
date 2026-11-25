@@ -25,8 +25,16 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+    HummingGroupedExperts,
+)
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
+from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
+    Nvfp4QuantizationEmulationTritonExperts,
+)
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
+from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.base import make_moe_kernel
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
@@ -80,7 +88,15 @@ from vllm.model_executor.layers.fused_moe.oracle.w4a8_int8 import (
     map_w4a8_int8_backend,
     select_w4a8_int8_moe_backend,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kInt4Static
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kInt4Static,
+    kMxfp4Dynamic,
+    kNvfp4Dynamic,
+    kNvfp4Static,
+)
 from vllm.platforms import current_platform
 
 # oracle -> (select call, backend mapper, explicit runner backend, name used in
@@ -648,3 +664,87 @@ def test_make_kernel_delegates() -> None:
         None,  # routing_tables default
     )
     assert built_kernel is sentinel_kernel
+
+
+@pytest.mark.parametrize(
+    ("strict", "expected"),
+    [(False, NvFp4MoeBackend.MARLIN), (True, NvFp4MoeBackend.EMULATION)],
+)
+def test_strict_quant_scheme_skips_activation_fallbacks(monkeypatch, strict, expected):
+    """Marlin runs NVFP4 W4A4 layers as W4A16. VLLM_STRICT_QUANT_SCHEME keeps the
+    backend priority order but skips such fallbacks; emulation honors W4A4."""
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", str(int(strict)))
+    kernels = {
+        NvFp4MoeBackend.MARLIN: MarlinExperts,
+        NvFp4MoeBackend.EMULATION: Nvfp4QuantizationEmulationTritonExperts,
+    }
+    for k_cls in kernels.values():
+        monkeypatch.setattr(
+            k_cls, "_supports_current_device", staticmethod(lambda: True)
+        )
+    monkeypatch.setattr(
+        nvfp4_oracle,
+        "backend_to_kernel_cls",
+        lambda backend: [kernels[backend]] if backend in kernels else [],
+    )
+
+    backend, experts_cls = select_nvfp4_moe_backend(
+        make_dummy_moe_config(hidden_dim=256, intermediate_size=256),
+        weight_key=kNvfp4Static,
+        activation_key=kNvfp4Dynamic,
+    )
+    assert (backend, experts_cls) == (expected, kernels[expected])
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_fp8_marlin_moe_runs_w8a8_as_w8a16_unless_strict(monkeypatch, strict):
+    """Marlin only runs unquantized activations, so the FP8 oracle must resolve
+    W8A8 layers to W8A16 for it rather than lose the Marlin fallback."""
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", str(int(strict)))
+    monkeypatch.setattr(
+        MarlinExperts, "_supports_current_device", staticmethod(lambda: True)
+    )
+    config = make_dummy_moe_config(hidden_dim=256, intermediate_size=256)
+    config.moe_backend = "marlin"
+
+    if strict:
+        with pytest.raises(ValueError, match="VLLM_STRICT_QUANT_SCHEME"):
+            select_fp8_moe_backend(config, kFp8Static128BlockSym, kFp8Dynamic128Sym)
+    else:
+        assert select_fp8_moe_backend(
+            config, kFp8Static128BlockSym, kFp8Dynamic128Sym
+        ) == (Fp8MoeBackend.MARLIN, MarlinExperts)
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_mxfp4_marlin_moe_runs_w4a4_as_w4a16_unless_strict(monkeypatch, strict):
+    """The MXFP4 oracle probes each backend with its own activation key, so it
+    must drop its BF16 fallback candidates itself under strict mode."""
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", str(int(strict)))
+    monkeypatch.setattr(
+        MarlinExperts, "_supports_current_device", staticmethod(lambda: True)
+    )
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    monkeypatch.setattr(
+        mxfp4_oracle, "_user_moe_activation_override_is_set", lambda: False
+    )
+    config = make_dummy_moe_config(hidden_dim=256, intermediate_size=256)
+    config.moe_backend = "marlin"
+
+    if strict:
+        with pytest.raises(ValueError, match="VLLM_STRICT_QUANT_SCHEME"):
+            mxfp4_oracle.select_mxfp4_moe_backend(config, kMxfp4Dynamic)
+    else:
+        assert mxfp4_oracle.select_mxfp4_moe_backend(config, kMxfp4Dynamic) == (
+            Mxfp4MoeBackend.MARLIN,
+            MarlinExperts,
+        )
+
+
+def test_humming_moe_executed_activation_follows_conversion(monkeypatch):
+    """Humming runs the input schema its weights are converted with: the W4A8
+    oracle converts for FP8 activations, the FP8 oracle for unquantized ones."""
+    monkeypatch.delenv("VLLM_HUMMING_INPUT_QUANT_CONFIG", raising=False)
+    executed = HummingGroupedExperts.executed_activation_key
+    assert executed(kInt4Static, kFp8DynamicTokenSym) == kFp8DynamicTokenSym
+    assert executed(kFp8Static128BlockSym, kFp8Dynamic128Sym) is None

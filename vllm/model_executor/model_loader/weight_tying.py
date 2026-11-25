@@ -18,7 +18,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class _UntiedLMHead:
     name: str
     lm_head: ParallelLMHead

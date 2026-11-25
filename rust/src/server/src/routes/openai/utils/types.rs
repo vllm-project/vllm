@@ -8,6 +8,7 @@ use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use vllm_chat::ChatTool;
+use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_llm::{PromptCacheUsage, TokenUsage};
 
 // ============================================================================
@@ -250,6 +251,18 @@ pub enum ContentPart {
     /// result (Anthropic's `tool_reference` block).
     #[serde(rename = "tool_reference")]
     ToolReference { name: String },
+}
+
+impl ContentPart {
+    /// The media modality this part carries, if any.
+    pub fn modality(&self) -> Option<MmModality> {
+        match self {
+            Self::ImageUrl { .. } => Some(MmModality::Image),
+            Self::VideoUrl { .. } => Some(MmModality::Video),
+            Self::AudioUrl { .. } | Self::InputAudio { .. } => Some(MmModality::Audio),
+            Self::Text { .. } | Self::Refusal { .. } | Self::ToolReference { .. } => None,
+        }
+    }
 }
 
 #[serde_with::skip_serializing_none]
@@ -628,6 +641,25 @@ impl<'de> Deserialize<'de> for ChatMessage {
             Ok(Self::Custom { role, content })
         } else {
             Self::deserialize(value).map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+impl ChatMessage {
+    /// The message's content parts; empty for string or absent content.
+    pub fn content_parts(&self) -> &[ContentPart] {
+        let content = match self {
+            Self::System { content, .. }
+            | Self::User { content, .. }
+            | Self::Tool { content, .. }
+            | Self::Developer { content, .. }
+            | Self::Custom { content, .. } => Some(content),
+            Self::Assistant { content, .. } => content.as_ref(),
+            Self::Function { .. } => None,
+        };
+        match content {
+            Some(MessageContent::Parts(parts)) => parts,
+            Some(MessageContent::Text(_)) | None => &[],
         }
     }
 }

@@ -110,12 +110,13 @@ from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import (
     All2AllBackend,
     DataParallelBackend,
+    DBOSchedule,
     DCPCommBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
 )
 from vllm.config.scheduler import SchedulerPolicy
-from vllm.config.utils import get_field
+from vllm.config.utils import get_field, replace
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.config.watermarking import WatermarkConfig
 from vllm.logger import configure_logging_if_needed, init_logger, suppress_logging
@@ -580,6 +581,7 @@ class EngineArgs:
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dp_sync_interval: int = ParallelConfig.dp_sync_interval
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
+    dbo_schedule: DBOSchedule | None = ParallelConfig.dbo_schedule
     disable_nccl_for_dp_synchronization: bool | None = (
         ParallelConfig.disable_nccl_for_dp_synchronization
     )
@@ -716,6 +718,7 @@ class EngineArgs:
 
     enable_chunked_prefill: bool | None = None
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
+    encoder_cache_size: int | None = None
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
@@ -835,6 +838,7 @@ class EngineArgs:
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
+    mamba_prefill_backend: MambaBackendEnum = MambaConfig.prefill_backend
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
     )
@@ -1143,6 +1147,9 @@ class EngineArgs:
             "--mamba-ssu-algorithm", **mamba_kwargs["ssu_algorithm"]
         )
         mamba_group.add_argument(
+            "--mamba-prefill-backend", **mamba_kwargs["prefill_backend"]
+        )
+        mamba_group.add_argument(
             "--enable-mamba-cache-stochastic-rounding",
             **mamba_kwargs["enable_stochastic_rounding"],
         )
@@ -1363,6 +1370,7 @@ class EngineArgs:
             "--dbo-prefill-token-threshold",
             **parallel_kwargs["dbo_prefill_token_threshold"],
         )
+        parallel_group.add_argument("--dbo-schedule", **parallel_kwargs["dbo_schedule"])
         parallel_group.add_argument(
             "--disable-nccl-for-dp-synchronization",
             **parallel_kwargs["disable_nccl_for_dp_synchronization"],
@@ -1820,6 +1828,9 @@ class EngineArgs:
         )
         scheduler_group.add_argument(
             "--disable-chunked-mm-input", **scheduler_kwargs["disable_chunked_mm_input"]
+        )
+        scheduler_group.add_argument(
+            "--encoder-cache-size", **scheduler_kwargs["encoder_cache_size"]
         )
         scheduler_group.add_argument(
             "--scheduler-cls", **scheduler_kwargs["scheduler_cls"]
@@ -2639,6 +2650,7 @@ class EngineArgs:
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dp_sync_interval=self.dp_sync_interval,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
+            dbo_schedule=self.dbo_schedule,
             disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
@@ -2672,6 +2684,14 @@ class EngineArgs:
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,
         )
+        if (
+            envs.VLLM_PP_LAYER_PARTITION is not None
+            and parallel_config.pipeline_parallel_size == 1
+        ):
+            logger.warning(
+                "VLLM_PP_LAYER_PARTITION is ignored because pipeline "
+                "parallelism is disabled."
+            )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
@@ -2709,6 +2729,7 @@ class EngineArgs:
             max_model_len=model_config.max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
+            encoder_cache_size=self.encoder_cache_size,
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,
             policy=self.scheduling_policy,
@@ -2776,9 +2797,9 @@ class EngineArgs:
                     "attention_backend and attention_config.backend "
                     "are mutually exclusive"
                 )
-            # Reuse the validator to handle "auto" and string-to-enum conversion
-            attention_config.backend = AttentionConfig.validate_backend_before(
-                self.attention_backend
+            attention_config = replace(
+                attention_config,
+                backend=self.attention_backend,
             )
 
         # Batch-invariant mode requires deterministic attention behavior.
@@ -2820,6 +2841,12 @@ class EngineArgs:
             mamba_config.backend = self.mamba_backend
         if self.mamba_ssu_algorithm is not None:
             mamba_config.ssu_algorithm = self.mamba_ssu_algorithm
+        if isinstance(self.mamba_prefill_backend, str):
+            mamba_config.prefill_backend = MambaBackendEnum[
+                self.mamba_prefill_backend.upper()
+            ]
+        else:
+            mamba_config.prefill_backend = self.mamba_prefill_backend
         if self.enable_mamba_cache_stochastic_rounding:
             mamba_config.enable_stochastic_rounding = (
                 self.enable_mamba_cache_stochastic_rounding

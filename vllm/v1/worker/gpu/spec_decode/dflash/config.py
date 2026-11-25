@@ -31,6 +31,23 @@ class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
         assert cls.base_method is not None
         wrap_eagle_hf_config(spec, cls.base_method)
 
+    @classmethod
+    def default_draft_decode_context_parallel_size(
+        cls, spec: "SpeculativeConfig"
+    ) -> int:
+        from vllm.model_executor.models.qwen3_dflash import dflash_has_any_sliding
+
+        draft = spec.draft_model_config
+        # Only full-attention MLA drafts shard their cache with the target:
+        # windowed layers cannot run under DCP, and non-MLA drafts stay replicated.
+        if (
+            draft.use_mla
+            and draft.get_sliding_window() is None
+            and not dflash_has_any_sliding(draft.hf_config)
+        ):
+            return super().default_draft_decode_context_parallel_size(spec)
+        return 1
+
     @property
     def uses_aux_hidden_states(self) -> bool:
         return True

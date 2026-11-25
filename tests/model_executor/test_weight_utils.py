@@ -438,15 +438,34 @@ def test_drop_checkpoint_cache_releases_local_weight_files(
     fadvise.assert_called_once()
 
 
-@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
-def test_dummy_fp8_weight_is_not_degenerate(dtype):
-    """+-1e-3 underflows in FP8, so 8-bit floats default to +-1."""
-    param = torch.empty(4096, dtype=dtype)
-    initialize_single_dummy_weight(param)
-    values = param.float()
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2fnuz,
+    ],
+)
+def test_dummy_fp8_weight_uses_full_range(dtype):
+    """FP8 weights get random finite codes across the range, as real checkpoints
+    use it: a narrow range lets power-capped GPUs run GEMMs faster than real
+    weights do, which skews dummy-weight benchmarks."""
+    params = [torch.empty(1 << 16, dtype=dtype) for _ in range(2)]
+    for param in params:
+        initialize_single_dummy_weight(param, name="weight")
+    values = params[0].float()
     assert values.isfinite().all()
-    assert values.abs().max() <= 1.0
-    assert (values != 0).float().mean() > 0.99
+    assert values.abs().max() >= torch.finfo(dtype).max / 2
+    assert params[0].view(torch.uint8).unique().numel() > 240
+    assert torch.equal(params[0].view(torch.uint8), params[1].view(torch.uint8))
+
+
+def test_dummy_fp8_weight_keeps_explicit_range():
+    """An explicit range still samples uniformly within it."""
+    param = torch.empty(4096, dtype=torch.float8_e4m3fn)
+    initialize_single_dummy_weight(param, low=-0.5, high=0.5)
+    assert param.float().abs().max() <= 0.5
 
 
 @pytest.mark.parametrize(

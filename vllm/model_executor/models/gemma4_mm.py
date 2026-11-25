@@ -652,8 +652,6 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             video_timestamps_per_video: list[list[float]] = []
             video_frame_counts: list[int] = []
 
-            video_replacements: list[str] = []
-
             for item in videos:
                 video_array, metadata = item
 
@@ -708,31 +706,9 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 video_timestamps_per_video.append(timestamps)
                 video_frame_counts.append(len(frames))
 
-                # Build expanded replacement text for this video.
-                ts_strs = [f"{int(s // 60):02d}:{int(s % 60):02d}" for s in timestamps]
-                replacement = " ".join(
-                    f"{t} {processor.boi_token}"
-                    f"{processor.video_token * n}"
-                    f"{processor.eoi_token}"
-                    for t, n in zip(ts_strs, num_soft_per_frame)
-                )
-                video_replacements.append(replacement)
-
-            # Replace all <|video|> placeholders at once. We split on
-            # video_token to get N+1 parts, then interleave with the
-            # N replacement strings. This avoids the iterative
-            # split-replace bug where replacement text (which itself
-            # contains <|video|> tokens) collides with later splits.
-            vt = processor.video_token
-            parts = prompt_text.split(vt, len(video_replacements))
-
-            # NOTE: len(parts) <= len(video_replacements) + 1
-            parts_with_repl: list[str] = []
-            for part, repl in zip(parts, video_replacements):
-                parts_with_repl.extend([part, repl])
-            parts_with_repl.extend(parts[len(video_replacements) :])
-
-            prompt_text = "".join(parts_with_repl)
+            # Videos were processed above, so drop their placeholders from the text.
+            mm_counts = {**mm_items.get_all_counts(), "video": 0}
+            prompt_text = self._get_hf_mm_text(mm_counts)
 
             video_outputs = {
                 "pixel_values_videos": torch.cat(all_video_pixel_values, dim=0),
@@ -776,11 +752,14 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         if val is not None and is_top_level_max_soft_tokens:
             patched_mm_kwargs["max_soft_tokens"] = val
 
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**patched_mm_kwargs),
-            dict(text=prompt_text, **hf_data),
-            patched_mm_kwargs,
-        )
+        if hf_data:
+            processed_data = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**patched_mm_kwargs),
+                dict(text=prompt_text, **hf_data),
+                patched_mm_kwargs,
+            )
+        else:
+            processed_data = BatchFeature()
 
         # HF uses 'image_position_ids'; vLLM uses 'pixel_position_ids'.
         # Remap here to keep a single translation point.
@@ -2224,13 +2203,13 @@ class Gemma4ForConditionalGeneration(
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
         **kwargs: Any,
     ) -> torch.Tensor:
-        pixel_values = inputs["pixel_values"]
-        pixel_position_ids = inputs["pixel_position_ids"]
-        gather_indices = inputs["gather_indices"]
+        pixel_values = values["pixel_values"]
+        pixel_position_ids = values["pixel_position_ids"]
+        gather_indices = values["gather_indices"]
 
         pad_tensor = (pixel_position_ids == -1).all(dim=-1)
 
@@ -2288,6 +2267,15 @@ class Gemma4ForConditionalGeneration(
 
         return torch.cat(embeddings, dim=0)
 
+    def _per_layer_embeddings_on(self, device: torch.device) -> torch.Tensor:
+        # A plain attribute, not a buffer, so the IPC weight cache never shares
+        # this per-step scratch; reallocate if the model was moved after init.
+        if self.per_layer_embeddings.device != device:
+            self.per_layer_embeddings = torch.zeros_like(
+                self.per_layer_embeddings, device=device
+            )
+        return self.per_layer_embeddings
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -2320,9 +2308,9 @@ class Gemma4ForConditionalGeneration(
                     self.config.text_config.num_hidden_layers,
                     self.config.text_config.hidden_size_per_layer_input,
                 )
-                self.per_layer_embeddings[: per_layer_inputs.shape[0]].copy_(
-                    per_layer_inputs
-                )
+                self._per_layer_embeddings_on(per_layer_inputs.device)[
+                    : per_layer_inputs.shape[0]
+                ].copy_(per_layer_inputs)
 
         if multimodal_embeddings is None or is_multimodal is None:
             return super().embed_input_ids(input_ids)
@@ -2351,7 +2339,9 @@ class Gemma4ForConditionalGeneration(
         # Select the pre-cached PLEs for this batch (None when PLE
         # is disabled for variants without PLE).
         per_layer_inputs = (
-            self.per_layer_embeddings[: inputs_embeds.shape[0]]
+            self._per_layer_embeddings_on(inputs_embeds.device)[
+                : inputs_embeds.shape[0]
+            ]
             if self.per_layer_embeddings is not None and inputs_embeds is not None
             else None
         )

@@ -47,8 +47,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,
 )
 
-from .qwen2 import Qwen2MLP as Qwen3MLP
-from .qwen3 import Qwen3ForCausalLM
+from .qwen3 import Qwen3ForCausalLM, Qwen3MLP
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -102,6 +101,16 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     (config mirror of the model's `get_draft_attn_causal`, usable pre-build)."""
     return not all(
         _dflash_layer_causal(config, i) for i in range(config.num_hidden_layers)
+    )
+
+
+def dflash_has_any_sliding(config: Qwen3Config) -> bool:
+    """Whether any draft layer uses sliding-window attention, resolved from config
+    (config mirror of `_resolve_layer_attention`, usable pre-build)."""
+    dflash_config = getattr(config, "dflash_config", None) or {}
+    layer_types = getattr(config, "layer_types", None) or ()
+    return bool(dflash_config.get("use_swa", False)) or (
+        _SLIDING_ATTENTION in layer_types
     )
 
 

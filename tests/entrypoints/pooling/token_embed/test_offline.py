@@ -261,7 +261,7 @@ def test_late_chunking_recomputes_cached_prefix_with_chunked_prefill(vllm_runner
         gpu_memory_utilization=0.3,
         seed=0,
     ) as runner:
-        text = "The document has several important words. " * 6
+        text = "The document has several important words. " * 10
         llm = runner.llm
         raw = llm.encode(
             text,

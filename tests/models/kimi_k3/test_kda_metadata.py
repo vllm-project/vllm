@@ -13,6 +13,7 @@ from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
     create_vllm_config,
+    register_mamba_layers,
 )
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -44,6 +45,11 @@ from vllm.v1.worker.mamba_utils import validate_mamba_state_copy_funcs
 
 BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
+HAS_GPU = current_platform.is_cuda_alike() or current_platform.is_xpu()
+GPU_DEVICE = torch.device(current_platform.device_type)
+requires_gpu = pytest.mark.skipif(
+    not HAS_GPU, reason="requires a CUDA-alike or XPU device"
+)
 PRUNED_METADATA_FIELDS = {
     "chunk_indices",
     "chunk_offsets",
@@ -135,17 +141,14 @@ def _make_builder(
         cache_hit_alignment_tokens or hash_block_size
     )
     vllm_config.num_hash_lookahead_tokens = num_hash_lookahead_tokens
+    register_mamba_layers(
+        vllm_config, ["layer.0"], 16 if num_prefill_checkpoint_blocks > 0 else None
+    )
     builder = builder_cls(
         kv_cache_spec=MambaSpec(
             block_size=mamba_block_size,
             shapes=((16, 64),),
             dtypes=(torch.float16,),
-            mamba_cache_mode=mamba_cache_mode,
-            num_speculative_blocks=(0 if use_recoverssm else num_speculative_tokens),
-            num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
-            prefill_checkpoint_alignment=(
-                16 if num_prefill_checkpoint_blocks > 0 else None
-            ),
         ),
         layer_names=["layer.0"],
         vllm_config=vllm_config,
@@ -187,9 +190,6 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         shapes=KimiLinearForCausalLM.get_mamba_state_shape_from_config(layout_config),
         dtypes=KimiLinearForCausalLM.get_mamba_state_dtype_from_config(layout_config),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-        mamba_cache_mode="align",
-        num_prefill_checkpoint_blocks=1,
-        prefill_checkpoint_alignment=16,
     )
 
     # This is the same compatibility check performed while initializing the
@@ -211,6 +211,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         ),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
+            use_replayssm=True,
             use_kda_recoverssm=True,
             prefix_match_unit=None,
         ),
@@ -231,6 +232,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         num_speculative_tokens=2,
         num_hash_lookahead_tokens=0,
     )
+    register_mamba_layers(builder_config, ["layer.0"], 16)
     builder = KimiK3KDAMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
         layer_names=["layer.0"],
@@ -253,6 +255,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         prefill_common.seq_lens,
         kv_cache_spec,
         "align",
+        builder.num_speculative_blocks,
     )
     prefill_metadata = builder.build(
         0,
@@ -282,6 +285,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         spec_common.seq_lens,
         kv_cache_spec,
         "align",
+        builder.num_speculative_blocks,
     )
     recoverssm_context = Mock()
     with patch(
@@ -306,7 +310,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_gpu
 @pytest.mark.parametrize(
     "batch,prefix_match_unit,hit_alignment,expected_offsets,expected_states",
     [
@@ -333,7 +337,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
 def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
     batch, prefix_match_unit, hit_alignment, expected_offsets, expected_states
 ):
-    device = torch.device("cuda")
+    device = GPU_DEVICE
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, device, arange_block_indices=True
     ).replace(is_prefilling=torch.tensor([True] * len(batch.seq_lens)))
@@ -354,6 +358,7 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
         common_attn_metadata.seq_lens,
         builder.kv_cache_spec,
         "align",
+        builder.num_speculative_blocks,
     )
     actual = builder.build(0, common_attn_metadata)
 
@@ -385,7 +390,7 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
         (96, True, 0, 16, 80),
     ],
 )
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_gpu
 def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     seq_len: int,
     disable_eagle_block_drop: bool,
@@ -394,7 +399,7 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     expected_offset: int | None,
 ) -> None:
     """Lookahead hashes need no back-off from the replay boundary."""
-    device = torch.device("cuda")
+    device = GPU_DEVICE
     batch = BatchSpec(seq_lens=[seq_len], query_lens=[seq_len])
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, device, arange_block_indices=True
@@ -422,6 +427,7 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
         common_attn_metadata.seq_lens,
         builder.kv_cache_spec,
         "align",
+        builder.num_speculative_blocks,
     )
     actual = builder.build(0, common_attn_metadata)
 
@@ -439,9 +445,9 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_gpu
 def test_internal_checkpoint_metadata_skips_unaligned_offset():
-    device = torch.device("cuda")
+    device = GPU_DEVICE
     # The checkpoint block boundary is 48, but this query starts at token 1,
     # making the real checkpoint offset 47, which is not FlashKDA-aligned.
     batch = BatchSpec(seq_lens=[50], query_lens=[49])
@@ -463,6 +469,7 @@ def test_internal_checkpoint_metadata_skips_unaligned_offset():
         common_attn_metadata.seq_lens,
         builder.kv_cache_spec,
         "align",
+        builder.num_speculative_blocks,
     )
     actual = builder.build(0, common_attn_metadata)
 
@@ -634,9 +641,9 @@ def test_mixed_regular_and_spec_decode_excludes_request_padding():
 def test_recoverssm_spec_uses_one_state_slot_and_current_window(
     mamba_cache_mode: str,
 ):
-    if mamba_cache_mode == "align" and not torch.cuda.is_available():
-        pytest.skip("align metadata construction requires CUDA")
-    device = torch.device("cuda") if mamba_cache_mode == "align" else DEVICE
+    if mamba_cache_mode == "align" and not HAS_GPU:
+        pytest.skip("align metadata construction requires a GPU")
+    device = GPU_DEVICE if mamba_cache_mode == "align" else DEVICE
     batch = BatchSpec(seq_lens=[100, 65, 20], query_lens=[1, 1, 3])
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, device
@@ -656,6 +663,7 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
             common_attn_metadata.seq_lens,
             builder.kv_cache_spec,
             mamba_cache_mode,
+            builder.num_speculative_blocks,
         )
     context = builder.recoverssm_context
     assert context is not None
@@ -827,9 +835,9 @@ def test_mixed_one_token_prefill_and_spec_decode_uses_prefill_metadata(
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_gpu
 def test_kimi_k3_kda_cudagraph_capture_matches_shared_gdn():
-    device = torch.device("cuda")
+    device = GPU_DEVICE
     batch = BatchSpec(seq_lens=[50, 30], query_lens=[3, 3])
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, device
@@ -858,9 +866,7 @@ def test_kimi_k3_kda_cudagraph_capture_matches_shared_gdn():
         # The Kimi-K3 builder stages spec-decode state indices on the device.
         pytest.param(
             KimiK3KDAMetadataBuilder,
-            marks=pytest.mark.skipif(
-                not torch.cuda.is_available(), reason="requires CUDA"
-            ),
+            marks=requires_gpu,
         ),
     ],
 )
@@ -873,7 +879,7 @@ def test_cudagraph_capture_metadata_avoids_device_to_host_copy(
     come from `query_start_loc_cpu` and match the device-derived values."""
     num_speculative_tokens = 2
     batch = BatchSpec(seq_lens=[50, 30], query_lens=[3, 3])
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = GPU_DEVICE if HAS_GPU else DEVICE
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, device
     ).replace(is_prefilling=torch.zeros(batch.batch_size, dtype=torch.bool))
@@ -913,9 +919,9 @@ def test_cudagraph_capture_metadata_avoids_device_to_host_copy(
             assert actual_value == reference_value, field.name
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_gpu
 def test_recoverssm_spec_cudagraph_stages_one_checkpoint_per_request():
-    device = torch.device("cuda")
+    device = GPU_DEVICE
     batch = BatchSpec(seq_lens=[50, 30], query_lens=[3, 3])
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, device
@@ -983,9 +989,9 @@ def test_kimi_k3_metadata_uses_precomputed_aligned_state_indices():
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_gpu
 def test_stage_spec_decode_metadata_matches_pytorch():
-    device = torch.device("cuda")
+    device = GPU_DEVICE
     num_spec_decodes = 33
     batch_size = 65
     num_state_slots = 3
@@ -1130,7 +1136,10 @@ def test_cudagraph_capture_batch_stays_decode_only():
     torch.testing.assert_close(staged, common_attn_metadata.block_table_tensor[:, 0])
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Kimi-K3 NVIDIA KDA layer")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_xpu()),
+    reason="Kimi-K3 NVIDIA KDA layer runs on CUDA and XPU",
+)
 def test_recoverssm_layer_keeps_records_outside_kv_cache(
     monkeypatch: pytest.MonkeyPatch, default_vllm_config
 ):

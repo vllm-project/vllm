@@ -432,7 +432,7 @@ class StopCompiling(BaseException):
     pass
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class SplitItem:
     submod_name: str
     graph_id: int

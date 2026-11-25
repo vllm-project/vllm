@@ -38,8 +38,13 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "openvla": CHAT_TEMPLATES_DIR / "template_openvla.jinja",
     "paligemma": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "siglip": CHAT_TEMPLATES_DIR / "template_siglip.jinja",
-    "siglip2": CHAT_TEMPLATES_DIR / "template_basic.jinja",
+    "siglip2": CHAT_TEMPLATES_DIR / "template_siglip.jinja",
 }
+
+# Model types whose fallback also replaces a chat template shipped with the
+# tokenizer. SigLIP2 checkpoints (model_type "siglip") reuse the Gemma tokenizer,
+# whose chat template wraps embedding text in chat turns and drops EOS.
+_MODEL_TYPES_OVERRIDING_TOKENIZER_CHAT_TEMPLATE = {"siglip"}
 
 
 def register_chat_template_fallback_path(
@@ -69,3 +74,20 @@ def get_chat_template_fallback_path(
         return None
 
     return chat_template
+
+
+def get_chat_template_override_path(
+    model_type: str,
+    tokenizer_name_or_path: str,
+) -> Path | None:
+    """Return the predefined template that replaces the tokenizer's own.
+
+    Only for model types whose Hub tokenizers ship a wrong chat template. Remove
+    "siglip" from `_MODEL_TYPES_OVERRIDING_TOKENIZER_CHAT_TEMPLATE` once the
+    SigLIP2 checkpoints drop the Gemma template upstream:
+    https://huggingface.co/google/siglip2-base-patch16-224/discussions/23
+    """
+    if model_type not in _MODEL_TYPES_OVERRIDING_TOKENIZER_CHAT_TEMPLATE:
+        return None
+
+    return get_chat_template_fallback_path(model_type, tokenizer_name_or_path)

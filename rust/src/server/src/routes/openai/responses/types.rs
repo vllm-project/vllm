@@ -384,6 +384,10 @@ pub struct ResponsesRequest {
     pub logit_bias: Option<HashMap<String, f32>>,
     #[serde(default)]
     pub stop_token_ids: Option<Vec<u32>>,
+    /// Token budget for reasoning/thinking. Accepts a non-negative integer, or
+    /// `-1` for unlimited, as on chat completions.
+    #[serde(default)]
+    pub thinking_token_budget: Option<i64>,
 
     // Extra request parameters shared with the other vLLM endpoints.
     /// Caller-supplied request ID used to derive the response and engine IDs.

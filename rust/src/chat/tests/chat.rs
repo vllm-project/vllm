@@ -1651,7 +1651,7 @@ async fn processor_excludes_request_tools_for_tool_choice_none_when_configured()
             true,
         )
         .unwrap();
-        let processor = ChatRequestProcessor::render_only(Arc::new(FakeChatBackend::new()))
+        let processor = ChatRequestProcessor::new(Arc::new(FakeChatBackend::new()), None, None)
             .with_exclude_tools_when_tool_choice_none(exclude);
         let text_request = processor.prepare_for_tokenization(request).await.unwrap();
         let Prompt::Text(prompt) = text_request.prompt else {

@@ -1493,6 +1493,9 @@ class CohereCompassForConditionalGeneration(
                 "max_seqlen",
                 "sequence_lengths",
             ],
+            padding_logics=MMEncoderAttention.get_cu_seqlens_padding_logics(
+                self.visual.attn_backend, "cu_seqlens"
+            ),
             out_hidden_size=self.visual.out_hidden_size,
             max_frames_per_video=max_frames,
         )

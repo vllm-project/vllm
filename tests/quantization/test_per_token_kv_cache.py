@@ -53,7 +53,7 @@ FP8_MIN, FP8_MAX = get_fp8_min_max()
 # ---------------------------------------------------------------------------
 # Per-dtype quantization config
 # ---------------------------------------------------------------------------
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class QuantConfig:
     """Quantization parameters for a given cache dtype."""
 

@@ -19,6 +19,10 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
                          const int64_t CuCount);
 
+torch::Tensor swmmacGEMM(const at::Tensor& in_a, const at::Tensor& in_b,
+                         const std::optional<at::Tensor>& in_bias,
+                         const int64_t logical_M, const int64_t CuCount);
+
 void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
                const std::optional<at::Tensor>& in_bias, at::Tensor& out_c,
                const at::Tensor& scale_a, const at::Tensor& scale_b,
@@ -43,6 +47,30 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          torch::Tensor num_tokens_post_padded, int64_t top_k,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
+
+// RDNA3.5 decode and prefill attention: the fields of every build (none off
+// gfx1151), and a launch of one build by its index.
+std::vector<int64_t> rdna_decode_configs();
+std::vector<int64_t> rdna_decode_batch_configs();
+void rdna_decode_attn(int64_t config, torch::Tensor& q, torch::Tensor& kv_cache,
+                      torch::Tensor& block_table, torch::Tensor& out,
+                      torch::Tensor& acc, torch::Tensor& m, torch::Tensor& l,
+                      torch::Tensor& cnt, torch::Tensor& seq_lens, double scale,
+                      const std::optional<torch::Tensor>& mm_ranges,
+                      bool batched);
+
+std::vector<int64_t> rdna_prefill_configs();
+std::vector<int64_t> rdna_prefill_batch_configs();
+void rdna_prefill_attn(int64_t config, torch::Tensor& q,
+                       torch::Tensor& kv_cache, torch::Tensor& block_table,
+                       torch::Tensor& out, torch::Tensor& partial_o,
+                       torch::Tensor& partial_ml, torch::Tensor& counters,
+                       torch::Tensor& seq_lens, int64_t max_seq_len,
+                       double scale,
+                       const std::optional<torch::Tensor>& mm_ranges,
+                       const std::optional<torch::Tensor>& plan,
+                       const std::optional<torch::Tensor>& query_start_loc,
+                       int64_t head_group);
 
 void paged_attention(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,

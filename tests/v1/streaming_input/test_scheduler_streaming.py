@@ -12,6 +12,7 @@ import torch
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from tests.v1.core.utils import create_scheduler as create_async_scheduler
 from tests.v1.core.utils import create_scheduler as create_spec_scheduler
+from tests.v1.core.utils import new_kv_cache_group
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -28,9 +29,8 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
 )
 from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
@@ -86,9 +86,9 @@ def create_scheduler() -> Scheduler:
         num_blocks=1000,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
+            new_kv_cache_group(
                 ["layer"],
-                FullAttentionSpec(
+                AttentionSpec(
                     block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
                 ),
             )

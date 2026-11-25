@@ -20,6 +20,9 @@ import pytest
 
 from vllm import LLM, SamplingParams
 
+# Every test here is hybrid; CI's Extended Generation step ignores this file.
+pytestmark = pytest.mark.hybrid_model
+
 # Small Qwen3-Next (GDN) model already used by the hybrid model test-suite.
 MODEL = "tiny-random/qwen3-next-moe"
 
@@ -31,7 +34,6 @@ PROMPTS = [
 ]
 
 
-@pytest.mark.hybrid_model
 def test_gdn_sleep_wake_no_stale_state():
     sampling_params = SamplingParams(temperature=0.0, max_tokens=32, logprobs=1)
 

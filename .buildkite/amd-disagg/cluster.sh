@@ -43,9 +43,9 @@ export NODE_RANK="${NODE_RANK:-${SLURM_PROCID:-}}"
 export PREFILL_IP="${PREFILL_IP:-10.0.0.1}"
 export DECODE_IP="${DECODE_IP:-10.0.0.2}"
 
-# Per-node GPU count and TP degree
+# Per-node GPU count. TP_SIZE, DP_SIZE and EP_SIZE default by mode in
+# vllm_disagg.sh (resolve_parallel_sizes).
 export GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
-export TP_SIZE="${TP_SIZE:-${GPUS_PER_NODE}}"
 
 # ----------------------------------------------------------------- ports
 # TP-mode (WIDE_EP_MODE=0) server ports.

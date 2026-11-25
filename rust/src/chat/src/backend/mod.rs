@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
-use vllm_text::backend::hf::{HfOverrides, ModelSource};
+use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 use vllm_text::{DynTextBackend, GenerationConfigMode, TextBackend};
 
 use crate::error::Result;
@@ -75,6 +75,9 @@ pub struct LoadModelBackendsOptions {
     /// Load no tokenizer and serve token IDs only, rejecting chat requests and
     /// text prompts (`--skip-tokenizer-init`).
     pub skip_tokenizer_init: bool,
+    /// Token for Hub downloads (`--hf-token`), or `None` for `HF_TOKEN` and
+    /// the stored login token.
+    pub hf_token: Option<HfToken>,
     /// JSON Merge Patch applied to the model config before loading any backend.
     pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.
