@@ -52,7 +52,7 @@ def make_config(**overrides) -> Nemotron4TextConfig:
 
 
 def save_checkpoint_config(
-    path: Path, text_config: Nemotron4TextConfig, image_token_id: int
+    path: Path, text_config: Nemotron4TextConfig, image_token_id: int, **overrides
 ) -> None:
     """config.json for a tiny random-weight model, with the stand-in config
     module next to it as remote code, as checkpoints ship theirs."""
@@ -65,6 +65,7 @@ def save_checkpoint_config(
         multimodal_projector_bias=False,
         projector_hidden_act="gelu_fast",
         projector_norm_eps=1e-5,
+        **overrides,
     ).save_pretrained(path)
 
 

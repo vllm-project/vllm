@@ -20,7 +20,7 @@ from torch import nn
 from transformers import BatchFeature, PreTrainedConfig, ProcessorMixin
 from transformers.models.pixtral.configuration_pixtral import PixtralVisionConfig
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
@@ -30,6 +30,7 @@ from vllm.model_executor.models.interfaces import (
     IsHybrid,
     MultiModalEmbeddings,
     SupportsMultiModal,
+    SupportsMultiModalPruning,
     SupportsPP,
 )
 from vllm.model_executor.models.mistral3 import (
@@ -68,7 +69,13 @@ from vllm.multimodal.video_decoders import (
     VideoSourceMetadata,
     VideoTargetMetadata,
 )
+from vllm.multimodal.video_prune.evs import (
+    compute_retained_tokens_count,
+    compute_retention_mask,
+)
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.transformers_utils.processor import cached_processor_from_config
 
 from .model import NemotronShortcutForCausalLM, check_sdsa_indexer_loaded
 from .sdsa import SdsaKVCacheGrouping
@@ -531,6 +538,22 @@ def video_prompt_token_ids(
     return token_ids
 
 
+def video_pruning_rate(model_config: ModelConfig) -> float | None:
+    """The EVS pruning rate, or None when video pruning is off. The model config
+    rejects every other pruning method."""
+    mm_config = model_config.multimodal_config
+    spec = None if mm_config is None else mm_config.get_video_pruning_spec()
+    return None if spec is None else spec[1]
+
+
+def max_video_tubelets(max_frames: int, temporal_patch_size: int) -> int:
+    """Tubelet count of the longest video that the processor makes."""
+    longest = select_video_frame_count(
+        max(max_frames, temporal_patch_size), max_frames, temporal_patch_size
+    )
+    return -(-longest // temporal_patch_size)
+
+
 def profile_video_num_frames(
     seq_len: int, tokens_per_tubelet: int, max_frames: int, temporal_patch_size: int
 ) -> int:
@@ -541,11 +564,28 @@ def profile_video_num_frames(
     the processor makes (`select_video_frame_count` with many decoded
     frames, padded up to a multiple of T).
     """
-    longest = select_video_frame_count(
-        max(max_frames, temporal_patch_size), max_frames, temporal_patch_size
-    )
-    max_tubelets = -(-longest // temporal_patch_size)
+    max_tubelets = max_video_tubelets(max_frames, temporal_patch_size)
     tubelets = min(max_tubelets, max(1, seq_len // tokens_per_tubelet))
+    return tubelets * temporal_patch_size
+
+
+def profile_pruned_video_num_frames(
+    seq_len: int,
+    rows: int,
+    cols: int,
+    max_frames: int,
+    temporal_patch_size: int,
+    pruning_rate: float,
+) -> int:
+    """Frame count of the profiling video with EVS: the most tubelets whose
+    kept image tokens and row ends fit in `seq_len`."""
+    tubelets = max_video_tubelets(max_frames, temporal_patch_size)
+    while tubelets > 1 and (
+        compute_retained_tokens_count(rows * cols, tubelets, pruning_rate)
+        + tubelets * rows
+        > seq_len
+    ):
+        tubelets -= 1
     return tubelets * temporal_patch_size
 
 
@@ -660,7 +700,17 @@ class NemotronShortcutDummyInputsBuilder(Mistral3DummyInputsBuilder):
             multiple = processor.patch_size * processor.spatial_merge_size
             tokens_per_frame = (width // multiple + 1) * (height // multiple)
             temporal_patch_size = self.info.get_video_temporal_patch_size()
-            if temporal_patch_size == 1:
+            pruning_rate = video_pruning_rate(self.info.ctx.model_config)
+            if pruning_rate is not None:
+                num_frames = profile_pruned_video_num_frames(
+                    seq_len,
+                    height // multiple,
+                    width // multiple,
+                    self.info.get_max_video_frames(),
+                    temporal_patch_size,
+                    pruning_rate,
+                )
+            elif temporal_patch_size == 1:
                 num_frames = min(
                     self.info.get_max_video_frames(),
                     max(1, seq_len // tokens_per_frame),
@@ -900,6 +950,26 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
                 )
             return PromptUpdateDetails.select_token_id(tokens, processor.image_token_id)
 
+        pruning_rate = video_pruning_rate(self.info.ctx.model_config)
+
+        def pruned_video_replacement(item_idx: int):
+            # EVS keeps the layout and drops image tokens. Only the length
+            # matters: the model embeds every position, text tokens included.
+            assert pruning_rate is not None
+            tokens = video_replacement(item_idx).full
+            num_images = tokens.count(processor.image_token_id)
+            num_tubelets = tokens.count(processor.image_end_token_id)
+            num_kept = compute_retained_tokens_count(
+                num_images // num_tubelets, num_tubelets, pruning_rate
+            )
+            image_positions = [
+                i for i, t in enumerate(tokens) if t == processor.image_token_id
+            ]
+            dropped = set(image_positions[num_kept:])
+            return PromptUpdateDetails.from_seq(
+                [t for i, t in enumerate(tokens) if i not in dropped]
+            )
+
         return [
             PromptReplacement(
                 modality="image",
@@ -912,7 +982,9 @@ class NemotronShortcutMultiModalProcessor(Mistral3MultiModalProcessor):
                     cast(NemotronShortcutProcessingInfo, self.info).video_token,
                     add_special_tokens=False,
                 ),
-                replacement=video_replacement,
+                replacement=video_replacement
+                if pruning_rate is None
+                else pruned_video_replacement,
             ),
         ]
 
@@ -1001,7 +1073,12 @@ class NemotronShortcutMultiModalProjector(Mistral3MultiModalProjector):
     dummy_inputs=NemotronShortcutDummyInputsBuilder,
 )
 class NemotronShortcutForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, IsHybrid, SdsaKVCacheGrouping
+    nn.Module,
+    SupportsMultiModal,
+    SupportsMultiModalPruning,
+    SupportsPP,
+    IsHybrid,
+    SdsaKVCacheGrouping,
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -1035,6 +1112,12 @@ class NemotronShortcutForConditionalGeneration(
             [config.image_token_id],
         )
         self.video_temporal_patch_size = get_video_temporal_patch_size(config)
+        model_config = vllm_config.model_config
+        self.video_pruning_rate = video_pruning_rate(model_config)
+        if self.video_pruning_rate is not None:
+            self._evs_processor = cached_processor_from_config(
+                model_config, tokenizer=cached_tokenizer_from_config(model_config)
+            )
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             vision_config = config.vision_config
             rope = dict(vision_config.rope_parameters or {})
@@ -1069,17 +1152,77 @@ class NemotronShortcutForConditionalGeneration(
                 embeddings.extend(self._embed_images(pixels))
             elif key == "pixel_values_videos":
                 assert isinstance(pixels, (list, tuple))
-                for frames in pixels:
+                timestamps = kwargs.get("video_timestamps")
+                assert timestamps is None or isinstance(
+                    timestamps, (torch.Tensor, list, tuple)
+                )
+                for video_idx, frames in enumerate(pixels):
                     if self.video_temporal_patch_size == 1:
-                        embeddings.append(torch.cat(self._embed_images(frames)))
-                        continue
-                    tubelets = group_frames_into_tubelets(
-                        list(frames), self.video_temporal_patch_size
-                    )
-                    embeddings.append(
-                        torch.cat(self._embed_images(tubelets, video=True))
-                    )
+                        embeds = torch.cat(self._embed_images(frames))
+                    else:
+                        tubelets = group_frames_into_tubelets(
+                            list(frames), self.video_temporal_patch_size
+                        )
+                        embeds = torch.cat(self._embed_images(tubelets, video=True))
+                    if self.video_pruning_rate is not None:
+                        embeds = self._prune_video(
+                            embeds,
+                            frames[0].shape[-2:],
+                            None if timestamps is None else timestamps[video_idx],
+                        )
+                    embeddings.append(embeds)
         return embeddings
+
+    def _prune_video(
+        self,
+        embeds: torch.Tensor,
+        frame_size: tuple[int, int],
+        timestamps: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Apply EVS to the tubelet embeddings of one video.
+
+        Returns embeddings for every position of the pruned video prompt: the
+        kept embeddings at its image tokens, text embeddings elsewhere.
+        """
+        assert self.video_pruning_rate is not None
+        processor = self._evs_processor
+        multiple = self.config.vision_config.patch_size * self.config.spatial_merge_size
+        rows, cols = frame_size[0] // multiple, frame_size[1] // multiple
+        num_tubelets = embeds.shape[0] // (rows * cols)
+        mask = compute_retention_mask(
+            embeds,
+            (num_tubelets, rows, cols),
+            spatial_merge_size=1,
+            q=self.video_pruning_rate,
+        )
+        # The kept tokens of each row, then its break or the grid's end token.
+        grids = []
+        for row_counts in mask.view(num_tubelets, rows, cols).sum(-1).tolist():
+            grid: list[int] = []
+            for count in row_counts:
+                grid += [processor.image_token_id] * count
+                grid.append(processor.image_break_token_id)
+            grid[-1] = processor.image_end_token_id
+            grids.append(grid)
+
+        def encode(text: str) -> list[int]:
+            return processor.tokenizer.encode(text, add_special_tokens=False)
+
+        # Same layouts as the processor's video replacements.
+        if timestamps is not None:
+            token_ids = video_prompt_token_ids(
+                encode, timestamps.tolist(), self.video_temporal_patch_size, grids
+            )
+        else:
+            token_ids = []
+            for grid in grids:
+                if token_ids:
+                    token_ids.extend(encode("\n"))
+                token_ids.extend(grid)
+        ids = torch.tensor(token_ids, device=embeds.device)
+        out = self.language_model.embed_input_ids(ids).to(embeds.dtype)
+        out[ids == processor.image_token_id] = embeds[mask]
+        return out
 
     def _embed_images(
         self, pixels: object, video: bool = False
