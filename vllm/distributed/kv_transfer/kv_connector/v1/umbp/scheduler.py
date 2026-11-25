@@ -314,11 +314,6 @@ class UMBPStoreConnectorScheduler:
                 enable_caching=True,
                 enable_kv_cache_events=False,
                 dcp_world_size=dcp_size,
-                pcp_world_size=getattr(
-                    vllm_config.parallel_config,
-                    "prefill_context_parallel_size",
-                    1,
-                ),
                 scheduler_block_size=self.block_size,
                 hash_block_size=self.hash_block_size,
                 allow_partial_hash_hits=self.enable_partial_hash_hits,

@@ -9,8 +9,8 @@ use llm_multimodal::{AudioClip, Modality, PreprocessedEncoderInputs};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
 use super::timing::MM_STAGE_TARGET;
-use super::{AudioModalitySupport, MultimodalModelInfo, PreparedMedia, item};
-use crate::error::{Error, Result, bail_multimodal, multimodal};
+use super::{AudioModalitySupport, MmModality, MultimodalModelInfo, PreparedMedia, item};
+use crate::error::{Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary audio encoder input.
 pub(super) const AUDIO_PRIMARY_KEY: &str = "input_audio_features";
@@ -28,9 +28,10 @@ impl MultimodalModelInfo {
         clips: Vec<Arc<AudioClip>>,
         uuids: Vec<Option<String>>,
     ) -> Result<PreparedMedia> {
-        let support = self.audio.as_ref().ok_or_else(|| Error::UnsupportedModality {
-            modality: Modality::Audio.to_string(),
-        })?;
+        let support = self
+            .audio
+            .as_ref()
+            .ok_or_else(|| self.unsupported_modality(MmModality::Audio))?;
         let preprocessed = self.preprocess_audios(support, &clips).await?;
         let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
         if replacements.len() != clips.len() {
@@ -82,6 +83,7 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{MmField, MmKwargValue};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
+    use super::super::tests::from_context;
     use super::super::{MultimodalModelContext, TokenizerResolver};
     use super::*;
 
@@ -120,7 +122,7 @@ mod tests {
             tokenizer: TokenizerResolver(Arc::new(tokenizer)),
         };
 
-        MultimodalModelInfo::from_loaded(
+        from_context(
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
@@ -141,7 +143,7 @@ mod tests {
             )),
         };
 
-        MultimodalModelInfo::from_loaded(
+        from_context(
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
