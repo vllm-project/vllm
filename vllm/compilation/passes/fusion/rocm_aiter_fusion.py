@@ -701,7 +701,7 @@ def _aiter_triton_mxfp4_out_dtype(
     linear: torch.nn.Module | None,
 ) -> torch.dtype | None:
     """`out_dtype` of `linear` if it runs AITER's Triton MXFP4 dynamic-quant
-    GEMM (the `gemm_with_dynamic_quant` call the gated-norm MXFP4 pattern
+    GEMM (the `rocm_aiter_mxfp4_gemm_dynamic_quant` call the gated-norm MXFP4 pattern
     matches), else None. The ASM GEMM takes a different scale layout and is
     not fused. The fused quant is validated on CDNA4 (gfx950) only; other
     archs that run the Triton GEMM, such as gfx1250, keep the unfused ops."""
@@ -728,7 +728,7 @@ def _aiter_triton_mxfp4_out_dtype(
 
 class AiterRMSNormGatedMxfp4GemmPattern(AiterRMSNormQuantPattern):
     """Matches RMSNormGated + reshape feeding an MXFP4 dynamic-quant linear
-    (`gemm_with_dynamic_quant` on `AiterMxfp4LinearKernel`, Triton GEMM),
+    (`rocm_aiter_mxfp4_gemm_dynamic_quant` on `AiterMxfp4LinearKernel`, Triton GEMM),
     the GDN out_proj with online MXFP4, and replaces it with
     rocm_aiter_fused_rms_gated_mxfp4_gemm, which quantizes inside the norm
     kernel.
@@ -765,7 +765,7 @@ class AiterRMSNormGatedMxfp4GemmPattern(AiterRMSNormQuantPattern):
         ) -> torch.Tensor:
             normed = self.rmsnorm_gated_matcher(x, z, norm_weight)
             merged = normed.reshape(-1, hidden_dim)
-            return torch.ops.vllm.gemm_with_dynamic_quant(
+            return torch.ops.vllm.rocm_aiter_mxfp4_gemm_dynamic_quant(
                 merged, weight, weight_scale, False, out_dtype
             )
 
