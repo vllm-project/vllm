@@ -6,8 +6,10 @@ from itertools import product
 
 import pytest
 import torch
+from transformers import LlamaConfig
 
 from vllm import ir
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.utils.torch_utils import set_random_seed
 
@@ -197,3 +199,31 @@ def test_rope_module_cache(default_vllm_config):
         )
         # check if cache take effect
         assert id(rope) == rope_setting_id_map[str(setting)]
+
+
+def test_dynamic_ntk_cache_covers_model_context(tmp_path, default_vllm_config):
+    hf_config = LlamaConfig(
+        max_position_embeddings=64,
+        rope_parameters={"rope_type": "dynamic", "rope_theta": 10000.0, "factor": 2.0},
+    )
+    hf_config.save_pretrained(tmp_path)
+    model_config = ModelConfig(model=str(tmp_path))
+    max_position = hf_config.max_position_embeddings
+    assert model_config.max_model_len > max_position
+    rope_parameters = model_config.hf_config.rope_parameters
+    original = get_rope(64, max_position, rope_parameters=rope_parameters)
+
+    with set_current_vllm_config(VllmConfig(model_config=model_config)):
+        rope = get_rope(64, max_position, rope_parameters=rope_parameters)
+        presized = get_rope(
+            64,
+            model_config.max_model_len,
+            rope_parameters={**rope_parameters, "max_trained_positions": max_position},
+        )
+
+    assert original.cos_sin_cache.shape[0] == max_position
+    assert rope.cos_sin_cache.shape[0] == model_config.max_model_len
+    assert presized.cos_sin_cache.shape[0] == model_config.max_model_len
+    torch.testing.assert_close(
+        rope.cos_sin_cache[:max_position], original.cos_sin_cache, atol=0, rtol=0
+    )

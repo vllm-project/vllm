@@ -68,3 +68,6 @@ The following parameters are specific to vLLM:
 
 - `max_model_len`: The new maximum sequence length after extension (original * factor).
   Used for KV cache pre‑allocation and request limit at serving time.
+
+With factor-based Dynamic NTK RoPE, the rotary cache covers the configured
+`max_model_len`. Larger context limits can increase memory use at startup.
