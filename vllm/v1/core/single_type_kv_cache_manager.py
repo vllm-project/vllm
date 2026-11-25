@@ -278,6 +278,29 @@ class SingleTypeKVCacheManager(ABC):
         """Return a reservation, or None to use the allocation-based admission check."""
         return None
 
+    @staticmethod
+    def _remaining_window_capacity(
+        blocks: Sequence[KVCacheBlock], cap: int, *, inflight: bool = False
+    ) -> int:
+        # A published block can gain another owner while a reservation is cached.
+        recyclable = 0
+        for block in reversed(blocks):
+            if block.is_null:
+                break
+            if block.ref_cnt == 1 and (not inflight or block.block_hash is None):
+                recyclable += 1
+        return max(cap - recyclable, 0)
+
+    def get_inflight_window_reservation(
+        self, request_id: str, num_tokens: int
+    ) -> int | None:
+        cap = self.max_admission_blocks_per_request
+        blocks = self.req_to_blocks.get(request_id, ())
+        if cap is None or not blocks:
+            return None
+        tail = max(cdiv(num_tokens, self.block_size) - len(blocks), 0)
+        return min(tail, self._remaining_window_capacity(blocks, cap, inflight=True))
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -304,9 +327,8 @@ class SingleTypeKVCacheManager(ABC):
             num_tokens_main_model: The number of tokens for the main model (aka target
                 model in spec decode). w/o spec decode, it is num_tokens;
                 with spec decode, it is num_tokens - num_lookahead_tokens.
-            apply_admission_cap: If True, clamp by `num_required_blocks` by
-                `max_admission_blocks_per_request`for recycling-aware specs
-                (SWA, chunked-local).
+            apply_admission_cap: Bound the additional physical capacity for
+                groups that recycle blocks as prefill advances.
             prefill_end: The token index the request's prefill ends at, the
                 same value the scheduler splits chunks against. Mamba reserves
                 a prefill checkpoint only on the chunk reaching it; 0 (dense
@@ -317,19 +339,11 @@ class SingleTypeKVCacheManager(ABC):
 
         """
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        if apply_admission_cap and self.max_admission_blocks_per_request is not None:
-            # Recycling-aware specs (SWA, chunked-local) cap the per-request
-            # reservation here so admission matches the startup pool sizer
-            # (`max_admission_blocks`). `remove_skipped_blocks` runs from
-            # `allocate_slots` before each chunk's `get_num_blocks_to_allocate`,
-            # so per-request peak real-held blocks <= this cap, which keeps
-            # `sum(reservations) <= pool` <=> `sum(peak_real_held) <= pool`.
-            # Drift between the two would re-introduce the deadlock from
-            # issue #39734 or, worse, mid-prefill OOM.
-            num_required_blocks = min(
-                num_required_blocks, self.max_admission_blocks_per_request
-            )
-        num_req_blocks = len(self.req_to_blocks.get(request_id, ()))
+        req_blocks = self.req_to_blocks.get(request_id, ())
+        num_req_blocks = len(req_blocks)
+        cap = self.max_admission_blocks_per_request if apply_admission_cap else None
+        if cap is not None and req_blocks:
+            cap = self._remaining_window_capacity(req_blocks, cap)
         num_unbacked_blocks = self._num_unbacked_leading_blocks(num_tokens_main_model)
 
         if request_id in self.num_cached_block:
@@ -338,9 +352,10 @@ class SingleTypeKVCacheManager(ABC):
             # NOTE: With speculative decoding, request's blocks may be allocated
             # for draft tokens which are later rejected. In this case,
             # num_required_blocks may be smaller than num_req_blocks.
-            return max(
+            additional = max(
                 num_required_blocks - max(num_req_blocks, num_unbacked_blocks), 0
             )
+            return additional if cap is None else min(additional, cap)
 
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
         num_local_computed_blocks = len(new_computed_blocks) + num_req_blocks
@@ -367,11 +382,16 @@ class SingleTypeKVCacheManager(ABC):
         num_evictable_blocks = self._get_num_evictable_blocks(
             new_computed_blocks[num_skipped_new_computed_blocks:]
         )
+        additional = num_new_blocks + num_evictable_blocks
+        if cap is not None:
+            # Skips and local hits reduce the logical tail. Apply the physical
+            # cap afterwards, so a shared prefix cannot also discount the peak.
+            additional = min(additional, cap)
         if self._has_partial_local_hit(new_computed_blocks, num_local_computed_tokens):
             # Reserve the extra block that allocate_new_blocks pulls for the
             # partial-hit CoW redirect.
-            num_new_blocks += 1
-        return num_new_blocks + num_evictable_blocks
+            additional += 1
+        return additional
 
     def add_local_computed_blocks(
         self,

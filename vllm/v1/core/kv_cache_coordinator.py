@@ -12,6 +12,7 @@ from vllm.v1.core.kv_cache_utils import (
     partial_hash_hits_enabled,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    ChunkedLocalAttentionManager,
     CrossAttentionManager,
     FullAttentionManager,
     MambaManager,
@@ -154,6 +155,7 @@ class KVCacheCoordinator(ABC):
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
         prefill_end: int = 0,
+        for_inflight_reservation: bool = False,
     ) -> int:
         """Get the number of device blocks needed to be allocated for the request.
 
@@ -175,6 +177,7 @@ class KVCacheCoordinator(ABC):
                 per-request admission cap (SWA / chunked-local). Set only by
                 the full-sequence admission gate; per-step allocation must
                 leave it False so the predictor matches `allocate_new_blocks`.
+            for_inflight_reservation: Reserve across changes in prefix-hit ownership.
             prefill_end: The token index the request's prefill ends at, the
                 same value the scheduler splits chunks against. Under sparse
                 retention Mamba reserves a prefill checkpoint only on the chunk
@@ -206,6 +209,18 @@ class KVCacheCoordinator(ABC):
                     reservation = manager.get_num_blocks_to_reserve(
                         request_id, num_tokens
                     )
+                    if (
+                        reservation is None
+                        and for_inflight_reservation
+                        and isinstance(
+                            manager,
+                            (SlidingWindowManager, ChunkedLocalAttentionManager),
+                        )
+                    ):
+                        assert not new_computed_blocks[i]
+                        reservation = manager.get_inflight_window_reservation(
+                            request_id, num_tokens
+                        )
                     if reservation is not None:
                         num_blocks_to_allocate += reservation
                         continue
