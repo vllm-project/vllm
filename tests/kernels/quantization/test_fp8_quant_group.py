@@ -10,6 +10,7 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import (
     QuantFP8,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 
@@ -210,6 +211,7 @@ def test_quantfp8_group_edge_cases(default_vllm_config, seed: int) -> None:
     )
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA FP8 quantization")
 @pytest.mark.parametrize("use_ue8m0", [True, False])
 @torch.inference_mode()
 def test_quantfp8_group_nan_input_matches_cuda(
