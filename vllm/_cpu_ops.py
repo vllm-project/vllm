@@ -220,6 +220,23 @@ def post_update_cpu(
     )
 
 
+def cpu_topp_sampling(logits: torch.Tensor, p: torch.Tensor) -> None:
+    """In-place top-p masking using the C++ ternary-search kernel (CPU only)."""
+    torch.ops._C.cpu_topp_sampling(logits, p)
+
+
+def cpu_topk_sampling(logits: torch.Tensor, k: torch.Tensor) -> None:
+    """In-place top-k masking using the C++ ternary-search kernel (CPU only)."""
+    torch.ops._C.cpu_topk_sampling(logits, k)
+
+
+def cpu_topk_topp_sampling(
+    logits: torch.Tensor, k: torch.Tensor, p: torch.Tensor
+) -> None:
+    """In-place fused top-k+top-p masking (CPU only)."""
+    torch.ops._C.cpu_topk_topp_sampling(logits, k, p)
+
+
 def gumbel_sample_cpu(
     logits: torch.Tensor,
     expanded_idx_mapping: torch.Tensor,

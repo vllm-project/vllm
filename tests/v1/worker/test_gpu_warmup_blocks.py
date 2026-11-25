@@ -8,23 +8,27 @@ writes KV past the token range the target model was scheduled for. The warmup
 hand-builds its `SchedulerOutput`s, so it has to reserve the same blocks.
 """
 
+import contextlib
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 from tests.v1.core.test_prefix_caching import make_kv_cache_manager
-from tests.v1.core.utils import create_requests
+from tests.v1.core.utils import create_requests, new_kv_cache_group
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.vllm import VllmConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    MambaManager,
+)
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
-    KVCacheGroupSpec,
+    KVCacheGroup,
     MambaSpec,
 )
 from vllm.v1.worker.gpu import warmup
@@ -46,10 +50,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _attention_group() -> KVCacheGroupSpec:
-    return KVCacheGroupSpec(
+def _attention_group() -> KVCacheGroup:
+    return new_kv_cache_group(
         ["layer"],
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=BLOCK_SIZE,
             num_kv_heads=1,
             head_size=1,
@@ -58,34 +62,31 @@ def _attention_group() -> KVCacheGroupSpec:
     )
 
 
-def _circular_group() -> KVCacheGroupSpec:
-    return KVCacheGroupSpec(
+def _circular_group() -> KVCacheGroup:
+    return new_kv_cache_group(
         ["circular"],
-        CircularBufferSpec(
-            block_size=BLOCK_SIZE,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
+        CircularBufferManager.layer_config(
+            AttentionSpec(
+                block_size=BLOCK_SIZE, num_kv_heads=1, head_size=1, dtype=torch.float32
+            )
         ),
     )
 
 
-def _mamba_group(mamba_cache_mode: str) -> KVCacheGroupSpec:
-    # Name carries the mode so several groups can coexist in one config.
-    return KVCacheGroupSpec(
-        [f"mamba_{mamba_cache_mode}"],
-        MambaSpec(
-            block_size=BLOCK_SIZE,
-            shapes=((1,),),
-            dtypes=(torch.float32,),
-            mamba_cache_mode=mamba_cache_mode,
+def _mamba_group(enable_prefix_caching: bool) -> KVCacheGroup:
+    # Name carries the flag so several groups can coexist in one config.
+    return new_kv_cache_group(
+        [f"mamba_prefix_caching_{enable_prefix_caching}"],
+        MambaManager.layer_config(
+            MambaSpec(block_size=BLOCK_SIZE, shapes=((1,),), dtypes=(torch.float32,)),
+            enable_prefix_caching=enable_prefix_caching,
             num_speculative_blocks=NUM_SPEC_STEPS,
         ),
     )
 
 
 def _make_runner(
-    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_cache_groups: list[KVCacheGroup],
     num_lookahead_tokens: int,
     num_spec_steps: int = NUM_SPEC_STEPS,
 ) -> SimpleNamespace:
@@ -117,7 +118,7 @@ def _make_runner(
             num_lookahead_tokens=num_lookahead_tokens,
             num_scheduled_spec_tokens=num_spec_steps,
             is_mm_encoder_only=False,
-            cache_config=SimpleNamespace(mamba_cache_mode="none"),
+            cache_config=SimpleNamespace(enable_prefix_caching=False),
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         ),
         kv_block_zeroer=None,
@@ -210,6 +211,26 @@ def test_mixed_warmup_reserves_lookahead_blocks():
 
     _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
     assert set(recorder.num_spec_tokens_to_schedule) == {NUM_SPEC_STEPS}
+
+
+def test_mixed_warmup_decode_verifies_drafts():
+    """Some decode backends allocate their largest workspace only to verify
+    drafts, so the measured step must verify a full set of them."""
+    outputs: list[SchedulerOutput] = []
+
+    assert run_mixed_prefill_decode_warmup(
+        _make_runner([_attention_group()], NUM_SPEC_STEPS),
+        worker_execute_model=outputs.append,
+        worker_sample_tokens=lambda grammar_output: None,
+        num_tokens=128,
+    )
+
+    mixed_output = outputs[1]
+    (decode_req_id,) = mixed_output.scheduled_cached_reqs.req_ids
+    assert mixed_output.num_scheduled_tokens[decode_req_id] == NUM_SPEC_STEPS + 1
+    assert mixed_output.scheduled_spec_decode_tokens == {
+        decode_req_id: [0] * NUM_SPEC_STEPS
+    }
 
 
 def test_warmup_kernels_reserves_drafting_slots(monkeypatch):
@@ -346,12 +367,12 @@ def test_context_prefill_warmup_is_capped_by_the_committable_blocks():
     assert recorder.steps == []
 
 
-@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
-def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
+@pytest.mark.parametrize("enable_prefix_caching", [False, True])
+def test_warmup_reserves_mamba_speculative_blocks(enable_prefix_caching):
     """Mamba groups hold the running-state block plus the speculative tail.
 
     `MambaManager` reserves `num_speculative_blocks` blocks past the token
-    range in every cache mode, and the mamba kernels read all
+    range with or without prefix caching, and the mamba kernels read all
     `1 + num_speculative_blocks` of those block-table columns (see
     `mamba_get_block_table_tensor`).
     """
@@ -359,7 +380,7 @@ def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
 
     warmup_kernels(
         _make_runner(
-            [_attention_group(), _mamba_group(mamba_cache_mode)], NUM_SPEC_STEPS
+            [_attention_group(), _mamba_group(enable_prefix_caching)], NUM_SPEC_STEPS
         ),
         recorder.execute_model,
         recorder.sample_tokens,
@@ -367,19 +388,20 @@ def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
 
     assert recorder.steps, "warmup ran no steps"
     for num_blocks, num_computed, num_scheduled in recorder.steps:
-        # `MambaManager` drops the lookahead tokens in align mode to keep the
-        # allocation block-aligned, and keeps them otherwise. Pin the token
+        # `MambaManager` drops the lookahead tokens with prefix caching to keep
+        # the allocation block-aligned, and keeps them otherwise. Pin the token
         # range and the speculative tail separately, so an implementation that
         # returned a flat `1 + num_speculative_blocks` would fail.
-        if mamba_cache_mode == "align":
-            # Align mode sizes from the uncapped main-model range.
+        if enable_prefix_caching:
+            # Prefix caching sizes from the uncapped main-model range.
             lookahead, num_tokens = 0, num_computed + num_scheduled
         else:
             lookahead = NUM_SPEC_STEPS
             num_tokens = min(num_computed + num_scheduled + lookahead, MAX_MODEL_LEN)
         assert num_blocks[1] == cdiv(num_tokens, BLOCK_SIZE) + NUM_SPEC_STEPS, (
-            f"{mamba_cache_mode}: {num_blocks[1]} mamba blocks for "
-            f"{num_computed}+{num_scheduled} tokens and {lookahead} lookahead"
+            f"prefix_caching={enable_prefix_caching}: {num_blocks[1]} mamba "
+            f"blocks for {num_computed}+{num_scheduled} tokens and {lookahead} "
+            "lookahead"
         )
 
 
@@ -391,8 +413,8 @@ def _hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
         kv_cache_groups=[
             _attention_group(),
             _circular_group(),
-            _mamba_group("none"),
-            _mamba_group("align"),
+            _mamba_group(False),
+            _mamba_group(True),
         ],
     )
 
@@ -401,7 +423,7 @@ def _row_length_config(dcp_world_size: int = 1) -> SimpleNamespace:
     """What `max_num_blocks_per_req` reads; align-mode Mamba specs return
     before the row clamp."""
     return SimpleNamespace(
-        cache_config=SimpleNamespace(mamba_cache_mode="none"),
+        cache_config=SimpleNamespace(enable_prefix_caching=False),
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_world_size),
     )
 
@@ -429,7 +451,7 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
     decode_query_len = NUM_SPEC_STEPS + 1
 
     kv_cache_config = _hybrid_kv_cache_config(num_blocks=256)
-    specs = [g.kv_cache_spec for g in kv_cache_config.kv_cache_groups]
+    groups = kv_cache_config.kv_cache_groups
     manager = make_kv_cache_manager(
         kv_cache_config,
         max_model_len=MAX_MODEL_LEN,
@@ -452,18 +474,20 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
         assert blocks is not None, "block pool exhausted"
         held = manager.get_block_ids(request.request_id)
         num_tokens = request.num_computed_tokens + num_new_tokens
-        for spec, group_held in zip(specs, held):
+        for group, group_held in zip(groups, held):
             expected = _reserved_block_count(
                 num_tokens,
-                spec,
+                group,
                 vllm_config=_row_length_config(),
                 num_lookahead_tokens=num_lookahead_tokens,
                 max_model_len=MAX_MODEL_LEN,
                 max_encoder_len=0,
             )
+            params = group.manager_config.params
+            prefix_caching = getattr(params, "enable_prefix_caching", None)
             assert len(group_held) == expected, (
-                f"{type(spec).__name__} "
-                f"mode={getattr(spec, 'mamba_cache_mode', None)}: real manager "
+                f"{group.manager_cls.__name__} prefix_caching={prefix_caching}: "
+                "real manager "
                 f"holds {len(group_held)} blocks for {num_tokens} tokens, "
                 f"_reserved_block_count predicts {expected}"
             )
@@ -487,7 +511,7 @@ def test_reserved_block_count_scales_dcp_sharded_blocks():
     kv_cache_config = KVCacheConfig(
         num_blocks=256, kv_cache_tensors=[], kv_cache_groups=[_attention_group()]
     )
-    (spec,) = [g.kv_cache_spec for g in kv_cache_config.kv_cache_groups]
+    (group,) = kv_cache_config.kv_cache_groups
     manager = make_kv_cache_manager(
         kv_cache_config,
         max_model_len=MAX_MODEL_LEN,
@@ -508,7 +532,7 @@ def test_reserved_block_count_scales_dcp_sharded_blocks():
 
     assert len(held) == _reserved_block_count(
         num_tokens,
-        spec,
+        group,
         vllm_config=_row_length_config(dcp_world_size),
         num_lookahead_tokens=0,
         max_model_len=MAX_MODEL_LEN,
@@ -543,6 +567,15 @@ def _config_without_post_init(
         ("draft_model", None, NUM_SPEC_STEPS),
         # DFlash's in-fill decoding adds a query for the last sampled token.
         ("dflash", None, NUM_SPEC_STEPS + 1),
+        (
+            "dflash",
+            {"dflash_config": {"sample_from_anchor": False}},
+            NUM_SPEC_STEPS + 1,
+        ),
+        # Anchor-first DFlash drafts have no separate bonus query.
+        ("dflash", {"dflash_config": {"sample_from_anchor": True}}, NUM_SPEC_STEPS),
+        # Some checkpoints set the flag at the top level, as DSpark does.
+        ("dflash", {"sample_from_anchor": True}, NUM_SPEC_STEPS),
         ("ngram", None, 0),
         ("ngram_gpu", None, 0),
         ("suffix", None, 0),
@@ -660,18 +693,23 @@ def test_sizing_warmup_waits_for_each_step(monkeypatch):
     ],
 )
 def test_sizing_warmup_fills_token_budget_beyond_max_model_len(
-    max_num_reqs, committable_blocks, expected_prefill_lens
+    monkeypatch, max_num_reqs, committable_blocks, expected_prefill_lens
 ):
     """max_num_batched_tokens can exceed max_model_len, so the scheduler can
     pack several prompts into one step. The sizing step must reach that
     budget, splitting it across requests the runner and KV cache can hold."""
-    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    runner = _make_runner(
+        [_attention_group()], num_lookahead_tokens=0, num_spec_steps=0
+    )
     runner.model_config = SimpleNamespace(
         get_vocab_size=lambda: 64, max_logprobs=0, use_mla=False
     )
     runner.max_num_reqs = max_num_reqs
     if committable_blocks is not None:
         runner.extensible_kv_cache = _StubExtensibleCache(committable_blocks)
+        monkeypatch.setattr(
+            warmup, "_measure_sizing_step", lambda runner: contextlib.nullcontext()
+        )
     outputs: list[SchedulerOutput] = []
 
     warmup.run_kv_cache_sizing_warmup(

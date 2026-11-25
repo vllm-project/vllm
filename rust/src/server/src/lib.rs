@@ -34,8 +34,8 @@ use axum::http::Request;
 pub use config::{
     AccessLogConfig, ApiServerOptions, Config, CoordinatorMode, CorsConfig,
     DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_MAX_N_SEQUENCES,
-    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogConfig,
-    OutputLogging, TlsConfig,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, DefaultMmLoras, HttpListenerMode, LoraModulePath,
+    OutputLogConfig, OutputLogging, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
 use hyper::body::Incoming;
@@ -58,6 +58,7 @@ pub use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
+pub use vllm_llm::AdmissionLimits;
 use vllm_llm::EngineCoreLlm;
 pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
@@ -129,8 +130,10 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             tokenizer: config.tokenizer.clone(),
             hf_config: config.hf_config.clone(),
             skip_tokenizer_init: config.skip_tokenizer_init,
+            hf_token: config.hf_token.clone(),
             hf_overrides: config.hf_overrides.clone(),
             generation_config: config.generation_config,
+            override_generation_config: config.override_generation_config.clone(),
             renderer: config.renderer,
             language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
@@ -141,6 +144,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
                 .clone()
                 .unwrap_or_default(),
             limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
+            mm_processor_kwargs: config.mm_processor_kwargs.clone(),
         },
     )
     .await
@@ -173,7 +177,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let llm = EngineCoreLlm::new(client)
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
         .with_request_id_randomization(!config.disable_request_id_randomization)
-        .with_stream_interval(config.stream_interval);
+        .with_stream_interval(config.stream_interval)
+        .with_admission_limits(config.admission_limits);
     let text = TextLlm::new(llm, text_backend)
         .with_served_model_name(metrics_model_name)
         .with_max_logprobs(config.max_logprobs)
@@ -201,32 +206,15 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
             .with_access_log(config.access_log.clone())
-            .with_profiler(config.profiler.clone()),
+            .with_profiler(config.profiler.clone())
+            .with_default_mm_lora_modalities(config.default_mm_loras.keys().copied().collect()),
     );
 
     // Load operator-configured static LoRA adapters before serving, failing
     // startup on any error like Python's `init_static_loras` does.
-    load_static_loras(&state, &config.lora_modules).await?;
+    lora::load_static_loras(&state, &config.lora_modules, &config.default_mm_loras).await?;
 
     Ok(state)
-}
-
-async fn load_static_loras(state: &AppState, modules: &[LoraModulePath]) -> Result<()> {
-    for module in modules {
-        let request = state.load_static_lora(module).await.with_context(|| {
-            format!(
-                "failed to load LoRA adapter `{}` from --lora-modules",
-                module.name
-            )
-        })?;
-        info!(
-            lora_name = %request.lora_name,
-            lora_int_id = request.lora_int_id,
-            lora_path = %request.lora_path,
-            "loaded static LoRA adapter"
-        );
-    }
-    Ok(())
 }
 
 /// Run the OpenAI-compatible HTTP server until the supplied shutdown token is
@@ -295,6 +283,7 @@ where
             .map(tls::build_grpc_server_config)
             .transpose()
             .context("invalid gRPC TLS configuration")?;
+        let message_limit = state.api_server_options.request_body_limit_bytes.unwrap_or(usize::MAX);
         let (health_reporter, health_service) = health_reporter();
         let engine_health = grpc::EngineHealth::subscribe(state.llm());
         let health_monitor = grpc::HealthMonitor::register(health_reporter, engine_health).await;
@@ -302,17 +291,21 @@ where
             grpc::ControlServiceImpl::new(state.clone())
                 .with_engine_shutdown(config.manages_engine.then(|| shutdown.clone())),
         )
-        .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+        .max_decoding_message_size(message_limit);
         let inference_service =
             grpc::InferenceGrpcService::new(grpc::InferenceServiceImpl::new(state.clone()))
-                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+                .max_decoding_message_size(message_limit);
+        let render_service =
+            grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state.clone()))
+                .max_decoding_message_size(message_limit);
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
             .layer(middleware::request_runtime_layer(state.clone()))
             .add_service(health_service)
             .add_service(control_service)
-            .add_service(inference_service);
+            .add_service(inference_service)
+            .add_service(render_service);
         Some((addr, grpc_listener, svc, grpc_tls, health_monitor))
     } else {
         None

@@ -10,7 +10,9 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 
 - [EAGLE](eagle.md)
 - [LiLiCorr](lilicorr.md)
+- [DSpine](#dspine)
 - [Multi-Token Prediction (MTP)](mtp.md)
+- [DFly](dfly.md)
 - [Draft Model](draft_model.md)
 - [N-Gram](n_gram.md)
 - [Suffix Decoding](suffix.md)
@@ -34,11 +36,42 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 | N-gram | Low to medium gain | Medium gain | Lightweight and easy to enable. |
 | Suffix decoding | Low to medium gain | Medium gain | No extra draft model; matches against prior responses too. |
 | Dynamic Speculative Decoding | High gain | Higher than base SD method | Useful for RL or workload with fluctuating QPS |
-| Adaptive Verification | High gain | Higher than base SD method | Sizes verification per request from drafter confidence; currently DSpark only. |
+| Adaptive Verification | High gain | Higher than base SD method | Sizes verification per request from estimated acceptance. |
 
 For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
+
+## DSpine
+
+DSpine drafts tokens in parallel with adjacent causal injection and
+predecessor-conditioned refinement. DSpine checkpoints use the DFlash serving
+path. Checkpoint metadata selects the DSpine model.
+
+```bash
+vllm serve Qwen/Qwen3.8-27B \
+  --language-model-only \
+  --speculative-config '{
+    "method": "dflash",
+    "model": "tencent/Qwen3.8-27B-DSpine-b16",
+    "num_speculative_tokens": 15
+  }'
+```
+
+Set `num_speculative_tokens` to the checkpoint's block size minus one.
+
+## DFlash query layouts
+
+DFlash and DFlash2 drafts default to the fill-in layout: the anchor is the
+bonus token, followed by one mask query per draft token (`1 + K` queries per
+request). Checkpoints whose `dflash_config` (or speculators config) sets
+`sample_from_anchor: true` use the anchor-first layout instead: the anchor
+query predicts the first draft token, so `K` drafts take `K` queries. vLLM
+reads the layout from the checkpoint; no extra flag is needed.
+Draft sampling defaults to `greedy`; set `draft_sample_method` to
+`probabilistic` for probabilistic proposals.
+Set `enable_adaptive_verification` to `true` in the speculative config to
+enable [adaptive verification](adaptive_verification.md).
 
 ## Custom Speculators (Experimental)
 
@@ -106,6 +139,14 @@ The speculator reads its options from
 `speculative_config.method` is the built-in method its config is based on
 (`"eagle3"`), so vLLM treats it like that built-in speculator.
 
+A speculator that keeps per-request state can override `BaseSpeculator`'s
+no-op request hooks, `add_request` and `on_requests_finished`, and `shutdown`.
+An override of `shutdown` must call `super().shutdown()`, which releases the
+draft model.
+A preempted request's slot is freed without a hook, and the request is added
+again when it resumes, so keep such state per slot and reset it in
+`add_request`.
+
 ## `--speculative-config` schema
 
 Use `--speculative-config` to pass speculative decoding settings as a JSON
@@ -137,17 +178,24 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `method` | `string` | `None` | Speculation method. Common values include `draft_model`, `ngram`, `suffix`, `mtp`, `eagle3`, and `dflash`. If omitted, vLLM infers the method from the provided configuration when possible. |
 | `model` | `string` | `None` | Draft model, EAGLE head, or auxiliary model identifier. For `ngram`, `ngram_gpu`, `suffix`, and `mtp`, this can often be omitted. |
 | `num_speculative_tokens` | `integer > 0` | `None` | Number of speculative tokens to propose per step. Required for methods that do not infer it from model metadata. |
-| `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |
+| `draft_tensor_parallel_size` | `integer >= 1` | `None` | Draft tensor parallel size. For DSpine, this must match the target. |
 | `draft_decode_context_parallel_size` | `integer >= 1` | `None` | Decode context parallel size for the draft model: `1` or the target's `decode_context_parallel_size`. Defaults to the target's, except `dflash`/`dspark` drafts, which default to `1` unless they are full-attention MLA. |
+| `draft_enable_eplb` | `boolean` | `true` | Enable EPLB for the draft when target EPLB is enabled. Set to `false` to disable EPLB for the draft. |
 | `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. A draft limit below the target's may also lower the engine's `max_model_len`. |
 | `parallel_drafting` | `boolean` | `null` | Deprecated and has no effect. `dflash` and `dspark` always draft in parallel, and no other method supports it. |
 | `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, `block`, or the lossy `fly` verifier. |
 | `draft_sample_method` | `string` | `greedy` | `greedy` uses target-only acceptance for random requests; `probabilistic` retains the full draft distribution for probability-ratio acceptance. |
 | `synthetic_acceptance_rates` | `list[float]` | `None` | Per-position unconditional acceptance rates for `synthetic` rejection sampling. Each entry in `[0, 1]`; length must equal `num_speculative_tokens`; must be non-increasing. |
 | `synthetic_acceptance_length` | `float` | `None` | Target mean acceptance length for `synthetic`; in `[1, num_speculative_tokens + 1]`. Mutually exclusive with `synthetic_acceptance_rates`. |
-| `fly_window_size` | `integer >= 1` | `min(6, num_speculative_tokens - 1)` | Number of subsequent native acceptance decisions checked by FLy. FLy requires at least two speculative tokens, and the window must be smaller than `num_speculative_tokens`. |
-| `fly_entropy_threshold` | `float >= 0` | `0.3` | Minimum target top-k entropy required for FLy to defer a native rejection. |
-| `fly_entropy_top_k` | `integer >= 1` | `3` | Number of largest processed target probabilities used by FLy's entropy gate, capped at the vocabulary size. |
+| `fly_window_size` | `integer >= 1` | `min(6, num_speculative_tokens - 1)` | Number of subsequent native acceptance decisions checked by FLy. FLy requires at least two speculative tokens, and the window must be smaller than `num_speculative_tokens`. With `synthetic`, runs FLy's entropy computation without deferring rejections (see [FLy](fly.md#measuring-fly-cost-with-synthetic-acceptance)). |
+| `fly_entropy_threshold` | `float >= 0` | `0.3` | Minimum normalized top-k entropy, in `[0, 1]`, required for FLy to defer a native rejection. |
+| `fly_entropy_top_k` | `integer >= 1` | `3` | Number of largest processed target scores renormalized for FLy's entropy gate, capped at the vocabulary size. |
+
+For an EPLB-backed MoE draft, set its redundant expert count with
+`eplb_config.draft_num_redundant_experts` in addition to configuring
+speculative decoding; the count setting is ignored without a speculative MoE
+draft. See the
+[EPLB deployment guide](../../serving/expert_parallel_deployment.md#multimodel-eplb-with-speculative-decoding).
 
 !!! note
     Gemma 4 assistant checkpoints are handled as Gemma 4 MTP speculators, not
@@ -214,6 +262,10 @@ vllm serve <target-model> \
 - Internal fields such as `target_model_config`, `draft_model_config`,
   `target_parallel_config`, `draft_parallel_config`, and `draft_load_config`
   are populated by vLLM and are not intended to be set by users.
+
+## Speculative Decoding with Pipeline Parallelism
+
+With pipeline parallelism (`pipeline_parallel_size > 1`), the draft model runs as a whole model on the last pipeline stage, as it would at `pipeline_parallel_size=1`. A custom `VLLM_PP_LAYER_PARTITION` applies only to the target model.
 
 ## Lossless guarantees of Speculative Decoding
 

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import functools
 import os
 from contextlib import nullcontext
 
@@ -121,6 +122,40 @@ def test_torch_compile_wrapper(use_bytecode_hook, monkeypatch):
         except Exception:
             return
         raise AssertionError("expected an exception to be raised")
+
+
+def _args_only_decorator(fn):
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        return fn(*args, **kwargs)
+
+    return wrapped
+
+
+class ArgsOnlyDecoratedWrapper(MyWrapper):
+    @_args_only_decorator
+    def forward(self, x: torch.Tensor):  # type: ignore[override]
+        return self.model(x)
+
+
+def test_bytecode_hook_with_args_only_decorated_forward(monkeypatch):
+    """A `forward` wrapped in a `(*args, **kwargs)` decorator, like Transformers'
+    `deprecate_kwarg`, has no `self` local in its frame. The bytecode hook must
+    still find the instance and keep the compiled bytecode."""
+    monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1")
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config = CompilationConfig()
+    vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
+    vllm_config.compilation_config.backend = "inductor"
+
+    with set_current_vllm_config(vllm_config):
+        torch._dynamo.reset()
+        wrapper = ArgsOnlyDecoratedWrapper(MyMod())
+        x = torch.tensor([1, 2, 3, 4])
+        torch._dynamo.mark_dynamic(x, 0)
+        assert torch.equal(wrapper(x), x * 2)
+        assert wrapper._compiled_bytecode is not None
+        assert torch.equal(wrapper(torch.tensor([1, 2, 3])), torch.tensor([2, 4, 6]))
 
 
 def test_compile_model_with_stock_torch(monkeypatch):

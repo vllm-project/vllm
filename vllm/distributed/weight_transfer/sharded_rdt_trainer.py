@@ -13,7 +13,7 @@ workers to pull.
 All serve-side state lives on the server actor, so trainer processes need no
 mixin, no named actors and no special actor options.
 
-See docs/training/weight_transfer/sharded_rdt.md for the publish -> serve ->
+See docs/training/weight_updates/engines/sharded_rdt.md for the publish -> serve ->
 free_group -> release lifecycle and the ownership model.
 """
 
@@ -131,7 +131,7 @@ PRODUCE_METHOD_NAME = "rdt_produce_weights_batched"
 # measuring rather than assuming.
 
 
-@dataclass
+@dataclass(slots=True)
 class _SharedPack:
     """One generation of one slot-sharing group: the rendezvous state for a
     single chunk, identified by the consumers' issue index."""
@@ -1317,14 +1317,21 @@ class ShardedRDTTrainerWeightTransferEngine(
         )
 
         update = asdict(ShardedRDTWeightTransferUpdateInfo(sync_idx=self._sync_idx))
-        with ThreadPoolExecutor(max_workers=1) as exe:
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
             # The workers block inside update_weights until they've pulled every
             # group, so it runs concurrently with the gather/publish loop.
-            future = exe.submit(self.client.update_weights, update)
+            future = executor.submit(self.client.update_weights, update)
+            if future.done():
+                future.result()
             self._run_gather_loop(
                 update_future=future, live_count=live_count, live_ids=live_ids
             )
             future.result()  # surface inference-side errors
+        finally:
+            # Never wait for the RPC thread on error: if the gather loop raised,
+            # workers may stay blocked in update_weights and joining would hang.
+            executor.shutdown(wait=False, cancel_futures=True)
 
         self.client.finish_weight_update()
 
