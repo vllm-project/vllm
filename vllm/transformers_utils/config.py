@@ -496,6 +496,17 @@ class HFConfigParser(ConfigParserBase):
             config_dict.pop("adaptor_input_dim", None)
             kwargs.setdefault("name_or_path", str(model))
             config = MossTranscribeDiarizeConfig.from_dict(config_dict, **kwargs)
+        elif (
+            model_type == "jina_embeddings_v5"
+            and config_dict.get("is_decoder") is False
+        ):
+            from transformers import EuroBertConfig
+
+            # Strip auto_map so AutoModel.from_config(..., trust_remote_code=True)
+            # instantiates upstream EuroBertModel rather than remote PEFT code.
+            encoder_config = {k: v for k, v in config_dict.items() if k != "auto_map"}
+            kwargs.setdefault("name_or_path", str(model))
+            config = EuroBertConfig.from_dict(encoder_config, **kwargs)
         elif model_type in _ARCHITECTURE_TO_MODEL_TYPE.values():
             from transformers import CONFIG_MAPPING
 

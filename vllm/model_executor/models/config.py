@@ -1187,16 +1187,15 @@ class JinaEmbeddingsV5ModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        """Enable the bidirectional encoder backbone for -nano checkpoints.
+        """Enable bidirectional attention for -nano encoder checkpoints.
 
         The V5 family ships more than one backbone under a single
         `architectures` entry: the `-small` variants are Qwen3 decoders, while
-        `-nano` is a bidirectional EuroBERT encoder. Upstream ships a separate
-        `configuration_*.py` per repository, so the config carries no backbone
-        field and the encoder variants are only identifiable by
-        `is_decoder=False`. For encoder checkpoints, set `is_causal=False` so the
-        Llama backbone uses EncoderOnlyAttention; `JinaEmbeddingsV5Model` then
-        dispatches to its encoder implementation.
+        `-nano` is a bidirectional EuroBERT encoder (`is_decoder=False`).
+        `EuroBertConfig` does not set `is_causal`, and `ModelConfig.attn_type`
+        defaults non-CLS models to causal unless `hf_config.is_causal=False` is
+        present, so set it here so `ModelConfig` resolves `encoder_only` and
+        `JinaEmbeddingsV5Model` dispatches to `JinaEmbeddingsV5EncoderModel`.
         """
         if getattr(model_config.hf_config, "is_decoder", True):
             return

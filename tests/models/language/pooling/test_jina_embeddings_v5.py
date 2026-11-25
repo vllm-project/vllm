@@ -6,21 +6,35 @@ The V5 family ships two backbones under one `architectures` entry: `-small` is
 a Qwen3 decoder, while `-nano` is a bidirectional EuroBERT encoder. Upstream
 ships a separate `configuration_*.py` per repository, so the only signal
 distinguishing them is `is_decoder`, which the encoder variant sets to False.
-`JinaEmbeddingsV5ModelConfig` uses it to enable bidirectional attention for the
-encoder variant; `JinaEmbeddingsV5Model` then dispatches to the correct backbone.
+`HFConfigParser` parses encoder checkpoints into `EuroBertConfig` without
+`auto_map`, `JinaEmbeddingsV5ModelConfig` sets `is_causal=False` for
+`ModelConfig.attn_type`, and `JinaEmbeddingsV5Model` dispatches to
+`JinaEmbeddingsV5EncoderModel` (`EuroBertModel`).
 """
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from transformers import PreTrainedConfig
+import torch
+from safetensors.torch import load_file, save_file
+from transformers import EuroBertConfig, EuroBertModel, PreTrainedConfig
 
 from vllm.config import ModelConfig
+from vllm.model_executor.layers.attention import EncoderOnlyAttention
 from vllm.model_executor.models.config import (
     MODELS_CONFIG_MAP,
     JinaEmbeddingsV5ModelConfig,
 )
+from vllm.model_executor.models.jina import (
+    JinaEmbeddingsV5DecoderModel,
+    JinaEmbeddingsV5EncoderModel,
+)
+from vllm.model_executor.models.transformers import TransformersEmbeddingModel
+
+from .embed_utils import check_embeddings_close
 
 
 def _model_config(hf_config: PreTrainedConfig) -> ModelConfig:
@@ -36,11 +50,8 @@ def test_registered_for_the_architecture():
 
 @pytest.mark.cpu_test
 def test_encoder_backbone_enables_bidirectional_attention():
-    """An encoder checkpoint (is_decoder=False) is supported.
-
-    The handler sets is_causal=False so the Llama backbone uses
-    EncoderOnlyAttention; JinaEmbeddingsV5Model then dispatches to the encoder
-    implementation.
+    """An encoder checkpoint (`is_decoder=False`) sets `is_causal=False` so
+    `ModelConfig.attn_type` resolves to `encoder_only`.
     """
     hf_config = PreTrainedConfig(is_decoder=False)
 
@@ -56,7 +67,7 @@ def test_supported_decoder_backbone_is_accepted():
     `-small` omits `is_decoder` entirely, so an absent attribute has to be
     treated as a decoder. The first assertion pins that assumption: if
     PreTrainedConfig ever gains an `is_decoder=False` default, this fails here
-    rather than silently rejecting a supported checkpoint.
+    rather than misrouting `-small` to the encoder.
     """
     absent = PreTrainedConfig()
     assert not hasattr(absent, "is_decoder")
@@ -64,4 +75,287 @@ def test_supported_decoder_backbone_is_accepted():
     JinaEmbeddingsV5ModelConfig.verify_and_update_model_config(_model_config(absent))
     JinaEmbeddingsV5ModelConfig.verify_and_update_model_config(
         _model_config(PreTrainedConfig(is_decoder=True))
+    )
+
+
+def _encoder_config_kwargs(vocab_size: int = 128) -> dict:
+    return {
+        "vocab_size": vocab_size,
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "max_position_embeddings": 2048,
+        "rms_norm_eps": 1e-5,
+        "rope_theta": 1000000.0,
+        "pad_token_id": 0,
+        "bos_token_id": 1,
+        "eos_token_id": 2,
+        "mask_token_id": 3,
+        "tie_word_embeddings": False,
+    }
+
+
+def _encoder_config_dict(vocab_size: int = 128) -> dict:
+    return {
+        **_encoder_config_kwargs(vocab_size=vocab_size),
+        "architectures": ["JinaEmbeddingsV5Model"],
+        "auto_map": {
+            "AutoConfig": "configuration_jina_embeddings_v5.JinaEmbeddingsV5Config",
+            "AutoModel": "modeling_jina_embeddings_v5.JinaEmbeddingsV5Model",
+        },
+        "model_type": "jina_embeddings_v5",
+        "is_decoder": False,
+        "dtype": "bfloat16",
+    }
+
+
+@pytest.mark.cpu_test
+def test_encoder_config_uses_eurobert_without_auto_map(tmp_path: Path):
+    (tmp_path / "config.json").write_text(json.dumps(_encoder_config_dict()))
+
+    for trust_remote_code in (True, False):
+        mc = ModelConfig(
+            str(tmp_path),
+            trust_remote_code=trust_remote_code,
+            hf_overrides={"jina_task": "clustering"},
+        )
+        assert type(mc.hf_config) is EuroBertConfig
+        assert not hasattr(mc.hf_config, "auto_map")
+        assert mc.hf_config.is_causal is False
+        assert mc.hf_config.jina_task == "clustering"
+        assert mc.attn_type == "encoder_only"
+        assert mc.pooler_config is not None
+        assert mc.pooler_config.seq_pooling_type == "LAST"
+
+    assert JinaEmbeddingsV5EncoderModel.default_seq_pooling_type == "LAST"
+
+
+def test_encoder_backbone_merges_lora_with_last_pooling(
+    vllm_runner, tmp_path: Path, monkeypatch
+):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from transformers import TokenizersBackend
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    adapter_ckpt = tmp_path / "with_adapter"
+    merged_ckpt = tmp_path / "pre_merged"
+    adapter_ckpt.mkdir()
+    merged_ckpt.mkdir()
+
+    vocab = {f"tok{i}": i for i in range(64)}
+    vocab["<unk>"] = 0
+    tok = Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>"))
+    tok.pre_tokenizer = Whitespace()
+    for dest in (adapter_ckpt, merged_ckpt):
+        TokenizersBackend(tokenizer_object=tok, unk_token="<unk>").save_pretrained(dest)
+
+    torch.manual_seed(0)
+    cfg = EuroBertConfig(**_encoder_config_kwargs(vocab_size=64), dtype=torch.bfloat16)
+    EuroBertModel(cfg).to(torch.bfloat16).save_pretrained(adapter_ckpt)
+
+    raw_cfg = _encoder_config_dict(vocab_size=64)
+    (adapter_ckpt / "config.json").write_text(json.dumps(raw_cfg))
+    (merged_ckpt / "config.json").write_text(json.dumps(raw_cfg))
+
+    base_weights = load_file(adapter_ckpt / "model.safetensors")
+    rank, alpha = 4, 8
+    scaling = alpha / rank
+    adapter_weights: dict[str, torch.Tensor] = {}
+    merged_weights = dict(base_weights)
+    target_suffixes = (
+        "self_attn.q_proj.weight",
+        "self_attn.k_proj.weight",
+        "self_attn.v_proj.weight",
+        "self_attn.o_proj.weight",
+        "mlp.gate_proj.weight",
+        "mlp.up_proj.weight",
+        "mlp.down_proj.weight",
+    )
+    torch.manual_seed(7)
+    for name, weight in base_weights.items():
+        if name.endswith(target_suffixes):
+            out_dim, in_dim = weight.shape
+            lora_a = torch.randn(rank, in_dim, dtype=torch.bfloat16) * 0.1
+            lora_b = torch.randn(out_dim, rank, dtype=torch.bfloat16) * 0.1
+            prefix = f"base_model.model.{name.removesuffix('.weight')}"
+            adapter_weights[f"{prefix}.lora_A.weight"] = lora_a
+            adapter_weights[f"{prefix}.lora_B.weight"] = lora_b
+            merged_weights[name] = weight + (lora_b @ lora_a) * scaling
+
+    adapter_dir = adapter_ckpt / "adapters" / "retrieval"
+    adapter_dir.mkdir(parents=True)
+    (adapter_dir / "adapter_config.json").write_text(
+        json.dumps({"r": rank, "lora_alpha": alpha})
+    )
+    save_file(adapter_weights, adapter_dir / "adapter_model.safetensors")
+    save_file(merged_weights, merged_ckpt / "model.safetensors")
+
+    prompts = ["tok1 tok2 tok3 tok4", "tok5 tok6 tok7"]
+    with vllm_runner(
+        str(adapter_ckpt),
+        runner="pooling",
+        dtype="bfloat16",
+        enforce_eager=True,
+        trust_remote_code=True,
+    ) as llm_adapter:
+        mc = llm_adapter.llm.llm_engine.model_config
+        assert mc.attn_type == "encoder_only"
+        assert mc.pooler_config is not None
+        assert mc.pooler_config.seq_pooling_type == "LAST"
+        checks = llm_adapter.apply_model(
+            lambda m: (
+                isinstance(m, JinaEmbeddingsV5EncoderModel),
+                isinstance(m, TransformersEmbeddingModel),
+                sum(isinstance(sub, EncoderOnlyAttention) for sub in m.modules()),
+            )
+        )
+        assert checks == [(True, True, 2)]
+        adapter_embeds = llm_adapter.embed(prompts)
+
+    with vllm_runner(
+        str(merged_ckpt),
+        runner="pooling",
+        dtype="bfloat16",
+        enforce_eager=True,
+    ) as llm_merged:
+        merged_embeds = llm_merged.embed(prompts)
+
+    check_embeddings_close(
+        embeddings_0_lst=merged_embeds,
+        embeddings_1_lst=adapter_embeds,
+        name_0="pre_merged",
+        name_1="runtime_lora_merged",
+        tol=1e-4,
+    )
+
+    with vllm_runner(
+        str(adapter_ckpt),
+        runner="pooling",
+        dtype="bfloat16",
+        enforce_eager=True,
+        hf_overrides={"jina_task": "text-matching"},
+    ) as llm_unmerged:
+        unmerged_embeds = llm_unmerged.embed(prompts)
+
+    delta = (
+        (torch.tensor(adapter_embeds) - torch.tensor(unmerged_embeds))
+        .abs()
+        .max()
+        .item()
+    )
+    assert delta > 1e-2
+
+
+_NANO_MODEL = "jinaai/jina-embeddings-v5-text-nano"
+_SMALL_MODEL = "jinaai/jina-embeddings-v5-text-small"
+_V5_TASKS = ("retrieval", "text-matching", "classification", "clustering")
+_REAL_CKPT_PROMPTS = [
+    "vLLM serves embeddings with upstream EuroBERT through Transformers.",
+    "Task-specific LoRA adapters are merged into base weights at load time.",
+]
+
+
+def _assert_real_checkpoint_all_tasks(
+    hf_runner,
+    vllm_runner,
+    model_name: str,
+    *,
+    trust_remote_code: bool,
+    expected_attn_type: str,
+    check_model,
+) -> None:
+    vllm_prompts = [f"Document: {p}" for p in _REAL_CKPT_PROMPTS]
+    task_embeds: dict[str, list[list[float]]] = {}
+
+    with hf_runner(
+        model_name,
+        dtype="bfloat16",
+        is_sentence_transformer=True,
+        trust_remote_code=True,
+    ) as hf_model:
+        for task in _V5_TASKS:
+            hf_embeds = hf_model.encode(
+                _REAL_CKPT_PROMPTS, task=task, prompt_name="document"
+            )
+            with vllm_runner(
+                model_name,
+                runner="pooling",
+                dtype="bfloat16",
+                gpu_memory_utilization=0.35,
+                trust_remote_code=trust_remote_code,
+                hf_overrides={"jina_task": task},
+            ) as vllm_model:
+                mc = vllm_model.llm.llm_engine.model_config
+                assert mc.attn_type == expected_attn_type
+                assert mc.pooler_config is not None
+                assert mc.pooler_config.seq_pooling_type == "LAST"
+                if task == "retrieval":
+                    check_model(mc, vllm_model)
+                vllm_embeds = vllm_model.embed(vllm_prompts)
+
+            check_embeddings_close(
+                embeddings_0_lst=hf_embeds,
+                embeddings_1_lst=vllm_embeds,
+                name_0=f"hf_{task}",
+                name_1=f"vllm_{task}",
+                tol=1e-2,
+            )
+            task_embeds[task] = vllm_embeds
+
+    retrieval = torch.tensor(task_embeds["retrieval"])
+    for task in _V5_TASKS[1:]:
+        diff = (retrieval - torch.tensor(task_embeds[task])).abs().max().item()
+        assert diff > 1e-2, f"Expected task {task!r} to diverge from retrieval"
+
+
+def test_nano_encoder_real_checkpoint_parity_all_tasks(
+    hf_runner, vllm_runner, monkeypatch
+):
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    def check_model(mc: ModelConfig, vllm_model) -> None:
+        assert type(mc.hf_config) is EuroBertConfig
+        checks = vllm_model.apply_model(
+            lambda m: (
+                isinstance(m, JinaEmbeddingsV5EncoderModel),
+                isinstance(m, TransformersEmbeddingModel),
+                sum(isinstance(s, EncoderOnlyAttention) for s in m.modules()),
+            )
+        )
+        assert checks == [(True, True, 12)]
+
+    _assert_real_checkpoint_all_tasks(
+        hf_runner,
+        vllm_runner,
+        _NANO_MODEL,
+        trust_remote_code=False,
+        expected_attn_type="encoder_only",
+        check_model=check_model,
+    )
+
+
+def test_small_decoder_regression_all_tasks(hf_runner, vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    def check_model(mc: ModelConfig, vllm_model) -> None:
+        checks = vllm_model.apply_model(
+            lambda m: (
+                isinstance(m, JinaEmbeddingsV5DecoderModel),
+                not isinstance(m, JinaEmbeddingsV5EncoderModel),
+            )
+        )
+        assert checks == [(True, True)]
+
+    _assert_real_checkpoint_all_tasks(
+        hf_runner,
+        vllm_runner,
+        _SMALL_MODEL,
+        trust_remote_code=True,
+        expected_attn_type="decoder",
+        check_model=check_model,
     )
