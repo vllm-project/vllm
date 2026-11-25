@@ -20,6 +20,7 @@ from tests.v1.core.utils import full_layer, new_kv_cache_group, sliding_window_l
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     _get_kv_cache_bytes_per_block,
@@ -268,13 +269,13 @@ def _compressor_state_name(layer_index: int) -> str:
 def _make_csa_linear_specs(
     num_mamba: int = 7,
     num_tuples: int = NUM_CACHE_TUPLES,
-    mamba_cache_mode: str = "none",
+    enable_prefix_caching: bool = False,
 ) -> dict[str, KVCacheLayerConfig]:
     specs: dict[str, KVCacheLayerConfig] = {}
     for layer_index in range(num_mamba):
         specs[f"model.layers.{layer_index}.linear_attn"] = MambaManager.layer_config(
             MambaSpec(block_size=16, shapes=((32,),), dtypes=(torch.bfloat16,)),
-            mamba_cache_mode=mamba_cache_mode,
+            enable_prefix_caching=enable_prefix_caching,
         )
     specs["model.layers.0.ple"] = MambaManager.layer_config(
         MambaSpec(
@@ -283,7 +284,7 @@ def _make_csa_linear_specs(
             dtypes=(torch.bfloat16,),
             tp_replicated=True,
         ),
-        mamba_cache_mode=mamba_cache_mode,
+        enable_prefix_caching=enable_prefix_caching,
     )
     for layer_index in range(num_tuples):
         specs[_main_kv_name(layer_index)] = full_layer(
@@ -329,7 +330,6 @@ def _shared_layout_config():
     config.cache_config.block_size = 16
     config.cache_config.enable_prefix_caching = False
     config.cache_config.prefix_match_unit = None
-    config.cache_config.mamba_cache_mode = "none"
     return config
 
 
@@ -407,9 +407,9 @@ class TestCSALinearGrouping:
         neither divides the hit length nor bounds the (empty) block list."""
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
-        config.cache_config.mamba_cache_mode = "align"
+        config.cache_config.enable_prefix_caching = True
         groups = get_kv_cache_groups(
-            config, _make_csa_linear_specs(mamba_cache_mode="align")
+            config, _make_csa_linear_specs(enable_prefix_caching=True)
         )
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=BYTES_PER_BLOCK * 64
@@ -440,8 +440,8 @@ class TestCSALinearGrouping:
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
         config.cache_config.prefix_match_unit = 16
-        config.cache_config.mamba_cache_mode = "align"
-        specs = _make_csa_linear_specs(num_tuples=1, mamba_cache_mode="align")
+        config.cache_config.enable_prefix_caching = True
+        specs = _make_csa_linear_specs(num_tuples=1, enable_prefix_caching=True)
         groups = get_kv_cache_groups(config, specs)
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=8 * MAIN_KV_PAGE_BYTES
@@ -457,8 +457,8 @@ class TestCSALinearGrouping:
     def test_scratch_ring_does_not_drag_hash_granularity(self):
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
-        config.cache_config.mamba_cache_mode = "align"
-        specs = _make_csa_linear_specs(num_tuples=1, mamba_cache_mode="align")
+        config.cache_config.enable_prefix_caching = True
+        specs = _make_csa_linear_specs(num_tuples=1, enable_prefix_caching=True)
         groups = get_kv_cache_groups(config, specs)
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=8 * MAIN_KV_PAGE_BYTES
@@ -550,6 +550,7 @@ class TestCSALinearGrouping:
             )
 
         groups = _get_packed_kv_cache_groups(config, specs)
+        assert groups is not None
         gdn = [g for g in groups if g.layer_names[0].startswith("gdn.")]
 
         assert _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC) == sum(
@@ -710,21 +711,30 @@ class TestDensePacking:
         assert idx_tensor.offset == mla_page * config.num_blocks
         _bind(config, "LBNHC")
 
-    def test_overlaid_groups_alias_and_stay_isolated(self):
-        groups, g1, g2 = _mixed_page_groups()
-        # Overlay models resolve to a block-outer layout at backend selection (the
-        # model's backend declares it); mirror that here.
+    @pytest.mark.parametrize(
+        ("layout", "n_swa"),
+        [
+            ("BLNHC", 5),
+            # Layer-compact overlays the groups only where the overlaid layers
+            # have the same page: 3 swa layers on the 3 mla layers.
+            ("LBNHC", 3),
+        ],
+    )
+    def test_overlaid_groups_alias_and_stay_isolated(self, layout, n_swa):
+        groups, g1, g2 = _mixed_page_groups(n_swa=n_swa)
         config = get_kv_cache_config_from_groups(
-            _mock_vllm_config("BLNHC"), groups, MEMORY
+            _mock_vllm_config(layout), groups, MEMORY
         )
         assert config.num_blocks == MEMORY // _expected_bytes_per_block(groups)
         assert _pool_bytes_per_block(
-            _mock_vllm_config("BLNHC"), groups
+            _mock_vllm_config(layout), groups
         ) == _expected_bytes_per_block(groups)
 
-        views = _bind(config, "BLNHC")
+        views = _bind(config, layout)
         assert set(views) == set(g1) | set(g2)
-        assert views["swa.0"].data_ptr() == views["mla.0"].data_ptr()
+        for i in range(3):
+            assert views[f"swa.{i}"].data_ptr() == views[f"mla.{i}"].data_ptr()
+        assert len({views[name].data_ptr() for name in g1}) == len(g1)
 
         # A block is owned by one group at a time: writes to group-owned
         # blocks never disturb the other group's blocks.
@@ -746,14 +756,28 @@ class TestDensePacking:
             assert (views[name][0].to(torch.int32) == i + 1).all()
 
     def test_layer_compact_layout_rejected_for_overlaid_groups(self):
-        # The layout has a single writer (backend-selection resolution); a layer-
-        # compact layout reaching an overlay model's allocation is an error, not a
-        # silent flip.
-        groups, _, _ = _mixed_page_groups()
+        # swa.3 and swa.4 would share the regions of the idx layers, whose block
+        # stride differs, so a layer-compact layout is refused.
+        groups, _, _ = _mixed_page_groups(n_swa=5)
         with pytest.raises(
             ValueError, match="cannot express this model's mixed page sizes"
         ):
             get_kv_cache_config_from_groups(_mock_vllm_config("LBNHC"), groups, MEMORY)
+
+    def test_layer_compact_overlay_follows_the_placement_order(self):
+        # Layers with the same spec are placed together, so mla.0, idx.0, mla.1,
+        # idx.1 has the regions [512, 512, 128, 128]: two swa layers share the
+        # mla regions.
+        mixed = {"mla.0": _mla(512), "idx.0": _mla(128)}
+        mixed |= {"mla.1": _mla(512), "idx.1": _mla(128)}
+        swa = {f"swa.{i}": _mla(512) for i in range(2)}
+        groups = [_uniform_group(mixed), _uniform_group(swa)]
+        config = get_kv_cache_config_from_groups(
+            _mock_vllm_config("LBNHC"), groups, MEMORY
+        )
+        views = _bind(config, "LBNHC")
+        for i in range(2):
+            assert views[f"swa.{i}"].data_ptr() == views[f"mla.{i}"].data_ptr()
 
     def test_unresolved_layout_rejected(self):
         groups, _, _ = _mixed_page_groups()
@@ -898,7 +922,9 @@ class TestSWABoundedReplayGrouping:
             hash_block_size=128,
             scheduler_block_size=128,
         )
-        (group,) = manager.coordinator.attention_groups
+        coordinator = manager.coordinator
+        assert isinstance(coordinator, HybridKVCacheCoordinator)
+        (group,) = coordinator.attention_groups
         assert group.manager_cls is FullAttentionManager
 
         # Allocating and caching a request goes through every group's manager;

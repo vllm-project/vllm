@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
+from tests.utils import core_dumped_bytes
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu import host_register as host_register_module
@@ -247,6 +248,64 @@ def _mp_barrier_construct_and_hold(
         time.sleep(60)  # hold the mapping until killed
     except Exception as e:
         done_queue.put({"rank": rank, "error": repr(e)})
+
+
+def _mp_hisparse_allocate_and_hold(
+    instance_id: str, tp_rank: int, local_world_size: int, barrier, done_queue
+) -> None:
+    """Allocate a shared HiSparse host pool as one TP rank, let each node's
+    leader write it, then hold the mapping until the parent SIGKILLs us."""
+    try:
+        from vllm.v1.hisparse import runtime
+
+        populated: list[tuple[int, int]] = []
+        get_populate_write_fn = region_module._get_populate_write_fn
+
+        def track_population(mmap_obj):
+            populate = get_populate_write_fn(mmap_obj)
+
+            def tracked(mm, offset, length):
+                populated.append((offset, length))
+                populate(mm, offset, length)
+
+            return tracked
+
+        region_module._get_populate_write_fn = track_population
+        runtime.pin_tensor = lambda tensor: None
+        runtime.check_hisparse_host_memory = lambda size: None
+        tp_group = MagicMock(rank_in_group=tp_rank, world_size=4)
+        tp_group.barrier.side_effect = lambda: barrier.wait(30)
+        runtime.get_tp_group = lambda: tp_group
+        runtime.get_tensor_model_parallel_rank = lambda: tp_rank
+        config = SimpleNamespace(
+            instance_id=instance_id,
+            parallel_config=SimpleNamespace(
+                data_parallel_index=0, local_world_size=local_world_size
+            ),
+        )
+        _, region = runtime.allocate_hisparse_host_pools(
+            config, [PAGE_SIZE], 4, PAGE_SIZE
+        )
+        pool = region.base_tensor
+        leader = runtime.get_hisparse_host_leader_rank(config)
+        if tp_rank == leader:
+            pool.fill_(leader + 1)
+        barrier.wait(30)
+        done_queue.put(
+            {
+                "rank": tp_rank,
+                "error": None,
+                "leader": leader,
+                "inode": os.fstat(region.fd).st_ino,
+                "path_exists": os.path.exists(region.mmap_path),
+                "populated": populated,
+                "total_size": region.total_size_bytes,
+                "contents_match": bool((pool == leader + 1).all()),
+            }
+        )
+        time.sleep(60)  # hold the mapping until killed
+    except Exception as e:
+        done_queue.put({"rank": tp_rank, "error": repr(e)})
 
 
 @pytest.fixture
@@ -813,6 +872,27 @@ def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
         for region in regions:
             region.cleanup()
     assert not any(os.path.exists(path) for path, _, _ in segments)
+
+
+@pytest.mark.parametrize("num_segments", [1, 3])
+def test_region_is_left_out_of_core_dumps(iid, monkeypatch, num_segments):
+    """Every mapping of the region, segment files included, is skipped by
+    core dumps."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=5,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        num_segments=num_segments,
+    )
+    try:
+        assert len(region._segments) == num_segments
+        start = region.base_tensor.data_ptr()
+        assert core_dumped_bytes(start, start + region.total_size_bytes) == 0
+    finally:
+        region.cleanup()
 
 
 @pytest.mark.parametrize("num_segments", [1, 3])
@@ -1462,6 +1542,32 @@ def test_cleanup_keeps_region_mapped_while_buffers_are_exported(iid):
         _cleanup_file(region.mmap_path)
 
 
+def test_private_region_unlinked_once_mapped(iid):
+    """A private region has no joiners, so its name is dropped without a
+    barrier while the mapping stays valid."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=4,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        private=True,
+    )
+    try:
+        assert not os.path.exists(path)
+        assert region._creator is False, "nothing left for cleanup() to unlink"
+        t = region.create_next_worker_view(PAGE_SIZE)
+        t[:, :] = 7
+        assert region.mmap_obj is not None
+        assert memoryview(region.mmap_obj)[0] == 7
+        del t
+    finally:
+        region.cleanup()
+        _cleanup_file(path)
+
+
 def test_backing_file_unlinked_after_barrier(iid):
     """The file must exist until the barrier releases (late joiners need the
     name) and be gone right after, so no exit path can leak it."""
@@ -1534,6 +1640,53 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid, replicated):
     assert not os.path.exists(path), "SIGKILL must not leak the file"
     with _region(iid) as restarted:
         assert restarted._creator is True, "restart must be able to create anew"
+
+
+@pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="requires /dev/shm")
+@pytest.mark.parametrize("local_world_size", [4, 2])
+def test_mp_hisparse_host_pool_is_shared_per_node(iid, local_world_size):
+    """TP ranks map one HiSparse host pool per node, created, fully populated
+    by that node's ranks and written by its leader; SIGKILL leaks none."""
+    tp_size = 4
+    num_nodes = tp_size // local_world_size
+    ctx = get_mp_context()
+    barrier = ctx.Barrier(tp_size)
+    done_queue = ctx.Queue()
+    procs = [
+        ctx.Process(
+            target=_mp_hisparse_allocate_and_hold,
+            args=(iid, rank, local_world_size, barrier, done_queue),
+        )
+        for rank in range(tp_size)
+    ]
+
+    def leaked_files() -> list[str]:
+        return [f for f in os.listdir("/dev/shm") if f"hisparse_{iid}_" in f]
+
+    try:
+        for p in procs:
+            p.start()
+        results = [done_queue.get(timeout=30) for _ in range(tp_size)]
+        for r in results:
+            assert r["error"] is None, f"rank {r['rank']}: {r['error']}"
+        nodes: dict[int, list[dict]] = {}
+        for r in results:
+            nodes.setdefault(r["leader"], []).append(r)
+        assert sorted(nodes) == list(range(0, tp_size, local_world_size))
+        assert len({r["inode"] for r in results}) == num_nodes
+        for node in nodes.values():
+            assert len({r["inode"] for r in node}) == 1
+            covered = sorted(span for r in node for span in r["populated"])
+            assert sum(length for _, length in covered) == node[0]["total_size"]
+            assert covered[0][0] == 0
+        assert all(r["contents_match"] for r in results)
+        assert not any(r["path_exists"] for r in results)
+    finally:
+        for p in procs:
+            p.kill()  # SIGKILL: no cleanup() runs
+            p.join(timeout=10)
+
+    assert leaked_files() == [], "SIGKILL must not leak the files"
 
 
 @pytest.mark.parametrize(

@@ -28,6 +28,7 @@ from tests.v1.core.utils import (
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import (
     CacheConfig,
+    KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
     VllmConfig,
@@ -40,6 +41,7 @@ from vllm.v1.core.kv_cache_planning import (
     check_enough_kv_cache_memory,
     estimate_max_model_len,
     get_kv_cache_groups,
+    get_pipeline_stages,
     kv_cache_groups_tp_replicas,
 )
 from vllm.v1.core.kv_cache_utils import (
@@ -47,6 +49,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
+    DFlashSlidingWindowManager,
     FullAttentionManager,
     HiSparseHotManager,
     HiSparseResidentManager,
@@ -92,6 +95,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
                 num_kv_heads=1,
                 head_size=576,
                 dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.SPARSE,
                 is_index_group_leader=True,
             )
         ),
@@ -118,7 +122,6 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             decode_context_parallel_size=1,
             world_size=2 if shared_host_pool else 1,
             distributed_executor_backend="mp",
-            nnodes_within_dp=1,
         ),
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=7,
@@ -188,6 +191,111 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     assert scheduler_block_size == hash_block_size == gpu_block_size
 
 
+def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(monkeypatch):
+    from vllm.v1.hisparse.binding import resolve_hisparse_specs
+
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
+    source_names = {"model.layers.0.self_attn", "model.layers.1.self_attn"}
+    indexer_names = {f"{name}.indexer" for name in source_names}
+    layer_configs: dict[str, KVCacheLayerConfig] = {
+        # Dense attention has no sparse cache role, so it stays on the device.
+        "dense": full_layer(
+            AttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=16, dtype=torch.bfloat16
+            )
+        )
+    }
+    for name in sorted(source_names):
+        layer_configs[name] = full_layer(
+            AttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=32,
+                dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.SPARSE,
+                topk_buffer_width=35,
+                is_index_group_leader=True,
+            )
+        )
+        layer_configs[f"{name}.indexer"] = full_layer(
+            MLAAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=16,
+                dtype=torch.bfloat16,
+                tokens_per_state=4,
+                cache_role=SparseCacheRole.INDEXER,
+            )
+        )
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
+        # QSA has no MLA-only index_topk field.
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(),
+            max_model_len=128,
+            get_total_num_kv_heads=lambda: 2,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            world_size=2,
+            distributed_executor_backend="mp",
+        ),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=7,
+            prefix_cache_retention_interval=None,
+            enable_prefix_caching=False,
+            kv_cache_layout=KVCacheLayout.BLNHC.name,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLNHC,
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
+        max_in_flight_tokens=128,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 1 / 1024},
+        ),
+    )
+    backend = SimpleNamespace(get_supported_kernel_block_sizes=lambda _: [16])
+    layers = {
+        name: SimpleNamespace(get_attn_backend=lambda: backend)
+        for name in source_names | indexer_names
+    }
+    layer_configs = resolve_hisparse_specs(config, layer_configs, layers)
+    cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
+        config, get_kv_cache_groups(config, layer_configs), available_memory=2**20
+    )
+
+    # A logical block has 2 layers x 16 tokens x 2 unique heads x K/V x
+    # 32 dimensions x 2 bytes = 8192 B. A 1 MiB logical budget holds 128
+    # blocks, with half the payload on each TP rank.
+    assert cache_config.hisparse_host_num_blocks == 128
+    assert cache_config.hisparse_host_block_stride == 4096
+    (host_group,) = [g for g in cache_config.kv_cache_groups if g.host_resident]
+    assert set(host_group.layer_names) == source_names
+    hot_groups = [
+        group
+        for group in cache_config.kv_cache_groups
+        if group.manager_cls is HiSparseHotManager
+    ]
+    assert {tuple(group.layer_names) for group in hot_groups} == {
+        (f"{name}.hisparse_hot",) for name in source_names
+    }
+    # One decode query plus one selection's LRU slack: 70 rows occupy five
+    # 16-token blocks, without reducing the 35 selected token slots.
+    assert all(
+        group.manager_config == HiSparseHotManager.config(blocks_per_request=5)
+        for group in hot_groups
+    )
+
+
 @pytest.mark.parametrize(
     "max_model_len,num_gpu_blocks,ok",
     [
@@ -223,6 +331,7 @@ def test_hisparse_pool_must_fit_max_model_len(
                 num_kv_heads=1,
                 head_size=576,
                 dtype=torch.bfloat16,
+                cache_role=SparseCacheRole.SPARSE,
                 is_index_group_leader=True,
             )
         )
@@ -683,6 +792,29 @@ def test_project_kv_cache_groups_to_worker():
     }
 
 
+def test_pipeline_stages_describe_every_stage():
+    """Every worker learns each PP stage's block size in bytes, draft layers on
+    the last stage included."""
+    layer = new_kv_cache_layer()
+    stage0 = {"layer0": layer, "layer1": layer}
+    stage1 = {
+        "layer2": layer,
+        "layer3": layer,
+        "draft.layer0": replace(layer, is_draft=True),
+    }
+    # Two TP ranks per stage.
+    layer_configs = [stage0, stage0, stage1, stage1]
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=512))
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    vllm_config.parallel_config.pipeline_parallel_size = 2
+    kv_cache_configs = get_kv_cache_configs(vllm_config, layer_configs, [2**30] * 4)
+
+    stages = get_pipeline_stages(vllm_config, kv_cache_configs)
+
+    page = kv_cache_planning._get_layer_block_stride(layer.spec)
+    assert [stage.bytes_per_block for stage in stages] == [2 * page, 3 * page]
+
+
 @pytest.mark.parametrize("stage_layers", [["other"], ["mixed_mla", "attn1"]])
 def test_group_on_pp_stage_keeps_the_whole_groups_specs(stage_layers):
     """A PP stage holding none or only some of a group's layers answers what
@@ -766,6 +898,7 @@ def test_sparse_mla_preserves_physical_row_addressing(with_draft, indexer_alignm
                 state_content_bytes=656,
                 block_stride_alignment=656,
                 cache_dtype_str="fp8_ds_mla",
+                cache_role=SparseCacheRole.SPARSE,
                 is_index_group_leader=True,
             )
         ),
@@ -843,7 +976,12 @@ def test_layers_group_by_manager_policy_not_layout():
         },
     )
     assert [g.layer_names for g in groups] == [["swa8.0"], ["swa16.0"]]
-    assert [g.manager_config.params.sliding_window for g in groups] == [8, 16]
+    windows = []
+    for group in groups:
+        params = group.manager_config.params
+        assert isinstance(params, SlidingWindowManager.Params)
+        windows.append(params.sliding_window)
+    assert windows == [8, 16]
 
     # Same policy, different layouts: one group keeping each layer's spec.
     groups = get_kv_cache_groups(
@@ -1458,7 +1596,7 @@ def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
         _grouping_config(),
         {
             "model.full_attn": full_layer(full_spec),
-            "model.mamba": mamba_layer(mamba_spec, mamba_cache_mode="align"),
+            "model.mamba": mamba_layer(mamba_spec, enable_prefix_caching=True),
             "cache_only_layers.0": full_layer(hidden_spec),
         },
     )
@@ -1544,6 +1682,60 @@ def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
     }
 
 
+def test_draft_only_bucket_does_not_set_the_group_size():
+    """Muse Spark shape: 46 sliding-window + 16 full-attention target layers and a
+    5-layer DSpark drafter whose tail-only manager gets its own bucket. Groups are
+    sized from the target's buckets (16), so the full-attention layers fill one
+    unpadded group; sizing from the draft bucket (5) would pad them to 20."""
+    spec = new_kv_cache_spec()
+    specs = {}
+    for i in range(62):
+        specs[f"target.{i}.attn"] = (
+            full_layer(spec) if i % 4 == 1 else sliding_window_layer(spec, 128)
+        )
+    for i in range(5):
+        specs[f"draft.{i}.attn"] = replace(
+            DFlashSlidingWindowManager.layer_config(
+                spec,
+                sliding_window=128,
+                num_speculative_tokens=3,
+                num_lookahead_tokens=3,
+            ),
+            is_draft=True,
+        )
+    assert sum(lc.manager_cls is FullAttentionManager for lc in specs.values()) == 16
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    full_groups = [g for g in groups if g.manager_cls is FullAttentionManager]
+    assert [len(g.layer_names) for g in full_groups] == [16]
+    sw_groups = [g for g in groups if g.manager_cls is SlidingWindowManager]
+    assert sorted(len(g.layer_names) for g in sw_groups) == [15, 15, 16]
+    draft_groups = [g for g in groups if g.manager_cls is DFlashSlidingWindowManager]
+    assert [len(g.layer_names) for g in draft_groups] == [5]
+    assert len(groups) == 5
+
+
+def test_full_attention_draft_only_bucket_still_sets_the_group_size():
+    """A draft-only full-attention bucket (here split off by its DCP layout) is
+    unbounded, so it still sizes the groups instead of being padded per token."""
+    spec = new_kv_cache_spec()
+    specs = {
+        f"target.{i}.attn": (
+            full_layer(spec) if i % 4 == 1 else sliding_window_layer(spec, 128)
+        )
+        for i in range(62)
+    }
+    specs["draft.0.attn"] = replace(
+        full_layer(replace(spec, dcp_sharded=False)), is_draft=True
+    )
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    assert {len(g.layer_names) for g in groups} == {1}
+    assert len(groups) == 63
+
+
 @pytest.mark.parametrize("draft_dcp_sharded", [True, False])
 def test_windowed_dspark_draft_keeps_its_dcp_layout(draft_dcp_sharded):
     """A windowed DSpark draft next to a sparse MLA target gets its own group,
@@ -1603,6 +1795,7 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm, d
     assert groups[0].manager_cls is FullAttentionManager
     assert groups[0].block_size == 64
     promoted_draft = groups[0].kv_cache_specs["draft.0"]
+    assert isinstance(promoted_draft, AttentionSpec)
     assert promoted_draft == replace(
         draft.spec,
         block_size=64,
@@ -1699,6 +1892,8 @@ def test_auto_fit_max_model_len_with_hybrid():
     model_config.original_max_model_len = -1
     vllm_config = VllmConfig(model_config=model_config)
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    # Without prefix caching a Mamba layer holds 1 + gamma blocks.
+    vllm_config.cache_config.enable_prefix_caching = False
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
     gamma = 2
@@ -1817,6 +2012,7 @@ def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
 
     assert unified_specs["target_attn"].spec == target_spec
     unified_draft_spec = unified_specs["draft_attn"].spec
+    assert isinstance(unified_draft_spec, AttentionSpec)
     assert unified_draft_spec.block_size == draft_spec.block_size
     assert unified_draft_spec.real_page_size_bytes == draft_spec.real_page_size_bytes
     assert unified_draft_spec.page_size_padded == target_spec.page_size_bytes
@@ -1839,7 +2035,6 @@ def test_unify_hybrid_kv_cache_specs():
     kv_cache_spec["draft_layer_2"] = replace(
         before_spec_2,
         spec=replace(before_spec_2.spec, dcp_sharded=False),
-        is_draft=True,
     )
     kv_cache_planning.unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_layer(block_size=64)
@@ -1850,7 +2045,6 @@ def test_unify_hybrid_kv_cache_specs():
     assert kv_cache_spec["draft_layer_2"] == replace(
         expected_spec_2, spec=replace(expected_spec_2.spec, dcp_sharded=False)
     )
-    assert kv_cache_spec["draft_layer_2"].is_draft
 
     # 2. has_full_attention and has_chunked_local_attention
     before_spec_1 = new_kv_cache_layer()
@@ -1948,13 +2142,17 @@ def test_unify_kv_cache_spec_page_size_mamba():
         }
     )
     # Mamba page is padded; block_size (caching granularity) is unchanged.
-    assert unified["mamba_layer"].spec.page_size_bytes == 32768
-    assert unified["mamba_layer"].spec.page_size_padded == 32768
-    assert unified["mamba_layer"].spec.block_size == mamba_spec.block_size
+    unified_mamba = unified["mamba_layer"].spec
+    assert isinstance(unified_mamba, MambaSpec)
+    assert unified_mamba.page_size_bytes == 32768
+    assert unified_mamba.page_size_padded == 32768
+    assert unified_mamba.block_size == mamba_spec.block_size
     # Attention layer with smaller page still unifies by scaling block_size.
-    assert unified["main_attn_layer"].spec.page_size_bytes == 32768
-    assert unified["main_attn_layer"].spec.block_size == 2 * main_attn_spec.block_size
-    assert unified["main_attn_layer"].spec.page_size_padded is None
+    unified_main = unified["main_attn_layer"].spec
+    assert isinstance(unified_main, AttentionSpec)
+    assert unified_main.page_size_bytes == 32768
+    assert unified_main.block_size == 2 * main_attn_spec.block_size
+    assert unified_main.page_size_padded is None
     # Layer already at max page size is unchanged.
     assert unified["draft_attn_layer"].spec == draft_attn_spec
 
@@ -1970,8 +2168,10 @@ def test_unify_kv_cache_spec_page_size_mamba():
             "draft_attn_layer": full_layer(draft_attn_spec),
         }
     )
-    assert unified["mamba_layer"].spec.page_size_bytes == 32768
-    assert unified["mamba_layer"].spec.page_size_padded == 32768
+    unified_mamba = unified["mamba_layer"].spec
+    assert isinstance(unified_mamba, MambaSpec)
+    assert unified_mamba.page_size_bytes == 32768
+    assert unified_mamba.page_size_padded == 32768
 
     # 3. Mamba page that does not evenly divide the maximum page size is
     # padded as well (the divisibility constraint only applies to block_size
@@ -1996,9 +2196,11 @@ def test_unify_kv_cache_spec_page_size_mamba():
             "draft_attn_layer": full_layer(draft_attn_spec),  # 32768
         }
     )
-    assert unified["attn_layer"].spec.page_size_padded == 32768
-    assert unified["attn_layer"].spec.page_size_bytes == 32768
-    assert unified["attn_layer"].spec.block_size == 24
+    unified_attn = unified["attn_layer"].spec
+    assert isinstance(unified_attn, AttentionSpec)
+    assert unified_attn.page_size_padded == 32768
+    assert unified_attn.page_size_bytes == 32768
+    assert unified_attn.block_size == 24
 
     # 5. Uniform page sizes are returned unchanged.
     specs = {
@@ -2082,102 +2284,78 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
     )
 
 
-def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
-    config = VllmConfig(model_config=ModelConfig(max_model_len=64))
+@pytest.mark.parametrize(
+    ("method", "num_lookahead_tokens"),
+    [("dflash", 4), ("dspark", 3), ("eagle", None)],
+)
+def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
+    method, num_lookahead_tokens
+):
+    """Only a DFlash-family drafter's own sliding-window layers get the
+    tail-only manager."""
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend
+
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
     config.cache_config.kv_cache_layout = "BLHNC"
     config.speculative_config = fake_speculative_config(
-        method="dflash",
-        use_eagle=lambda: True,
-        use_eagle_block_drop=lambda: use_eagle_block_drop,
-        use_multi_module_mtp=lambda: False,
-        draft_model_config=SimpleNamespace(architectures=[]),
-    )
-    configs = get_kv_cache_configs(config, worker_specs, [2**30] * len(worker_specs))
-    return generate_scheduler_kv_cache_config(configs).kv_cache_groups
-
-
-def _as_draft(spec):
-    return replace(spec, is_draft=True)
-
-
-def _hybrid_specs(draft=True):
-    """Qwen3.5-shaped [GDN x3, full-attn] x2, plus an MTP full-attn layer."""
-    specs = {}
-    for i in range(8):
-        specs[f"layers.{i}"] = (
-            new_kv_cache_layer()
-            if i % 4 == 3
-            else new_mamba_layer(mamba_cache_mode="align")
-        )
-    if draft:
-        specs["mtp.0"] = _as_draft(new_kv_cache_layer())
-    return specs
-
-
-_DRAFT_SPEC_SHAPES = {
-    "uniform": lambda: {
-        "layers.0": new_kv_cache_layer(),
-        "draft.0": _as_draft(new_kv_cache_layer()),
-    },
-    "hybrid": _hybrid_specs,
-    "draft_spans_groups": lambda: {
-        "layers.0": new_mla_layer(),
-        "layers.1": new_swa_mla_layer(head_size=1024),
-        "mtp.0": _as_draft(new_mla_layer()),
-        "mtp.1": _as_draft(new_swa_mla_layer(head_size=1024)),
-    },
-}
-
-
-@pytest.mark.parametrize(
-    "make_specs", _DRAFT_SPEC_SHAPES.values(), ids=list(_DRAFT_SPEC_SHAPES)
-)
-@pytest.mark.parametrize("pp", [1, 2])
-def test_eagle_groups_are_the_groups_holding_draft_layers(make_specs, pp):
-    specs = make_specs()
-    draft_layers = {name for name, spec in specs.items() if spec.is_draft}
-    untagged = {name: replace(spec, is_draft=False) for name, spec in specs.items()}
-    groups = _spec_decode_kv_cache_groups([specs])
-    assert [(g.kv_cache_specs, g.manager_config) for g in groups] == [
-        (g.kv_cache_specs, g.manager_config)
-        for g in _spec_decode_kv_cache_groups([untagged])
-    ]
-
-    worker_specs = [
-        {n: s for n, s in specs.items() if n not in draft_layers},
-        {n: s for n, s in specs.items() if n in draft_layers},
-    ]
-    scheduler_groups = _spec_decode_kv_cache_groups(
-        [specs] if pp == 1 else worker_specs
-    )
-    assert [g.is_eagle_group for g in scheduler_groups] == [
-        bool(draft_layers & set(g.layer_names)) for g in groups
-    ]
-
-
-def test_no_eagle_groups_without_eagle_block_drop():
-    groups = _spec_decode_kv_cache_groups([_hybrid_specs()], use_eagle_block_drop=False)
-    assert not any(g.is_eagle_group for g in groups)
-
-
-@pytest.mark.parametrize(
-    "make_specs,warns",
-    [
-        (lambda: _hybrid_specs(draft=False), True),
-        (
-            lambda: {
-                "layers.0": new_kv_cache_layer(),
-                "draft.0": new_kv_cache_layer(),
-            },
-            False,
+        method=method,
+        num_speculative_tokens=3,
+        draft_model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(), architectures=[]
         ),
-    ],
-    ids=["untagged_hybrid", "untagged_uniform_attention"],
-)
-def test_warns_only_when_untagged_draft_meets_mamba(make_specs, warns, caplog_vllm):
-    _spec_decode_kv_cache_groups([make_specs()])
-    warned = "could be identified as the draft model's" in caplog_vllm.text
-    assert warned == warns
+        use_dspark=lambda: method == "dspark",
+        use_multi_module_mtp=lambda: False,
+        parallel_drafting=False,
+        prefill_context_kv_only=False,
+    )
+    with set_current_vllm_config(config):
+        target = Attention(
+            num_heads=1,
+            head_size=64,
+            scale=0.125,
+            cache_config=config.cache_config,
+            per_layer_sliding_window=64,
+            prefix="layers.1",
+            attn_backend=CPUAttentionBackend,
+        )
+        draft = Attention(
+            num_heads=1,
+            head_size=64,
+            scale=0.125,
+            cache_config=config.cache_config,
+            per_layer_sliding_window=64,
+            prefix="draft.0",
+            attn_backend=CPUAttentionBackend,
+        )
+        draft.is_draft_layer = True
+        target_layer = target.get_kv_cache_config(config)
+        draft_layer = draft.get_kv_cache_config(config)
+    assert target_layer is not None and draft_layer is not None
+    layers = {
+        "layers.0": full_layer(new_kv_cache_spec()),
+        "layers.1": target_layer,
+        "draft.0": draft_layer,
+    }
+    configs = get_kv_cache_configs(config, [layers], [2**30])
+    manager_config_by_layer = {
+        name: group.manager_config
+        for group in generate_scheduler_kv_cache_config(configs).kv_cache_groups
+        for name in group.layer_names
+    }
+
+    assert manager_config_by_layer["layers.1"].manager_cls is SlidingWindowManager
+    draft_config = manager_config_by_layer["draft.0"]
+    if num_lookahead_tokens is None:
+        assert draft_config.manager_cls is SlidingWindowManager
+        return
+    assert draft_config.manager_cls is DFlashSlidingWindowManager
+    params = draft_config.params
+    assert isinstance(params, DFlashSlidingWindowManager.Params)
+    assert params.num_speculative_tokens == 3
+    assert params.max_in_flight_steps == config.max_concurrent_batches
+    assert params.num_lookahead_tokens == num_lookahead_tokens
 
 
 _GQA_SPEC = AttentionSpec(
