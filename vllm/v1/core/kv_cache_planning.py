@@ -9,7 +9,7 @@ from dataclasses import replace
 from functools import partial, reduce
 from typing import TYPE_CHECKING, Any
 
-from vllm.config import SpeculativeConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayerConfig,
     KVCacheLayout,
     KVCacheSpec,
+    KVCacheStage,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
@@ -1017,33 +1018,6 @@ def _get_packed_kv_cache_groups(
     return groups
 
 
-def _warn_if_unannotated_eagle_mamba(
-    spec_config: SpeculativeConfig,
-    kv_cache_groups: list[KVCacheGroup],
-) -> None:
-    """Warn when no KV cache group could be identified as the draft model's.
-
-    Args:
-        spec_config: Config supplying the speculative method.
-        kv_cache_groups: Groups as they will be handed to consumers.
-
-    """
-    if any(group.is_eagle_group for group in kv_cache_groups):
-        return
-    mamba_groups = [
-        idx
-        for idx, group in enumerate(kv_cache_groups)
-        if issubclass(group.manager_cls, MambaManager)
-    ]
-    if not mamba_groups:
-        return
-    logger.warning(
-        "Speculative decoding (method=%s) is enabled but no KV cache group "
-        "could be identified as the draft model's.",
-        spec_config.method,
-    )
-
-
 def _largest_divisor_at_most(value: int, limit: int) -> int:
     for candidate in range(min(value, limit), 0, -1):
         if value % candidate == 0:
@@ -1480,6 +1454,25 @@ def _project_kv_cache_groups_to_worker(
     return projected_groups
 
 
+def get_pipeline_stages(
+    vllm_config: VllmConfig,
+    kv_cache_configs: list[KVCacheConfig],
+) -> tuple[KVCacheStage, ...]:
+    """The KV cache of every pipeline stage, described by the first worker of
+    each stage (workers are ordered by PP rank, then by PCP and TP rank)."""
+    pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
+    workers_per_stage = len(kv_cache_configs) // pipeline_parallel_size
+    builder = get_kv_cache_config_builder(vllm_config)
+    return tuple(
+        KVCacheStage(
+            bytes_per_block=_pool_bytes_per_block_from_builder(
+                builder, vllm_config, config.kv_cache_groups
+            )
+        )
+        for config in kv_cache_configs[::workers_per_stage]
+    )
+
+
 def get_kv_cache_configs(
     vllm_config: VllmConfig,
     layer_configs: list[dict[str, KVCacheLayerConfig]],
@@ -1631,6 +1624,36 @@ def get_kv_cache_configs(
     return kv_cache_configs
 
 
+def resolve_mamba_block_size(
+    vllm_config: VllmConfig,
+    layer_configs: list[dict[str, KVCacheLayerConfig]],
+) -> int | None:
+    """Mamba block size for every worker's prefix-caching Mamba specs, or None if
+    the workers already agree.
+
+    Each worker sizes its Mamba blocks from the attention layers it holds, which
+    a pipeline stage may lack, but the scheduler aligns every Mamba group to one
+    size. The result is the largest size that every attention block size of the
+    model is a multiple of.
+    """
+    if not vllm_config.cache_config.enable_prefix_caching:
+        return None
+    configs = [lc for worker in layer_configs for lc in worker.values()]
+    mamba_sizes = {
+        lc.spec.block_size for lc in configs if isinstance(lc.spec, MambaSpec)
+    }
+    if len(mamba_sizes) <= 1:
+        return None
+    return math.gcd(
+        *(
+            lc.spec.block_size
+            for lc in configs
+            if not isinstance(lc.spec, MambaSpec)
+            and lc.manager_cls.prefix_cacheable(lc.manager_config)
+        )
+    )
+
+
 def get_global_kv_cache_groups(
     vllm_config: VllmConfig,
     layer_configs: list[dict[str, KVCacheLayerConfig]],
@@ -1654,7 +1677,7 @@ def get_global_kv_cache_groups(
 
     # When speculating with more than 1 speculative module (e.g. multi-layered MTP)
     # tag every sliding window with how many extra tokens to retain in the window.
-    extra_retained_tokens = max(0, vllm_config.num_prefill_lookahead_tokens - 1)
+    extra_retained_tokens = vllm_config.num_reprefillable_tokens
     for layer_name, layer_config in merged_layer_configs.items():
         config = layer_config.manager_config
         if isinstance(config.params, SlidingWindowManager.Params):
@@ -1668,18 +1691,7 @@ def get_global_kv_cache_groups(
     # Get global KV cache groups. This also handles spec unification for
     # hybrid models when disable_hybrid_kv_cache_manager is enabled.
     # After this call, merged_layer_configs may be modified in-place.
-    global_kv_cache_groups = get_kv_cache_groups_from_builder(
-        builder, vllm_config, merged_layer_configs
-    )
-    spec_config = vllm_config.speculative_config
-    if spec_config is not None and spec_config.use_eagle_block_drop():
-        draft_layer_names = {
-            name for name, config in merged_layer_configs.items() if config.is_draft
-        }
-        for group in global_kv_cache_groups:
-            group.is_eagle_group = not draft_layer_names.isdisjoint(group.layer_names)
-        _warn_if_unannotated_eagle_mamba(spec_config, global_kv_cache_groups)
-    return global_kv_cache_groups
+    return get_kv_cache_groups_from_builder(builder, vllm_config, merged_layer_configs)
 
 
 class DefaultKVCacheConfigBuilder(KVCacheConfigBuilder):

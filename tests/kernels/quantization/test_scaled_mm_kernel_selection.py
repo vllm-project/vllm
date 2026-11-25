@@ -43,6 +43,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import PlatformEnum
+from vllm.utils.deep_gemm import is_deep_gemm_fp8_linear_requested
 
 pytestmark = pytest.mark.cpu_test
 
@@ -494,3 +495,27 @@ def test_xpu_fp8_kernel_preference(
             weight_shape=(128, 128),
         )
     assert type(kernel) is expected
+
+
+@pytest.mark.parametrize(
+    "kernel_config,requested",
+    [
+        (KernelConfig(), False),
+        (KernelConfig(linear_backend="cutlass"), False),
+        (KernelConfig(linear_backend="deep_gemm"), True),
+        (
+            KernelConfig(linear_backend_per_quant={"fp8_block_w8a8": "deep_gemm"}),
+            True,
+        ),
+        (KernelConfig(linear_backend_per_quant={"fp8_w8a8": "deep_gemm"}), False),
+        (
+            KernelConfig(
+                linear_backend="deep_gemm",
+                linear_backend_per_quant={"fp8_block_w8a8": "cutlass"},
+            ),
+            False,
+        ),
+    ],
+)
+def test_deep_gemm_fp8_linear_requested(kernel_config, requested):
+    assert is_deep_gemm_fp8_linear_requested(kernel_config) is requested
