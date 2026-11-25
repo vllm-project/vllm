@@ -147,6 +147,7 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._finished_jobs = []
     mgr._failed_req_ids = set()
     mgr._sessions = {}
+    mgr._reaped_sessions = []
     mgr._reconnect_backoff = {}
     mgr._data_plane_faults = {}
     mgr._kv_to_session = {}
@@ -1071,6 +1072,7 @@ class _FakeSession:
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
         self.finishes: list[str] = []
+        self.demand_reports: list[object] = []
         self.last_activity_at: float = (
             last_activity_at if last_activity_at is not None else time.monotonic()
         )
@@ -1085,7 +1087,7 @@ class _FakeSession:
         return self._client.has_active_loads or self._server.has_inflight_transfers
 
     def report_demand(self, parent) -> None:
-        pass
+        self.demand_reports.append(parent)
 
     def poll(self):
         result = SessionPollResult(
@@ -3240,6 +3242,20 @@ def test_reset_cache_aborts_load_from_silent_peer(monkeypatch):
     assert primary.num_deferred_release_chunks == 0
 
 
+def test_reaped_session_still_reports_its_demand():
+    """A peer that dies mid-fetch is reaped before its demands are reported."""
+    mgr = _make_manager()
+    mgr._data = SimpleNamespace(remove_remote_peer=lambda pid: None)  # type: ignore[assignment]
+    session = _FakeSession(alive=False)
+    mgr._sessions[session.peer_id] = session  # type: ignore[assignment]
+    mgr._reap_dead_sessions()
+
+    parent = _RecordingParent()
+    mgr.report_demand(parent)  # type: ignore[arg-type]
+    mgr.report_demand(parent)  # type: ignore[arg-type]
+    assert session.demand_reports == [parent]
+
+
 class TestReconnectBackoff:
     """A peer whose session ended on a data-plane fault reconnects at once the
     first time; repeats back off from 1 s up to _RECONNECT_MAX_BACKOFF_S."""
@@ -3492,10 +3508,16 @@ def test_peer_lookup_counts_as_demand_only_after_fetch(fetch):
         else:
             # The peer releases its lookup pin with an empty fetch.
             consumer.on_request_finished(ctx)
-        tiering.on_schedule_end(ScheduleEndContext([], ()))
+        step = tiering.on_schedule_end(ScheduleEndContext([], ()))
         assert list(consumer.get_finished_jobs()) == (
             [JobResult(7, True)] if fetch else []
         )
+        # The demand is reported with the step that matched the fetch.
+        assert step.stats is not None
+        first_demands = step.stats.data["data"].get(
+            CPUOffloadingMetrics.CPU_CHUNK_TIME_TO_FIRST_DEMAND, {}
+        )
+        assert len(first_demands.get((), [])) == int(fetch)
 
         # Fill the four-slot primary tier so the pinned residency is evicted.
         primary = tiering.primary_tier
@@ -3507,10 +3529,6 @@ def test_peer_lookup_counts_as_demand_only_after_fetch(fetch):
         assert stats is not None
         evictions = stats.data["data"][CPUOffloadingMetrics.CPU_CHUNK_EVICTIONS]
         assert evictions == {("true" if fetch else "false",): 1}
-        first_demands = stats.data["data"].get(
-            CPUOffloadingMetrics.CPU_CHUNK_TIME_TO_FIRST_DEMAND, {}
-        )
-        assert len(first_demands.get((), [])) == int(fetch)
     finally:
         tiering.shutdown()
         consumer.shutdown()
