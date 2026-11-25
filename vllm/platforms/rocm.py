@@ -628,6 +628,39 @@ def _get_invalid_reasons(
     return invalid_reasons
 
 
+@cache
+def _flash_attn_runs_on_device(dtype: torch.dtype) -> bool:
+    # An installed flash-attn may lack kernels for this GPU arch; probe the same
+    # entry point the ViT path uses so such builds fall back instead of crashing.
+    try:
+        from flash_attn import flash_attn_varlen_func
+    except ImportError:
+        return False
+    try:
+        q = torch.zeros(1, 1, 64, dtype=dtype, device="cuda")
+        cu_seqlens = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+        flash_attn_varlen_func(
+            q,
+            q,
+            q,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=1,
+            max_seqlen_k=1,
+        )
+        torch.cuda.synchronize()
+    except Exception as e:
+        logger.warning_once(
+            "flash_attn is installed but failed to run on %s (%s: %s); "
+            "falling back to another ViT attention backend.",
+            _GCN_ARCH,
+            type(e).__name__,
+            str(e)[:200],
+        )
+        return False
+    return True
+
+
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
     device_name: str = "rocm"
@@ -950,6 +983,7 @@ class RocmPlatform(Platform):
             (on_cdna() or on_gfx1x())
             and find_spec("flash_attn") is not None
             and (dtype == torch.float16 or dtype == torch.bfloat16)
+            and _flash_attn_runs_on_device(dtype)
         ):
             logger.debug_once("Using Flash Attention backend for ViT model.")
             return AttentionBackendEnum.FLASH_ATTN

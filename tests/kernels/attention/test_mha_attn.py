@@ -71,6 +71,10 @@ def test_mha_attn_platform(default_vllm_config, device: str):
                     "vllm._aiter_ops.rocm_aiter_ops.is_mha_enabled",
                     return_value=aiter_mha_enabled,
                 ),
+                patch(
+                    "vllm.platforms.rocm._flash_attn_runs_on_device",
+                    return_value=True,
+                ),
             ):
                 attn = MMEncoderAttention(16, 64, scale=1)
                 assert attn.attn_backend == expected_backend
@@ -490,3 +494,97 @@ def test_mha_attn_fp8_rejects_wrong_backend(default_vllm_config):
             MMEncoderAttention(4, 64)
     finally:
         vllm_config.model_config = old_model_config
+
+
+def _rocm_vit_backend(probe_result: bool, **kwargs):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    with (
+        patch.object(rocm_aiter_ops, "is_mha_enabled", return_value=False),
+        patch("vllm.platforms.rocm.on_cdna", return_value=False),
+        patch("vllm.platforms.rocm.on_gfx1x", return_value=True),
+        patch("importlib.util.find_spec", return_value=object()),
+        patch(
+            "vllm.platforms.rocm._flash_attn_runs_on_device",
+            return_value=probe_result,
+        ) as probe,
+    ):
+        backend = RocmPlatform.get_vit_attn_backend(64, torch.bfloat16, **kwargs)
+    return backend, probe
+
+
+def test_rocm_vit_backend_flash_attn_when_probe_passes():
+    backend, probe = _rocm_vit_backend(True)
+    assert backend == AttentionBackendEnum.FLASH_ATTN
+    probe.assert_called_once_with(torch.bfloat16)
+
+
+def test_rocm_vit_backend_falls_back_to_sdpa_when_probe_fails():
+    backend, _ = _rocm_vit_backend(False)
+    assert backend == AttentionBackendEnum.TORCH_SDPA
+
+
+def test_rocm_vit_backend_explicit_backend_skips_probe():
+    backend, probe = _rocm_vit_backend(False, backend=AttentionBackendEnum.FLASH_ATTN)
+    assert backend == AttentionBackendEnum.FLASH_ATTN
+    probe.assert_not_called()
+
+
+def _patch_flash_attn_probe(monkeypatch, flash_attn_varlen_func):
+    import sys
+    import types
+
+    from vllm.platforms import rocm
+
+    fake = types.ModuleType("flash_attn")
+    fake.flash_attn_varlen_func = flash_attn_varlen_func
+    monkeypatch.setitem(sys.modules, "flash_attn", fake)
+    # Keep the probe off the GPU: tensors are created on CPU.
+    monkeypatch.setattr(
+        torch,
+        "zeros",
+        lambda *a, **k: torch.empty(*a, **{**k, "device": "cpu"}),
+    )
+    monkeypatch.setattr(
+        torch,
+        "tensor",
+        lambda *a, **k: torch.as_tensor(*a, **{**k, "device": "cpu"}),
+    )
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *a, **k: None)
+    rocm._flash_attn_runs_on_device.cache_clear()
+    return rocm._flash_attn_runs_on_device
+
+
+def test_flash_attn_probe_returns_false_on_runtime_error(monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("device kernel image is invalid")
+
+    probe = _patch_flash_attn_probe(monkeypatch, broken)
+    try:
+        assert probe(torch.bfloat16) is False
+    finally:
+        probe.cache_clear()
+
+
+def test_flash_attn_probe_returns_true_on_success(monkeypatch):
+    calls = []
+    probe = _patch_flash_attn_probe(monkeypatch, lambda *a, **k: calls.append(1))
+    try:
+        assert probe(torch.float16) is True
+        assert probe(torch.float16) is True
+        assert len(calls) == 1
+    finally:
+        probe.cache_clear()
+
+
+def test_flash_attn_probe_returns_false_when_not_importable(monkeypatch):
+    import sys
+
+    from vllm.platforms import rocm
+
+    monkeypatch.setitem(sys.modules, "flash_attn", None)
+    rocm._flash_attn_runs_on_device.cache_clear()
+    try:
+        assert rocm._flash_attn_runs_on_device(torch.bfloat16) is False
+    finally:
+        rocm._flash_attn_runs_on_device.cache_clear()
