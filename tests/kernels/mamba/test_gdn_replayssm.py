@@ -356,3 +356,73 @@ def test_gdn_replayssm_output_and_accepted_state(width, query_len, accepted):
             int(ring_start[1].item()),
         )
         torch.testing.assert_close(reconstructed, accepted_state, atol=2e-2, rtol=0)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10,
+    reason="FlashInfer GDN ReplaySSM requires an SM100-class CUDA device",
+)
+@torch.inference_mode()
+def test_gdn_replayssm_stochastic_rounding_on_flush():
+    """A seed makes the flush round the FP16 state stochastically: outputs and rings
+    match round-to-nearest, each state element moves by at most one ulp, and the
+    same seed gives the same bits."""
+    device, dtype = torch.device("cuda"), torch.bfloat16
+    generator = torch.Generator(device=device).manual_seed(20261124)
+
+    def random_tensor(*shape, scale=1.0):
+        return torch.randn(*shape, generator=generator, device=device) * scale
+
+    caches = (
+        random_tensor(2, 2, 128, 128, scale=0.03).half(),
+        random_tensor(2, 2, 32, 128, scale=0.3).to(dtype),
+        F.normalize(random_tensor(2, 1, 32, 128), dim=-1).to(dtype),
+        random_tensor(2, 2, 32).abs().mul(-0.1).cumsum(-1),
+    )
+    initial = [cache.clone() for cache in caches]
+    # Row 1 holds a full 16-token history, so this one-token step flushes it.
+    cursors = torch.empty(3, 1, dtype=torch.int32, device=device)
+    plan_gdn_replayssm_cursors(
+        torch.tensor([1], dtype=torch.int32, device=device),
+        torch.zeros(2, dtype=torch.int32, device=device),
+        torch.tensor([0, 16], dtype=torch.int32, device=device),
+        cursors,
+    )
+    inputs = dict(
+        kernel=load_gdn_replayssm_kernel(),
+        executed_width=1,
+        mixed_qkv=torch.cat(
+            (random_tensor(1, 256), random_tensor(1, 256, scale=0.1)), -1
+        ).to(dtype),
+        a=random_tensor(1, 2, scale=0.2).to(dtype),
+        b=random_tensor(1, 2).to(dtype),
+        A_log=torch.full((2,), -3.0, device=device),
+        dt_bias=random_tensor(2, scale=0.2).to(dtype),
+        checkpoint_state=caches[0],
+        replayssm_cache=caches[1:],
+        cursors=cursors,
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32, device=device),
+        output_indices=torch.zeros(1, dtype=torch.int32, device=device),
+        num_k_heads=1,
+        num_v_heads=2,
+        head_k_dim=128,
+        head_v_dim=128,
+        uniform_query_length=1,
+    )
+
+    def step(rand_seed):
+        for cache, value in zip(caches, initial):
+            cache.copy_(value)
+        output = run_gdn_replayssm(**inputs, rand_seed=rand_seed)
+        return output, [cache.clone() for cache in caches]
+
+    nearest_output, nearest = step(None)
+    seed = torch.tensor([7], dtype=torch.int64, device=device)
+    output, rounded = step(seed)
+    torch.testing.assert_close(output, nearest_output, rtol=0, atol=0)
+    for ring, nearest_ring in zip(rounded[1:], nearest[1:]):
+        torch.testing.assert_close(ring, nearest_ring, rtol=0, atol=0)
+    assert rounded[0][0].equal(initial[0][0])
+    ulps = rounded[0][1].view(torch.int16).int() - nearest[0][1].view(torch.int16)
+    assert ulps.abs().max() == 1
+    assert step(seed)[1][0].equal(rounded[0])

@@ -3855,11 +3855,6 @@ class VllmConfig:
             raise ValueError(
                 "FlashInfer GDN ReplaySSM requires --mamba-ssm-cache-dtype float16"
             )
-        if self.mamba_config.enable_stochastic_rounding:
-            raise ValueError(
-                "FlashInfer GDN ReplaySSM does not support "
-                "--enable-mamba-cache-stochastic-rounding"
-            )
         # Replay rings and cursors are not part of the pipeline, microbatch, or
         # KV-connector state handoff.
         if self.parallel_config.pipeline_parallel_size > 1:

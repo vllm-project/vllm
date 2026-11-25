@@ -2147,6 +2147,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     self._replayssm_prev_num_accepted,
                     cursors,
                 )
+            if self._replayssm_rand_seeds is not None:
+                self._replayssm_rand_seeds.random_(0, 2**32)
             core_attn_out_spec = run_gdn_replayssm(
                 kernel=self._replayssm_kernel,
                 executed_width=self.replayssm_executed_width,
@@ -2166,6 +2168,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 head_k_dim=self.head_k_dim,
                 head_v_dim=self.head_v_dim,
                 offsets=self._replayssm_offsets,
+                rand_seed=self._replayssm_rand_seed,
+                philox_rounds=self.mamba_config.stochastic_rounding_philox_rounds or 10,
             ).unsqueeze(0)
             last_recurrent_state = None
         elif spec_sequence_masks is not None:
