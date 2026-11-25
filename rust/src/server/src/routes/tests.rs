@@ -7716,6 +7716,20 @@ async fn engine_request_errors_map_to_http_status() {
                        "logprobs": 1, "stream": true}),
                 StatusCode::OK,
             ),
+            (
+                "/v1/completions",
+                json!({"model": model, "prompt": "hello", "echo": true, "stream": true}),
+                StatusCode::OK,
+            ),
+            // Building the echoed prompt's logprobs fails (no tokenizer piece
+            // for token 10000; `return_token_ids` skips decoding the echoed
+            // text), but the engine's error comes first.
+            (
+                "/v1/completions",
+                json!({"model": model, "prompt": [10000, 65], "echo": true, "logprobs": 0,
+                       "return_token_ids": true, "stream": true}),
+                StatusCode::OK,
+            ),
         ];
         for (uri, request, expected_status) in cases {
             let engine_error = error.clone();
@@ -7766,7 +7780,90 @@ async fn engine_request_errors_map_to_http_status() {
                     && text.contains(&error.message),
                 "{uri} {request}: {text}"
             );
+            // Like Python, an echoed prompt does not precede the error of the
+            // update it belongs to.
+            if uri == "/v1/completions" && request["stream"] == true {
+                let first_frame = text.split("\n\n").next().unwrap_or_default();
+                assert!(first_frame.contains("\"error\""), "{request}: {text}");
+            }
         }
+    }
+}
+
+/// A request the engine finishes during prefill, such as an abort, gets no
+/// prompt logprobs. Like Python, the echoed prompt still has one `logprobs`
+/// entry per token, each `null`, and `prompt_logprobs` is the first token's
+/// `[null]`.
+#[tokio::test]
+async fn completions_echo_logprobs_of_request_aborted_during_prefill() {
+    let model = "Qwen/Qwen1.5-0.5B-Chat";
+    for stream in [false, true] {
+        let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+            b"engine-openai",
+            |request_id| {
+                RequestBatchOutputs {
+                    outputs: vec![EngineCoreOutput {
+                        request_id: request_id.to_string(),
+                        finish_reason: Some(EngineCoreFinishReason::Abort),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }
+                .into()
+            },
+            |_| {},
+            Arc::new(FakeChatBackend::new()),
+        )
+        .await;
+        let mut app = build_router(Arc::new(AppState::new(vec![model.to_string()], chat)));
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"model": model, "prompt": "Hi!", "echo": true, "logprobs": 0,
+                               "add_special_tokens": false, "stream": stream})
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+        let choices: Vec<serde_json::Value> = if stream {
+            assert!(!text.contains("\"error\""), "{text}");
+            sse_json_payloads(&text)
+                .into_iter()
+                .flat_map(|event| event["choices"].as_array().cloned().unwrap_or_default())
+                .collect()
+        } else {
+            let response: serde_json::Value = serde_json::from_str(&text).expect("json response");
+            assert_eq!(response["choices"][0]["prompt_logprobs"], json!([null]));
+            response["choices"].as_array().cloned().unwrap_or_default()
+        };
+        let tokens: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| choice["logprobs"]["tokens"].as_array())
+            .flatten()
+            .collect();
+        let token_logprobs: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| choice["logprobs"]["token_logprobs"].as_array())
+            .flatten()
+            .collect();
+        assert_eq!(tokens, [&json!("H"), &json!("i"), &json!("!")], "{text}");
+        assert_eq!(token_logprobs, [&serde_json::Value::Null; 3], "{text}");
+        assert_eq!(
+            choices.last().expect("a choice")["finish_reason"],
+            json!("abort"),
+            "{text}"
+        );
     }
 }
 
