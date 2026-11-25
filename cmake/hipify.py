@@ -53,8 +53,35 @@ if __name__ == "__main__":
     parser.add_argument(
         "--manifest", help="Write generated-to-original source/header provenance."
     )
+    parser.add_argument(
+        "--list-outputs",
+        action="store_true",
+        help="Print every path under the output directory that a run may write, "
+        "one per line, and exit.",
+    )
 
     args = parser.parse_args()
+
+    if args.list_outputs:
+        # A run copies the whole project tree and may write a hipified variant
+        # next to each copy. The build declares all of them so that ninja
+        # re-stats them after hipify instead of using mtimes read beforehand.
+        outputs = set()
+        for source in Path(args.project_dir).resolve().rglob("*"):
+            if not source.is_file():
+                continue
+            rel = os.path.relpath(source, args.project_dir)
+            outputs.add(os.path.abspath(os.path.join(args.output_dir, rel)))
+            outputs.add(
+                os.path.abspath(
+                    os.path.join(
+                        args.output_dir,
+                        get_hip_file_path(rel, is_pytorch_extension=True),
+                    )
+                )
+            )
+        print("\n".join(sorted(outputs)))
+        raise SystemExit(0)
 
     # Limit include scope to project_dir only
     includes = [os.path.join(args.project_dir, "*")]
