@@ -334,10 +334,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
-        # cpu_bytes_to_use smaller than one aligned chunk sizes the shared
-        # region to zero bytes, which cannot be mmap'd; fail fast here with
-        # a clear configuration error instead of surfacing an opaque error
-        # from SharedOffloadRegion in get_manager()/create_worker().
+        # cpu_bytes_to_use smaller than one aligned chunk leaves zero
+        # chunks, which dies in the segment calculation (range() gets a
+        # zero step); fail fast here with a clear configuration error
+        # instead of surfacing an opaque error from SharedOffloadRegion
+        # in get_manager()/create_worker().
         if self.kv_bytes_per_chunk > 0 and self.num_chunks == 0:
             raise ValueError(
                 "cpu_bytes_to_use must be at least one aligned chunk for "
