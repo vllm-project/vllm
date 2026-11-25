@@ -62,7 +62,6 @@ class UMBPStoreConnectorWorker:
         self._pending_stores: list[_StoreBatch] = []
         self._worker_meta = UMBPConnectorWorkerMetadata()
         self._kv_events: list[KVCacheEvent] = []
-        self._kv_devices: set[torch.device] = set()
         self._finished_recving: set[str] = set()
         # Core maps block-level load failures to requests only with one group.
         self._report_failed_requests = report_failed_requests
@@ -76,9 +75,6 @@ class UMBPStoreConnectorWorker:
         if self.layout is not None and self.layout.regions:
             self.layout.register_kv_caches(kv_caches)
         self.runtime.register_buffers(kv_caches)
-        self._kv_devices.update(
-            cache.device for cache in kv_caches.values() if cache.device.type != "cpu"
-        )
 
     def _materialize_plans(
         self, plans: list[BlockTransferPlan]
@@ -116,11 +112,6 @@ class UMBPStoreConnectorWorker:
     ) -> None:
         del forward_context
         self._report_load_completions = metadata.async_load
-        if metadata.load_requests and not metadata.async_load:
-            # Core zeroes a synchronous load's blocks on the caller stream
-            # first, and a transfer is not ordered behind that stream.
-            for device in self._kv_devices:
-                torch.accelerator.synchronize(device)
         for request_id, plans in metadata.load_requests.items():
             if plans:
                 self._submit_loads(request_id, plans)
