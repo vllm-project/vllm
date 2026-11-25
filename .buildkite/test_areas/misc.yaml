@@ -251,6 +251,22 @@ steps:
   - python3 -c "import mori"
   - pytest -v -s -rs v1/kv_connector/unit/test_umbp_*.py
 
+- label: ":computer: (CPU) Prefix Lookup Unit Tests"
+  key: prefix-lookup-unit-cpu
+  automatic_shard: true
+  depends_on:
+  - image-build-cpu
+  device: cpu-small
+  timeout_in_minutes: 20
+  working_dir: /vllm-workspace/tests
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/lookup.py
+  - tests/v1/kv_connector/unit/test_prefix_lookup.py
+  commands:
+  - >-
+    pytest -v -s
+    v1/kv_connector/unit/test_prefix_lookup.py
+
 - label: ":amd: (MI355 DPX) UMBP Connector Integration"
   key: amd-umbp-connector-integration-mi355
   automatic_shard: true
