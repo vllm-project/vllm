@@ -211,8 +211,8 @@ class SparseMQAIndexer(nn.Module):
             num_rows = decode_rows.row_ke.shape[0]
             if num_rows > 0:
                 if indexer_overlap.take_expanded(decode_rows):
-                    # Expanded on the candidate stream, whose DeepGEMM schedule
-                    # workspace cannot be created in a capture: build the schedule.
+                    # Expanded on the candidate stream; the schedule is built here, as
+                    # DeepGEMM cannot create that stream's workspace in a capture.
                     decode_rows.kernel_metadata = decode_schedule(
                         self, decode_rows, sparse_block_kv, decode_rows.sparse_indices
                     )

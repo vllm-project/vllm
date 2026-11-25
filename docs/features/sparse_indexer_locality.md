@@ -18,14 +18,15 @@ layer around the indexer; the kernels and their inputs are unchanged, so the
 outputs are bit-identical. Eager steps and piecewise CUDA graphs keep the stock
 order.
 
-- Kimi K3.1: the indexer's scan and top-k run on another stream and the layer
-  issues the query projections, the output gate, the MLA cache insert and the
-  query preparation meanwhile; sparse attention waits for the kept tokens. The
-  indexer's key projection runs on a side stream beside the query chain.
+- Kimi K3.1: the indexer's scan and top-k run on another stream while the layer
+  issues the KV norm, the query projection, the output gate, the MLA cache
+  insert and the query preparation; sparse attention waits for the kept tokens.
+  The indexer's key projection runs on a side stream beside the query chain.
 - DeepSeek-V4.1: the candidate source layer selects its candidate blocks, and
   expands them into the sparse block ids of its first consumer layer, on a side
   stream that the consumer joins. The main query projection and cache inserts
-  run beside the indexer, and the indexer query beside the index key.
+  run beside the indexer, and the indexer query beside the compressor and the
+  index key.
 
 The overlap is off with micro-batching (`--enable-dbo` or `--ubatch-size`), with
 speculative decoding, and for Kimi K3.1 with an attention backend whose top-k

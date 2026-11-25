@@ -238,8 +238,7 @@ class KimiK3DSAIndexer(nn.Module):
         # The specialized decode merges each rank's packed local top-N in one
         # exchange (0 keeps the generic merge).
         self.dcp_local_topk = init_dcp_topk_merge(vllm_config, index_topk)
-        # wkv_index issued early on its own stream by prefetch_kv.
-        self._kv_stream: torch.cuda.Stream | None = None
+        self._wkv_stream: torch.cuda.Stream | None = None
 
     @property
     def cp_kv_cache_interleave_size(self) -> int:
@@ -330,17 +329,17 @@ class KimiK3DSAIndexer(nn.Module):
             num_tokens,
         )
 
-    def prefetch_kv(
+    def start_wkv_index(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.cuda.Event]:
         """Issue wkv_index, which reads only the layer input, on a side stream
         beside the query chain; `forward` given the result waits for it."""
-        if self._kv_stream is None:
-            self._kv_stream = torch.cuda.Stream(device=hidden_states.device)
-        self._kv_stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(self._kv_stream):
-            kv = self.wkv_index(hidden_states)[0]
-        return kv, self._kv_stream.record_event()
+        if self._wkv_stream is None:
+            self._wkv_stream = torch.cuda.Stream(device=hidden_states.device)
+        self._wkv_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(self._wkv_stream):
+            wkv = self.wkv_index(hidden_states)[0]
+        return wkv, self._wkv_stream.record_event()
 
     def forward(
         self,
@@ -348,7 +347,7 @@ class KimiK3DSAIndexer(nn.Module):
         index_q_input: torch.Tensor | None,
         positions: torch.Tensor | None = None,
         rotary_emb: nn.Module | None = None,
-        prefetched_kv: tuple[torch.Tensor, torch.cuda.Event] | None = None,
+        started_wkv: tuple[torch.Tensor, torch.cuda.Event] | None = None,
     ) -> torch.Tensor:
         if index_q_input is None:
             # q_lora_rank is None: MultiHeadLatentAttention.forward_native
@@ -362,12 +361,12 @@ class KimiK3DSAIndexer(nn.Module):
         index_q = self.wq_index(index_q_input)[0].view(
             -1, self.index_num_heads, self.index_head_dim
         )
-        if prefetched_kv is None:
-            kv = self.wkv_index(hidden_states)[0]
+        if started_wkv is None:
+            wkv = self.wkv_index(hidden_states)[0]
         else:
-            kv, kv_ready = prefetched_kv
-            torch.cuda.current_stream().wait_event(kv_ready)
-        index_k, index_weights = kv.split(
+            wkv, wkv_ready = started_wkv
+            torch.cuda.current_stream().wait_event(wkv_ready)
+        index_k, index_weights = wkv.split(
             [self.index_head_dim, self.index_num_heads], dim=-1
         )
         if rows is not None:
@@ -819,20 +818,20 @@ class KimiK3DSAAttention(nn.Module):
     ) -> torch.Tensor:
         """`MultiHeadLatentAttentionWrapper.forward`'s ops for this layer around a
         deferred indexer top-k: while it runs on another stream, this one issues
-        the work that never reads the kept tokens (kv norm, q_b_proj, RoPE, the
-        output gate, the MLA cache insert and query preparation). The index group's
-        conversion waits for the top-k, and sparse attention for the conversion.
+        the work that never reads the kept tokens (kv norm, q_b_proj, optional
+        RoPE, output gate, MLA cache insert and query preparation). The index
+        group's conversion waits for the top-k, and attention for the conversion.
         """
         assert self.q_lora_rank is not None
         attn = cast(Any, self.mla_attn.mla_attn)
-        prefetched_kv = self.dsa_indexer.prefetch_kv(hidden_states)
+        started_wkv = self.dsa_indexer.start_wkv_index(hidden_states)
         q_c, kv_c, k_pe = self.fused_qkv_a_proj(hidden_states)[0].split(
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
         q_c = self.q_a_layernorm(q_c)
 
         indexer_overlap.request_deferred_topk()
-        self.dsa_indexer(hidden_states, q_c, positions, self.rotary_emb, prefetched_kv)
+        self.dsa_indexer(hidden_states, q_c, positions, self.rotary_emb, started_wkv)
         topk_stream, topk_inputs = indexer_overlap.take_deferred_topk()
 
         kv_c_normed = self.kv_a_layernorm(kv_c)

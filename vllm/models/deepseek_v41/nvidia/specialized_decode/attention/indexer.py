@@ -449,7 +449,7 @@ class CandidateOverlap(CandidateStream):
             return None
         return rows, metadata.sparse_block_kv
 
-    def _schedule(
+    def _expand_and_schedule(
         self, rows: SparseMQARowsMetadata, sparse_block_kv: int, scratch: bool = False
     ) -> torch.Tensor:
         op = self.consumer
@@ -466,7 +466,7 @@ class CandidateOverlap(CandidateStream):
         main = torch.cuda.current_stream()
         self.stream.wait_stream(main)
         with torch.cuda.stream(self.stream):
-            self._schedule(*found, scratch=True)
+            self._expand_and_schedule(*found, scratch=True)
         main.wait_stream(self.stream)
         self.warmed = True
 
@@ -477,6 +477,6 @@ class CandidateOverlap(CandidateStream):
         if found is None or found[0].kernel_metadata is not None:
             return
         rows, sparse_block_kv = found
-        schedule = self.defer(lambda: self._schedule(rows, sparse_block_kv))
+        schedule = self.defer(lambda: self._expand_and_schedule(rows, sparse_block_kv))
         schedule.record_stream(torch.cuda.current_stream())
         rows.kernel_metadata = schedule

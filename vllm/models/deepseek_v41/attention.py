@@ -1078,8 +1078,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """`_prepare_and_attn` with the same ops and inputs, on other streams:
 
         - main: compressor, index K (`wk` and store), indexer op, attention;
-        - aux 1: index Q (indexer `wq_b`, RoPE, quantization) beside the index
-          K, joined before the indexer op;
+        - aux 1: index Q (indexer `wq_b`, RoPE, quantization) beside the
+          compressor and index K, joined before the indexer op;
         - aux 0: main query (`wq_b`, q norm, RoPE, SWA KV insert) and compressed
           KV insert beside the indexer op, joined before attention, their only reader.
 

@@ -1291,7 +1291,7 @@ def sparse_attn_indexer(
             ):
                 # Defer the candidate selection and the first consumer's block-id
                 # expansion to the candidate stream (VLLM_INDEXER_OVERLAP).
-                def deferred_candidates() -> None:
+                def select_and_expand() -> None:
                     _select_candidate_blocks(
                         logits,
                         None,
@@ -1306,7 +1306,7 @@ def sparse_attn_indexer(
                         attn_metadata_narrowed, candidate_blocks, candidate_block_size
                     )
 
-                indexer_overlap.defer_candidates(deferred_candidates, (logits, vis))
+                indexer_overlap.defer_candidates(select_and_expand, (logits, vis))
             elif candidate_write:
                 _select_candidate_blocks(
                     logits,
