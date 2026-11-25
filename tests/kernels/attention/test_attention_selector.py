@@ -880,7 +880,8 @@ def ampere():
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only backends")
-def test_encoder_only_attention_with_sinks_selects_sink_backend(ampere):
+@pytest.mark.parametrize("window_source", ["layer", "cache"])
+def test_encoder_only_attention_with_sinks_selects_sink_backend(ampere, window_source):
     """FA2 has no sinks, so on SM8x an encoder-only layer with sinks (e.g.
     openai/privacy-filter) must select a backend that supports them."""
     from vllm.model_executor.layers.attention.encoder_only_attention import (
@@ -895,8 +896,12 @@ def test_encoder_only_attention_with_sinks_selects_sink_backend(ampere):
             head_size=64,
             scale=0.125,
             num_kv_heads=2,
-            per_layer_sliding_window=129,
+            per_layer_sliding_window=129 if window_source == "layer" else None,
+            cache_config=CacheConfig(
+                sliding_window=129 if window_source == "cache" else None
+            ),
             prefix="model.layers.0.attn",
             sinks=torch.zeros(num_heads, device="cuda"),
         )
     assert layer.get_attn_backend().supports_sink()
+    assert layer.sliding_window == 129

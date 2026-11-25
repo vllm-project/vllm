@@ -887,6 +887,7 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/v1/attention/backends/mla/cutlass_mla.py
   - vllm/v1/attention/backends/mla/flashinfer_mla.py
+  - vllm/model_executor/layers/attention/encoder_only_attention.py
   - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
   - vllm/cute_utils/
@@ -902,6 +903,7 @@ steps:
   - csrc/ops.h
   - csrc/torch_bindings.cpp
   - tests/kernels/attention/test_flashinfer_mla_decode.py
+  - tests/kernels/attention/test_attention_selector.py
   - tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
   - tests/kernels/attention/test_cache.py
   - tests/kernels/quantization/nvfp4_utils.py
