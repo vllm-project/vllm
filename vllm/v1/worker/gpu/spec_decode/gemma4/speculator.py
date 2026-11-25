@@ -46,8 +46,6 @@ def _copy_target_kv_scales(attn: nn.Module, target_attn: nn.Module) -> None:
 
 
 class Gemma4Speculator(TargetDependentARSpeculator):
-    uses_only_target_kv_cache = True
-
     @property
     def advance_draft_positions(self) -> bool:
         # Gemma4 MTP is Q-only and reads K/V from the target's existing cache.

@@ -27,9 +27,6 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
     hidden states (and, for Gemma4, its KV cache) at each draft step.
     """
 
-    # When true, the drafter has no context of its own to update on K=0 steps.
-    uses_only_target_kv_cache = False
-
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
@@ -134,7 +131,7 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         num_reqs = input_batch.num_reqs
         if num_speculative_tokens is None:
             num_speculative_tokens = self.num_speculative_steps
-        if num_speculative_tokens == 0 and self.uses_only_target_kv_cache:
+        if num_speculative_tokens == 0 and not self.has_draft_kv_cache:
             return self.draft_tokens[:num_reqs].fill_(-1)
         num_tokens = input_batch.num_tokens
         num_tokens_padded = input_batch.num_tokens_after_padding
