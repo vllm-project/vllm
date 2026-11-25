@@ -1252,6 +1252,42 @@ def test_eager_in_flight_store_dedup_across_steps() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 2bb: Eager intra-request dedup (SWA physical-block reuse pattern)
+# ---------------------------------------------------------------------------
+def test_eager_intra_request_dedup_swa_reuse() -> None:
+    """Store each physical block once when a request reuses SWA blocks."""
+    fix = make_scheduler(num_cpu_blocks=16, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    num_logical_blocks = 6
+    req = make_request(num_blocks=num_logical_blocks)
+    kv_blocks = _alloc_and_register(fix, req, num_blocks=4)
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    a, b, c, d = kv_blocks.get_block_ids()[0]
+
+    # SWA reuse: 6 logical positions, 4 distinct physical blocks. ``a`` and
+    # ``b`` are reused at later positions (window slide). The scheduler
+    # extends ``state.block_ids[0]`` with this list verbatim, so the
+    # downstream scan sees the duplicates.
+    swa_block_table = ([a, b, a, c, b, d],)
+    req.num_computed_tokens = num_logical_blocks * BLOCK_SIZE
+    sched_out = make_scheduler_output(
+        {req.request_id: req.num_computed_tokens},
+        new_reqs={req.request_id: swa_block_table},
+    )
+
+    meta = sched.build_connector_meta(sched_out)
+
+    assert meta.store_event >= 0
+    assert len(meta.store_gpu_blocks) == len(set(meta.store_gpu_blocks)), (
+        f"Duplicate gpu_block_ids leaked into store event: {meta.store_gpu_blocks}"
+    )
+    assert set(meta.store_gpu_blocks) == {a, b, c, d}
+    # One CPU block allocated per distinct GPU block — no wasted CPU slots.
+    assert len(meta.store_cpu_blocks) == len(meta.store_gpu_blocks)
+
+
+# ---------------------------------------------------------------------------
 # Test 2c: Lazy duplicate store is skipped
 # ---------------------------------------------------------------------------
 def test_lazy_duplicate_store_skipped() -> None:
