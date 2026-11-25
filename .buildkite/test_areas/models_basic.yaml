@@ -448,8 +448,17 @@ steps:
   - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
   - tests/models/glm5next/
   - vllm/model_executor/layers/mamba/checkpoint.py
+  - vllm/model_executor/layers/linear.py
+  - vllm/v1/attention/ops/pcp.py
+  - vllm/v1/worker/gpu/pcp_manager.py
+  - vllm/v1/worker/gpu/model_states/mamba_hybrid.py
+  - vllm/v1/attention/backends/gdn_attn.py
+  - vllm/v1/attention/backends/mla/indexer.py
+  - tests/v1/worker/test_gpu_pcp_manager.py
+  - vllm/v1/worker/utils.py
   commands:
     - pytest -v -s models/glm5next
+    - pytest -v -s v1/worker/test_gpu_pcp_manager.py -k mamba_pcp
   mirror:
     amd:
       automatic_shard: true

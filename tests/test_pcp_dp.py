@@ -115,11 +115,11 @@ def test_ag_rs_dispatch_and_combine_use_dp_pcp_sizes(monkeypatch, enable_ep):
         lambda: SimpleNamespace(dp_metadata=metadata),
     )
     with metadata.sp_local_sizes(1, pcp_size=2, use_ep=enable_ep):
-        hidden_states, _, _ = manager.dispatch(
+        hidden_states = manager.dispatch(
             torch.tensor(local_tokens),
             torch.ones(len(local_tokens)),
             torch.zeros(len(local_tokens)),
-        )
+        )[0]
         combined = manager.combine(hidden_states)
     assert combined.tolist() == local_tokens
     sizes = [1, 1, 2, 2] if enable_ep else [2, 4]
@@ -137,6 +137,20 @@ def test_decode_cache_write_ignores_dp_padding(slots):
     torch.testing.assert_close(cache_kv, kv[:2])
     torch.testing.assert_close(cache_pe, pe[:2])
     torch.testing.assert_close(cache_slots, slots[:2])
+
+
+@pytest.mark.parametrize("num_tokens", [0, 3])
+def test_pcp_cache_inputs_without_positional_dimensions(num_tokens):
+    """GLM's zero-width positional keys retain explicit empty/decode rows."""
+    kv = torch.arange(num_tokens * 4).reshape(num_tokens, 4)
+    pe = torch.empty(num_tokens, 1, 0)
+    slots = torch.arange(num_tokens)
+    cache_kv, cache_pe, cache_slots = maybe_gather_mla_latent_cache_inputs(
+        kv, pe, slots, num_decode_tokens=num_tokens, use_pcp=True
+    )
+    torch.testing.assert_close(cache_kv, kv)
+    torch.testing.assert_close(cache_pe, pe)
+    torch.testing.assert_close(cache_slots, slots)
 
 
 def test_expanded_slot_mapping_keeps_pcp_prefill_padding(monkeypatch):
@@ -158,4 +172,5 @@ def test_expanded_slot_mapping_keeps_pcp_prefill_padding(monkeypatch):
     )
     assert calls == [1, 1]
     assert cache_kv.shape == (4, 2)
+    assert cache_slots is not None
     assert cache_slots.tolist() == [3, 4, 8, -1]

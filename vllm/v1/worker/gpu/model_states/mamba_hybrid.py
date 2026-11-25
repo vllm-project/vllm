@@ -22,8 +22,7 @@ from vllm.v1.attention.backends.short_conv_attn import (
     ShortConvAttentionMetadataBuilder,
 )
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
@@ -240,38 +239,34 @@ class MambaHybridModelState(DefaultModelState):
     ) -> dict[str, Any]:
         assert ubatch_idx == 0, "DBO is not supported"
         assert model_specific_attn_metadata is None
-        if cudagraph_mode == CUDAGraphMode.FULL:
-            num_reqs = input_batch.num_reqs_after_padding
-            num_tokens = input_batch.num_tokens_after_padding
-        else:
-            num_reqs = input_batch.num_reqs
-            num_tokens = input_batch.num_tokens
-        query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
-        # Prefer the promised bound: a capture dummy's measured max is its even
-        # split, not the length the graph must replay.
-        max_query_len = input_batch.max_query_len
-        if max_query_len is None:
-            max_query_len = input_batch.num_scheduled_tokens.max().item()
-        seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
-        if for_capture:
-            # Capture with worst-case max_seq_len so the graph is valid at any replay.
-            max_seq_len = self.max_model_len
-        else:
-            max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
-
-        is_prefilling_np = input_batch.is_prefilling_np
+        num_reqs = (
+            input_batch.num_reqs_after_padding
+            if cudagraph_mode == CUDAGraphMode.FULL
+            else input_batch.num_reqs
+        )
+        is_prefilling_np = input_batch.is_prefilling_np[: input_batch.num_reqs]
         if input_batch.prefill_runs_as_decode_np is not None:
             # A prompt tail the scheduler padded with placeholder drafts must run
             # as a spec-decode row: the prefill kernels can't roll them back.
             is_prefilling_np = is_prefilling_np & ~input_batch.prefill_runs_as_decode_np
         is_prefilling = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
         is_prefilling[: input_batch.num_reqs] = torch.from_numpy(is_prefilling_np)
+
+        has_mamba_groups = any(
+            isinstance(group.kv_cache_spec, MambaSpec)
+            for groups in attn_groups
+            for group in groups
+        )
         # During CUDAGraph capture, num_decode_draft_tokens_cpu and num_accepted_tokens
         # are created by attn_metadata_builder.build_for_cudagraph_capture, so we only
         # compute them during actual (non-capture) forward execution.
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None
-        if not for_capture and self.vllm_config.num_speculative_tokens > 0:
+        if (
+            has_mamba_groups
+            and not for_capture
+            and self.vllm_config.num_speculative_tokens > 0
+        ):
             num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
             num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[
                 input_batch.idx_mapping
@@ -300,7 +295,7 @@ class MambaHybridModelState(DefaultModelState):
             )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
-        if self.prefix_caching:
+        if has_mamba_groups and self.prefix_caching:
             ctx = self._mamba_ctx
             assert ctx is not None
             aligned_index_builders = []
@@ -321,26 +316,18 @@ class MambaHybridModelState(DefaultModelState):
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
-        attn_metadata = build_attn_metadata(
-            attn_groups=attn_groups,
-            num_reqs=num_reqs,
-            num_tokens=num_tokens,
-            query_start_loc_gpu=input_batch.query_start_loc,
-            query_start_loc_cpu=query_start_loc_cpu,
-            max_query_len=max_query_len,
-            seq_lens=input_batch.seq_lens,
-            max_seq_len=max_seq_len,
+        attn_metadata = super().prepare_attn(
+            input_batch=input_batch,
+            cudagraph_mode=cudagraph_mode,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
+            attn_groups=attn_groups,
             kv_cache_config=kv_cache_config,
-            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-            dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
-            positions=input_batch.positions,
+            for_capture=for_capture,
+            ubatch_idx=ubatch_idx,
             model_specific_attn_metadata=mamba_attn_metadata,
-            for_cudagraph_capture=for_capture,
-            rswa_prefix_lens=input_batch.prompt_lens,
         )
-        if self._use_replayssm_trackers:
+        if has_mamba_groups and self._use_replayssm_trackers:
             self._replayssm_query_start_loc = None
             mamba_metadata = next(
                 (
@@ -359,7 +346,7 @@ class MambaHybridModelState(DefaultModelState):
                 async_tensor_h2d(
                     replayssm_prefilling, out=self._is_prefilling_gpu[:num_reqs]
                 )
-        if self.recoverssm is not None:
+        if has_mamba_groups and self.recoverssm is not None:
             self.recoverssm.record_step(
                 attn_metadata, attn_groups, for_capture=for_capture
             )

@@ -8,7 +8,7 @@ from transformers import Glm5NextTextConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import divide
+from vllm.distributed import divide, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
@@ -43,7 +43,7 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
 from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
-from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import (
     maybe_disable_graph_partition,
     refill_derived,
@@ -60,7 +60,10 @@ from vllm.utils.flashinfer import (
     has_flashinfer_packed_fused_kda_decode,
     has_flashinfer_recurrent_kda,
 )
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backends.gdn_attn import (
+    GDNAttentionBackend,
+    GDNAttentionMetadata,
+)
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -76,6 +79,12 @@ else:
         chunk_kda_with_fused_gate,
         fused_recurrent_kda,
     )
+
+
+class Glm5NextLinearAttentionBackend(GDNAttentionBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -100,7 +109,7 @@ class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
         output_sizes = output_sizes.copy()
         for sid in self.replicated_shard_ids:
             output_sizes[sid] *= tp_size
-        super().__init__(input_size, output_sizes, **kwargs)
+        super().__init__(input_size, output_sizes, tp_size=tp_size, **kwargs)
 
     def weight_loader(
         self,
@@ -210,6 +219,8 @@ def _fused_qkv_conv1d(
         bias=False,
         params_dtype=torch.float32,
         prefix=prefix,
+        tp_size=tp_size,
+        tp_rank=tp_rank,
     )
     conv1d.weight.data = conv1d.weight.data.unsqueeze(1)
     delattr(conv1d.weight, "weight_loader")
@@ -352,6 +363,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     num_heads: int
     conv_size: int
 
+    def get_attn_backend(self):
+        return Glm5NextLinearAttentionBackend
+
     def get_kv_cache_checkpoint_alignment(self, vllm_config: VllmConfig) -> int | None:
         return kda_prefill_checkpoint_alignment(self.kda_prefill_backend)
 
@@ -389,6 +403,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     ) -> None:
         super().__init__(config, vllm_config, prefix)
 
+        tp_world_size = self.tp_size
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        if self.pcp_size > 1:
+            self.tp_rank = self.tp_rank * self.pcp_size + get_pcp_group().rank_in_group
+            self.tp_size *= self.pcp_size
         self.head_dim = config.linear_head_dim
         self.num_heads = config.linear_num_heads
         self.conv_size = config.linear_conv_kernel_dim
@@ -422,6 +441,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             ],
             replicated_shard_ids=(4, 5),
             tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_qkvbfg_a",
@@ -433,12 +453,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.f_b_proj",
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
         )
         self.dt_bias = nn.Parameter(
             torch.empty(divide(projection_size, self.tp_size), dtype=torch.float32)
         )
 
-        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
+        set_weight_attrs(self.dt_bias, {"weight_loader": self._dt_bias_weight_loader})
 
         self.conv1d = _fused_qkv_conv1d(
             self.conv_size,
@@ -451,7 +473,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
         )
-        set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(2)})
+        set_weight_attrs(self.A_log, {"weight_loader": self._a_log_weight_loader})
 
         self.g_b_proj = ColumnParallelLinear(
             self.head_dim,
@@ -459,6 +481,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.g_b_proj",
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
         )
         self.o_norm = FusedRMSNormGated(
             self.head_dim,
@@ -469,22 +493,17 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             projection_size,
             self.hidden_size,
             bias=False,
+            reduce_results=tp_world_size > 1,
             quant_config=self.quant_config,
             prefix=f"{prefix}.o_proj",
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
         )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-
-        # Checkpoints store A_log as 1-D; the model parameter is 4-D.
-        def _a_log_weight_loader(param, loaded_weight):
-            if loaded_weight.dim() == 1:
-                loaded_weight = loaded_weight.view([1, 1, -1, 1])
-            return sharded_weight_loader(2)(param, loaded_weight)
-
-        self.A_log.weight_loader = _a_log_weight_loader
 
         # GLM-5.3-Flash uses a bounded sigmoid gate instead of the default
         # unbounded softplus gate.
@@ -574,6 +593,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 ),
             )
 
+    def _dt_bias_weight_loader(self, param, loaded_weight):
+        size = param.shape[0]
+        default_weight_loader(param, loaded_weight.narrow(0, self.tp_rank * size, size))
+
+    def _a_log_weight_loader(self, param, loaded_weight):
+        if loaded_weight.dim() == 1:
+            loaded_weight = loaded_weight.view(1, 1, -1, 1)
+        size = param.shape[2]
+        default_weight_loader(param, loaded_weight.narrow(2, self.tp_rank * size, size))
+
     def _flashkda_prefill(
         self,
         q: torch.Tensor,
@@ -650,6 +679,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        if self.pcp_size > 1:
+            hidden_states = torch.ops.vllm.pcp_causal_gather(
+                hidden_states, self.pcp_size, self.prefix
+            )
         num_tokens = hidden_states.size(0)
         # One merged GEMM for q, k, v, b, f_a, g_a (replaces 6 separate GEMMs).
         projected = self.in_proj_qkvbfg_a(hidden_states)[0]
@@ -693,7 +726,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if not self._norm_in_forward:
             core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
-        return self.o_proj(core_attn_out)[0]
+        output = self.o_proj(core_attn_out)[0]
+        if self.pcp_size > 1:
+            output = torch.ops.vllm.pcp_causal_scatter(
+                output, self.pcp_size, self.prefix
+            )
+        return output
 
     @property
     def _norm_in_forward(self) -> bool:

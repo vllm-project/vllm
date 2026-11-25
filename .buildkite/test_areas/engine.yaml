@@ -2,6 +2,25 @@ group: Engine
 depends_on:
   - image-build
 steps:
+- label: ":nvidia: (H200) GLM5Next PCP with KDA and MTP"
+  key: glm5next-pcp-e2e
+  device: h200
+  num_devices: 8
+  timeout_in_minutes: 90
+  automatic_shard: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+    - tests/v1/e2e/general/test_glm5next_pcp.py
+    - vllm/models/glm5next/
+    - vllm/model_executor/layers/linear.py
+    - vllm/v1/attention/backends/gdn_attn.py
+    - vllm/v1/attention/backends/mla/indexer.py
+    - vllm/v1/attention/ops/pcp.py
+    - vllm/v1/worker/gpu/
+    - vllm/v1/worker/utils.py
+  commands:
+    - pytest -v -s v1/e2e/general/test_glm5next_pcp.py
+
 - label: ":nvidia: (H200 MIG 18GB) Engine Core"
   key: engine
   automatic_shard: true
