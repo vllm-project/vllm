@@ -36,6 +36,9 @@ steps:
   - vllm/model_executor/layers/fused_moe/experts/zentorch_moe.py
   - tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
   - tests/kernels/mamba/test_cpu_short_conv.py
+  - tests/kernels/mamba/test_short_conv_checkpoint.py
+  - vllm/model_executor/layers/mamba/short_conv.py
+  - vllm/model_executor/layers/mamba/ops/cpu/causal_conv1d.py
   - tests/kernels/mamba/test_causal_conv1d.py
   - tests/kernels/mamba/test_mamba_ssm.py
   - vllm/v1/sample/ops/topk_topp_triton.py
@@ -58,6 +61,7 @@ steps:
       tests/kernels/moe/test_zen_cpu_int8_moe.py \
       tests/test_zentorch_version_pin.py \
       tests/kernels/mamba/test_cpu_short_conv.py \
+      tests/kernels/mamba/test_short_conv_checkpoint.py \
       tests/kernels/test_onednn.py \
       tests/kernels/test_cpu_fused_sampling.py \
       tests/kernels/test_awq_int4_to_int8.py \
@@ -260,6 +264,7 @@ steps:
   - pytest -x -v -s kernels/mamba/cpu/test_cpu_gdn_ops.py
   - pytest -x -v -s kernels/moe/test_cpu_int4_moe.py
   - pytest -x -v -s kernels/mamba/test_cpu_short_conv.py
+  - pytest -x -v -s kernels/mamba/test_short_conv_checkpoint.py
   - pytest -x -v -s kernels/mamba/test_causal_conv1d.py
   - pytest -x -v -s kernels/mamba/test_mamba_ssm.py
   - pytest -x -v -s v1/worker/cpu

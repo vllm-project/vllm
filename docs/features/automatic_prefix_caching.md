@@ -15,6 +15,8 @@ Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an exampl
 
 ## Hybrid Mamba models
 
+On CPU, LFM2 ShortConv layers can save their convolution state at a cache boundary inside a prefill chunk. A later request can reuse that state even when the original prefill continued past the boundary.
+
 With prefix caching enabled, Mamba state is stored only on the Mamba block grid, so a prefix-cache hit can resume only at a block boundary. `--enable-mamba-shared-prefix-checkpoint` also stores a checkpoint at the shared-prefix junction, the point where an earlier request with the same prefix stopped. Requests whose shared prefix ends inside a block can then reuse it.
 
 This helps when many requests share a long system prompt and then diverge. It is off by default, and takes effect only when all of the following hold:

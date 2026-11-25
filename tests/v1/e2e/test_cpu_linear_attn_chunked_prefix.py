@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU chunked-prefill / prefix-caching correctness for linear-attention models."""
+"""CPU chunked prefill and prefix caching for hybrid models with recurrent state."""
 
 import os
 
 import pytest
+import torch
 
 from tests.models.utils import TokensTextLogprobs, check_logprobs_close
 from vllm import LLM, SamplingParams
@@ -130,3 +131,70 @@ def test_prefix_cache_hit_reaches_last_full_block():
     del llm
 
     assert hits == [0, block_size]
+
+
+def test_lfm2_shortconv_internal_checkpoint(tmp_path, monkeypatch, vllm_runner):
+    """One CPU prefill exports an internal ShortConv block for the next request."""
+    from transformers import Lfm2Config, Lfm2ForCausalLM
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    config = Lfm2Config(
+        hidden_size=128,
+        conv_dim=128,
+        block_dim=128,
+        intermediate_size=256,
+        block_multiple_of=64,
+        block_auto_adjust_ff_dim=False,
+        vocab_size=256,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        num_hidden_layers=2,
+        layer_types=["conv", "full_attention"],
+        full_attn_idxs=[1],
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(82)
+        Lfm2ForCausalLM(config).to(torch.bfloat16).save_pretrained(tmp_path)
+
+    with vllm_runner(
+        str(tmp_path),
+        dtype="bfloat16",
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
+        async_scheduling=False,
+        block_size=64,
+        max_model_len=512,
+        max_num_batched_tokens=512,
+        max_num_seqs=1,
+        kv_cache_memory_bytes=64 << 20,
+    ) as runner:
+        llm = runner.llm
+        rng = torch.Generator().manual_seed(186)
+        prefix = torch.randint(16, 256, (256,), generator=rng).tolist()
+        params = SamplingParams(temperature=0, max_tokens=1, detokenize=False)
+        llm.enqueue(
+            TokensPrompt(prompt_token_ids=prefix + [3, 4, 5, 6, 7, 8, 9]), params
+        )
+        # A prefill split at token 256 cannot emit the first token on this step.
+        outputs = llm.llm_engine.step()
+        assert len(outputs) == 1 and outputs[0].finished
+
+        branch = TokensPrompt(prompt_token_ids=prefix + [10, 11, 12, 13, 14, 15])
+        params = SamplingParams(
+            temperature=0, max_tokens=4, ignore_eos=True, detokenize=False, logprobs=1
+        )
+        warm = llm.generate(branch, params)[0]
+        assert llm.reset_prefix_cache()
+        cold = llm.generate(branch, params)[0]
+        assert warm.num_cached_tokens == len(prefix) and cold.num_cached_tokens == 0
+        warm_out, cold_out = warm.outputs[0], cold.outputs[0]
+        assert warm_out.token_ids == cold_out.token_ids
+        assert warm_out.logprobs is not None and cold_out.logprobs is not None
+        for token, warm_step, cold_step in zip(
+            warm_out.token_ids, warm_out.logprobs, cold_out.logprobs, strict=True
+        ):
+            assert warm_step[token].logprob == pytest.approx(
+                cold_step[token].logprob, abs=0.02
+            )
