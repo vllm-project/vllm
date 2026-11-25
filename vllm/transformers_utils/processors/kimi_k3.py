@@ -8,6 +8,31 @@ from transformers.processing_utils import ProcessorMixin
 from vllm.tokenizers.hf import HfTokenizer
 
 
+def encode_k3_text_prompt(
+    tokenizer: HfTokenizer,
+    text: str,
+    image_placeholder: str,
+    *,
+    add_special_tokens: bool = True,
+) -> list[int]:
+    """Tokenize a text prompt, encoding each image placeholder on its own.
+
+    The placeholder is made of ordinary tokens. Encoded together with the
+    surrounding text, its first and last tokens can merge with their
+    neighbours, and the placeholder is then not found in the token ids.
+    """
+    placeholder_ids = tokenizer.encode(image_placeholder, add_special_tokens=False)
+    token_ids: list[int] = []
+    for i, segment in enumerate(text.split(image_placeholder)):
+        if i > 0:
+            token_ids += placeholder_ids
+        if segment:
+            token_ids += tokenizer.encode(
+                segment, add_special_tokens=add_special_tokens
+            )
+    return token_ids
+
+
 class KimiK3Processor(ProcessorMixin):
     """HF-style processor wrapper for the image-only Kimi-K3 model.
 

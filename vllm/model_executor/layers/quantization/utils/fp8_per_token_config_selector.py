@@ -461,6 +461,8 @@ def launch_fp8_per_token(
             sb,
             result,
             bias,
+            None,  # azp_adj_ptr
+            None,  # azp_ptr
             m,
             n,
             k,

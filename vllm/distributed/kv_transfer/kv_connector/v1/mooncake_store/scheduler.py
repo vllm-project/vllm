@@ -9,9 +9,6 @@ from collections.abc import Sequence
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import get_max_offload_tokens
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorMetadata,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (
     MooncakeStoreCoordinator,
 )
@@ -32,8 +29,8 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
-    is_mamba_align_group,
     is_mamba_group,
+    is_mamba_prefix_caching_group,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -174,8 +171,8 @@ class MooncakeStoreScheduler:
         self._store_coord: MooncakeStoreCoordinator | None = None
         self.enable_partial_hash_hits = False
         if not self._capacity_only:
-            assert all(map(is_mamba_align_group, mamba_groups.values())), (
-                "MooncakeStoreScheduler requires mamba_cache_mode='align'"
+            assert all(map(is_mamba_prefix_caching_group, mamba_groups.values())), (
+                "MooncakeStoreScheduler requires prefix caching for Mamba layers"
             )
             self._store_coord = MooncakeStoreCoordinator.from_kv_cache_config(
                 kv_cache_config, vllm_config, self._block_size, self._hash_block_size
@@ -194,6 +191,10 @@ class MooncakeStoreScheduler:
         self._request_trackers: dict[str, RequestTracker] = {}
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
+        # Requests whose store load failed. The lookup may keep reporting the
+        # hit while the GET keeps failing, so they skip the store from then on
+        # and recompute locally instead of reloading in a loop.
+        self._load_failed_req_ids: set[str] = set()
         self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
         self._finished_lookahead_metas: dict[str, ReqMeta] = {}
 
@@ -232,7 +233,7 @@ class MooncakeStoreScheduler:
         Returns `(None, False)` when an async lookup is still in flight,
         signaling the scheduler to retry this request on a later step.
         """
-        if not self.enable_lookup:
+        if not self.enable_lookup or request.request_id in self._load_failed_req_ids:
             return 0, False
 
         if request.num_tokens < self._lookup_align():
@@ -316,7 +317,7 @@ class MooncakeStoreScheduler:
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
-    ) -> KVConnectorMetadata:
+    ) -> MooncakeStoreConnectorMetadata:
         """Build connector metadata for this scheduler step."""
         is_consumer = self.kv_role == "kv_consumer"
         can_process_cached = not is_consumer or self.save_decode_cache
@@ -326,6 +327,7 @@ class MooncakeStoreScheduler:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._unfinished_request_ids.discard(finished_req_id)
+            self._load_failed_req_ids.discard(finished_req_id)
 
         preempted_ids = scheduler_output.preempted_req_ids or set()
         for req_id in preempted_ids:
@@ -772,7 +774,16 @@ class MooncakeStoreScheduler:
             )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
-        """Drop the block references of store jobs every rank has finished."""
+        """Record failed loads and drop the block references of store jobs
+        every rank has finished."""
+        # Every load error is reported per request in failed_recving, so the
+        # block-level invalid_block_ids are not needed here. A request aborted
+        # mid-load is cleaned up before its failure arrives; skip it so the
+        # entry is not leaked.
+        self._load_failed_req_ids |= (
+            connector_output.failed_recving & self._unfinished_request_ids
+        )
+
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, MooncakeStoreWorkerMetadata):
             return
