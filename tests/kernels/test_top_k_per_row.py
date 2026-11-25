@@ -984,7 +984,7 @@ def test_gfx942_dsa_decode_topk_runs_flydsl_under_graphs(monkeypatch) -> None:
         fill(seed)
         indices.fill_(-777)
         graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         check()
 
 
