@@ -10,6 +10,7 @@ test-utils = []
 [dependencies]
 base64.workspace = true
 fastokens.workspace = true
+json5.workspace = true
 riptoken.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
