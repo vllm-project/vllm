@@ -587,9 +587,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
     ),
-    "TeleFLMForCausalLM": _HfExamplesInfo(
-        "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
-    ),
     "VaultGemmaForCausalLM": _HfExamplesInfo("google/vaultgemma-1b"),
     "YoutuForCausalLM": _HfExamplesInfo("tencent/Youtu-LLM-2B"),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
