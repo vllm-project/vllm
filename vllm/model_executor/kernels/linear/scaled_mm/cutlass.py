@@ -7,6 +7,12 @@ from collections.abc import Sequence
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.kernels.linear.cute_dsl.skinny_fp8_block_gemm import (
+    shape_dynamic_skinny_fp8_block_gemm,
+)
+from vllm.model_executor.kernels.linear.cute_dsl.skinny_fp8_block_gemm_plans import (
+    get_skinny_fp8_block_gemm_plan,
+)
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -281,10 +287,21 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         # Small-M problems run FlashInfer's TRT-LLM groupwise FP8 GEMM, which
         # gives the same output as the CUTLASS kernel (see
         # _use_flashinfer_trtllm_fp8_block_gemm).
-        self.use_flashinfer_small_m = (
-            config.out_dtype == torch.bfloat16
-            and has_flashinfer_trtllm_fp8_groupwise_gemm()
+        # Token counts listed in a measured skinny plan for this weight shape
+        # run the CuTe DSL skinny GEMM instead (both through the same op).
+        skinny_plan = (
+            get_skinny_fp8_block_gemm_plan(*config.weight_shape)
+            if config.out_dtype == torch.bfloat16
+            else None
         )
+        self.use_flashinfer_small_m = config.out_dtype == torch.bfloat16 and (
+            has_flashinfer_trtllm_fp8_groupwise_gemm() or bool(skinny_plan)
+        )
+        if skinny_plan:
+            # Compiled before CUDA graph capture.
+            shape_dynamic_skinny_fp8_block_gemm.request_warmup_configs(
+                torch.bfloat16, list(skinny_plan.values())
+            )
 
     @classmethod
     def is_supported(cls, compute_capability=None):
@@ -351,11 +368,23 @@ def _fp8_block_scaled_mm_small_m(
 ) -> torch.Tensor:
     # Decided per call so that every CUDA graph size takes the faster kernel.
     m, k = A.shape
+    n = B.shape[0]
+    scales_ok = m > 0 and (m == 1 or As.stride(0) == 1) and Bs.is_contiguous()
+    skinny_plan = get_skinny_fp8_block_gemm_plan(n, k)
+    skinny_config = None if skinny_plan is None else skinny_plan.get(m)
     if (
-        m > 0
-        and (m == 1 or As.stride(0) == 1)
-        and Bs.is_contiguous()
-        and _use_flashinfer_trtllm_fp8_block_gemm(m, B.shape[0], k)
+        skinny_config is not None
+        and scales_ok
+        and A.is_contiguous()
+        and B.is_contiguous()
+    ):
+        return shape_dynamic_skinny_fp8_block_gemm(
+            A, As, B, Bs, skinny_config, torch.bfloat16
+        )
+    if (
+        scales_ok
+        and has_flashinfer_trtllm_fp8_groupwise_gemm()
+        and _use_flashinfer_trtllm_fp8_block_gemm(m, n, k)
     ):
         # As is (m, k // 128) with stride (1, m) and Bs.T is (k // 128,
         # n // 128) with stride (1, k // 128): the layouts the kernel expects.
