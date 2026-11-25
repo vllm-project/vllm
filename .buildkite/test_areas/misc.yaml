@@ -152,9 +152,9 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) EC Filesystem Tiering"
+- label: ":nvidia: (H200 MIG 35GB) EC Filesystem Tiering"
   key: ec-filesystem-tiering
-  device: h200
+  device: h200_35gb
   num_devices: 1
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"

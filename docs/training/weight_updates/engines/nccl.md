@@ -162,7 +162,7 @@ rank raises immediately, but the other trainer ranks and the inference workers
 can stay blocked in that update's broadcasts, so tear down the trainer job and
 restart or re-initialize the inference engine before transferring again.
 
-[`rlhf_nccl_multi_source.py`](../../../examples/rl/rlhf_nccl_multi_source.py)
+[`rlhf_nccl_multi_source.py`](../../../../examples/rl/rlhf_nccl_multi_source.py)
 shows two pipeline stages updating one tensor-parallel inference engine.
 
 ### Metadata is sent once, then reused
@@ -200,7 +200,7 @@ lists when they are equal. You only need to think about them if you build
 
 A trainer can speak the [HTTP endpoints](../README.md#api-endpoints) directly, with
 only PyTorch and an HTTP client. It mints the `ncclUniqueId` itself and is NCCL
-rank 0. Reference: [`rlhf_http_nccl_no_vllm.py`](../../../examples/rl/rlhf_http_nccl_no_vllm.py).
+rank 0. Reference: [`rlhf_http_nccl_no_vllm.py`](../../../../examples/rl/rlhf_http_nccl_no_vllm.py).
 
 `POST /init_weight_transfer_engine` body `{"init_info": {...}}`:
 
@@ -309,7 +309,7 @@ client.finish_weight_update()
 
 Sparse NCCL sends only `O(nnz)` indices and values, in batches of at most 512 MiB (a larger patch travels alone). Workers validate and apply each batch before receiving the next, so an invalid batch fails after earlier ones landed. Checkpoint application still uses `O(N)` staging through the native loader, and the caller owns export/diff state and restart or reseed after a partial failure.
 
-[`rlhf_sparse_nccl.py`](../../../examples/rl/rlhf_sparse_nccl.py) demonstrates per-expert checkpoint patches with a Qwen3 MoE TP2/EP2 engine.
+[`rlhf_sparse_nccl.py`](../../../../examples/rl/rlhf_sparse_nccl.py) demonstrates per-expert checkpoint patches with a Qwen3 MoE TP2/EP2 engine.
 
 ## Limitations
 
@@ -323,10 +323,10 @@ Sparse NCCL sends only `O(nnz)` indices and values, in batches of at most 512 Mi
 
 ## Examples
 
-- [RLHF with NCCL weight syncing (`vllm serve`, HTTP)](../../../examples/rl/rlhf_http_nccl.py) - **Start here.** Trainer on one GPU, 2x tensor-parallel fp8 server on two others; HTTP control plane, NCCL data plane. Launches and tears down its own server
-- [Multi-source NCCL weight syncing](../../../examples/rl/rlhf_nccl_multi_source.py) - Two pipeline stages each broadcast their own parameters to one TP2 inference engine within a single lifecycle
-- [NCCL weight syncing from a trainer that does not import vLLM](../../../examples/rl/rlhf_http_nccl_no_vllm.py) - `torch` + `requests` only, `nccl_unique_id_b64` rendezvous; see [Trainer Without vLLM over HTTP](#trainer-without-vllm-over-http)
-- [RLHF with NCCL + FSDP2 and expert parallelism](../../../examples/rl/rlhf_nccl_fsdp_ep.py) - Multi-rank trainer: every FSDP rank builds an engine and joins the `full_tensor()` gather while only rank 0 touches the wire
-- [RLHF with sparse NCCL weight syncing (offline, Ray)](../../../examples/rl/rlhf_sparse_nccl.py) - Qwen3 MoE per-expert checkpoint updates with one trainer GPU and two TP2/EP2 inference GPUs
-- [RLHF with async weight syncing (offline, Ray)](../../../examples/rl/rlhf_async_new_apis.py) - Async generation with mid-flight pause, weight sync, resume, and validation against a fresh model; uses an in-process `AsyncLLMEngine` with `RayVLLMWeightSyncClient`
+- [RLHF with NCCL weight syncing (`vllm serve`, HTTP)](../../../../examples/rl/rlhf_http_nccl.py) - **Start here.** Trainer on one GPU, 2x tensor-parallel fp8 server on two others; HTTP control plane, NCCL data plane. Launches and tears down its own server
+- [Multi-source NCCL weight syncing](../../../../examples/rl/rlhf_nccl_multi_source.py) - Two pipeline stages each broadcast their own parameters to one TP2 inference engine within a single lifecycle
+- [NCCL weight syncing from a trainer that does not import vLLM](../../../../examples/rl/rlhf_http_nccl_no_vllm.py) - `torch` + `requests` only, `nccl_unique_id_b64` rendezvous; see [Trainer Without vLLM over HTTP](#trainer-without-vllm-over-http)
+- [RLHF with NCCL + FSDP2 and expert parallelism](../../../../examples/rl/rlhf_nccl_fsdp_ep.py) - Multi-rank trainer: every FSDP rank builds an engine and joins the `full_tensor()` gather while only rank 0 touches the wire
+- [RLHF with sparse NCCL weight syncing (offline, Ray)](../../../../examples/rl/rlhf_sparse_nccl.py) - Qwen3 MoE per-expert checkpoint updates with one trainer GPU and two TP2/EP2 inference GPUs
+- [RLHF with async weight syncing (offline, Ray)](../../../../examples/rl/rlhf_async_new_apis.py) - Async generation with mid-flight pause, weight sync, resume, and validation against a fresh model; uses an in-process `AsyncLLMEngine` with `RayVLLMWeightSyncClient`
 - [Checkpoint publisher and weight-update verifier](https://github.com/vllm-project/vllm/tree/vllm-state-transition-verifier/tools/state_transition_verifier) - On the `vllm-state-transition-verifier` branch. Pushes a local Hugging Face checkpoint into a running `vllm serve` over NCCL without a trainer, with fixed-token and GSM8K checks before and after the update; use it to verify weight updates for a new model before wiring up an RL framework. Get it with `git fetch origin vllm-state-transition-verifier && git checkout FETCH_HEAD -- tools/state_transition_verifier`, then start from `tools/state_transition_verifier/README.md`
