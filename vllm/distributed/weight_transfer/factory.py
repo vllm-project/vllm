@@ -256,6 +256,12 @@ WeightTransferEngineFactory.register_engine(
     "ModelExpressWeightTransferEngine",
 )
 
+WeightTransferEngineFactory.register_engine(
+    "connex",
+    "vllm.distributed.weight_transfer.connex_engine",
+    "ConnexWeightTransferEngine",
+)
+
 
 # Trainer-side engines, parallel to the worker registry above.
 WeightTransferTrainerFactory.register_engine(
@@ -286,4 +292,10 @@ WeightTransferTrainerFactory.register_engine(
     "nccl_m2n",
     "vllm.distributed.weight_transfer.m2n_trainer",
     "M2NTrainerWeightTransferEngine",
+)
+
+WeightTransferTrainerFactory.register_engine(
+    "connex",
+    "vllm.distributed.weight_transfer.connex_engine",
+    "ConnexTrainerWeightTransferEngine",
 )
