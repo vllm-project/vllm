@@ -319,6 +319,7 @@ class EPDProxyConfig:
     probe_timeout: float = 2.0
     fail_threshold: int = 3
     evicted_ttl: float = 900.0
+    media_fanout_token_ids: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -399,7 +400,13 @@ encoder_rr_lock = asyncio.Lock()
 ###############################################################################
 
 
-MM_TYPES = {"image_url", "audio_url", "input_audio", "video_url"}
+MEDIA_MODALITIES = {
+    "image_url": "image",
+    "audio_url": "audio",
+    "input_audio": "audio",
+    "video_url": "video",
+}
+MM_TYPES = MEDIA_MODALITIES.keys()
 
 # The embeds content type each MM item is rewritten to once the encoder has
 # published its embedding out of band.
@@ -423,6 +430,27 @@ def encoder_rr_assignment(
     urls = [e_urls[(start + i) % len(e_urls)] for i in range(count)]
     next_start = (start + count) % len(e_urls)
     return urls, next_start
+
+
+async def _encoder_groups(
+    items: list[dict], e_urls: list[str]
+) -> list[tuple[str, list[int]]]:
+    global encoder_rr_idx
+    async with encoder_rr_lock:
+        urls, encoder_rr_idx = encoder_rr_assignment(e_urls, encoder_rr_idx, len(items))
+    groups: list[tuple[str, list[int]]] = []
+    image_groups: dict[str, list[int]] = {}
+    for idx, (item, url) in enumerate(zip(items, urls, strict=True)):
+        indices = image_groups.get(url) if item["type"] == "image_url" else None
+        if indices is None or (
+            ENCODER_MAX_BATCH_SIZE and len(indices) >= ENCODER_MAX_BATCH_SIZE
+        ):
+            indices = []
+            if item["type"] == "image_url":
+                image_groups[url] = indices
+            groups.append((url, indices))
+        indices.append(idx)
+    return groups
 
 
 def validate_ec_consumer_routing(
@@ -611,26 +639,7 @@ async def fanout_encoder_primer(
     # Round-robin over encode servers to distribute load a bit. The cursor
     # persists across requests so fan-out doesn't restart at e_urls[0] every
     # time (which would hot-spot the first encoder for single-item requests).
-    global encoder_rr_idx
-    async with encoder_rr_lock:
-        url_cycle, encoder_rr_idx = encoder_rr_assignment(
-            e_urls, encoder_rr_idx, len(mm_items)
-        )
-
-    groups: list[tuple[str, list[int]]] = []
-    image_groups: dict[str, list[int]] = {}
-    for idx, (item, target_url) in enumerate(zip(mm_items, url_cycle)):
-        if item["type"] == "image_url":
-            indices = image_groups.get(target_url)
-            if indices is None or (
-                ENCODER_MAX_BATCH_SIZE and len(indices) >= ENCODER_MAX_BATCH_SIZE
-            ):
-                indices = []
-                image_groups[target_url] = indices
-                groups.append((target_url, indices))
-            indices.append(idx)
-        else:
-            groups.append((target_url, [idx]))
+    groups = await _encoder_groups(mm_items, e_urls)
 
     for target_url, indices in groups:
         # Derive a *child* request id:  <parent>:<index>:<random-short>
@@ -1185,6 +1194,352 @@ async def forward_stream(
 # Public routes
 ###############################################################################
 
+GENERATE_PATH = "/inference/v1/generate"
+GENERATE_MEDIA_OPTIONS = ("mm_processor_kwargs", "media_io_kwargs")
+
+
+async def _read_generate_body(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except ValueError as err:
+        raise HTTPException(400, "Invalid Generate JSON") from err
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected a Generate request object")
+    parts = body.get("content_parts")
+    if parts is not None and (
+        not isinstance(parts, list)
+        or any(
+            not isinstance(part, dict)
+            or not isinstance(part.get("type"), str)
+            or part.get("type") not in MM_TYPES
+            for part in parts
+        )
+    ):
+        raise HTTPException(400, "Invalid Generate content_parts")
+    ids = body.get("token_ids")
+    if (
+        not isinstance(ids, list)
+        or not ids
+        or any(type(t) is not int or t < 0 for t in ids)
+    ):
+        raise HTTPException(400, "Expected a nonempty list of token IDs")
+    if body.get("return_prompt_features") or body.get("encode_media_fragment"):
+        raise HTTPException(400, "Encoder response options are for direct worker calls")
+    return body
+
+
+async def _generate_stage(
+    session: aiohttp.ClientSession,
+    url: str,
+    body: dict,
+    headers: dict[str, str],
+) -> dict | None:
+    async with session.post(url + GENERATE_PATH, json=body, headers=headers) as resp:
+        if resp.status == 501 and body.get("encode_media_fragment"):
+            error = (await resp.json()).get("error", {})
+            if error.get("type") == "MediaFragmentUnsupported":
+                return None
+        if resp.status != 200:
+            if 400 <= resp.status < 500:
+                raise HTTPException(resp.status, (await resp.text())[:512])
+            raise HTTPException(502, "A Generate worker failed")
+        result = await resp.json()
+        if (
+            body.get("encode_media_fragment")
+            and result.get("media_fragment") is not True
+        ):
+            return None  # A worker without fragment support.
+        return result
+
+
+def _splice_media_fragments(
+    token_ids: list[int],
+    offsets: list[int],
+    fragments: list[tuple[list[int], str | None, dict]],
+) -> tuple[list[int], dict, list[str]] | None:
+    # Key by source occurrence, not hash. Only image batches need partitioning.
+    patches = {}
+    for indices, prefix, response in fragments:
+        features = response["features"]
+        ids = response["prompt_token_ids"]
+        spans = features["mm_placeholders"]
+        # Engine feature indices are sorted by offset, stably across modalities.
+        items = sorted(
+            (
+                (m, span, mm_hash, metadata)
+                for m, ranges in spans.items()
+                for span, mm_hash, metadata in zip(
+                    ranges,
+                    features["mm_hashes"][m],
+                    features["mm_metadata"][m],
+                    strict=True,
+                )
+            ),
+            key=lambda item: item[1]["offset"],
+        )
+        if not items or any(
+            meta is None
+            or not 0 <= span["offset"] < span["offset"] + span["length"] <= len(ids)
+            for _, span, _, meta in items
+        ):
+            raise ValueError("Invalid encoder fragment spans")
+        if len(indices) == 1:
+            patches[indices[0]] = (ids, 0, prefix, list(enumerate(items)))
+            continue
+        if set(spans) != {"image"} or len(items) != len(indices):
+            return None
+        start = 0
+        for local_idx, (idx, item) in enumerate(zip(indices, items, strict=True)):
+            span = item[1]
+            if span["offset"] != start:
+                return None
+            end = start + span["length"]
+            patches[idx] = (ids[start:end], start, prefix, [(local_idx, item)])
+            start = end
+        if start != len(ids):
+            return None
+
+    result_ids: list[int] = []
+    result_spans: dict[str, list[dict]] = {}
+    result_hashes: dict[str, list[str]] = {}
+    result_metadata: dict[str, list[str]] = {}
+    transfers: dict[str, list[tuple[int, str]]] = {}
+    start = 0
+    for idx, offset in enumerate(offsets):
+        ids, fragment_start, prefix, indexed_items = patches[idx]
+        result_ids.extend(token_ids[start:offset])
+        for local_idx, (modality, span, mm_hash, item) in indexed_items:
+            new_offset = len(result_ids) + span["offset"] - fragment_start
+            result_spans.setdefault(modality, []).append({**span, "offset": new_offset})
+            result_hashes.setdefault(modality, []).append(mm_hash)
+            result_metadata.setdefault(modality, []).append(item)
+            if prefix is not None:
+                transfers.setdefault(modality, []).append(
+                    (new_offset, f"{prefix}:{local_idx}")
+                )
+        result_ids.extend(ids)
+        start = offset + 1
+    result_ids.extend(token_ids[start:])
+    transfer_ids = [
+        tid
+        for _, tid in sorted(
+            (entry for m in result_spans for entry in transfers.get(m, ())),
+            key=lambda entry: entry[0],
+        )
+    ]
+    return (
+        result_ids,
+        {
+            "mm_placeholders": result_spans,
+            "mm_hashes": result_hashes,
+            "mm_metadata": result_metadata,
+        },
+        transfer_ids,
+    )
+
+
+async def _encode_generate(
+    body: dict, route: _Route, markers: dict[str, int], request_id: str
+) -> dict:
+    parts = body["content_parts"]
+    token_ids = body["token_ids"]
+    modality = MEDIA_MODALITIES[parts[0]["type"]]
+    marker = markers.get(modality)
+    offsets = [i for i, token in enumerate(token_ids) if token == marker]
+    fan_out = (
+        len(parts) > 1
+        and len(offsets) == len(parts)
+        and all(MEDIA_MODALITIES[part["type"]] == modality for part in parts)
+    )
+
+    async def encode(url: str, indices: list[int], fragment: bool):
+        transfer_prefix = None
+        encoder_body = {
+            "model": body.get("model"),
+            "token_ids": [marker] * len(indices) if fragment else token_ids,
+            "content_parts": [parts[i] for i in indices],
+            "sampling_params": {"max_tokens": 1},
+            "return_prompt_features": True,
+        }
+        if fragment:
+            encoder_body["encode_media_fragment"] = modality
+        for key in ("priority", "cache_salt", *GENERATE_MEDIA_OPTIONS):
+            if key in body:
+                encoder_body[key] = body[key]
+        if route.consumer_zmq:
+            transfer_prefix = uuid.uuid4().hex
+            encoder_body["ec_transfer_params"] = {
+                "consumer_zmq": route.consumer_zmq,
+                "transfer_id_prefix": transfer_prefix,
+            }
+        response = await _generate_stage(
+            encode_session,
+            url,
+            encoder_body,
+            {"X-Request-Id": f"{request_id}:e:{uuid.uuid4().hex}"},
+        )
+        return indices, transfer_prefix, response
+
+    groups = await _encoder_groups(parts if fan_out else parts[:1], route.encoder_urls)
+    stitched = None
+    if fan_out and len({url for url, _ in groups}) > 1:
+        results = await asyncio.gather(
+            *(encode(url, indices, True) for url, indices in groups),
+            return_exceptions=True,
+        )
+        successful = []
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+            indices, prefix, data = result
+            if data is not None:
+                successful.append((indices, prefix, data))
+        if len(successful) == len(groups):
+            try:
+                stitched = _splice_media_fragments(token_ids, offsets, successful)
+            except (ValueError, TypeError, LookupError) as err:
+                raise HTTPException(502, "Invalid Generate media fragments") from err
+    if stitched is None:
+        indices, prefix, response = await encode(
+            groups[0][0], list(range(len(parts))), False
+        )
+        assert response is not None  # The full prompt does not use fragment mode.
+        successful = [(indices, prefix, response)]
+        token_ids, features = response["prompt_token_ids"], response["features"]
+        count = sum(len(spans) for spans in features["mm_placeholders"].values())
+        transfer_ids = [f"{prefix}:{i}" for i in range(count)] if prefix else []
+    else:
+        token_ids, features, transfer_ids = stitched
+
+    params: dict[str, Any] = {}
+    for _, _, response in successful:
+        reported = response.get("ec_transfer_params") or {}
+        if not reported:
+            raise HTTPException(
+                502, "The encoder did not return EC transfer parameters"
+            )
+        for mm_hash, value in reported.items():
+            params.setdefault(mm_hash, value)
+    if route.consumer_zmq:
+        params["ec_items"] = [{"transfer_id": tid} for tid in transfer_ids]
+    prepared = {**body, "token_ids": token_ids, "features": features}
+    prepared.pop("content_parts")
+    for key in GENERATE_MEDIA_OPTIONS:
+        prepared.pop(key, None)
+    return {**prepared, "ec_transfer_params": params}
+
+
+async def _prepare_generate(
+    body: dict,
+    route: _Route,
+    markers: dict[str, int],
+    request_id: str,
+    consumer_headers: dict[str, str],
+) -> dict:
+    consumer_body = body
+    if body.get("content_parts"):
+        if body.get("features") is not None:
+            raise HTTPException(400, "EPD proxy requires raw content_parts or features")
+        handoff = await _encode_generate(body, route, markers, request_id)
+        consumer_body = (
+            {**body, "ec_transfer_params": handoff["ec_transfer_params"]}
+            if NO_REWRITE
+            else handoff
+        )
+        body = handoff
+    if route.prefill:
+        response = await _generate_stage(
+            prefill_session,
+            route.prefill.url,
+            {
+                **consumer_body,
+                "stream": False,
+                "stream_options": None,
+                "output_mode": "tokens",
+                "sampling_params": {"max_tokens": 1, "detokenize": False},
+                "kv_transfer_params": {
+                    "do_remote_decode": True,
+                    "do_remote_prefill": False,
+                },
+            },
+            consumer_headers,
+        )
+        kv_params = response.get("kv_transfer_params")
+        if (kv_params or {}).get("do_remote_prefill") is not True:
+            raise HTTPException(502, "The prefill worker did not return KV parameters")
+        body = {**body, "kv_transfer_params": kv_params}
+        body.pop("ec_transfer_params", None)
+        return body
+    return consumer_body
+
+
+async def _forward_generate(
+    body: dict, route: _Route, markers: dict[str, int], request_id: str
+) -> Response:
+    headers = {"X-Request-Id": request_id}
+    consumer_headers = dict(headers)
+    if route.dp_rank is not None:
+        consumer_headers["X-data-parallel-rank"] = str(route.dp_rank)
+
+    # A retry needs fresh EC/KV handles; the original media or text prompt
+    # can be replayed, but externally provided features may have expired.
+    external_handoff = (
+        body.get("features") is not None
+        or body.get("ec_transfer_params")
+        or body.get("kv_transfer_params")
+    )
+    retries = 0 if external_handoff else DECODE_RETRIES
+    for attempt in range(retries + 1):
+        prepared = await _prepare_generate(
+            body, route, markers, request_id, consumer_headers
+        )
+        upstream = await decode_session.post(
+            route.decode.url + GENERATE_PATH,
+            json=prepared,
+            headers=headers if route.prefill else consumer_headers,
+        )
+        if upstream.status == 500 and attempt < retries:
+            async with upstream:
+                await upstream.read()
+            logger.warning(
+                "[%s] Generate decode failed before streaming; retrying", request_id
+            )
+            continue
+        if body.get("stream") and upstream.status == 200:
+
+            async def stream(response: aiohttp.ClientResponse) -> AsyncIterator[bytes]:
+                async with response:
+                    async for chunk in response.content.iter_any():
+                        yield chunk
+
+            return StreamingResponse(stream(upstream), media_type="text/event-stream")
+        async with upstream:
+            return Response(
+                await upstream.read(), upstream.status, media_type="application/json"
+            )
+    raise AssertionError("Generate decode exhausted retries without a response")
+
+
+@app.post(GENERATE_PATH)
+async def generate(request: Request):
+    body = await _read_generate_body(request)
+    req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+    p_url = random.choice(app.state.p_urls) if app.state.p_urls else None
+    index = random.randrange(len(app.state.d_urls))
+    dp_size = app.state.ec_consumer_dp_size
+    rank = next(app.state.replica_counter) % dp_size if dp_size > 1 else None
+    ec_index = index * dp_size + (rank or 0)
+    route = _Route(
+        encoder_urls=app.state.e_urls,
+        prefill=InstanceRecord(InstanceRole.PREFILL, p_url) if p_url else None,
+        decode=InstanceRecord(InstanceRole.DECODE, app.state.d_urls[index]),
+        consumer_zmq=app.state.d_ec_urls[ec_index] if app.state.d_ec_urls else None,
+        dp_rank=rank,
+    )
+    return await _forward_generate(
+        body, route, app.state.media_fanout_token_ids, req_id
+    )
+
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
@@ -1436,6 +1791,15 @@ def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
             )
         return await forward_non_stream(*args, **ranks)
 
+    @app.post(GENERATE_PATH)
+    async def generate(request: Request):
+        body = await _read_generate_body(request)
+        req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
+        route = proxy.route(len(body.get("content_parts") or ()))
+        return await _forward_generate(
+            body, route, config.media_fanout_token_ids, req_id
+        )
+
     @app.get("/v1/models")
     async def list_models():
         decode = registry.pick(InstanceRole.PREFILL_DECODE) or registry.pick(
@@ -1493,6 +1857,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
+    for modality in ("image", "audio", "video"):
+        parser.add_argument(
+            f"--{modality}-fanout-token-id",
+            type=int,
+            help=f"Unexpanded {modality} marker ID for Generate fan-out.",
+        )
     parser.add_argument(
         "--dynamic-registration",
         action="store_true",
@@ -1565,6 +1935,12 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    media_fanout_token_ids = {
+        modality: marker
+        for modality in ("image", "audio", "video")
+        if (marker := getattr(args, f"{modality}_fanout_token_id")) is not None
+    }
+    app.state.media_fanout_token_ids = media_fanout_token_ids
     if args.fail_threshold < 1:
         parser.error("--fail-threshold must be at least 1")
     if args.log_requests:
@@ -1590,6 +1966,7 @@ if __name__ == "__main__":
                 probe_timeout=args.probe_timeout,
                 fail_threshold=args.fail_threshold,
                 evicted_ttl=args.evicted_ttl,
+                media_fanout_token_ids=media_fanout_token_ids,
             )
         )
         if args.log_requests:

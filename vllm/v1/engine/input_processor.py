@@ -545,6 +545,7 @@ class InputProcessor:
             decoder_mm_inputs = decoder_input["mm_kwargs"]
             decoder_mm_positions = decoder_input["mm_placeholders"]
             decoder_mm_hashes = decoder_input["mm_hashes"]
+            metadata_only = decoder_input.get("mm_metadata_only", {})
 
             if not all(
                 isinstance(leaf, str) for leaf in json_iter_leaves(decoder_mm_hashes)
@@ -573,6 +574,7 @@ class InputProcessor:
                         ),
                         mm_position=decoder_mm_positions[modality][idx],
                         mm_hash=base_mm_hash,
+                        is_metadata_only=idx in metadata_only.get(modality, ()),
                     )
                 )
 

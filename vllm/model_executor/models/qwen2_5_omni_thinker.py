@@ -680,6 +680,13 @@ _PASS_AUDIO_FROM_VIDEO_INDICES = Version(transformers.__version__) >= Version(
 
 
 class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
+    def get_independent_mm_token_id(self, modality: str) -> int | None:
+        if modality not in ("audio", "video"):
+            return None
+        processor = self.info.get_hf_processor()
+        token = processor.audio_token if modality == "audio" else processor.video_token
+        return self.info.get_tokenizer().get_vocab().get(token)
+
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 

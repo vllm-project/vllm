@@ -150,6 +150,9 @@ class MultiModalInput(_InputOptions):
     `prompt_token_ids`.
     """
 
+    mm_metadata_only: NotRequired[dict[str, set[int]]]
+    """Per-modality indices carrying layout metadata but no encoder input."""
+
 
 def mm_input(
     prompt_token_ids: list[int],

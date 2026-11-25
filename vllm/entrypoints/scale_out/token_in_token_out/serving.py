@@ -9,6 +9,7 @@ import time
 from collections.abc import AsyncGenerator, Callable
 from collections.abc import Sequence as GenericSequence
 from dataclasses import replace
+from http import HTTPStatus
 from typing import Any, cast
 
 import msgspec
@@ -19,6 +20,7 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     PerRequestMetrics,
     RequestResponseMetadata,
+    validate_request_mm_kwargs,
 )
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
@@ -57,6 +59,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
+from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.outputs import RequestOutput
 from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
 from vllm.renderers.online_derenderer import OnlineDerenderer
@@ -68,6 +71,7 @@ from vllm.utils.serial_utils import numpy2base64
 
 from .logprobs_render import render_json_with_fragments, render_tokens_logprobs
 from .mm_features import (
+    extract_mm_features,
     mm_hashes_from_engine_input,
     mm_kwargs_from_features,
     placeholder_ranges_from_engine_input,
@@ -98,6 +102,19 @@ from .protocol import (
 )
 
 logger = init_logger(__name__)
+
+_FRAGMENT_PART_TYPES = {
+    "image": ("image_url",),
+    "audio": ("audio_url", "input_audio"),
+    "video": ("video_url",),
+}
+
+
+def _contains_list(value: object) -> bool:
+    return isinstance(value, list) or (
+        isinstance(value, dict) and any(_contains_list(v) for v in value.values())
+    )
+
 
 _STREAM_RESPONSE_CLS: dict[OutputMode, Callable[..., GenerateStreamResponseBase]] = {
     "tokens": GenerateTokensStreamResponse,
@@ -238,6 +255,63 @@ class ServingTokens(GenerateBaseServing):
 
         self._preflight()
 
+        if request.return_prompt_features and (
+            request.stream
+            or not request.content_parts
+            or request.features is not None
+            or not self.model_config.is_multimodal_model
+            or self.model_config.is_encoder_decoder
+        ):
+            return self.create_error_response(
+                "return_prompt_features requires a non-streaming request with "
+                "raw content_parts only and a decoder-only multimodal model."
+            )
+
+        if request.content_parts:
+            try:
+                validate_request_mm_kwargs(
+                    mm_processor_kwargs=request.mm_processor_kwargs,
+                    media_io_kwargs=request.media_io_kwargs,
+                    trust_request_mm_kwargs=self.online_renderer.trust_request_mm_kwargs,
+                )
+            except VLLMValidationError as exc:
+                return self.create_error_response(exc)
+
+        fragment = request.encode_media_fragment
+        if fragment:
+            if not request.return_prompt_features:
+                return self.create_error_response(
+                    "encode_media_fragment requires return_prompt_features."
+                )
+            processor = self.renderer.get_mm_processor()
+            marker = processor.get_independent_mm_token_id(fragment)
+            parts = request.content_parts or []
+            fragment_mm_config = self.model_config.get_multimodal_config()
+            if (
+                marker is None
+                or request.token_ids != [marker] * len(parts)
+                or any(
+                    part.get("type") not in _FRAGMENT_PART_TYPES[fragment]
+                    for part in parts
+                )
+                # Per-item option lists would start at index zero on each E.
+                or _contains_list(
+                    fragment_mm_config.merge_mm_processor_kwargs(
+                        request.mm_processor_kwargs or {}
+                    )
+                )
+                or _contains_list(
+                    merge_media_io_kwargs(
+                        fragment_mm_config.media_io_kwargs, request.media_io_kwargs
+                    )
+                )
+            ):
+                return self.create_error_response(
+                    "This request cannot be encoded as an independent media fragment.",
+                    err_type="MediaFragmentUnsupported",
+                    status_code=HTTPStatus.NOT_IMPLEMENTED,
+                )
+
         lora_request = None
         lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
 
@@ -334,6 +408,32 @@ class ServingTokens(GenerateBaseServing):
 
         engine_input: EngineInput
         features = request.features
+        metadata_only = features.metadata_only_indices() if features else {}
+        if metadata_only:
+            config = self.engine_client.vllm_config
+            ec_config = config.ec_transfer_config
+            kv_config = config.kv_transfer_config
+            mm_config = self.model_config.multimodal_config
+            from_ec = (
+                ec_config is not None
+                and ec_config.is_ec_consumer
+                and bool(request.ec_transfer_params)
+            )
+            from_kv = (
+                kv_config is not None
+                and kv_config.is_kv_consumer
+                and (request.kv_transfer_params or {}).get("do_remote_prefill") is True
+            )
+            if not (
+                mm_config
+                and mm_config.allow_missing_mm_embeddings
+                and (from_ec or from_kv)
+            ):
+                return self.create_error_response(
+                    "Metadata-only features require an EC consumer with "
+                    "ec_transfer_params or a KV consumer with remote-prefill "
+                    "transfer parameters."
+                )
         if request.content_parts:
             # Items in features are already expanded; render every token
             # after the last of them, so new placeholders must lie there.
@@ -341,8 +441,17 @@ class ServingTokens(GenerateBaseServing):
             start = max(
                 (p.offset + p.length for rs in feature_ranges for p in rs), default=0
             )
-            tracker = AsyncMultiModalItemTracker(self.model_config)
-            mm_parser = tracker.create_parser()
+            mm_config = self.model_config.multimodal_config
+            media_io_kwargs = merge_media_io_kwargs(
+                mm_config.media_io_kwargs if mm_config else None,
+                request.media_io_kwargs,
+            )
+            tracker = AsyncMultiModalItemTracker(
+                self.model_config, media_io_kwargs=media_io_kwargs
+            )
+            mm_parser = tracker.create_parser(
+                mm_processor_kwargs=request.mm_processor_kwargs
+            )
             for part in request.content_parts:
                 ptype = part.get("type", "")
                 url = part.get("url")
@@ -351,8 +460,21 @@ class ServingTokens(GenerateBaseServing):
                     mm_parser.parse_image(url, uuid)
                 elif ptype == "audio_url":
                     mm_parser.parse_audio(url, uuid)
+                elif ptype == "input_audio":
+                    audio = part.get("input_audio")
+                    if audio is not None and (
+                        not isinstance(audio, dict)
+                        or not isinstance(audio.get("data"), str)
+                        or not isinstance(audio.get("format"), str)
+                    ):
+                        return self.create_error_response(
+                            "input_audio requires data and format strings."
+                        )
+                    mm_parser.parse_input_audio(audio, uuid)
                 elif ptype == "video_url":
                     mm_parser.parse_video(url, uuid)
+                else:
+                    return self.create_error_response("Unsupported content_parts type.")
             mm_data, mm_uuids = await tracker.resolve_items()
             prompt = TokensPrompt(prompt_token_ids=request.token_ids[start:])
             if request.cache_salt is not None:
@@ -361,9 +483,13 @@ class ServingTokens(GenerateBaseServing):
                 prompt["multi_modal_data"] = mm_data
             if mm_uuids:
                 prompt["multi_modal_uuids"] = mm_uuids
+            if request.mm_processor_kwargs is not None:
+                prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
+            if media_io_kwargs is not None:
+                prompt["media_io_kwargs"] = media_io_kwargs
             try:
                 (engine_input,) = await self.online_renderer.renderer.render_cmpl_async(
-                    [prompt]
+                    [prompt], skip_mm_cache=request.return_prompt_features
                 )
             except PromptUpdateMismatchError as e:
                 if not features:
@@ -375,8 +501,7 @@ class ServingTokens(GenerateBaseServing):
         if features:
             mm_placeholders = rebuild_mm_placeholders(features.mm_placeholders)
 
-            # Deserialize full tensor data and optional metadata-only data.
-            # Metadata-only items are valid when ec_transfer_params is set.
+            # Deserialize full tensor data and optional layout metadata.
             mm_kwargs = mm_kwargs_from_features(features)
             if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
                 return error
@@ -400,6 +525,8 @@ class ServingTokens(GenerateBaseServing):
                 mm_placeholders=mm_placeholders,
                 cache_salt=request.cache_salt,
             )
+            if metadata_only:
+                engine_input["mm_metadata_only"] = metadata_only
         elif not request.content_parts:
             (engine_input,) = await self.online_renderer.preprocess_completion(
                 request,
@@ -407,6 +534,23 @@ class ServingTokens(GenerateBaseServing):
                 prompt_embeds=None,
                 skip_mm_cache=True,
             )
+
+        if request.return_prompt_features:
+            parser = self.renderer.get_mm_processor().info.data_parser
+            try:
+                prompt_features = extract_mm_features(
+                    engine_input,
+                    metadata_fields_for=parser.placeholder_metadata_fields,
+                    mm_payload="metadata",
+                    include_empty_metadata=True,
+                )
+            except ValueError as exc:
+                return self.create_error_response(exc)
+            if prompt_features is None or prompt_features.mm_metadata is None:
+                return self.create_error_response(
+                    "No multimodal features were produced from content_parts."
+                )
+            request._response_prompt_features = prompt_features
 
         # Offsets are relative to the decoder prompt, so they are not
         # meaningful for encoder-decoder models.
@@ -758,8 +902,12 @@ class ServingTokens(GenerateBaseServing):
                 else None
             ),
             prompt_token_ids=(
-                final_res.prompt_token_ids if request.return_token_ids else None
+                final_res.prompt_token_ids
+                if request.return_token_ids or request.return_prompt_features
+                else None
             ),
+            features=request._response_prompt_features,
+            media_fragment=True if request.encode_media_fragment else None,
             mm_placeholders=request._response_mm_placeholders,
             mm_hashes=request._response_mm_hashes,
             metrics=per_request_metrics,

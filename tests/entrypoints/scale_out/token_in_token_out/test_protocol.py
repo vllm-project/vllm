@@ -132,6 +132,19 @@ def test_multimodal_features_reject_overlapping_placeholders():
         )
 
 
+def test_multimodal_features_accept_interleaved_video_and_audio():
+    span = {"offset": 1, "length": 4}
+    features = MultiModalFeatures(
+        mm_hashes={"video": ["v"], "audio": ["a"]},
+        mm_placeholders={
+            "video": [PlaceholderRangeInfo(**span, is_embed=[True, False] * 2)],
+            "audio": [PlaceholderRangeInfo(**span, is_embed=[False, True] * 2)],
+        },
+        mm_metadata={"video": ["v"], "audio": ["a"]},
+    )
+    assert list(features.mm_placeholders) == ["video", "audio"]
+
+
 def test_generate_request_rejects_placeholder_outside_prompt():
     with pytest.raises(ValueError, match="within the token_ids sequence"):
         GenerateRequest(

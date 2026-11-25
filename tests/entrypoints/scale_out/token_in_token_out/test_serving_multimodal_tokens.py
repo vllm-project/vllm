@@ -58,6 +58,29 @@ async def client(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("mm_processor_kwargs", {"do_resize": True}),
+        ("media_io_kwargs", {"video": {"num_frames": 2}}),
+    ],
+)
+async def test_generate_rejects_untrusted_raw_media_options(client, field, value):
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "token_ids": [151655],
+            "content_parts": [{"type": "image_url", "url": "not-a-media-url"}],
+            "sampling_params": {"max_tokens": 1},
+            field: value,
+        },
+    )
+    assert response.status_code == 400
+    assert "--trust-request-mm-kwargs" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_render_to_generate_roundtrip(client, test_image):
     """End-to-end: render a multimodal chat -> feed into generate -> decode.
 
@@ -227,6 +250,33 @@ async def test_content_parts_generates_tokens(client, test_image):
     assert gen_data["prompt_token_ids"] == expanded
     assert gen_data["mm_placeholders"] == mm_placeholders
     assert gen_data["mm_hashes"] == render_data["features"]["mm_hashes"]
+    assert "features" not in gen_data
+
+
+@pytest.mark.asyncio
+async def test_content_parts_returns_forwardable_features(client, test_image):
+    """Return the rendered layout and metadata, without encoder inputs."""
+    urls = [
+        encode_image_url(test_image, format="PNG"),
+        encode_image_url(Image.new("RGB", (224, 336)), format="PNG"),
+    ]
+    rendered = await _render_image_prompt(client, *urls)
+    features = rendered["features"]
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "token_ids": _collapse_placeholders(
+                rendered["token_ids"], features["mm_placeholders"]
+            ),
+            "content_parts": [{"type": "image_url", "url": url} for url in urls],
+            "sampling_params": {"max_tokens": 1, "temperature": 0.0},
+            "return_prompt_features": True,
+        },
+    )
+    response.raise_for_status()
+    result = response.json()
+    assert result["prompt_token_ids"] == rendered["token_ids"]
+    assert result["features"] == {**features, "kwargs_data": None}
 
 
 @pytest.mark.asyncio

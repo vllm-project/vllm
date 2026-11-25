@@ -1057,6 +1057,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         self.data_parser = self.info.get_data_parser()
 
+    def get_independent_mm_token_id(self, modality: str) -> int | None:
+        """Return the marker if its replacement is independent of other items."""
+        return None
+
     def get_dummy_inputs(
         self,
         seq_len: int,

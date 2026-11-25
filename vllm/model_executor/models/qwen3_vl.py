@@ -1320,6 +1320,11 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
 
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
+    def get_independent_mm_token_id(self, modality: str) -> int | None:
+        if modality == "image":
+            return self.info.get_hf_config().image_token_id
+        return None
+
     def _get_per_video_kwargs(
         self, kwargs: Mapping[str, object], num_videos: int | None = None
     ) -> dict[str, list[Any]]:
