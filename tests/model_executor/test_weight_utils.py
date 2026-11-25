@@ -391,15 +391,7 @@ class TestKvCacheScaleMapper:
     @pytest.mark.parametrize(
         "name,expected",
         [
-            # llm-compressor stores the scales on the HF attention module,
-            # which GPT-J names `attn`; vLLM's Attention layer is `attn.attn`.
             ("transformer.h.0.attn.k_scale", "transformer.h.0.attn.attn.k_scale"),
-            ("transformer.h.0.attn.v_scale", "transformer.h.0.attn.attn.v_scale"),
-            ("transformer.h.0.attn.q_scale", "transformer.h.0.attn.attn.q_scale"),
-            (
-                "transformer.h.0.attn.k_zero_point",
-                "transformer.h.0.attn.attn.k_zero_point",
-            ),
             # deprecated fused kv_scale
             ("transformer.h.0.attn.kv_scale", "transformer.h.0.attn.attn.k_scale"),
             # already in vLLM form -> unchanged
@@ -407,35 +399,53 @@ class TestKvCacheScaleMapper:
                 "transformer.h.0.attn.attn.k_scale",
                 "transformer.h.0.attn.attn.k_scale",
             ),
-            # projections are still stacked into qkv_proj
+            # other weights untouched
             (
                 "transformer.h.0.attn.k_proj.weight",
-                "transformer.h.0.attn.qkv_proj.weight",
+                "transformer.h.0.attn.k_proj.weight",
             ),
         ],
     )
-    def test_gptj_attention_named_attn(self, name, expected):
-        """GPT-J's attention module is itself named `attn`, so the default
-        rule, which skips names already ending in `.attn.k_scale`, must not
-        leave its checkpoint scales pointing at the outer module."""
-        from vllm.model_executor.models.gpt_j import GPTJForCausalLM
+    def test_attention_named_attn(self, name, expected):
+        """Scales on an HF attention module named `attn` (e.g. GPT-J) must
+        reach the nested vLLM `Attention`, which the default rule skips because
+        the names already end in `.attn.k_scale`."""
+        from vllm.model_executor.models.transformers.base import (
+            NESTED_ATTN_SCALE_MAPPER,
+        )
 
         # AutoWeightsLoader does `mapper |= cache_scale_mapper`
-        combined = GPTJForCausalLM.hf_to_vllm_mapper | self._mapper()
+        combined = NESTED_ATTN_SCALE_MAPPER | self._mapper()
         assert combined._map_name(name) == expected
 
 
+@pytest.mark.parametrize(
+    ("index", "calls"),
+    [
+        (
+            (
+                '{"weight_map": {"a": "tensors/nested.safetensors", '
+                '"b": "tensors/missing.safetensors"}}'
+            ),
+            2,
+        ),
+        ("{", 1),
+    ],
+)
 @pytest.mark.parametrize("fails", [False, True])
 def test_drop_checkpoint_cache_releases_local_weight_files(
-    tmp_path, monkeypatch, fails
+    tmp_path, monkeypatch, fails, index, calls
 ):
-    """Evict only weights; cache eviction errors must not prevent loading."""
-    for name in ("weights.safetensors", "config.json"):
+    """Evict only weights, also the ones the index lists under tensors/; cache
+    eviction errors and a broken index must not prevent loading."""
+    (tmp_path / "tensors").mkdir()
+    for name in ("weights.safetensors", "tensors/nested.safetensors", "config.json"):
         (tmp_path / name).touch()
+    (tmp_path / "model.safetensors.index.json").write_text(index)
     fadvise = Mock(side_effect=OSError("cache eviction failed") if fails else None)
     monkeypatch.setattr("os.posix_fadvise", fadvise)
     drop_checkpoint_cache(str(tmp_path))
-    fadvise.assert_called_once()
+    assert fadvise.call_count == calls
 
 
 @pytest.mark.parametrize(

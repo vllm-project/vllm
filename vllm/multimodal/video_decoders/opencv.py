@@ -12,6 +12,7 @@ from vllm.utils.import_utils import PlaceholderModule
 from .base import (
     VideoSourceMetadata,
     VideoTargetMetadata,
+    charge_sampled_frames,
     check_frame_pixel_limit,
 )
 
@@ -34,16 +35,17 @@ def decode_opencv(
     frame_recovery: bool = False,
 ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
     cap = OpenCVVideoBackendMixin.open_video_capture(data)
-    check_frame_pixel_limit(
-        int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-        int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-    )
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    check_frame_pixel_limit(width, height)
     source = loader_cls._prepare_source(
-        OpenCVVideoBackendMixin.get_video_metadata(data)
+        OpenCVVideoBackendMixin.get_video_metadata(data, cap=cap)
     )
     frame_idx = loader_cls.compute_frames_index_to_sample(
         source=source, target=target, **sampling_kwargs
     )
+    # OpenCV reads each distinct index once.
+    charge_sampled_frames(len(set(frame_idx)), width, height)
     frames, valid = loader_cls.read_frames(
         cap,
         frame_idx,
@@ -94,8 +96,11 @@ class OpenCVVideoBackendMixin:
         return count
 
     @staticmethod
-    def get_video_metadata(data: bytes) -> VideoSourceMetadata:
-        cap = OpenCVVideoBackendMixin.open_video_capture(data)
+    def get_video_metadata(
+        data: bytes, *, cap: "cv2.VideoCapture | None" = None
+    ) -> VideoSourceMetadata:
+        if cap is None:
+            cap = OpenCVVideoBackendMixin.open_video_capture(data)
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         if total_frames_num <= 0:
@@ -113,7 +118,7 @@ class OpenCVVideoBackendMixin:
         # may land mid-stream on corrupt files, so only trust it when the
         # stream really ends there. A one-frame tolerance keeps mere header
         # miscounts from being "corrected".
-        if cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1.0):
+        if total_frames_num > 1 and cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1.0):
             visible_frames = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
             at_stream_end = not cap.grab()
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
