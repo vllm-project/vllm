@@ -9,6 +9,9 @@ service Control {
   rpc GetServerInfo (GetServerInfoRequest) returns (ServerInfo) {}
   rpc GetModelInfo (GetModelInfoRequest) returns (ModelInfo) {}
 
+  // Point-in-time engine load.
+  rpc GetLoad (GetLoadRequest) returns (LoadInfo) {}
+
   // Request managed-engine shutdown using the configured shutdown timeout.
   // Returns FAILED_PRECONDITION when this server does not manage the engine process.
   rpc Shutdown (ShutdownRequest) returns (ShutdownResponse) {}
@@ -74,6 +77,30 @@ message ParallelismInfo {
   uint32 decode_context_parallel_size = 5;
   uint64 world_size = 6;
   uint32 data_parallel_size_local = 7;
+}
+
+message GetLoadRequest {
+  // Whether to include the per-rank breakdown in `LoadInfo.ranks`.
+  bool include_per_rank = 1;
+}
+
+message LoadInfo {
+  string instance_id = 1;
+  fixed64 timestamp_unix_nanos = 2;
+  optional uint64 running_requests = 3;
+  optional uint64 waiting_requests = 4;
+  optional uint64 used_kv_blocks = 5;
+  uint64 total_kv_blocks = 6;
+  // Per-engine breakdown; present when requested and non-empty.
+  repeated RankLoadInfo ranks = 7;
+}
+
+message RankLoadInfo {
+  uint32 data_parallel_rank = 1;
+  optional uint64 running_requests = 2;
+  optional uint64 waiting_requests = 3;
+  optional uint64 used_kv_blocks = 4;
+  uint64 total_kv_blocks = 5;
 }
 
 message GetModelInfoRequest {}

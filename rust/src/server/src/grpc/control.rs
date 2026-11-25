@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value as JsonValue;
 use thiserror_ext::AsReport as _;
@@ -9,6 +10,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tonic::{Code, Request, Response, Status};
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::EngineLoadSnapshot;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::utility::{PauseMode as EnginePauseMode, SleepLevel};
 
@@ -248,6 +250,37 @@ impl pb::control_server::Control for ControlServiceImpl {
                 .unwrap_or_default()
                 .to_string(),
         }))
+    }
+
+    async fn get_load(
+        &self,
+        request: Request<pb::GetLoadRequest>,
+    ) -> Result<Response<pb::LoadInfo>, Status> {
+        let include_per_rank = request.into_inner().include_per_rank;
+        let client = self.client();
+        let snapshots = client.load_snapshots();
+        let engines = client
+            .engine_indices()
+            .into_iter()
+            .zip(client.ready_responses())
+            .map(|(index, ready)| {
+                (
+                    index,
+                    ready.num_gpu_blocks,
+                    snapshots.get(&index).copied().flatten(),
+                )
+            })
+            .collect();
+        let timestamp_unix_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        Ok(Response::new(load_info(
+            &self.ready().instance_id,
+            timestamp_unix_nanos,
+            engines,
+            include_per_rank,
+        )))
     }
 
     async fn abort(
@@ -523,6 +556,68 @@ impl pb::control_server::Control for ControlServiceImpl {
     }
 }
 
+fn load_info(
+    instance_id: &str,
+    timestamp_unix_nanos: u64,
+    engines: Vec<(u32, u64, Option<EngineLoadSnapshot>)>,
+    include_per_rank: bool,
+) -> pb::LoadInfo {
+    let mut running_requests = 0;
+    let mut waiting_requests = 0;
+    let mut used_kv_blocks = 0;
+    let mut total_kv_blocks = 0;
+    let mut any_stats = false;
+    let mut ranks = Vec::new();
+
+    for (rank, blocks, snapshot) in engines {
+        total_kv_blocks += blocks;
+        let load = snapshot.map(|snapshot| {
+            any_stats = true;
+            // The scheduler reports KV usage as a fraction of the engine's
+            // blocks; convert back to blocks, rounding to the nearest one.
+            let used = (snapshot.kv_cache_usage.clamp(0.0, 1.0) * blocks as f64).round();
+            (
+                snapshot.running.min(u64::MAX as usize) as u64,
+                snapshot.waiting.min(u64::MAX as usize) as u64,
+                used as u64,
+            )
+        });
+        if let Some((running, waiting, used)) = load {
+            running_requests += running;
+            waiting_requests += waiting;
+            used_kv_blocks += used;
+        }
+        if include_per_rank {
+            ranks.push(pb::RankLoadInfo {
+                data_parallel_rank: rank,
+                running_requests: load.map(|(running, _, _)| running),
+                waiting_requests: load.map(|(_, waiting, _)| waiting),
+                used_kv_blocks: load.map(|(_, _, used)| used),
+                total_kv_blocks: blocks,
+            });
+        }
+    }
+
+    let (running_requests, waiting_requests, used_kv_blocks) = if any_stats {
+        (
+            Some(running_requests),
+            Some(waiting_requests),
+            Some(used_kv_blocks),
+        )
+    } else {
+        (None, None, None)
+    };
+    pb::LoadInfo {
+        instance_id: instance_id.to_string(),
+        timestamp_unix_nanos,
+        running_requests,
+        waiting_requests,
+        used_kv_blocks,
+        total_kv_blocks,
+        ranks,
+    }
+}
+
 pub(super) fn kv_event_source(response: &EngineCoreReadyResponse) -> Option<pb::KvEventSource> {
     let config = response.kv_events_config.as_ref()?;
     if !config.enable_kv_cache_events || config.publisher != "zmq" {
@@ -545,9 +640,11 @@ pub(super) fn kv_event_source(response: &EngineCoreReadyResponse) -> Option<pb::
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
     use tonic::Code;
+    use vllm_engine_core_client::EngineLoadSnapshot;
 
-    use super::load_lora_status;
+    use super::{load_info, load_lora_status};
     use crate::lora::{LoadLoraError, LoraPathAccessError};
 
     #[test]
@@ -556,5 +653,180 @@ mod tests {
             lora_path: "/not/an/adapter".to_string(),
         }));
         assert_eq!(status.code(), Code::NotFound);
+    }
+
+    fn snapshot(running: usize, waiting: usize, kv_cache_usage: f64) -> EngineLoadSnapshot {
+        EngineLoadSnapshot {
+            running,
+            waiting,
+            kv_cache_usage,
+        }
+    }
+
+    #[test]
+    fn load_info_aggregates_reported_engines_and_expands_ranks() {
+        let info = load_info(
+            "instance",
+            1_700_000_000_000_000_000,
+            vec![
+                (0, 100, Some(snapshot(3, 2, 0.25))),
+                (1, 200, Some(snapshot(1, 0, 0.5))),
+            ],
+            true,
+        );
+        expect![[r#"
+            LoadInfo {
+                instance_id: "instance",
+                timestamp_unix_nanos: 1700000000000000000,
+                running_requests: Some(
+                    4,
+                ),
+                waiting_requests: Some(
+                    2,
+                ),
+                used_kv_blocks: Some(
+                    125,
+                ),
+                total_kv_blocks: 300,
+                ranks: [
+                    RankLoadInfo {
+                        data_parallel_rank: 0,
+                        running_requests: Some(
+                            3,
+                        ),
+                        waiting_requests: Some(
+                            2,
+                        ),
+                        used_kv_blocks: Some(
+                            25,
+                        ),
+                        total_kv_blocks: 100,
+                    },
+                    RankLoadInfo {
+                        data_parallel_rank: 1,
+                        running_requests: Some(
+                            1,
+                        ),
+                        waiting_requests: Some(
+                            0,
+                        ),
+                        used_kv_blocks: Some(
+                            100,
+                        ),
+                        total_kv_blocks: 200,
+                    },
+                ],
+            }
+        "#]]
+        .assert_debug_eq(&info);
+    }
+
+    #[test]
+    fn load_info_omits_ranks_unless_requested() {
+        let info = load_info(
+            "instance",
+            42,
+            vec![(0, 100, Some(snapshot(3, 2, 0.25)))],
+            false,
+        );
+        expect![[r#"
+            LoadInfo {
+                instance_id: "instance",
+                timestamp_unix_nanos: 42,
+                running_requests: Some(
+                    3,
+                ),
+                waiting_requests: Some(
+                    2,
+                ),
+                used_kv_blocks: Some(
+                    25,
+                ),
+                total_kv_blocks: 100,
+                ranks: [],
+            }
+        "#]]
+        .assert_debug_eq(&info);
+    }
+
+    #[test]
+    fn load_info_leaves_dynamic_fields_unset_without_scheduler_stats() {
+        let info = load_info("instance", 42, vec![(0, 100, None), (1, 200, None)], true);
+        expect![[r#"
+            LoadInfo {
+                instance_id: "instance",
+                timestamp_unix_nanos: 42,
+                running_requests: None,
+                waiting_requests: None,
+                used_kv_blocks: None,
+                total_kv_blocks: 300,
+                ranks: [
+                    RankLoadInfo {
+                        data_parallel_rank: 0,
+                        running_requests: None,
+                        waiting_requests: None,
+                        used_kv_blocks: None,
+                        total_kv_blocks: 100,
+                    },
+                    RankLoadInfo {
+                        data_parallel_rank: 1,
+                        running_requests: None,
+                        waiting_requests: None,
+                        used_kv_blocks: None,
+                        total_kv_blocks: 200,
+                    },
+                ],
+            }
+        "#]]
+        .assert_debug_eq(&info);
+    }
+
+    #[test]
+    fn load_info_aggregates_only_engines_that_reported() {
+        let info = load_info(
+            "instance",
+            42,
+            vec![(0, 100, Some(snapshot(3, 2, 0.25))), (1, 200, None)],
+            true,
+        );
+        expect![[r#"
+            LoadInfo {
+                instance_id: "instance",
+                timestamp_unix_nanos: 42,
+                running_requests: Some(
+                    3,
+                ),
+                waiting_requests: Some(
+                    2,
+                ),
+                used_kv_blocks: Some(
+                    25,
+                ),
+                total_kv_blocks: 300,
+                ranks: [
+                    RankLoadInfo {
+                        data_parallel_rank: 0,
+                        running_requests: Some(
+                            3,
+                        ),
+                        waiting_requests: Some(
+                            2,
+                        ),
+                        used_kv_blocks: Some(
+                            25,
+                        ),
+                        total_kv_blocks: 100,
+                    },
+                    RankLoadInfo {
+                        data_parallel_rank: 1,
+                        running_requests: None,
+                        waiting_requests: None,
+                        used_kv_blocks: None,
+                        total_kv_blocks: 200,
+                    },
+                ],
+            }
+        "#]]
+        .assert_debug_eq(&info);
     }
 }
