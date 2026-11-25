@@ -1580,9 +1580,6 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             attn_metadata.remapped_epoch = self.index_epoch
 
         if fp8_ds_mla_cache:
-            assert self.sinks is None, (
-                "the fp8_ds_mla sparse MLA path does not support attention sinks"
-            )
             if q.dtype != torch.bfloat16:
                 # A packed fp8 query would need a q_scale the aiter wrapper
                 # does not accept; only the dequantized bf16 form is supported.
@@ -1611,6 +1608,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                 # for an invalid top-k entry, so no slot in the stream is
                 # negative.
                 has_invalid=False,
+                attn_sink=self.sinks,
             )
             return output, None
 

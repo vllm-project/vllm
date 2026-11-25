@@ -33,10 +33,7 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     maybe_prefix,
 )
-from vllm.models.hy_v4.dfly_config import (
-    HYV4DFlySpeculatorConfig,
-    verify_rocm_dfly_kv_cache_dtype,
-)
+from vllm.models.hy_v4.dfly_config import HYV4DFlySpeculatorConfig
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.hy_v4 import HYV4Config
 from vllm.utils.math_utils import round_up
@@ -374,9 +371,6 @@ class HYV4DFlyForCausalLM(nn.Module):
         super().__init__()
         if not current_platform.is_rocm():
             raise NotImplementedError("The HYV4 DFly AMD implementation requires ROCm")
-        # Covers a cache dtype inherited from the target, which the speculative
-        # config cannot see.
-        verify_rocm_dfly_kv_cache_dtype(vllm_config.cache_config.cache_dtype)
         self.model = HYV4DFlyModel(vllm_config, maybe_prefix(prefix, "model"))
         self.config = self.model.config
         self.has_own_embed_tokens = False

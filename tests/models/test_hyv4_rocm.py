@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 import torch
@@ -340,6 +340,17 @@ _E2E_CASES = {
         ),
     ),
 }
+_E2E_CASES["hy4-fp8-ds-mla"] = replace(
+    _E2E_CASES["hy4"],
+    engine_kwargs={**_E2E_CASES["hy4"].engine_kwargs, "kv_cache_dtype": "fp8_ds_mla"},
+)
+_E2E_CASES["hy4-flash-fp8-ds-mla"] = replace(
+    _E2E_CASES["hy4-flash-fp8"],
+    engine_kwargs={
+        **_E2E_CASES["hy4-flash-fp8"].engine_kwargs,
+        "kv_cache_dtype": "fp8_ds_mla",
+    },
+)
 
 _MAX_TOKENS = 12
 

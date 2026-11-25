@@ -676,8 +676,8 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
     and `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1`: AITER's default sparse MLA
     decode kernel reads the wrong KV rows once a layer's KV cache exceeds
     4 GiB (ROCm/aiter#6277), and vLLM warns when the Triton kernel is not
-    selected. HY4 Flash on ROCm also requires BF16 KV storage
-    (`--kv-cache-dtype auto` or `bfloat16`) and OCP FP8.
+    selected. HY4 Flash on ROCm also requires `--kv-cache-dtype` `auto`,
+    `bfloat16` or `fp8_ds_mla`, and OCP FP8.
 
     HY4 Flash does not support LoRA or pipeline parallelism. Published HY4
     Flash checkpoints use `HYV4FlashForConditionalGeneration`, which vLLM maps
