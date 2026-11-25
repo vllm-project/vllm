@@ -86,8 +86,7 @@ impl ManagedEngineConfig {
             .arg(self.handshake_port.to_string())
             .arg("--data-parallel-size")
             .arg(self.data_parallel_size.to_string())
-            // vllm-rs has no multimodal processor cache yet, so the engine's
-            // receiver cache would never be hit. `python_args` can override it.
+            // Managed serve overrides this default when it configures a cache.
             .arg("--mm-processor-cache-gb")
             .arg("0");
         if let Some(client_handshake_address) = &self.client_handshake_address {

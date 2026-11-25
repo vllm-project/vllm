@@ -1086,11 +1086,21 @@ impl SharedRuntimeArgs {
             && self.mm_processor_cache_gb > 0.0
     }
 
-    /// Build the shm cache configuration for this process and handshake port,
-    /// or `None` when the shm cache is disabled.
-    pub fn mm_shm_cache_config(&self, handshake_port: u16) -> Option<MmCacheConfig> {
-        self.mm_shm_cache_enabled().then(|| MmCacheConfig {
-            shm_name: format!("vllm-mm-shm-{}-{handshake_port}", std::process::id()),
+    /// Resolve the SHM segment shared by the frontend and its managed workers.
+    pub fn mm_shm_cache_config(&self, topology: &DataParallelTopology) -> Option<MmCacheConfig> {
+        if self.mm_processor_cache_type != Some(MmProcessorCacheType::Shm)
+            || self.mm_processor_cache_gb == 0.0
+        {
+            return None;
+        }
+        if topology.frontend_engine_count() != 1 || !topology.frontend_local_only() {
+            tracing::warn!(
+                "The SHM multimodal cache requires one colocated engine. Sending media inline."
+            );
+            return None;
+        }
+        Some(MmCacheConfig {
+            shm_name: MmCacheConfig::unique_shm_name(),
             data_buffer_size: gib_to_bytes(self.mm_processor_cache_gb),
             max_object_size: (self.mm_shm_cache_max_object_size_mb as usize) << 20,
         })
@@ -1691,13 +1701,7 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
-    /// Validate the shared cache arguments and, when shm caching is enabled,
-    /// their compatibility with the managed-engine topology.
-    ///
-    /// Mirrors Python's IPC-support check in `_get_cache_type`
-    /// (vllm/multimodal/cache/factories.py): shm caching requires a single
-    /// API process colocated with the engine. Data parallel deployments must
-    /// use external LB so each frontend serves only its colocated rank.
+    /// Validate that a requested SHM cache has a frontend and a local engine.
     pub fn check_mm_shm_cache_support(&self) -> Result<(), String> {
         self.runtime.validate_mm_processor_cache()?;
         if !self.runtime.mm_shm_cache_enabled() {
@@ -1716,16 +1720,6 @@ impl ServeArgs {
                  is disabled by `--data-parallel-size-local 0`"
                     .to_string(),
             );
-        }
-        let external_lb = self.data_parallel_lb.data_parallel_external_lb
-            || self.data_parallel_lb.data_parallel_rank.is_some();
-        if self.managed_engine.data_parallel_size > 1 && !external_lb {
-            return Err(format!(
-                "`--mm-processor-cache-type shm` requires IPC between the frontend and \
-                 engine processes, which requires `--data-parallel-size 1` or \
-                 `--data-parallel-external-lb` (got data parallel size {})",
-                self.managed_engine.data_parallel_size
-            ));
         }
         Ok(())
     }
@@ -1778,6 +1772,7 @@ impl ServeArgs {
         handshake_port: u16,
         topology: &DataParallelTopology,
         client_handshake_address: Option<String>,
+        shm_cache: Option<&MmCacheConfig>,
     ) -> ManagedEngineConfig {
         let reasoning_parser = effective_engine_reasoning_parser(
             &self.runtime.reasoning_parser,
@@ -1831,22 +1826,19 @@ impl ServeArgs {
             topology,
             client_handshake_address,
         );
-        let cache_config = self.runtime.mm_shm_cache_config(handshake_port);
-        if self.runtime.mm_processor_cache_type == Some(MmProcessorCacheType::Shm) {
+        if let Some(cache) = shm_cache {
             config.python_args.extend([
-                "--mm-processor-cache-type".to_string(),
-                "shm".to_string(),
-                "--mm-processor-cache-gb".to_string(),
+                "--mm-processor-cache-type".into(),
+                "shm".into(),
+                "--mm-processor-cache-gb".into(),
                 self.runtime.mm_processor_cache_gb.to_string(),
-                "--mm-shm-cache-max-object-size-mb".to_string(),
+                "--mm-shm-cache-max-object-size-mb".into(),
                 self.runtime.mm_shm_cache_max_object_size_mb.to_string(),
+                "--mm-shm-cache-buffer-name".into(),
+                cache.shm_name.clone(),
             ]);
-        }
-        if let Some(cache_config) = cache_config {
-            config.python_args.extend([
-                "--mm-shm-cache-buffer-name".to_string(),
-                cache_config.shm_name,
-            ]);
+        } else if self.runtime.mm_processor_cache_type == Some(MmProcessorCacheType::Shm) {
+            config.python_args.extend(["--mm-processor-cache-gb".into(), "0".into()]);
         }
         config
     }

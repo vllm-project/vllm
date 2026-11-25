@@ -499,7 +499,7 @@ fn serve_args_merge_dotted_forms_of_frontend_flags() {
     );
     // Shared flags still reach the engine; dotted forms of engine-only flags
     // are left for Python to expand.
-    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None, None);
     let forwarded = |flag: &str| {
         let index = engine.python_args.iter().position(|arg| arg == flag).unwrap();
         serde_json::from_str::<serde_json::Value>(&engine.python_args[index + 1]).unwrap()
@@ -551,7 +551,7 @@ fn serve_args_forward_shutdown_timeout_to_managed_engine() {
     };
     assert_eq!(args.runtime.shutdown_timeout, 60);
 
-    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None, None);
     expect![[r#"
         [
             "--reasoning-parser",
@@ -587,7 +587,9 @@ fn skip_tokenizer_init_reaches_backends_and_managed_engine() {
             "qwen3",
         ]
     "#]]
-    .assert_debug_eq(&args.to_managed_engine_config(5555, &topology(&args), None).python_args);
+    .assert_debug_eq(
+        &args.to_managed_engine_config(5555, &topology(&args), None, None).python_args,
+    );
 
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -625,7 +627,7 @@ fn serve_args_forward_log_level_to_managed_engine() {
     };
 
     // Python's level choices are upper case only.
-    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None, None);
     expect![[r#"
         [
             "--logging-config",
@@ -748,7 +750,7 @@ fn serve_forwards_logging_config_to_managed_engine() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None, None);
     expect![[r#"
         [
             "--logging-config",
@@ -778,7 +780,7 @@ fn serve_logging_config_formatter() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None, None);
     expect![[r#"
         [
             "--logging-config",
@@ -860,7 +862,7 @@ fn serve_args_forward_disable_log_stats_to_managed_engine() {
     };
     assert!(args.runtime.disable_log_stats);
 
-    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None, None);
     expect![[r#"
         [
             "--reasoning-parser",
@@ -887,7 +889,7 @@ fn serve_args_forward_profiler_config_to_managed_engine() {
     };
     assert_eq!(args.runtime.profiler().as_deref(), Some("torch"));
 
-    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None, None);
     let profiler_flag_index = config
         .python_args
         .iter()
@@ -916,7 +918,7 @@ fn serve_args_select_structured_outputs_backend_and_forward_config() {
         let frontend = args.to_frontend_config("tcp://127.0.0.1:0".into(), &topology(&args));
         (
             frontend.structured_outputs_backend,
-            args.to_managed_engine_config(5555, &topology(&args), None).python_args,
+            args.to_managed_engine_config(5555, &topology(&args), None, None).python_args,
         )
     };
 
@@ -1370,7 +1372,7 @@ fn serve_args_forward_max_logprobs_to_frontend_and_managed_engine() {
         args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     assert_eq!(frontend_config.max_logprobs, Some(-1));
 
-    let engine_config = args.to_managed_engine_config(5555, &topology(&args), None);
+    let engine_config = args.to_managed_engine_config(5555, &topology(&args), None, None);
     expect![[r#"
         [
             "--max-logprobs",
@@ -1391,7 +1393,7 @@ fn serve_args_resolve_auto_reasoning_parser_for_managed_engine() {
     };
     assert_eq!(args.runtime.reasoning_parser, ParserSelection::Auto);
 
-    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None, None);
     expect![[r#"
         [
             "--reasoning-parser",
@@ -1413,7 +1415,9 @@ fn serve_args_resolve_unified_reasoning_parser_for_managed_engine() {
             "kimi_k3",
         ]
     "#]]
-    .assert_debug_eq(&args.to_managed_engine_config(5555, &topology(&args), None).python_args);
+    .assert_debug_eq(
+        &args.to_managed_engine_config(5555, &topology(&args), None, None).python_args,
+    );
 }
 
 #[test]
@@ -1431,7 +1435,7 @@ fn serve_args_forward_explicit_reasoning_parser_to_managed_engine() {
         panic!("expected serve args");
     };
 
-    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None, None);
     expect![[r#"
         [
             "--reasoning-parser",
@@ -1456,7 +1460,7 @@ fn serve_args_do_not_forward_disabled_reasoning_parser_to_managed_engine() {
         panic!("expected serve args");
     };
 
-    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None, None);
     assert!(config.python_args.is_empty());
 }
 
@@ -1476,7 +1480,7 @@ fn serve_args_forward_reasoning_parser_even_with_passthrough_reasoning_parser() 
         panic!("expected serve args");
     };
 
-    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None, None);
     expect![[r#"
         [
             "--reasoning-parser",
@@ -1542,7 +1546,7 @@ fn default_mm_loras_reach_config_and_managed_engine() {
         config.default_mm_loras.get(&MmModality::Audio).map(String::as_str),
         Some("org/speech-lora")
     );
-    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None, None);
     let forwarded = engine.python_args.iter().position(|arg| arg == "--default-mm-loras");
     assert_eq!(
         forwarded.map(|index| engine.python_args[index + 1].as_str()),
@@ -2564,7 +2568,9 @@ fn serve_args_resolve_model_sources_and_forward_them_to_managed_engine() {
             "org/config",
         ]
     "#]]
-    .assert_debug_eq(&args.to_managed_engine_config(1234, &topology(&args), None).python_args);
+    .assert_debug_eq(
+        &args.to_managed_engine_config(1234, &topology(&args), None, None).python_args,
+    );
 }
 
 #[test]
@@ -2621,7 +2627,8 @@ fn hf_token_reaches_model_files_and_managed_engine() {
             panic!("expected serve args")
         };
         let config = args.to_frontend_config("tcp://127.0.0.1:1234".to_string(), &topology(&args));
-        let python_args = args.to_managed_engine_config(1234, &topology(&args), None).python_args;
+        let python_args =
+            args.to_managed_engine_config(1234, &topology(&args), None, None).python_args;
         (config, python_args)
     };
 
@@ -2696,7 +2703,7 @@ fn hf_overrides_preserve_merge_patch_in_cli_and_python_bootstrap() {
         serde_json::to_value(&args.runtime.hf_overrides).unwrap(),
         expected
     );
-    let engine = args.to_managed_engine_config(1234, &topology(&args), None);
+    let engine = args.to_managed_engine_config(1234, &topology(&args), None, None);
     let index = engine.python_args.iter().position(|arg| arg == "--hf-overrides").unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&engine.python_args[index + 1]).unwrap(),
@@ -2760,7 +2767,7 @@ fn override_generation_config_reaches_frontend_and_engine() {
         panic!("expected serve args")
     };
     // The managed Python engine reads it too, so it is forwarded unchanged.
-    let engine = args.to_managed_engine_config(1234, &topology(&args), None);
+    let engine = args.to_managed_engine_config(1234, &topology(&args), None, None);
     let index = engine
         .python_args
         .iter()
@@ -2854,7 +2861,7 @@ fn serve_args_forward_auto_max_model_len_to_managed_engine() {
     };
     assert_eq!(args.managed_engine.max_model_len.as_deref(), Some("auto"));
 
-    let config = args.to_managed_engine_config(5555, &topology(&args), None);
+    let config = args.to_managed_engine_config(5555, &topology(&args), None, None);
     expect![[r#"
         [
             "--max-model-len",
@@ -3366,8 +3373,9 @@ fn serve_args_accept_mm_processor_cache_shm() {
     assert_eq!(args.runtime.mm_shm_cache_max_object_size_mb, 64);
     args.check_mm_shm_cache_support().unwrap();
 
-    let config = args.to_managed_engine_config(5555, &topology(&args), None);
-    let shm_config = args.runtime.mm_shm_cache_config(5555).expect("shm cache should be enabled");
+    let topology = topology(&args);
+    let shm_config = args.runtime.mm_shm_cache_config(&topology).unwrap();
+    let config = args.to_managed_engine_config(5555, &topology, None, Some(&shm_config));
     assert_eq!(shm_config.data_buffer_size, 8 << 30);
     assert_eq!(shm_config.max_object_size, 64 << 20);
 
@@ -3398,7 +3406,7 @@ fn serve_args_mm_processor_cache_numeric_defaults_match_python() {
     assert_eq!(args.runtime.mm_processor_cache_type, None);
     assert_eq!(args.runtime.mm_processor_cache_gb, 4.0);
     assert_eq!(args.runtime.mm_shm_cache_max_object_size_mb, 128);
-    assert!(args.runtime.mm_shm_cache_config(5555).is_none());
+    assert!(args.runtime.mm_shm_cache_config(&topology(&args)).is_none());
 }
 
 #[test]
@@ -3419,10 +3427,12 @@ fn serve_args_mm_processor_cache_gb_zero_disables_cache() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert!(args.runtime.mm_shm_cache_config(5555).is_none());
     args.check_mm_shm_cache_support().unwrap();
-    let config = args.to_managed_engine_config(5555, &topology(&args), None);
-    assert!(!config.python_args.iter().any(|arg| arg == "--mm-shm-cache-buffer-name"));
+    let topology = topology(&args);
+    let shm_config = args.runtime.mm_shm_cache_config(&topology);
+    assert!(shm_config.is_none());
+    let config = args.to_managed_engine_config(5555, &topology, None, shm_config.as_ref());
+    assert!(config.python_args.ends_with(&["--mm-processor-cache-gb".into(), "0".into()]));
 }
 
 #[test]
@@ -3477,24 +3487,38 @@ fn serve_args_reject_mm_processor_cache_type_lru() {
 }
 
 #[test]
-fn serve_args_mm_shm_cache_rejects_data_parallel_without_external_lb() {
-    let cli = Cli::try_parse_from([
+fn serve_args_mm_shm_cache_falls_back_when_frontend_serves_multiple_ranks() {
+    let base = [
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
         "--mm-processor-cache-type",
         "shm",
         "--data-parallel-size",
-        "2",
-    ])
-    .unwrap();
-
-    let Command::Serve(args) = cli.command else {
-        panic!("expected serve args");
-    };
-    let error = args.check_mm_shm_cache_support().unwrap_err();
-    assert!(error.contains("--data-parallel-size 1"), "{error}");
-    assert!(error.contains("--data-parallel-external-lb"), "{error}");
+        "4",
+        "--data-parallel-rpc-port",
+        "5555",
+    ];
+    for extra in [
+        &[][..],
+        &["--data-parallel-size-local", "1"],
+        &[
+            "--data-parallel-hybrid-lb",
+            "--data-parallel-size-local",
+            "2",
+        ],
+    ] {
+        let cli = Cli::try_parse_from(base.into_iter().chain(extra.iter().copied())).unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.check_mm_shm_cache_support().unwrap();
+        let topology = topology(&args);
+        let shm_config = args.runtime.mm_shm_cache_config(&topology);
+        assert!(shm_config.is_none());
+        let config = args.to_managed_engine_config(5555, &topology, None, shm_config.as_ref());
+        assert!(config.python_args.ends_with(&["--mm-processor-cache-gb".into(), "0".into()]));
+    }
 }
 
 #[test]
@@ -3519,7 +3543,14 @@ fn serve_args_mm_shm_cache_accepts_external_data_parallel_lb() {
         panic!("expected serve args");
     };
     args.check_mm_shm_cache_support().unwrap();
-    topology(&args);
+    let topology = topology(&args);
+    let shm = args.runtime.mm_shm_cache_config(&topology).unwrap();
+    let config = args.to_managed_engine_config(5555, &topology, None, Some(&shm));
+    assert!(
+        config
+            .python_args
+            .ends_with(&["--mm-shm-cache-buffer-name".into(), shm.shm_name])
+    );
 }
 
 #[test]
@@ -4012,8 +4043,12 @@ fn serve_hybrid_lb_frontend_connects_only_its_ranks() {
     assert_eq!(config.effective_coordinator_mode(true), None);
 
     // The engines dial the rank-0 handshake and this frontend's local one.
-    let engine =
-        args.to_managed_engine_config(13345, &topology, Some("ipc:///tmp/vllm-rs-h".to_string()));
+    let engine = args.to_managed_engine_config(
+        13345,
+        &topology,
+        Some("ipc:///tmp/vllm-rs-h".to_string()),
+        None,
+    );
     let command = engine.to_command();
     expect![[r#"
         [
@@ -4777,7 +4812,7 @@ fn serve_revision_reaches_frontend_and_managed_engine() {
             .as_deref(),
         Some("release")
     );
-    let engine = args.to_managed_engine_config(1234, &topology(&args), None);
+    let engine = args.to_managed_engine_config(1234, &topology(&args), None, None);
     assert!(engine.python_args.windows(2).any(|args| args == ["--revision", "release"]));
 }
 
@@ -4800,7 +4835,7 @@ fn tokens_only_implies_scale_out_and_skip_tokenizer_init() {
     let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     assert!(config.api_server_options.enable_scale_out);
     assert!(config.skip_tokenizer_init);
-    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None, None);
     assert!(engine.python_args.iter().any(|arg| arg == "--skip-tokenizer-init"));
     assert!(!engine.python_args.iter().any(|arg| arg == "--tokens-only"));
 
@@ -4842,7 +4877,7 @@ fn mm_processor_kwargs_reach_frontend_engine_and_render() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args")
     };
-    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None, None);
     let forwarded = engine
         .python_args
         .windows(2)

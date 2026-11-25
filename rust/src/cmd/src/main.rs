@@ -195,20 +195,22 @@ async fn async_main(cli: Cli) -> Result<()> {
             let client_handshake_address = (!args.headless
                 && topology.frontend_engine_start_index() != 0)
                 .then(frontend_ipc_handshake_address);
+            let shm_config = args.runtime.mm_shm_cache_config(&topology);
             let engine_config = args.to_managed_engine_config(
                 handshake_port,
                 &topology,
                 client_handshake_address.clone(),
+                shm_config.as_ref(),
             );
-            // Create the shm multi-modal processor cache (the P0 writer) before
-            // spawning the managed Python engine, so its workers can open the
-            // segment named by `--mm-shm-cache-buffer-name`.
-            let mm_cache = args
-                .runtime
-                .mm_shm_cache_config(handshake_port)
-                .map(|config| MmProcessorShmCache::create(config).map(Arc::new))
-                .transpose()
-                .context("failed to create the shm multi-modal processor cache")?;
+            // The workers open the segment during startup.
+            let mm_cache = match shm_config {
+                Some(config) => {
+                    let writer = MmProcessorShmCache::create(config)
+                        .context("failed to create the shm multi-modal processor cache")?;
+                    Some(Arc::new(writer))
+                }
+                None => None,
+            };
             let handshake_address =
                 client_handshake_address.unwrap_or_else(|| engine_config.handshake_address());
 
