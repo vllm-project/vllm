@@ -224,6 +224,17 @@ class EncoderCudaGraphManager:
             min_path_budget = path_config.min_token_budget
             if min_path_budget is None:
                 budgets = list(self.token_budgets)
+            elif (
+                self.config.requires_exact_token_budget
+                and user_budgets
+                and min_path_budget > 0
+            ):
+                # An explicit list limits both the shapes and the number of graphs.
+                budgets = sorted({b for b in user_budgets if b % min_path_budget == 0})
+            elif (
+                self.config.requires_exact_token_budget and min_path_budget > max_budget
+            ):
+                budgets = []
             else:
                 if min_path_budget <= 0 or min_path_budget > max_budget:
                     raise ValueError(
@@ -495,12 +506,15 @@ class EncoderCudaGraphManager:
         return round_up_to(budgets, total_tokens)
 
     def _path_fitting_budget(self, path: str, tokens: int) -> int | None:
-        """Smallest captured budget on a path; 0 when idle, None if oversized."""
+        """Return a fitting budget, 0 for an idle path, or None for eager execution."""
         if tokens == 0:
             return 0
-        return self._find_smallest_fitting_budget_given_tokens(
+        budget = self._find_smallest_fitting_budget_given_tokens(
             tokens, self.path_token_budgets[path]
         )
+        if self.config.requires_exact_token_budget and budget != tokens:
+            return None
+        return budget
 
     def _get_item_specs(self, mm_kwargs: dict[str, Any]) -> list[EncoderItemSpec]:
         """Get item specs from the model."""

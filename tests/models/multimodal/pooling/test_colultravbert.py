@@ -36,6 +36,8 @@ def page_grid(width: int, height: int) -> tuple[int, int]:
 @pytest.mark.parametrize(
     ("width", "height", "grid"),
     [
+        (384, 64, (1, 6)),
+        (720, 720, (5, 5)),
         (1700, 2200, (5, 4)),
         (2200, 1700, (4, 5)),
         (2000, 2000, (5, 5)),

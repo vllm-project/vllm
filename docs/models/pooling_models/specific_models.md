@@ -240,6 +240,15 @@ An example can be found here: [examples/pooling/score/colqwen3_5_rerank_online.p
 
 ColUltraVBERT pairs the UltraBERT text encoder with a SigLIP vision encoder and returns per-token vectors for MaxSim scoring.
 
+To capture the image encoder and projection with CUDA Graphs, enable
+`compilation_config={"cudagraph_mm_encoder": True}`. Encoder token budgets
+count output embeddings across all tiles in the batch. For the published
+checkpoint each tile contributes 64 tokens. Replay requires an exact tile
+count because padding can change BF16 encoder outputs. With explicit
+`encoder_cudagraph_token_budgets`, only the listed whole-tile shapes are
+captured. For example, `[448, 1344]` enables replay for batches of 7 or 21
+tiles. Other shapes use eager image encoding.
+
 | Architecture | Backbone | Example HF Models |
 | - | - | - |
 | `UltraVBertModel`, `ColUltraVBertForRetrieval` | UltraVBERT | `athrael-soju/ColUltraVBERT` |

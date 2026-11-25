@@ -107,6 +107,9 @@ class EncoderCudaGraphConfig:
     product), so the total number of captured graphs is
     `num_budgets * prod(len(axis) for axis in capture_axes)`."""
 
+    requires_exact_token_budget: bool = False
+    """Only replay an exact token count when padding can change valid outputs."""
+
 
 @dataclass(slots=True)
 class EncoderCudaGraphCaptureInputs:
