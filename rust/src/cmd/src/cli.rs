@@ -243,7 +243,7 @@ pub struct RenderArgs {
     /// The maximum number of input items allowed per prompt for each
     /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`); set it
     /// to the engine's `--limit-mm-per-prompt`. Unspecified modalities
-    /// default to 999 items.
+    /// default to the model's default, else 999 items.
     ///
     /// Also accepts the engine's configurable form
     /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); only `count`
@@ -504,7 +504,7 @@ pub struct SharedRuntimeArgs {
     /// Also accepts the engine's configurable form
     /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); the extra
     /// profiling options are forwarded to the engine untouched.
-    /// Unspecified modalities default to 999 items.
+    /// Unspecified modalities default to the model's default, else 999 items.
     #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
     #[serde(default)]
     pub limit_mm_per_prompt: MmLimitPerPrompt,
