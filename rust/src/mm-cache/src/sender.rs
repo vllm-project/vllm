@@ -43,6 +43,18 @@ impl MmCacheConfig {
     }
 }
 
+/// A processor result split between a SHM payload and a value kept by the writer.
+pub trait MmCacheEntry:
+    From<(MmKwargsItem, Self::Local)> + Into<(MmKwargsItem, Self::Local)>
+{
+    /// Stored alongside the SHM handle and released on eviction or reset.
+    type Local: Clone;
+}
+
+impl<Local: Clone> MmCacheEntry for (MmKwargsItem, Local) {
+    type Local = Local;
+}
+
 /// The cache which is used on P0 when SHM caching is enabled.
 ///
 /// How to update each item:
@@ -53,15 +65,15 @@ impl MmCacheConfig {
 /// - If the item is not in the cache, store the data in shared memory.
 ///
 /// Send + Sync, internally locked.
-pub struct MmProcessorShmCache<Metadata> {
+pub struct MmProcessorShmCache<Entry: MmCacheEntry> {
     shm_name: String,
-    inner: Mutex<SingleWriterShmObjectStorage<Metadata>>,
+    inner: Mutex<SingleWriterShmObjectStorage<Entry::Local>>,
     /// Per-engine world size (TP*PP); 0 until `set_n_readers` is called.
     n_readers: AtomicU32,
     warned_oversize: AtomicBool,
 }
 
-impl<Metadata> MmProcessorShmCache<Metadata> {
+impl<Entry: MmCacheEntry> MmProcessorShmCache<Entry> {
     /// Create the shm segment (fails if the name already exists).
     pub fn create(config: MmCacheConfig) -> Result<Self> {
         let ring_buffer =
@@ -106,35 +118,29 @@ impl<Metadata> MmProcessorShmCache<Metadata> {
         self.inner.lock().is_cached(hash)
     }
 
-    /// Bump the writer flag and return the signed address and its writer-local metadata.
-    pub fn get_cached(&self, hash: &str) -> Option<(MmKwargsItem, Metadata)>
-    where
-        Metadata: Clone,
-    {
+    /// Bump the writer flag and return the entry with a signed address in place of its payload.
+    pub fn get_cached(&self, hash: &str) -> Option<Entry> {
         if self.n_readers() == 0 {
             return None;
         }
         let mut inner = self.inner.lock();
-        let (address, monotonic_id, metadata) = inner.get_cached(hash)?;
+        let (address, monotonic_id, local) = inner.get_cached(hash)?;
         let signature = inner.make_signature(hash, address, monotonic_id);
-        Some((address_as_item(address, monotonic_id, signature), metadata))
+        Some(Entry::from((
+            address_as_item(address, monotonic_id, signature),
+            local,
+        )))
     }
 
-    /// Miss path: put the item into shm and return the signed address item,
-    /// or return the input item unchanged for inline sending on oversize /
-    /// buffer-full / duplicate-key.
+    /// Store the payload in SHM and return the entry with its signed address.
+    /// If it cannot be cached, return the original entry for inline sending.
     ///
     /// Each of the `occurrences` issues one handle signed over `hash`.
-    pub fn put_or_inline(
-        &self,
-        hash: &str,
-        item: MmKwargsItem,
-        metadata: Metadata,
-        occurrences: NonZeroUsize,
-    ) -> MmKwargsItem {
+    pub fn put_or_inline(&self, hash: &str, entry: Entry, occurrences: NonZeroUsize) -> Entry {
         if self.n_readers() == 0 {
-            return item;
+            return entry;
         }
+        let (item, local) = entry.into();
         // Size the chunk with a counting write pass, then serialize directly
         // into the shm chunk: tensor bytes are copied exactly once.
         let payload_len = match serialized_mm_item_len(&item) {
@@ -145,12 +151,12 @@ impl<Metadata> MmProcessorShmCache<Metadata> {
                     error = %error,
                     "mm_input failed to serialize for shm cache; sending inline"
                 );
-                return item;
+                return Entry::from((item, local));
             }
         };
 
         let mut inner = self.inner.lock();
-        match inner.put_with(hash, payload_len, metadata, occurrences, |buf| {
+        let item = match inner.put_with(hash, payload_len, local.clone(), occurrences, |buf| {
             serialize_mm_item_into(&item, buf)
         }) {
             Ok(Ok((address, monotonic_id))) => {
@@ -187,7 +193,8 @@ impl<Metadata> MmProcessorShmCache<Metadata> {
                 );
                 item
             }
-        }
+        };
+        Entry::from((item, local))
     }
 
     /// Clear the cache (used by /reset_mm_cache).
@@ -241,10 +248,10 @@ mod tests {
     use super::*;
     use vllm_engine_core_client::protocol::tensor::WireTensor;
 
-    fn create_cache<Metadata>(
+    fn create_cache<Entry: MmCacheEntry>(
         data_buffer_size: usize,
         max_object_size: usize,
-    ) -> MmProcessorShmCache<Metadata> {
+    ) -> MmProcessorShmCache<Entry> {
         MmProcessorShmCache::create(MmCacheConfig {
             shm_name: MmCacheConfig::unique_shm_name(),
             data_buffer_size,
@@ -265,8 +272,12 @@ mod tests {
         )])
     }
 
-    fn put(cache: &MmProcessorShmCache<()>, hash: &str, item: MmKwargsItem) -> MmKwargsItem {
-        cache.put_or_inline(hash, item, (), NonZeroUsize::MIN)
+    fn put(
+        cache: &MmProcessorShmCache<(MmKwargsItem, ())>,
+        hash: &str,
+        item: MmKwargsItem,
+    ) -> MmKwargsItem {
+        cache.put_or_inline(hash, (item, ()), NonZeroUsize::MIN).0
     }
 
     /// The 32 signature bytes of an address item.
@@ -303,8 +314,12 @@ mod tests {
         let cache = create_cache(1 << 20, 1 << 16);
         cache.set_n_readers(2);
 
-        let address_item =
-            cache.put_or_inline("hash-a", item_with_tensor(8), "metadata", NonZeroUsize::MIN);
+        let (address_item, metadata) = cache.put_or_inline(
+            "hash-a",
+            (item_with_tensor(8), "metadata"),
+            NonZeroUsize::MIN,
+        );
+        assert_eq!(metadata, "metadata");
         assert_eq!(address_item.len(), 3);
         assert_eq!(address_item["address"].data, Some(MmKwargValue::Int(0)));
         assert_eq!(

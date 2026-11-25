@@ -58,7 +58,7 @@ use self::timing::MM_STAGE_TARGET;
 pub use self::timing::{mm_request_span, mm_timing_layer};
 
 /// SHM sender with the prompt replacement owned by each cached media entry.
-pub type MmProcessorCache = MmProcessorShmCache<Arc<PromptReplacement>>;
+pub type MmProcessorCache = MmProcessorShmCache<(MmKwargsItem, Arc<PromptReplacement>)>;
 
 /// Resolved multimodal support for one loaded model.
 #[derive(Clone)]

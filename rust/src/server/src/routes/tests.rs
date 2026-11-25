@@ -11135,7 +11135,11 @@ async fn reset_mm_cache_route_clears_shm_processor_cache() {
         2,
     ));
     let cached_replacement = Arc::downgrade(&replacement);
-    let stored = cache.put_or_inline("mm-hash-0", item, replacement, std::num::NonZeroUsize::MIN);
+    let (stored, _) = cache.put_or_inline(
+        "mm-hash-0",
+        (item, replacement),
+        std::num::NonZeroUsize::MIN,
+    );
     assert!(
         stored.contains_key("address"),
         "item should be stored in shm"

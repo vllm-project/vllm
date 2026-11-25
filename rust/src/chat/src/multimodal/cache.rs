@@ -85,14 +85,13 @@ impl MultimodalModelInfo {
             for ((first, duplicates), replacement, mut item) in
                 izip!(positions, replacements, items)
             {
-                let replacement = Arc::new(replacement);
                 let occurrences = NonZeroUsize::MIN.saturating_add(duplicates.len());
-                item.data = cache.put_or_inline(
+                let (data, replacement) = cache.put_or_inline(
                     &item.mm_hash,
-                    item.data,
-                    Arc::clone(&replacement),
+                    (item.data, Arc::new(replacement)),
                     occurrences,
                 );
+                item.data = data;
                 for index in duplicates {
                     slots[index] = Some((Arc::clone(&replacement), item.clone()));
                 }
@@ -169,38 +168,37 @@ pub(super) mod tests {
     #[test]
     fn duplicate_put_preserves_cached_replacement_and_address() {
         let cache = test_shm_cache();
-        let sent = cache.put_or_inline(
+        let (sent, replacement) = cache.put_or_inline(
             "uuid:uuid-1",
-            test_item(11),
-            Arc::new(test_replacement()),
+            (test_item(11), Arc::new(test_replacement())),
             NonZeroUsize::MIN,
         );
         assert!(is_address_item(&sent));
 
         let mut other_replacement = test_replacement();
         other_replacement.tokens.push(151_655);
-        let inline = cache.put_or_inline(
+        let other_replacement = Arc::new(other_replacement);
+        let (inline, inline_replacement) = cache.put_or_inline(
             "uuid:uuid-1",
-            test_item(22),
-            Arc::new(other_replacement),
+            (test_item(22), Arc::clone(&other_replacement)),
             NonZeroUsize::MIN,
         );
         assert_eq!(inline, test_item(22));
+        assert!(Arc::ptr_eq(&inline_replacement, &other_replacement));
 
-        let Some((hit, replacement)) = cache.get_cached("uuid:uuid-1") else {
+        let Some((hit, cached_replacement)) = cache.get_cached("uuid:uuid-1") else {
             panic!("uuid-1 should be cached");
         };
-        assert_eq!(replacement.tokens, test_replacement().tokens);
+        assert!(Arc::ptr_eq(&cached_replacement, &replacement));
         assert_eq!(hit, sent);
     }
 
     #[tokio::test]
     async fn cold_content_duplicates_share_one_result_in_request_order() {
         let cache = test_shm_cache();
-        let hot = cache.put_or_inline(
+        let (hot, _) = cache.put_or_inline(
             "content:hot",
-            test_item(0),
-            Arc::new(test_replacement()),
+            (test_item(0), Arc::new(test_replacement())),
             NonZeroUsize::MIN,
         );
         let info = super::super::tests::qwen3_vl_info().with_mm_processor_cache(Some(cache));

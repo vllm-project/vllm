@@ -23,4 +23,4 @@ mod sender;
 mod serde;
 
 pub use error::{Error, Result};
-pub use sender::{MmCacheConfig, MmProcessorShmCache};
+pub use sender::{MmCacheConfig, MmCacheEntry, MmProcessorShmCache};
