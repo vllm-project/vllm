@@ -50,7 +50,12 @@ from vllm.v1.engine.output_processor import (
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
-from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
+from vllm.v1.metrics.stats import (
+    IterationStats,
+    PrefillStats,
+    RequestStateStats,
+    SchedulerStats,
+)
 from vllm.v1.outputs import SamplingMaskLists
 
 
@@ -1192,7 +1197,9 @@ def test_iteration_stats(dummy_test_vectors):
     # First iteration has 2 prefills.
     outputs = engine_core.get_outputs(num_active)
     iteration_stats = IterationStats()
-    output_processor.process_outputs(outputs, engine_core_timestamp, iteration_stats)
+    first_outputs = output_processor.process_outputs(
+        outputs, engine_core_timestamp, iteration_stats
+    ).request_outputs
     total_prompt_tokens = sum(
         [
             len(prompt_tokens)
@@ -1206,7 +1213,19 @@ def test_iteration_stats(dummy_test_vectors):
     # Just decodes in this step.
     outputs = engine_core.get_outputs(num_active)
     iteration_stats = IterationStats()
-    output_processor.process_outputs(outputs, engine_core_timestamp, iteration_stats)
+    next_outputs = output_processor.process_outputs(
+        outputs, engine_core_timestamp + 1.0, iteration_stats
+    ).request_outputs
+
+    assert len(first_outputs) == len(next_outputs) == num_active
+    for first, next_output in zip(first_outputs, next_outputs, strict=True):
+        assert isinstance(first, RequestOutput)
+        assert isinstance(next_output, RequestOutput)
+        assert first.metrics is not None
+        assert next_output.metrics is not None
+        assert first.metrics.last_token_ts == engine_core_timestamp
+        assert next_output.metrics.last_token_ts == engine_core_timestamp + 1.0
+    engine_core_timestamp += 1.0
 
     assert iteration_stats.num_prompt_tokens == 0
     assert iteration_stats.num_generation_tokens == num_active
@@ -1521,6 +1540,7 @@ async def test_request_output_collector():
                     )
                 ],
                 finished=(idx == NUM_REQS - 1),
+                metrics=RequestStateStats(last_token_ts=2.0 + idx),
             )
             for idx in range(NUM_REQS)
         ]
@@ -1538,6 +1558,8 @@ async def test_request_output_collector():
     assert collector.output is None
     assert output.outputs[0].text == "a"
     assert output.outputs[0].token_ids == [0]
+    assert output.metrics is not None
+    assert output.metrics.last_token_ts == 2.0
 
     # CASE 2: 2 puts then get.
     num_to_put = 2
@@ -1550,6 +1572,8 @@ async def test_request_output_collector():
     assert collector.output is None
 
     assert not output.finished
+    assert output.metrics is not None
+    assert output.metrics.last_token_ts == 3.0
     # Text, token_ids, and logprobs should get merged.
     assert output.outputs[0].text == TEXT * num_to_put
     for tok_0, tok_1 in zip(output.outputs[0].token_ids, list(range(num_to_put))):
@@ -1571,6 +1595,8 @@ async def test_request_output_collector():
     assert collector.output is None
 
     assert output.finished
+    assert output.metrics is not None
+    assert output.metrics.last_token_ts == 4.0
     assert output.outputs[0].finish_reason == "length"
     np.testing.assert_array_equal(output.outputs[0].routed_experts, routed_experts)
     # Text, token_ids, and logprobs should get merged.

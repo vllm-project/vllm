@@ -94,6 +94,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
     FullAttentionManager,
 )
+from vllm.v1.hisparse.runtime import get_hisparse_host_leader_rank
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
@@ -1053,8 +1054,8 @@ class NixlBaseConnectorWorker:
         self.region_names: list[str] = []
         self.region_num_blocks: list[int] = []
         self._mixed_mem_types = False
-        # True on TP ranks that share a HiSparse host pool with TP rank 0 and
-        # leave its NIXL registration and DRAM reads to rank 0.
+        # True on TP ranks that share a HiSparse host pool with their node's
+        # host leader and leave its NIXL registration and DRAM reads to it.
         self._skip_dram_xfer = False
         self._desc_is_dram_by_block_size: dict[int, np.ndarray] = {}
         self._desc_pos_by_block_size: dict[int, np.ndarray] = {}
@@ -2076,7 +2077,7 @@ class NixlBaseConnectorWorker:
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = sum(self.region_num_blocks)
 
-        self._skip_dram_xfer = self._leaves_dram_xfer_to_rank0()
+        self._skip_dram_xfer = self._leaves_dram_xfer_to_host_leader()
         if self._mixed_mem_types:
             assert self.use_mla and not self._has_mamba, (
                 "Mixed-device KV registration is only supported for MLA "
@@ -3458,22 +3459,25 @@ class NixlBaseConnectorWorker:
                 indices=indices,
             )
 
-    def _leaves_dram_xfer_to_rank0(self) -> bool:
-        """Whether this rank leaves the DRAM regions' NIXL work to TP rank 0.
+    def _leaves_dram_xfer_to_host_leader(self) -> bool:
+        """Whether this rank leaves the DRAM regions' NIXL work to its node's
+        HiSparse host leader.
 
-        A HiSparse host pool shared by the local TP ranks (one mmap per DP
-        rank) is registered with NIXL and filled by TP rank 0 alone: every
-        rank would otherwise register the same pages on every NIC and READ the
-        same host KV into them. Private pools are unaffected.
+        A HiSparse host pool shared by a node's TP ranks (one mmap per node)
+        is registered with NIXL and filled by the node's host leader alone:
+        every rank would otherwise register the same pages on every NIC and
+        READ the same host KV into them. Private pools are unaffected.
         """
         if not (
             self._mixed_mem_types and self.kv_cache_config.hisparse_shared_host_pool
         ):
             return False
-        skip = self.tp_rank != 0
+        leader = get_hisparse_host_leader_rank(self.vllm_config, self.tp_rank)
+        skip = self.tp_rank != leader
         logger.info(
-            "HiSparse host pool: NIXL DRAM registration and reads on TP rank 0 "
-            "only (tp_rank=%d, skip=%s)",
+            "HiSparse host pool: NIXL DRAM registration and reads on host "
+            "leader TP rank %d only (tp_rank=%d, skip=%s)",
+            leader,
             self.tp_rank,
             skip,
         )
@@ -3488,7 +3492,7 @@ class NixlBaseConnectorWorker:
             if not blocks:
                 continue
             if self._skip_dram_xfer and self.region_mem_types[region] == "DRAM":
-                # The shared pool is rank 0's to write.
+                # The shared pool is the node's host leader's to write.
                 continue
             cache = self.device_kv_caches[self.region_names[region]]
             storage = cache.untyped_storage()

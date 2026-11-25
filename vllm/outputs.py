@@ -219,6 +219,7 @@ class RequestOutput:
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
+        self.metrics = next_output.metrics
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):
