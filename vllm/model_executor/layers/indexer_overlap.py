@@ -37,12 +37,11 @@ def full_cuda_graph_capture() -> bool:
 
 
 def captured_decode_metadata(layer_name: str) -> Any:
-    """`layer_name`'s metadata while a FULL CUDA graph of a decode-only batch is
-    captured, else None."""
+    """`layer_name`'s metadata while a FULL CUDA graph is captured, else None.
+    The models' attention builders take FULL graphs only for decode batches."""
     if not full_cuda_graph_capture():
         return None
-    metadata = cast(dict, get_forward_context().attn_metadata)[layer_name]
-    return metadata if metadata.num_prefills == 0 else None
+    return cast(dict, get_forward_context().attn_metadata)[layer_name]
 
 
 def index_group_joins_topk(impl: Any) -> bool:
@@ -183,9 +182,9 @@ def join_candidates() -> None:
 
 
 def take_expanded(rows: Any) -> bool:
-    """True once for the rows the deferred work expanded, while unscheduled."""
+    """True once for the rows the deferred work expanded."""
     global _expanded
-    if rows is not _expanded or rows.kernel_metadata is not None:
+    if rows is not _expanded:
         return False
     _expanded = None
     return True
