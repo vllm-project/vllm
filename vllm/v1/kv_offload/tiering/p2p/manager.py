@@ -546,7 +546,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             owns_source = owner is None or owner is req_context
             if owner is req_context:
                 self._source_owners.pop(owner_key)
-        source_id = source.kv_request_id if owns_source else None
+        source_id = source.kv_request_id if source is not None and owns_source else None
         dest_id = dest.kv_request_id if dest is not None else None
         if source_id is None and dest_id is None:
             return
