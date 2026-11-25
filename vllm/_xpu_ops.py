@@ -756,8 +756,14 @@ class xpu_ops:
             "when block_table is disabled, cu_seqlens_k is needed"
         )
         if out is None:
+            # Int4: V last-dim is packed_hs; logical output head is Q's.
+            out_head = (
+                q.shape[-1]
+                if v.dtype == torch.uint8 and v.shape[-1] == q.shape[-1] // 2
+                else v.shape[-1]
+            )
             out = torch.empty(
-                q.shape[:-1] + (v.shape[-1],),
+                q.shape[:-1] + (out_head,),
                 dtype=q.dtype,
                 device=q.device,
             )
