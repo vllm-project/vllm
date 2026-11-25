@@ -535,8 +535,9 @@ class SpeculativeConfig:
     drafter's own lm_head and Markov head on ROCm. "fp8" uses per-row weight
     and per-token activation scales on the platform's FP8 linear kernel; "nvfp4" is
     weight-only on the platform's W4A16 kernel. The current platform may
-    provide further formats, which take precedence over these; the format is
-    checked when the copy is built. The target verifies with its
+    provide or replace these; a platform that declares any format owns the
+    whole surface, and names it maps to None or omits are rejected. The
+    format is checked when the copy is built. The target verifies with its
     own head, so only the acceptance length can change."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits

@@ -84,4 +84,6 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   counted in the model weights, so with `--kv-cache-memory-bytes` leave room
   for it. A hardware platform may provide further formats through
   `Platform.get_draft_lm_head_quantization_methods`; a platform format using
-  a core format's name takes precedence over it.
+  a core format's name replaces it. A platform that declares any format owns
+  the whole format surface: names it maps to `None` or omits are rejected
+  with an error listing the formats that actually run on this platform.

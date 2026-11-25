@@ -131,16 +131,53 @@ def test_platform_format_takes_precedence_over_core(
 def test_unknown_format_lists_supported_formats(
     default_vllm_config, dist_init, monkeypatch
 ):
-    """An unknown format is rejected listing the core and platform formats."""
+    """An unknown format is rejected listing the platform's formats only."""
     monkeypatch.setattr(
         current_platform,
         "get_draft_lm_head_quantization_methods",
-        lambda: {"fp8": "irrelevant.qualname", "platform-fp8": "irrelevant.qualname"},
+        lambda: {
+            "platform-fp4": "irrelevant.qualname",
+            "platform-fp8": "irrelevant.qualname",
+        },
     )
     head = _target_head(monkeypatch)
-    # A platform format shadowing a core format's name is listed once.
-    with pytest.raises(ValueError, match=r"bogus.*\['fp8', 'nvfp4', 'platform-fp8'\]"):
+    with pytest.raises(ValueError, match=r"bogus.*\['platform-fp4', 'platform-fp8'\]"):
         quantized_lm_head_copy(head, "bogus")
+
+
+@requires_cuda
+@pytest.mark.parametrize("format_name", ["fp8", "nvfp4"])
+def test_claimed_format_has_no_execution_path(
+    default_vllm_config, dist_init, monkeypatch, format_name
+):
+    """A format the platform claims with None is rejected like an unknown
+    one, listing only the formats the platform actually runs."""
+    monkeypatch.setattr(
+        current_platform,
+        "get_draft_lm_head_quantization_methods",
+        lambda: {"platform-fp8": "irrelevant.qualname", format_name: None},
+    )
+    head = _target_head(monkeypatch)
+    with pytest.raises(
+        ValueError, match=r"supported formats on this platform: \['platform-fp8'\]"
+    ):
+        quantized_lm_head_copy(head, format_name)
+
+
+@requires_cuda
+def test_all_none_mapping_lists_no_formats(
+    default_vllm_config, dist_init, monkeypatch
+):
+    """A platform claiming only core formats with None (no formats of its
+    own) rejects every request and reports that nothing is supported."""
+    monkeypatch.setattr(
+        current_platform,
+        "get_draft_lm_head_quantization_methods",
+        lambda: {"fp8": None, "nvfp4": None},
+    )
+    head = _target_head(monkeypatch)
+    with pytest.raises(ValueError, match=r"supported formats on this platform: none"):
+        quantized_lm_head_copy(head, "fp8")
 
 
 @requires_cuda

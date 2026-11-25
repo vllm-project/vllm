@@ -237,15 +237,32 @@ def lm_head_padding_size(tp_size: int) -> int:
 
 def _lm_head_method_factory(quantization: str) -> Callable[[], OnlineLinearBase]:
     # Platform formats first: a hardware plugin may provide or override one.
+    # A None entry claims the name with no execution path here; any non-empty
+    # mapping makes the platform own the whole format surface, and an empty
+    # one inherits the core (CUDA) formats.
     platform_methods = current_platform.get_draft_lm_head_quantization_methods()
-    if quantization in platform_methods:
-        return resolve_obj_by_qualname(platform_methods[quantization])
-    if quantization in _LM_HEAD_METHODS:
+    qualname = platform_methods.get(quantization)
+    if qualname is not None:
+        return resolve_obj_by_qualname(qualname)
+    if quantization in _LM_HEAD_METHODS and not platform_methods:
         return _LM_HEAD_METHODS[quantization]
-    raise ValueError(
-        f"Unsupported draft_lm_head_quantization {quantization!r}; supported "
-        # A platform format shadowing a core name is listed once.
-        f"formats: {sorted({*_LM_HEAD_METHODS, *platform_methods})}"
+    raise _unsupported(quantization, platform_methods)
+
+
+def _unsupported(
+    quantization: str, platform_methods: dict[str, str | None]
+) -> ValueError:
+    """Single error for a format with no execution path on this platform."""
+    if platform_methods:
+        # The platform owns the surface: list only what it actually runs.
+        available = sorted(k for k, v in platform_methods.items() if v is not None)
+    else:
+        # The platform declared nothing: the core (CUDA) formats run.
+        available = sorted(_LM_HEAD_METHODS)
+    formats = f"{available}" if available else "none"
+    return ValueError(
+        f"Unsupported draft_lm_head_quantization {quantization!r}; "
+        f"supported formats on this platform: {formats}"
     )
 
 
@@ -298,9 +315,9 @@ def quantized_lm_head_copy(
 
     "fp8" uses per-row weight and per-token activation scales on the platform's
     FP8 linear kernel; "nvfp4" is weight-only on the
-    platform's W4A16 kernel. The current platform may provide further formats
-    (see `Platform.get_draft_lm_head_quantization_methods`), which take
-    precedence over these. `lm_head` is left
+    platform's W4A16 kernel. The current platform may provide or replace these
+    through `Platform.get_draft_lm_head_quantization_methods`; a non-empty
+    platform mapping owns the whole format surface. `lm_head` is left
     unchanged and no bf16 copy of its weight is made. The copy is derived state:
     `refresh_quantized_lm_heads` re-derives it after `lm_head` changes.
     """

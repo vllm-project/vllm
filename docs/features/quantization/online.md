@@ -284,8 +284,10 @@ vllm serve amd/Qwen3.6-35B-A3B-Quark-UINT4-G128 \
   speculative-decoding drafter a private quantized copy of the target's lm_head
   and leaves the target unchanged. Besides the core `"fp8"` and `"nvfp4"`
   formats, a hardware platform may provide further formats through
-  `Platform.get_draft_lm_head_quantization_methods`, which take precedence
-  over same-named core formats. Both live in
+  `Platform.get_draft_lm_head_quantization_methods`; a platform that
+  declares any format owns the whole surface, and names it maps to `None`
+  or omits are rejected instead of falling back to the core formats. Both
+  live in
   `vllm/model_executor/layers/quantization/online/lm_head.py`, where
   `OnlineLMHeadMethodBase` implements the weight-only methods above that are
   specific to the lm_head.

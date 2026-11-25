@@ -268,14 +268,17 @@ class Platform:
         return cls.simple_compile_backend
 
     @classmethod
-    def get_draft_lm_head_quantization_methods(cls) -> dict[str, str]:
+    def get_draft_lm_head_quantization_methods(cls) -> dict[str, str | None]:
         """Online `draft_lm_head_quantization` formats this platform provides.
 
         Maps a format name to the qualified name of a zero-argument factory
         returning the online linear method quantizing the drafter's lm_head
-        copy (see `quantized_lm_head_copy`). Factories are resolved lazily,
-        so they may live in a hardware plugin. Platform formats take
-        precedence over core formats with the same name.
+        copy (see `quantized_lm_head_copy`), or None for a recognized name
+        with no execution path here. Factories are resolved lazily, so they
+        may live in a hardware plugin. Any non-empty mapping makes the
+        platform own the whole format surface: names missing from the
+        mapping or mapped to None are rejected, and only an empty mapping
+        inherits the core (CUDA) formats.
         """
         return {}
 
