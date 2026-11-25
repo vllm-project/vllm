@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import ctypes
 import os
 from datetime import timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -723,3 +725,264 @@ class XPUPlatform(Platform):
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
+
+    @classmethod
+    def _load_libze(cls) -> ctypes.CDLL | None:
+        for lib_name in ("libze_loader.so.1", "libze_loader.so"):
+            try:
+                return ctypes.CDLL(lib_name)
+            except OSError:
+                continue
+        return None
+
+    @classmethod
+    def _get_level_zero_pci_bdfs(
+        cls,
+    ) -> tuple[dict[bytes, str], list[str]] | None:
+        """Query Level Zero for GPU UUID -> PCI BDF mapping and ordered BDFs."""
+        libze = cls._load_libze()
+        if libze is None:
+            return None
+
+        ze_pci_get = getattr(libze, "zeDevicePciGetPropertiesExt", None)
+        if ze_pci_get is None:
+            return None
+
+        ze_result_success = 0
+        ze_init_flag_gpu_only = 1
+        ze_structure_type_device_properties = 0x3
+        ze_structure_type_pci_ext_properties = 0x10008
+        ze_device_type_gpu = 1
+
+        class _ZeDeviceProperties(ctypes.Structure):
+            _fields_ = [
+                ("stype", ctypes.c_uint32),
+                ("pNext", ctypes.c_void_p),
+                ("type", ctypes.c_uint32),
+                ("vendorId", ctypes.c_uint32),
+                ("deviceId", ctypes.c_uint32),
+                ("flags", ctypes.c_uint32),
+                ("subdeviceId", ctypes.c_uint32),
+                ("coreClockRate", ctypes.c_uint32),
+                ("maxMemAllocSize", ctypes.c_uint64),
+                ("maxHardwareContexts", ctypes.c_uint32),
+                ("maxCommandQueuePriority", ctypes.c_uint32),
+                ("numThreadsPerEU", ctypes.c_uint32),
+                ("physicalEUSimdWidth", ctypes.c_uint32),
+                ("numEUsPerSubslice", ctypes.c_uint32),
+                ("numSubslicesPerSlice", ctypes.c_uint32),
+                ("numSlices", ctypes.c_uint32),
+                ("timerResolution", ctypes.c_uint64),
+                ("timestampValidBits", ctypes.c_uint32),
+                ("kernelTimestampValidBits", ctypes.c_uint32),
+                ("uuid", ctypes.c_ubyte * 16),
+                ("name", ctypes.c_char * 256),
+            ]
+
+        class _ZePciAddressExt(ctypes.Structure):
+            _fields_ = [
+                ("domain", ctypes.c_uint32),
+                ("bus", ctypes.c_uint32),
+                ("device", ctypes.c_uint32),
+                ("function", ctypes.c_uint32),
+            ]
+
+        class _ZePciSpeedExt(ctypes.Structure):
+            _fields_ = [
+                ("genVersion", ctypes.c_int32),
+                ("width", ctypes.c_int32),
+                ("maxBandwidth", ctypes.c_int64),
+            ]
+
+        class _ZePciExtProperties(ctypes.Structure):
+            _fields_ = [
+                ("stype", ctypes.c_uint32),
+                ("pNext", ctypes.c_void_p),
+                ("address", _ZePciAddressExt),
+                ("maxSpeed", _ZePciSpeedExt),
+            ]
+
+        libze.zeInit.argtypes = [ctypes.c_uint32]
+        libze.zeInit.restype = ctypes.c_uint32
+        libze.zeDriverGet.argtypes = [
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        libze.zeDriverGet.restype = ctypes.c_uint32
+        libze.zeDeviceGet.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        libze.zeDeviceGet.restype = ctypes.c_uint32
+        libze.zeDeviceGetSubDevices.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        libze.zeDeviceGetSubDevices.restype = ctypes.c_uint32
+        libze.zeDeviceGetProperties.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_ZeDeviceProperties),
+        ]
+        libze.zeDeviceGetProperties.restype = ctypes.c_uint32
+        ze_pci_get.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_ZePciExtProperties),
+        ]
+        ze_pci_get.restype = ctypes.c_uint32
+
+        if libze.zeInit(ze_init_flag_gpu_only) != ze_result_success:
+            return None
+
+        driver_count = ctypes.c_uint32(0)
+        if libze.zeDriverGet(ctypes.byref(driver_count), None) != ze_result_success:
+            return None
+        if driver_count.value == 0:
+            return None
+
+        drivers = (ctypes.c_void_p * driver_count.value)()
+        if libze.zeDriverGet(ctypes.byref(driver_count), drivers) != ze_result_success:
+            return None
+
+        def _query_pci_bdf(handle: ctypes.c_void_p) -> str | None:
+            pci_props = _ZePciExtProperties(
+                stype=ze_structure_type_pci_ext_properties,
+            )
+            if ze_pci_get(handle, ctypes.byref(pci_props)) != ze_result_success:
+                return None
+            addr = pci_props.address
+            return (
+                f"{addr.domain:04x}:{addr.bus:02x}:{addr.device:02x}.{addr.function:x}"
+            )
+
+        uuid_to_bdf: dict[bytes, str] = {}
+        ordered_bdfs: list[str] = []
+
+        for drv in drivers:
+            dev_count = ctypes.c_uint32(0)
+            if (
+                libze.zeDeviceGet(drv, ctypes.byref(dev_count), None)
+                != ze_result_success
+                or dev_count.value == 0
+            ):
+                continue
+            devs = (ctypes.c_void_p * dev_count.value)()
+            if (
+                libze.zeDeviceGet(drv, ctypes.byref(dev_count), devs)
+                != ze_result_success
+            ):
+                continue
+
+            for dev in devs:
+                dev_props = _ZeDeviceProperties(
+                    stype=ze_structure_type_device_properties,
+                )
+                if (
+                    libze.zeDeviceGetProperties(dev, ctypes.byref(dev_props))
+                    != ze_result_success
+                    or dev_props.type != ze_device_type_gpu
+                ):
+                    continue
+
+                bdf = _query_pci_bdf(dev)
+                if bdf is not None:
+                    uuid_to_bdf[bytes(dev_props.uuid)] = bdf
+                    ordered_bdfs.append(bdf)
+
+                sub_count = ctypes.c_uint32(0)
+                if (
+                    libze.zeDeviceGetSubDevices(dev, ctypes.byref(sub_count), None)
+                    == ze_result_success
+                    and sub_count.value > 0
+                ):
+                    sub_devs = (ctypes.c_void_p * sub_count.value)()
+                    if (
+                        libze.zeDeviceGetSubDevices(
+                            dev, ctypes.byref(sub_count), sub_devs
+                        )
+                        == ze_result_success
+                    ):
+                        for sub_dev in sub_devs:
+                            sub_props = _ZeDeviceProperties(
+                                stype=ze_structure_type_device_properties,
+                            )
+                            if (
+                                libze.zeDeviceGetProperties(
+                                    sub_dev, ctypes.byref(sub_props)
+                                )
+                                != ze_result_success
+                            ):
+                                continue
+                            sub_bdf = _query_pci_bdf(sub_dev) or bdf
+                            if sub_bdf is not None:
+                                uuid_to_bdf[bytes(sub_props.uuid)] = sub_bdf
+
+        return uuid_to_bdf, ordered_bdfs
+
+    @classmethod
+    def _get_numa_node_for_pci_bdf(cls, bdf: str) -> int | None:
+        numa_node_path = Path(f"/sys/bus/pci/devices/{bdf}/numa_node")
+        try:
+            numa_node = int(numa_node_path.read_text().strip())
+        except (OSError, ValueError):
+            return None
+        return numa_node if numa_node >= 0 else None
+
+    @classmethod
+    def get_device_numa_node(cls, device_id: int = 0) -> int | None:
+        """Get the NUMA node ID for a visible XPU device."""
+        numa_nodes = cls.get_all_device_numa_nodes()
+        if numa_nodes is None or not (0 <= device_id < len(numa_nodes)):
+            return None
+        return numa_nodes[device_id]
+
+    @classmethod
+    def get_all_device_numa_nodes(cls) -> list[int] | None:
+        """Get NUMA nodes for all visible XPU devices."""
+        try:
+            device_count = cls.device_count()
+            if device_count <= 0:
+                return None
+
+            lz_result = cls._get_level_zero_pci_bdfs()
+            if lz_result is None:
+                logger.warning(
+                    "Could not query XPU PCI topology via Level Zero, "
+                    "disabling automatic NUMA binding"
+                )
+                return None
+            uuid_to_bdf, ordered_bdfs = lz_result
+
+            numa_nodes: list[int] = []
+            for device_id in range(device_count):
+                bdf: str | None = None
+                props = torch.xpu.get_device_properties(device_id)
+                uuid_obj = getattr(props, "uuid", None)
+                if uuid_obj is not None:
+                    uuid_bytes = bytes(uuid_obj.bytes)
+                    bdf = uuid_to_bdf.get(uuid_bytes)
+                if bdf is None and device_id < len(ordered_bdfs):
+                    bdf = ordered_bdfs[device_id]
+                if bdf is None:
+                    logger.warning(
+                        "Could not detect PCI address for XPU %d, "
+                        "disabling automatic NUMA binding",
+                        device_id,
+                    )
+                    return None
+
+                numa_node = cls._get_numa_node_for_pci_bdf(bdf)
+                if numa_node is None:
+                    logger.warning(
+                        "Could not detect NUMA node for XPU %d (PCI %s), "
+                        "disabling automatic NUMA binding",
+                        device_id,
+                        bdf,
+                    )
+                    return None
+                numa_nodes.append(numa_node)
+            return numa_nodes
+        except Exception as e:
+            logger.warning("Failed to get NUMA nodes for XPUs: %s", e)
+            return None
