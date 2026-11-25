@@ -651,6 +651,41 @@ class TestRenderPrompt:
         if renderer._can_produce_offsets():
             assert results[0].get("prompt_token_offsets") == expected["offset_mapping"]
 
+    @pytest.mark.parametrize(
+        ("truncate_prompt_tokens", "truncation_side", "expected"),
+        [
+            # Room for `[CLS]` (1) and `[SEP]` (2) only: no text is left.
+            (2, "left", [1, 2]),
+            (2, "right", [1, 2]),
+            # Less room than the special tokens need: the plain slice applies.
+            (1, "left", [2]),
+            (1, "right", [1]),
+        ],
+    )
+    def test_explicit_side_special_tokens_at_the_limit(
+        self, truncate_prompt_tokens, truncation_side, expected
+    ):
+        """When the limit only fits the tokens that the tokenizer added, they
+        stay and no text does; when it can't fit them, the prompt is sliced."""
+        renderer = HfRenderer(
+            MockVllmConfig(MockModelConfig(), parallel_config=MockParallelConfig()),
+            tokenizer=_cls_sep_tokenizer(),
+        )
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "a b c d e f g h i j")
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=truncate_prompt_tokens,
+                truncation_side=truncation_side,
+            ),
+        )
+
+        assert results[0].get("prompt_token_ids") == expected
+
     def test_padding_with_left_truncation_keeps_the_prompt(self):
         """Padding must not be truncated away.
 
