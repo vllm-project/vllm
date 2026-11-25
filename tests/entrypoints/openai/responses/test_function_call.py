@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import runpy
+from pathlib import Path
 
 import openai  # use the official client for correctness check
 import pytest
@@ -227,6 +229,56 @@ async def test_named_tool_use(client: openai.AsyncOpenAI):
     response_2 = await client.responses.create(model=MODEL_NAME, input=input_messages)
     # check the output
     assert len(response_2.output_text) > 0
+
+
+@pytest.mark.asyncio
+async def test_example_replays_all_tool_results(client: openai.AsyncOpenAI):
+    """The example's two-call follow-up is accepted and completed by vLLM."""
+    example = runpy.run_path(
+        str(
+            Path(__file__).parents[4]
+            / "examples/tool_calling/openai_responses_client_with_tools.py"
+        )
+    )
+    prompt = [
+        {
+            "role": "user",
+            "content": "Report the weather in Paris and Tokyo from the tool results.",
+        }
+    ]
+    calls = [
+        openai.types.responses.ResponseFunctionToolCall(
+            id=f"fc_weather_{i}",
+            call_id=f"call_weather_{i}",
+            name="get_weather",
+            arguments=json.dumps({"latitude": lat, "longitude": lon}),
+            type="function_call",
+            status="completed",
+        )
+        for i, (lat, lon) in enumerate([(48, 2), (35, 139)])
+    ]
+    followup = example["build_followup_input"](prompt, calls)
+    assert followup[:3] == [*prompt, *calls]
+    assert followup[3:] == [
+        {
+            "type": "function_call_output",
+            "call_id": call.call_id,
+            "output": f"Current temperature at ({lat}, {lon}) is 20°C.",
+        }
+        for call, (lat, lon) in zip(calls, [(48, 2), (35, 139)])
+    ]
+
+    response = await client.responses.create(
+        model=MODEL_NAME,
+        input=followup,
+        tools=example["tools"],
+        tool_choice="none",
+        temperature=0.0,
+        max_output_tokens=1024,
+    )
+    assert response.status == "completed"
+    assert response.incomplete_details is None
+    assert response.output_text.strip()
 
 
 @pytest.mark.asyncio

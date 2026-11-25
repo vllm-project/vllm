@@ -45,16 +45,10 @@ input_messages = [
 ]
 
 
-def main():
-    base_url = "http://0.0.0.0:8000/v1"
-    client = OpenAI(base_url=base_url, api_key="empty")
-    model = client.models.list().data[0].id
-    response = client.responses.create(
-        model=model, input=input_messages, tools=tools, tool_choice="required"
-    )
-
+def build_followup_input(input_messages, response_output):
+    """Keep every response item and its matching tool result in the next turn."""
     tool_outputs = []
-    for out in response.output:
+    for out in response_output:
         if out.type == "function_call":
             print("Function call:", out.name, out.arguments)
             args = json.loads(out.arguments)
@@ -66,9 +60,20 @@ def main():
                     "output": result,
                 }
             )
+    return [*input_messages, *response_output, *tool_outputs]
+
+
+def main():
+    base_url = "http://0.0.0.0:8000/v1"
+    client = OpenAI(base_url=base_url, api_key="empty")
+    model = client.models.list().data[0].id
+    response = client.responses.create(
+        model=model, input=input_messages, tools=tools, tool_choice="required"
+    )
+
     response_2 = client.responses.create(
         model=model,
-        input=[*input_messages, *response.output, *tool_outputs],
+        input=build_followup_input(input_messages, response.output),
         tools=tools,
     )
     print(response_2.output_text)

@@ -206,6 +206,7 @@ steps:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/openai/responses
+  - examples/tool_calling/openai_responses_client_with_tools.py
   commands:
   - pytest -v -s entrypoints/openai/responses
   mirror:
