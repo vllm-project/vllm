@@ -1445,12 +1445,6 @@ def fastsafetensors_weights_iterator(
     # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
     # initializes the GDS DMA subsystem for all visible GPUs, creating
     # unwanted CUDA contexts on every device.
-    # Planning and GDS are mutually exclusive in fastsafetensors 0.4: the GDS
-    # copier does not implement sub-file chunking, so a planned load on a
-    # GDS-capable host would construct the loader, fail, and fall back with a
-    # misleading "GDS not enabled" warning. Choose planning -- running out of
-    # memory fails the load, while buffered reads only slow it -- and let
-    # VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET=0 select GDS instead.
     nogds = distributed and torch.distributed.get_world_size() > 1
 
     queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
@@ -1492,7 +1486,6 @@ def fastsafetensors_weights_iterator(
     budget, budget_reason = _fastsafetensors_memory_budget(
         device, pg, derive=accumulate_resident is False
     )
-    nogds = nogds or budget is not None
 
     def _make_loader(nogds: bool) -> "ParallelLoader":
         kwargs = dict(
@@ -1561,7 +1554,7 @@ def fastsafetensors_weights_iterator(
                 yielded = True
                 yield name, tensor
         except RuntimeError as e:
-            if nogds or yielded or "gds" not in str(e):
+            if nogds or yielded or "gds" not in str(e).lower():
                 raise
             logger.warning_once(
                 "GDS not enabled, setting `nogds=True`.\n"

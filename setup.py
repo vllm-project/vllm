@@ -1730,7 +1730,7 @@ setup(
         "zen": ["zentorch==2.14.0.2"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.12.1"],
-        "fastsafetensors": ["fastsafetensors >= 0.4"],
+        "fastsafetensors": ["fastsafetensors >= 0.5"],
         "instanttensor": ["instanttensor >= 0.2.2"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.17.1"],
         "audio": [

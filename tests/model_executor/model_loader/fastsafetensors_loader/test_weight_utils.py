@@ -243,3 +243,22 @@ def test_fastsafetensors_uninspected_consumer_is_not_planned(monkeypatch):
         )
         assert calls[-1]["device_memory_budget"] == budget
         assert calls[-1]["accumulate_resident"] is False
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="fastsafetensors requires NVIDIA/AMD GPUs",
+)
+def test_fastsafetensors_planned_load_requests_gds(monkeypatch):
+    """A memory budget must not cost a single-rank load its GDS reads.
+
+    The GDS copier reads sub-shard chunks, so planning does not imply buffered
+    reads.
+    """
+    calls = _spy_parallel_loader(monkeypatch)
+    monkeypatch.setenv(
+        "VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET", str(512 * 1024 * 1024)
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _assert_matches_safetensors(tmpdir)
+    assert calls[0]["nogds"] is False

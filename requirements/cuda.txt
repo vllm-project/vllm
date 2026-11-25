@@ -21,7 +21,7 @@ nvidia-cudnn-frontend>=1.31.0,<1.33
 # Required for LLM_NVTX_SCOPES_FOR_PROFILING=1
 nvtx==0.2.15
 # Required for faster safetensors model loading
-fastsafetensors >= 0.4
+fastsafetensors >= 0.5
 instanttensor >= 0.2.2
 
 # QuACK and Cutlass DSL for FA4 (cute-DSL implementation)
