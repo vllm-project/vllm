@@ -132,17 +132,23 @@ class _RegionPairs:
     """How a peer's KV regions transfer with the local ones.
 
     Pairs come from the layers both sides hold (`region_members`): pair `k`
-    moves the peer's region `remote[k]` and local region `local[k]` at
-    cache group `group[k]`'s blocks. A region shared by several cache groups
-    pairs once per group it holds a layer of, so which layers share a region
-    may differ between the two sides.
+    moves the peer's region `remote[k]` at its cache group `remote_group[k]`'s
+    blocks and local region `local[k]` at cache group `group[k]`'s. A region
+    shared by several cache groups pairs once per group it holds a layer of,
+    so which layers share a region, and which group holds a layer, may differ
+    between the two sides.
     """
 
     remote: list[int]
     local: list[int]
     group: list[int]
-    # Whether every paired layer is in the same cache group on both sides.
-    groups_match: bool = True
+    remote_group: list[int]
+
+    @property
+    def groups_match(self) -> bool:
+        """Whether every paired layer is in the same cache group on both
+        sides."""
+        return self.group == self.remote_group
 
 
 @dataclass(slots=True)
@@ -409,24 +415,22 @@ class NixlBaseConnectorWorker:
         remote_rank: int,
         local_block_ids: BlockIds,
         remote_block_ids: BlockIds,
-        by_region: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Local and remote desc ids moving the block ids.
+        """Local and remote desc ids moving the block ids, both listed per
+        local cache group.
 
         Each byte range moved with the remote rank moves its cache group's
-        blocks (its region's own, for region-mapped transfers), one desc per
-        block.
+        blocks, one desc per block.
         """
         starts = stage.desc_starts[remote_rank]
-        keys = starts[:, 1] if by_region else starts[:, 0]
         local_ids: list[np.ndarray] = []
         remote_ids: list[np.ndarray] = []
-        for key in np.unique(keys).tolist():
-            local_blocks = np.asarray(local_block_ids[key], dtype=np.int64)
+        for group in np.unique(starts[:, 0]).tolist():
+            local_blocks = np.asarray(local_block_ids[group], dtype=np.int64)
             if not local_blocks.size:
                 continue
-            remote_blocks = np.asarray(remote_block_ids[key], dtype=np.int64)
-            rows = starts[keys == key]
+            remote_blocks = np.asarray(remote_block_ids[group], dtype=np.int64)
+            rows = starts[starts[:, 0] == group]
             local_ids.append((rows[:, 2, None] + local_blocks).ravel())
             remote_ids.append((rows[:, 3, None] + remote_blocks).ravel())
         if not local_ids:
@@ -479,9 +483,8 @@ class NixlBaseConnectorWorker:
         remote_layer_groups = nixl_agent_meta.layer_group_ids
         group_by_layer = self.kv_cache_config.transfer_group_index_by_layer
 
-        pairs: dict[tuple[int, int, int], None] = {}
+        pairs: dict[tuple[int, int, int, int], None] = {}
         layers: set[str] = set()
-        groups_match = True
         for remote, layer_names in enumerate(nixl_agent_meta.region_members):
             for layer_name in layer_names:
                 local = self._region_by_layer.get(layer_name)
@@ -495,31 +498,39 @@ class NixlBaseConnectorWorker:
                     )
                 group = group_by_layer[layer_name]
                 layers.add(layer_name)
-                # Block ids are listed per group, so the group numbers must match.
-                if (
-                    remote_layer_groups and remote_layer_groups.get(layer_name) != group
-                ) or (remote_groups and remote_groups[remote] != group):
-                    groups_match = False
-                pairs[(remote, local, group)] = None
+                # Block ids are listed per group: the peer's group of the layer
+                # says which of its lists the layer's blocks are in.
+                remote_group = remote_layer_groups.get(layer_name)
+                if remote_group is None:
+                    remote_group = remote_groups[remote] if remote_groups else group
+                pairs[(remote, local, group, remote_group)] = None
         missing = self._region_by_layer.keys() - layers
         if missing and not remote_pp_stage:
             raise RuntimeError(
                 f"Engine {engine_id} does not hold the KV layers "
                 f"{sorted(missing, key=_region_sort_key)}."
             )
-        if self._has_mamba and not groups_match:
-            # Region-mapped reads, the only fallback, support pure MLA alone.
+        region_pairs = _RegionPairs(
+            remote=[remote for remote, _, _, _ in pairs],
+            local=[local for _, local, _, _ in pairs],
+            group=[group for _, _, group, _ in pairs],
+            remote_group=[remote_group for _, _, _, remote_group in pairs],
+        )
+        if self._has_mamba and not region_pairs.groups_match:
             raise NotImplementedError(
                 f"Engine {engine_id} puts Mamba/SSM hybrid KV layers in other "
                 "cache groups than this worker; use the same KV cache plan on P "
                 "and D."
             )
-        return _RegionPairs(
-            remote=[remote for remote, _, _ in pairs],
-            local=[local for _, local, _ in pairs],
-            group=[group for _, _, group in pairs],
-            groups_match=groups_match,
-        )
+        # A cache group's blocks pair with those of a single peer group.
+        if len(set(zip(region_pairs.group, region_pairs.remote_group))) != len(
+            set(region_pairs.group)
+        ):
+            raise NotImplementedError(
+                f"Engine {engine_id} splits the layers of a local KV cache group "
+                "across several of its cache groups."
+            )
+        return region_pairs
 
     def __init__(
         self,
@@ -918,6 +929,9 @@ class NixlBaseConnectorWorker:
         self._layer_views: dict[str, tuple[dict[str, torch.Tensor], bool]] = {}
         # Per engine and cache group, the remote ranks its blocks move with.
         self.source_ranks: dict[EngineId, list[tuple[int, ...]]] = {}
+        # Per engine and cache group, the remote cache group its blocks pair
+        # with (`_pair_regions`).
+        self.remote_group_ids: dict[EngineId, list[int]] = {}
 
         self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
             "enforce_handshake_compat", True
@@ -1733,10 +1747,10 @@ class NixlBaseConnectorWorker:
             addr, _, *blocks = local_regions[local]
             remote_addr, _, *remote_blocks = remote_regions[remote]
             mem_types = self.region_mem_types[local], remote_mem_types[remote]
-            # Region-mapped reads take each region's own blocks, and a block
-            # of several units repeats a range in each: those stay apart.
+            # A block of several units repeats a range in each: those stay
+            # apart.
             alike: tuple = (local, remote)
-            if pairs.groups_match and units == (1, 1):
+            if units == (1, 1):
                 alike = (*blocks, *remote_blocks, *mem_types)
             for rank, ranges in ranges_by_rank.items():
                 for offset, remote_offset, num_bytes in ranges:
@@ -2027,13 +2041,18 @@ class NixlBaseConnectorWorker:
                 remote_dcp_size,
                 receiving=self._TRANSFER_MODE == "pull",
             )
-            if not pairs.groups_match and self._TRANSFER_MODE == "pull":
-                self._check_region_mapped_pull(stage, nixl_agent_meta, remote_dcp_size)
-            # Every stage adds the ranks its cache groups move with.
+            # Every stage adds the ranks its cache groups move with, and the
+            # remote cache group each of them pairs with.
             source_ranks = [set(r) for r in self.source_ranks.get(engine_id, [])]
             source_ranks += [set() for _ in self._group_spec_types[len(source_ranks) :]]
-            for group, ranges_by_rank in zip(pairs.group, stage.byte_ranges):
+            remote_group_ids = self.remote_group_ids.setdefault(
+                engine_id, list(range(len(self._group_spec_types)))
+            )
+            for group, remote_group, ranges_by_rank in zip(
+                pairs.group, pairs.remote_group, stage.byte_ranges
+            ):
                 source_ranks[group].update(ranges_by_rank)
+                remote_group_ids[group] = remote_group
             self.source_ranks[engine_id] = [tuple(sorted(r)) for r in source_ranks]
         self._prep_descs(
             nixl_agent_meta,
@@ -2092,38 +2111,6 @@ class NixlBaseConnectorWorker:
                 "every local KV layer exactly once."
             )
         return stages[pp_rank]
-
-    def _check_region_mapped_pull(
-        self, stage: _RemoteStage, meta: NixlAgentMetadata, remote_dcp_size: int
-    ) -> None:
-        """A remote that puts some layer in another cache group is read region
-        by region, each at its own blocks: whole blocks of the same regions."""
-        pairs = stage.pairs
-        if pairs.remote != pairs.local or len(pairs.local) != self.num_regions:
-            raise NotImplementedError(
-                "Different NIXL cache-group layouts need the same KV regions "
-                "on both sides"
-            )
-        # A whole block: all its bytes, at the same offset on both sides.
-        if any(
-            sum(n for offset, remote_offset, n in ranges if offset == remote_offset)
-            != self.block_len_per_layer[local]
-            for local, ranges_by_rank in zip(pairs.local, stage.byte_ranges)
-            for ranges in ranges_by_rank.values()
-        ):
-            raise NotImplementedError(
-                "Different NIXL cache-group layouts are only supported for "
-                "attention KV read in whole blocks"
-            )
-        if (self.dcp_size > 1 or remote_dcp_size > 1) and self._dcp_replicated_groups:
-            raise NotImplementedError(
-                "Region-mapped NIXL pulls with DCP do not support "
-                "DCP-replicated MLA draft groups"
-            )
-        if self.block_size != meta.block_size:
-            raise NotImplementedError(
-                "Region-mapped NIXL transfers require matching physical block sizes"
-            )
 
     def _single_remote_stage(self, engine_id: EngineId) -> _RemoteStage:
         """The only stage of a remote engine that runs PP=1."""
@@ -2819,6 +2806,7 @@ class NixlBaseConnectorWorker:
         prefill_block_ids: BlockIds,
         decode_physical_per_logical: int,
         prefill_physical_per_logical: int,
+        prefill_group_ids: Sequence[int] | None = None,
     ) -> tuple[BlockIds, BlockIds]:
         """Trim block ID lists so only the uncomputed suffix is transferred.
 
@@ -2837,6 +2825,10 @@ class NixlBaseConnectorWorker:
         For Mamba hybrid: SSM groups pair state slots by position and FA
         groups end-trim to the uncomputed suffix when physical-per-logical
         matches.
+
+        Each decode group `i` pairs with prefill group `prefill_group_ids[i]`,
+        the one holding the same layers on that side (`_pair_regions`); the
+        same group by default. The returned lists are indexed by decode group.
         """
         ratios_match = decode_physical_per_logical == prefill_physical_per_logical
         # Allocation rounding legitimately leaves up to ppl - 1 trailing dead
@@ -2844,10 +2836,11 @@ class NixlBaseConnectorWorker:
         # recomputed final token), so the counts may differ by up to the sum
         # of the two ratios; anything larger indicates mismatched lists.
         max_padding = decode_physical_per_logical + prefill_physical_per_logical
-        decode_block_ids, prefill_block_ids = (
-            list(decode_block_ids),
-            list(prefill_block_ids),
-        )
+        if prefill_group_ids is None:
+            prefill_block_ids = list(prefill_block_ids)
+        else:
+            prefill_block_ids = [prefill_block_ids[g] for g in prefill_group_ids]
+        decode_block_ids = list(decode_block_ids)
         for i, (decode, prefill) in enumerate(zip(decode_block_ids, prefill_block_ids)):
             num_blocks = min(len(decode), len(prefill))
             num_extra = len(decode) - len(prefill)
@@ -3067,6 +3060,7 @@ class NixlBaseConnectorWorker:
         self.kv_caches_base_addr.pop(engine_id, None)
         self.dst_num_blocks.pop(engine_id, None)
         self.source_ranks.pop(engine_id, None)
+        self.remote_group_ids.pop(engine_id, None)
         self._remote_physical_blocks_per_group.pop(engine_id, None)
         self._remote_block_splits.pop(engine_id, None)
         self._push_senders.pop(engine_id, None)

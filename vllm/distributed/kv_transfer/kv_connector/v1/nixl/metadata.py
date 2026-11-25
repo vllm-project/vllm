@@ -229,16 +229,6 @@ def compute_nixl_compatibility_hash(
     return compat_hash
 
 
-@dataclass(frozen=True, slots=True)
-class ReadSpec:
-    """Specification for a single remote block read operation."""
-
-    remote_rank: int
-    local_block_ids: BlockIds
-    remote_block_ids: BlockIds
-    block_ids_by_region: bool = False
-
-
 @dataclass(slots=True)
 class HeartbeatInfo:
     """Heartbeat data for a single remote engine, sent from D worker to P."""

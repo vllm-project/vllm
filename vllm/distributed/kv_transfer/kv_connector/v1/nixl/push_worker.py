@@ -51,7 +51,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlConnectorMetadata,
-    ReadSpec,
     RemoteMeta,
     ReqId,
     ReqMeta,
@@ -556,11 +555,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         ranks = sorted(set().union(*source_ranks))
         handles: list[int] = []
         for rank in ranks:
-            spec = ReadSpec(
-                remote_rank=rank,
-                local_block_ids=group_ids(meta.local_physical_block_ids, rank),
-                remote_block_ids=group_ids(meta.remote.block_ids, rank),
-            )
             logger.debug(
                 "Remote agent %s available, calling _xfer_blocks on remote rank %s "
                 "for req %s",
@@ -569,7 +563,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 req_id,
             )
             handle = self._xfer_blocks(
-                read_spec=spec,
+                remote_rank=rank,
+                local_block_ids=group_ids(meta.local_physical_block_ids, rank),
+                remote_block_ids=group_ids(meta.remote.block_ids, rank),
                 request_id=req_id,
                 dst_engine_id=engine_id,
                 remote_request_id=meta.remote.request_id,
@@ -588,7 +584,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     def _xfer_blocks(
         self,
-        read_spec: ReadSpec,
+        remote_rank: int,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
         dst_engine_id: str,
         request_id: str,
         remote_request_id: str,
@@ -600,10 +598,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         a request's handles atomically), or `None` if nothing was submitted.
         """
         assert self.transfer_topo is not None
-        remote_rank = read_spec.remote_rank
-        local_block_ids = read_spec.local_block_ids
-        remote_block_ids = read_spec.remote_block_ids
-
         remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
         notif_id = f"{remote_request_id}:{self.world_size}".encode()
 

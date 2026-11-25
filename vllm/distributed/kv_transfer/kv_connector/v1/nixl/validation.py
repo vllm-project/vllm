@@ -151,6 +151,21 @@ def validate_remote_agent_handshake(
         stage.pairs.groups_match
         for stage in worker._remote_stages[remote_engine_id].values()
     )
+    if not groups_match and worker._TRANSFER_MODE == "pull":
+        # Blocks pair by group pair; these were never validated with a
+        # remote that puts some layer in another cache group.
+        if worker.block_size != nixl_agent_meta.block_size:
+            raise NotImplementedError(
+                "Different NIXL cache-group layouts require matching physical "
+                "block sizes"
+            )
+        if (
+            worker.dcp_size > 1 or remote_dcp_size > 1
+        ) and worker._dcp_replicated_groups:
+            raise NotImplementedError(
+                "Different NIXL cache-group layouts with DCP do not support "
+                "DCP-replicated MLA draft groups"
+            )
     if (
         (worker.dcp_size > 1 or remote_dcp_size > 1)
         and not groups_match
