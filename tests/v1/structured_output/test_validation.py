@@ -17,9 +17,6 @@ from vllm.sampling_params import (
 )
 from vllm.tokenizers import mistral as mistral_tokenizers
 from vllm.v1.structured_output import backend_guidance
-from vllm.v1.structured_output.backend_lm_format_enforcer import (
-    validate_structured_output_request_lm_format_enforcer,
-)
 from vllm.v1.structured_output.backend_outlines import (
     validate_structured_output_request_outlines,
 )
@@ -178,9 +175,7 @@ def _structural_tag(schema: str) -> str:
         ),
     ],
 )
-@pytest.mark.parametrize(
-    "backend", ["auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"]
-)
+@pytest.mark.parametrize("backend", ["auto", "xgrammar", "guidance", "outlines"])
 def test_deeply_nested_schema_rejected(structured_outputs, backend):
     """Converting a schema to a grammar gets steeply more expensive with nesting
     and runs on the API server; past the recursion limit it used to escape as a
@@ -242,11 +237,9 @@ STRUCTURAL_TAG = (
         ("auto", StructuredOutputsParams(json='{"type": ')),
         ("xgrammar", StructuredOutputsParams(grammar="not a grammar")),
         ("guidance", StructuredOutputsParams(grammar="not a grammar")),
-        ("lm-format-enforcer", StructuredOutputsParams(grammar="not a grammar")),
         ("outlines", StructuredOutputsParams(regex="(")),
         ("guidance", StructuredOutputsParams(structural_tag='{"nope": 1}')),
         ("outlines", StructuredOutputsParams(structural_tag=STRUCTURAL_TAG)),
-        ("lm-format-enforcer", StructuredOutputsParams(structural_tag=STRUCTURAL_TAG)),
         ("outlines", StructuredOutputsParams(json_object=True)),
     ],
 )
@@ -269,9 +262,6 @@ def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
         ("xgrammar", StructuredOutputsParams(regex="[0-9]+")),
         ("xgrammar", StructuredOutputsParams(regex="")),
         ("xgrammar", StructuredOutputsParams(json={})),
-        ("lm-format-enforcer", StructuredOutputsParams(json_object=True)),
-        ("lm-format-enforcer", StructuredOutputsParams(regex="")),
-        ("lm-format-enforcer", StructuredOutputsParams(json={})),
         ("outlines", StructuredOutputsParams(regex="")),
         ("outlines", StructuredOutputsParams(json={})),
     ],
@@ -291,10 +281,9 @@ def test_supported_spec_is_not_rejected(backend, structured_outputs):
     "validate",
     [
         validate_structured_output_request_outlines,
-        validate_structured_output_request_lm_format_enforcer,
         validate_xgrammar_grammar,
     ],
-    ids=["outlines", "lm-format-enforcer", "xgrammar"],
+    ids=["outlines", "xgrammar"],
 )
 def test_unhandled_spec_is_a_validation_error(validate):
     """json_object=False is rejected before backend selection, so only a direct

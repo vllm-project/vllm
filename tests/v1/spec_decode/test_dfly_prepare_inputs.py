@@ -10,7 +10,7 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="HY4 DFly requires CUDA"
+    not current_platform.is_cuda_alike(), reason="HY4 DFly requires CUDA or ROCm"
 )
 
 QUERY_WIDTH = 4
@@ -44,7 +44,7 @@ def _reference_reuse_indices(snapshot_rows, anchors, local_window, active, width
 
 @pytest.fixture
 def prepared():
-    from vllm.models.hy_v4.nvidia.dfly_inputs import prepare_dfly_inputs
+    from vllm.models.hy_v4.common.dfly_inputs import prepare_dfly_inputs
 
     device = torch.device("cuda")
     max_reqs, max_tokens, hidden_size, padded_batch = 8, 64, 16, 5
@@ -180,7 +180,7 @@ def test_prepare_inputs_matches_torch_reference(prepared):
 
 
 def test_query_slots_skip_inactive_and_null_blocks(prepared):
-    from vllm.models.hy_v4.nvidia.dfly_inputs import write_dfly_query_slots
+    from vllm.models.hy_v4.common.dfly_inputs import write_dfly_query_slots
 
     out, inp = prepared
     device = out["positions"].device
@@ -210,7 +210,7 @@ def test_query_slots_skip_inactive_and_null_blocks(prepared):
 
 @pytest.mark.parametrize("layer_slots", [[0, 0], [1, 0]])
 def test_reuse_indices_match_torch_reference(prepared, layer_slots):
-    from vllm.models.hy_v4.nvidia.dfly_inputs import build_dfly_reuse_indices
+    from vllm.models.hy_v4.common.dfly_inputs import build_dfly_reuse_indices
 
     out, inp = prepared
     device = out["positions"].device
@@ -241,3 +241,86 @@ def test_reuse_indices_match_torch_reference(prepared, layer_slots):
             width,
         )
         torch.testing.assert_close(indices[layer, :count], expected)
+
+
+def test_all_padding_batch_without_mrope():
+    """Dummy runs and graph capture prepare an all-padding batch with no
+    requests and no M-RoPE; every row must be inactive padding and the reuse
+    rows must be dead."""
+    from vllm.models.hy_v4.common.dfly_inputs import (
+        build_dfly_reuse_indices,
+        prepare_dfly_inputs,
+    )
+
+    device = torch.device("cuda")
+    max_reqs, padded_batch, hidden_size = 8, 3, 16
+    count = padded_batch * QUERY_WIDTH
+
+    def full(shape, value, dtype):
+        return torch.full(shape, value, dtype=dtype, device=device)
+
+    out = dict(
+        input_ids=full((64,), -7, torch.int32),
+        positions=full((64,), -7, torch.int64),
+        is_padding=full((64,), False, torch.bool),
+        query_start_loc=full((max_reqs + 1,), -7, torch.int32),
+        seq_lens=full((max_reqs,), -7, torch.int32),
+        active=full((max_reqs,), True, torch.bool),
+        source_rows=full((max_reqs,), -7, torch.int64),
+        anchors=full((max_reqs,), -7, torch.int64),
+        target_hidden_out=torch.randn(
+            max_reqs, hidden_size, dtype=torch.bfloat16, device=device
+        ),
+        mrope_positions=None,
+        draft_idx_mapping=full((max_reqs,), -7, torch.int64),
+        out_temperature=full((max_reqs,), 0.0, torch.float32),
+        out_seeds=full((max_reqs,), 0, torch.int64),
+    )
+    empty = torch.empty(0, dtype=torch.int32, device=device)
+    prepare_dfly_inputs(
+        **out,
+        target_query_start_loc=torch.zeros(1, dtype=torch.int32, device=device),
+        target_positions=torch.empty(0, dtype=torch.int64, device=device),
+        idx_mapping=empty,
+        num_sampled=empty,
+        num_rejected=empty,
+        last_sampled=torch.zeros(max_reqs, 2, dtype=torch.int64, device=device),
+        target_hidden=torch.empty(0, hidden_size, dtype=torch.bfloat16, device=device),
+        mrope_delta=None,
+        temperature=torch.rand(max_reqs, device=device),
+        seeds=torch.arange(max_reqs, device=device),
+        max_model_len=torch.tensor(MAX_MODEL_LEN, dtype=torch.int32, device=device),
+        mask_token_id=MASK_TOKEN_ID,
+        query_width=QUERY_WIDTH,
+        num_reqs=0,
+        padded_batch=padded_batch,
+    )
+
+    block = [0] + [MASK_TOKEN_ID] * (QUERY_WIDTH - 1)
+    assert out["input_ids"][:count].tolist() == block * padded_batch
+    assert out["positions"][:count].tolist() == list(range(QUERY_WIDTH)) * padded_batch
+    assert out["is_padding"][:count].all()
+    assert out["query_start_loc"][: padded_batch + 1].tolist() == [
+        i * QUERY_WIDTH for i in range(padded_batch + 1)
+    ]
+    assert out["seq_lens"][:padded_batch].tolist() == [QUERY_WIDTH] * padded_batch
+    assert not out["active"][:padded_batch].any()
+    assert not out["target_hidden_out"][:padded_batch].any()
+    assert out["draft_idx_mapping"][:padded_batch].tolist() == [-1] * padded_batch
+    assert not out["out_temperature"].any()
+
+    indices = torch.full((2, 64, 128), -7, dtype=torch.int32, device=device)
+    build_dfly_reuse_indices(
+        indices,
+        torch.zeros(1, 8, 8, dtype=torch.int32, device=device),
+        torch.zeros(2, dtype=torch.int32, device=device),
+        out["active"],
+        out["source_rows"],
+        out["anchors"],
+        8,
+        3,
+        QUERY_WIDTH,
+        padded_batch,
+    )
+    assert (indices[:, :count] == -1).all()
+    assert (indices[:, count:] == -7).all()

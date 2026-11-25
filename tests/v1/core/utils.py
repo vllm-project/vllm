@@ -128,6 +128,7 @@ def create_scheduler(
         runner=runner,
     )
     if mm_encoder_only:
+        assert model_config.multimodal_config is not None
         model_config.multimodal_config.mm_encoder_only = True
     if use_ec_connector and ec_role == "ec_producer":
         model_config.multimodal_config = MultiModalConfig()
@@ -254,7 +255,7 @@ def create_scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         block_size=block_size,
-        log_stats=True,
+        collect_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
     return scheduler
