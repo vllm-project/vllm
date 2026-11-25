@@ -33,7 +33,7 @@ def _wmma_chip() -> bool:
         return False
     from vllm.platforms.rocm import get_rdna_version, on_rdna
 
-    return on_rdna() and get_rdna_version() in (3, 3.5)
+    return on_rdna() and 3 <= get_rdna_version() < 4
 
 
 pytestmark = pytest.mark.skipif(
