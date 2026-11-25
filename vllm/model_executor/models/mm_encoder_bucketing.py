@@ -55,8 +55,9 @@ from __future__ import annotations
 
 import functools
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from torch import nn
 
@@ -120,10 +121,10 @@ _VERIFIED_FOR_BUCKETING: dict[str, str] = {
 # changes forward semantics must not inherit the base recipe. Classes without a
 # verified variable-length recipe keep their original forward (which also serves
 # the fallback path).
-_FORWARD_SHIMS: dict[str, object] = {}
+_FORWARD_SHIMS: dict[str, Callable[..., Any]] = {}
 
 
-def register_forward_shim(class_name: str, shim_fn: object) -> None:
+def register_forward_shim(class_name: str, shim_fn: Callable[..., Any]) -> None:
     """Register a variable-length forward recipe for a fixed-window encoder class.
 
     Called at import time by an adapted model (see `qwen2_audio.py`) to install
@@ -298,7 +299,7 @@ class EncoderBucketingSpec:
     context_margin: int | None = None
     align_to: int = 1
 
-    def item_lengths(self, mm_kwargs_batch: Mapping[str, object]) -> list[int] | None:
+    def item_lengths(self, mm_kwargs_batch: Mapping[str, Any]) -> list[int] | None:
         """Per-item true lengths in feature frames.
 
         Args:
@@ -310,7 +311,7 @@ class EncoderBucketingSpec:
         """
         raise NotImplementedError
 
-    def padded_time(self, mm_kwargs_batch: Mapping[str, object]) -> int:
+    def padded_time(self, mm_kwargs_batch: Mapping[str, Any]) -> int:
         """The padded time extent of the batch (the no-bucket compute per item).
 
         Args:
@@ -324,10 +325,10 @@ class EncoderBucketingSpec:
 
     def crop(
         self,
-        mm_kwargs_batch: Mapping[str, object],
+        mm_kwargs_batch: Mapping[str, Any],
         indices: list[int],
         rung: int,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         """Crop to the given rows, each truncated to `rung` feature frames.
 
         The frames past an item's real content are the producer's own padding and
@@ -383,9 +384,9 @@ class EncoderBucketing:
 
     def bucket(
         self,
-        mm_kwargs_batch: Mapping[str, object],
+        mm_kwargs_batch: dict[str, Any],
         num_items: int,
-    ) -> list[tuple[list[int], Mapping[str, object]]]:
+    ) -> list[tuple[list[int], dict[str, Any]]]:
         """Split a batch into fixed-length rung sub-batches.
 
         Falls back to a single full batch when bucketing cannot help: no
@@ -403,7 +404,8 @@ class EncoderBucketing:
 
         """
         full = [(list(range(num_items)), mm_kwargs_batch)]
-        if not self.active or num_items == 0:
+        ladder = self.ladder
+        if ladder is None or num_items == 0:
             return full
         lengths = self.spec.item_lengths(mm_kwargs_batch)
         if lengths is None or len(lengths) != num_items:
@@ -411,10 +413,10 @@ class EncoderBucketing:
         time_extent = self.spec.padded_time(mm_kwargs_batch)
         if time_extent <= 0:
             return full
-        margin = self.spec.context_margin
+        margin = self.spec.context_margin or 0
         windows: list[int] = []
         for length in lengths:
-            rung = self.ladder.padded_length(length + margin)
+            rung = ladder.padded_length(length + margin)
             if rung is None:
                 # An item too long for the ladder has no safe rung; run the
                 # untouched forward rather than truncate content.
@@ -437,9 +439,10 @@ class EncoderBucketing:
         groups: dict[int, list[int]] = {}
         for index, window in enumerate(windows):
             groups.setdefault(window, []).append(index)
-        if self.compute_budget is not None:
-            groups = self._fold_rungs_to_floor(groups)
-            calls: list[tuple[int, list[int]]] = self._split_oversized(groups)
+        budget = self.compute_budget
+        if budget is not None:
+            groups = self._fold_rungs_to_floor(groups, budget, self.fill_floor or 1)
+            calls: list[tuple[int, list[int]]] = self._split_oversized(groups, budget)
         else:
             calls = list(groups.items())
         return [
@@ -448,7 +451,7 @@ class EncoderBucketing:
         ]
 
     def _fold_rungs_to_floor(
-        self, groups: dict[int, list[int]]
+        self, groups: dict[int, list[int]], budget: int, floor: int
     ) -> dict[int, list[int]]:
         """Fold under-full rungs up until each call reaches the fill floor.
 
@@ -458,7 +461,6 @@ class EncoderBucketing:
         at the budget instead of gated on a raw item count. Groups already at
         or above the floor never fold, so healthy batches are not over-merged.
         """
-        budget, floor = self.compute_budget, self.fill_floor
         rungs = sorted(groups)
         folded: dict[int, list[int]] = {}
         i = 0
@@ -481,7 +483,7 @@ class EncoderBucketing:
         return folded
 
     def _split_oversized(
-        self, groups: dict[int, list[int]]
+        self, groups: dict[int, list[int]], budget: int
     ) -> list[tuple[int, list[int]]]:
         """Split rung groups whose call compute exceeds the budget.
 
@@ -494,7 +496,7 @@ class EncoderBucketing:
         calls: list[tuple[int, list[int]]] = []
         for rung, indices in groups.items():
             n = len(indices)
-            max_bs = max(1, self.compute_budget // rung)
+            max_bs = max(1, budget // rung)
             if n <= max_bs:
                 calls.append((rung, indices))
                 continue

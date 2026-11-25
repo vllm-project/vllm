@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 import torch
 from torch import nn
@@ -78,7 +78,7 @@ class FireRedASR2BucketingSpec(EncoderBucketingSpec):
     frames_per_second = 100  # frame_shift=10ms -> hop 160 @ 16 kHz
     context_margin = 7  # Conv2dSubsampling context (left+1+right = 3+1+3)
 
-    def item_lengths(self, mm_kwargs_batch: Mapping[str, object]) -> list[int] | None:
+    def item_lengths(self, mm_kwargs_batch: Mapping[str, Any]) -> list[int] | None:
         speech_lengths = mm_kwargs_batch.get("speech_lengths")
         if speech_lengths is None:
             return None
@@ -86,7 +86,7 @@ class FireRedASR2BucketingSpec(EncoderBucketingSpec):
             return speech_lengths.tolist()
         return torch.as_tensor(speech_lengths).tolist()
 
-    def padded_time(self, mm_kwargs_batch: Mapping[str, object]) -> int:
+    def padded_time(self, mm_kwargs_batch: Mapping[str, Any]) -> int:
         input_features = mm_kwargs_batch.get("input_features")
         if input_features is None:
             return 0
@@ -96,10 +96,10 @@ class FireRedASR2BucketingSpec(EncoderBucketingSpec):
 
     def crop(
         self,
-        mm_kwargs_batch: Mapping[str, object],
+        mm_kwargs_batch: Mapping[str, Any],
         indices: list[int],
         rung: int,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         input_features = mm_kwargs_batch["input_features"]
         speech_lengths = mm_kwargs_batch["speech_lengths"]
         fake_token_lengths = mm_kwargs_batch.get("fake_token_lengths")

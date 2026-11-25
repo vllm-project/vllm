@@ -26,7 +26,7 @@
 
 import math
 from collections.abc import Iterable, Mapping
-from typing import Annotated
+from typing import Annotated, Any
 
 import torch
 import torch.nn.functional as F
@@ -273,7 +273,7 @@ class GraniteSpeechBucketingSpec(EncoderBucketingSpec):
             sizes = [int(s) for s in audio_embed_sizes]
         return [(int(s) // 3) * 15 for s in sizes]
 
-    def item_lengths(self, mm_kwargs_batch: Mapping[str, object]) -> list[int] | None:
+    def item_lengths(self, mm_kwargs_batch: Mapping[str, Any]) -> list[int] | None:
         feats = mm_kwargs_batch.get("input_features")
         if feats is not None:
             if isinstance(feats, list):
@@ -284,7 +284,7 @@ class GraniteSpeechBucketingSpec(EncoderBucketingSpec):
             return self._lengths_from_embed_sizes(sizes)
         return None
 
-    def padded_time(self, mm_kwargs_batch: Mapping[str, object]) -> int:
+    def padded_time(self, mm_kwargs_batch: Mapping[str, Any]) -> int:
         feats = mm_kwargs_batch.get("input_features")
         if feats is None:
             return 0
@@ -294,10 +294,10 @@ class GraniteSpeechBucketingSpec(EncoderBucketingSpec):
 
     def crop(
         self,
-        mm_kwargs_batch: Mapping[str, object],
+        mm_kwargs_batch: Mapping[str, Any],
         indices: list[int],
         rung: int,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         feats = mm_kwargs_batch["input_features"]
         sizes = mm_kwargs_batch.get("audio_embed_sizes")
 
@@ -312,7 +312,7 @@ class GraniteSpeechBucketingSpec(EncoderBucketingSpec):
             sel = torch.tensor(indices, dtype=torch.long, device=feats.device)
             out_feats = feats[sel, ..., :rung, :]
 
-        result: dict[str, object] = {"input_features": out_feats}
+        result: dict[str, Any] = {"input_features": out_feats}
         if sizes is not None:
             result["audio_embed_sizes"] = select(sizes)
         return result

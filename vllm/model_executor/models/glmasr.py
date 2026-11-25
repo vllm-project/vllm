@@ -603,7 +603,7 @@ class GlmAsrBucketingSpec(EncoderBucketingSpec):
             i += c
         return groups
 
-    def item_lengths(self, mm_kwargs_batch: Mapping[str, object]) -> list[int] | None:
+    def item_lengths(self, mm_kwargs_batch: Mapping[str, Any]) -> list[int] | None:
         mask = mm_kwargs_batch.get("feature_attention_mask")
         if mask is None:
             return None
@@ -612,7 +612,7 @@ class GlmAsrBucketingSpec(EncoderBucketingSpec):
         # is its longest chunk.
         return [max(g) if g else 0 for g in groups]
 
-    def padded_time(self, mm_kwargs_batch: Mapping[str, object]) -> int:
+    def padded_time(self, mm_kwargs_batch: Mapping[str, Any]) -> int:
         feats = mm_kwargs_batch.get("input_features")
         if feats is None:
             return 0
@@ -622,15 +622,15 @@ class GlmAsrBucketingSpec(EncoderBucketingSpec):
 
     def crop(
         self,
-        mm_kwargs_batch: Mapping[str, object],
+        mm_kwargs_batch: Mapping[str, Any],
         indices: list[int],
         rung: int,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         feats = mm_kwargs_batch["input_features"]
         mask = mm_kwargs_batch["feature_attention_mask"]
         counts = mm_kwargs_batch.get("chunk_counts")
 
-        out: dict[str, object] = {}
+        out: dict[str, Any] = {}
         if isinstance(feats, list):
             # one element per audio (its chunks stacked on dim 0); select and
             # truncate each chunk stack's time axis (always the last dim)

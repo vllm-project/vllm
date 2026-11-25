@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 import time
-from collections.abc import Collection, Mapping
+from collections.abc import Collection
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -12,7 +12,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
 from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.multimodal.inputs import MultiModalKwargsItem
+from vllm.multimodal.inputs import BatchedTensorInputs, MultiModalKwargsItem
 from vllm.multimodal.utils import (
     get_mm_features_in_window,
     group_and_batch_mm_kwargs,
@@ -202,8 +202,8 @@ class EncoderRunner:
         return [encoder_outputs[i] for i in np.argsort(order)]
 
     def _bucket_mm_batch(
-        self, mm_kwargs_batch: Mapping[str, torch.Tensor], num_items: int
-    ) -> list[tuple[list[int], Mapping[str, torch.Tensor]]]:
+        self, mm_kwargs_batch: BatchedTensorInputs, num_items: int
+    ) -> list[tuple[list[int], BatchedTensorInputs]]:
         """Split a batch into rungs when the model declares bucketing, else one.
 
         Args:

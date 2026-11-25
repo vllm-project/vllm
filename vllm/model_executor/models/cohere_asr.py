@@ -91,11 +91,11 @@ class CohereASRBucketingSpec(EncoderBucketingSpec):
     context_margin = 8  # conv subsampling receptive field
     align_to = 8  # subsampling_factor
 
-    def item_lengths(self, mm_kwargs_batch: Mapping[str, object]) -> list[int] | None:
+    def item_lengths(self, mm_kwargs_batch: Mapping[str, Any]) -> list[int] | None:
         length = mm_kwargs_batch.get("length")
         return length.tolist() if length is not None else None
 
-    def padded_time(self, mm_kwargs_batch: Mapping[str, object]) -> int:
+    def padded_time(self, mm_kwargs_batch: Mapping[str, Any]) -> int:
         input_features = mm_kwargs_batch.get("input_features")
         if input_features is None:
             return 0
@@ -105,10 +105,10 @@ class CohereASRBucketingSpec(EncoderBucketingSpec):
 
     def crop(
         self,
-        mm_kwargs_batch: Mapping[str, object],
+        mm_kwargs_batch: Mapping[str, Any],
         indices: list[int],
         rung: int,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         input_features = mm_kwargs_batch["input_features"]
         length = mm_kwargs_batch["length"]
         if is_list_of(input_features, torch.Tensor):

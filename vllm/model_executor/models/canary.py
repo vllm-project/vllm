@@ -8,7 +8,7 @@ whose `config.json` has `model_type == "canary"`.
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import regex as re
 import torch
@@ -103,13 +103,13 @@ class CanaryBucketingSpec(EncoderBucketingSpec):
     # pad_sequence in embed_multimodal zero-fills past the true length, so a
     # rung >= the true length never clips content or the subsampling boundary.
 
-    def item_lengths(self, mm_kwargs_batch: Mapping[str, object]) -> list[int] | None:
+    def item_lengths(self, mm_kwargs_batch: Mapping[str, Any]) -> list[int] | None:
         feature_lengths = mm_kwargs_batch.get("feature_lengths")
         if feature_lengths is None:
             return None
         return feature_lengths.tolist()
 
-    def padded_time(self, mm_kwargs_batch: Mapping[str, object]) -> int:
+    def padded_time(self, mm_kwargs_batch: Mapping[str, Any]) -> int:
         input_features = mm_kwargs_batch.get("input_features")
         if input_features is None:
             return 0
@@ -119,10 +119,10 @@ class CanaryBucketingSpec(EncoderBucketingSpec):
 
     def crop(
         self,
-        mm_kwargs_batch: Mapping[str, object],
+        mm_kwargs_batch: Mapping[str, Any],
         indices: list[int],
         rung: int,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         input_features = mm_kwargs_batch["input_features"]
         feature_lengths = mm_kwargs_batch["feature_lengths"]
         rows = torch.tensor(indices, dtype=torch.long, device=feature_lengths.device)
