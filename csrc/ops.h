@@ -639,6 +639,19 @@ void selective_scan_fwd(
     const std::optional<torch::stable::Tensor>& cu_chunk_seqlen,
     const std::optional<torch::stable::Tensor>& last_chunk_indices);
 
+void gdn_prefill_conv(
+    const torch::stable::Tensor& x, const torch::stable::Tensor& weight,
+    const torch::stable::Tensor& conv_states,
+    const torch::stable::Tensor& query_start_loc,
+    const torch::stable::Tensor& cache_indices,
+    const torch::stable::Tensor& has_initial_state,
+    const torch::stable::Tensor& a, const torch::stable::Tensor& b,
+    const torch::stable::Tensor& A_log, const torch::stable::Tensor& dt_bias,
+    const torch::stable::Tensor& q, const torch::stable::Tensor& k,
+    const torch::stable::Tensor& v, const torch::stable::Tensor& g,
+    const torch::stable::Tensor& beta, int64_t num_k_heads, int64_t head_dim,
+    bool output_g_exp, double beta_scale, int64_t null_block_id);
+
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
                       torch::stable::Tensor& rank_data, int64_t rank,
