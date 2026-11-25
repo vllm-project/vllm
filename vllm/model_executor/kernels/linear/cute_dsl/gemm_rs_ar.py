@@ -40,6 +40,10 @@ from cutlass.utils import get_smem_capacity_in_bytes
 
 from vllm.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
 from vllm.distributed import get_tp_group
+from vllm.distributed.device_communicators.nvlink_fabric import (
+    SymmetricMemoryTopology,
+    get_symmetric_memory_topology,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
@@ -705,7 +709,7 @@ class Sm100GemmRsAr:
             partial_vecs = cute.zipped_divide(partial_uc, (1, WIDTH))
 
             bf16x16_atom = cute.make_copy_atom(
-                cute.nvgpu.CopyUniversalOp(),
+                cute.nvgpu.CopyR2GOp(),
                 BFloat16,
                 num_bits_per_copy=256,
                 l1c_evict_priority=cute.nvgpu.CacheEvictionPriority.NO_ALLOCATE,
@@ -894,6 +898,11 @@ class GemmRsAr:
         assert 1 < world_size <= 16
         assert 128 % world_size == 0
         assert max_M >= 128 and N % 128 == 0
+        if (
+            get_symmetric_memory_topology(tp_group.cpu_group)
+            is SymmetricMemoryTopology.UNSUPPORTED
+        ):
+            raise RuntimeError("TP ranks do not share a symmetric-memory fabric")
 
         max_M = (max_M + world_size - 1) // world_size * world_size
         self.rank = rank

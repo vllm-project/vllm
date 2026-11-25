@@ -404,7 +404,6 @@ def _numerics(
             num_kv_heads=1,
             head_size=HEAD_SIZE,
             dtype=vllm_config.model_config.dtype,
-            non_causal_multi_token_decode=False,
         )
 
         nr, ctx, qlen = NUM_REQS, CTX, QLEN
@@ -632,7 +631,6 @@ def test_adaptive_varlen_shards_match_reference(monkeypatch, asm, expected):
             num_kv_heads=1,
             head_size=HEAD_SIZE,
             dtype=vllm_config.model_config.dtype,
-            non_causal_multi_token_decode=False,
         )
         kv_flat = torch.randn(
             nr * max_len, 1, HEAD_SIZE, dtype=torch.float32, device=device

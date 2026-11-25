@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
+from itertools import groupby
 from typing import cast
 
 import torch
@@ -13,6 +14,7 @@ from vllm.renderers.chat_utils import (
     BaseMultiModalItemTracker,
     ChatCompletionContentPartParam,
     ChatCompletionContentPartTextParam,
+    ChatTemplateContentFormat,
     ConversationMessage,
     MultiModalItemTracker,
     parse_chat_message_content_parts,
@@ -45,7 +47,16 @@ def truncate_text_to_tokens(
     tokenizer,
     max_tokens: int,
 ) -> str:
-    """Truncate text to a maximum number of content tokens.
+    """Truncate text to a maximum number of content tokens."""
+    return _truncate_text_to_tokens(text, tokenizer, max_tokens)[0]
+
+
+def _truncate_text_to_tokens(
+    text: str,
+    tokenizer,
+    max_tokens: int,
+) -> tuple[str, int]:
+    """Return truncated text and its validated content-token count.
 
     Uses offset_mapping to slice the original text at the exact character
     boundary, avoiding lossy encode→decode round-trips that can shift
@@ -54,13 +65,14 @@ def truncate_text_to_tokens(
     the token count of the sliced text is re-checked either way.
     """
     if max_tokens <= 0:
-        return ""
+        return "", 0
 
     while text:
         if is_mistral_tokenizer(tokenizer):
             token_ids = tokenizer.encode(text, add_special_tokens=False)
-            if len(token_ids) <= max_tokens:
-                break
+            num_tokens = len(token_ids)
+            if num_tokens <= max_tokens:
+                return text, num_tokens
 
             # Unless special tokens are skipped, SentencePiece pieces such as
             # "▁" and "<0x0A>" are decoded verbatim.
@@ -73,8 +85,9 @@ def truncate_text_to_tokens(
                 return_offsets_mapping=True,
             )
             offsets = encoding["offset_mapping"]
-            if len(encoding["input_ids"]) <= max_tokens:
-                break
+            num_tokens = len(encoding["input_ids"])
+            if num_tokens <= max_tokens:
+                return text, num_tokens
 
             char_end = min(offsets[max_tokens - 1][1], offsets[max_tokens][0])
 
@@ -82,7 +95,7 @@ def truncate_text_to_tokens(
             char_end = len(text) - 1
         text = text[:char_end]
 
-    return text
+    return "", 0
 
 
 def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tensor:
@@ -198,6 +211,7 @@ def _parse_score_content(
     role: str,
     data: ScoreData,
     mm_tracker: BaseMultiModalItemTracker,
+    content_format: ChatTemplateContentFormat = "string",
 ) -> list[ConversationMessage]:
     parts: Iterable[ChatCompletionContentPartParam]
     if isinstance(data, str):
@@ -209,7 +223,7 @@ def _parse_score_content(
         role=role,
         parts=parts,
         mm_tracker=mm_tracker,
-        wrap_dicts=False,
+        wrap_dicts=(content_format == "openai"),
         interleave_strings=False,
         multimodal_content_part_separator="",
     )
@@ -223,7 +237,7 @@ def parse_score_data_single(
     """Parse **one** ScoreData into a text prompt and its own multi-modal
     data.
 
-    Unlike `parse_score_data`, each call creates an **independent**
+    Unlike `parse_score_messages`, each call creates an **independent**
     `MultiModalItemTracker` so multi-modal items are kept separate.
     This is the correct behaviour for late-interaction scoring, where
     query and document are encoded independently.
@@ -236,29 +250,48 @@ def parse_score_data_single(
     return prompt, mm_items, mm_uuids
 
 
-def parse_score_data(
+def parse_score_messages(
     data_1: ScoreData,
     data_2: ScoreData,
     model_config: ModelConfig,
-) -> tuple[str, str, MultiModalDataDict | None, MultiModalUUIDDict | None]:
-    """Parse a query-document pair into text prompts and shared multi-modal
-    data.
-
-    Uses a **single** `MultiModalItemTracker` so that multi-modal
-    items from both inputs are merged into one `mm_data` dict.  This is
-    the correct behaviour for cross-encoder scoring, where query and
-    document are concatenated into a single model prompt.
-    """
+    content_format: ChatTemplateContentFormat = "string",
+) -> tuple[
+    list[ConversationMessage], MultiModalDataDict | None, MultiModalUUIDDict | None
+]:
+    """Parse a scoring pair, retaining content blocks for OpenAI-format templates."""
     mm_tracker = MultiModalItemTracker(model_config)
-
-    content_1 = _parse_score_content("query", data_1, mm_tracker)
-    content_2 = _parse_score_content("document", data_2, mm_tracker)
-
-    prompt_1 = _ensure_str(content_1)
-    prompt_2 = _ensure_str(content_2)
+    conversation = _parse_score_content("query", data_1, mm_tracker, content_format)
+    conversation += _parse_score_content("document", data_2, mm_tracker, content_format)
     mm_items, mm_uuids = mm_tracker.resolve_items()
+    return conversation, mm_items, mm_uuids
 
-    return prompt_1, prompt_2, mm_items, mm_uuids
+
+def truncate_score_content(
+    content: str | list[dict[str, str]],
+    tokenizer,
+    max_tokens: int,
+) -> str | list[dict[str, str]]:
+    """Limit text tokens across content blocks without dropping media blocks."""
+    if isinstance(content, str):
+        return truncate_text_to_tokens(content, tokenizer, max_tokens)
+
+    result = []
+    for is_text, group in groupby(content, key=lambda part: part["type"] == "text"):
+        parts = list(group)
+        if not is_text:
+            result.extend(parts)
+            continue
+
+        # Tokenize adjacent text together: token counts are not additive.
+        text, num_tokens = _truncate_text_to_tokens(
+            "".join(part["text"] for part in parts), tokenizer, max_tokens
+        )
+        max_tokens -= num_tokens
+        for part in parts:
+            length = len(part["text"])
+            result.append({**part, "text": text[:length]})
+            text = text[length:]
+    return result
 
 
 def compress_token_type_ids(token_type_ids: list[int]) -> tuple[int, int]:

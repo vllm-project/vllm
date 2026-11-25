@@ -14,7 +14,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
+    AttentionSpec,
     MambaSpec,
     MLAAttentionSpec,
 )
@@ -57,8 +57,8 @@ MoRIIOWriter = moriio_engine.MoRIIOWriter
 
 def _full_spec(
     block_size: int = 4, num_kv_heads: int = 2, head_size: int = 3
-) -> FullAttentionSpec:
-    return FullAttentionSpec(
+) -> AttentionSpec:
+    return AttentionSpec(
         block_size=block_size,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
@@ -100,6 +100,7 @@ def _wrapper_for_messages() -> Any:
     wrapper.done_write_cache_req_ids = []
     wrapper._write_done_senders = {}
     wrapper._terminal_transfer_ids = OrderedDict()
+    wrapper._aborted_write_endpoints = {}
     return wrapper
 
 
@@ -407,7 +408,9 @@ def test_write_scheduler_deduplicates_layers_and_seals_expected_count():
     request_info = RemoteAllocInfo(block_ids=[[4, 5]])
     wrapper = _wrapper_for_messages()
     wrapper.done_remote_allocate_req_dict["xfer"] = request_info
-    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper))
+    writer = make_moriio_writer(
+        SimpleNamespace(moriio_wrapper=wrapper, world_size=1, pp_size=1)
+    )
 
     assert writer.schedule_write(_write_task("dense0"))
     assert not writer.schedule_write(_write_task("dense0"))
@@ -493,12 +496,16 @@ def test_hybrid_write_posts_both_regions_before_layer_completion():
         _is_mamba_layer=lambda name: True,
         _hybrid_payload_index_by_layer={"kda": 2},
         _region_session_indices=lambda name: [0, 1],
+        kv_region_mr_offsets={},
         _compute_mamba_transfer_offsets=Mock(
             return_value=([10, 20, 30, 40], [50, 60, 70, 80], [2, 4, 8, 16], 3)
         ),
     )
     worker._mamba_blocks_for_layer = lambda name, blocks: (
         MoRIIOConnectorWorker._mamba_blocks_for_layer(worker, name, blocks)
+    )
+    worker._mamba_region_mr_offsets = lambda *args: (
+        MoRIIOConnectorWorker._mamba_region_mr_offsets(worker, *args)
     )
     writer = make_moriio_writer(worker)
     task = _write_task("kda")
