@@ -1053,7 +1053,7 @@ def test_aggregate_keeps_the_config_info_of_the_other_payload():
 
     worker_stats.aggregate(scheduler_stats)
 
-    assert worker_stats.data[_StatsKey.INFO] == [{"cpu_num_chunks": 512}]
+    assert worker_stats.data[_StatsKey.INFO] == [{"cpu_num_chunks": "512"}]
     assert worker_stats.data[_StatsKey.DATA][LOAD_BYTES] == {(): 100}
 
 
@@ -1067,7 +1067,7 @@ def test_aggregate_keeps_the_config_info_of_a_later_payload():
 
     stats.aggregate(later_stats)
 
-    assert stats.data[_StatsKey.INFO] == [{"cpu_num_chunks": 512}]
+    assert stats.data[_StatsKey.INFO] == [{"cpu_num_chunks": "512"}]
 
 
 def test_metric_sections_leave_out_the_config_info():

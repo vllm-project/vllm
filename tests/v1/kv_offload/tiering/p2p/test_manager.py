@@ -47,7 +47,9 @@ from vllm.v1.kv_offload.tiering.p2p.manager import (
     _RECONNECT_MAX_BACKOFF_S,
     _RETAINED_HOLD_CAP_S,
     _UNBOUND_STORE_TIMEOUT_S,
+    P2PDestInfo,
     P2PSecondaryTierManager,
+    P2PSourceInfo,
     _annotate_req_context,
 )
 from vllm.v1.kv_offload.tiering.p2p.session import (
@@ -368,6 +370,50 @@ def test_on_new_request_policy(monkeypatch, kv_params, expected):
     assert mgr.on_new_request(_req_context(kv_params=kv_params)).policy is expected
 
 
+@pytest.mark.parametrize(
+    "kv_params,expect_p2p_store",
+    [
+        (None, False),
+        (_remote_prefiller_kv_params(), False),
+        (_remote_decoder_kv_params(), True),
+    ],
+    ids=["local", "consumer", "producer"],
+)
+def test_primary_store_only_cascades_to_p2p_for_producers(
+    monkeypatch, kv_params, expect_p2p_store
+):
+    p2p = _make_manager()
+    p2p.locality = None
+    _attach_fake_transports(p2p)
+    monkeypatch.setattr(p2p, "_get_or_create_session", lambda peer_id: None)
+    region = _mock_mmap_region(4)
+    example = ExampleSecondaryTierManager(
+        offloading_spec=SimpleNamespace(),
+        primary_kv_view=region.create_kv_memoryview(),
+        tier_type="example",
+    )
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=region)
+    tiering = TieringOffloadingManager(primary, [p2p, example], tier_poll_interval_s=0)
+    ctx = ReqContext(req_id="req", kv_transfer_params=kv_params)
+    keys = [OffloadKey(b"new-chunk")]
+    try:
+        tiering.on_new_request(ctx)
+        assert (
+            tiering.prepare_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        tiering.complete_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
+
+        # No P2P submission also means no primary read/pin or job accounting.
+        assert {job.tier_idx for job in tiering._jobs.values()} == (
+            {0, 1} if expect_p2p_store else {1}
+        )
+        assert example.lookup(keys[0], ctx) is LookupResult.HIT
+        assert bool(p2p._unbound_stores) is expect_p2p_store
+    finally:
+        tiering.shutdown()
+
+
 # ---------------------------------------------------------------------------
 # Tests for serve_external_requests
 # ---------------------------------------------------------------------------
@@ -444,10 +490,11 @@ class TestServeExternalRequests:
 
 
 class TestSubmitStore:
-    def test_no_decode_succeeds_immediately(self):
-        """Without a `remote_decoder` block, job succeeds immediately."""
+    @pytest.mark.parametrize("params", [{}, {"remote_decoder": None}])
+    def test_no_decode_succeeds_immediately(self, params):
+        """An absent or null `remote_decoder` permits a local store."""
         mgr = _make_manager()
-        job = _job_metadata(job_id=1, kv_params={})
+        job = _job_metadata(job_id=1, kv_params=params)
         mgr.submit_store(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
 
@@ -573,6 +620,43 @@ class TestSubmitLoad:
         assert mgr._finished_jobs == []
         assert "req-42" not in mgr._failed_req_ids
 
+    @pytest.mark.parametrize("symmetric", [False, True])
+    @pytest.mark.parametrize("empty", [False, True])
+    def test_pd_lookup_misses_after_first_fetch(self, monkeypatch, symmetric, empty):
+        """Only a nonempty PD fetch consumes the request's one-time supply."""
+        mgr = _make_manager()
+        peer_id = "10.0.0.1:8000"
+        session = _FakeSession(peer_id=peer_id)
+        if symmetric:
+            monkeypatch.setattr(
+                session, "register_lookup", lambda *_: True, raising=False
+            )
+        mgr._sessions[peer_id] = session
+        params = (
+            _remote_kv_source_kv_params()
+            if symmetric
+            else _remote_prefiller_kv_params()
+        )
+        job = _job_metadata(
+            job_id=1,
+            keys=[] if empty else [OffloadKey(b"prompt")],
+            chunk_ids=[] if empty else [0],
+            kv_params=params,
+        )
+        ctx = job.req_context
+        assert mgr.lookup(OffloadKey(b"prompt"), ctx) is LookupResult.HIT
+
+        mgr.submit_load(job)
+
+        expected = (
+            LookupResult.MISS if not symmetric and not empty else LookupResult.HIT
+        )
+        assert mgr.lookup(OffloadKey(b"prompt"), ctx) is expected
+        assert mgr.lookup(OffloadKey(b"generated"), ctx) is expected
+        # A fresh request has its own handoff, even with the same transfer ID.
+        fresh = _req_context(kv_params=params)
+        assert mgr.lookup(OffloadKey(b"prompt"), fresh) is LookupResult.HIT
+
     def test_missing_consumer_flag_fails(self):
         """Peer fields present but neither do_remote_prefill nor
         do_p2p_fetch is set — submit_load fails the job rather than
@@ -646,6 +730,76 @@ class TestPromotionLatency:
         assert stats is not None
         observations = stats.data["data"][TieringOffloadingMetrics.PROMOTION_LATENCY]
         assert len(observations[("1:p2p", "success")]) == 1
+
+
+def test_pd_partial_promotion_does_not_refetch_tail():
+    """A full primary must not turn a deferred PD tail into a second fetch."""
+    from tests.v1.kv_offload.tiering.p2p.test_sessions import (
+        FakeConnection,
+        FakeDataTransport,
+        _activate,
+    )
+    from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+    from vllm.v1.kv_offload.tiering.p2p.session.protocol import FetchMsg
+
+    peer = "10.0.0.1:8000"
+    p2p_tier = _make_manager()
+    p2p_tier.locality = None
+    _attach_fake_transports(p2p_tier)
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=3, mmap_region=_mock_mmap_region(3)
+    )
+    tiering = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[p2p_tier],
+        tier_poll_interval_s=0.0,
+    )
+    conn = FakeConnection(peer_id=peer)
+    session = P2PSession(
+        peer_id=peer,
+        local_id=p2p_tier._local_id,
+        transport=FakeDataTransport(),
+        local_block_len=4096,
+        local_hash_seed="0",
+        conn=conn,
+    )
+    _activate(session, conn, peer_id=peer)
+    p2p_tier._sessions[peer] = session
+
+    # An in-flight write leaves only two chunks available for the PD prompt.
+    other = ReqContext(req_id="other", kv_transfer_params=None)
+    filler = OffloadKey(b"filler")
+    assert primary.prepare_write([filler], other) is not None
+    ctx = ReqContext(req_id="pd", kv_transfer_params=_remote_prefiller_kv_params())
+    tiering.on_new_request(ctx)
+    prompt = [OffloadKey(f"prompt-{i}".encode()) for i in range(3)]
+
+    def prefix_lookup():
+        results = []
+        for key in prompt:
+            results.append(tiering.lookup(key, ctx))
+            if results[-1] is LookupResult.MISS:
+                break
+        return results
+
+    def sent_fetch_rounds():
+        return [
+            msg[FetchMsg.ROUND_SEQ]
+            for msg in conn._sent
+            if msg[TYPE_KEY] == FetchMsg.TYPE
+        ]
+
+    expected = [LookupResult.HIT_PENDING, LookupResult.HIT_PENDING, LookupResult.MISS]
+    assert prefix_lookup() == expected
+    tiering.on_schedule_end(ScheduleEndContext(new_req_ids=(), preempted_req_ids=()))
+    assert sent_fetch_rounds() == [0]
+
+    # Free space before the deferred rescan: the tail must still MISS.
+    primary.complete_write([filler], other, success=False)
+    assert primary._get_num_free_chunks() == 1
+    assert prefix_lookup() == expected
+    tiering.on_schedule_end(ScheduleEndContext(new_req_ids=(), preempted_req_ids=()))
+    assert sent_fetch_rounds() == [0]
 
 
 def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch):
@@ -1163,6 +1317,7 @@ class TestHasPendingWork:
 
         from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
             OffloadingConnectorScheduler,
+            _ManagerStepState,
         )
         from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
             OffloadingConnector,
@@ -1189,6 +1344,12 @@ class TestHasPendingWork:
             connector_scheduler.manager = manager
             connector_scheduler._job_statuses = {}
             connector_scheduler._reset_fence = {}
+            connector_scheduler._step_state = _ManagerStepState()
+            connector_scheduler._step_state.update(
+                manager.on_schedule_end(
+                    ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+                )
+            )
             connector = object.__new__(OffloadingConnector)
             connector.connector_scheduler = connector_scheduler
             scheduler = object.__new__(Scheduler)
@@ -1198,6 +1359,7 @@ class TestHasPendingWork:
             scheduler.kv_holding_waiting = []
             scheduler.async_kv_waiting = []
             scheduler.num_waiting_for_streaming_input = 0
+            scheduler.dropped_streaming_updates = []
             scheduler.finished_req_ids = set()
             scheduler.requests = {}
             scheduler.connector = connector
@@ -1219,6 +1381,7 @@ class TestHasPendingWork:
 
         from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
             OffloadingConnectorScheduler,
+            _ManagerStepState,
         )
         from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
             OffloadingConnector,
@@ -1247,6 +1410,12 @@ class TestHasPendingWork:
             connector_scheduler.manager = manager
             connector_scheduler._job_statuses = {}
             connector_scheduler._reset_fence = {}
+            connector_scheduler._step_state = _ManagerStepState()
+            connector_scheduler._step_state.update(
+                manager.on_schedule_end(
+                    ScheduleEndContext(new_req_ids=(), preempted_req_ids=())
+                )
+            )
             connector = object.__new__(OffloadingConnector)
             connector.connector_scheduler = connector_scheduler
             scheduler = object.__new__(Scheduler)
@@ -1256,6 +1425,7 @@ class TestHasPendingWork:
             scheduler.kv_holding_waiting = []
             scheduler.async_kv_waiting = []
             scheduler.num_waiting_for_streaming_input = 0
+            scheduler.dropped_streaming_updates = []
             scheduler.finished_req_ids = set()
             scheduler.requests = {}
             scheduler.connector = connector
@@ -3593,3 +3763,120 @@ def test_reset_symmetric_lookup_rounds(drain_peers, fetch_before_reset):
     finally:
         tiering.shutdown()
         region.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Tests for non-dict role params rejection
+# ---------------------------------------------------------------------------
+
+
+class TestNonDictRoleParamsRejected:
+    """Non-dict role values must not crash EngineCore.
+
+    Consumer roles (remote_prefiller / remote_kv_source) are treated as
+    absent. A present but malformed remote_decoder is a remote-decode
+    signal and must fail closed.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_remote_prefiller_treated_as_absent(self, bad_value):
+        ctx = _req_context(kv_params={"remote_prefiller": bad_value})
+        assert ctx.get_state(P2PSourceInfo) is None
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_remote_decoder_fails_closed(self, bad_value):
+        ctx = _req_context(kv_params={"remote_decoder": bad_value})
+        dest = ctx.get_state(P2PDestInfo)
+        assert dest is not None
+        assert dest.kv_request_id is None
+
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_remote_kv_source_treated_as_absent(self, bad_value):
+        ctx = _req_context(kv_params={"remote_kv_source": bad_value})
+        assert ctx.get_state(P2PSourceInfo) is None
+
+    @pytest.mark.parametrize(
+        "bad_params",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_kv_params_treated_as_absent(self, bad_params):
+        ctx = _req_context(kv_params=bad_params)
+        assert ctx.get_state(P2PSourceInfo) is None
+        assert ctx.get_state(P2PDestInfo) is None
+
+    @pytest.mark.parametrize("request_id", [17, ["id"], {"id": "req"}])
+    def test_non_string_transfer_ids_do_not_become_routing_keys(self, request_id):
+        source = _req_context(
+            kv_params={
+                "remote_prefiller": {
+                    "remote_host": "host",
+                    "remote_port": 8000,
+                    "kv_request_id": request_id,
+                }
+            }
+        )
+        assert source.get_state(P2PSourceInfo) is None
+
+        dest = _req_context(
+            kv_params={"remote_decoder": {"kv_request_id": request_id}}
+        ).get_state(P2PDestInfo)
+        assert dest is not None
+        assert dest.kv_request_id is None
+
+    def test_manager_survives_malformed_prefiller_role(self):
+        """Full manager flow: malformed remote_prefiller does not crash
+        on_new_request or lookup — the request is handled locally."""
+        mgr = _make_manager()
+        ctx = _req_context(kv_params={"remote_prefiller": "not-a-dict"})
+        result = mgr.on_new_request(ctx)
+        assert result.policy is OffloadPolicy.CHUNK_LEVEL
+        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+
+    def test_malformed_decoder_role_fails_store(self):
+        """Malformed remote_decoder does not crash; submit_store fails
+        closed instead of succeeding as a local store."""
+        mgr = _make_manager()
+        ctx = _req_context(kv_params={"remote_decoder": "not-a-dict"})
+        result = mgr.on_new_request(ctx)
+        assert result.policy is OffloadPolicy.CHUNK_LEVEL
+        job = _job_metadata(job_id=1, kv_params={"remote_decoder": "not-a-dict"})
+        mgr.submit_store(job)
+        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+
+    def test_manager_survives_malformed_kv_source_role(self):
+        """Malformed remote_kv_source does not crash — request handled
+        locally."""
+        mgr = _make_manager()
+        ctx = _req_context(kv_params={"remote_kv_source": "not-a-dict"})
+        result = mgr.on_new_request(ctx)
+        assert result.policy is OffloadPolicy.CHUNK_LEVEL
+        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
