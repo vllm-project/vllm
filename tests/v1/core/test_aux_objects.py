@@ -33,6 +33,7 @@ from vllm.distributed.aux_output_connector.connector import (
 )
 from vllm.distributed.aux_output_connector.object_store import (
     AuxObjectWriter,
+    aux_namespace_cache_salt,
     read_aux_rows,
 )
 from vllm.distributed.aux_output_connector.routed_experts import RoutedExpertsBuffer
@@ -53,7 +54,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.engine import CheckpointState, FinishReason
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
-from vllm.v1.engine.input_processor import aux_output_cache_salt
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, MambaSpec
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -98,7 +98,9 @@ def _requests(
                 prompt_token_ids=prompt,
                 sampling_params=params,
                 pooling_params=None,
-                cache_salt=aux_output_cache_salt(cache_salt, params, _PREFIX),
+                cache_salt=cache_salt
+                if namespace is None
+                else aux_namespace_cache_salt(_PREFIX, namespace, cache_salt),
                 block_hasher=get_request_block_hasher(_BLOCK, sha256, lookahead),
             )
         )

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import queue
 import re
 import threading
@@ -138,6 +139,14 @@ def aux_namespace_prefix(key_prefix: str, namespace: str) -> str:
     """Key prefix of every object of a namespace and of the namespaces nested
     in it."""
     return f"{key_prefix}/{namespace}/"
+
+
+def aux_namespace_cache_salt(
+    key_prefix: str, namespace: str, cache_salt: str | None
+) -> str:
+    """The cache salt of a request with `aux_namespace`: only requests of the
+    same namespace and key prefix share KV blocks, as they share objects."""
+    return json.dumps([key_prefix, namespace, cache_salt])
 
 
 def read_aux_rows(

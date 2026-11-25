@@ -11,7 +11,6 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
-from types import MethodType
 from typing import Protocol
 from unittest.mock import Mock
 
@@ -22,6 +21,7 @@ from pydantic import ValidationError
 import vllm.envs as envs
 from vllm import SamplingParams
 from vllm.config import AuxOutputConfig
+from vllm.distributed.aux_output_connector.object_store import aux_namespace_cache_salt
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.generate.beam_search.utils import get_beam_search_score
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -39,7 +39,7 @@ from vllm.tokenizers import (
     deepseek_v32_encoding,
     deepseek_v41_encoding,
 )
-from vllm.v1.engine.input_processor import InputProcessor, aux_output_cache_salt
+from vllm.v1.engine.input_processor import InputProcessor
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -175,9 +175,6 @@ def _mock_input_processor() -> Mock:
     processor.renderer = Mock()
     processor.renderer.get_eos_token_id.return_value = None
     processor.vllm_config = Mock()
-    processor.check_aux_namespace = MethodType(
-        InputProcessor.check_aux_namespace, processor
-    )
     return processor
 
 
@@ -284,26 +281,22 @@ def test_aux_namespace_validated_before_engine_submission(
     if error is None:
         request = InputProcessor.process_inputs(processor, *args, resumable=resumable)
         assert request.sampling_params.aux_namespace == "g/0"
-        assert request.cache_salt == aux_output_cache_salt("user", params, key_prefix)
-        assert request.cache_salt != "user"
+        assert request.cache_salt == aux_namespace_cache_salt(key_prefix, "g/0", "user")
         return
     with pytest.raises(VLLMValidationError, match=error) as exc_info:
         InputProcessor.process_inputs(processor, *args, resumable=resumable)
     assert exc_info.value.parameter == "aux_namespace"
 
 
-def test_aux_output_cache_salt_separates_namespaces():
-    params = [SamplingParams(), *(SamplingParams(aux_namespace=n) for n in "gh")]
-    salts = [None, "user"]
-    outputs = [
-        aux_output_cache_salt(s, p, prefix)
-        for s in salts
-        for p in params
-        for prefix in (("a", "b") if p.aux_namespace else ("a",))
+def test_aux_namespace_cache_salt_separates_namespaces():
+    salts = [None, "user", "a/g"]
+    outputs = salts + [
+        aux_namespace_cache_salt(prefix, namespace, salt)
+        for prefix in ("a", "b")
+        for namespace in ("g", "h", "g/h")
+        for salt in salts
     ]
     assert len(set(outputs)) == len(outputs)
-    assert aux_output_cache_salt("user", params[0], "a") == "user"
-    assert aux_output_cache_salt("user", params[1], None) == "user"
 
 
 def _process_inputs_with_max_model_len(
