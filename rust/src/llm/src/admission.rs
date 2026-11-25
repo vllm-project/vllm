@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Serialize;
 use vllm_engine_core_client::RequestObserver;
 use vllm_engine_core_client::protocol::output::EngineCoreOutput;
+use vllm_metrics::{AdmissionRejectionLabels, METRICS, U64Counter};
 
 use crate::{Error, Result};
 
@@ -39,17 +40,31 @@ struct Counters {
 }
 
 /// Admission state shared by every request of one [`crate::EngineCoreLlm`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Admission {
     limits: AdmissionLimits,
     counters: Arc<Counters>,
+    /// `vllm:admission_rejections` by `max_num_queued_reqs`.
+    queued_reqs_rejections: U64Counter,
+    /// `vllm:admission_rejections` by `max_num_queued_tokens`.
+    queued_tokens_rejections: U64Counter,
 }
 
 impl Admission {
-    pub(crate) fn new(limits: AdmissionLimits) -> Self {
+    /// Like Python, the rejection series of both limits exist from startup,
+    /// at zero, whether or not the limits are set.
+    pub(crate) fn new(model_name: &str, limits: AdmissionLimits) -> Self {
+        let rejections = |reason| {
+            (METRICS.request.admission_rejections).get_or_create_owned(&AdmissionRejectionLabels {
+                model_name: model_name.to_string(),
+                reason,
+            })
+        };
         Self {
             limits,
             counters: Arc::default(),
+            queued_reqs_rejections: rejections("max_num_queued_reqs"),
+            queued_tokens_rejections: rejections("max_num_queued_tokens"),
         }
     }
 
@@ -67,12 +82,16 @@ impl Admission {
                 let requests = requests + n;
                 max_reqs.is_none_or(|max| requests <= max).then_some(requests)
             })
-            .map_err(|_| Error::QueueFull)?;
+            .map_err(|_| {
+                self.queued_reqs_rejections.inc();
+                Error::QueueFull
+            })?;
 
         if let Some(max) = self.limits.max_num_queued_tokens
             && counters.prefill_tokens.load(Ordering::Acquire) >= max
         {
             counters.requests.fetch_sub(n, Ordering::AcqRel);
+            self.queued_tokens_rejections.inc();
             return Err(Error::PrefillBacklogFull);
         }
         counters.prefill_tokens.fetch_add(n * prompt_len, Ordering::AcqRel);
@@ -128,10 +147,17 @@ mod tests {
         max_num_queued_reqs: Option<u64>,
         max_num_queued_tokens: Option<u64>,
     ) -> Admission {
-        Admission::new(AdmissionLimits {
+        // The metrics registry is global: give each admission its own series.
+        static NEXT_MODEL: AtomicU64 = AtomicU64::new(0);
+        let model_name = format!(
+            "admission-test-{}",
+            NEXT_MODEL.fetch_add(1, Ordering::Relaxed)
+        );
+        let limits = AdmissionLimits {
             max_num_queued_reqs,
             max_num_queued_tokens,
-        })
+        };
+        Admission::new(&model_name, limits)
     }
 
     fn counts(admission: &Admission) -> (u64, u64) {
@@ -139,6 +165,15 @@ mod tests {
         (
             counters.requests.load(Ordering::Acquire),
             counters.prefill_tokens.load(Ordering::Acquire),
+        )
+    }
+
+    /// `vllm:admission_rejections` by `max_num_queued_reqs` and by
+    /// `max_num_queued_tokens`.
+    fn rejections(admission: &Admission) -> (u64, u64) {
+        (
+            admission.queued_reqs_rejections.get(),
+            admission.queued_tokens_rejections.get(),
         )
     }
 
@@ -159,6 +194,8 @@ mod tests {
         let second = admission.admit(1, 1).unwrap();
         assert!(matches!(admission.admit(1, 1), Err(Error::QueueFull)));
         assert_eq!(counts(&admission), (3, 3));
+        // A rejection counts once, whatever its number of samples.
+        assert_eq!(rejections(&admission), (2, 0));
 
         drop(first);
         assert!(admission.admit(2, 1).is_ok());
@@ -178,6 +215,7 @@ mod tests {
         ));
         // A rejection takes no request slot.
         assert_eq!(counts(&admission), (2, 12));
+        assert_eq!(rejections(&admission), (0, 1));
 
         first[0].observe_output(&EngineCoreOutput::default());
         assert_eq!(counts(&admission), (2, 6));
