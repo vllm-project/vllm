@@ -772,9 +772,6 @@ class KVCacheGroup:
             self.manager_config, self.block_size, self.dcp_sharded, vllm_config
         )
 
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        return self.max_allocated_blocks_per_request(vllm_config) * self.page_size_bytes
-
     def max_num_blocks_per_req(
         self, vllm_config: VllmConfig, max_len: int | None = None
     ) -> int:
@@ -849,7 +846,7 @@ class KVCacheConfig:
     For models with only one type of attention, there is only one group that
     contains all layers.
     For models with multiple types of attention, there will be multiple groups,
-    see `_get_kv_cache_config_uniform_page_size` for more details.
+    see `_get_kv_cache_groups_uniform_page_size` for more details.
     """
     prefix_cache_retention_interval: int | None = None
     """Resolved retention policy for local prefix-cache checkpoints."""
