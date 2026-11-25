@@ -187,9 +187,18 @@ class XPUPlatform(Platform):
         if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
             logger.debug_once("Using TurboQuant attention backend.")
             return AttentionBackendEnum.TURBOQUANT.get_path()
-        # Packed int4-per-token-head lives in Triton (customize_spec + kernels).
-        # XPU FlashAttention has no int4 path; keep FA for fp8/auto.
+        # Packed int4-per-token-head: Triton by default (PR #15). Opt into
+        # greenfield FA2 in-kernel int4 when VLLM_XPU_FA_INT4=1 and kernels
+        # report FA_INT4_AVAILABLE (see fa_int4_enabled).
         if kv_cache_dtype == "int4_per_token_head":
+            from vllm.v1.attention.backends.fa_int4 import fa_int4_enabled
+
+            if fa_int4_enabled():
+                logger.info_once(
+                    "Using Flash Attention backend for int4_per_token_head "
+                    "KV cache (VLLM_XPU_FA_INT4=1)."
+                )
+                return AttentionBackendEnum.FLASH_ATTN.get_path()
             logger.info_once(
                 "Using Triton Attention backend for int4_per_token_head KV cache."
             )

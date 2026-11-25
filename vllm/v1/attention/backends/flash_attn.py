@@ -397,6 +397,8 @@ class FlashAttentionBackend(AttentionBackend):
     supports_kv_cache_update_bypass: bool = True
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    # int4_per_token_head is added dynamically in supports_kv_cache_dtype /
+    # get_supported_kv_cache_dtypes when FA int4 kernels are available.
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "float16",
@@ -404,6 +406,24 @@ class FlashAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
     ]
+
+    @classmethod
+    def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
+        """Pack C=136 for INT4 (shared with Triton) before any allow-list."""
+        from vllm.v1.attention.backends.per_token_head_packing import (
+            customize_per_token_head_spec,
+        )
+
+        return customize_per_token_head_spec(spec)
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
+        dtypes = list(cls.supported_kv_cache_dtypes)
+        from vllm.v1.attention.backends.fa_int4 import fa_int4_kernels_available
+
+        if fa_int4_kernels_available() and "int4_per_token_head" not in dtypes:
+            dtypes.append("int4_per_token_head")
+        return dtypes
 
     @staticmethod
     def _get_sm90_fa4_fp8_kv_block_size(
@@ -531,7 +551,7 @@ class FlashAttentionBackend(AttentionBackend):
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is None:
             return True
-        if kv_cache_dtype not in cls.supported_kv_cache_dtypes:
+        if kv_cache_dtype not in cls.get_supported_kv_cache_dtypes():
             return False
         if is_quantized_kv_cache(kv_cache_dtype):
             return flash_attn_supports_kv_cache_dtype(kv_cache_dtype)

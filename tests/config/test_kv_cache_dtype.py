@@ -191,3 +191,45 @@ def test_int4_per_token_head_customize_spec_d128():
         )
         assert raw.state_content_size_bytes == 136
         assert raw.page_size_bytes == num_kv_heads * block_size * 136
+
+        # FA customize_spec must share the same C=136 helper (FA2 int4 path).
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+        fa = FlashAttentionBackend.customize_spec(
+            FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=num_kv_heads,
+                head_size=head_size,
+                dtype=dtype,
+                kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+            )
+        )
+        assert fa.state_content_bytes == 136
+        assert fa.page_size_bytes == num_kv_heads * block_size * 136
+
+
+def test_int4_dequant_scale_zp_steganography():
+    """Python mirror of csrc/xpu/attn/int4_kv_dequant.hpp unpack rules."""
+    import struct
+
+    scale = 0.125
+    zp = 7
+    bits = struct.unpack("I", struct.pack("f", scale))[0]
+    packed_bits = (bits & ~0xF) | (zp & 0xF)
+    packed = struct.unpack("f", struct.pack("I", packed_bits))[0]
+
+    # unpack
+    pb = struct.unpack("I", struct.pack("f", packed))[0]
+    got_zp = pb & 0xF
+    got_scale = struct.unpack("f", struct.pack("I", pb & ~0xF))[0]
+    assert got_zp == zp
+    assert abs(got_scale - scale) < 1e-6
+
+    # nibble pack/dequant: q=3,11 → values (3-zp)*s, (11-zp)*s
+    lo, hi = 3, 11
+    byte = (lo & 0xF) | ((hi & 0xF) << 4)
+    even = (lo - zp) * got_scale
+    odd = (hi - zp) * got_scale
+    assert byte == 0xB3
+    assert abs(even - (3 - 7) * 0.125) < 1e-6
+    assert abs(odd - (11 - 7) * 0.125) < 1e-6

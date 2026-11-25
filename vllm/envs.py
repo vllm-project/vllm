@@ -352,6 +352,10 @@ if TYPE_CHECKING:
     VLLM_XPU_SUPPORT_FP8_QUERY: bool | None = None
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
+    # FA2 XPU int4-KV in-kernel path (greenfield). Default 0 keeps Triton
+    # route for int4_per_token_head. Set 1 only when vllm-xpu-kernels
+    # reports FA_INT4_AVAILABLE and FA views/wiring are present.
+    VLLM_XPU_FA_INT4: bool = False
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
@@ -2390,6 +2394,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
         int(os.getenv("VLLM_XPU_USE_SAMPLER_KERNEL", "1"))
     ),
+    "VLLM_XPU_FA_INT4": lambda: bool(int(os.getenv("VLLM_XPU_FA_INT4", "0"))),
     # Kernel backend for INC weight-only intN (WNA16) linear layers on XPU.
     # "auto" keeps the default preference order (ARK when importable, else the
     # oneDNN w4a16 path). "ark" forces the auto_round_kernel backend, "w4a16"

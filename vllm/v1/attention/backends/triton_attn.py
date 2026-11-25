@@ -308,20 +308,11 @@ class TritonAttentionBackend(AttentionBackend):
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
         """Per-token-head modes pack inline fp32 scales after each head's
         data, so the content is (data + one scale) per K/V side."""
-        mode = spec.kv_quant_mode
-        if spec.state_content_bytes is not None or not mode.is_per_token_head:
-            return spec
-        hs_k, hs_v = spec.head_size, spec.head_size_v
-        # INT4 storage cells are uint8 regardless of the logical activation
-        # dtype on the AttentionSpec (prod A2: float16 dtype → false C=264).
-        if mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
-            hs_k, hs_v = hs_k // 2, hs_v // 2
-            data_dtype_size = get_dtype_size(torch.uint8)
-        else:
-            data_dtype_size = get_dtype_size(spec.dtype)
-        scale_bytes = get_dtype_size(torch.float32)
-        content = (hs_k + hs_v) * data_dtype_size + 2 * scale_bytes
-        return replace(spec, state_content_bytes=content)
+        from vllm.v1.attention.backends.per_token_head_packing import (
+            customize_per_token_head_spec,
+        )
+
+        return customize_per_token_head_spec(spec)
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
