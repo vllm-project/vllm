@@ -708,8 +708,8 @@ struct Decode {
     int* const committedMask = counters + 2 * kNumKvHeads * kRowGroups +
                                2 * (kvHead * kRowGroups + rowGroup);
     const int startGeneration =
-        kSharedMerge ? __hip_atomic_load(generation, __ATOMIC_RELAXED,
-                                         __HIP_MEMORY_SCOPE_AGENT)
+        kSharedMerge ? __scoped_atomic_load_n(generation, __ATOMIC_RELAXED,
+                                              __MEMORY_SCOPE_DEVICE)
                      : 0;
 
     // The merge reuses the Q and K tile LDS.
@@ -1154,8 +1154,9 @@ struct Decode {
       } else if (cooperative) {
         // Bounded, since residency is only estimated.
         for (int spin = 0; spin < kMaxSpins; ++spin) {
-          if (__hip_atomic_load(generation, __ATOMIC_RELAXED,
-                                __HIP_MEMORY_SCOPE_AGENT) != startGeneration) {
+          if (__scoped_atomic_load_n(generation, __ATOMIC_RELAXED,
+                                     __MEMORY_SCOPE_DEVICE) !=
+              startGeneration) {
             // A late commit only makes two segments write the same values.
             atomicOr(&committedMask[startGeneration & 1], (int)(1u << segment));
             go = 1;
@@ -1219,8 +1220,8 @@ struct Decode {
       if (slice == segment) {
         // Any view of the mask covers every slice.
         const unsigned committed =
-            __hip_atomic_load(&committedMask[startGeneration & 1],
-                              __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+            __scoped_atomic_load_n(&committedMask[startGeneration & 1],
+                                   __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
         pendingSlices = ~committed &
                         ((numSegments < 32 ? 1u << numSegments : 0u) - 1) &
                         ~(1u << segment);
