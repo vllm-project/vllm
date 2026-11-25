@@ -29,9 +29,6 @@ class DeepseekV32Renderer(BaseHfRenderer[DeepseekV32Tokenizer]):
             self._apply_chat_template, executor=self._executor
         )
 
-    def _can_produce_special_tokens_mask(self) -> bool:
-        return True
-
     def _apply_chat_template(self, *args, **kwargs):
         return self.get_tokenizer().apply_chat_template(*args, **kwargs)
 

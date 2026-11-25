@@ -769,9 +769,6 @@ class CohereRenderer(BaseHfRenderer[HfTokenizer]):
         # adapter on every request.
         self._render_async = make_async(self._render, executor=self._executor)
 
-    def _can_produce_special_tokens_mask(self) -> bool:
-        return True
-
     def _render(self, fmt: str, config_dict: dict[str, Any]) -> str:
         if fmt == "cmd3":
             return self._melody.render_cmd3(config_dict)

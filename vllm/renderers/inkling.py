@@ -135,9 +135,6 @@ class InklingRenderer(BaseHfRenderer[HfTokenizer]):
         )
         self._render_async = make_async(self._render, executor=self._executor)
 
-    def _can_produce_special_tokens_mask(self) -> bool:
-        return True
-
     def _render(
         self,
         messages: list[ChatCompletionMessageParam],

@@ -206,7 +206,9 @@ def hf_renderer_config(tmp_path):
 )
 @pytest.mark.parametrize(
     ("truncation_side", "expected"),
-    [("left", "<bos> Hello world"), ("right", "<bos> Hello")],
+    # Truncation keeps the BOS token that the tokenizer adds, which is not
+    # echoed. The `<bos>` spelled in the prompt is text and can be cut.
+    [("left", "Hello world"), ("right", "<bos> Hello")],
 )
 async def test_native_hf_renderer_truncated_echo(
     hf_renderer_config, renderer_mode, truncation_side, expected

@@ -214,9 +214,6 @@ class KimiK3Renderer(BaseHfRenderer[HfTokenizer]):
             self._apply_chat_template, executor=self._executor
         )
 
-    def _can_produce_special_tokens_mask(self) -> bool:
-        return True
-
     def _apply_chat_template(
         self,
         conversation: list[dict[str, Any]],

@@ -202,7 +202,7 @@ def test_apply_mistral_chat_template_thinking_chunk():
 @pytest.mark.parametrize("truncation_side", ["left", "right"])
 def test_explicit_truncation_side_keeps_bos(truncation_side):
     """Truncating from an explicit side must keep BOS, as the tokenizer's own
-    truncation does, although `MistralTokenizer` has no `special_tokens_mask`."""
+    truncation does."""
     renderer = MistralRenderer(
         MockVllmConfig(MockModelConfig(), parallel_config=MockParallelConfig()),
         tokenizer=MistralTokenizer.from_pretrained(MODEL_NAME),

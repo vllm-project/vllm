@@ -1067,12 +1067,13 @@ def tokenize_prompt(
     *,
     want_offsets: bool = False,
 ) -> HfTokensPrompt:
-    """Tokenize text, preserving an optional mask for truncated echoes."""
-    # The mask identifies truncated text inputs even when no tokens were added.
+    """Tokenize text, preserving an optional mask for truncation and echoes."""
+    # With an explicit side, `TokenizeParams` truncates the prompt instead of
+    # the tokenizer and keeps the tokens that the mask marks as added. The
+    # echo also uses it to identify truncated text inputs, even when no
+    # tokens were added.
     want_special_tokens_mask = (
-        params.needs_detokenization
-        and params.truncate_prompt_tokens is not None
-        and params.truncation_side is not None
+        params.truncate_prompt_tokens is not None and params.truncation_side is not None
     )
     kwargs = params.get_encode_kwargs()
     if want_offsets:
@@ -1218,10 +1219,6 @@ class HfRenderer(BaseHfRenderer[HfTokenizer]):
     def _can_produce_offsets(self) -> bool:
         # Only fast tokenizers expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
-
-    def _can_produce_special_tokens_mask(self) -> bool:
-        # `kimi_audio` also uses this renderer, and its tokenizer returns no mask.
-        return isinstance(self.tokenizer, HfTokenizer)
 
     def _resolve_content_format(self, params: ChatParams) -> ChatTemplateContentFormat:
         return resolve_chat_template_content_format(

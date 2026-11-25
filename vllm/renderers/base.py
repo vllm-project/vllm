@@ -65,7 +65,6 @@ from .inputs import (
     TokPrompt,
 )
 from .inputs.preprocess import extract_target_prompt
-from .inputs.tokenize import get_truncation_indices
 from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
@@ -648,13 +647,6 @@ class BaseRenderer(ABC, Generic[_T]):
             and not prompt.get("multi_modal_uuids")
         )
 
-    def _can_produce_special_tokens_mask(self) -> bool:
-        """Whether this renderer's tokenizer can return `special_tokens_mask`.
-
-        Defaults to False; renderers backed by an HF tokenizer override this.
-        """
-        return False
-
     @staticmethod
     def _build_tokens_prompt(
         token_ids: Sequence[int],
@@ -704,40 +696,14 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> TokensPrompt:
         tokenizer = self.get_tokenizer()
         want_offsets = self._wants_offsets(prompt, params)
-        # With an explicit side, the tokenizer does not truncate the prompt (see
-        # `TokenizeParams.get_encode_kwargs`), so truncate it here and keep the
-        # tokens that the tokenizer added, as its own truncation does.
-        # `MistralRenderer` keeps BOS itself. Multimodal prompts are sliced again
-        # after placeholder expansion (see `_truncate_expanded_prompt`), which
-        # would cut these tokens anyway.
-        want_mask = (
-            params.truncation_side is not None
-            and params.add_special_tokens
-            and self._can_produce_special_tokens_mask()
-            and not prompt.get("multi_modal_data")
-            and not prompt.get("multi_modal_uuids")
-        )
         kwargs = params.get_encode_kwargs()
         if want_offsets:
             kwargs = {**kwargs, "return_offsets_mapping": True}
-        if want_mask:
-            kwargs = {**kwargs, "return_special_tokens_mask": True}
         encoding = tokenizer(prompt["prompt"], **kwargs)
-
-        token_ids = encoding["input_ids"]
-        offset_mapping = encoding["offset_mapping"] if want_offsets else None
-        truncation = (
-            params._truncation_slice(tokenizer, len(token_ids)) if want_mask else None
-        )
-        if truncation is not None:
-            kept = get_truncation_indices(truncation, encoding["special_tokens_mask"])
-            if kept is not None:
-                token_ids = [token_ids[i] for i in kept]
-                if offset_mapping is not None:
-                    offset_mapping = [offset_mapping[i] for i in kept]
-
         return self._build_tokens_prompt(
-            token_ids, prompt, offset_mapping=offset_mapping
+            encoding["input_ids"],
+            prompt,
+            offset_mapping=encoding["offset_mapping"] if want_offsets else None,
         )
 
     def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
