@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A one-GPU kernel that hands data between CTAs on different XCDs with the
-FFN launch's same-GPU protocol (``mono/sync.py``).
+FFN launch's same-GPU protocol (`mono/sync.py`).
 
-Every round each of ``BLOCKS`` resident CTAs writes a ``DWORDS`` payload to its
+Every round each of `BLOCKS` resident CTAs writes a `DWORDS` payload to its
 own buffer (32-, 64- or 16-bit stores by round, values alternating with the
-round's parity), publishes it, and checks the buffer of the CTA ``k`` behind
-it with 128-bit loads in another lane order; ``k`` is odd and changes every
+round's parity), publishes it, and checks the buffer of the CTA `k` behind
+it with 128-bit loads in another lane order; `k` is odd and changes every
 round, so under round-robin placement over 8 XCDs producer and consumer never
 share an XCD (each CTA records its XCC_ID / HW_ID to verify). Before polling,
 the consumer pulls the producer's buffer into its caches with plain loads, so
@@ -175,7 +175,7 @@ def _round(c, r):
 
 
 def build(stores=True, loads=True):
-    """``stores`` / ``loads`` False: the payload's stores / loads plain cached
+    """`stores` / `loads` False: the payload's stores / loads plain cached
     accesses instead (negative controls: not store-available / load-visible)."""
     name = f"minimax_m3_xcd_stress_s{int(stores)}_l{int(loads)}"
 
@@ -229,7 +229,7 @@ def build(stores=True, loads=True):
 
 
 def run(launches, stores=True, loads=True, stop_on_error=True):
-    """``launches`` launches of ``ROUNDS`` rounds; returns the error word and
+    """`launches` launches of `ROUNDS` rounds; returns the error word and
     the per-CTA records (host tensors)."""
     import torch
 

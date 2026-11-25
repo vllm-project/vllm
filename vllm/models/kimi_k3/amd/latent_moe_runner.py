@@ -1,16 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    AiterMxfp4Experts,
+)
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+    MoEPrepareAndFinalizeNoDPEPModular,
+)
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.quantization.online.fp8 import Fp8PtpcOnlineLinearMethod
+from vllm.model_executor.layers.quantization.online.mxfp4 import Mxfp4OnlineLinearMethod
+
+if TYPE_CHECKING:
+    from vllm.models.kimi_k3.amd.linear import KimiRoutedInputLinear
 
 logger = init_logger(__name__)
 
@@ -60,6 +75,7 @@ class ROCmLatentMoERunner(MoERunner):
                 scope="global",
             )
         self._logged_sharded_tail = False
+        self._quantized_routed_input: bool | None = None
 
     def _shard_up_proj_tail(
         self,
@@ -123,21 +139,39 @@ class ROCmLatentMoERunner(MoERunner):
         input_ids: torch.Tensor | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        # The modular kernel is selected after weight loading. Resolve its
+        # compatible prepare adapter once, during warmup before graph capture.
+        if self._quantized_routed_input is None:
+            self._quantized_routed_input = enable_quantized_routed_input(self)
+        transform = self.routed_input_transform
+        defer_projection = (
+            self._quantized_routed_input
+            and shared_experts_input is None
+            and transform is not None
+            and transform._token_group is not None
+            and hidden_states.shape[0] >= transform.min_sharded_tokens
+            and hidden_states.dtype == torch.bfloat16
+        )
         # When the caller pre-applies the routed input transform outside the
         # runner (e.g. to overlap it on a separate stream), it passes the
         # already-transformed routed input as ``hidden_states`` and the original
         # hidden states as ``shared_experts_input``; skip the transform then.
-        if shared_experts_input is None:
+        if defer_projection:
+            shared_experts_input = hidden_states
+            og_hidden_dim_pre_xform: int | None = self.moe_config.hidden_dim
+            og_hidden_dim_post_xform: int | None = hidden_states.shape[-1]
+        elif shared_experts_input is None:
             hidden_states, shared_experts_input = self.apply_routed_input_transform(
                 hidden_states
             )
 
-        hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = (
-            self._maybe_pad_hidden_states(
-                shared_experts_input,
-                hidden_states,
+        if not defer_projection:
+            hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = (
+                self._maybe_pad_hidden_states(
+                    shared_experts_input,
+                    hidden_states,
+                )
             )
-        )
 
         result = self._forward_entry(
             hidden_states,
@@ -146,7 +180,7 @@ class ROCmLatentMoERunner(MoERunner):
             input_ids,
             self._encode_layer_name(),
             self.moe_config.hidden_dim_unpadded
-            if self._quant_method.has_unpadded_output
+            if defer_projection or self._quant_method.has_unpadded_output
             else 0,
         )
 
@@ -160,3 +194,94 @@ class ROCmLatentMoERunner(MoERunner):
         )
 
         return self._maybe_add_zero_expert_output(result)
+
+
+class KimiLatentAiterExperts(AiterMxfp4Experts):
+    def output_hidden_dim(self, hidden_dim: int) -> int:
+        # Input may still be in model space when prepare owns the projection.
+        return self.moe_config.hidden_dim
+
+    def moe_problem_size(self, a1, w1, w2, topk_ids):
+        experts, rows, intermediate, width, topk = super().moe_problem_size(
+            a1, w1, w2, topk_ids
+        )
+        if a1.dtype == torch.float4_e2m1fn_x2:
+            width *= 2
+        return experts, rows, intermediate, width, topk
+
+
+class KimiLatentPrepare(MoEPrepareAndFinalizeNoDPEPModular):
+    def __init__(self, projection: "KimiRoutedInputLinear"):
+        self.projection = projection
+
+    def prepare(
+        self,
+        a1,
+        topk_weights,
+        topk_ids,
+        num_experts,
+        expert_map,
+        apply_router_weight_on_input,
+        quant_config,
+        defer_input_quant=False,
+    ):
+        if a1.shape[-1] == self.projection.input_size:
+            assert a1.shape[0] >= self.projection.min_sharded_tokens
+            assert not apply_router_weight_on_input
+            values, scales = self.projection.forward_quantized(a1)
+            return values, scales, None, None, None
+        return super().prepare(
+            a1,
+            topk_weights,
+            topk_ids,
+            num_experts,
+            expert_map,
+            apply_router_weight_on_input,
+            quant_config,
+            defer_input_quant,
+        )
+
+
+def enable_quantized_routed_input(runner) -> bool:
+    """Use the existing modular prepare/scale interface for Kimi A4 prefill."""
+    # linear.py imports this module, so import the layer class here.
+    from vllm.models.kimi_k3.amd.linear import KimiRoutedInputLinear
+
+    projection = runner.routed_input_transform
+    if (
+        not isinstance(projection, KimiRoutedInputLinear)
+        or projection._token_group is None
+        # These methods return BF16 activations. Their existing A4 quantization
+        # can happen on the local token shard before gathering values/scales.
+        or (
+            projection.weight.dtype != torch.bfloat16
+            and not isinstance(
+                projection.quant_method,
+                (Mxfp4OnlineLinearMethod, Fp8PtpcOnlineLinearMethod),
+            )
+        )
+        or get_current_vllm_config().lora_config is not None
+        or runner.routed_experts.activation != MoEActivation.SITU
+        or not rocm_aiter_ops.is_fused_moe_situv2_enabled()
+        or rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
+        or runner.routed_experts.apply_router_weight_on_input
+    ):
+        return False
+    method = runner._quant_method
+    kernel = getattr(method, "moe_kernel", None)
+    if (
+        kernel is None
+        or type(kernel.fused_experts) is not AiterMxfp4Experts
+        or type(kernel.prepare_finalize) is not MoEPrepareAndFinalizeNoDPEPModular
+        or kernel.fused_experts.post_gemm2_hook is not None
+        or runner.moe_config.hidden_dim != projection.output_size
+        or runner.moe_config.hidden_dim_unpadded != projection.output_size
+    ):
+        return False
+    method.moe_kernel = FusedMoEKernel(
+        KimiLatentPrepare(projection),
+        KimiLatentAiterExperts(
+            kernel.fused_experts.moe_config, kernel.fused_experts.quant_config
+        ),
+    )
+    return True

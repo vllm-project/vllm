@@ -15,6 +15,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
+use crate::client::readiness::{RecheckGuard, run_readiness_loop};
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result, bail_invalid_client_config};
 use crate::metrics::EngineSleepState;
@@ -29,9 +30,11 @@ use crate::transport::{self, ConnectedEngine};
 
 pub(crate) mod imp;
 mod output_channel;
+mod readiness;
 mod state;
 mod stream;
 
+pub use state::RequestObserver;
 pub use stream::{EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput};
 
 /// How the frontend acquires its request/response transport with Python
@@ -326,8 +329,10 @@ pub struct EngineCoreClient {
     runtime: BackgroundShutdownRuntime,
     // Background tasks
     output_task: AbortOnDropHandle<()>,
+    input_watch_task: AbortOnDropHandle<()>,
     dispatcher_task: AbortOnDropHandle<()>,
     abort_task: AbortOnDropHandle<()>,
+    readiness_task: AbortOnDropHandle<()>,
     coordinator_output_task: Option<AbortOnDropHandle<()>>,
     coordinator_task: Option<AbortOnDropHandle<()>>,
 }
@@ -431,6 +436,13 @@ impl EngineCoreClient {
             config.engine_stats_enabled,
             &engines,
         ));
+        let input_watch_task =
+            AbortOnDropHandle::new(runtime.spawn(transport::run_input_watch_loop(
+                connected.input_recv,
+                connected.input_events,
+                engines.iter().map(|engine| engine.engine_id.clone()).collect(),
+                output_tx.clone(),
+            )));
         let output_task = AbortOnDropHandle::new(runtime.spawn(transport::run_output_loop(
             connected.output_socket,
             output_tx,
@@ -440,6 +452,8 @@ impl EngineCoreClient {
         );
         let abort_task =
             AbortOnDropHandle::new(runtime.spawn(run_abort_loop(inner.clone(), abort_rx)));
+        let readiness_task =
+            AbortOnDropHandle::new(runtime.spawn(run_readiness_loop(inner.clone())));
 
         // If any engine reported a dp_stats_address in its ready response, use it
         // as the external coordinator address.
@@ -480,6 +494,14 @@ impl EngineCoreClient {
                 (None, None, None)
             };
 
+        // Only engines with sleep mode can start paused, prepared for a
+        // checkpoint. Asking here also fails startup with a clear error when
+        // the engines predate the `is_inference_ready` utility.
+        if engines.iter().all(|engine| engine.ready_response.enable_sleep_mode) {
+            let ready = inner.is_inference_ready().await?;
+            inner.readiness().start(ready);
+        }
+
         Ok(Self {
             config,
             input_address: connected.input_address,
@@ -492,8 +514,10 @@ impl EngineCoreClient {
             profile_active: Mutex::new(false),
             runtime,
             output_task,
+            input_watch_task,
             dispatcher_task,
             abort_task,
+            readiness_task,
             coordinator_output_task,
             coordinator_task,
         })
@@ -525,6 +549,11 @@ impl EngineCoreClient {
     #[cfg(test)]
     pub(crate) fn pending_utility_call_count(&self) -> usize {
         self.inner.pending_utility_call_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn readiness_recheck_pending(&self) -> bool {
+        self.inner.readiness().pending_ask().is_some()
     }
 
     /// Return the engine-side indices connected to this client, as stamped on
@@ -559,6 +588,23 @@ impl EngineCoreClient {
             .expect("engine core client requires at least one engine")
             .ready_response
     }
+
+    /// Whether every engine computes prompt logprobs. A request may go to any
+    /// engine, so one engine without them (e.g. under
+    /// `--kv-sharing-fast-prefill`) disables them for all.
+    pub fn supports_prompt_logprobs(&self) -> bool {
+        (self.engines.iter()).all(|engine| engine.ready_response.supports_prompt_logprobs)
+    }
+
+    /// The tightest engine-reported limit on the encoder cache tokens a
+    /// request's multimodal items may need together, if any engine has one.
+    pub fn max_mm_embeds_per_request(&self) -> Option<u64> {
+        self.engines
+            .iter()
+            .filter_map(|engine| engine.ready_response.max_mm_embeds_per_request)
+            .min()
+    }
+
     /// Return the engine-reported effective model dtype.
     pub fn model_dtype(&self) -> ModelDtype {
         self.engines
@@ -640,6 +686,13 @@ impl EngineCoreClient {
     pub fn health_error(&self) -> Option<Arc<Error>> {
         self.inner.health_error()
     }
+
+    /// Subscribe to whether the engines can accept and process new requests.
+    /// It is `false` while they are paused, asleep, or prepared for a
+    /// checkpoint, or while a weight update has not finished successfully.
+    pub fn subscribe_readiness(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.inner.readiness().subscribe()
+    }
 }
 
 /// Build the prompt block hasher if every engine reports the same supported
@@ -696,7 +749,26 @@ impl EngineCoreClient {
     /// tokens, and the terminal output is delivered immediately together with
     /// any held-back outputs. The stream still yields every raw output in
     /// order; batching only reduces how often the consuming task is woken.
-    pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
+    pub async fn call(&self, req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
+        self.submit(req, None).await
+    }
+
+    /// Like [`Self::call`], with an observer that sees each of the request's
+    /// outputs as the client receives it and is dropped when the request
+    /// leaves the client. See [`RequestObserver`].
+    pub async fn call_observed(
+        &self,
+        req: EngineCoreRequest,
+        observer: Box<dyn RequestObserver>,
+    ) -> Result<EngineCoreOutputStream> {
+        self.submit(req, Some(observer)).await
+    }
+
+    async fn submit(
+        &self,
+        mut req: EngineCoreRequest,
+        observer: Option<Box<dyn RequestObserver>>,
+    ) -> Result<EngineCoreOutputStream> {
         req.client_index = self.config.client_index;
         req.validate()?;
         if req.block_hashes.is_none()
@@ -723,6 +795,7 @@ impl EngineCoreClient {
             lora_name,
             data_parallel_rank,
             stream_interval,
+            observer,
         )?;
 
         // Construct the output stream first before actually sending the request to the engine.
@@ -735,30 +808,25 @@ impl EngineCoreClient {
             rx,
         );
 
-        let result: Result<()> = async {
-            // The engine that receives it wakes the other ranks if they are idle.
-            if let Some(coordinator) = self.coordinator.as_ref() {
-                req.current_wave = coordinator.snapshot().current_wave;
-            }
-
-            debug!(
-                request_id = req.request_id,
-                ?engine_id,
-                "registered request to engine"
-            );
-
-            self.inner.send_request_to_engine(&engine_id, req).await?;
-            Ok(())
+        // The engine that receives it wakes the other ranks if they are idle.
+        if let Some(coordinator) = self.coordinator.as_ref() {
+            req.current_wave = coordinator.snapshot().current_wave;
         }
-        .await;
+
+        debug!(
+            request_id = req.request_id,
+            ?engine_id,
+            "registered request to engine"
+        );
+
+        let result = self.inner.send_request_to_engine(&engine_id, req, stream).await;
 
         // Failed to send the request to the engine, roll back the registration.
-        if let Err(error) = result {
+        if result.is_err() {
             self.inner.rollback_request(&request_id);
-            return Err(error);
         }
 
-        Ok(stream)
+        result
     }
 
     /// Abort currently in-flight requests by request ID.
@@ -798,7 +866,7 @@ impl EngineCoreClient {
         T: serde::de::DeserializeOwned,
         A: serde::Serialize + std::fmt::Debug,
     {
-        self.inner.call_utility(method, args).await
+        self.inner.call_utility(method, args, None).await
     }
 
     /// Call a utility method on all connected engines and return the shared
@@ -835,8 +903,31 @@ impl EngineCoreClient {
         A: serde::Serialize + std::fmt::Debug,
         K: serde::Serialize + std::fmt::Debug,
     {
+        // Worker methods can change readiness, as a weight update does.
+        let recheck = self.inner.readiness().recheck_after_call();
+        self.collective_rpc_with(recheck, method, timeout, args, kwargs).await
+    }
+
+    /// [`Self::collective_rpc`] as a control call that passes `recheck`.
+    async fn collective_rpc_with<A, K>(
+        &self,
+        recheck: RecheckGuard,
+        method: &str,
+        timeout: Option<f64>,
+        args: A,
+        kwargs: K,
+    ) -> Result<Vec<rmpv::Value>>
+    where
+        A: serde::Serialize + std::fmt::Debug,
+        K: serde::Serialize + std::fmt::Debug,
+    {
         let results = self
-            .call_utility::<rmpv::Value, _>("collective_rpc", (method, timeout, args, kwargs))
+            .inner
+            .call_utility::<rmpv::Value, _>(
+                "collective_rpc",
+                (method, timeout, args, kwargs),
+                Some(recheck),
+            )
             .await?;
 
         Ok(results
@@ -875,7 +966,8 @@ impl EngineCoreClient {
 
     /// Start a weight update for the base model.
     pub async fn start_weight_update(&self) -> Result<()> {
-        self.collective_rpc(
+        self.collective_rpc_with(
+            self.inner.readiness().withdraw_until_recheck(),
             "start_weight_update",
             None,
             Vec::<JsonValue>::new(),
@@ -887,7 +979,8 @@ impl EngineCoreClient {
 
     /// Start a weight update for the speculative draft model.
     pub async fn start_draft_weight_update(&self) -> Result<()> {
-        self.collective_rpc(
+        self.collective_rpc_with(
+            self.inner.readiness().withdraw_until_recheck(),
             "start_draft_weight_update",
             None,
             Vec::<JsonValue>::new(),
@@ -987,15 +1080,24 @@ impl EngineCoreClient {
     }
 
     /// Put the engine to sleep.
-    pub async fn sleep(&self, level: SleepLevel, mode: PauseMode) -> Result<()> {
-        self.call_utility::<(), _>("sleep", (level, mode)).await?;
+    pub async fn sleep(
+        &self,
+        level: SleepLevel,
+        mode: PauseMode,
+        reset_connector: bool,
+    ) -> Result<()> {
+        let recheck = self.inner.readiness().withdraw_until_recheck();
+        self.inner
+            .call_utility::<(), _>("sleep", (level, mode, reset_connector), Some(recheck))
+            .await?;
         self.inner.record_sleep_state(EngineSleepState::Asleep(level));
         Ok(())
     }
 
     /// Release KV cache memory while keeping model weights resident.
-    pub async fn release_kv_cache_memory(&self) -> Result<()> {
-        self.call_utility::<(), _>("release_kv_cache_memory", ()).await?;
+    pub async fn release_kv_cache_memory(&self, reset_connector: bool) -> Result<()> {
+        self.call_utility::<(), _>("release_kv_cache_memory", (reset_connector,))
+            .await?;
         self.inner.record_sleep_state(EngineSleepState::KvCacheReleased);
         Ok(())
     }
@@ -1003,8 +1105,10 @@ impl EngineCoreClient {
     /// Wake the engine from sleep, optionally limiting the wake-up to specific
     /// tags, and return whether every engine is fully awake.
     pub async fn wake_up(&self, tags: Option<Vec<String>>) -> Result<bool> {
+        let recheck = self.inner.readiness().recheck_after_call();
         let fully_awake = self
-            .call_utility::<bool, _>("wake_up", (tags,))
+            .inner
+            .call_utility::<bool, _>("wake_up", (tags,), Some(recheck))
             .await?
             .into_iter()
             .all(|fully_awake| fully_awake);
@@ -1018,13 +1122,17 @@ impl EngineCoreClient {
     /// Pause generation (e.g. for weight updates). In `abort` and `wait` mode
     /// the engine rejects new requests with a retryable error until resume.
     pub async fn pause_generation(&self, mode: PauseMode, clear_cache: bool) -> Result<()> {
-        self.call_utility::<(), _>("pause_generation", (mode, clear_cache)).await?;
+        let recheck = self.inner.readiness().withdraw_until_recheck();
+        self.inner
+            .call_utility::<(), _>("pause_generation", (mode, clear_cache), Some(recheck))
+            .await?;
         Ok(())
     }
 
     /// Resume the scheduler after a pause
     pub async fn resume_scheduler(&self) -> Result<()> {
-        self.call_utility::<(), _>("resume_scheduler", ()).await?;
+        let recheck = self.inner.readiness().recheck_after_call();
+        self.inner.call_utility::<(), _>("resume_scheduler", (), Some(recheck)).await?;
         Ok(())
     }
 
@@ -1033,14 +1141,18 @@ impl EngineCoreClient {
     /// Returns the first refusal from any engine. An engine that refuses
     /// changes nothing, but with data parallelism the others may have started.
     pub async fn checkpoint_prepare(&self, mode: PauseMode) -> Result<Option<String>> {
+        let recheck = self.inner.readiness().withdraw_until_recheck();
         let refusals: Vec<Option<String>> =
-            self.call_utility("checkpoint_prepare", (mode,)).await?;
+            self.inner.call_utility("checkpoint_prepare", (mode,), Some(recheck)).await?;
         Ok(refusals.into_iter().flatten().next())
     }
 
     /// Bring back what `checkpoint_prepare` released and serve again.
     pub async fn checkpoint_restore(&self) -> Result<()> {
-        self.call_utility::<(), _>("checkpoint_restore", ()).await?;
+        let recheck = self.inner.readiness().recheck_after_call();
+        self.inner
+            .call_utility::<(), _>("checkpoint_restore", (), Some(recheck))
+            .await?;
         Ok(())
     }
 
@@ -1120,8 +1232,10 @@ impl EngineCoreClient {
             abort_tx,
             runtime,
             output_task,
+            input_watch_task,
             dispatcher_task,
             abort_task,
+            readiness_task,
             coordinator_output_task,
             coordinator_task,
             ..
@@ -1133,7 +1247,13 @@ impl EngineCoreClient {
 
         // Abort all client tasks first, then await them.
         // Note the aborting orders here.
-        let mut tasks = vec![abort_task, dispatcher_task, output_task];
+        let mut tasks = vec![
+            readiness_task,
+            abort_task,
+            dispatcher_task,
+            output_task,
+            input_watch_task,
+        ];
         tasks.extend(coordinator_task);
         tasks.extend(coordinator_output_task);
 

@@ -8,11 +8,11 @@ Per-token, per-head, per-group-of-32 the kernel computes:
     s     = 2^round(log2(s_raw))         # UE8M0 snap (power of 2)
     code  = quantize_to_fp4(group / s)   # OCP E2M1, 4 bits/elt
 
-and stores ``code`` as packed nibbles + ``s`` as a single UE8M0 byte per
-group. The output layout matches ``format.py`` (272 B/slot for D=256).
+and stores `code` as packed nibbles + `s` as a single UE8M0 byte per
+group. The output layout matches `format.py` (272 B/slot for D=256).
 
 K is Hadamard-rotated in-register; V is not. There is no per-token L2
-norm. The UE8M0 snap makes ``s`` a power of two so scaled F8F6F4 MFMA
+norm. The UE8M0 snap makes `s` a power of two so scaled F8F6F4 MFMA
 can consume it on the read side.
 """
 
@@ -62,7 +62,6 @@ def _ensure_const_tables() -> None:
 # ── Cached per-device constant tensors ─────────────────────────────────────
 _MIDPOINTS_CACHE: dict[torch.device, torch.Tensor] = {}
 _SORTED_TO_BITS_CACHE: dict[torch.device, torch.Tensor] = {}
-_PIT_CACHE: dict[tuple[int, torch.device, torch.dtype], torch.Tensor] = {}
 
 
 def _get_midpoints_tensor(device: torch.device) -> torch.Tensor:
@@ -79,24 +78,6 @@ def _get_sorted_to_bits_tensor(device: torch.device) -> torch.Tensor:
         t = torch.tensor(SORTED_TO_BITS, device=device, dtype=torch.int32)
         _SORTED_TO_BITS_CACHE[device] = t
     return t
-
-
-def _get_hadamard(
-    dim: int, device: torch.device, dtype: torch.dtype = torch.float32
-) -> torch.Tensor:
-    """Sylvester Hadamard in fp32 (cached, normalised)."""
-    key = (dim, device, dtype)
-    cached = _PIT_CACHE.get(key)
-    if cached is not None:
-        return cached
-    if dim <= 0 or (dim & (dim - 1)) != 0:
-        raise ValueError(f"ultraquant store requires power-of-two dim, got {dim}")
-    H = torch.tensor([[1.0]], dtype=torch.float64)
-    while H.shape[0] < dim:
-        H = torch.cat([torch.cat([H, H], dim=1), torch.cat([H, -H], dim=1)], dim=0)
-    H = (H / (dim**0.5)).to(device=device, dtype=dtype).contiguous()
-    _PIT_CACHE[key] = H
-    return H
 
 
 # ═══════════════════════════════════════════════════════════════════════════

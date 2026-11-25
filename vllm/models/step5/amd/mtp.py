@@ -14,9 +14,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
@@ -215,7 +212,7 @@ class Step5MTP(nn.Module, SupportsMultiModal):
                     )
                 yield name, weight
 
-        loaded = {
+        return {
             f"model.{name}"
             for name in load_step5_weights(
                 self.model,
@@ -225,16 +222,3 @@ class Step5MTP(nn.Module, SupportsMultiModal):
                 ),
             )
         }
-        if is_mtp_completeness_check_enabled():
-            missing = {
-                name
-                for name, _ in self.named_parameters()
-                if not name.endswith(
-                    (".k_scale", ".v_scale", ".q_scale", ".prob_scale")
-                )
-            } - loaded
-            if missing:
-                raise RuntimeError(
-                    f"Step5 MTP checkpoint is missing parameters: {sorted(missing)}"
-                )
-        return loaded

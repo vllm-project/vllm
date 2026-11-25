@@ -1,0 +1,23 @@
+{
+    "512": {"USE_TMA": false},
+    "1023": {"USE_TMA": false},
+    "1024": {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 64,
+        "num_warps": 4,
+        "num_stages": 3,
+        "USE_TMA": true
+    },
+    "3072": {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 64,
+        "num_warps": 4,
+        "num_stages": 3,
+        "USE_TMA": true
+    },
+    "4096": {"USE_TMA": false}
+}

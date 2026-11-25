@@ -113,11 +113,10 @@ def initialize_layerwise_reload(
 
     With defer_processing=True, only finalize_layerwise_reload triggers processing.
     """
-    # disable torchao reloading to avoid infinite recursion
-    model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
-    model._do_torchao_reload = False
-
     for layer in model.modules():
+        if getattr(layer, "_skip_layerwise_reload", False):
+            continue
+
         info = get_layerwise_info(layer)
 
         # Skip if the layer has already been initialized
@@ -258,9 +257,6 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         model_config: config needed for applying processing to attention layers
 
     """
-    if hasattr(model, "_original_do_torchao_reload"):
-        model._do_torchao_reload = model._original_do_torchao_reload
-
     deferred_attn: list[tuple[torch.nn.Module, LayerReloadingInfo]] = []
 
     for layer in model.modules():
@@ -293,6 +289,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         # Having too many of these delayed layers can lead to excess memory usage
         # see Limitations(4)
         elif info.defer_processing or info.load_numel < info.load_numel_total:  # type: ignore[operator]
+            _check_requantization_source_fully_loaded(layer, info)
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
             _layerwise_process(layer, info)
 
@@ -304,6 +301,31 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         info.reset()
 
     LOADING_LAYERS.clear()
+
+
+def _check_requantization_source_fully_loaded(
+    layer: torch.nn.Module, info: LayerReloadingInfo
+) -> None:
+    """Raise if a requantization source layer was only partially loaded.
+
+    Serialized weights are created at their exact size, so unlike padded
+    full-precision weights every element must be loaded. A missing checkpoint
+    tensor would otherwise be materialized as zeros and silently requantized.
+    """
+    for attr in ("quant_method", "_quant_method"):
+        method = getattr(layer, attr, None)
+        if getattr(method, "requantization_source", None) is not None:
+            break
+    else:
+        return
+    assert info.load_numel_total is not None
+    if info.load_numel <= 0 or info.load_numel >= info.load_numel_total:
+        return
+    raise ValueError(
+        f"{getattr(layer, 'prefix', layer.__class__.__name__)}: the checkpoint is "
+        f"missing weights to requantize ({info.load_numel} of "
+        f"{info.load_numel_total} elements loaded)."
+    )
 
 
 def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig):
@@ -323,7 +345,7 @@ def _finalize_attention_layer(
         _reload_attention_scales(layer, info)
     else:
         _place_kernel_tensors(layer, info)
-    layer.process_weights_after_loading()
+    # its post-load hook runs from finalize_model_weights
 
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
@@ -376,11 +398,6 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Materialize layer tensors onto device
     materialize_layer(layer, info)
 
-    # Reset online quantization flag so process_weights_after_loading
-    # will run again during reload
-    if hasattr(layer, "_already_called_process_weights_after_loading"):
-        delattr(layer, "_already_called_process_weights_after_loading")
-
     # Unwrap layerwise loading wrappers
     for param in get_layer_tensors(layer).values():
         param.weight_loader = _get_original_loader(param)
@@ -390,6 +407,24 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         param = getattr(layer, name)
         args.arguments["param"] = param
         param.weight_loader(*args.args, **args.kwargs)
+
+    _process_loaded_layer(layer, info)
+    logger.debug("%s: Processed", layer.__class__.__name__)
+
+
+def _process_loaded_layer(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
+    """Finish a layer whose weights are all loaded: run its quant method's
+    processing, copy the result into the persistent kernel storage and reset
+    its reload info.
+
+    Shared by `_layerwise_process` and the sharded-RDT engine's quant stream,
+    which loads a layer's weights by scattering into it instead of through the
+    buffered loaders but finishes it exactly the same way.
+    """
+    # Reset online quantization flag so process_weights_after_loading
+    # will run again during reload
+    if hasattr(layer, "_already_called_process_weights_after_loading"):
+        delattr(layer, "_already_called_process_weights_after_loading")
 
     # Process weights (quantization, repacking, etc.)
     quant_method = getattr(layer, "quant_method", None)
@@ -421,7 +456,6 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         _copy_and_restore_kernel_tensors(layer, info)
 
     info.reset()
-    logger.debug("%s: Processed", layer.__class__.__name__)
 
 
 def _get_original_loader(tensor: torch.Tensor) -> Callable:

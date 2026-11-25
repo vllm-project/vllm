@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared helpers for the MuseSpark1x MoE runner tests."""
+"""Shared helpers for the Muse Spark MoE runner tests."""
 
 from collections.abc import Callable
 
@@ -16,11 +16,15 @@ from vllm.config import (
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_processing,
+    record_metadata_for_reloading,
+)
 from vllm.models.muse_spark.nvidia.muse_moe_runner import (
     MuseMoERunner,
     MusePostExpertFinalize,
-    MuseSpark1xRouter,
     MuseSparkRoutedExperts,
+    MuseSparkRouter,
 )
 
 # route_scale must be 1.0 and scoring sigmoid for the routing to classify as
@@ -29,12 +33,12 @@ ROUTE_SCALE = 1.0
 DIVISION_EPS = 1e-15
 
 
-def nvfp4_quant_config() -> ModelOptNvFp4Config:
+def nvfp4_quant_config(exclude_modules: list[str] | None = None) -> ModelOptNvFp4Config:
     return ModelOptNvFp4Config(
         quant_method="NVFP4",
         is_checkpoint_nvfp4_serialized=True,
         kv_cache_quant_algo=None,
-        exclude_modules=[],
+        exclude_modules=exclude_modules or [],
         group_size=16,
     )
 
@@ -42,21 +46,24 @@ def nvfp4_quant_config() -> ModelOptNvFp4Config:
 def make_runner(
     norm: torch.nn.Module,
     expert_bias: torch.Tensor,
-    ckpt: dict[str, torch.Tensor],
+    ckpt: dict[str, torch.Tensor] | None,
     quant_config=None,
     *,
     hidden_size: int,
     intermediate_size: int,
     top_k: int,
 ):
-    """Build a MuseSpark runner, load ``ckpt`` and finalize its weights."""
+    """Build a MuseSpark runner, load `ckpt` and finalize its weights.
+
+    With `ckpt=None` the runner is only built.
+    """
     num_experts = expert_bias.numel()
     vllm_config = VllmConfig(
         parallel_config=ParallelConfig(),
         kernel_config=KernelConfig(moe_backend="auto"),
     )
-    with set_current_vllm_config(vllm_config):
-        router = MuseSpark1xRouter(
+    with set_current_vllm_config(vllm_config), torch.device("cuda"):
+        router = MuseSparkRouter(
             top_k=top_k,
             num_experts=num_experts,
             expert_bias=expert_bias,
@@ -81,11 +88,23 @@ def make_runner(
             runner_cls=MuseMoERunner,
             runner_args={"post_expert_norm": norm},
         )
-    runner.cuda()
+        # Record the BF16 layout before loading quantizes it, same as the model
+        # loader does: layerwise reload (RL weight sync) restores the layer from it.
+        record_metadata_for_reloading(runner)
+    if ckpt is None:
+        return router, runner, vllm_config
+    # Online-quantized experts start on the meta device, which .cuda() cannot
+    # move; those callers build under torch.device("cuda") instead.
+    if all(not p.is_meta for p in runner.parameters()):
+        runner.cuda()
     routed = runner.routed_experts
     loaded = list(routed.load_weights(list(ckpt.items())))
     assert len(loaded) == len(ckpt)
+    # The loader's order: online layers, then quant methods, then modules.
+    if routed.quant_method.uses_meta_device:
+        finalize_layerwise_processing(runner, vllm_config.model_config)
     routed.quant_method.process_weights_after_loading(routed)
+    runner.process_weights_after_loading()
     moe_kernel = routed.quant_method.moe_kernel
     assert moe_kernel is not None
     experts = moe_kernel.fused_experts
@@ -133,7 +152,7 @@ def swiglu_moe_ref(
     norm_fn: Callable[[torch.Tensor], torch.Tensor],
     act_quant: Callable[[torch.Tensor], torch.Tensor] | None = None,
 ) -> torch.Tensor:
-    """fp32 SwiGLU MoE with ``norm_fn`` applied to each BF16 expert output."""
+    """fp32 SwiGLU MoE with `norm_fn` applied to each BF16 expert output."""
     out = torch.zeros(x.shape, dtype=torch.float32, device=x.device)
     for e in range(w13.shape[0]):
         token_idx, slot = (topk_ids == e).nonzero(as_tuple=True)

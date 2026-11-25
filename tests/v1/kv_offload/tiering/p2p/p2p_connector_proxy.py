@@ -190,8 +190,8 @@ def _get_next(app, service: str):
 def _next_dp_rank(app, service: str):
     """Advance the round-robin DP cursor for a role.
 
-    Returns (rank, header_rank). ``rank`` (0..dp_size-1) is always used for the
-    P2P remote_port arithmetic; ``header_rank`` is the same value when the role
+    Returns (rank, header_rank). `rank` (0..dp_size-1) is always used for the
+    P2P remote_port arithmetic; `header_rank` is the same value when the role
     has dp_size>1 and None otherwise (so dp=1 sends no header, matching the
     single-replica behavior).
     """
@@ -295,7 +295,12 @@ async def _handle_completions(api: str, request: Request):
             ):
                 yield chunk
 
-        return StreamingResponse(generate(), media_type="application/json")
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream"
+            if req_data.get("stream")
+            else "application/json",
+        )
 
     except Exception as e:
         import sys
@@ -374,7 +379,12 @@ async def _handle_completions_decoder_first(api: str, request: Request):
                     raise value
                 yield value
 
-        return StreamingResponse(generate(), media_type="application/json")
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream"
+            if req_data.get("stream")
+            else "application/json",
+        )
 
     except Exception as e:
         import sys

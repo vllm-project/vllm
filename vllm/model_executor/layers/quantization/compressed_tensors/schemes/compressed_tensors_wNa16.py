@@ -13,16 +13,18 @@ from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
 from vllm.model_executor.determinism.batch_invariant import matmul_batch_invariant
 from vllm.model_executor.kernels.linear import (
-    MarlinLinearKernel,
     MPLinearKernel,
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
+    MarlinLinearKernel,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    get_marlin_input_dtype,
+    marlin_make_empty,
     marlin_repeat_scales_on_all_ranks,
 )
 from vllm.model_executor.parameter import (
@@ -32,7 +34,7 @@ from vllm.model_executor.parameter import (
     PackedColumnParameter,
     PackedvLLMParameter,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -108,6 +110,12 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             else WNA16_SUPPORTED_TYPES_MAP[num_bits]
         )
 
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        return isinstance(
+            self.kernel, MarlinLinearKernel
+        ) and self.kernel.config.act_type in (torch.float16, torch.bfloat16)
+
     @classmethod
     def get_min_capability(cls) -> int:
         # Turing and up
@@ -150,13 +158,8 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             backend_name = kernel_type.__name__
 
         if backend_name not in self._kernel_backends_being_used:
-            logger.info("Using %s for CompressedTensorsWNA16", backend_name)
+            logger.debug("Using %s for CompressedTensorsWNA16", backend_name)
             self._kernel_backends_being_used.add(backend_name)
-
-        if kernel_type is MarlinLinearKernel:
-            input_dtype = get_marlin_input_dtype(self.layer_name)
-            if input_dtype is not None:
-                mp_linear_kernel_config.act_type = input_dtype
 
         # If group_size is -1, we are in channelwise case.
         group_size = self.group_size if self.group_size != -1 else input_size
@@ -249,10 +252,26 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                 w_s_param_name="weight_scale",
                 w_zp_param_name="weight_zero_point",
             )
+            if self.symmetric and isinstance(self.kernel, MarlinLinearKernel):
+                # Marlin consumes an empty zero-point parameter for symmetric
+                # weights. Register it before processed tensors are attached.
+                layer.register_parameter(
+                    "w_zp", marlin_make_empty(layer.weight_packed.device)
+                )
 
     # Checkpoints are serialized in compressed-tensors format, which is
     # different from the format the kernel may want. Handle repacking here.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Pre-processed compressed-tensors WNA16 weights require "
+                    "Marlin with FP16 or BF16 activations"
+                )
+            if self.symmetric:
+                assert self.kernel is not None
+                self.kernel.w_zp_name = "w_zp"
+            return
         if self.use_batch_invariant:
             # Keep the checkpoint layout: Marlin's reduction depends on M.
             for name in ("weight_packed", "weight_scale", "weight_zero_point"):

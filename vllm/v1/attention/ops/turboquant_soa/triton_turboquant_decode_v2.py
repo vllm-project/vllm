@@ -86,7 +86,7 @@ def _get_layout(D, mse_bits, value_quant_bits, key_packed_size):
 
 
 def _get_pair_lut(centroids: torch.Tensor) -> torch.Tensor:
-    """Return a fresh pair-LUT for ``centroids`` on each call.
+    """Return a fresh pair-LUT for `centroids` on each call.
 
     The LUT is tiny (N*N*2 fp32, e.g. 2KB for 4-bit MSE) so the build cost
     is negligible compared to attention. We avoid caching by data_ptr()

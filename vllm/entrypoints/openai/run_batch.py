@@ -9,8 +9,8 @@ from vllm.logger import init_logger
 from vllm.version import __version__ as VLLM_VERSION
 
 warnings.warn(
-    "The `python -m vllm.entrypoints.openai.run_batch` command is deprecated "
-    "and may be removed in a future release. Please use `vllm run_batch` instead.",
+    "The `python -m vllm.entrypoints.openai.run_batch` command is deprecated"
+    "and we will remove this file in v0.37.0. Please use `vllm run_batch` instead.",
     DeprecationWarning,
     stacklevel=1,
 )

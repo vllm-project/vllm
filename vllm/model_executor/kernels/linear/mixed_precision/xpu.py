@@ -32,22 +32,28 @@ class XPUwNa16LinearKernel(MPLinearKernel):
         if c.weight_type not in _XPUWNA16_SUPPORTED_QUANT_TYPES:
             return (
                 False,
-                f"Quant type ({c.weight_type}) not supported by "
-                "XPUwNa16, supported types are: "
-                f"{_XPUWNA16_SUPPORTED_QUANT_TYPES}",
+                (
+                    f"Quant type ({c.weight_type}) not supported by "
+                    "XPUwNa16, supported types are: "
+                    f"{_XPUWNA16_SUPPORTED_QUANT_TYPES}"
+                ),
             )
         if c.group_size != -1 and c.group_size % 32 != 0:
             return (
                 False,
-                f"Group size ({c.group_size}) not supported by "
-                "XPUwNa16, supported group sizes are multiples of 32",
+                (
+                    f"Group size ({c.group_size}) not supported by "
+                    "XPUwNa16, supported group sizes are multiples of 32"
+                ),
             )
 
         if c.partition_weight_shape[0] % 32 != 0:
             return (
                 False,
-                f"Input size ({c.partition_weight_shape[0]}) not supported by "
-                "XPUwNa16, supported sizes are multiples of 32",
+                (
+                    f"Input size ({c.partition_weight_shape[0]}) not supported by "
+                    "XPUwNa16, supported sizes are multiples of 32"
+                ),
             )
 
         return True, None
@@ -133,8 +139,10 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
         if c.group_size != -1 and c.group_size % 32 != 0:
             return (
                 False,
-                f"Group size ({c.group_size}) not supported by XPUW4A8Int, "
-                "must be a multiple of 32",
+                (
+                    f"Group size ({c.group_size}) not supported by XPUW4A8Int, "
+                    "must be a multiple of 32"
+                ),
             )
         in_size, out_size = c.partition_weight_shape
         if in_size % 8 != 0 or out_size % 8 != 0:

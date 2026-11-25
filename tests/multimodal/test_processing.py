@@ -1314,6 +1314,40 @@ def test_supported_mm_processor_kwargs_is_cached(
     assert calls == 1
 
 
+def test_video_frame_limits_read_the_hf_video_processor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info = BaseProcessingInfo(SimpleNamespace())
+    info.__dict__["supported_mm_limits"] = {"video": None}
+    monkeypatch.setattr(
+        info,
+        "get_hf_processor",
+        lambda **_: SimpleNamespace(
+            video_processor=SimpleNamespace(max_frames=384, min_frames=4)
+        ),
+    )
+
+    assert info.get_video_frame_limits() == {"max_frames": 384, "min_frames": 4}
+
+
+def test_video_frame_limits_skip_the_hf_processor_without_video(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info = BaseProcessingInfo(SimpleNamespace())
+    info.__dict__["supported_mm_limits"] = {"audio": None}
+    calls = 0
+
+    def get_hf_processor(**_):
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace()
+
+    monkeypatch.setattr(info, "get_hf_processor", get_hf_processor)
+
+    assert info.get_video_frame_limits() == {}
+    assert calls == 0
+
+
 def test_resolve_mm_processor_kwargs_routes_supported_flat_kwargs():
     kwargs = {
         "size": {"shortest_edge": 64},
@@ -1527,12 +1561,53 @@ def test_processor_inputs_hashes_partial_uuids():
 
     assert inputs.get_mm_hashes("test-model", "blake3") == {
         "image": [
-            "image-uuid",
-            MultiModalHasher.hash_kwargs(
+            "uuid:image-uuid",
+            "content:"
+            + MultiModalHasher.hash_kwargs(
                 "blake3", model_id="test-model", image=images[1]
             ),
         ]
     }
+
+
+def test_processor_inputs_hashes_separate_content_and_uuid_domains():
+    """A caller-chosen uuid must never alias a content-addressed digest.
+
+    Regression test for #66422: `get_mm_hashes()` used to emit content
+    digests and verbatim caller uuids into the same untagged string keyspace,
+    so a caller could poison the multimodal cache for later callers by
+    setting `uuid` to the content digest of a target media item.
+    """
+    image = random_image(np.random.RandomState(0), min_wh=8, max_wh=9)
+    mm_data_items = MultiModalDataParser().parse_mm_data({"image": [image]})
+
+    content_key = ProcessorInputs(
+        prompt=[],
+        mm_data_items=mm_data_items,
+    ).get_mm_hashes("test-model", "blake3")["image"][0]
+    assert content_key.startswith("content:")
+
+    raw_digest = MultiModalHasher.hash_kwargs(
+        "blake3", model_id="test-model", image=image
+    )
+    assert content_key == f"content:{raw_digest}"
+
+    # A caller sets `uuid` to the predictable content digest of the target.
+    uuid_key = ProcessorInputs(
+        prompt=[],
+        mm_data_items=mm_data_items,
+        mm_uuid_items={"image": [raw_digest]},
+    ).get_mm_hashes("test-model", "blake3")["image"][0]
+    assert uuid_key == f"uuid:{raw_digest}"
+    assert uuid_key != content_key
+
+    # A caller sets `uuid` to the full content-addressed key.
+    aliased_key = ProcessorInputs(
+        prompt=[],
+        mm_data_items=mm_data_items,
+        mm_uuid_items={"image": [content_key]},
+    ).get_mm_hashes("test-model", "blake3")["image"][0]
+    assert aliased_key != content_key
 
 
 def test_processor_inputs_hashes_scope_kwargs_by_modality():
@@ -1582,7 +1657,9 @@ def test_processor_inputs_hashes_ignore_unrelated_kwargs():
         hf_processor_mm_kwargs={"videos_kwargs": {"size": {"longest_edge": 448}}},
     )
 
-    assert inputs.get_mm_hashes("test-model", "blake3") == {"image": ["image-uuid"]}
+    assert inputs.get_mm_hashes("test-model", "blake3") == {
+        "image": ["uuid:image-uuid"]
+    }
 
 
 @pytest.mark.parametrize(
@@ -1604,7 +1681,7 @@ def test_processor_inputs_hashes_ignore_unrelated_kwargs():
 def test_processor_inputs_hashes_distinguish_kwargs_shapes(left, right):
     """Distinct processor kwargs must not share a multi-modal hash.
 
-    ``hf_processor_mm_kwargs`` is per-request input, so both the keys and the
+    `hf_processor_mm_kwargs` is per-request input, so both the keys and the
     values here are caller-controlled. The hash is the identity of the
     processor cache entry and is mixed into the prefix-cache block key, so two
     requests sharing one is a cross-request cache hit.

@@ -8,7 +8,7 @@ path runs; every rank then overwrites them in place at sensible scales,
 distinct per layer and per TP shard, the experts generated in the checkpoint's
 MXFP4 format and converted by that same path.
 
-- layer: each sparse ``MiniMaxM3DecoderLayer``'s FFN half (seam all-reduce and
+- layer: each sparse `MiniMaxM3DecoderLayer`'s FFN half (seam all-reduce and
   residual, post-attention norm, MoE) on captured decode-step inputs, native
   vs the fused launch;
 - model: teacher-forced decode (trace replay) with full-vocabulary logprobs,
@@ -61,7 +61,7 @@ pytestmark = [
 
 @pytest.fixture(scope="module")
 def model_dir(tmp_path_factory):
-    from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3Config
+    from transformers import MiniMaxM3VLConfig
 
     layers = [0] * 3 + [1] * (LAYERS - 3)
     mx = dict(
@@ -75,7 +75,7 @@ def model_dir(tmp_path_factory):
         round_method="half_even",
     )
     path = tmp_path_factory.mktemp("minimax_m3_mini")
-    MiniMaxM3Config(
+    MiniMaxM3VLConfig(
         text_config=dict(
             num_hidden_layers=LAYERS,
             vocab_size=VOCAB,
@@ -203,7 +203,7 @@ def _requests():
 
 def _decode(llm, capture=False):
     """Full-vocabulary logprobs of every decode step (the first output token
-    comes from prefill, which runs stock), every token forced; ``capture``:
+    comes from prefill, which runs stock), every token forced; `capture`:
     also each sparse layer's inputs at the first decode step of each batch."""
     from vllm import SamplingParams
 
@@ -354,6 +354,16 @@ def _env():
         yield
 
 
+@pytest.fixture
+def no_gpu_coredump():
+    """For the tests that inject a fault on purpose. Writing the HSA coredump
+    keeps the worker alive long enough that the executor waits out
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS instead of seeing it die."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("HSA_DISABLE_COREDUMP_ON_EXCEPTION", "1")
+        yield
+
+
 @pytest.fixture(scope="module")
 def native(vllm_runner, model_dir):
     """Native eager: the reference logprobs and the layer replays."""
@@ -427,7 +437,7 @@ def _arm_late_fault(worker, rank, ticks):
 
 
 def test_late_rank_fault_returns_no_tokens_from_full_graphs(
-    vllm_runner, model_dir, capfd
+    vllm_runner, model_dir, capfd, no_gpu_coredump
 ):
     """During a replayed step, rank 2 fails 5 ms after the rest of the step's
     last launch, so the output rank is ahead of it; that step returns no
@@ -505,7 +515,9 @@ def _spec_requests():
     ]
 
 
-def test_eagle3_verify_steps_match_native(vllm_runner, model_dir, draft_dir, capfd):
+def test_eagle3_verify_steps_match_native(
+    vllm_runner, model_dir, draft_dir, capfd, no_gpu_coredump
+):
     """EAGLE3 (random draft) with --monokernel under FULL graphs: the verify
     steps of 1-4 requests (4, 8, 12 padded to 16, and 16 rows) run the fused
     launches (the device epoch moves on); the target's full-vocabulary
