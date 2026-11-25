@@ -107,7 +107,7 @@ The XPU Docker image builds UCX with Level Zero support, so NIXL can move KV cac
 
 See [run_xpu_disagg_accuracy_test.sh](../../tests/v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh) for a full example.
 
-If these can't be met, set `UCX_TLS=^ze_ipc`: intra-node transfers then go through the local NIC, like inter-node ones.
+If these can't be met, set `UCX_TLS=^ze_ipc`: intra-node transfers are then staged through host memory (`ze_copy` + `cma`), which is slower.
 
 ## Basic Usage (on the same host)
 
