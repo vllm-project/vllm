@@ -51,6 +51,7 @@ from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.mamba import MambaBackendEnum
 from vllm.config.profiler import ProfilerConfig
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field, hash_config
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
@@ -1152,8 +1153,12 @@ def test_breakable_cudagraph_platform_default(
         ("eager", 2048, (16, 8), 6144, 1, False),
         ("fp16", 2048, (16, 8), 6144, 1, False),
         ("quantized", 2048, (16, 8), 6144, 1, False),
-        ("mxfp4", 2048, (16, 8), 6144, 1, True),
+        ("mxfp4", 2048, (16, 8), 6144, 1, False),
         ("gpt_oss_mxfp4", 2048, (16, 8), 6144, 1, True),
+        ("qcfg-linear", 2048, (16, 8), 6144, 1, False),
+        ("qcfg-linear-args", 2048, (16, 8), 6144, 1, False),
+        ("qcfg-targets", 2048, (16, 8), 6144, 1, False),
+        ("qcfg-moe", 2048, (16, 8), 6144, 1, True),
         ("untuned", 4096, (32, 32), 11008, 1, False),
         ("tp4-tuned", 4096, (8, 2), 12288, 4, True),
         ("list-intermediate", 2048, (16, 8), [2048, 4096], 1, False),
@@ -1190,6 +1195,12 @@ def test_batch_invariant_breakable_cudagraph(
             "quantized": "fp8",
             "mxfp4": "mxfp4",
             "gpt_oss_mxfp4": "gpt_oss_mxfp4",
+        }.get(case),
+        quantization_config={
+            "qcfg-linear": {"linear": "fp8_per_tensor"},
+            "qcfg-linear-args": QuantizationConfigArgs(linear="fp8_per_tensor"),
+            "qcfg-targets": {"targets": {"re:.*qkv_proj": "fp8_per_tensor"}},
+            "qcfg-moe": {"moe": "fp8_per_tensor"},
         }.get(case),
         hf_text_config=SimpleNamespace(intermediate_size=intermediate),
         get_hidden_size=lambda: hidden,
