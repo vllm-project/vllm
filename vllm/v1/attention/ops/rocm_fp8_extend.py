@@ -16,7 +16,6 @@ import math
 
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -170,9 +169,6 @@ def extend(
         and seq_lens.numel() == block_table.shape[0] == cu_seqlens_q.numel() - 1
     )
     q_scale = q_scale.reshape(1).to(torch.float32)
-    if not exp_free:
-        q_fp8, _ = ops.scaled_fp8_quant(q.reshape(num_tokens, -1), scale=q_scale)
-        q = q_fp8.view(num_tokens, -1, HEAD_SIZE)
     window = max(sliding_window, 0)
     _fly().fp8_extend_attention(
         q,

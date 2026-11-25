@@ -35,7 +35,6 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl._mlir.dialects import rocdl as _rocdl
 from flydsl.expr import arith, range_constexpr
-from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 
 from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
@@ -50,7 +49,6 @@ NBUF = 2  # LDS stages
 STAGE = 2 * TILE * HD  # K + V bytes of one LDS stage
 LOG2E = 1.4426950408889634
 LOG2_448 = math.log2(448.0)  # P = 448 at the running maximum: the largest e4m3
-M_INIT = -1.0e30  # running maximum (log2 units) before any unmasked key
 CODE_PER_OCTAVE = 8.0
 CODE_ONE = 56.0  # e4m3 code of 1.0
 MAX_CODE_BIAS = (126.0 - CODE_ONE) / CODE_PER_OCTAVE  # code 126 = 448
@@ -159,8 +157,12 @@ def _launcher(hk, kv_s0, kv_s1, kv_sh, scale, logb, bias, ppb, window, exp_free)
     waves_per_eu = 4 if exp_free else 3
     s1w = kv_s1 // 4
     nid = 2 if ppb == 1 else 1  # page-id loads per wave and tile
-    code_ref = CODE_PER_OCTAVE * bias + CODE_ONE  # code of the running maximum
-    code_scale = CODE_PER_OCTAVE * float(scale) * LOG2E
+    # Both modes run S in "code" units out of the QK MFMA (query pre-scaled, column
+    # offsets as the accumulator input): exp_free codes are 8 log2(P) + 56; the exp2
+    # mode's are log2(P) itself, the exponent argument.
+    cpo = CODE_PER_OCTAVE if exp_free else 1.0
+    code_ref = cpo * bias + (CODE_ONE if exp_free else 0.0)  # running maximum
+    code_scale = cpo * float(scale) * LOG2E
 
     @fx.struct
     class Lds:
@@ -269,76 +271,55 @@ def _launcher(hk, kv_s0, kv_s1, kv_sh, scale, logb, bias, ppb, window, exp_free)
         tok_b = wave * 4 + col // GQA  # token within the block
         tok = local * BQ + tok_b
         head = h * GQA + col % GQA
-        if fx.const_expr(not exp_free):
-            # FP8 query, per-tensor descale q_scale; P = exp2(s c + bias - m)
-            q_off = (tok_b * q_s0 + head * HD + hl * 32) // 4
-            qf = _cat(
-                buffer_ops.buffer_load(q_rs, q_off, vec_width=4, dtype=T.i32),
-                buffer_ops.buffer_load(q_rs, q_off + 4, vec_width=4, dtype=T.i32),
+        q_off = (tok_b * q_s0 + (head * HD + hl * 32) * 2) // 4
+        qd16: list = []
+        for i4 in range_constexpr(4):
+            v4 = _vec(
+                buffer_ops.buffer_load(q_rs, q_off + 4 * i4, vec_width=4, dtype=T.i32),
                 4,
+                fx.Int32,
             )
-            c_s = arith.mulf(arith.mulf(q_scale, k_descale), _f32(float(scale) * LOG2E))
-            inv_c = arith.divf(_f32(1.0), c_s)
-            c_pair = _to_raw(
-                fx.Vector.from_elements([fx.Float32(c_s), fx.Float32(c_s)], fx.Float32)
+            qd16.extend(_to_raw(v4[e]) for e in range(4))
+        fq = []
+        for d in qd16:
+            fq.append(arith.bitcast(T.f32, arith.shli(d, _i32c(16))))
+            fq.append(arith.bitcast(T.f32, arith.andi(d, _i32c(-65536))))
+        # S in code units needs Q pre-multiplied by c = 8 log2(e) scale k_descale.
+        # Q is cast as fp8(clamp(q c 2^-e)) with the smallest integer
+        # e >= log2(c q_scale), so queries within the static q scale's FP8 range
+        # (|q| <= 448 q_scale) are not clipped, and the QK MFMA's E8M0 B scale 2^e
+        # restores c exactly.
+        c_q = arith.mulf(k_descale, _f32(code_scale))
+        t_bits = arith.bitcast(T.i32, arith.mulf(c_q, q_scale))
+        t_exp = arith.subi(
+            arith.andi(arith.shrui(t_bits, _i32c(23)), _i32c(255)), _i32c(127)
+        )
+        t_frac = arith.andi(t_bits, _i32c(0x7FFFFF))
+        e_q = arith.select(
+            arith.cmpi(arith.CmpIPredicate.ne, t_frac, _i32c(0)),
+            arith.addi(t_exp, _i32c(1)),
+            t_exp,
+        )
+        e_q = arith.maxsi(arith.minsi(e_q, _i32c(126)), _i32c(-126))
+        inv_q = arith.mulf(
+            c_q,
+            arith.bitcast(T.f32, arith.shli(arith.subi(_i32c(127), e_q), _i32c(23))),
+        )
+        q_sb = arith.addi(_i32c(127), e_q)
+        fq = [
+            arith.maximumf(
+                arith.minimumf(arith.mulf(x, inv_q), _f32(448.0)), _f32(-448.0)
             )
-            q_sb = s127
-        else:
-            q_off = (tok_b * q_s0 + (head * HD + hl * 32) * 2) // 4
-            qd16: list = []
-            for i4 in range_constexpr(4):
-                v4 = _vec(
-                    buffer_ops.buffer_load(
-                        q_rs, q_off + 4 * i4, vec_width=4, dtype=T.i32
-                    ),
-                    4,
-                    fx.Int32,
-                )
-                qd16.extend(_to_raw(v4[e]) for e in range(4))
-            fq = []
-            for d in qd16:
-                fq.append(arith.bitcast(T.f32, arith.shli(d, _i32c(16))))
-                fq.append(arith.bitcast(T.f32, arith.andi(d, _i32c(-65536))))
-            # S in code units needs Q pre-multiplied by c = 8 log2(e) scale k_descale.
-            # Q is cast as fp8(clamp(q c 2^-e)) with the smallest integer
-            # e >= log2(c q_scale), so queries within the static q scale's FP8 range
-            # (|q| <= 448 q_scale) are not clipped, and the QK MFMA's E8M0 B scale 2^e
-            # restores c exactly.
-            c_q = arith.mulf(k_descale, _f32(code_scale))
-            t_bits = arith.bitcast(T.i32, arith.mulf(c_q, q_scale))
-            t_exp = arith.subi(
-                arith.andi(arith.shrui(t_bits, _i32c(23)), _i32c(255)), _i32c(127)
+            for x in fq
+        ]
+        qw = []
+        for w4 in range_constexpr(8):
+            e0 = 4 * w4
+            hw = _rocdl.cvt_pk_fp8_f32(
+                T.i32, fq[e0], fq[e0 + 1], llvm.mlir_poison(T.i32), False
             )
-            t_frac = arith.andi(t_bits, _i32c(0x7FFFFF))
-            e_q = arith.select(
-                arith.cmpi(arith.CmpIPredicate.ne, t_frac, _i32c(0)),
-                arith.addi(t_exp, _i32c(1)),
-                t_exp,
-            )
-            e_q = arith.maxsi(arith.minsi(e_q, _i32c(126)), _i32c(-126))
-            inv_q = arith.mulf(
-                c_q,
-                arith.bitcast(
-                    T.f32, arith.shli(arith.subi(_i32c(127), e_q), _i32c(23))
-                ),
-            )
-            q_sb = arith.addi(_i32c(127), e_q)
-            fq = [
-                arith.maximumf(
-                    arith.minimumf(arith.mulf(x, inv_q), _f32(448.0)), _f32(-448.0)
-                )
-                for x in fq
-            ]
-            qw = []
-            for w4 in range_constexpr(8):
-                e0 = 4 * w4
-                hw = _rocdl.cvt_pk_fp8_f32(
-                    T.i32, fq[e0], fq[e0 + 1], llvm.mlir_poison(T.i32), False
-                )
-                qw.append(
-                    _rocdl.cvt_pk_fp8_f32(T.i32, fq[e0 + 2], fq[e0 + 3], hw, True)
-                )
-            qf = _to_raw(fx.Vector.from_elements([fx.Int32(w) for w in qw], fx.Int32))
+            qw.append(_rocdl.cvt_pk_fp8_f32(T.i32, fq[e0 + 2], fq[e0 + 3], hw, True))
+        qf = _to_raw(fx.Vector.from_elements([fx.Int32(w) for w in qw], fx.Int32))
         qpos = ctx + tok
 
         k_base = buf_base_i64(k)
@@ -505,11 +486,8 @@ def _launcher(hk, kv_s0, kv_s1, kv_sh, scale, logb, bias, ppb, window, exp_free)
                     for u in range_constexpr(2)
                 ]
                 kfr.append(_cat(parts[0], parts[1], 4))
-            if fx.const_expr(exp_free):
-                # codes: S in code units plus the column's offset (accumulator input)
-                s = [mfma(kfr[t], qf, mref, q_sb) for t in range_constexpr(mts)]
-            else:
-                s = [mfma(kfr[t], qf, zero16) for t in range_constexpr(mts)]
+            # codes: S in code units plus the column's offset (accumulator input)
+            s = [mfma(kfr[t], qf, mref, q_sb) for t in range_constexpr(mts)]
             ninf = fx.Float32(float("-inf"))
             flat = []
             for t in range_constexpr(mts):
@@ -536,51 +514,29 @@ def _launcher(hk, kv_s0, kv_s1, kv_sh, scale, logb, bias, ppb, window, exp_free)
                     arith.constant(0, type=ir.IntegerType.get_signless(1)),
                 )
             )
-            if fx.const_expr(exp_free):
-                if hit:
-                    # Shift by d = new max - reference (code units). A column that
-                    # has only seen masked keys (thr = NO_REF) takes its first finite
-                    # maximum as the reference, in either direction.
-                    mxa = _allreduce32(_to_raw(mx))
-                    ini = arith.cmpf(
-                        arith.CmpFPredicate.OGT, _to_raw(thr), _f32(-1.0e29)
-                    )
-                    fin = arith.cmpf(arith.CmpFPredicate.OGT, mxa, _f32(-1.0e29))
-                    d8 = arith.subf(mxa, _f32(code_ref))
-                    d8 = arith.select(
-                        ini,
-                        arith.maximumf(d8, _f32(0.0)),
-                        arith.select(fin, d8, _f32(0.0)),
-                    )
-                    alpha = arith.select(
-                        ini,
-                        fx.rocdl.exp2(
-                            T.f32, arith.mulf(d8, _f32(-1.0 / CODE_PER_OCTAVE))
-                        ),
-                        _f32(1.0),
-                    )
-                    thr = arith.select(
-                        arith.ori(ini, fin), _f32(code_ref), _f32(NO_REF)
-                    )
-                    mref = _to_raw(_vec(mref, 16) - fx.Float32(d8))
-                    flat = [arith.subf(_to_raw(x), d8) for x in flat]
-                    l_run = _scale_np(l_run, 2, alpha)
-                    o_acc = [_scale_np(o, 16, alpha) for o in o_acc]
-            elif hit:
-                # new running maximum mn (log2 units): P is re-aimed at 2^bias there
-                mxa = _allreduce32(mx)
-                m_old = arith.subf(_f32(bias), _to_raw(_vec(mref, 2)[0]))
-                mn = arith.maximumf(m_old, arith.mulf(mxa, c_s))
-                alpha = fx.rocdl.exp2(T.f32, arith.subf(m_old, mn))
-                nm = arith.subf(_f32(bias), mn)
-                mref = _to_raw(
-                    fx.Vector.from_elements(
-                        [fx.Float32(nm), fx.Float32(nm)], fx.Float32
-                    )
+            if hit:
+                # Shift by d = new max - reference (code units). A column that
+                # has only seen masked keys (thr = NO_REF) takes its first finite
+                # maximum as the reference, in either direction.
+                mxa = _allreduce32(_to_raw(mx))
+                ini = arith.cmpf(arith.CmpFPredicate.OGT, _to_raw(thr), _f32(-1.0e29))
+                fin = arith.cmpf(arith.CmpFPredicate.OGT, mxa, _f32(-1.0e29))
+                d8 = arith.subf(mxa, _f32(code_ref))
+                d8 = arith.select(
+                    ini,
+                    arith.maximumf(d8, _f32(0.0)),
+                    arith.select(fin, d8, _f32(0.0)),
                 )
-                thr = arith.mulf(mn, inv_c)
-                l_run = _to_raw(_vec(l_run, 2) * fx.Float32(alpha))
-                o_acc = [_to_raw(_vec(o, 16) * fx.Float32(alpha)) for o in o_acc]
+                alpha = arith.select(
+                    ini,
+                    fx.rocdl.exp2(T.f32, arith.mulf(d8, _f32(-1.0 / cpo))),
+                    _f32(1.0),
+                )
+                thr = arith.select(arith.ori(ini, fin), _f32(code_ref), _f32(NO_REF))
+                mref = _to_raw(_vec(mref, 16) - fx.Float32(d8))
+                flat = [arith.subf(_to_raw(x), d8) for x in flat]
+                l_run = _scale_np(l_run, 2, alpha)
+                o_acc = [_scale_np(o, 16, alpha) for o in o_acc]
             words = []
             if fx.const_expr(exp_free):
                 fx.rocdl.sched_barrier(0)
@@ -590,15 +546,10 @@ def _launcher(hk, kv_s0, kv_s1, kv_sh, scale, logb, bias, ppb, window, exp_free)
                         acc_w = _cvt_u8(_to_raw(flat[4 * w + b]), b, acc_w)
                     words.append(acc_w)
             else:
-                # all exponent arguments first (interleaving fma -> exp through one
-                # temporary serializes on the transcendental unit's operand reads)
-                zs = []
-                for i in range_constexpr(len(flat) // 2):
-                    pr = fx.Vector.from_elements(
-                        [fx.Float32(flat[2 * i]), fx.Float32(flat[2 * i + 1])],
-                        fx.Float32,
-                    )
-                    zs.append(_vec(fmath.fma(_to_raw(pr), c_pair, _to_raw(mref)), 2))
+                zs = [
+                    [flat[2 * i], flat[2 * i + 1]]
+                    for i in range_constexpr(len(flat) // 2)
+                ]
                 fx.rocdl.sched_barrier(0)
                 for t in range_constexpr(mts):
                     ps = []
@@ -699,17 +650,8 @@ def _launcher(hk, kv_s0, kv_s1, kv_sh, scale, logb, bias, ppb, window, exp_free)
         for t in range_constexpr(NBUF - 1):
             issue_dma(t0 + t, t * STAGE, pages(t0 + t), t)
         ids0 = pages(t0 + (NBUF - 1))
-        if fx.const_expr(exp_free):
-            # code offset 0 until a column's first finite maximum sets its reference
-            init = [zero16, zero16, zero16, _f32(NO_REF)]
-        else:
-            nm0 = fx.Float32(bias - M_INIT)
-            init = [
-                zero16,
-                zero16,
-                _to_raw(fx.Vector.from_elements([nm0, nm0], fx.Float32)),
-                arith.mulf(_f32(M_INIT), inv_c),
-            ]
+        # code offset 0 until a column's first finite maximum sets its reference
+        init = [zero16, zero16, zero16, _f32(NO_REF)]
         init = init + [_to_raw(fx.full(2, 0.0, fx.Float32))] + ids0
         # tiles counted from t0: [0, nlo) window-masked (rounded up to whole stage
         # groups), [nlo, n_in) unmasked in groups of NBUF with static LDS stages then
