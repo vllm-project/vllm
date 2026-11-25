@@ -9,51 +9,30 @@ import "inference.proto";
 // KV cache events of the engine, as its ZMQ publisher emits them
 // (`vllm/distributed/kv_events.py`), with the same sequence numbers.
 service KvEvents {
-  // Streams the KV cache events of one data-parallel rank.
-  //
-  // The first response is `start`; every later response is a `batch`, in
-  // sequence-number order, each number once. Without `resume`, the stream
-  // starts with the next batch the engine publishes. With `resume`, it first
-  // replays the engine's buffered batches from the cursor (the engine keeps
-  // `buffer_steps` batches), then continues live.
+  // Streams the KV cache events of one data-parallel rank, from the next
+  // batch the engine publishes, in sequence-number order. As with the ZMQ
+  // publisher, batches can be lost: a gap in the sequence numbers means the
+  // engine's publisher dropped them, the server could not decode them, or the
+  // subscriber fell too far behind.
   //
   // Each batch is one message, however large; raise the client's receive
   // limit above gRPC's default 4 MiB for long prompts.
   //
   // INVALID_ARGUMENT: the rank is not connected to this server.
   // FAILED_PRECONDITION: the engine does not publish KV cache events.
-  // OUT_OF_RANGE: the cursor's batches are no longer buffered, or its
-  //   `stream_id` is not the current one.
-  // DATA_LOSS: batches after the last one sent can no longer be recovered,
-  //   because the subscriber fell too far behind or the server lost them.
-  // UNAVAILABLE: the engine's publisher or replay socket did not answer, or
-  //   the server is shutting down.
+  // UNAVAILABLE: the engine's publisher did not answer, or the server is
+  //   shutting down.
   rpc SubscribeKvEvents (SubscribeKvEventsRequest) returns (stream SubscribeKvEventsResponse) {}
 }
 
 message SubscribeKvEventsRequest {
   uint32 data_parallel_rank = 1;
-  // Absent: live batches only.
-  optional KvEventCursor resume = 2;
-}
-
-message KvEventCursor {
-  // Empty: the current stream.
-  string stream_id = 1;
-  uint64 next_sequence_number = 2;
 }
 
 message SubscribeKvEventsResponse {
   oneof item {
-    KvEventStreamStart start = 1;
-    KvEventBatch batch = 2;
+    KvEventBatch batch = 1;
   }
-}
-
-message KvEventStreamStart {
-  // Changes when the server restarts.
-  string stream_id = 1;
-  uint32 data_parallel_rank = 2;
 }
 
 // `KVEventBatch` (`[ts, events, data_parallel_rank]`) and its sequence number.

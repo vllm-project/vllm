@@ -113,10 +113,9 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
-    # Private KV event and replay addresses of the Rust frontend, which the
-    # KV event publisher binds in addition to its configured endpoints.
+    # Private KV event address of the Rust frontend, which the KV event
+    # publisher binds in addition to its configured endpoint.
     kv_events: str | None = None
-    kv_events_replay: str | None = None
 
 
 @dataclass(slots=True)
@@ -1221,7 +1220,7 @@ class CoreEngineLaunch:
     # Frontend processes to watch during engine startup; may be assigned by
     # the caller before the startup barrier runs on context manager exit.
     watched_frontend_processes: Sequence[FrontendProcess] = ()
-    # Whether to give each engine private KV event addresses for the Rust
+    # Whether to give each engine a private KV event address for the Rust
     # frontend; may be set like `watched_frontend_processes`.
     assign_kv_event_addresses: bool = False
 
@@ -1569,14 +1568,8 @@ def wait_for_engine_startup(
                     )
             addresses = launch.addresses
             if launch.assign_kv_event_addresses:
-                kv_events, kv_events_replay = (
-                    (get_open_zmq_ipc_path(), get_open_zmq_ipc_path())
-                    if local
-                    else ("tcp://*:0", "tcp://*:0")
-                )
-                addresses = replace(
-                    addresses, kv_events=kv_events, kv_events_replay=kv_events_replay
-                )
+                kv_events = get_open_zmq_ipc_path() if local else "tcp://*:0"
+                addresses = replace(addresses, kv_events=kv_events)
             init_message = msgspec.msgpack.encode(
                 EngineHandshakeMetadata(
                     addresses=addresses,

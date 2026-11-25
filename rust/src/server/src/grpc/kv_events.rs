@@ -11,14 +11,16 @@ use asynk_strim_attr::{TryYielder, try_stream};
 use futures::Stream;
 use thiserror_ext::AsReport as _;
 use tokio::sync::OnceCell;
+use tokio::sync::broadcast::{self, error::RecvError};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
+use tracing::warn;
 use vllm_engine_core_client::protocol::handshake::KvEventsConfig;
 use vllm_engine_core_client::protocol::kv_events::{
     BlockRemoved, BlockStored, ExternalBlockHash, ExtraKeyValue, KvCacheEvent, KvEventBatch,
 };
 
-use self::relay::{KvEventReader, KvEventRelay, ReadError};
+use self::relay::KvEventRelay;
 use super::{KvEventsServer, pb};
 use crate::state::AppState;
 
@@ -27,29 +29,27 @@ pub(crate) type KvEventsGrpcService = KvEventsServer<KvEventsServiceImpl>;
 /// gRPC KV event service: re-publishes each engine's ZMQ KV events as typed
 /// streams.
 pub struct KvEventsServiceImpl {
-    /// By data-parallel rank: the private addresses its engine publishes on
-    /// for this frontend, and its relay, started by its first subscriber.
-    ranks: BTreeMap<u32, (Option<PublisherAddresses>, OnceCell<KvEventRelay>)>,
+    /// By data-parallel rank: the private address its engine publishes on for
+    /// this frontend, and its relay, started by its first subscriber.
+    ranks: BTreeMap<u32, (Option<PublisherAddress>, OnceCell<KvEventRelay>)>,
     /// Ends the streams, which would otherwise hold up a graceful shutdown.
     shutdown: CancellationToken,
 }
 
 /// Where an engine publishes its KV events for this frontend.
-pub(super) struct PublisherAddresses {
+pub(super) struct PublisherAddress {
     endpoint: String,
-    replay_endpoint: String,
     topic: String,
 }
 
-impl PublisherAddresses {
-    /// The private addresses of an engine that publishes KV events to this
-    /// frontend: its ZMQ publisher reports the two it bound.
+impl PublisherAddress {
+    /// The private address of an engine that publishes KV events to this
+    /// frontend, as its ZMQ publisher reports it bound.
     pub(super) fn of(config: Option<&KvEventsConfig>) -> Option<Self> {
         let config =
             config.filter(|config| config.enable_kv_cache_events && config.publisher == "zmq")?;
         Some(Self {
             endpoint: config.frontend_endpoint.clone()?,
-            replay_endpoint: config.frontend_replay_endpoint.clone()?,
             topic: config.topic.clone(),
         })
     }
@@ -59,7 +59,7 @@ impl KvEventsServiceImpl {
     pub fn new(state: Arc<AppState>, shutdown: CancellationToken) -> Self {
         let ranks = (state.engine_core_client().ready_responses().into_iter())
             .map(|ready| {
-                let publisher = PublisherAddresses::of(ready.kv_events_config.as_ref());
+                let publisher = PublisherAddress::of(ready.kv_events_config.as_ref());
                 (ready.data_parallel_rank, (publisher, OnceCell::new()))
             })
             .collect();
@@ -103,56 +103,40 @@ impl pb::kv_events_server::KvEvents for KvEventsServiceImpl {
                     ))
                 })?;
 
-        let reader = relay.reader(request.resume).await.map_err(read_status)?;
         Ok(Response::new(Box::pin(kv_event_responses(
-            reader,
+            relay.subscribe(),
             rank,
             self.shutdown.clone(),
         ))))
     }
 }
 
-fn read_status(error: ReadError) -> Status {
-    match error {
-        ReadError::OutOfRange => Status::out_of_range(
-            "the cursor's KV event batches are no longer buffered by the engine, or its stream \
-             is not the current one; subscribe without `resume` and rebuild",
-        ),
-        ReadError::DataLoss => Status::data_loss(
-            "KV event batches after the last one sent can no longer be recovered; subscribe \
-             without `resume` and rebuild",
-        ),
-        ReadError::ReplayFailed(error) => {
-            Status::unavailable(format!("the engine's KV event replay failed: {error}"))
-        }
-        ReadError::RelayStopped => Status::unavailable("the KV event relay stopped"),
-    }
-}
-
 #[try_stream]
 async fn kv_event_responses(
-    mut reader: KvEventReader,
+    mut live: broadcast::Receiver<Arc<pb::KvEventBatch>>,
     data_parallel_rank: u32,
     shutdown: CancellationToken,
     mut y: TryYielder<pb::SubscribeKvEventsResponse, Status>,
 ) -> Result<(), Status> {
     use pb::subscribe_kv_events_response::Item;
 
-    let start = pb::KvEventStreamStart {
-        stream_id: reader.stream_id().to_string(),
-        data_parallel_rank,
-    };
-    y.yield_ok(pb::SubscribeKvEventsResponse {
-        item: Some(Item::Start(start)),
-    })
-    .await;
-
     loop {
         let batch = tokio::select! {
             _ = shutdown.cancelled() => {
                 return Err(Status::unavailable("the server is shutting down"));
             }
-            batch = reader.next_batch() => batch.map_err(read_status)?,
+            batch = live.recv() => batch,
+        };
+        let batch = match batch {
+            Ok(batch) => batch,
+            // The subscriber sees the skipped batches as a gap in sequence numbers.
+            Err(RecvError::Lagged(skipped)) => {
+                warn!(data_parallel_rank, skipped, "KV event subscriber lagged");
+                continue;
+            }
+            Err(RecvError::Closed) => {
+                return Err(Status::unavailable("the KV event relay stopped"));
+            }
         };
         y.yield_ok(pb::SubscribeKvEventsResponse {
             item: Some(Item::Batch(Arc::unwrap_or_clone(batch))),

@@ -66,18 +66,15 @@ publishing credentials.
 with `--kv-events-config '{"enable_kv_cache_events": true}'`, one stream per
 data-parallel rank, with the same batches and sequence numbers as the engine's
 ZMQ publisher. Nothing else needs configuring: at startup the frontend gives
-each engine a private events address and replay address, which the publisher
-binds in addition to its configured endpoints: IPC when every engine it connects
-to runs on its node, and TCP on each engine's own node otherwise (under
+each engine a private events address, which the publisher binds in addition to
+its configured endpoint: IPC when every engine it connects to runs on its node,
+and TCP on each engine's own node otherwise (under
 `VLLM_USE_RUST_FRONTEND=1 vllm serve`, only for the engines on other nodes).
 `Control.GetKvEventSources` lists the stream as a source with transport `grpc`.
 
-A subscriber without `resume` receives live batches. With `resume`, the
-frontend first replays the batches the engine still buffers (`buffer_steps`)
-from the cursor, then continues live; it keeps no history of its own, and fills
-batches its own subscription misses from the same buffer. A cursor older than
-the buffer fails with `OUT_OF_RANGE`; batches that can no longer be recovered
-end the stream with `DATA_LOSS`.
+The stream carries live batches only, from the next one the engine publishes;
+the frontend keeps no history and does not replay. As with a ZMQ subscriber, a
+gap in the sequence numbers means batches were lost.
 
 Each batch is one gRPC message. Requests that set `kv_cache_report_mode=full`
 can produce batches above the 4 MiB that gRPC clients accept by default, so

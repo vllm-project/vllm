@@ -69,8 +69,6 @@ pub enum Error {
     },
     #[error("unexpected KV event message: {message}")]
     UnexpectedKvEventMessage { message: String },
-    #[error("KV event replay timed out after {timeout:?}")]
-    KvEventReplayTimeout { timeout: Duration },
     #[error("request `{request_id}` is already in flight")]
     DuplicateRequestId { request_id: String },
     #[error(

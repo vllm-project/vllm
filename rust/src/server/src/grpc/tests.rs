@@ -2723,7 +2723,6 @@ fn kv_event_sources_expose_the_zmq_publisher_and_this_frontends_stream() {
         max_queue_size: 100_000,
         topic: "kv".to_string(),
         frontend_endpoint: None,
-        frontend_replay_endpoint: None,
     });
 
     assert!(kv_event_sources(&ready).is_empty());
@@ -2745,7 +2744,6 @@ fn kv_event_sources_expose_the_zmq_publisher_and_this_frontends_stream() {
 
     let config = ready.kv_events_config.as_mut().unwrap();
     config.frontend_endpoint = Some("ipc:///tmp/vllm-rs-i-kv0".to_string());
-    config.frontend_replay_endpoint = Some("ipc:///tmp/vllm-rs-i-kvr0".to_string());
     let [zmq, grpc] = kv_event_sources(&ready).try_into().expect("both sources");
     assert_eq!(zmq.transport, "zmq");
     assert_eq!(
@@ -2755,7 +2753,6 @@ fn kv_event_sources_expose_the_zmq_publisher_and_this_frontends_stream() {
             data_parallel_rank: Some(2),
             encoding: "protobuf".to_string(),
             schema_version: 1,
-            buffer_steps: 10_000,
             ..Default::default()
         }
     );
@@ -3769,27 +3766,14 @@ async fn kv_events_service(
     (KvEventsServiceImpl::new(state, shutdown), engine_task)
 }
 
-/// Subscribe to rank 0, from `resume = (stream ID, next sequence number)`
-/// when given. Returns the stream's ID and its batches.
-async fn subscribe_kv_events(
-    service: &KvEventsServiceImpl,
-    resume: Option<(&str, u64)>,
-) -> Result<(String, KvEventStream), Status> {
+/// Subscribe to rank 0.
+async fn subscribe_kv_events(service: &KvEventsServiceImpl) -> Result<KvEventStream, Status> {
     use pb::kv_events_server::KvEvents as _;
-    use pb::subscribe_kv_events_response::Item;
 
     let request = pb::SubscribeKvEventsRequest {
         data_parallel_rank: 0,
-        resume: resume.map(|(stream_id, next_sequence_number)| pb::KvEventCursor {
-            stream_id: stream_id.to_string(),
-            next_sequence_number,
-        }),
     };
-    let mut stream = service.subscribe_kv_events(Request::new(request)).await?.into_inner();
-    match stream.next().await.expect("start item")?.item {
-        Some(Item::Start(start)) => Ok((start.stream_id, stream)),
-        other => panic!("expected a start item, got {other:?}"),
-    }
+    Ok(service.subscribe_kv_events(Request::new(request)).await?.into_inner())
 }
 
 async fn next_kv_event_batch(stream: &mut KvEventStream) -> Result<pb::KvEventBatch, Status> {
@@ -3914,113 +3898,46 @@ fn kv_event_batch_with_every_field() -> (KvEventBatch, pb::KvEventBatch) {
 }
 
 /// Publish an empty batch until the stream yields it. A PUB socket drops what
-/// it sends before the subscription reaches it, and readers skip the repeats.
+/// it sends before the subscription reaches it; a late copy can still follow.
 async fn publish_kv_events_until_received(
     publisher: &mut MockKvEventPublisher,
     sequence_number: u64,
     stream: &mut KvEventStream,
-) -> pb::KvEventBatch {
+) {
     loop {
         publisher.publish(sequence_number, &kv_event_batch(vec![])).await;
         let received = tokio::time::timeout(Duration::from_millis(20), next_kv_event_batch(stream));
         if let Ok(batch) = received.await {
-            return batch.unwrap();
+            batch.unwrap();
+            return;
         }
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kv_events_resume_replays_the_engine_buffer_then_continues_live() {
-    let ipc = IpcNamespace::new().expect("create ipc namespace");
-    let mut publisher = MockKvEventPublisher::bind(&ipc).await;
-    // Published before anyone subscribed.
-    let (published, streamed) = kv_event_batch_with_every_field();
-    publisher.retain(0, &published);
-    let (service, _engine_task) = kv_events_service(Some(publisher.config.clone())).await;
-
-    // Without a cursor, the stream starts live.
-    let (stream_id, mut live) = subscribe_kv_events(&service, None).await.unwrap();
-    let first_live = publish_kv_events_until_received(&mut publisher, 1, &mut live).await;
-    assert_eq!(first_live.sequence_number, 1);
-
-    // A cursor replays the engine's buffer, then continues live.
-    let (_, mut resumed) = subscribe_kv_events(&service, Some((&stream_id, 0))).await.unwrap();
-    assert_eq!(next_kv_event_batch(&mut resumed).await.unwrap(), streamed);
-    assert_eq!(next_kv_event_batch(&mut resumed).await.unwrap(), first_live);
-    publisher.publish(2, &kv_event_batch(vec![])).await;
-    for stream in [&mut resumed, &mut live] {
-        assert_eq!(
-            next_kv_event_batch(stream).await.unwrap().sequence_number,
-            2
-        );
-    }
-
-    // A cursor of another stream, or older than the engine's buffer, is refused.
-    let status = subscribe_kv_events(&service, Some(("another-stream", 2))).await.err().unwrap();
-    assert_eq!(status.code(), Code::OutOfRange);
-    publisher.forget_before(1);
-    let status = subscribe_kv_events(&service, Some(("", 0))).await.err().unwrap();
-    assert_eq!(status.code(), Code::OutOfRange);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kv_events_fill_a_gap_from_the_engine_buffer_or_end_the_stream() {
+async fn kv_events_stream_live_batches_to_each_subscriber() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let mut publisher = MockKvEventPublisher::bind(&ipc).await;
     let (service, _engine_task) = kv_events_service(Some(publisher.config.clone())).await;
-    let (_, mut stream) = subscribe_kv_events(&service, None).await.unwrap();
-    publish_kv_events_until_received(&mut publisher, 0, &mut stream).await;
+    let mut first = subscribe_kv_events(&service).await.unwrap();
+    publish_kv_events_until_received(&mut publisher, 0, &mut first).await;
+    let mut second = subscribe_kv_events(&service).await.unwrap();
 
-    // Batch 1 is dropped by the PUB socket but still buffered.
-    publisher.retain(1, &kv_event_batch(vec![]));
-    publisher.publish(2, &kv_event_batch(vec![])).await;
-    for sequence_number in [1, 2] {
-        let batch = next_kv_event_batch(&mut stream).await.unwrap();
-        assert_eq!(batch.sequence_number, sequence_number);
-    }
-
-    // Batch 3 is dropped and not buffered.
-    publisher.publish(4, &kv_event_batch(vec![])).await;
-    let status = next_kv_event_batch(&mut stream).await.unwrap_err();
-    assert_eq!(status.code(), Code::DataLoss);
-    // A cursor before the hole is refused, not served across it.
-    let status = subscribe_kv_events(&service, Some(("", 2))).await.err().unwrap();
-    assert_eq!(status.code(), Code::OutOfRange);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kv_events_resume_at_the_head_keeps_a_batch_published_during_the_replay() {
-    let ipc = IpcNamespace::new().expect("create ipc namespace");
-    let mut publisher = MockKvEventPublisher::bind(&ipc).await;
-    let (service, _engine_task) = kv_events_service(Some(publisher.config.clone())).await;
-    let (stream_id, mut live) = subscribe_kv_events(&service, None).await.unwrap();
-    publish_kv_events_until_received(&mut publisher, 0, &mut live).await;
-
-    // The engine answers the resume from 1 with an empty replay, held until
-    // the relay has forwarded batch 1, which the resumed stream yields once.
-    let gate = publisher.replay_gate.clone();
-    let held = gate.lock().await;
-    let resume = subscribe_kv_events(&service, Some((&stream_id, 1)));
-    tokio::pin!(resume);
-    assert!(tokio::time::timeout(Duration::from_millis(300), &mut resume).await.is_err());
-    publisher.publish(1, &kv_event_batch(vec![])).await;
-    assert_eq!(
-        next_kv_event_batch(&mut live).await.unwrap().sequence_number,
-        1
-    );
-    drop(held);
-
-    let (_, mut resumed) = resume.await.unwrap();
-    publisher.publish(2, &kv_event_batch(vec![])).await;
-    for sequence_number in [1, 2] {
-        let batch = next_kv_event_batch(&mut resumed).await.unwrap();
-        assert_eq!(batch.sequence_number, sequence_number);
+    let (published, mut streamed) = kv_event_batch_with_every_field();
+    streamed.sequence_number = 1;
+    publisher.publish(1, &published).await;
+    for stream in [&mut first, &mut second] {
+        let mut batch = next_kv_event_batch(stream).await.unwrap();
+        while batch.sequence_number == 0 {
+            batch = next_kv_event_batch(stream).await.unwrap();
+        }
+        assert_eq!(batch, streamed);
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kv_events_require_an_engine_that_publishes_them() {
     let (service, _engine_task) = kv_events_service(None).await;
-    let status = subscribe_kv_events(&service, None).await.err().unwrap();
+    let status = subscribe_kv_events(&service).await.err().unwrap();
     assert_eq!(status.code(), Code::FailedPrecondition);
 }

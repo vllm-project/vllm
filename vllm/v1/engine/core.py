@@ -1396,7 +1396,6 @@ class EngineCoreProc(EngineCore):
             self.process_input_queue_block = True
             if (kv_events_config := vllm_config.kv_events_config) is not None:
                 kv_events_config._frontend_endpoint = addresses.kv_events
-                kv_events_config._frontend_replay_endpoint = addresses.kv_events_replay
             self._init_data_parallel(vllm_config)
 
             super().__init__(
@@ -1527,7 +1526,6 @@ class EngineCoreProc(EngineCore):
                 addresses.inputs = client_addresses.inputs
                 addresses.outputs = client_addresses.outputs
                 addresses.kv_events = client_addresses.kv_events
-                addresses.kv_events_replay = client_addresses.kv_events_replay
                 yield addresses
 
         # Update config which may have changed from the handshake
