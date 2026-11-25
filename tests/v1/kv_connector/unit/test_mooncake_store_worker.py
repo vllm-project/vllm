@@ -89,6 +89,12 @@ def _hashes(*raw: bytes) -> list[BlockHash]:
     return [BlockHash(value) for value in raw]
 
 
+def _lookup(owner, num_tokens: int, block_hashes) -> MooncakeLookupResult:
+    result = owner.lookup(num_tokens, block_hashes)
+    assert result is not None
+    return result
+
+
 @pytest.fixture(autouse=True)
 def _reset_conv_state_layout_cache():
     get_conv_state_layout.cache_clear()
@@ -3654,7 +3660,7 @@ def test_hybrid_lookup_uses_each_pp_stage_schema(
         gather = MagicMock(side_effect=gather_prefixes)
         monkeypatch.setattr(torch.distributed, "all_gather_object", gather)
         stage._init_lookup_key_prefixes()
-        assert stage.lookup(33, hashes).hit_length == (
+        assert _lookup(stage, 33, hashes).hit_length == (
             32 if missing_group is None else 0
         )
         gather.assert_called_once()
@@ -5149,12 +5155,12 @@ def test_lookup_rejects_boundary_missing_one_mamba_shard():
     # 33 tokens for two 16-token blocks: the hit stops below the request end,
     # so the full-hit re-derivation stays out of the shard accounting.
     worker.store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
-    assert worker.lookup(33, _hashes(b"h0", b"h1")).hit_length == 32
+    assert _lookup(worker, 33, _hashes(b"h0", b"h1")).hit_length == 32
 
     worker.store.batch_is_exist.side_effect = lambda keys: [
         0 if "tp_rank:1" in k and "group:1" in k else 1 for k in keys
     ]
-    assert worker.lookup(33, _hashes(b"h0", b"h1")).hit_length == 0
+    assert _lookup(worker, 33, _hashes(b"h0", b"h1")).hit_length == 0
 
 
 @pytest.mark.parametrize("mamba_block_size", [4, 16])
@@ -5204,7 +5210,7 @@ def test_lookup_requires_all_attention_chunks_in_page(
         int(any(key.endswith(suffix) for suffix in present)) for key in keys
     ]
 
-    assert worker.lookup(33, hashes).hit_length == expected_hit
+    assert _lookup(worker, 33, hashes).hit_length == expected_hit
 
 
 def test_lookup_requires_all_dcp_rank_namespaces():
@@ -5215,7 +5221,7 @@ def test_lookup_requires_all_dcp_rank_namespaces():
     _refresh_group_tp_replication_factors(worker)
     worker.store.batch_is_exist.return_value = [1, 1, 0, 1]
 
-    assert worker.lookup(16, _hashes(b"a0")).hit_length == 0
+    assert _lookup(worker, 16, _hashes(b"a0")).hit_length == 0
     assert worker.store.batch_is_exist.call_args.args[0] == [
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
         "test-model@tp_rank:1@pcp0@dcp1@pp_rank:0@group:0@6130",
@@ -5227,7 +5233,7 @@ def test_lookup_requires_all_dcp_rank_namespaces():
 def test_lookup_partial_prefix_returns_first_hit_length():
     worker = _make_bare_worker()
     worker.store.batch_is_exist.return_value = [1, 1, 0]
-    assert worker.lookup(48, _hashes(b"a0", b"a1", b"a2")).hit_length == 32
+    assert _lookup(worker, 48, _hashes(b"a0", b"a1", b"a2")).hit_length == 32
 
 
 def test_lookup_partial_tail_uses_hash_alignment():
@@ -5266,7 +5272,7 @@ def test_lookup_partial_tail_uses_hash_alignment():
     _refresh_group_tp_replication_factors(worker)
     worker.store.batch_is_exist.return_value = [0, 0, 1, 0, 0, 1]
 
-    assert worker.lookup(13, _hashes(b"h0", b"h1", b"h2")).hit_length == 12
+    assert _lookup(worker, 13, _hashes(b"h0", b"h1", b"h2")).hit_length == 12
 
 
 def test_lookup_full_hit_reuses_existing_boundary():
@@ -5312,7 +5318,7 @@ def test_lookup_skips_tail_key_for_empty_chunked_local_window():
         int("@group:0@" in key) for key in keys
     ]
 
-    result = worker.lookup(33, _hashes(b"h0", b"h1"))
+    result = _lookup(worker, 33, _hashes(b"h0", b"h1"))
 
     assert result.hit_length == 32
     assert result.tail_key_boundaries == (TailKeyBoundary(0, 32),)
@@ -5374,7 +5380,7 @@ def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
 
     worker.store.batch_is_exist.side_effect = exists
 
-    result = worker.lookup(25, hashes)
+    result = _lookup(worker, 25, hashes)
 
     # Both groups load the exact key at the proven 24-token boundary.
     assert result.hit_length == 24
@@ -5438,7 +5444,7 @@ def test_lookup_plan_recovers_tail_key_after_multi_chunk_convergence():
 
     worker.store.batch_is_exist.side_effect = exists
 
-    result = worker.lookup(49, hashes)
+    result = _lookup(worker, 49, hashes)
 
     assert result.hit_length == 20
     assert result.tail_key_boundaries == (
@@ -5466,7 +5472,7 @@ def test_lookup_full_hit_swa_degrades_when_no_stored_boundary_is_usable():
     )
     worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
 
-    assert worker.lookup(64, _hashes(b"h0", b"h1", b"h2", b"h3")).hit_length == 0
+    assert _lookup(worker, 64, _hashes(b"h0", b"h1", b"h2", b"h3")).hit_length == 0
     assert worker.store.batch_is_exist.call_count == 1
 
 
@@ -5485,7 +5491,7 @@ def test_lookup_swa_single_group_returns_full_when_tail_window_present():
         hash_block_size=worker.hash_block_size,
     )
     worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
-    assert worker.lookup(65, _hashes(b"h0", b"h1", b"h2", b"h3")).hit_length == 64
+    assert _lookup(worker, 65, _hashes(b"h0", b"h1", b"h2", b"h3")).hit_length == 64
 
 
 def test_lookup_checks_all_potential_swa_hit_boundaries():
@@ -5532,7 +5538,8 @@ def test_lookup_checks_all_potential_swa_hit_boundaries():
     # chunk 7 and miss this earlier reusable prefix.
     worker.store.batch_is_exist.return_value = [1, 0, 0, 1, 0, 0]
 
-    result = worker.lookup(
+    result = _lookup(
+        worker,
         96,
         [BlockHash(f"h{i}".encode()) for i in range(12)],
     )
@@ -6432,10 +6439,12 @@ def test_lookup_records_results_and_failure_status(results):
     result = worker.lookup(33, _hashes(b"a0", b"a1"))
     stats = worker.get_kv_connector_stats()
     failed = len(results) != 2 or any(value < 0 for value in results)
+    assert isinstance(stats, MooncakeStoreConnectorStats)
     if failed:
         assert result is None
         assert stats.data["lookup_exists"][0]["status"] != "ok"
     else:
+        assert result is not None
         assert result.hit_length == 32
         assert stats.data["lookup_exists"][0]["status"] == "ok"
     assert stats.data["lookup_exists"][0]["num_keys"] == 2
@@ -6591,11 +6600,16 @@ def test_failed_get_frees_hbm_and_request_recomputes(
     scheduler.update_from_output(waiting_output, combined)
     # Defer a new lookup so promotion exposes the release before recompute
     # allocates replacement blocks (possibly reusing the very same IDs).
-    scheduler.connector.get_num_new_matched_tokens = lambda *_: (None, False)
+    assert scheduler.connector is not None
+    monkeypatch.setattr(
+        scheduler.connector, "get_num_new_matched_tokens", lambda *_: (None, False)
+    )
     scheduler.schedule()
     assert all(block.ref_cnt == 0 for block in old_blocks)
     assert pool.get_num_free_blocks() == free_before
-    scheduler.connector.get_num_new_matched_tokens = lambda *_: (0, False)
+    monkeypatch.setattr(
+        scheduler.connector, "get_num_new_matched_tokens", lambda *_: (0, False)
+    )
     retried = scheduler.schedule()
     assert request.status == RequestStatus.RUNNING
     assert retried.num_scheduled_tokens[request.request_id] == 64

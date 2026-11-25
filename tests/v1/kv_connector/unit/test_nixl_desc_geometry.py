@@ -926,6 +926,7 @@ def _register_kernel_rows_worker(layer, layout, transfer_block_size):
     )
     vllm_config = create_vllm_config(block_size=spec.block_size)
     vllm_config.cache_config.kv_cache_layout = layout.name
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
     backend = MagicMock()
     backend.get_name.return_value = "TEST"

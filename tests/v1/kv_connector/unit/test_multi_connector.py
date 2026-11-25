@@ -1354,9 +1354,11 @@ def test_handshake_metadata_reaches_only_its_connector():
     )
     assert isinstance(scheduler, MultiConnector)
 
+    worker_metadata = worker.get_handshake_metadata()
+    assert worker_metadata is not None
     # What the engine core merges from the workers of two PP stages.
     scheduler.set_xfer_handshake_metadata_pp_aware(
-        {(pp_rank, 0): worker.get_handshake_metadata() for pp_rank in range(2)}
+        {(pp_rank, 0): worker_metadata for pp_rank in range(2)}
     )
 
     for index, agent in ((0, "first"), (2, "third")):
@@ -1391,9 +1393,9 @@ def test_handshake_metadata_of_subclass_reaches_every_connector():
         vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
     )
 
-    scheduler.set_xfer_handshake_metadata_pp_aware(
-        {(0, 0): worker.get_handshake_metadata()}
-    )
+    worker_metadata = worker.get_handshake_metadata()
+    assert worker_metadata is not None
+    scheduler.set_xfer_handshake_metadata_pp_aware({(0, 0): worker_metadata})
 
     for connector in scheduler.sub_connectors:
         assert isinstance(connector, HandshakeTestConnector)

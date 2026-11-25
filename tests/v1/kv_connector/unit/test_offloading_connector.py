@@ -173,6 +173,7 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
     total_cpu_hit_time = 0.0
     vllm_config = llm.llm_engine.vllm_config
     max_model_len = vllm_config.model_config.max_model_len
+    assert vllm_config.kv_transfer_config is not None
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     cpu_block_size = extra_config.get(
         "block_size",

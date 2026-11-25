@@ -227,6 +227,7 @@ def test_decode_allocation_notifies_both_tp_ranks_on_remote_dp1():
     scheduler = _decode_scheduler()
     scheduler.tp_size = 1
     request = create_request(request_id=7, do_remote_prefill=True)
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params.update(
         transfer_id="tA",
         remote_host="10.0.0.1",
@@ -480,9 +481,11 @@ def test_first_stage_failure_fails_the_transfer_once():
 def _write_done_fields(pp_rank: int, pp_size: int) -> list:
     sent = []
     wrapper = MoRIIOWrapper()
-    wrapper.send_notify = lambda *args, message_type, message_fields=None: sent.append(
-        message_fields
-    )
+
+    def send_notify(*args, message_type, message_fields=None):
+        sent.append(message_fields)
+
+    wrapper.send_notify = send_notify  # type: ignore[method-assign]
     writer = make_moriio_writer(
         SimpleNamespace(
             moriio_wrapper=wrapper, tp_rank=0, pp_rank=pp_rank, pp_size=pp_size

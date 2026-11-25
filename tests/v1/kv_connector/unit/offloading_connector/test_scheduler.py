@@ -2704,6 +2704,7 @@ def test_partially_stored_handoff_is_reported():
     jobs = _partial_tail_store_jobs(scheduler, output)
 
     [job] = jobs.values()
+    assert isinstance(job.src_spec, GPULoadStoreSpec)
     assert job.src_spec.block_ids.tolist() == [12]
     reduced = scheduler._connector_stats.reduce()
     assert reduced[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
@@ -4985,7 +4986,9 @@ def test_hisparse_host_block_id_does_not_flush_gpu_store(async_scheduling):
         config, kv_cache_config=kv_cache_config, hash_block_size=4
     )
     get_hisparse_coordinator(scheduler.kv_cache_manager)
-    offloading = scheduler.connector.scheduler
+    connector = scheduler.connector
+    assert isinstance(connector, OffloadingConnector)
+    offloading = connector.scheduler
     manager = offloading.manager
     assert isinstance(manager, CPUOffloadingManager)
 
@@ -5001,7 +5004,9 @@ def test_hisparse_host_block_id_does_not_flush_gpu_store(async_scheduling):
     a_blocks = scheduler.kv_cache_manager.get_blocks(request_a.request_id).blocks
     host_block_id = a_blocks[0][0].block_id
     gpu_block_id = a_blocks[1][0].block_id
-    assert a_blocks[0][0].pool() is not a_blocks[1][0].pool()
+    host_pool, gpu_pool = a_blocks[0][0].pool, a_blocks[1][0].pool
+    assert host_pool is not None and gpu_pool is not None
+    assert host_pool() is not gpu_pool()
     assert host_block_id == gpu_block_id
     scheduler.update_from_output(output, create_model_runner_output(scheduler.running))
 
@@ -5600,6 +5605,7 @@ def test_write_access_mode_gates_store_handlers(
         assert calls
     else:
         assert calls == []
+        assert isinstance(meta, OffloadingConnectorMetadata)
         assert meta.store_jobs == {}
         spec.manager.prepare_store.assert_not_called()
 

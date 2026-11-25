@@ -5541,6 +5541,7 @@ def test_agent_is_synchronized(dist_init, transfer_mode):
             KVConnectorRole.WORKER,
             make_kv_cache_config(block_size=block_size),
         )
+        assert connector.connector_worker is not None
         config = connector.connector_worker.nixl_wrapper.config
         connector.shutdown()
     assert config.num_threads == (0 if transfer_mode == "push" else 4)

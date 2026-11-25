@@ -1282,16 +1282,17 @@ def test_failed_load_skips_store_lookup_until_finished():
     # make the request reload forever; it recomputes locally instead.
     scheduler = _make_bare_scheduler()
     scheduler.load_async = True
-    scheduler.client = _StubLookupClient(hit_tokens=32)
+    lookup_client = _StubLookupClient(hit_tokens=32)
+    scheduler.client = lookup_client
     request = _make_admission_request()
     assert scheduler.get_num_new_matched_tokens(request, 0) == (32, True)
     scheduler.update_connector_output(
         KVConnectorOutput(failed_recving={request.request_id})
     )
 
-    num_lookups = len(scheduler.client.num_tokens)
+    num_lookups = len(lookup_client.num_tokens)
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
-    assert len(scheduler.client.num_tokens) == num_lookups
+    assert len(lookup_client.num_tokens) == num_lookups
 
     finished_output = _make_preemption_scheduler_output()
     finished_output.preempted_req_ids = set()

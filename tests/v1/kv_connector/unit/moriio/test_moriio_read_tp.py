@@ -395,6 +395,7 @@ def test_dp2_tp2_read_uses_remote_dp1_and_releases_its_holders(
             consumer,
             {0: other_producers, 1: producers},
             "xgmi",
+            monkeypatch,
             dp_rank=local_dp_rank,
             session_keys=session_keys,
         )

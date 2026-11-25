@@ -372,7 +372,7 @@ def test_del_keeps_quiet_when_the_constructor_did_not_finish():
 def test_del_shuts_down_a_worker_that_started():
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.async_zmq_ctx = MagicMock()
-    worker.shutdown = MagicMock()
+    worker.shutdown = MagicMock()  # type: ignore[method-assign]
 
     worker.__del__()
 
@@ -2440,6 +2440,7 @@ async def test_pull_fails_fast_when_prefill_worker_is_lost(loss):
         worker = MooncakeConnector(
             vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
         ).connector_worker
+        assert worker is not None
         worker._remote_agents = {
             "p-engine": {0: {0: addr}},
             "other-engine": {0: {0: "tcp://127.0.0.1:1"}},

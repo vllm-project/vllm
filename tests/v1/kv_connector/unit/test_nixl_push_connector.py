@@ -1163,7 +1163,7 @@ class TestPushWriterNotifs:
         assert request_id not in w._send_failures
         assert w._evict_finished_inbox.empty()
 
-    def test_expired_lease_waits_for_submission(self):
+    def test_expired_lease_waits_for_submission(self, monkeypatch: pytest.MonkeyPatch):
         """A lease expiring while the request's WRITEs are being submitted
         keeps its blocks until the submission ends."""
         w = self._pollable_worker()
@@ -1176,7 +1176,7 @@ class TestPushWriterNotifs:
         def submit(*args):
             during.append(w.get_transfer_results().finished_sending)
 
-        w._start_push_kv = submit
+        monkeypatch.setattr(w, "_start_push_kv", submit)
         NixlPushConnectorWorker._do_start_push_kv(
             w, request_id, ([1],), _registration_data(request_id)
         )
@@ -1184,28 +1184,35 @@ class TestPushWriterNotifs:
         assert during == [set()]
         assert w.get_transfer_results().finished_sending == {request_id}
 
-    def test_released_request_is_not_pushed(self):
+    def test_released_request_is_not_pushed(self, monkeypatch: pytest.MonkeyPatch):
         """A registration arriving after the request's blocks were released
         must not WRITE from them."""
         w = self._pollable_worker()
         request_id = "req-late"
-        w._start_push_kv = MagicMock()
+        start_push_kv = MagicMock()
+        monkeypatch.setattr(w, "_start_push_kv", start_push_kv)
 
         NixlPushConnectorWorker._do_start_push_kv(
             w, request_id, ([1],), _registration_data(request_id)
         )
 
-        w._start_push_kv.assert_not_called()
+        start_push_kv.assert_not_called()
         assert not w._inflight_pushes
 
-    def test_push_dst_engine_tracked_until_writes_finish(self):
+    def test_push_dst_engine_tracked_until_writes_finish(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         """TTL eviction keeps a D engine while WRITEs to it are in flight."""
         w = self._pollable_worker()
         request_id = "req-dst"
         w._reqs_to_send[request_id] = time.perf_counter() + 60
         w._reqs_to_process.add(request_id)
         w.expected_consumer_notifications_by_req = {}
-        w._start_push_kv = lambda rid, *_: w._sending_transfers[rid].append(101)
+        monkeypatch.setattr(
+            w,
+            "_start_push_kv",
+            lambda rid, *_: w._sending_transfers[rid].append(101),
+        )
 
         NixlPushConnectorWorker._do_start_push_kv(
             w, request_id, ([1],), _registration_data(request_id)
