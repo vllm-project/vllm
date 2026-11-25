@@ -26,11 +26,14 @@ pytestmark = pytest.mark.hybrid_model
 
 APC_MULTIPLY_BY = 300
 
-# Not compared against Transformers, whose Mamba2 does not support n_groups > 1:
-# https://github.com/huggingface/transformers/pull/40861
 SSM_MODELS = [
-    "vllm-project/mamba2-codestral-v0.1-tiny-random",
+    # mamba2-codestral in transformers is broken pending:
+    # https://github.com/huggingface/transformers/pull/40861
+    # "vllm-project/mamba2-codestral-v0.1-tiny-random",
 ]
+
+# For tests that do not compare against Transformers
+MAMBA2_MODEL = "vllm-project/mamba2-codestral-v0.1-tiny-random"
 
 HYBRID_MODELS = [
     "tiiuae/Falcon-H1-Tiny-90M-Instruct",
@@ -63,7 +66,7 @@ def _set_conv_state_layout(monkeypatch, layout: str) -> None:
     mamba_utils.get_conv_state_layout.cache_clear()
 
 
-@pytest.mark.parametrize("model", HYBRID_MODELS)
+@pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
@@ -106,7 +109,7 @@ def test_models(
     )
 
 
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [MAMBA2_MODEL, HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("conv_state_layout", ["SD", "DS"])
@@ -150,7 +153,7 @@ def test_batching(
     )
 
 
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [MAMBA2_MODEL, HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [10])
 @pytest.mark.parametrize("conv_state_layout", ["SD", "DS"])
 def test_chunked_prefill_with_parallel_sampling(
@@ -184,7 +187,7 @@ def test_chunked_prefill_with_parallel_sampling(
         vllm_model.generate(example_prompts, sampling_params)
 
 
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [MAMBA2_MODEL, HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [20])
 @pytest.mark.parametrize("conv_state_layout", ["SD", "DS"])
 def test_mamba_cache_cg_padding(
@@ -221,7 +224,7 @@ def test_mamba_cache_cg_padding(
         )
 
 
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [MAMBA2_MODEL, HYBRID_MODELS[0]])
 def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     vllm_runner,
     example_prompts,
@@ -247,7 +250,7 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
         )
 
 
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", [MAMBA2_MODEL, HYBRID_MODELS[0]])
 def test_state_cleanup(
     vllm_runner,
     example_prompts,
@@ -272,7 +275,7 @@ def test_state_cleanup(
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
+@pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS[:1])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_distributed_correctness(
@@ -879,7 +882,7 @@ def test_apc_multiple_prompts_partial_cached_outputs(
 
 
 # Test that outputs match whether prefix caching is enabled or not for mamba.
-@pytest.mark.parametrize("model", [SSM_MODELS[0]])
+@pytest.mark.parametrize("model", [MAMBA2_MODEL])
 def test_same_mamba_output_apc_on_vs_off(
     vllm_runner,
     model: str,
