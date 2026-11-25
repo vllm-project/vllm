@@ -167,20 +167,33 @@ def _fused_gdn_gated_rms_norm_quant(
     out_proj: LinearBase,
     **kwargs,
 ) -> torch.Tensor | QuantizedActivation:
-    """GDN gated norm, quantized for out_proj when it takes static FP8."""
-    if get_input_quant_key(out_proj) != kFp8StaticTensorSym:
-        fused_gdn_gated_rms_norm(x=x, out=out, **kwargs)
-        return out
-    scale = out_proj.input_scale
-    q = torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device)
-    fused_gdn_gated_rms_norm(x=x, out=q, scale=scale, **kwargs)
-    return QuantizedActivation(
-        data=q,
-        scale=scale,
-        orig_dtype=x.dtype,
-        orig_shape=x.shape,
-        quant_key=kFp8StaticTensorSym,
-    )
+    """GDN gated norm, quantized for out_proj when it takes static or dynamic
+    per-token FP8."""
+    key = get_input_quant_key(out_proj)
+    if key == kFp8StaticTensorSym:
+        scale = out_proj.input_scale
+        q = torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device)
+        fused_gdn_gated_rms_norm(x=x, out=q, scale=scale, **kwargs)
+        return QuantizedActivation(
+            data=q,
+            scale=scale,
+            orig_dtype=x.dtype,
+            orig_shape=x.shape,
+            quant_key=kFp8StaticTensorSym,
+        )
+    if key == kFp8DynamicTokenSym:
+        q = torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device)
+        scale = torch.empty((x.shape[0], 1), dtype=torch.float32, device=x.device)
+        fused_gdn_gated_rms_norm(x=x, out=q, out_scale=scale, **kwargs)
+        return QuantizedActivation(
+            data=q,
+            scale=scale,
+            orig_dtype=x.dtype,
+            orig_shape=x.shape,
+            quant_key=kFp8DynamicTokenSym,
+        )
+    fused_gdn_gated_rms_norm(x=x, out=out, **kwargs)
+    return out
 
 
 class Qwen3_5RMSNorm(nn.Module):

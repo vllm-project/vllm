@@ -18,7 +18,10 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
-from vllm.kernels.triton.fused_sigmoid_gate_mul import fused_sigmoid_gate_mul
+from vllm.kernels.triton.fused_sigmoid_gate_mul import (
+    fused_sigmoid_gate_mul,
+    fused_sigmoid_gate_mul_dynamic_fp8,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -55,6 +58,7 @@ from vllm.model_executor.layers.quantization.utils.config_utils import (
     get_quark_ocp_mx_group_size,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding, get_rope
@@ -479,7 +483,9 @@ class Qwen3NextAttention(nn.Module):
         if gate is not None:
             if not self.use_fused_output_gate:
                 attn_output = attn_output * torch.sigmoid(gate)
-            elif get_input_quant_key(self.o_proj) == kFp8StaticTensorSym:
+            elif (
+                o_quant_key := get_input_quant_key(self.o_proj)
+            ) == kFp8StaticTensorSym:
                 # Sigmoid gate, fused with o_proj's static FP8 input quant.
                 scale = self.o_proj.input_scale
                 attn_output = QuantizedActivation(
@@ -488,6 +494,16 @@ class Qwen3NextAttention(nn.Module):
                     orig_dtype=attn_output.dtype,
                     orig_shape=attn_output.shape,
                     quant_key=kFp8StaticTensorSym,
+                )
+            elif o_quant_key == kFp8DynamicTokenSym:
+                # Sigmoid gate, fused with o_proj's dynamic per-token FP8 quant.
+                q, scale = fused_sigmoid_gate_mul_dynamic_fp8(attn_output, gate)
+                attn_output = QuantizedActivation(
+                    data=q,
+                    scale=scale,
+                    orig_dtype=attn_output.dtype,
+                    orig_shape=attn_output.shape,
+                    quant_key=kFp8DynamicTokenSym,
                 )
             else:
                 attn_output = fused_sigmoid_gate_mul(attn_output, gate)

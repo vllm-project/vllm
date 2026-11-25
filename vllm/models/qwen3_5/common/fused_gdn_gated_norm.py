@@ -7,6 +7,80 @@ from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
 )
 from vllm.triton_utils import tl, triton
 
+_FP8_MAX = tl.constexpr(448.0)
+# min_scaling_factor in csrc/quantization/utils.cuh: 1 / (448 * 512).
+_FP8_MIN_SCALE = tl.constexpr(1.0 / (448.0 * 512.0))
+
+
+@triton.jit
+def _fused_gdn_gated_rms_norm_dynamic_fp8_kernel(
+    x_ptr,
+    z_ptr,
+    w_ptr,
+    out_ptr,
+    out_scale_ptr,
+    stride_x_tok,
+    stride_z_tok,
+    stride_out_tok,
+    eps,
+    H: tl.constexpr,  # num_v_heads
+    N: tl.constexpr,  # head_v_dim
+    BLOCK_H: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    NORM_BEFORE_GATE: tl.constexpr,
+    ACTIVATION: tl.constexpr,
+):
+    """Per-head gated RMS norm fused with dynamic per-token FP8 quantization."""
+    row = tl.program_id(0).to(tl.int64)
+    heads = tl.arange(0, BLOCK_H)
+    cols = tl.arange(0, BLOCK_N)
+    h_mask = heads[:, None] < H
+    c_mask = cols[None, :] < N
+    mask = h_mask & c_mask
+
+    offsets = heads[:, None] * N + cols[None, :]
+    x = tl.load(x_ptr + row * stride_x_tok + offsets, mask=mask, other=0.0).to(
+        tl.float32
+    )
+
+    if not NORM_BEFORE_GATE:
+        z = tl.load(z_ptr + row * stride_z_tok + offsets, mask=mask, other=0.0).to(
+            tl.float32
+        )
+        if ACTIVATION == "swish" or ACTIVATION == "silu":
+            x *= z * tl.sigmoid(z)
+        elif ACTIVATION == "sigmoid":
+            x *= tl.sigmoid(z)
+
+    xbar = tl.where(mask, x, 0.0)
+    var = tl.sum(xbar * xbar, axis=1) / N
+    rstd = tl.rsqrt(var + eps)
+
+    w = tl.load(w_ptr + cols, mask=cols < N, other=0.0).to(tl.float32)
+    y = x * rstd[:, None] * w[None, :]
+
+    if NORM_BEFORE_GATE:
+        z = tl.load(z_ptr + row * stride_z_tok + offsets, mask=mask, other=0.0).to(
+            tl.float32
+        )
+        if ACTIVATION == "swish" or ACTIVATION == "silu":
+            y *= z * tl.sigmoid(z)
+        elif ACTIVATION == "sigmoid":
+            y *= tl.sigmoid(z)
+
+    # Dynamic per-token FP8 from the activation-dtype-rounded output, matching
+    # dynamic_per_token_scaled_fp8_quant numerics.
+    y = tl.where(mask, y.to(x_ptr.dtype.element_ty).to(tl.float32), 0.0)
+    amax = tl.max(tl.abs(y))
+    token_scale = tl.maximum(tl.math.div_rn(amax, _FP8_MAX), _FP8_MIN_SCALE)
+    q = tl.clamp(tl.math.div_rn(y, token_scale), -_FP8_MAX, _FP8_MAX)
+    tl.store(
+        out_ptr + row * stride_out_tok + offsets,
+        q.to(out_ptr.dtype.element_ty),
+        mask=mask,
+    )
+    tl.store(out_scale_ptr + row, token_scale)
+
 
 @triton.jit(do_not_specialize=["M"])
 def _fused_gdn_gated_rms_norm_kernel(
@@ -83,6 +157,7 @@ def fused_gdn_gated_rms_norm(
     norm_before_gate: bool,
     activation: str,
     scale: torch.Tensor | None = None,
+    out_scale: torch.Tensor | None = None,
 ) -> None:
     """Gated RMS norm `out = rms_norm(x) * act(z)` for Qwen3.5 GDN.
 
@@ -101,18 +176,75 @@ def fused_gdn_gated_rms_norm(
         activation: "swish"/"silu" or "sigmoid".
         scale: optional static per-tensor FP8 scale; when given, out is
             float8_e4m3fn and must not alias x.
+        out_scale: optional (num_tokens, 1) fp32 buffer for dynamic per-token
+            FP8 quantization; mutually exclusive with scale. When given, out is
+            float8_e4m3fn and must not alias x.
 
     """
     assert x.shape == z.shape == out.shape and x.dim() == 2
     assert x.stride(-1) == 1 and z.stride(-1) == 1 and out.stride(-1) == 1
     assert weight.shape == (head_v_dim,) and weight.stride(0) == 1
     assert x.shape[1] == num_v_heads * head_v_dim
+    assert not (scale is not None and out_scale is not None)
     quant_fp8 = scale is not None
     if scale is not None:
         assert out.dtype == torch.float8_e4m3fn and scale.numel() == 1
+    if out_scale is not None:
+        assert (
+            out.dtype == torch.float8_e4m3fn
+            and out_scale.shape == (x.shape[0], 1)
+            and out_scale.dtype == torch.float32
+            and out_scale.is_contiguous()
+        )
 
     num_tokens = x.shape[0]
     if num_tokens == 0:
+        return
+    if out_scale is not None:
+        block_h = triton.next_power_of_2(num_v_heads)
+        block_n = triton.next_power_of_2(head_v_dim)
+        if block_h * block_n <= 8192:
+            # At small M (decode), grid=(num_tokens,) underfills SMs so 32 warps
+            # minimizes per-token latency; at large M (prefill), 4 warps maximizes
+            # CTA occupancy per SM.
+            num_warps = 32 if num_tokens <= 128 and block_h * block_n >= 2048 else 4
+            _fused_gdn_gated_rms_norm_dynamic_fp8_kernel[(num_tokens,)](
+                x,
+                z,
+                weight,
+                out,
+                out_scale,
+                x.stride(0),
+                z.stride(0),
+                out.stride(0),
+                eps,
+                H=num_v_heads,
+                N=head_v_dim,
+                BLOCK_H=block_h,
+                BLOCK_N=block_n,
+                NORM_BEFORE_GATE=norm_before_gate,
+                ACTIVATION=activation,
+                num_warps=num_warps,
+            )
+            return
+        # Fallback for unusually wide partitions (> 8192 elements per token).
+        from vllm import _custom_ops as ops
+
+        tmp = torch.empty_like(x)
+        fused_gdn_gated_rms_norm(
+            x=x,
+            z=z,
+            weight=weight,
+            out=tmp,
+            eps=eps,
+            num_v_heads=num_v_heads,
+            head_v_dim=head_v_dim,
+            norm_before_gate=norm_before_gate,
+            activation=activation,
+        )
+        q, s = ops.scaled_fp8_quant(tmp, use_per_token_if_dynamic=True)
+        out.copy_(q)
+        out_scale.copy_(s)
         return
     block_n = triton.next_power_of_2(head_v_dim)
     rows_per_block = calc_rows_per_block(num_tokens, x.device)
