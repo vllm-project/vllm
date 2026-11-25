@@ -58,8 +58,9 @@ HB_NOTIF_PREFIX = "HB:"
 #      region_members and the cache group of each layer
 #  17: Export remote_blocks_expiry_time for P blocks too, plus
 #      remote_lease_extension; the consumer gates every remote read on it
+#  18: Advertise the layers of every pipeline stage; peers pair stages by them
 #
-NIXL_CONNECTOR_VERSION: int = 17
+NIXL_CONNECTOR_VERSION: int = 18
 
 
 @dataclass(slots=True)
@@ -90,6 +91,8 @@ class NixlAgentMetadata:
     layer_group_ids: dict[str, int] = field(default_factory=dict)
     # Packed member -> (byte offset in its region's block, bytes per page).
     packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # Layers of each pipeline stage of the engine, by PP rank.
+    pipeline_stage_layers: list[list[str]] = field(default_factory=list)
 
 
 @dataclass

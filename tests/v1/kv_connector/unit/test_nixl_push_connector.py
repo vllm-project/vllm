@@ -1578,6 +1578,7 @@ class TestPushPipelineParallel:
             transfer_group_index_by_layer={f"L{i}": 0 for i in range(4)}
         )
         w._set_region_layers([["L2"], ["L3"]])
+        w._pipeline_stage_layers = [["L0", "L1"], ["L2", "L3"]]
         w.nixl_wrapper = MagicMock()
 
         class _StopAfterSlice(RuntimeError):
@@ -1601,6 +1602,7 @@ class TestPushPipelineParallel:
             attn_backend_name="FLASH_ATTN",
             physical_blocks_per_logical_kv_block=1,
             region_members=[["L0"], ["L1"], ["L2"], ["L3"]],
+            pipeline_stage_layers=[["L0", "L1", "L2", "L3"]],
         )
 
         with pytest.raises(_StopAfterSlice):
@@ -1935,10 +1937,9 @@ def _agent_metadata(
 def _layer_routing_worker(
     region_layers: list[list[str]],
     group_by_layer: dict[str, int],
-    pp_size: int = 2,
 ) -> _StubWriterWorker:
     worker = _StubWriterWorker.fresh()
-    worker.pp_size = pp_size
+    worker.pp_size = 2
     worker.dcp_size = 1
     worker.block_size = 16
     worker._has_mamba = False
@@ -1962,7 +1963,8 @@ def test_shared_region_reads_once_per_group_from_one_descriptor_list():
         [["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0}
     )
     pairs = worker._pair_regions(
-        _agent_metadata([["a", "a.swa"], ["b"]], [0xA000, 0xB000], [128, 128])
+        _agent_metadata([["a", "a.swa"], ["b"]], [0xA000, 0xB000], [128, 128]),
+        worker._regions_by_layer,
     )
     assert (pairs.local, pairs.group) == ([0, 0, 1], [0, 1, 0])
     desc_ids = worker._compute_desc_ids(
@@ -2004,7 +2006,7 @@ def test_packed_row_expansion_rejects_invalid_page_layout(l0_layout, error):
     if l0_layout is not None:
         metadata.packed_member_layouts["L0"] = l0_layout
     with pytest.raises(AssertionError, match=error):
-        worker._pair_regions(metadata)
+        worker._pair_regions(metadata, worker._regions_by_layer)
 
 
 def test_pairing_expands_packed_rows_alongside_nonpacked_regions():
@@ -2015,7 +2017,7 @@ def test_pairing_expands_packed_rows_alongside_nonpacked_regions():
     )
     metadata.packed_member_layouts = {"a": (64, 64), "other": (128, 64)}
 
-    pairs = worker._pair_regions(metadata)
+    pairs = worker._pair_regions(metadata, worker._regions_by_layer)
     worker._select_remote_regions(metadata, pairs.remote_regions)
 
     assert (pairs.remote, pairs.local) == ([0, 1], [0, 1])
@@ -2032,7 +2034,7 @@ def test_pairing_keeps_pooled_regions_once():
     metadata.region_num_blocks = [4, 6]
     metadata.region_group_ids = [-1, 0]
 
-    pairs = worker._pair_regions(metadata)
+    pairs = worker._pair_regions(metadata, worker._regions_by_layer)
 
     assert pairs.remote_regions == [0, 1]
     assert (pairs.remote, pairs.local, pairs.group) == (
@@ -2060,7 +2062,8 @@ def test_pairing_compares_each_layer_s_group_in_a_shared_region(
     metadata.region_group_ids = [-1, 0]
     metadata.layer_group_ids = remote_layer_groups
 
-    assert worker._pair_regions(metadata).groups_match is groups_match
+    pairs = worker._pair_regions(metadata, worker._regions_by_layer)
+    assert pairs.groups_match is groups_match
 
 
 def test_pairing_keeps_a_pp_stage_s_regions():
@@ -2076,7 +2079,7 @@ def test_pairing_keeps_a_pp_stage_s_regions():
     metadata.region_names = ["l2", "l0", "l3", "l1"]
     metadata.region_mem_types = ["VRAM"] * 4
 
-    pairs = worker._pair_regions(metadata)
+    pairs = worker._pair_regions(metadata, worker._regions_by_layer)
     worker._select_remote_regions(metadata, pairs.remote_regions)
 
     assert (pairs.remote, pairs.local, pairs.group) == ([0, 1], [0, 1], [0, 1])
@@ -2116,7 +2119,7 @@ def test_layer_descriptors_pair_layers_across_asymmetric_pp_split(
     )
     consumer.num_blocks = 4
     consumer.region_num_blocks = remote_num_blocks
-    pairs = worker._pair_regions(consumer)
+    pairs = worker._pair_regions(consumer, worker._regions_by_layer)
     worker._select_remote_regions(consumer, pairs.remote_regions)
 
     # L3 -> remote region 1, L4 and L5 -> 2; region 0 holds no local layer.
@@ -2169,21 +2172,17 @@ def test_layer_descriptors_pair_layers_across_asymmetric_pp_split(
 
 
 @pytest.mark.parametrize(
-    ("local_layers", "pp_size", "remote_layers", "error", "match"),
+    ("local_layers", "remote_layers", "error", "match"),
     [
         # Pairing by index would silently transfer stale KV, so a peer that
         # does not advertise its layers must fail the handshake instead.
-        ([["a"]], 2, [], RuntimeError, "did not advertise the layers"),
-        ([["a"], ["b"]], 2, [["a"]], RuntimeError, "does not hold the KV layers"),
-        # Only a PP stage may hold a slice of the peer's layers.
-        ([["a"]], 1, [["a"], ["b"]], RuntimeError, "has no counterpart here"),
-        ([["a"]], 2, [["a"], ["a"]], NotImplementedError, "spans 2 NIXL regions"),
+        ([["a"]], [], RuntimeError, "did not advertise the layers"),
+        ([["a"], ["b"]], [["a"]], RuntimeError, "does not hold the KV layers"),
+        ([["a"]], [["a"], ["a"]], NotImplementedError, "spans 2 NIXL regions"),
     ],
 )
-def test_pairing_rejects_unpairable_peers(
-    local_layers, pp_size, remote_layers, error, match
-):
-    worker = _layer_routing_worker(local_layers, {"a": 0, "b": 0}, pp_size=pp_size)
+def test_pairing_rejects_unpairable_peers(local_layers, remote_layers, error, match):
+    worker = _layer_routing_worker(local_layers, {"a": 0, "b": 0})
     num_regions = max(len(remote_layers), 1)
     metadata = _agent_metadata(
         remote_layers,
@@ -2192,7 +2191,7 @@ def test_pairing_rejects_unpairable_peers(
     )
 
     with pytest.raises(error, match=match):
-        worker._pair_regions(metadata)
+        worker._pair_regions(metadata, worker._regions_by_layer)
 
 
 def test_pairing_pairs_split_layers_in_order():
@@ -2200,7 +2199,7 @@ def test_pairing_pairs_split_layers_in_order():
     worker = _layer_routing_worker([["a"], ["a"]], {"a": 0})
     metadata = _agent_metadata([["a"], ["a"]], [0xA000, 0xB000], [128, 128])
 
-    pairs = worker._pair_regions(metadata)
+    pairs = worker._pair_regions(metadata, worker._regions_by_layer)
 
     assert worker._regions_by_layer == {"a": [0, 1]}
     assert (pairs.remote, pairs.local) == ([0, 1], [0, 1])
@@ -2222,7 +2221,7 @@ def test_pairing_rejects_inconsistent_region_geometry(field):
     setattr(metadata, field, [])
 
     with pytest.raises(RuntimeError, match="metadata of different lengths"):
-        worker._pair_regions(metadata)
+        worker._pair_regions(metadata, worker._regions_by_layer)
 
 
 def test_head_sharded_draft_push_rejects_heterogeneous_tp():

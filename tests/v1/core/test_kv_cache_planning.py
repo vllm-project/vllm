@@ -791,8 +791,8 @@ def test_project_kv_cache_groups_to_worker():
 
 
 def test_pipeline_stages_describe_every_stage():
-    """Every worker learns each PP stage's block size in bytes, draft layers on
-    the last stage included."""
+    """Every worker learns each PP stage's groups and block size in bytes,
+    draft layers included; worker edits do not change the stage's groups."""
     layer = new_kv_cache_layer()
     stage0 = {"layer0": layer, "layer1": layer}
     stage1 = {
@@ -809,8 +809,16 @@ def test_pipeline_stages_describe_every_stage():
 
     stages = get_pipeline_stages(vllm_config, kv_cache_configs)
 
+    assert [[g.layer_names for g in stage.kv_cache_groups] for stage in stages] == [
+        [g.layer_names for g in kv_cache_configs[worker].kv_cache_groups]
+        for worker in (0, 2)
+    ]
     page = kv_cache_planning._get_layer_block_stride(layer.spec)
     assert [stage.bytes_per_block for stage in stages] == [2 * page, 3 * page]
+    draft_stage_layers = ["layer2", "layer3", "draft.layer0"]
+    assert stages[1].kv_cache_groups[0].layer_names == draft_stage_layers
+    kv_cache_configs[2].kv_cache_groups[0].kv_cache_specs["shared"] = layer.spec
+    assert stages[1].kv_cache_groups[0].layer_names == draft_stage_layers
 
 
 @pytest.mark.parametrize("stage_layers", [["other"], ["mixed_mla", "attn1"]])

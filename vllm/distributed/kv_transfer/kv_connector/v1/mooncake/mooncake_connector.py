@@ -33,6 +33,8 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     check_compressed_kernel_split,
     get_current_attn_backends,
     get_current_attn_backends_and_specs,
+    pair_pipeline_stages,
+    pipeline_stage_layers,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -675,6 +677,8 @@ class MooncakeXferMetadata(
     # peer did not send the field, so the run must not be promoted.
     registered_row_offsets: list[int] = msgspec.field(default_factory=list)
     remote_pp_size: int = 1
+    # Layers of each pipeline stage of the peer's engine. Empty if not sent.
+    pipeline_stage_layers: list[list[str]] = msgspec.field(default_factory=list)
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
     layout_id: int = 0
@@ -1563,6 +1567,7 @@ class MooncakeConnectorWorker:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.kv_cache_config = kv_cache_config
+        self._pipeline_stage_layers = pipeline_stage_layers(kv_cache_config)
         self.use_mla = self.model_config.use_mla
         self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
@@ -3172,6 +3177,7 @@ class MooncakeConnectorWorker:
             tuple(meta.registered_group_indices),
             tuple(tuple(groups) for groups in meta.registered_shared_group_ids),
             tuple(meta.registered_row_offsets),
+            tuple(tuple(layers) for layers in meta.pipeline_stage_layers),
         )
         cached = self._prepared_transfer_regions.get(cache_key)
         if cached is not None:
@@ -3187,6 +3193,21 @@ class MooncakeConnectorWorker:
             prepared = (local, remote, err)
             self._prepared_transfer_regions[cache_key] = prepared
             return prepared
+
+        if meta.pipeline_stage_layers:
+            # Each stage aligns only its own layers; check that both engines
+            # hold the same ones.
+            try:
+                pair_pipeline_stages(
+                    self._pipeline_stage_layers, meta.pipeline_stage_layers
+                )
+            except ValueError as e:
+                return finish(
+                    [],
+                    [],
+                    f"Mooncake cannot transfer KV with {meta.remote_hostname}:"
+                    f"{meta.remote_port}: {e}",
+                )
 
         shared_groups: list[tuple[int, ...]] | None = self.region_shared_groups
         if len(self.region_shared_groups) != len(self.registered_layer_names):
@@ -3349,6 +3370,7 @@ class MooncakeConnectorWorker:
                 list(groups) for groups in self.region_shared_groups
             ],
             registered_row_offsets=self.region_row_offsets,
+            pipeline_stage_layers=self._pipeline_stage_layers,
         )
 
     def _validate_head_resharding_layout(

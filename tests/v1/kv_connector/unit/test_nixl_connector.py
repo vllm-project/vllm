@@ -626,6 +626,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self.region_mem_types = [self.nixl_memory_type]
         self.dst_num_blocks[self.engine_id] = self.num_blocks
         self._set_region_layers([["layer0"]])
+        self._pipeline_stage_layers = [["layer0"]]
 
         assert expected_engine_id == self.REMOTE_ENGINE_ID
 
@@ -666,6 +667,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     region_group_ids=self.region_group_ids,
                     region_mem_types=self.region_mem_types,
                     region_members=self.region_members,
+                    pipeline_stage_layers=self._pipeline_stage_layers,
                 ),
                 remote_tp_rank=remote_tp_rank,
                 remote_tp_size=remote_tp_size,
@@ -683,8 +685,11 @@ def _advertise_one_layer_per_region(worker, *metas: NixlAgentMetadata) -> None:
     assert num_regions <= len(layer_names)
     region_layers = [[name] for name in layer_names[:num_regions]]
     worker._set_region_layers(region_layers)
+    # Both engines run one pipeline stage holding these layers.
+    worker._pipeline_stage_layers = [layer_names[:num_regions]]
     for meta in metas:
         meta.region_members = region_layers
+        meta.pipeline_stage_layers = [layer_names[:num_regions]]
 
 
 class TestNixlHandshake:

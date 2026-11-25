@@ -821,7 +821,6 @@ def remote_stage(
         0: _RemoteStage(
             pp_rank=0,
             pairs=pairs,
-            layers=[],
             region_num_blocks=list(region_num_blocks),
             region_group_ids=list(region_group_ids)
             if region_group_ids is not None

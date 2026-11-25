@@ -830,6 +830,9 @@ class KVCacheStage:
     bytes_per_block: int
     """Bytes one block takes in the device KV cache of each worker of the
     stage: the size the engine core plans that worker's `num_blocks` with."""
+    kv_cache_groups: tuple[KVCacheGroup, ...]
+    """The KV cache groups projected onto the stage, by group ID; a group may
+    hold no layer of the stage."""
 
 
 @dataclass

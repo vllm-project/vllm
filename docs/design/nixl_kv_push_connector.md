@@ -251,13 +251,11 @@ per-layer regions, remain unvalidated for pull PP.
 
 Invariants enforced when pairing:
 
-* for push, the remote D must hold every layer of the local P stage; remote
-  layers owned by other P stages are skipped;
-* for pull from a PP1 peer, the remote must hold every required local layer;
-* for pull from a PP producer, each remote stage holds a subset of the local
-  D's layers. `_add_remote_stage` checks that all stages together hold every
-  required local KV layer exactly once when all stages are known. A missing or
-  duplicated layer fails the handshake instead of leaving stale KV;
+* every worker advertises the layers of every stage of its engine
+  (`pipeline_stage_layers`). The first handshake fails unless both engines
+  hold the same layers, each on one stage, so no layer keeps stale KV;
+* regions pair only through the local layers the remote stage holds, which
+  must match the layers in its regions;
 * a remote that does not advertise its layers fails the handshake
   instead of falling back to pairing by index;
 * a layer must span the same number of regions on both sides;
