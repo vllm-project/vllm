@@ -21,6 +21,9 @@ from vllm.platforms import current_platform
 
 MODEL_NAME = "microsoft/Phi-3.5-vision-instruct"
 MAXIMUM_IMAGES = 2
+IMAGE_BUDGET_TEST_SIDE = 128
+# Each image is charged four bytes per pixel. Either image fits on its own.
+IMAGE_BUDGET_TEST_LIMIT = 6 * IMAGE_BUDGET_TEST_SIDE**2
 
 
 def test_processor_only_cache_eviction_preserves_chat_logprobs():
@@ -150,7 +153,7 @@ def assert_non_empty_content(chat_completion, *, context: str = "") -> str:
 
 
 @pytest.fixture(scope="module")
-def server():
+def server(request: pytest.FixtureRequest):
     args = [
         "--runner",
         "generate",
@@ -175,6 +178,8 @@ def server():
             else {}
         ),
     }
+    if (decoded_limit := getattr(request, "param", None)) is not None:
+        env_overrides["VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"] = str(decoded_limit)
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_overrides) as remote_server:
         yield remote_server
@@ -564,50 +569,6 @@ async def test_chat_rejects_unsupported_image_format(
         )
 
 
-def test_chat_shares_decoded_image_budget():
-    side = 128
-    image_urls = [
-        encode_image_url(Image.new("RGB", (side, side), color), format=image_format)
-        for color, image_format in (("red", "PNG"), ("blue", "WEBP"))
-    ]
-    # Each image is charged four bytes per pixel.
-    decoded_limit = 6 * side * side
-    args = [
-        "--max-model-len",
-        "2048",
-        "--enforce-eager",
-        "--trust-remote-code",
-        "--limit-mm-per-prompt",
-        '{"image": 2}',
-        *ROCM_EXTRA_ARGS,
-    ]
-    with (
-        RemoteOpenAIServer(
-            MODEL_NAME,
-            args,
-            env_dict={"VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES": str(decoded_limit)},
-        ) as server,
-        server.get_client() as client,
-    ):
-
-        def complete(urls):
-            return client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=dummy_messages_from_image_url(urls),
-                max_completion_tokens=1,
-                temperature=0.0,
-            )
-
-        for image_url in image_urls:
-            assert complete(image_url).choices
-
-        with pytest.raises(
-            openai.BadRequestError,
-            match=f"VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES={decoded_limit}",
-        ):
-            complete(image_urls)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
@@ -825,3 +786,30 @@ async def test_completions_with_image_with_incorrect_uuid_format(
             messages,
             context=f"incorrect uuid format url={image_url}",
         )
+
+
+@pytest.mark.parametrize("server", [IMAGE_BUDGET_TEST_LIMIT], indirect=True)
+def test_chat_shares_decoded_image_budget(server: RemoteOpenAIServer):
+    side = IMAGE_BUDGET_TEST_SIDE
+    image_urls = [
+        encode_image_url(Image.new("RGB", (side, side), color), format=image_format)
+        for color, image_format in (("red", "PNG"), ("blue", "WEBP"))
+    ]
+    with server.get_client() as client:
+
+        def complete(urls):
+            return client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=dummy_messages_from_image_url(urls),
+                max_completion_tokens=1,
+                temperature=0.0,
+            )
+
+        for image_url in image_urls:
+            assert complete(image_url).choices
+
+        with pytest.raises(
+            openai.BadRequestError,
+            match=f"VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES={IMAGE_BUDGET_TEST_LIMIT}",
+        ):
+            complete(image_urls)
