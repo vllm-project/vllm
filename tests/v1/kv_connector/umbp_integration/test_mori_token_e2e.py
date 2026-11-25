@@ -245,20 +245,30 @@ def test_restore_under_pool_eviction(umbp_llm):
 _STEP_TOKENS = 8192
 
 
+_MIXED_PRECISION_RUNNER = {
+    "kv_cache_dtype": "fp8",
+    "kv_cache_dtype_skip_layers": ["0"],
+    "max_model_len": _STEP_TOKENS,
+    "max_num_batched_tokens": _STEP_TOKENS,
+}
+
+
 @pytest.mark.parametrize(
     "umbp_llm",
     [
-        {
-            "load_async": False,
-            "runner": {
-                "kv_cache_dtype": "fp8",
-                "kv_cache_dtype_skip_layers": ["0"],
-                "max_model_len": _STEP_TOKENS,
-                "max_num_batched_tokens": _STEP_TOKENS,
+        pytest.param(
+            {"load_async": False, "runner": _MIXED_PRECISION_RUNNER},
+            id="mixed-precision",
+        ),
+        pytest.param(
+            {
+                "load_async": False,
+                "runner": {**_MIXED_PRECISION_RUNNER, "tensor_parallel_size": 2},
             },
-        }
+            id="mixed-precision-tp2",
+            marks=multi_gpu_marks(num_gpus=2),
+        ),
     ],
-    ids=["mixed-precision"],
     indirect=True,
 )
 def test_synchronous_restore_survives_block_zeroing(umbp_llm):
