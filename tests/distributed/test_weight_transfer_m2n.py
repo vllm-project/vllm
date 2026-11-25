@@ -11,6 +11,7 @@ import logging
 from contextlib import contextmanager
 from functools import cached_property, wraps
 from types import MethodType, SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, call
 
 import pybase64 as base64
@@ -397,7 +398,7 @@ class TestWireTypes:
 
     def _init_info(self, **overrides):
         param = self._param()
-        fields = dict(
+        fields: dict[str, Any] = dict(
             schema_version=M2N_WIRE_SCHEMA_VERSION,
             master_address="127.0.0.1",
             master_port=1234,
@@ -694,7 +695,7 @@ class TestWireTypes:
             ),
         )
         engine._prepare_source_plan(params, num_trainer_ranks=32)
-        engine._reshard = Mock()
+        engine._reshard = Mock()  # type: ignore[method-assign]
 
         with pytest.raises(ValueError, match=r"parameter 'invalid'.*MAX_SOURCES=16"):
             engine._prepare_destination_plan(
@@ -721,7 +722,7 @@ class TestWireTypes:
                 M2NLayout(M2NMesh((1, 1), 0), REPLICATED),
             )
         ]
-        engine._reshard = Mock()
+        engine._reshard = Mock()  # type: ignore[method-assign]
 
         with pytest.raises(ValueError, match=r"parameter 'unknown'"):
             engine.receive_weights(
@@ -770,7 +771,7 @@ class TestWireTypes:
             reshard_order.append(meta.name)
             buffer.fill_(len(reshard_order))
 
-        engine._reshard = reshard
+        engine._reshard = reshard  # type: ignore[method-assign]
         stream = Mock()
         monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
 
@@ -1520,6 +1521,7 @@ class TestDestinationResolution:
             shard_axis_size=2,
             allow_direct=True,
         )
+        assert destination.tensor is not None
         assert destination.tensor.data_ptr() == model.column.data_ptr()
 
     def test_known_transforming_model_submodule_falls_back(self):

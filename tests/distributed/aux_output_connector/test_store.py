@@ -307,6 +307,7 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
     result = output.get_output()
 
     assert result.sampled_token_ids == [[7]]
+    assert result.aux_output_connector_output is not None
     np.testing.assert_array_equal(
         result.aux_output_connector_output["request"].rows, rows.numpy()
     )
@@ -342,9 +343,11 @@ def test_finished_request_teardown_waits_for_pending_output(num_pending):
         np.testing.assert_array_equal(output["request"].rows, rows)
         if i + 1 < num_pending:
             assert "request" in worker._requests
+            assert isinstance(worker._store, BlockObjectStore)
             assert worker._store._references
     assert "request" not in worker._requests
     # The finished request's store keys must be released after commit.
+    assert isinstance(worker._store, BlockObjectStore)
     assert not worker._store._references
     worker.close()
 
@@ -1064,7 +1067,9 @@ def test_worker_does_not_rematerialize_emitted_rows():
     assert output is not None
 
     assert worker._store is not None
-    worker._store.get_concatenated = Mock(wraps=worker._store.get_concatenated)
+    worker._store.get_concatenated = Mock(  # type: ignore[method-assign]
+        wraps=worker._store.get_concatenated
+    )
     second = _metadata(
         0,
         # Async scheduling may build this before the scheduler consumes first.
@@ -2119,7 +2124,8 @@ def test_connector_marks_partly_computed_block_once_its_hash_exists():
     decode = _SchedulerRequest("decode", [_HASHES[0]], 7, num_computed_tokens=5)
     request = _SchedulerRequest("request", list(_HASHES[:2]), 9, num_output_tokens=0)
     connector.build_connector_meta(
-        _step_output(["decode"], [5], [1]), {"decode": decode}
+        _step_output(["decode"], [5], [1]),
+        {"decode": decode},  # type: ignore[dict-item]
     )
     decode.block_hashes.append(_HASHES[1])
     decode.num_tokens = 8
@@ -2164,6 +2170,7 @@ def test_connector_keeps_pending_load_blocks_retained():
 def test_worker_retains_kv_cache_blocks_in_the_sending_generation():
     worker = _make_worker(1)
     store = worker._store
+    assert isinstance(store, BlockObjectStore)
     keys = routed_experts_keys(_HASHES[:2], "0")
     step = _metadata(0, [], {})
     step.metadata.retained_block_hashes = PackedBlockHashes(b"".join(_HASHES[:2]), 32)

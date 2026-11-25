@@ -86,9 +86,11 @@ def test_partition_counts_remainder_and_pool_device(cuda_locality):
     # Unequal partitions must retain their actual counts, excluding remainder SMs.
     assert result.split_sm_counts == [60, 68]
     assert result.sm_per_resource == [60, 68, 12]
+    assert result.aux_stream is not None
     assert result.aux_stream.partition is state.remainder
-    assert [pool.device for pool in result.pools[:2]] == [1, 1]
-    assert [pool.allocator for pool in result.pools[:2]] == [(0, 1), (1, 1)]
+    pools = [pool for pool in result.pools[:2] if pool is not None]
+    assert [pool.device for pool in pools] == [1, 1]
+    assert [pool.allocator for pool in pools] == [(0, 1), (1, 1)]
     assert state.device == 0
     assert localization.maybe_init_localized_resources(device) is result
     assert resource.split.call_count == 1
@@ -108,6 +110,7 @@ def test_backfill_failure_retries_node_local_partitions(
 
     assert result is not None
     assert result.split_sm_counts == [60, 68]
+    assert result.aux_stream is not None
     assert result.aux_stream.partition is state.remainder
     assert [call.kwargs["backfill"] for call in resource.split.call_args_list] == [
         True,
@@ -130,6 +133,7 @@ def test_no_remainder_uses_full_device_aux_stream(cuda_locality, monkeypatch, ba
     assert result.split_sm_counts == [70, 70]
     assert result.contexts[-1] is None
     assert result.pools[-1] is None
+    assert result.aux_stream is not None
     assert result.aux_stream.device == 1
     assert result.sm_per_resource[-1] == 140
 
@@ -148,6 +152,7 @@ def test_remainder_creation_failure_preserves_compute_domains(cuda_locality):
 
     assert result is not None
     assert result.split_sm_counts == [60, 68]
+    assert result.aux_stream is not None
     assert result.aux_stream.device == 0
     assert result.contexts[-1] is None
 

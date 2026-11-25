@@ -144,7 +144,7 @@ def _rdt_engine_with_fake_server(
     names = [m.name for m in engine._meta]
     engine._groups = layerwise_groups(names)
     engine._server = server
-    engine._rpc = lambda method, *args: getattr(server, method)(*args)
+    engine._rpc = lambda method, *args: getattr(server, method)(*args)  # type: ignore[method-assign]
     engine._resolve_ownership(world, init_info.rank)
     return engine
 
@@ -169,7 +169,7 @@ class TestShardedRDTTrainerInitInfo:
         assert ShardedRDTTrainerInitInfo(num_consumers=4, rank=1).is_sender is False
         with pytest.raises(TypeError):
             # rank is keyword-only.
-            ShardedRDTTrainerInitInfo(4, 0)  # type: ignore[misc]
+            ShardedRDTTrainerInitInfo(4, 0)  # type: ignore[call-arg]
 
     def test_registered_in_trainer_factory(self):
         cls = WeightTransferTrainerFactory._registry["sharded_rdt"]()
@@ -446,7 +446,9 @@ class TestLiveCountPlumbing:
             init_info=ShardedRDTTrainerInitInfo(rank=rank, num_consumers=num_consumers),
         )
         received: list = []
-        engine._send_weights_inner = lambda count, ids: received.append((count, ids))
+        engine._send_weights_inner = (  # type: ignore[method-assign]
+            lambda count, ids: received.append((count, ids))
+        )
         return engine, received
 
     def test_none_counts_the_whole_provisioned_fleet(self):
@@ -547,7 +549,7 @@ class TestSyncIndexPlumbing:
             producer_calls.append((method, args))
             return [] if method == "end_sync" else None
 
-        engine._rpc = _rpc
+        engine._rpc = _rpc  # type: ignore[method-assign]
         return engine, producer_calls
 
     def test_sender_uses_same_index_for_producers_and_workers(self):

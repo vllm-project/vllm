@@ -400,8 +400,8 @@ def test_connector_reports_configured_cache_source(
         kv_cache_config,
     )
 
-    assert connector.get_external_cache_hit_sources(None, 32) == {source: 32}  # type: ignore[arg-type]
-    assert connector.get_external_cache_hit_sources(None, 0) == {}  # type: ignore[arg-type]
+    assert connector.get_external_cache_hit_sources(None, 32) == {source: 32}
+    assert connector.get_external_cache_hit_sources(None, 0) == {}
 
 
 @pytest.mark.parametrize("num_layers", [1, 2])

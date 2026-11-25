@@ -255,7 +255,7 @@ def test_sizing_step_measures_torch_reserve_growth():
     kv_cache.buffer = SimpleNamespace(device=torch.device("cuda"))
     runner = SimpleNamespace(extensible_kv_cache=kv_cache, device=torch.device("cuda"))
     kept = []
-    with _measure_sizing_step(runner):  # type: ignore[arg-type]
+    with _measure_sizing_step(runner):
         workspace = torch.empty(512 * mib, dtype=torch.uint8, device="cuda")
         del workspace
         kept.append(torch.empty(100 * mib, dtype=torch.uint8, device="cuda"))
@@ -309,8 +309,8 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     )
 
     num_blocks = extensible_kv_cache.measure_kv_cache_blocks(
-        kv_cache,  # type: ignore[arg-type]
-        vllm_config,  # type: ignore[arg-type]
+        kv_cache,
+        vllm_config,
         torch.device("cpu"),
         init_free_memory=10 * gib,
         requested_memory=10 * gib,
@@ -371,8 +371,8 @@ def test_measured_sizing_warns_when_utilization_withholds_memory(
     )
 
     extensible_kv_cache.measure_kv_cache_blocks(
-        kv_cache,  # type: ignore[arg-type]
-        vllm_config,  # type: ignore[arg-type]
+        kv_cache,
+        vllm_config,
         torch.device("cpu"),
         init_free_memory=init_free_gib * gib,
         requested_memory=int(80 * gib * (utilization or 1.0)),
@@ -432,8 +432,8 @@ def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch
     )
     measure = functools.partial(
         extensible_kv_cache.measure_kv_cache_blocks,
-        kv_cache,  # type: ignore[arg-type]
-        vllm_config,  # type: ignore[arg-type]
+        kv_cache,
+        vllm_config,
         torch.device("cuda", 0),
         init_free_memory=110 * gib,
         requested_memory=96 * gib,

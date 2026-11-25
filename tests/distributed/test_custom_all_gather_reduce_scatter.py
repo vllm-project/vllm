@@ -27,6 +27,7 @@ from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm.platforms import current_platform
 
 from ..utils import (
+    cuda_communicator,
     ensure_model_parallel_initialized,
     init_test_distributed_environment,
     multi_process_parallel,
@@ -311,7 +312,7 @@ def _run_stage_cleanup_test(
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
 
-        fa = get_tp_group().device_communicator.ca_comm
+        fa = cuda_communicator(get_tp_group()).ca_comm
         assert fa is not None and not fa.disabled
         assert fa.mnnvl_multicast_ptr
 
@@ -349,7 +350,7 @@ def _run_multimem_reduce_scatter_test(
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
 
-        fa = get_tp_group().device_communicator.ca_comm
+        fa = cuda_communicator(get_tp_group()).ca_comm
         assert fa is not None and not fa.disabled
         assert fa.mnnvl_multimem_rs_supported
         assert not fa.mnnvl_multimem_rs_initialized

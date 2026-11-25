@@ -160,7 +160,7 @@ TEXT_GENERATION_MODELS = {
     # "facebook/bart-base": PPTestSettings.fast(),
 }
 
-EMBEDDING_MODELS = {  # type: ignore[var-annotated]
+EMBEDDING_MODELS = {
     # [Text-only]
     "vllm-project/e5-mistral-7b-instruct": PPTestSettings.fast(runner="pooling"),
     "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(runner="pooling"),

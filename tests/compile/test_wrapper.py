@@ -134,7 +134,7 @@ def _args_only_decorator(fn):
 
 class ArgsOnlyDecoratedWrapper(MyWrapper):
     @_args_only_decorator
-    def forward(self, x: torch.Tensor):  # type: ignore[override]
+    def forward(self, x: torch.Tensor):
         return self.model(x)
 
 
@@ -197,13 +197,13 @@ def test_compile_model_with_stock_torch(monkeypatch):
 
 
 class BufferAssignWrapper(MyWrapper):
-    def forward(self, x: torch.Tensor):  # type: ignore[override]
+    def forward(self, x: torch.Tensor):
         self.model.buffer = self.model.buffer * 2
         return x
 
 
 class KwargsUpdateWrapper(MyWrapper):
-    def forward(self, x: torch.Tensor, **kwargs):  # type: ignore[override]
+    def forward(self, x: torch.Tensor, **kwargs):
         kwargs["scale"] = 2
         return x * kwargs["scale"]
 

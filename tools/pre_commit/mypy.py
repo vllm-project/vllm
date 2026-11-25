@@ -31,6 +31,7 @@ SILENT_GROUPS = [
     "tests/benchmarks",
     "tests/compile",
     "tests/config",
+    "tests/distributed",
     "tests/entrypoints/anthropic",
     "tests/entrypoints/generate",
     "tests/entrypoints/llm",
@@ -78,35 +79,14 @@ SILENT_GROUPS = [
     "tests/tool_use",
     "tests/transformers_utils",
     "tests/utils_",
-    "tests/v1/attention",
-    "tests/v1/core",
-    "tests/v1/cudagraph",
-    "tests/v1/determinism",
-    "tests/v1/distributed",
-    "tests/v1/e2e",
-    "tests/v1/ec_connector",
-    "tests/v1/engine",
-    "tests/v1/executor",
-    "tests/v1/kv_connector",
-    "tests/v1/kv_offload",
-    "tests/v1/logits_processors",
-    "tests/v1/metrics",
-    "tests/v1/sample",
-    "tests/v1/shutdown",
-    "tests/v1/simple_kv_offload",
-    "tests/v1/spec_decode",
-    "tests/v1/streaming_input",
-    "tests/v1/structured_output",
-    "tests/v1/worker",
+    "tests/v1",
 ]
 
 # After fixing errors resulting from changing follow_imports
 # from "skip" to "silent", move its directory to SILENT_GROUPS.
 SEPARATE_GROUPS = [
     "tests",
-    "tests/distributed",
     "tests/models",
-    "tests/v1",
 ]
 
 

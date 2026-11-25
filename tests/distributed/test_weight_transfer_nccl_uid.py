@@ -45,7 +45,7 @@ class TestNCCLRendezvousValidation:
         # kw_only so a stale positional call fails loudly rather than silently
         # swapping fields once the rendezvous fields became optional.
         with pytest.raises(TypeError):
-            NCCLWeightTransferInitInfo(1, 3, "127.0.0.1", 12345)  # type: ignore[call-arg]
+            NCCLWeightTransferInitInfo(1, 3, "127.0.0.1", 12345)  # type: ignore[misc]
 
     def test_trainer_init_info_accepts_positional_fields(self):
         # NCCLTrainerInitInfo keeps positional subclass fields; only `rank`
@@ -229,7 +229,9 @@ def inference_receive_tensor(
     # receive_weights enters, since vllm_config here is a mock.
     import vllm.config as _vllm_config_mod
 
-    _vllm_config_mod.set_current_vllm_config = lambda cfg: contextlib.nullcontext()
+    _vllm_config_mod.set_current_vllm_config = (
+        lambda cfg: contextlib.nullcontext()  # type: ignore[misc]
+    )
 
     try:
         engine.init_transfer_engine(NCCLWeightTransferInitInfo(**init_info_dict))

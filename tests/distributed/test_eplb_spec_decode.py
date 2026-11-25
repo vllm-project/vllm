@@ -96,7 +96,9 @@ def test_dspark_loads_all_local_eplb_redundant_experts(model_type):
     if model_type == "deepseek_v4":
         from vllm.models.deepseek_v4.nvidia import dspark as dspark_module
     else:
-        from vllm.models.deepseek_v41.nvidia import dspark as dspark_module
+        from vllm.models.deepseek_v41.nvidia import (  # type: ignore[no-redef]
+            dspark as dspark_module,
+        )
 
     param_name = "model.layers.0.ffn.experts.routed_experts.w13_weight"
     param = nn.Parameter(torch.full((5, 2), -1.0))
@@ -119,7 +121,9 @@ def test_dspark_loads_all_local_eplb_redundant_experts(model_type):
         return True
 
     param.weight_loader = load_local_expert
-    draft = object.__new__(dspark_module.DSparkDeepseekV4ForCausalLM)
+    draft = object.__new__(
+        dspark_module.DSparkDeepseekV4ForCausalLM  # type: ignore[type-abstract]
+    )
     nn.Module.__init__(draft)
     draft.model = SimpleNamespace(
         layers=[
@@ -198,6 +202,7 @@ def test_eplb_registers_dspark_draft_when_supported(
         if supports_draft_eplb
         else []
     )
+    assert isinstance(controller.state, FakeEplbState)
     assert controller.state.add_model_calls == expected_calls
     assert speculator.eplb_state is (controller.state if supports_draft_eplb else None)
 
@@ -232,7 +237,7 @@ def test_eplb_skips_dspark_registration_with_dummy_weights(
     )
 
     assert registered is False
-    assert controller.state is not None
+    assert isinstance(controller.state, FakeEplbState)
     assert controller.state.add_model_calls == []
 
 

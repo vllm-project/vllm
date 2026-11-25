@@ -2180,7 +2180,7 @@ def test_step3_vl_postprocess_clones_global_only_item():
     global_out = torch.randn(4, _HIDDEN)
     dest: dict[int, torch.Tensor] = {}
     Step3VLForConditionalGeneration.postprocess_encoder_output(
-        model,  # type: ignore[arg-type]
+        model,
         {"global": global_out},
         indices=[0],
         per_item_out_tokens=[],

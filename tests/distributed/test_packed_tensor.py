@@ -749,6 +749,7 @@ class TestPackedIpcRoundtrip:
         )
 
         c = chunks[0]
+        assert c.ipc_handle is not None
         fake_handle = {"fake-uuid-12345": c.ipc_handle[gpu_uuid]}
 
         with pytest.raises(ValueError, match="IPC handle not found"):

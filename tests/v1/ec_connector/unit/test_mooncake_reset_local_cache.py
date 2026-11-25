@@ -262,7 +262,7 @@ def test_reset_does_not_reschedule_consumed_reservation():
             return allocation
 
     reservations = ConsumerReservationManager(
-        _StubMemory(),  # type: ignore[arg-type]
+        _StubMemory(),
         lease_ttl=300,
         tombstone_limit=8,
     )
