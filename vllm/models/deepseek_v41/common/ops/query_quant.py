@@ -104,7 +104,7 @@ def fused_q_kv_rmsnorm_quant(
     early_trigger: bool = False,
 ) -> tuple[QuantizedActivation, torch.Tensor]:
     """Normalize Q/KV and quantize Q with FlashInfer's swizzled MXFP8 scales.
-    With ``early_trigger``, the kernel triggers its PDL dependents before its
+    With `early_trigger`, the kernel triggers its PDL dependents before its
     own grid-dependency wait, for a caller whose query projection loads its
     weights before its wait."""
     assert qr.ndim == kv.ndim == 2 and qr.shape[0] == kv.shape[0]

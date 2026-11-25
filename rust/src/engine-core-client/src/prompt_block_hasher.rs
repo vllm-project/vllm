@@ -134,7 +134,8 @@ impl PromptBlockHasher {
             }),
             cache_salt,
         };
-        self.hash_prompt(request.prompt_token_ids.as_deref()?, &keys)
+        let token_ids = request.prompt_token_ids.as_ref()?.to_u32_vec()?;
+        self.hash_prompt(&token_ids, &keys)
     }
 
     /// Hash each full block of `token_ids` whose lookahead tokens are also in
@@ -378,7 +379,7 @@ mod tests {
 
     fn request(prompt_token_ids: Vec<u32>) -> EngineCoreRequest {
         EngineCoreRequest {
-            prompt_token_ids: Some(prompt_token_ids),
+            prompt_token_ids: Some(prompt_token_ids.into()),
             ..EngineCoreRequest::default()
         }
     }

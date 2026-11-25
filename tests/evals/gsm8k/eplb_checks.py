@@ -7,7 +7,7 @@ import torch
 from vllm.distributed import get_ep_group
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
 class EplbCheckExtension:

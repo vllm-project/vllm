@@ -1,31 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark the Kimi K3 latent-MoE tail and its up-projection kernels.
+r"""Benchmark the Kimi K3 latent-MoE tail and its up-projection kernels.
 
-The ``up-projection`` subcommand isolates the TP-local dynamic and static-M
+The `up-projection` subcommand isolates the TP-local dynamic and static-M
 skinny GEMMs. It rotates weights through a working set larger than L2 to model
 successive model layers.
 
-The ``whole-tail`` subcommand measures the distributed operator. Its reference
+The `whole-tail` subcommand measures the distributed operator. Its reference
 path includes two AllReduces, RMSNorm, the replicated up-projection, and the
 final add. CUDA-event samples report the slowest rank so cross-rank skew is
 included.
 
 Examples:
+```console
+.venv/bin/python \
+  benchmarks/kernels/benchmark_kimi_k3_latent_moe_tail.py up-projection
 
-.. code-block:: console
+torchrun --nproc-per-node=8 \
+  benchmarks/kernels/benchmark_kimi_k3_latent_moe_tail.py whole-tail
 
-    .venv/bin/python \
-      benchmarks/kernels/benchmark_kimi_k3_latent_moe_tail.py up-projection
+torchrun --nproc-per-node=8 \
+  benchmarks/kernels/benchmark_kimi_k3_latent_moe_tail.py whole-tail \
+  --backend fused --routed-input both
+```
 
-    torchrun --nproc-per-node=8 \
-      benchmarks/kernels/benchmark_kimi_k3_latent_moe_tail.py whole-tail
-
-    torchrun --nproc-per-node=8 \
-      benchmarks/kernels/benchmark_kimi_k3_latent_moe_tail.py whole-tail \
-      --backend fused --routed-input both
-
-For multi-node runs, launch one ``torchrun`` agent per node and use a shared
+For multi-node runs, launch one `torchrun` agent per node and use a shared
 rendezvous endpoint.
 
 """

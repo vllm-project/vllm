@@ -35,6 +35,7 @@ class PollableFuture(Future):
         self.ready_after = ready_after
         self.on_poll = on_poll
         self.polls = 0
+        self.waits = 0
 
     def poll(self) -> bool:
         self.polls += 1
@@ -43,6 +44,9 @@ class PollableFuture(Future):
         if self.polls >= self.ready_after and not self.done():
             self.set_result("output")
         return self.done()
+
+    def wait_briefly(self, pending, deadline) -> None:
+        self.waits += 1
 
     def result(self, timeout=None):
         # Stands in for blocking until the output arrives.
@@ -56,14 +60,14 @@ def make_engine(handle: bool = True) -> tuple[EngineCoreProc, list[Any]]:
     engine = object.__new__(EngineCoreProc)
     engine.input_queue = queue.Queue()
     engine._deferred_inputs = deque()
-    engine.has_work = lambda: True  # type: ignore[method-assign]
+    engine.has_work = lambda: True
     handled: list[Any] = []
     if handle:
 
         def record(request_type: EngineCoreRequestType, request: Any) -> None:
             handled.append((request_type, request))
 
-        engine._handle_client_request = record  # type: ignore[method-assign]
+        engine._handle_client_request = record
     return engine, handled
 
 
@@ -128,11 +132,46 @@ def test_blocks_for_output_after_spin_period():
     engine, handled = make_engine()
     engine.input_queue.put((ADD, "a"))
     future = PollableFuture(ready_after=1000)
-    with (
-        mock.patch.object(engine_core, "_INPUT_SPIN_DURATION_S", 0.0),
-        mock.patch.object(engine_core, "sched_yield") as sched_yield,
-    ):
+    with mock.patch.object(engine_core, "_INPUT_SPIN_DURATION_S", 0.0):
         assert engine._wait_for_output(future) == "output"
-    sched_yield.assert_not_called()
+    assert future.waits == 0
     assert future.polls == 2
     assert handled == [(ADD, "a")]
+
+
+def test_stop_on_add_returns_at_first_add():
+    """With a free batch-queue slot, the wait returns as soon as a request is added
+    (aborts don't stop it), leaving the step's output to be collected later."""
+    engine, handled = make_engine()
+
+    def on_poll(n: int) -> None:
+        if n == 2:
+            engine.input_queue.put((ABORT, ["x"]))
+        elif n == 4:
+            engine.input_queue.put((ADD, "a"))
+            engine.input_queue.put((ADD, "b"))
+
+    future = PollableFuture(ready_after=1000, on_poll=on_poll)
+    assert engine._handle_inputs_while_waiting(future, stop_on_add=True)
+    assert not future.done()
+    assert handled == [(ABORT, ["x"]), (ADD, "a")]
+    assert engine.input_queue.qsize() == 1
+
+    # A request arriving after the spin period still stops the wait.
+    engine, handled = make_engine()
+
+    def on_late_poll(n: int) -> None:
+        if n == 5:
+            engine.input_queue.put((ADD, "c"))
+
+    future = PollableFuture(ready_after=1000, on_poll=on_late_poll)
+    with mock.patch.object(engine_core, "_INPUT_SPIN_DURATION_S", 0.0):
+        assert engine._handle_inputs_while_waiting(future, stop_on_add=True)
+    assert future.waits == 0
+    assert handled == [(ADD, "c")]
+
+    # Output ready before any request arrives.
+    engine, handled = make_engine()
+    assert not engine._handle_inputs_while_waiting(
+        PollableFuture(ready_after=3), stop_on_add=True
+    )

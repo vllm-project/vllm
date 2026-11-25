@@ -11,12 +11,12 @@ import itertools
 import operator
 import textwrap
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, fields
 from functools import wraps
-from typing import Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 __all__ = [
     "JitWarmupRegistry",
@@ -53,7 +53,7 @@ def kernel_launcher(call_fn: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WarmupIntRange:
     """Expand integers with range semantics or a custom monotonic progression."""
 
@@ -95,7 +95,7 @@ def _eval_local_exprs(
     return evaluated_values
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _WarmupInputRows:
     """Warmup dispatch inputs expanded in lockstep."""
 
@@ -174,7 +174,7 @@ def _merge_warmup_kwargs(parts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     return merged
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _CompileKeyDispatchTrace:
     local_exprs: _LocalExprs
     field_exprs: tuple[tuple[str, ast.AST], ...]
@@ -213,7 +213,7 @@ class _CompileKeyDispatchTrace:
         return compile_key_type(**fields)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _WarmupPredicateTrace:
     local_exprs: _LocalExprs
     return_expr: ast.AST
@@ -651,7 +651,11 @@ def _trace_warmup_predicate(
 class VllmJitKernel(Generic[CompileKeyT], ABC):
     """Kernel wrapper that owns dispatch, warmup keys, and compilation."""
 
-    CompileKey: type[CompileKeyT]
+    if TYPE_CHECKING:
+
+        @property
+        def CompileKey(self) -> type[CompileKeyT]: ...
+
     bind_launch_inputs = True
 
     def __init__(self) -> None:
@@ -949,7 +953,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
                 raise TypeError("Warmup domains must be direct expressions")
             yield case
 
-    def dispatch(self, **kwargs: Any) -> CompileKeyT:
+    def dispatch(self, *args: Any, **kwargs: Any) -> CompileKeyT:
         """Build one compile key from one concrete dispatch point."""
         raise NotImplementedError
 
@@ -980,8 +984,8 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
 def _same_value(left: Any, right: Any) -> bool:
     """True if two registration values are the same object or compare equal.
 
-    Identity is checked first so shared singletons (e.g. ``vllm_config``, torch
-    dtypes) short-circuit before any potentially deep or non-boolean ``__eq__``.
+    Identity is checked first so shared singletons (e.g. `vllm_config`, torch
+    dtypes) short-circuit before any potentially deep or non-boolean `__eq__`.
     """
     if left is right:
         return True
@@ -995,7 +999,7 @@ def _same_registration(
     left: tuple[tuple[Any, ...], dict[str, Any]],
     right: tuple[tuple[Any, ...], dict[str, Any]],
 ) -> bool:
-    """True if two ``(args, kwargs)`` registrations are equivalent."""
+    """True if two `(args, kwargs)` registrations are equivalent."""
     left_args, left_kwargs = left
     right_args, right_kwargs = right
     if len(left_args) != len(right_args) or left_kwargs.keys() != right_kwargs.keys():
@@ -1034,7 +1038,7 @@ class JitWarmupRegistry:
         return wrapped
 
     @contextmanager
-    def activate(self) -> Iterator[None]:
+    def activate(self) -> Generator[None]:
         """Collect registrations made in this context."""
         token = self._active.set(self)
         try:

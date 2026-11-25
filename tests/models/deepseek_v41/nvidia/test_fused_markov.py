@@ -36,6 +36,7 @@ def _sample(fused: bool, temps: torch.Tensor, base: torch.Tensor, seed: int):
     s.num_speculative_steps, s.temperature = N_SPEC, temps
     s._draft_topk = s.acceptance_estimator = s.draft_watermarker = None
     s._d2t_scatter_index, s.use_confidence_head, s.use_fp64_gumbel = None, False, False
+    s._fuse_markov_bias = False
     cache = torch.zeros(REQS, N_SPEC, VOCAB, dtype=base.dtype, device="cuda")
     s.draft_logits = SimpleNamespace(values=cache, row_mapping=None)
     s.seeds = torch.randint(0, 2**62, (REQS,), device="cuda")

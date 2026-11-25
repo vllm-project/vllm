@@ -9,10 +9,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import numpy as np
 import orjson
 import pytest
 import pytest_asyncio
 from fastapi.responses import JSONResponse
+from PIL import Image
 
 from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.anthropic.protocol import (
@@ -35,6 +37,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import create_json_response
+from vllm.multimodal.utils import encode_image_url, encode_video_url
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 
@@ -456,6 +459,22 @@ async def test_responses_render_basic(client):
 
 
 @pytest.mark.asyncio
+async def test_responses_render_input_list_reports_only_first_invalid_item(client):
+    invalid_item = {"type": "message", "role": "user"}
+    first = await client.post(
+        "/v1/responses/render", json={"model": MODEL_NAME, "input": [invalid_item]}
+    )
+    multiple = await client.post(
+        "/v1/responses/render",
+        json={"model": MODEL_NAME, "input": [invalid_item, invalid_item]},
+    )
+
+    assert first.status_code == multiple.status_code == 400
+    first_summary = first.json()["error"]["message"].splitlines()[0]
+    assert multiple.json()["error"]["message"].splitlines()[0] == first_summary
+
+
+@pytest.mark.asyncio
 async def test_responses_render_includes_prior_input_items(client):
     current_turn = {
         "role": "user",
@@ -810,8 +829,8 @@ async def test_chat_completion_render_with_sampling_params(client):
     "max_tokens", [{"max_tokens": 16}, {}], ids=["sixteen", "omitted"]
 )
 async def test_completion_render_keeps_default_max_tokens(client, max_tokens):
-    """``max_tokens=16`` (also the completions default) equals the
-    ``SamplingParams`` default; /render must still return it, or generate
+    """`max_tokens=16` (also the completions default) equals the
+    `SamplingParams` default; /render must still return it, or generate
     treats it as unset."""
     response = await client.post(
         "/v1/completions/render",
@@ -1119,7 +1138,8 @@ def deepseek_v41_server():
 async def test_messages_render_tool_search_result_for_deepseek_v41(
     deepseek_v41_server,
 ):
-    """A tool search result renders as one result naming the tools it found."""
+    """A tool search result renders as one result naming the tools it found,
+    followed by a system turn listing them, as in deepseek-recipe."""
     request = {
         "model": DEEPSEEK_V41_MODEL_NAME,
         "max_tokens": 16,
@@ -1182,5 +1202,112 @@ async def test_messages_render_tool_search_result_for_deepseek_v41(
     assert detokenize.status_code == 200
     assert (
         "<｜User｜><tool_result>get_weather</tool_result>\n\n"
-        "<tool_result>notes</tool_result><｜Assistant｜>"
+        "<tool_result>notes</tool_result><｜System｜>\n\n### Updated Tool Schemas\n\n"
+        '{"name": "get_weather", "parameters": {"type": "object"}}<｜Assistant｜>'
     ) in detokenize.json()["prompt"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", ["omitted", None, False, True])
+async def test_render_omits_null_token_id_override(client, override):
+    """Default requests must not send a new field to older generate nodes."""
+    body = {"model": MODEL_NAME, "messages": [{"role": "user", "content": "Hi"}]}
+    if override != "omitted":
+        body["return_tokens_as_token_ids"] = override
+    response = await client.post("/v1/chat/completions/render", json=body)
+    response.raise_for_status()
+    context = response.json()["parse_context"]
+    if override is None or override == "omitted":
+        assert "return_tokens_as_token_ids" not in context
+    else:
+        assert context["return_tokens_as_token_ids"] is override
+
+
+_IMAGE_PART = {
+    "type": "image_url",
+    "image_url": {"url": encode_image_url(Image.new("RGB", (224, 224)))},
+}
+_VIDEO_PART = {
+    "type": "video_url",
+    "video_url": {"url": encode_video_url(np.zeros((8, 224, 224, 3), dtype=np.uint8))},
+}
+QWEN2_VL_MODEL = "Qwen/Qwen2-VL-2B-Instruct"
+LLAVA_OV_MODEL = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
+
+
+@pytest.fixture(scope="module")
+def qwen2_vl_server():
+    with RemoteLaunchRenderServer(QWEN2_VL_MODEL, []) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture(scope="module")
+def llava_ov_server():
+    with RemoteLaunchRenderServer(LLAVA_OV_MODEL, []) as remote_server:
+        yield remote_server
+
+
+def _render_mm_payloads(
+    remote_server: RemoteLaunchRenderServer,
+    model: str,
+    content: list[dict],
+) -> dict[str, httpx.Response]:
+    return {
+        mm_payload: httpx.post(
+            remote_server.url_for("v1/chat/completions/render"),
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": content}],
+                "mm_payload": mm_payload,
+            },
+            timeout=120,
+        )
+        for mm_payload in ("tensors", "metadata", "none")
+    }
+
+
+@pytest.mark.parametrize("content", [[_IMAGE_PART], [_IMAGE_PART, _VIDEO_PART]])
+def test_chat_render_metadata_payload_omits_tensors_only(qwen2_vl_server, content):
+    responses = _render_mm_payloads(qwen2_vl_server, QWEN2_VL_MODEL, content)
+
+    assert {r.status_code for r in responses.values()} == {HTTPStatus.OK}
+    tensors = responses["tensors"].json()
+    metadata = responses["metadata"].json()
+    assert metadata["token_ids"] == tensors["token_ids"]
+    assert metadata["features"]["kwargs_data"] is None
+    assert metadata["features"]["mm_metadata"] is not None
+    for key in ("mm_hashes", "mm_placeholders", "mm_metadata"):
+        assert metadata["features"][key] == tensors["features"][key]
+    assert responses["none"].json()["features"]["mm_metadata"] is None
+
+
+def test_chat_render_metadata_payload_rejects_modality_without_metadata(
+    llava_ov_server,
+):
+    """LLaVA-OneVision has `keep_on_cpu` image fields but none for video."""
+    responses = _render_mm_payloads(
+        llava_ov_server, LLAVA_OV_MODEL, [_IMAGE_PART, _VIDEO_PART]
+    )
+
+    assert responses["metadata"].status_code == HTTPStatus.BAD_REQUEST
+    assert "requires metadata for every modality" in responses["metadata"].text
+    for mm_payload in ("tensors", "none"):
+        assert responses[mm_payload].status_code == HTTPStatus.OK
+        assert responses[mm_payload].json()["features"]["mm_metadata"] is None
+    assert set(responses["tensors"].json()["features"]["kwargs_data"]) == {
+        "image",
+        "video",
+    }
+
+
+def test_chat_render_metadata_payload_keeps_complete_metadata(llava_ov_server):
+    responses = _render_mm_payloads(llava_ov_server, LLAVA_OV_MODEL, [_IMAGE_PART])
+
+    assert {r.status_code for r in responses.values()} == {HTTPStatus.OK}
+    metadata = responses["metadata"].json()["features"]
+    assert metadata["kwargs_data"] is None
+    assert metadata["mm_metadata"] is not None
+    assert (
+        metadata["mm_metadata"]
+        == responses["tensors"].json()["features"]["mm_metadata"]
+    )

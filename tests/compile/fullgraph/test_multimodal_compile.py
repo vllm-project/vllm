@@ -19,7 +19,9 @@ def test_compile():
 
 
 @pytest.mark.core_model
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not CUDA or ROCm"
+)
 @pytest.mark.parametrize(
     ("model", "tokenizer", "config_format", "tokenizer_mode", "model_arch"),
     [
@@ -78,7 +80,7 @@ def test_pixtral_compilation(
             max_model_len=4096,
             limit_mm_per_prompt={"image": 1},
             gpu_memory_utilization=0.8,
-            attention_backend="FLASH_ATTN",
+            attention_backend=None if current_platform.is_rocm() else "FLASH_ATTN",
             compilation_config={
                 "mode": CompilationMode.VLLM_COMPILE,
                 "compile_mm_encoder": compile_mm_encoder,
@@ -89,7 +91,9 @@ def test_pixtral_compilation(
         pass
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not CUDA or ROCm"
+)
 @create_new_process_for_each_test("spawn")
 def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
     """Test that Qwen2.5-VL vision submodules are compiled.
@@ -122,7 +126,9 @@ def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
         pass
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not CUDA or ROCm"
+)
 @create_new_process_for_each_test("spawn")
 def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
     """Test that Qwen2.5-VL vision submodules are not compiled when the
@@ -150,10 +156,10 @@ def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
 @pytest.mark.parametrize(
     ("compile_mm_encoder", "expected_models"),
     [
-        # The Ernie-4.5 language model always registers two compiled modules.
+        # The Transformers backend language model registers one compiled module.
         # Enabling encoder compilation adds one per SigLIP encoder layer (27).
-        pytest.param(False, 2, id="disabled"),
-        pytest.param(True, 29, id="enabled"),
+        pytest.param(False, 1, id="disabled"),
+        pytest.param(True, 28, id="enabled"),
     ],
 )
 @create_new_process_for_each_test("spawn")
@@ -168,7 +174,6 @@ def test_paddleocr_vl_compilation(
         compilation_counter.expect(num_models_seen=expected_models),
         vllm_runner(
             "PaddlePaddle/PaddleOCR-VL",
-            trust_remote_code=True,
             max_model_len=2048,
             limit_mm_per_prompt={"image": 1},
             gpu_memory_utilization=0.5,

@@ -9,13 +9,13 @@ _autotuned_configs: dict[tuple, Any] = {}
 
 
 def launch_autotuned(kernel: Any, grid: Any, **kwargs) -> None:
-    """Launch a ``@triton.autotune`` kernel with the config it already picked.
+    """Launch a `@triton.autotune` kernel with the config it already picked.
 
-    ``Autotuner.run`` rebuilds its cache key on every launch, matching each
+    `Autotuner.run` rebuilds its cache key on every launch, matching each
     argument name against a list and formatting the dtype of every tensor
     argument, several microseconds of host time per launch. This builds an
-    equivalent key directly from ``kwargs``: the values of the kernel's
-    autotune ``key`` arguments plus the dtype (or ``None``) of every argument.
+    equivalent key directly from `kwargs`: the values of the kernel's
+    autotune `key` arguments plus the dtype (or `None`) of every argument.
     """
     key = (
         kernel,

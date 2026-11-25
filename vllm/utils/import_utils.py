@@ -403,7 +403,7 @@ class LazyLoader(ModuleType):
 def _has_module(module_name: str) -> bool:
     """Return True if *module_name* can be imported in the current environment.
 
-    Uses ``importlib.util.find_spec`` as a fast pre-check, then performs a
+    Uses `importlib.util.find_spec` as a fast pre-check, then performs a
     trial import to verify that native dependencies (shared libraries, etc.)
     are also satisfied. Any failure during the trial import is treated as the
     module being unavailable. The result is cached so that subsequent queries
@@ -512,7 +512,7 @@ def has_deep_ep_v2() -> bool:
 def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available.
 
-    Prefers an externally installed ``deep_gemm`` package (so users can
+    Prefers an externally installed `deep_gemm` package (so users can
     override with a newer version), then falls back to the vendored copy
     bundled in the vLLM wheel.
     """
@@ -522,6 +522,11 @@ def has_deep_gemm() -> bool:
 def has_nixl_ep() -> bool:
     """Whether the optional `nixl_ep` package is available."""
     return _has_module("nixl_ep")
+
+
+def has_mooncake() -> bool:
+    """Whether the optional Mooncake TransferEngine is available."""
+    return _has_module("mooncake.engine")
 
 
 def has_moonep() -> bool:
@@ -534,7 +539,7 @@ def check_moonep_system_support() -> None:
 
     MoonEP's symmetric-memory buffers require CUDA VMM plus NVSwitch multicast
     (SHARP) on every EP rank; NVLink-only topologies without NVSwitch (e.g.
-    4x H100 NV6) fail deep inside ``moonep.Buffer`` otherwise.
+    4x H100 NV6) fail deep inside `moonep.Buffer` otherwise.
     """
     if not has_moonep():
         raise RuntimeError(
@@ -572,7 +577,7 @@ def get_triton_kernels_version() -> str | None:
     """The triton_kernels MoE-API generation ("3.5.1"/"3.6"/"3.8"), or None.
 
     Inferred by capability since the package exposes no usable version: 3.8
-    replaced ``matmul_ogs`` with ``matmul``, and 3.5.1 predates ``SparseMatrix``.
+    replaced `matmul_ogs` with `matmul`, and 3.5.1 predates `SparseMatrix`.
     """
     if not has_triton_kernels():
         return None
@@ -607,11 +612,6 @@ def has_tilelang() -> bool:
         if on_gfx1250():
             return False
     return True
-
-
-def has_arctic_inference() -> bool:
-    """Whether the optional `arctic_inference` package is available."""
-    return _has_module("arctic_inference")
 
 
 def has_helion() -> bool:
@@ -683,6 +683,14 @@ def has_humming() -> bool:
 def has_quark():
     """Whether the optional `quark` package is available."""
     return _has_module("quark")
+
+
+def has_torchcodec_image_decoding() -> bool:
+    """Whether `torchcodec.decoders.decode_image` is available."""
+    if not _has_module("torchcodec.decoders"):
+        return False
+    decoders = importlib.import_module("torchcodec.decoders")
+    return hasattr(decoders, "decode_image")
 
 
 def check_torchcodec_available():

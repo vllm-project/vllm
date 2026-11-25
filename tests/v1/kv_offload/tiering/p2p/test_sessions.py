@@ -264,17 +264,17 @@ def _peer_connect_msg(
 
 
 class FakeParent:
-    """Configurable :class:`ParentManager` for server-role tests.
+    """Configurable `ParentManager` for server-role tests.
 
-    ``stored`` is the dict of ready blocks (key → primary block_id).
-    ``pending`` and ``retry`` script the first lookup() result for those
+    `stored` is the dict of ready blocks (key → primary block_id).
+    `pending` and `retry` script the first lookup() result for those
     keys; subsequent lookups behave normally (a key that promised
     HIT_PENDING / RETRY can later be promoted to HIT by adding it to
-    ``stored`` and removing it from ``pending``/``retry``). ``calls``
+    `stored` and removing it from `pending`/`retry`). `calls`
     captures every parent invocation in order for assertions.
 
-    Injected per-step via ``session.serve_external_requests(parent)`` —
-    not held by the session, matching how ``TieringOffloadingManager``
+    Injected per-step via `session.serve_external_requests(parent)` —
+    not held by the session, matching how `TieringOffloadingManager`
     hands the tier a handle valid only for that call.
     """
 
@@ -735,6 +735,45 @@ class TestClientFlows:
         assert not _released(failure)
         assert session.close().failed_jobs == []
         assert _released(failure)
+
+    def test_abort_loads_fails_each_load_once(self):
+        """abort_loads aborts every load not already aborting and fails it
+        at once; the AbortAck only releases it."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=1, kv_request_id="req-1", keys=[OffloadKey(b"a")], block_ids=[0]
+        )
+        session.request_blocks(
+            job_id=2, kv_request_id="req-2", keys=[OffloadKey(b"b")], block_ids=[1]
+        )
+        session.finish_request("req-1")
+
+        session.abort_loads()
+        session.abort_loads()
+
+        aborts = [m for m in conn._sent if m[TYPE_KEY] == AbortFetchMsg.TYPE]
+        assert sorted(m[AbortFetchMsg.KV_REQUEST_ID] for m in aborts) == [
+            "req-1",
+            "req-2",
+        ]
+        failures = session.poll().loads
+        assert sorted((f.job_id, f.success) for f in failures) == [
+            (1, False),
+            (2, False),
+        ]
+        assert not any(_released(f) for f in failures)
+        for req_id in ("req-1", "req-2"):
+            conn.enqueue(
+                {
+                    TYPE_KEY: AbortAckMsg.TYPE,
+                    AbortAckMsg.ROUND_SEQ: 0,
+                    AbortAckMsg.KV_REQUEST_ID: req_id,
+                }
+            )
+        assert session.poll().loads == []
+        assert all(_released(f) for f in failures)
+        assert session._client.has_active_loads is False
 
     def test_late_transfer_done_after_abort_ack_is_ignored(self):
         session, conn, _ = _make_session()
@@ -1253,7 +1292,7 @@ class TestLookupFlow:
         A request with no newly-registered keys is not revisited: after a
         flush the work-list is empty, an idle re-flush sends nothing, and a
         subsequent register re-arms exactly the one affected id — even while
-        an unrelated request stays live in ``_requests``.
+        an unrelated request stays live in `_requests`.
         """
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -1436,10 +1475,10 @@ class TestLookupFlow:
         assert fetches == []
 
     def test_server_lookup_deferred_until_serve_then_all_misses(self):
-        """``poll()`` only enqueues an inbound LookupMsg — no response is
-        sent until ``serve_external_requests``. With an all-miss parent
+        """`poll()` only enqueues an inbound LookupMsg — no response is
+        sent until `serve_external_requests`. With an all-miss parent
         the aggregated LookupRespMsg carries the same keys and
-        ``hits=[False, ...]``."""
+        `hits=[False, ...]`."""
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -1615,7 +1654,7 @@ class TestServerLookupHandling:
 
     def test_pending_timeout_replies_miss_no_store_job(self):
         """A HIT_PENDING key that stays pending past the batch
-        ``deadline`` is force-MISS and never pinned; the deferred
+        `deadline` is force-MISS and never pinned; the deferred
         aggregate response fires with hits=[False]."""
         cb = FakeParent(pending={OffloadKey(b"hA")})
         session, conn, _ = _make_session()
@@ -1686,7 +1725,7 @@ class TestServerLookupHandling:
         assert all(c[0] != "on_request_finished" for c in cb.calls)
 
     def test_wire_finish_drops_pending_batches_for_kv_request_id(self):
-        """``ServerRole.finish(kv_request_id)`` drops every parked batch
+        """`ServerRole.finish(kv_request_id)` drops every parked batch
         whose kv_request_id matches and queues its ctx for the next
         serve's on_request_finished."""
         cb = FakeParent(pending={OffloadKey(b"hA"), OffloadKey(b"hB")})
@@ -2825,7 +2864,7 @@ class TestFinishRequestServerSide:
         """write_blocks returns None on a SECOND match while a first transfer
         is still inflight. The request should NOT finalize until the inflight
         completes, then the elif branch in collect_results
-        (``finishing and not _has_inflight_for(...)``) finalizes it as failure.
+        (`finishing and not _has_inflight_for(...)`) finalizes it as failure.
         """
         session, conn, transport = _make_session()
         _activate(session, conn)
@@ -3149,6 +3188,73 @@ class TestDisconnect:
             }
         )
         assert session.poll().loads == [LoadResult(8, "req-7", success=False)]
+
+    @pytest.mark.parametrize("finished", [False, True])
+    @pytest.mark.parametrize("ack_before_poll", [False, True])
+    def test_unsent_fetch_retires_without_abort(
+        self, lookup_clock, finished, ack_before_poll, caplog
+    ):
+        session, conn, _ = _make_session()
+        session.request_blocks(7, "req-7", [OffloadKey(b"key")], [0])
+        if finished:
+            session.finish_request("req-7")
+        else:
+            lookup_clock.now = _PD_LOAD_TIMEOUT_S
+        if ack_before_poll:
+            conn.enqueue(_peer_connect_msg())
+            conn.enqueue(
+                {TYPE_KEY: ConnectAckMsg.TYPE, ConnectAckMsg.PEER_ID: "peer:8000"}
+            )
+        assert session.poll().loads == [
+            LoadResult(7, "req-7", success=False, request_finished=finished)
+        ]
+        if not finished:
+            assert "queued fetch req-7" in caplog.text
+        assert not session.has_pending_work
+        session.request_blocks(8, "req-7", [OffloadKey(b"replacement")], [1])
+        if not ack_before_poll:
+            _activate(session, conn)
+        assert [
+            msg[FetchMsg.BLOCK_INDEXES]
+            for msg in conn._sent
+            if msg[TYPE_KEY] == FetchMsg.TYPE
+        ] == ([[], [1]] if ack_before_poll else [[1]])
+        assert not any(msg[TYPE_KEY] == AbortFetchMsg.TYPE for msg in conn._sent)
+        assert session.close().failed_jobs == [8]
+
+    @pytest.mark.parametrize("already_dead", [False, True])
+    def test_dead_connection_does_not_flush_unsent_fetch(
+        self, lookup_clock, already_dead
+    ):
+        class FailedFetchConnection(FakeConnection):
+            def send(self, msg):
+                if msg[TYPE_KEY] == FetchMsg.TYPE:
+                    raise ConnectionError("failed fetch send")
+                super().send(msg)
+
+        conn = FailedFetchConnection()
+        session, _, _ = _make_session(conn=conn)
+        if already_dead:
+            _activate(session, conn)
+            conn.mark_dead()
+        session.request_blocks(1, "req-1", [OffloadKey(b"first")], [0])
+        session.request_blocks(2, "req-2", [OffloadKey(b"second")], [1])
+        if not already_dead:
+            _activate(session, conn)
+        lookup_clock.now = _PD_LOAD_TIMEOUT_S + 1
+        loads = session.poll().loads
+        assert {result.job_id for result in loads} == {1, 2}
+        assert all(not result.success for result in loads)
+        assert next(r for r in loads if r.job_id == 2).deferred_release is None
+        first = next(r for r in loads if r.job_id == 1)
+        if already_dead:
+            assert first.deferred_release is None
+        else:
+            assert first.deferred_release is not None
+            assert not first.deferred_release.is_set()
+            session.close()
+            assert first.deferred_release.is_set()
+        assert not any(msg[TYPE_KEY] == FetchMsg.TYPE for msg in conn._sent)
 
     def test_disconnect_marks_session_dead(self):
         session, conn, _ = _make_session()

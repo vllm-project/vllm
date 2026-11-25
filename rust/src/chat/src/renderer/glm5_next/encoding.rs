@@ -414,7 +414,7 @@ fn render_inner(
     Ok(())
 }
 
-// TODO: Expose tool_reference and bundled outputs in ChatContentPart.
+// TODO: Expose bundled outputs in ChatContentPart.
 
 fn content(value: &ChatContent, message_index: usize) -> Value {
     match value {
@@ -430,16 +430,23 @@ fn content(value: &ChatContent, message_index: usize) -> Value {
                     ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
                         json!({"type": "audio", "message_index": message_index, "content_part_index": content_part_index})
                     }
+                    ChatContentPart::ToolReference { name } => json!({"type": "tool_reference", "name": name}),
                 })
                 .collect(),
         ),
     }
 }
 
+/// The template messages for `messages`.
+///
+/// The template has no developer role. As in the HF renderer
+/// (`hf::developer`), a leading run of system and developer messages that
+/// includes a developer message becomes one system message, and later
+/// developer messages become system messages in place. Media parts keep the
+/// indices of the message they came from.
 pub(super) fn messages(messages: &[ChatMessage]) -> Vec<Value> {
-    messages.iter().enumerate().map(|(index, message)| match message {
-        ChatMessage::System { content: value } => json!({"role": "system", "content": content(value, index)}),
-        ChatMessage::Developer { content: value, .. } => json!({"role": "developer", "content": content(value, index)}),
+    let mut values: Vec<Value> = messages.iter().enumerate().map(|(index, message)| match message {
+        ChatMessage::System { content: value } | ChatMessage::Developer { content: value, .. } => json!({"role": "system", "content": content(value, index)}),
         ChatMessage::User { content: value } => json!({"role": "user", "content": content(value, index)}),
         ChatMessage::Custom { role, content: value } => json!({"role": role, "content": content(value, index)}),
         ChatMessage::ToolResponse { content: value, tool_call_id } => {
@@ -462,7 +469,70 @@ pub(super) fn messages(messages: &[ChatMessage]) -> Vec<Value> {
             }
             message
         }
-    }).collect()
+    }).collect();
+    let leading = messages
+        .iter()
+        .take_while(|message| {
+            matches!(
+                message,
+                ChatMessage::System { .. } | ChatMessage::Developer { .. }
+            )
+        })
+        .count();
+    if messages[..leading]
+        .iter()
+        .any(|message| matches!(message, ChatMessage::Developer { .. }))
+    {
+        // Empty messages add nothing, as in `ChatContent::append`.
+        let content = messages
+            .iter()
+            .zip(values.drain(..leading))
+            .filter(|(message, _)| {
+                !matches!(
+                    message,
+                    ChatMessage::System { content } | ChatMessage::Developer { content, .. }
+                        if content.is_empty()
+                )
+            })
+            .map(|(_, mut value)| value["content"].take())
+            .reduce(append_content)
+            .unwrap_or_else(|| json!(""));
+        values.insert(0, json!({"role": "system", "content": content}));
+    }
+    values
+}
+
+/// Join non-empty `next` to non-empty `content` as `ChatContent::append`
+/// joins merged messages: text on either side of the boundary is joined with a
+/// blank line, and parts keep their order.
+fn append_content(content: Value, next: Value) -> Value {
+    const SEPARATOR: &str = "\n\n";
+    let into_parts = |value: Value| match value {
+        Value::Array(parts) => parts,
+        text => vec![json!({"type": "text", "text": text})],
+    };
+    match (content, next) {
+        (Value::String(text), Value::String(next)) => {
+            Value::String(format!("{text}{SEPARATOR}{next}"))
+        }
+        (content, next) => {
+            let mut parts = into_parts(content);
+            let mut next = into_parts(next).into_iter().peekable();
+            if let Some(last) = parts.last_mut()
+                && last["type"] == "text"
+                && let Some(first) = next.next_if(|part| part["type"] == "text")
+            {
+                let joined = format!(
+                    "{}{SEPARATOR}{}",
+                    last["text"].as_str().unwrap_or_default(),
+                    first["text"].as_str().unwrap_or_default()
+                );
+                last["text"] = Value::String(joined);
+            }
+            parts.extend(next);
+            Value::Array(parts)
+        }
+    }
 }
 
 pub(super) fn tools(tools: &[ChatTool]) -> Vec<Value> {

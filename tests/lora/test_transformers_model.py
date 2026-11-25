@@ -46,8 +46,8 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
-def test_ilama_lora(ilama_lora_files):
-    llm = vllm.LLM(
+def test_ilama_lora(vllm_runner, ilama_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
@@ -55,23 +55,23 @@ def test_ilama_lora(ilama_lora_files):
         max_lora_rank=16,
         trust_remote_code=True,
         enable_chunked_prefill=True,
-    )
-
-    output1 = do_sample(llm, ilama_lora_files, lora_id=1)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output1[i] == EXPECTED_LORA_OUTPUT[i]
-    output2 = do_sample(llm, ilama_lora_files, lora_id=2)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output2[i] == EXPECTED_LORA_OUTPUT[i]
+    ) as runner:
+        output1 = do_sample(runner.llm, ilama_lora_files, lora_id=1)
+        for i in range(len(EXPECTED_LORA_OUTPUT)):
+            assert output1[i] == EXPECTED_LORA_OUTPUT[i]
+        output2 = do_sample(runner.llm, ilama_lora_files, lora_id=2)
+        for i in range(len(EXPECTED_LORA_OUTPUT)):
+            assert output2[i] == EXPECTED_LORA_OUTPUT[i]
 
 
 @pytest.mark.skipif(
-    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
+    current_platform.is_cuda_alike() or current_platform.is_xpu(),
+    reason="Skipping to avoid redundant model tests",
 )
 @multi_gpu_test(num_gpus=4)
 @create_new_process_for_each_test()
-def test_ilama_lora_tp4(ilama_lora_files):
-    llm = vllm.LLM(
+def test_ilama_lora_tp4(vllm_runner, ilama_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
@@ -81,23 +81,23 @@ def test_ilama_lora_tp4(ilama_lora_files):
         trust_remote_code=True,
         fully_sharded_loras=False,
         enable_chunked_prefill=True,
-    )
-
-    output1 = do_sample(llm, ilama_lora_files, lora_id=1)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output1[i] == EXPECTED_LORA_OUTPUT[i]
-    output2 = do_sample(llm, ilama_lora_files, lora_id=2)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output2[i] == EXPECTED_LORA_OUTPUT[i]
+    ) as runner:
+        output1 = do_sample(runner.llm, ilama_lora_files, lora_id=1)
+        for i in range(len(EXPECTED_LORA_OUTPUT)):
+            assert output1[i] == EXPECTED_LORA_OUTPUT[i]
+        output2 = do_sample(runner.llm, ilama_lora_files, lora_id=2)
+        for i in range(len(EXPECTED_LORA_OUTPUT)):
+            assert output2[i] == EXPECTED_LORA_OUTPUT[i]
 
 
 @pytest.mark.skipif(
-    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
+    current_platform.is_cuda_alike() or current_platform.is_xpu(),
+    reason="Skipping to avoid redundant model tests",
 )
 @multi_gpu_test(num_gpus=4)
 @create_new_process_for_each_test()
-def test_ilama_lora_tp4_fully_sharded_loras(ilama_lora_files):
-    llm = vllm.LLM(
+def test_ilama_lora_tp4_fully_sharded_loras(vllm_runner, ilama_lora_files):
+    with vllm_runner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
@@ -107,10 +107,10 @@ def test_ilama_lora_tp4_fully_sharded_loras(ilama_lora_files):
         trust_remote_code=True,
         fully_sharded_loras=True,
         enable_chunked_prefill=True,
-    )
-    output1 = do_sample(llm, ilama_lora_files, lora_id=1)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output1[i] == EXPECTED_LORA_OUTPUT[i]
-    output2 = do_sample(llm, ilama_lora_files, lora_id=2)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output2[i] == EXPECTED_LORA_OUTPUT[i]
+    ) as runner:
+        output1 = do_sample(runner.llm, ilama_lora_files, lora_id=1)
+        for i in range(len(EXPECTED_LORA_OUTPUT)):
+            assert output1[i] == EXPECTED_LORA_OUTPUT[i]
+        output2 = do_sample(runner.llm, ilama_lora_files, lora_id=2)
+        for i in range(len(EXPECTED_LORA_OUTPUT)):
+            assert output2[i] == EXPECTED_LORA_OUTPUT[i]

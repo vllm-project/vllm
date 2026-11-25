@@ -27,10 +27,10 @@ class BackpressurePolicy(ABC):
 class DropAccountingPolicy(BackpressurePolicy):
     """Base policy that tracks dropped store/block counters.
 
-    Subclasses implement ``should_store``; the shared drop accounting
-    (``on_store_skipped``/``pop_stores_dropped``/``reset``) lives here so
+    Subclasses implement `should_store`; the shared drop accounting
+    (`on_store_skipped`/`pop_stores_dropped`/`reset`) lives here so
     every policy reports these counters identically. Subclasses that add
-    their own state override ``reset`` and call ``super().reset()``.
+    their own state override `reset` and call `super().reset()`.
     """
 
     def __init__(self):
@@ -68,13 +68,13 @@ class ThrottledDropPolicy(DropAccountingPolicy):
         overshoot = (ema - high_water) / high_water
         drop_rate = min(1.0, overshoot / ramp_factor)
 
-    With the default ``ramp_factor=2.0``, stores ramp from 0% drop at
+    With the default `ramp_factor=2.0`, stores ramp from 0% drop at
     the high watermark to 100% drop at 3x the high watermark.  This
     keeps secondary tiers populated under moderate pressure, reducing
     cache misses (and therefore recomputation / ITL regression) while
     still protecting TTFT under severe congestion.
 
-    Accumulate ``drop_rate`` across store decisions. When the accumulator
+    Accumulate `drop_rate` across store decisions. When the accumulator
     reaches one, drop the store and subtract one from the accumulator,
     carrying the remaining fraction into the next decision.
     """
@@ -133,7 +133,7 @@ class BackpressureDetector(ABC):
     def on_store_completed(self, elapsed_s: float, num_bytes: int) -> None: ...
 
     def on_store_failed(self) -> None:
-        """Observe a store job that completed with ``success=False``.
+        """Observe a store job that completed with `success=False`.
 
         Ignored by default; detectors may treat failures as pressure.
         """
@@ -149,7 +149,7 @@ class BackpressureDetector(ABC):
         """Update pressure state from a completed store job.
 
         Args:
-            submit_time: ``time.monotonic()`` when the job was submitted.
+            submit_time: `time.monotonic()` when the job was submitted.
             num_bytes: Total bytes written (num_blocks * block_size_bytes).
 
         """
@@ -169,14 +169,14 @@ class BackpressureDetector(ABC):
     def default_config(
         cls, tier_type: str, *, locality: str | None = None
     ) -> dict | None:
-        """Return default constructor kwargs for ``tier_type``, or None.
+        """Return default constructor kwargs for `tier_type`, or None.
 
         Args:
-            tier_type: The tier type string (e.g. ``"fs"``, ``"obj"``).
+            tier_type: The tier type string (e.g. `"fs"`, `"obj"`).
             locality: Optional locality hint from the tier config
-                (``"LOCAL"`` or ``"REMOTE"``). When ``"REMOTE"``, tiers
+                (`"LOCAL"` or `"REMOTE"`). When `"REMOTE"`, tiers
                 that would normally get local-storage watermarks (e.g.
-                ``"fs"``) receive network watermarks instead.
+                `"fs"`) receive network watermarks instead.
 
         """
         return None
@@ -200,13 +200,13 @@ class EMABackpressureDetector(BackpressureDetector):
         high=0.005 s/MiB (~200 MB/s) catches severe congestion;
         low=0.001 s/MiB (~1 GB/s) requires meaningful recovery.
 
-      NETWORK (CephFS, object store, ``obj``tiers, or any tier
-        with ``"locality": "REMOTE"``): CephFS sustains ~1.5 GB/s.
+      NETWORK (CephFS, object store, `obj`tiers, or any tier
+        with `"locality": "REMOTE"`): CephFS sustains ~1.5 GB/s.
         high=0.020 s/MiB (~50 MB/s); low=0.005 s/MiB (~200 MB/s).
 
-    ``obj`` tiers get NETWORK defaults automatically. An
-    ``fs`` tier defaults to LOCAL (appropriate for NVMe/SSD); set
-    ``"locality": "REMOTE"`` in the tier config for network-backed
+    `obj` tiers get NETWORK defaults automatically. An
+    `fs` tier defaults to LOCAL (appropriate for NVMe/SSD); set
+    `"locality": "REMOTE"` in the tier config for network-backed
     filesystems like CephFS.
     """
 
@@ -325,8 +325,8 @@ class EMABackpressureDetector(BackpressureDetector):
     def _apply_idle_decay(self) -> None:
         """Decay the EMA toward zero based on elapsed idle time.
 
-        Uses the formula ``ema * 0.5^(dt / half_life)`` so the EMA
-        halves every ``decay_half_life_s`` seconds of silence.  This
+        Uses the formula `ema * 0.5^(dt / half_life)` so the EMA
+        halves every `decay_half_life_s` seconds of silence.  This
         lets the detector recover from pressure when no stores are
         attempted (and therefore no completions arrive to update the
         EMA organically).
@@ -366,7 +366,7 @@ class EMABackpressureDetector(BackpressureDetector):
             self._healthy_streak = 0
 
     def on_store_failed(self) -> None:
-        """Enter pressure after ``failure_threshold`` consecutive failures.
+        """Enter pressure after `failure_threshold` consecutive failures.
 
         Idle decay then lets probe stores through: a failed probe re-enters
         pressure at once, and a successful one resets the failure streak.
@@ -398,10 +398,10 @@ class EMABackpressureDetector(BackpressureDetector):
     def is_healthy(self) -> bool:
         """True when the tier has been consistently fast.
 
-        After ``_HEALTHY_THRESHOLD`` consecutive store completions with
+        After `_HEALTHY_THRESHOLD` consecutive store completions with
         EMA below the low watermark (and no active pressure), the
-        detector enters a healthy fast-path: ``should_store()`` returns
-        ``True`` immediately, skipping the policy check entirely.
+        detector enters a healthy fast-path: `should_store()` returns
+        `True` immediately, skipping the policy check entirely.
         """
         return (
             not self._under_pressure and self._healthy_streak >= self._HEALTHY_THRESHOLD

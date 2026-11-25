@@ -9,18 +9,18 @@ describes its behavior to code outside the speculator (queried through
 its implementation class. Config modules must not import the speculators, as
 they're used in every process. Custom speculators are registered with
 `register_speculative_method`.
-
-Parts only needed by the V1 model runner are marked "V1 model runner only", and
-will be removed with it.
 """
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, final, get_args
 
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 # vllm.config imports this module, so it imports vllm.config lazily.
 if TYPE_CHECKING:
-    from vllm.config import ParallelConfig, SpeculativeConfig
+    from transformers import PreTrainedConfig
+
+    from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 
 _PKG = "vllm.v1.worker.gpu.spec_decode"
 
@@ -45,6 +45,8 @@ class SpeculatorConfig:
 
     # Uses the target model's hidden states (EAGLE or EAGLE3-style).
     uses_target_hidden_states: ClassVar[bool] = False
+    # The drafter's own KV at a position depends on the tokens it reads ahead.
+    draft_kv_depends_on_lookahead: ClassVar[bool] = False
     # Drafts in its own workspace lane.
     uses_separate_workspace_lane: ClassVar[bool] = False
     # For performance, prefers requests' full token history on the GPU instead of
@@ -53,13 +55,19 @@ class SpeculatorConfig:
     # Proposes draft tokens (unlike e.g. hidden state extraction).
     proposes_draft_tokens: ClassVar[bool] = True
     adaptive_verification_uses_draft_logits: ClassVar[bool] = True
-    # The draft model has its own vocabulary, which must match the target's
-    # unless use_heterogeneous_vocab is set.
+    # Generates all draft tokens in one forward pass (e.g. DFlash).
+    parallel_drafting: ClassVar[bool] = False
+    # The draft model has its own vocabulary, which must match the target's.
     draft_has_own_vocab: ClassVar[bool] = False
+    # Runs the draft steps after the first as one-token decodes, with FULL graphs.
+    one_token_draft_decodes: ClassVar[bool] = False
 
     supports_watermarking: ClassVar[bool] = False
     # Prefill context parallelism.
     supports_pcp: ClassVar[bool] = False
+    # Its context KV is projected from the target's hidden states, so it supports
+    # `prefill_context_kv_only` and drafts read only its sliding-window tail.
+    projects_context_kv: ClassVar[bool] = False
 
     # --- SpeculativeConfig setup ---
 
@@ -93,6 +101,17 @@ class SpeculatorConfig:
         """Apply method-specific options to the draft model config."""
         return
 
+    @classmethod
+    def supports_draft_eplb(cls, draft_model_config: "ModelConfig") -> bool:
+        """Whether the draft model's experts can be balanced by EPLB."""
+        return False
+
+    @classmethod
+    def verify_draft_eplb(cls, spec: "SpeculativeConfig") -> int | None:
+        """Validate draft EPLB with the target's, for a draft that supports it.
+        Returns the draft's routed expert count if its model config's isn't."""
+        return None
+
     # --- Behavior ---
 
     def __init__(self, spec_config: "SpeculativeConfig"):
@@ -103,6 +122,15 @@ class SpeculatorConfig:
     @final
     def num_speculative_tokens(self) -> int:
         return self.spec_config.num_speculative_tokens
+
+    @property
+    @final
+    def num_scheduled_spec_tokens(self) -> int:
+        """Spec tokens scheduled per step: `num_speculative_tokens`, or 0 with
+        `prefill_context_kv_only`."""
+        if self.spec_config.prefill_context_kv_only:
+            return 0
+        return self.num_speculative_tokens
 
     @property
     def uses_aux_hidden_states(self) -> bool:
@@ -127,6 +155,15 @@ class SpeculatorConfig:
         return 1 if self.uses_target_hidden_states else 0
 
     @property
+    @final
+    def num_hash_lookahead_tokens(self) -> int:
+        """Next tokens the drafter's own KV at a position depends on, which
+        prefix-cache block hashes must cover."""
+        if self.draft_kv_depends_on_lookahead:
+            return self.num_prefill_lookahead_tokens
+        return 0
+
+    @property
     def max_num_new_slots_for_drafting(self) -> int:
         """See `SpeculativeConfig.max_num_new_slots_for_drafting`."""
         return 0
@@ -138,7 +175,7 @@ class SpeculatorConfig:
         return None
 
     def hash_factors(self) -> list[Any]:
-        """Extra factors of `SpeculativeConfig.compute_hash`."""
+        """Extra factors of `SpeculativeConfig.compile_factors`."""
         return []
 
     def pcp_unsupported_reason(self, parallel_config: "ParallelConfig") -> str | None:
@@ -160,18 +197,31 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
 
     @property
     def max_model_len(self) -> int | None:
-        from vllm.config.speculative import _rope_only_sizes_cache
+        from vllm.config.speculative import (
+            _rope_only_sizes_cache,
+            _yarn_cache_positions,
+        )
 
         draft = self.spec_config.draft_model_config
-        if draft is None or (
-            # Its max_position_embeddings was raised to the target's.
-            self.shares_target_positions and _rope_only_sizes_cache(draft.hf_config)
-        ):
+        if draft is None:
             return None
+        if self.shares_target_positions:
+            if _rope_only_sizes_cache(draft.hf_text_config):
+                # Its max_position_embeddings was raised to the target's.
+                return None
+            if (positions := _yarn_cache_positions(draft.hf_text_config)) is not None:
+                return positions
         return draft.max_model_len
 
     @classmethod
     def default_model(cls, spec: "SpeculativeConfig") -> str | None:
+        """Overridden by drafts whose checkpoint the target implies (e.g.
+        MTP), which may then also give `num_speculative_tokens`."""
+        if spec.num_speculative_tokens is None:
+            return None
+        method = spec.method
+        if method and (draft := spec.get_subfolder_checkpoint(method, required=False)):
+            return draft
         raise ValueError(
             "num_speculative_tokens was provided but without speculative model."
         )
@@ -186,17 +236,11 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
             return
 
         target = spec.target_model_config
-        # Callable target hf_overrides also apply to the draft; dict ones don't.
-        draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
-            target.hf_overrides, cls.transformers_backend_hf_overrides(spec)
-        )
+        draft_hf_overrides = cls.draft_hf_overrides(spec)
         spec.draft_model_config = ModelConfig(
             model=spec.model,
             runner="draft",
-            # use_heterogeneous_vocab is V1 model runner only.
-            tokenizer=(
-                spec.model if spec.use_heterogeneous_vocab else target.tokenizer
-            ),
+            tokenizer=target.tokenizer,
             tokenizer_mode=target.tokenizer_mode,
             trust_remote_code=target.trust_remote_code,
             allowed_local_media_path=target.allowed_local_media_path,
@@ -221,7 +265,7 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
 
         if config_cls.shares_target_positions:
             SpeculativeConfig._maybe_override_draft_max_position_embeddings(
-                spec.draft_model_config.hf_config, target.max_model_len
+                spec.draft_model_config.hf_text_config, target.max_model_len
             )
         config_cls.adapt_draft_model_config(spec)
         config_cls.resolve_num_speculative_tokens(spec)
@@ -233,6 +277,15 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
 
         spec.draft_tensor_parallel_size = SpeculativeConfig._verify_and_get_draft_tp(
             spec.target_parallel_config, spec.draft_tensor_parallel_size
+        )
+        if spec.draft_decode_context_parallel_size is None:
+            spec.draft_decode_context_parallel_size = (
+                config_cls.default_draft_decode_context_parallel_size(spec)
+            )
+        spec.draft_decode_context_parallel_size = (
+            SpeculativeConfig._verify_and_get_draft_dcp(
+                spec.target_parallel_config, spec.draft_decode_context_parallel_size
+            )
         )
         spec.draft_model_config.max_model_len = (
             SpeculativeConfig._maybe_override_draft_max_model_len(
@@ -249,6 +302,18 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
         )
 
     @classmethod
+    def draft_hf_overrides(
+        cls, spec: "SpeculativeConfig"
+    ) -> Callable[["PreTrainedConfig"], "PreTrainedConfig"]:
+        """Build the picklable transform applied before draft architecture parsing."""
+        from vllm.config import SpeculativeConfig
+
+        return SpeculativeConfig.compose_draft_hf_overrides(
+            spec.target_model_config.hf_overrides,
+            cls.transformers_backend_hf_overrides(spec),
+        )
+
+    @classmethod
     def transformers_backend_hf_overrides(
         cls, spec: "SpeculativeConfig"
     ) -> dict[str, Any] | None:
@@ -259,6 +324,13 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
     @classmethod
     def adapt_draft_model_config(cls, spec: "SpeculativeConfig") -> None:
         return
+
+    @classmethod
+    def default_draft_decode_context_parallel_size(
+        cls, spec: "SpeculativeConfig"
+    ) -> int:
+        """The draft's DCP when `draft_decode_context_parallel_size` is unset."""
+        return spec.target_parallel_config.decode_context_parallel_size
 
     @classmethod
     def resolve_num_speculative_tokens(cls, spec: "SpeculativeConfig") -> None:
@@ -297,11 +369,19 @@ _CONFIG_BY_METHOD: dict[str, str] = {
     "mtp": _builtin("mtp.config", "MTPSpeculatorConfig"),
     "dflash": _builtin("dflash.config", "DFlashSpeculatorConfig"),
     "dspark": _builtin("dspark.config", "DSparkSpeculatorConfig"),
+    "dfly": _builtin("dfly.config", "DFlySpeculatorConfig"),
 }
 
-
-# V1 model runner only (see `v1_speculator_configs`).
-_V1_ONLY_METHODS = ("custom_class",)
+# Combined checkpoints need a model-specific transform before the draft's
+# architecture can be inspected. Keys use the target's text model type.
+_CONFIG_BY_TARGET_MODEL_TYPE: dict[str, dict[str, str]] = {
+    "dfly": {
+        "hy_v4": "vllm.models.hy_v4.dfly_config.HYV4DFlySpeculatorConfig",
+        "hy_v4_flash": (
+            "vllm.models.hy_v4_flash.dfly_config.HYV4FlashDFlySpeculatorConfig"
+        ),
+    },
+}
 
 # Custom speculative methods' configs (or their qualified names), by name.
 _CUSTOM_CONFIGS: dict[str, "type[SpeculatorConfig] | str"] = {}
@@ -314,8 +394,8 @@ def register_speculative_method(
 
     `config_cls` is its `SpeculatorConfig` subclass, or its qualified name to
     import it lazily. Register it from a vLLM general plugin, so that it's
-    registered in every process. Custom methods require the V2 model runner.
-    This is an experimental interface that may change between releases.
+    registered in every process. This is an experimental interface that may
+    change between releases.
     """
     from vllm.config.speculative import SpeculativeMethod
 
@@ -353,8 +433,7 @@ def get_custom_speculator_config_class(
 
 
 def get_method_config_class(spec_config: "SpeculativeConfig") -> type[SpeculatorConfig]:
-    """The config class for `spec_config.method`, regardless of the draft
-    checkpoint (for setting up `spec_config`)."""
+    """Select method and target-family configuration before loading the draft."""
     if spec_config.custom_method is not None:
         custom_cls = get_custom_speculator_config_class(spec_config.custom_method)
         assert custom_cls is not None
@@ -363,15 +442,28 @@ def get_method_config_class(spec_config: "SpeculativeConfig") -> type[Speculator
     if method is None:
         # Not configured: a draft model, unless the checkpoint shows otherwise.
         method = "draft_model"
-    if method in _V1_ONLY_METHODS:
-        from vllm.v1.worker.gpu.spec_decode.v1_speculator_configs import (
-            V1CustomProposerConfig,
-        )
-
-        return V1CustomProposerConfig
     if method not in _CONFIG_BY_METHOD:
         raise ValueError(f"Unsupported speculative method: '{method}'")
-    return resolve_obj_by_qualname(_CONFIG_BY_METHOD[method])
+    config_cls = resolve_obj_by_qualname(_CONFIG_BY_METHOD[method])
+    target_configs = _CONFIG_BY_TARGET_MODEL_TYPE.get(method)
+    if target_configs is None:
+        return config_cls
+    target = spec_config.target_model_config
+    if target is not None:
+        model_type = target.hf_text_config.model_type
+        if qualname := target_configs.get(model_type):
+            target_config_cls = resolve_obj_by_qualname(qualname)
+            if not (
+                isinstance(target_config_cls, type)
+                and issubclass(target_config_cls, SpeculatorConfig)
+                and issubclass(target_config_cls, config_cls)
+                and target_config_cls.base_method == method
+            ):
+                raise TypeError(
+                    f"Target config {qualname!r} must specialize method {method!r}"
+                )
+            return target_config_cls
+    return config_cls
 
 
 def get_speculator_config_class(

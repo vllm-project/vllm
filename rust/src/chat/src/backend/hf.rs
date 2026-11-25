@@ -17,7 +17,7 @@ use crate::backend::{
     ChatBackend, DynChatBackend, LoadModelBackendsOptions, LoadedModelBackends,
     NewChatOutputProcessorOptions,
 };
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, bail_multimodal};
 use crate::multimodal::{MultimodalConfigFiles, MultimodalModelInfo};
 use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
@@ -27,6 +27,7 @@ use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
 use crate::renderer::{
     DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer, DynChatRenderer,
     Glm5NextChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer,
+    KimiK3Variant,
 };
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
@@ -67,8 +68,12 @@ impl HfChatBackend {
                 },
                 tokenizer.clone(),
                 options.limit_mm_per_prompt.clone(),
+                &options.mm_processor_kwargs,
             )?
         };
+        if multimodal_model_info.is_none() && !options.mm_processor_kwargs.is_empty() {
+            bail_multimodal!("mm_processor_kwargs requires a supported multimodal processor");
+        }
         let multimodal_render_info = resolve_multimodal_render_info(multimodal_model_info.as_ref());
         let response_template = load_response_template(&files)?;
 
@@ -96,6 +101,15 @@ impl HfChatBackend {
             RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new(
                 options.default_chat_template_kwargs,
             )?),
+            RendererSelection::Inkling
+                if model_type == RendererSelection::INKLING2_MODEL_TYPE
+                    || model_type == RendererSelection::INKLING2_LOOP_MODEL_TYPE =>
+            {
+                Arc::new(InklingChatRenderer::new_inkling2(
+                    tokenizer.clone(),
+                    options.default_chat_template_kwargs,
+                )?)
+            }
             RendererSelection::Inkling => Arc::new(InklingChatRenderer::new(
                 tokenizer.clone(),
                 options.default_chat_template_kwargs,
@@ -103,6 +117,7 @@ impl HfChatBackend {
             RendererSelection::KimiK3 => Arc::new(KimiK3ChatRenderer::new(
                 tokenizer.clone(),
                 options.default_chat_template_kwargs,
+                KimiK3Variant::from_model_type(model_type),
             )),
             RendererSelection::Glm5Next => Arc::new(
                 Glm5NextChatRenderer::new(options.default_chat_template_kwargs)
@@ -199,6 +214,7 @@ pub(super) async fn load_model_backends(
         tokenizer: options.tokenizer.clone(),
         hf_config: options.hf_config.clone(),
         skip_tokenizer_init: options.skip_tokenizer_init,
+        hf_token: options.hf_token.clone(),
     })
     .await?;
     files.apply_overrides(&options.hf_overrides)?;
@@ -206,6 +222,7 @@ pub(super) async fn load_model_backends(
         files.clone(),
         model_id.to_string(),
         options.generation_config,
+        &options.override_generation_config,
     )?;
     let tokenizer = text_backend.tokenizer();
     // Rendering and parsing a chat need a tokenizer.
@@ -253,7 +270,7 @@ mod tests {
     use super::HfChatBackend;
     use crate::backend::{ChatBackend, LoadModelBackendsOptions, NewChatOutputProcessorOptions};
     use crate::request::{ChatContent, ChatMessage, ChatRequest, ResolvedToolContext};
-    use crate::{ChatTool, ParserSelection, RendererSelection};
+    use crate::{ChatTool, EffortValue, ParserSelection, RendererSelection};
 
     fn request_with_user_text(text: &str) -> ChatRequest {
         ChatRequest {
@@ -315,14 +332,19 @@ mod tests {
                 hf_config: None,
                 hf_overrides: Default::default(),
                 generation_config: Default::default(),
+                override_generation_config: Default::default(),
                 renderer,
-                language_model_only: false,
+                // These fixtures are text configs; a spec-backed model type
+                // (e.g. `kimi_k31`) would otherwise need its media tokens.
+                language_model_only: true,
                 chat_template_content_format: Default::default(),
                 chat_template: chat_template.map(str::to_string),
                 trust_request_chat_template: false,
                 default_chat_template_kwargs: HashMap::new(),
                 limit_mm_per_prompt: HashMap::new(),
+                mm_processor_kwargs: HashMap::new(),
                 skip_tokenizer_init: false,
+                hf_token: None,
             },
             test_tokenizer(),
         )
@@ -353,6 +375,25 @@ mod tests {
         assert_eq!(
             prompt,
             "<｜begin▁of▁sentence｜><｜User｜>hello<｜Assistant｜></think>"
+        );
+    }
+
+    #[test]
+    fn auto_uses_kimi_k3_renderer_with_k31_efforts_for_kimi_k31_model_type() {
+        let backend = backend_for_selection(
+            RendererSelection::Auto,
+            r#"{"model_type":"kimi_k31"}"#,
+            r#"{}"#,
+        );
+        let mut request = request_with_user_text("hello");
+        request.chat_options.reasoning_effort = Some(EffortValue::from("medium"));
+
+        let rendered = backend.chat_renderer().render(&request).unwrap();
+
+        assert!(matches!(rendered.prompt, Prompt::TokenIds(_)));
+        assert_eq!(
+            rendered.effective_template_kwargs["thinking_effort"],
+            "medium"
         );
     }
 
@@ -473,7 +514,7 @@ mod tests {
             r#"{"model_type":"deepseek_v4"}"#,
             "{}",
         );
-        let processor = crate::ChatRequestProcessor::render_only(Arc::new(backend))
+        let processor = crate::ChatRequestProcessor::new(Arc::new(backend), None, None)
             .with_reasoning_effort_map([("high".to_string(), "max".to_string())].into());
 
         let mut request = request_with_user_text("hello");
@@ -514,7 +555,7 @@ mod tests {
             let backend = backend_for_selection(Auto, config_json, TOKENIZER_CONFIG);
             let mut request = request_with_user_text("hello");
             request.chat_options.chat_template = Some(TEMPLATE.to_string());
-            crate::ChatRequestProcessor::render_only(Arc::new(backend))
+            crate::ChatRequestProcessor::new(Arc::new(backend), None, None)
                 .prepare_for_tokenization(request)
                 .await
                 .unwrap_err()

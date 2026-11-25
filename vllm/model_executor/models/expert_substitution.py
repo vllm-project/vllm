@@ -36,7 +36,7 @@ def _collect_expert_substitutions(
 
 
 def _parse_approx_value_name(name: str) -> tuple[int, int] | None:
-    """Return (layer index, expert ID) of an ``approx_value`` tensor name."""
+    """Return (layer index, expert ID) of an `approx_value` tensor name."""
     if not name.endswith(APPROX_VALUE_SUFFIX):
         return None
     experts_path, _, expert_id = name.removesuffix(APPROX_VALUE_SUFFIX).rpartition(".")
@@ -47,11 +47,11 @@ def _parse_approx_value_name(name: str) -> tuple[int, int] | None:
 
 
 def as_expert_substitution_model(model_cls: type[_T], model_config: Any) -> type[_T]:
-    """Load constant expert values at the ``load_weights`` boundary.
+    """Load constant expert values at the `load_weights` boundary.
 
-    Initial loading and direct weight updates both go through ``load_weights``.
+    Initial loading and direct weight updates both go through `load_weights`.
     Explicitly named values are always consumed and loaded if their layer is
-    built by this model. ``approx_value`` tensors of layers built elsewhere
+    built by this model. `approx_value` tensors of layers built elsewhere
     (other pipeline stages, MTP layers) are passed through, so the model's own
     loader skips them like any other weight of a layer it does not own.
     """

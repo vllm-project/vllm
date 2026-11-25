@@ -201,6 +201,28 @@ impl Default for SamplingParams {
     }
 }
 
+impl SamplingParams {
+    /// vLLM's neutral sampling defaults, set explicitly: temperature 1, no
+    /// top-k, top-p or min-p truncation, and no penalties, so the sampler sees
+    /// the model's own distribution.
+    ///
+    /// Unlike [`Self::default`], whose unset fields inherit the model's
+    /// generation config during lowering, these lower the same under any
+    /// generation config, as with `--generation-config vllm`.
+    pub fn neutral() -> Self {
+        Self {
+            temperature: Some(1.0),
+            top_p: Some(1.0),
+            top_k: Some(0),
+            min_p: Some(0.0),
+            frequency_penalty: Some(0.0),
+            presence_penalty: Some(0.0),
+            repetition_penalty: Some(1.0),
+            ..Self::default()
+        }
+    }
+}
+
 /// One raw text-generation request ready to be tokenized or sent directly to
 /// the engine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

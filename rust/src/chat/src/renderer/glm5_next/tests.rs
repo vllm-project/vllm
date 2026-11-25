@@ -13,7 +13,7 @@ use super::writer::{ControlTokenizer, Glm5PromptWriter};
 use super::{Glm5NextChatRenderer, encoding};
 use crate::renderer::hf::{ChatTemplateContentFormatOption, HfChatRenderer, MultimodalRenderInfo};
 use crate::request::{
-    ChatMessage, ChatRequest, ChatTool, GenerationPromptMode, ResolvedToolContext,
+    ChatContentPart, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode, ResolvedToolContext,
 };
 use crate::{AssistantContentBlock, AssistantToolCall, ChatRenderer, EffortValue};
 
@@ -112,6 +112,7 @@ fn hf_renderer(template: &str) -> HfChatRenderer {
     HfChatRenderer::new(
         Some(template.into()),
         HashMap::new(),
+        None,
         ChatTemplateContentFormatOption::OpenAi,
     )
     .unwrap()
@@ -289,6 +290,43 @@ fn continue_final_message_matches_existing_hf_renderer() {
     }
 }
 
+/// A tool search result made of tool references expands into the referenced
+/// deferred tools' definitions, as the checkpoint templates do.
+#[test]
+fn tool_references_expand_like_existing_hf_renderer() {
+    let native = Glm5NextChatRenderer::default();
+    let mut request = tool_request(1);
+    request.messages[3] =
+        ChatMessage::tool_response(vec![ChatContentPart::tool_reference("lookup")], "call_0");
+    for tools in [
+        &mut request.tool_context.initial_tools,
+        &mut request.tool_context.effective_tools,
+    ] {
+        tools[0].defer_loading = Some(true);
+    }
+    for (name, template) in CHECKPOINT_TEMPLATES {
+        let prompt = native.render(&request).unwrap().prompt;
+        for content_format in [
+            ChatTemplateContentFormatOption::OpenAi,
+            ChatTemplateContentFormatOption::Auto,
+        ] {
+            let hf =
+                HfChatRenderer::new(Some(template.into()), HashMap::new(), None, content_format)
+                    .unwrap();
+            assert_eq!(
+                prompt,
+                hf.render(&request).unwrap().prompt,
+                "{name} {content_format:?}"
+            );
+        }
+        let prompt = prompt.into_text().unwrap();
+        assert!(
+            prompt.contains("<tool_response><tools>\n{\"name\": \"lookup\""),
+            "{name}: {prompt}"
+        );
+    }
+}
+
 /// History tool-call `arguments` that are not a JSON object render as `{}`,
 /// as on the HF renderer, instead of failing the request.
 #[test]
@@ -314,6 +352,140 @@ fn non_object_tool_call_arguments_match_existing_hf_renderer() {
             );
         }
     }
+}
+
+#[test]
+fn developer_messages_match_existing_hf_renderer() {
+    use crate::renderer::MediaPartSource;
+    use crate::request::ChatContentPart;
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::developer("Reply in French.", None),
+            ChatMessage::user("Hi"),
+            ChatMessage::assistant_text("Bonjour !"),
+            ChatMessage::developer("Be brief.", None),
+            ChatMessage::user("Thanks"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    let native = Glm5NextChatRenderer::default().render(&request).unwrap();
+    for (name, template) in CHECKPOINT_TEMPLATES {
+        assert_eq!(
+            native.prompt,
+            hf_renderer(template).render(&request).unwrap().prompt,
+            "{name}"
+        );
+    }
+    expect_test::expect![[r#"
+        [gMASK]<sop><|system|>Reasoning Effort: Max<|system|>You are a helpful assistant.
+
+        Reply in French.<|user|>Hi<|assistant|><think></think>Bonjour !<|system|>Be brief.<|user|>Thanks<|assistant|><think>"#]].assert_eq(&native.prompt.into_text().unwrap());
+
+    // Media after the merged leading turn keeps its message index.
+    request.messages.push(ChatMessage::user(vec![ChatContentPart::image_url(
+        "unused",
+    )]));
+    let native = Glm5NextChatRenderer::default().with_multimodal(true).render(&request).unwrap();
+    let hf = hf_renderer(CHECKPOINT_TEMPLATES[1].1)
+        .with_multimodal(Some(MultimodalRenderInfo {
+            image_token: Some("<|image|>".into()),
+            video_token: Some("<|video|>".into()),
+            audio_token: None,
+        }))
+        .render(&request)
+        .unwrap();
+    assert_eq!(native.prompt, hf.prompt);
+    assert_eq!(
+        native.media_order.unwrap(),
+        vec![MediaPartSource {
+            message_index: 6,
+            content_part_index: 0
+        }]
+    );
+}
+
+#[test]
+fn empty_developer_messages_merge_like_existing_hf_renderer() {
+    let empty = || vec![ChatContentPart::text("")];
+    let conversations = [
+        vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::developer(empty(), None),
+            ChatMessage::user("Hi"),
+        ],
+        vec![
+            ChatMessage::developer(empty(), None),
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("Hi"),
+        ],
+    ];
+    for messages in conversations {
+        let request = ChatRequest {
+            messages,
+            ..ChatRequest::for_test()
+        };
+        let native = Glm5NextChatRenderer::default().render(&request).unwrap();
+        for (name, template) in CHECKPOINT_TEMPLATES {
+            assert_eq!(
+                native.prompt,
+                hf_renderer(template).render(&request).unwrap().prompt,
+                "{name}"
+            );
+        }
+        expect_test::expect![[r#"
+            [gMASK]<sop><|system|>Reasoning Effort: Max<|system|>You are a helpful assistant.<|user|>Hi<|assistant|><think>"#]]
+        .assert_eq(&native.prompt.into_text().unwrap());
+    }
+}
+
+#[test]
+fn media_in_merged_leading_turn_keeps_source_indices() {
+    use crate::renderer::MediaPartSource;
+    let request = ChatRequest {
+        messages: vec![
+            ChatMessage::system(vec![
+                ChatContentPart::image_url("unused"),
+                ChatContentPart::text("You are a helpful assistant."),
+            ]),
+            ChatMessage::developer(
+                vec![
+                    ChatContentPart::text("Reply in French."),
+                    ChatContentPart::image_url("unused"),
+                ],
+                None,
+            ),
+            ChatMessage::user("Hi"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    let native = Glm5NextChatRenderer::default().with_multimodal(true).render(&request).unwrap();
+    let hf = hf_renderer(CHECKPOINT_TEMPLATES[1].1)
+        .with_multimodal(Some(MultimodalRenderInfo {
+            image_token: Some("<|image|>".into()),
+            video_token: Some("<|video|>".into()),
+            audio_token: None,
+        }))
+        .render(&request)
+        .unwrap();
+    assert_eq!(native.prompt, hf.prompt);
+    assert_eq!(
+        native.media_order.unwrap(),
+        vec![
+            MediaPartSource {
+                message_index: 0,
+                content_part_index: 0
+            },
+            MediaPartSource {
+                message_index: 1,
+                content_part_index: 1
+            },
+        ]
+    );
+    expect_test::expect![[r#"
+        [gMASK]<sop><|system|>Reasoning Effort: Max<|system|><|begin_of_image|><|image|><|end_of_image|>You are a helpful assistant.
+
+        Reply in French.<|begin_of_image|><|image|><|end_of_image|><|user|>Hi<|assistant|><think>"#]].assert_eq(&native.prompt.into_text().unwrap());
 }
 
 #[test]

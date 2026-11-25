@@ -4,8 +4,8 @@
 
 One persistent SM100 tcgen05 MXFP8 GEMM tuned for prefill shapes (BM=128,
 BN=128 per gate/up half, BK=128, cta_group=2; 6-warp CTA: warps 0-3
-epilogue, warp 4 MMA, warp 5 TMA) computes ``gate = X @ Wg^T`` and
-``up = X @ Wu^T`` and applies clamped SwiGLU and MXFP8 quantization. No
+epilogue, warp 4 MMA, warp 5 TMA) computes `gate = X @ Wg^T` and
+`up = X @ Wu^T` and applies clamped SwiGLU and MXFP8 quantization. No
 BF16 intermediate.
 
 The tmem accumulator is double-buffered with a 32-col overlap (even tiles
@@ -384,7 +384,7 @@ class Sm100DenseGemm1Mxfp8:
             Q_ = Q_[(0, None), None]
 
             f8x32_atom = cute.make_copy_atom(
-                cute.nvgpu.CopyUniversalOp(),
+                cute.nvgpu.CopyR2GOp(),
                 Float8E4M3FN,
                 num_bits_per_copy=256,
                 l1c_evict_priority=cute.nvgpu.CacheEvictionPriority.NO_ALLOCATE,
