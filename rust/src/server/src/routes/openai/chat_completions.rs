@@ -35,7 +35,9 @@ use crate::routes::openai::chat_completions::types::{
     ChatCompletionStreamChoice, ChatCompletionStreamPrompt, ChatCompletionStreamResponse,
     ChatMessageDelta,
 };
-use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
+use crate::routes::openai::utils::choices::{
+    ChoiceChunk, ChoiceResponse, merge_choice_chunk_streams, merge_choice_responses,
+};
 use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
 };
@@ -148,24 +150,24 @@ pub async fn chat_completions(
     }
 }
 
-/// Merge the responses of a request's choices, in index order, like Python's
-/// non-streaming response for `n > 1`: the prompt-level fields come from the
-/// first choice, usage adds up per [`Usage::add_choice`], and per-request
-/// metrics, which describe a single sample, are reported only for `n = 1`.
-fn merge_choice_responses(responses: Vec<ChatCompletionResponse>) -> ChatCompletionResponse {
-    let mut responses = responses.into_iter();
-    let mut merged = responses.next().expect("a request has at least one choice");
-    for (index, response) in (1..).zip(responses) {
-        merged.metrics = None;
-        if let (Some(usage), Some(other)) = (&mut merged.usage, &response.usage) {
-            usage.add_choice(other);
-        }
-        merged.choices.extend(response.choices.into_iter().map(|mut choice| {
+impl ChoiceResponse for ChatCompletionResponse {
+    fn set_choice_index(&mut self, index: u32) {
+        for choice in &mut self.choices {
             choice.index = index;
-            choice
-        }));
+        }
     }
-    merged
+
+    fn usage_mut(&mut self) -> Option<&mut Usage> {
+        self.usage.as_mut()
+    }
+
+    fn clear_metrics(&mut self) {
+        self.metrics = None;
+    }
+
+    fn append_choices(&mut self, other: Self) {
+        self.choices.extend(other.choices);
+    }
 }
 
 impl ChoiceChunk for ChatCompletionStreamResponse {
@@ -274,10 +276,7 @@ async fn collect_chat_completion(
         None
     };
     let prompt_logprobs = if include_prompt_logprobs {
-        Some(prompt_logprobs_to_maps(
-            prompt_logprobs.as_ref(),
-            &prompt_token_ids,
-        )?)
+        Some(prompt_logprobs_to_maps(prompt_logprobs.as_ref()))
     } else {
         None
     };
@@ -286,6 +285,7 @@ async fn collect_chat_completion(
         timestamps,
         usage.output_token_count,
         spec_decode_metrics,
+        None,
     );
     let usage = Usage::from_token_usage(
         usage.engine,
@@ -572,6 +572,7 @@ async fn chat_completion_chunk_stream(
                 message,
                 usage: final_usage,
                 timestamps,
+                first_content_token_ts,
                 spec_decode_metrics,
                 finish_reason,
                 kv_transfer_params,
@@ -650,6 +651,7 @@ async fn chat_completion_chunk_stream(
                         timestamps,
                         final_usage.output_token_count,
                         spec_decode_metrics.map(|value| *value),
+                        first_content_token_ts,
                     );
                     y.yield_ok(usage_chunk(
                         &envelope,
@@ -1261,6 +1263,7 @@ mod tests {
                     first_token_ts: 10.5,
                     last_token_ts: 11.0,
                 },
+                first_content_token_ts: Some(10.75),
                 spec_decode_metrics: Some(Box::new(RequestSpecDecodeMetrics {
                     num_spec_tokens: 3,
                     histogram: vec![0, 1, 1, 0],
@@ -1319,6 +1322,7 @@ mod tests {
         );
         assert!(chunks[..3].iter().all(|chunk| chunk.metrics.is_none()));
         let metrics = chunks[3].metrics.as_ref().expect("per-request metrics");
+        assert!((metrics.time_to_first_content_token_ms.unwrap() - 550.0).abs() < 1e-9);
         assert!((metrics.time_to_first_token_ms.unwrap() - 300.0).abs() < 1e-9);
         assert!((metrics.tokens_per_second.unwrap() - 1.25).abs() < 1e-9);
         assert_eq!(
@@ -1365,6 +1369,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1420,6 +1425,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
                 routed_experts: None,
@@ -1488,6 +1494,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 2, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1575,6 +1582,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 2, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1714,6 +1722,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 4, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1799,6 +1808,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(1, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1867,6 +1877,7 @@ mod tests {
                 message: Default::default(),
                 usage: done_usage(3, 1, 0),
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -1953,6 +1964,7 @@ mod tests {
                     reasoning_tokens: 2,
                 },
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -2031,6 +2043,7 @@ mod tests {
                     reasoning_tokens: 2,
                 },
                 timestamps: Default::default(),
+                first_content_token_ts: None,
                 spec_decode_metrics: None,
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
@@ -2098,6 +2111,7 @@ mod tests {
                     message: Default::default(),
                     usage: done_usage(1, 1, 0),
                     timestamps: Default::default(),
+                    first_content_token_ts: None,
                     spec_decode_metrics: None,
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,

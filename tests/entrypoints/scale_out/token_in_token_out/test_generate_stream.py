@@ -15,6 +15,7 @@ from vllm.entrypoints.generate.base.protocol import DeltaMessage, StreamOptions
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+    mm_hashes_from_engine_input,
     placeholder_ranges_from_engine_input,
 )
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
@@ -227,6 +228,21 @@ def test_placeholder_ranges_from_engine_input():
 
     text_only: Any = {"type": "token", "prompt_token_ids": [1, 2, 3]}
     assert placeholder_ranges_from_engine_input(text_only) is None
+
+
+def test_mm_hashes_from_engine_input():
+    engine_input: Any = {
+        "type": "multimodal",
+        "mm_hashes": {"image": ["img-0", "img-1"], "audio": ["aud-0"]},
+    }
+
+    assert mm_hashes_from_engine_input(engine_input) == {
+        "image": ["img-0", "img-1"],
+        "audio": ["aud-0"],
+    }
+
+    text_only: Any = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+    assert mm_hashes_from_engine_input(text_only) is None
 
 
 @pytest.mark.asyncio
@@ -661,8 +677,10 @@ MM_ENGINE_INPUT: Any = {
     "type": "multimodal",
     "prompt_token_ids": [1, 2, 2, 2, 3],
     "mm_placeholders": {"image": [PlaceholderRange(offset=1, length=3)]},
+    "mm_hashes": {"image": ["content:image_A"]},
 }
 MM_PLACEHOLDERS = {"image": [{"offset": 1, "length": 3, "is_embed": None}]}
+MM_HASHES = {"image": ["content:image_A"]}
 
 
 def _build_mm_serving_tokens(engine: AsyncLLM) -> ServingTokens:
@@ -704,10 +722,13 @@ async def test_non_stream_prompt_metadata_requires_return_token_ids(
     if return_token_ids:
         assert response.prompt_token_ids == [1, 2, 3]
         assert response.model_dump()["mm_placeholders"] == MM_PLACEHOLDERS
+        assert response.mm_hashes == MM_HASHES
     else:
         assert response.prompt_token_ids is None
         assert response.mm_placeholders is None
+        assert response.mm_hashes is None
         assert request._response_mm_placeholders is None
+        assert request._response_mm_hashes is None
 
 
 @pytest.mark.asyncio
@@ -733,6 +754,7 @@ async def test_non_stream_text_only_prompt_has_no_mm_placeholders():
     assert isinstance(response, GenerateTokensResponse)
     assert response.prompt_token_ids == [1, 2, 3]
     assert response.mm_placeholders is None
+    assert response.mm_hashes is None
 
 
 @pytest.mark.asyncio
@@ -759,6 +781,7 @@ async def test_non_stream_encoder_decoder_omits_mm_placeholders():
     assert isinstance(response, GenerateTokensResponse)
     assert response.prompt_token_ids == [1, 2, 3]
     assert response.mm_placeholders is None
+    assert response.mm_hashes is None
 
 
 @pytest.mark.asyncio
@@ -808,9 +831,11 @@ async def test_stream_prompt_metadata_lands_on_first_emitted_chunk():
     ]
     assert data_chunks[0]["prompt_token_ids"] == [1, 2, 3]
     assert data_chunks[0]["mm_placeholders"] == MM_PLACEHOLDERS
+    assert data_chunks[0]["mm_hashes"] == MM_HASHES
     for chunk in data_chunks[1:]:
         assert "prompt_token_ids" not in chunk
         assert "mm_placeholders" not in chunk
+        assert "mm_hashes" not in chunk
 
 
 @pytest.mark.asyncio
@@ -839,6 +864,7 @@ async def test_stream_omits_prompt_metadata_by_default():
     for chunk in data_chunks:
         assert "prompt_token_ids" not in chunk
         assert "mm_placeholders" not in chunk
+        assert "mm_hashes" not in chunk
 
 
 @pytest.mark.asyncio
@@ -866,6 +892,7 @@ async def test_stream_text_only_prompt_omits_mm_placeholders_key():
 
     assert data_chunks[0]["prompt_token_ids"] == [1, 2, 3]
     assert "mm_placeholders" not in data_chunks[0]
+    assert "mm_hashes" not in data_chunks[0]
 
 
 @pytest.mark.asyncio
@@ -896,6 +923,7 @@ async def test_stream_zero_token_completion_still_delivers_prompt_metadata():
     assert data_chunks[0]["choices"][0]["finish_reason"] == "stop"
     assert data_chunks[0]["prompt_token_ids"] == [1, 2, 3]
     assert data_chunks[0]["mm_placeholders"] == MM_PLACEHOLDERS
+    assert data_chunks[0]["mm_hashes"] == MM_HASHES
 
 
 @pytest.mark.asyncio

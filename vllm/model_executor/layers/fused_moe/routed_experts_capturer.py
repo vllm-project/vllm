@@ -45,7 +45,12 @@ class RoutedExpertsRowRestorer(Protocol):
 
 def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
     model_config = vllm_config.model_config
-    num_layers = model_config.get_total_num_hidden_layers()
+    # One row per layer visit for models that run some decoder layers several
+    # times per token (Inkling2 loop checkpoints).
+    num_layers = (
+        getattr(model_config.hf_text_config, "num_layer_visits", None)
+        or model_config.get_total_num_hidden_layers()
+    )
     num_experts = model_config.get_num_experts()
     num_experts_per_tok = model_config.get_num_experts_per_tok()
     if num_layers <= 0 or num_experts <= 0 or num_experts_per_tok <= 0:

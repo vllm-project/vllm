@@ -32,14 +32,16 @@ pub(crate) use self::features::{MmPayload, MultiModalFeatures};
 use self::types::{
     GenerateChoiceLogProbs, GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent,
     GenerateLogprob, GenerateOutputMode, GenerateResponse, GenerateResponseChoice,
-    GenerateResponseStreamChoice, GenerateStreamResponse, MultiModalPlaceholders,
-    PerRequestMetrics, PlaceholderRangeInfo,
+    GenerateResponseStreamChoice, GenerateStreamResponse, MmResponseInfo, PerRequestMetrics,
+    PlaceholderRangeInfo,
 };
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
-use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
+use crate::routes::openai::utils::choices::{
+    ChoiceChunk, ChoiceResponse, merge_choice_chunk_streams, merge_choice_responses,
+};
 use crate::routes::openai::utils::logprobs::{clamp_logprob, decoded_logprobs_to_openai_chat};
 use crate::routes::openai::utils::metrics::{
     SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
@@ -82,10 +84,10 @@ pub async fn generate(
             };
             ApiError::invalid_request(format!("{context}: {}", e.as_report()), Some(param))
         })?;
-    let mm_placeholders = body
+    let mm_info = body
         .return_token_ids
         .unwrap_or(false)
-        .then(|| extract_mm_placeholders(mm_features.as_deref()))
+        .then(|| extract_mm_response_info(mm_features.as_deref()))
         .flatten();
 
     let prepared = prepare_generate_request(body, &lora_resolution, request_context, mm_features)?;
@@ -131,7 +133,7 @@ pub async fn generate(
                     prepared.request_id.clone(),
                     api_server_options,
                     prepared.options,
-                    mm_placeholders.clone(),
+                    mm_info.clone(),
                 )
             })
             .collect();
@@ -141,6 +143,7 @@ pub async fn generate(
             if prompt_sent {
                 chunk.prompt_token_ids = None;
                 chunk.mm_placeholders = None;
+                chunk.mm_hashes = None;
             }
             prompt_sent |= chunk.prompt_token_ids.is_some();
             chunk
@@ -177,7 +180,7 @@ pub async fn generate(
                     created,
                     api_server_options,
                     prepared.options,
-                    mm_placeholders.clone(),
+                    mm_info.clone(),
                 )
             })
             .collect::<Result<Vec<_>, _>>()
@@ -185,22 +188,24 @@ pub async fn generate(
     Ok(Json(merge_choice_responses(responses)).into_response())
 }
 
-/// Merge the responses of a request's choices, in index order, like Python's
-/// non-streaming response for `n > 1`: the prompt-level fields come from the
-/// first choice, usage adds up per [`Usage::add_choice`], and per-request
-/// metrics, which describe a single sample, are reported only for `n = 1`.
-fn merge_choice_responses(responses: Vec<GenerateResponse>) -> GenerateResponse {
-    let mut responses = responses.into_iter();
-    let mut merged = responses.next().expect("a request has at least one choice");
-    for (index, response) in (1..).zip(responses) {
-        merged.metrics = None;
-        merged.usage.add_choice(&response.usage);
-        merged.choices.extend(response.choices.into_iter().map(|mut choice| {
+impl ChoiceResponse for GenerateResponse {
+    fn set_choice_index(&mut self, index: u32) {
+        for choice in &mut self.choices {
             choice.index = index;
-            choice
-        }));
+        }
     }
-    merged
+
+    fn usage_mut(&mut self) -> Option<&mut Usage> {
+        Some(&mut self.usage)
+    }
+
+    fn clear_metrics(&mut self) {
+        self.metrics = None;
+    }
+
+    fn append_choices(&mut self, other: Self) {
+        self.choices.extend(other.choices);
+    }
 }
 
 impl ChoiceChunk for GenerateStreamResponse {
@@ -227,6 +232,7 @@ async fn generate_chunk_stream(
         enable_log_requests,
         enable_prompt_tokens_details,
         default_return_tokens_as_token_ids,
+        force_include_usage,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -238,9 +244,11 @@ async fn generate_chunk_stream(
         return_token_ids,
         output_mode,
     }: ResponseOptions,
-    mut mm_placeholders: Option<MultiModalPlaceholders>,
+    mut mm_info: Option<MmResponseInfo>,
     mut y: TryYielder<GenerateStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
+    let include_usage = include_usage || force_include_usage;
+    let include_continuous_usage = include_continuous_usage || force_include_usage;
     pin_mut!(stream);
     let mut prompt_token_ids = None;
     // Like Python, continuous usage counts tokens only; the final usage chunk
@@ -283,6 +291,7 @@ async fn generate_chunk_stream(
             token_ids,
             logprobs,
             sampling_mask,
+            ..
         } = sampled;
         continuous_usage.add_output_tokens(token_ids.len());
 
@@ -339,6 +348,9 @@ async fn generate_chunk_stream(
         let stop_reason =
             finish_reason.as_ref().and_then(|reason| reason.as_stop_reason().cloned());
         let prompt_token_ids = prompt_token_ids.take();
+        let mm_info = prompt_token_ids.as_ref().and_then(|_| mm_info.take());
+        let (mm_placeholders, mm_hashes) =
+            mm_info.map(|info| (info.mm_placeholders, info.mm_hashes)).unzip();
         y.yield_ok(GenerateStreamResponse {
             request_id: request_id.clone(),
             output_mode,
@@ -354,7 +366,8 @@ async fn generate_chunk_stream(
                 weight_versions,
             }],
             usage: include_continuous_usage.then(|| continuous_usage.to_usage()),
-            mm_placeholders: prompt_token_ids.as_ref().and_then(|_| mm_placeholders.take()),
+            mm_placeholders,
+            mm_hashes,
             prompt_token_ids,
             metrics: None,
         })
@@ -373,6 +386,7 @@ async fn generate_chunk_stream(
             )),
             prompt_token_ids: None,
             mm_placeholders: None,
+            mm_hashes: None,
             metrics: spec_decode_metrics.map(|speculative_decoding| PerRequestMetrics {
                 speculative_decoding: StreamingSpeculativeDecodingMetrics::from(
                     speculative_decoding,
@@ -407,8 +421,13 @@ fn collect_generate(
         return_token_ids,
         output_mode,
     }: ResponseOptions,
-    mm_placeholders: Option<MultiModalPlaceholders>,
+    mm_info: Option<MmResponseInfo>,
 ) -> Result<GenerateResponse, ApiError> {
+    let (mm_placeholders, mm_hashes) = return_token_ids
+        .then_some(mm_info)
+        .flatten()
+        .map(|info| (info.mm_placeholders, info.mm_hashes))
+        .unzip();
     // Like Python, an engine error fails the request instead of returning a
     // choice with finish reason `error`; an untyped one is a 500.
     if let FinishReason::Error(error) = &collected.finish_reason {
@@ -487,7 +506,8 @@ fn collect_generate(
             .map(npy_base64)
             .transpose()?,
         prompt_token_ids: return_token_ids.then(|| collected.prompt_token_ids.to_vec()),
-        mm_placeholders: return_token_ids.then_some(mm_placeholders).flatten(),
+        mm_placeholders,
+        mm_hashes,
         kv_transfer_params: collected.kv_transfer_params,
         ec_transfer_params: collected.ec_transfer_params,
         metrics: collected.spec_decode_metrics.map(|metrics| PerRequestMetrics {
@@ -496,15 +516,17 @@ fn collect_generate(
     })
 }
 
-fn extract_mm_placeholders(features: Option<&[MmFeatureSpec]>) -> Option<MultiModalPlaceholders> {
+/// Placeholder ranges and cache keys per modality, in prompt order. A hash and
+/// its range are sorted together so the two lists stay parallel.
+fn extract_mm_response_info(features: Option<&[MmFeatureSpec]>) -> Option<MmResponseInfo> {
     let features = features?;
     if features.is_empty() {
         return None;
     }
 
-    let mut placeholders = MultiModalPlaceholders::new();
+    let mut by_modality = HashMap::<&str, Vec<(PlaceholderRangeInfo, &str)>>::new();
     for feature in features {
-        placeholders.entry(feature.modality.as_str().to_string()).or_default().push(
+        by_modality.entry(feature.modality.as_str()).or_default().push((
             PlaceholderRangeInfo {
                 offset: feature.mm_position.offset,
                 length: feature.mm_position.length,
@@ -512,12 +534,21 @@ fn extract_mm_placeholders(features: Option<&[MmFeatureSpec]>) -> Option<MultiMo
                     .and_then(|mask| mask.data.as_raw_view())
                     .map(|bytes| bytes.iter().map(|&b| b != 0).collect()),
             },
+            feature.identifier.as_str(),
+        ));
+    }
+
+    let mut info = MmResponseInfo::default();
+    for (modality, mut items) in by_modality {
+        items.sort_by_key(|(range, _)| range.offset);
+        let (ranges, hashes): (Vec<_>, Vec<_>) = items.into_iter().unzip();
+        info.mm_placeholders.insert(modality.to_owned(), ranges);
+        info.mm_hashes.insert(
+            modality.to_owned(),
+            hashes.into_iter().map(str::to_owned).collect(),
         );
     }
-    for ranges in placeholders.values_mut() {
-        ranges.sort_by_key(|range| range.offset);
-    }
-    Some(placeholders)
+    Some(info)
 }
 
 /// The choice's output logprobs at its response level: decoded token strings at
@@ -648,6 +679,7 @@ fn format_token_id(token_id: u32) -> String {
 mod tests {
     use std::sync::Arc;
 
+    use super::types::{MultiModalHashes, MultiModalPlaceholders};
     use futures::{TryStreamExt as _, stream};
     use vllm_engine_core_client::protocol::dtype::TensorDtype;
     use vllm_engine_core_client::protocol::multimodal::{MmModality, PlaceholderRange};
@@ -917,7 +949,7 @@ mod tests {
     async fn collect_chunks(
         outputs: Vec<GenerateOutput>,
         return_token_ids: bool,
-        mm_placeholders: Option<MultiModalPlaceholders>,
+        mm_info: Option<MmResponseInfo>,
     ) -> Vec<GenerateStreamResponse> {
         generate_chunk_stream(
             text_events(outputs),
@@ -927,7 +959,7 @@ mod tests {
                 return_token_ids,
                 ..Default::default()
             },
-            mm_placeholders,
+            mm_info,
         )
         .try_collect()
         .await
@@ -986,20 +1018,57 @@ mod tests {
                 stream_output(Some(&[11, 22]), vec![44], Some(FinishReason::stop_eos())),
             ],
             false,
-            Some(MultiModalPlaceholders::from([(
+            Some(MmResponseInfo {
+                mm_placeholders: MultiModalPlaceholders::from([(
+                    "image".to_string(),
+                    vec![PlaceholderRangeInfo {
+                        offset: 1,
+                        length: 4,
+                        is_embed: None,
+                    }],
+                )]),
+                mm_hashes: MultiModalHashes::from([("image".to_string(), vec!["h".to_string()])]),
+            }),
+        )
+        .await;
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|c| c.prompt_token_ids.is_none()));
+        assert!(chunks.iter().all(|c| c.mm_placeholders.is_none() && c.mm_hashes.is_none()));
+    }
+
+    #[tokio::test]
+    async fn generate_chunk_stream_sends_mm_hashes_with_placeholders_on_first_chunk() {
+        let info = MmResponseInfo {
+            mm_placeholders: MultiModalPlaceholders::from([(
                 "image".to_string(),
                 vec![PlaceholderRangeInfo {
                     offset: 1,
                     length: 4,
                     is_embed: None,
                 }],
-            )])),
+            )]),
+            mm_hashes: MultiModalHashes::from([(
+                "image".to_string(),
+                vec!["content:h".to_string()],
+            )]),
+        };
+        let chunks = collect_chunks(
+            vec![
+                stream_output(Some(&[11, 22]), vec![33], None),
+                stream_output(Some(&[11, 22]), vec![44], Some(FinishReason::stop_eos())),
+            ],
+            true,
+            Some(info.clone()),
         )
         .await;
 
-        assert_eq!(chunks.len(), 2);
-        assert!(chunks.iter().all(|c| c.prompt_token_ids.is_none()));
-        assert!(chunks.iter().all(|c| c.mm_placeholders.is_none()));
+        assert_eq!(
+            chunks[0].mm_placeholders.as_ref(),
+            Some(&info.mm_placeholders)
+        );
+        assert_eq!(chunks[0].mm_hashes.as_ref(), Some(&info.mm_hashes));
+        assert!(chunks[1..].iter().all(|c| c.mm_hashes.is_none()));
     }
 
     #[tokio::test]
@@ -1018,9 +1087,9 @@ mod tests {
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].prompt_token_ids, Some(vec![11, 22]));
-        assert!(chunks[0].mm_placeholders.is_none());
+        assert!(chunks[0].mm_placeholders.is_none() && chunks[0].mm_hashes.is_none());
         assert!(chunks[1].prompt_token_ids.is_none());
-        assert!(chunks[1].mm_placeholders.is_none());
+        assert!(chunks[1].mm_placeholders.is_none() && chunks[1].mm_hashes.is_none());
     }
 
     #[tokio::test]
@@ -1117,19 +1186,22 @@ mod tests {
             0,
             ApiServerOptions::default(),
             ResponseOptions::default(),
-            Some(MultiModalPlaceholders::from([(
-                "image".to_string(),
-                vec![PlaceholderRangeInfo {
-                    offset: 0,
-                    length: 1,
-                    is_embed: None,
-                }],
-            )])),
+            Some(MmResponseInfo {
+                mm_placeholders: MultiModalPlaceholders::from([(
+                    "image".to_string(),
+                    vec![PlaceholderRangeInfo {
+                        offset: 0,
+                        length: 1,
+                        is_embed: None,
+                    }],
+                )]),
+                mm_hashes: MultiModalHashes::from([("image".to_string(), vec!["h".to_string()])]),
+            }),
         )
         .expect("response");
 
         assert!(response.prompt_token_ids.is_none());
-        assert!(response.mm_placeholders.is_none());
+        assert!(response.mm_placeholders.is_none() && response.mm_hashes.is_none());
         assert_eq!(response.choices[0].sampling_mask, Some(vec![vec![30, 40]]));
     }
 
@@ -1195,13 +1267,13 @@ mod tests {
     }
 
     #[test]
-    fn extract_mm_placeholders_returns_none_without_features() {
-        assert!(extract_mm_placeholders(None).is_none());
-        assert!(extract_mm_placeholders(Some(&[])).is_none());
+    fn extract_mm_response_info_returns_none_without_features() {
+        assert!(extract_mm_response_info(None).is_none());
+        assert!(extract_mm_response_info(Some(&[])).is_none());
     }
 
     #[test]
-    fn extract_mm_placeholders_groups_ranges_in_prompt_order() {
+    fn extract_mm_response_info_groups_ranges_and_hashes_in_prompt_order() {
         let feature = |modality: MmModality, offset: usize, length: usize| MmFeatureSpec {
             data: None,
             modality,
@@ -1219,7 +1291,10 @@ mod tests {
             feature(MmModality::Image, 1, 5),
         ];
 
-        let placeholders = extract_mm_placeholders(Some(&features)).expect("metadata");
+        let info = extract_mm_response_info(Some(&features)).expect("metadata");
+        let placeholders = &info.mm_placeholders;
+        assert_eq!(info.mm_hashes["image"], ["image-1", "image-8"]);
+        assert_eq!(info.mm_hashes["audio"], ["audio-4"]);
 
         assert_eq!(
             placeholders["image"],
@@ -1247,7 +1322,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_mm_placeholders_keeps_is_embed() {
+    fn extract_mm_response_info_keeps_is_embed() {
         let mask = vec![false, true, true, false];
         let features = vec![MmFeatureSpec {
             data: None,
@@ -1261,9 +1336,44 @@ mod tests {
             mm_hash: None,
         }];
 
-        let placeholders = extract_mm_placeholders(Some(&features)).expect("metadata");
+        let info = extract_mm_response_info(Some(&features)).expect("metadata");
 
-        assert_eq!(placeholders["image"][0].is_embed, Some(mask));
+        assert_eq!(info.mm_placeholders["image"][0].is_embed, Some(mask));
+    }
+
+    #[test]
+    fn collect_generate_returns_mm_hashes_when_requested() {
+        let info = MmResponseInfo {
+            mm_placeholders: MultiModalPlaceholders::from([(
+                "image".to_string(),
+                vec![PlaceholderRangeInfo {
+                    offset: 0,
+                    length: 1,
+                    is_embed: None,
+                }],
+            )]),
+            mm_hashes: MultiModalHashes::from([(
+                "image".to_string(),
+                vec!["content:h".to_string()],
+            )]),
+        };
+
+        let response = collect_generate(
+            collected(&[10, 20], vec![30], FinishReason::stop_eos()),
+            "raw-1".to_string(),
+            "model".to_string(),
+            0,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                return_token_ids: true,
+                ..Default::default()
+            },
+            Some(info.clone()),
+        )
+        .expect("response");
+
+        assert_eq!(response.mm_placeholders, Some(info.mm_placeholders));
+        assert_eq!(response.mm_hashes, Some(info.mm_hashes));
     }
 
     #[test]

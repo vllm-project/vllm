@@ -103,6 +103,34 @@ def minicpmv_chat_template(content: str) -> str:
     return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
 
 
+def lfm3_vl_chat_template(content: str) -> str:
+    """ChatML template used by LFM3-VL."""
+    return (
+        f"<|startoftext|><|im_start|>user\n{content}<|im_end|>\n"
+        "<|im_start|>assistant\n<think></think>"
+    )
+
+
+def _lfm3_vl_dummy_hf_overrides(hf_config):
+    """Shrink LFM3-VL for dummy tests while keeping conv and attention layers."""
+    # `dummy_hf_overrides` sets num_hidden_layers=1 and slices vision
+    # layer_types[:1] (`["conv"]`), so restore both conv and full_attention.
+    hf_config = dummy_hf_overrides(
+        hf_config,
+        model_arch="Lfm3VlForConditionalGeneration",
+        num_hidden_layers=3,
+    )
+    if hasattr(hf_config, "vision_config"):
+        hf_config.vision_config.update(
+            {
+                "num_layers": 2,
+                "num_hidden_layers": 2,
+                "layer_types": ["conv", "full_attention"],
+            }
+        )
+    return hf_config
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
     "pixtral": VitCudagraphTestConfig(
         model="mistralai/Ministral-3-3B-Instruct-2512",
@@ -501,6 +529,27 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
+    "lfm3_vl": VitCudagraphTestConfig(
+        model="LiquidAI/LFM3-VL-2B",
+        image_prompt=lfm3_vl_chat_template(
+            "<|vision_start|><|image|><|vision_end|>What is in this image?"
+        ),
+        video_prompt=lfm3_vl_chat_template(
+            "<|vision_start|><|video|><|vision_end|>"
+            "Describe this video in one sentence."
+        ),
+        needs_video_metadata=True,
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [1152, 2048],
+        },
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "hf_overrides": _lfm3_vl_dummy_hf_overrides,
+            "enable_chunked_prefill": True,
+            "gpu_memory_utilization": 0.80,
+        },
+        marks=[pytest.mark.core_model],
+    ),
 }
 
 
@@ -861,3 +910,101 @@ def test_kimi_k3_vit_cudagraph_replay_and_threshold(
         )
     for token_budgets in results:
         assert token_budgets[-1] == 512
+
+
+@pytest.mark.core_model
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
+def test_lfm3_vl_conv2d_gather_isolates_frames_and_tail_padding(dist_init):
+    """Verify `conv_indices` gather kernels match eager and ignore NaN tails."""
+    import torch
+
+    from vllm.model_executor.models.lfm3_vl import (
+        Lfm3VlVisionConv2d,
+        Lfm3VlVisionModel,
+        _native_conv2d_gather,
+        _triton_conv2d_gather,
+    )
+    from vllm.transformers_utils.configs.lfm3_vl import Lfm3VlVisionConfig
+    from vllm.triton_utils import HAS_TRITON
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    with torch.inference_mode():
+        torch.manual_seed(0)
+        device = torch.device(current_platform.device_type, 0)
+        cfg = Lfm3VlVisionConfig(
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            layer_types=["conv", "full_attention"],
+        )
+        with set_default_torch_dtype(torch.bfloat16):
+            vision = Lfm3VlVisionModel(cfg).to(device).eval()
+        conv = vision.layers[0].conv
+        assert isinstance(conv, Lfm3VlVisionConv2d)
+        for param in conv.parameters():
+            param.normal_(std=0.05)
+
+        grid_thw = [[1, 16, 32], [2, 8, 8]]
+        frame_shapes = [(h, w) for t, h, w in grid_thw for _ in range(t)]
+        n_valid = sum(h * w for h, w in frame_shapes)
+        n_buf = n_valid + 128
+
+        x = torch.randn(n_valid, cfg.hidden_size, device=device, dtype=torch.bfloat16)
+        eager = conv(x, frame_shapes=frame_shapes)
+
+        conv_indices = vision._build_conv_indices(grid_thw, device=device)
+        padded_idx = torch.zeros(
+            n_buf, cfg.conv_kernel_size**2, device=device, dtype=torch.int64
+        )
+        padded_idx[:n_valid].copy_(conv_indices)
+
+        padded_x = torch.full(
+            (n_buf, cfg.hidden_size),
+            float("nan"),
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        padded_x[:n_valid].copy_(x)
+
+        # Exercise both Triton and PyTorch fallback paths directly under NaN tails.
+        bcx, _ = conv.in_proj(x)
+        b_gate, c_gate, x_in = bcx.chunk(3, dim=-1)
+        padded_gated = torch.full(
+            (n_buf, b_gate.shape[1]),
+            float("nan"),
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        padded_gated[:n_valid].copy_(b_gate * x_in)
+
+        native_conv = _native_conv2d_gather(
+            padded_gated, conv.spatial_conv.weight, padded_idx
+        )
+        native_out, _ = conv.out_proj(c_gate * native_conv[:n_valid])
+        assert torch.isfinite(native_out).all()
+        torch.testing.assert_close(native_out, eager, rtol=1e-3, atol=1e-3)
+
+        if HAS_TRITON:
+            triton_conv = _triton_conv2d_gather(
+                padded_gated, conv.spatial_conv.weight, padded_idx
+            )
+            triton_out, _ = conv.out_proj(c_gate * triton_conv[:n_valid])
+            assert torch.isfinite(triton_out).all()
+            torch.testing.assert_close(triton_out, eager, rtol=1e-3, atol=1e-3)
+
+        graph_out = conv(padded_x, conv_indices=padded_idx)[:n_valid]
+        assert torch.isfinite(graph_out).all()
+        torch.testing.assert_close(graph_out, eager, rtol=1e-3, atol=1e-3)
+
+        swapped_grid = [[1, 32, 16], [2, 8, 8]]
+        padded_idx[:n_valid].copy_(
+            vision._build_conv_indices(swapped_grid, device=device)
+        )
+        swapped_eager = conv(x, frame_shapes=[(32, 16), (8, 8), (8, 8)])
+        swapped_out = conv(padded_x, conv_indices=padded_idx)[:n_valid]
+        torch.testing.assert_close(swapped_out, swapped_eager, rtol=1e-3, atol=1e-3)
+        assert not torch.allclose(swapped_out, eager, rtol=1e-2, atol=1e-2)

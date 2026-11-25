@@ -95,9 +95,7 @@ def default_stages(
 
 def captures_pure_decode(prefixes: list[str]) -> bool:
     """Whether the forward being captured into a CUDA graph is a FULL graph of
-    a pure decode step: not a PIECEWISE capture (Model Runner V2 captures FULL
-    graphs with the forward context's mode NONE, and PIECEWISE ones, which
-    report capturing too, with PIECEWISE), and attention metadata without
+    a pure decode step: not a PIECEWISE capture, and attention metadata without
     prefills for every attention layer and index cache in `prefixes`."""
     context = get_forward_context()
     attn_metadata = context.attn_metadata

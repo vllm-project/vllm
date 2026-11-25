@@ -440,7 +440,7 @@ def test_qwen3_omni_audio_encoder_has_no_gpu_sync(
     with torch.device("cuda"), set_default_torch_dtype(torch.bfloat16):
         encoder = Qwen3OmniMoeAudioEncoder(config)
     # Multiple chunks and attention windows, with ragged tails.
-    feature_lens = torch.tensor([950, 130])
+    feature_lens = torch.tensor([950, 130], device="cpu")
     aftercnn_lens = _get_feat_extract_output_lengths(feature_lens)
     features = torch.randn(
         config.num_mel_bins, int(feature_lens.sum()), device="cuda"
