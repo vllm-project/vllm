@@ -33,6 +33,7 @@ from vllm.distributed.ec_transfer.ec_connector.example_connector import (
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.ec_transfer.ec_connector.utils import PlaceholderMetadataResolver
+from vllm.distributed.ec_transfer.ec_events import AllECCleared, ECRemoved, ECStored
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
     ExampleConnectorMetadata,
 )
@@ -7292,6 +7293,7 @@ def test_scheduler_ec_connector_stats():
         )
         scheduler.ec_connector = Mock()
         scheduler.ec_connector.take_unavailable_requests.return_value = set()
+        scheduler.ec_connector.take_events.return_value = ()
         scheduler.ec_connector.get_ec_connector_stats.return_value = (
             scheduler_stats if worker_stats is None else None
         )
@@ -7829,6 +7831,7 @@ def test_unavailable_encoder_input_fails_the_request_as_retryable():
     scheduler.ec_connector.take_unavailable_requests.return_value = {request.request_id}
     # `request_finished` reports (delay_free, params) for the request teardown.
     scheduler.ec_connector.request_finished.return_value = (False, None)
+    scheduler.ec_connector.take_events.return_value = ()
 
     scheduler_output = scheduler.schedule()
     outputs = scheduler.update_from_output(
@@ -9671,3 +9674,103 @@ def test_cpu_encoder_input_updates_preserve_shm_handles():
     )
     assert scheduler.schedule().encoder_input_updates == {request.request_id: {1: None}}
     assert request.mm_features[0].data is handle
+
+
+def test_reset_encoder_cache_publishes_clear_event_while_idle():
+    """An idle engine must publish `AllECCleared` on reset.
+
+    `update_from_output` is the only place that normally drains EC events, and
+    it never runs while the engine is idle, so the reset has to flush its own.
+    """
+    scheduler = create_scheduler()
+    scheduler.encoder_cache_manager = EncoderCacheManager(
+        cache_size=100, enable_events=True
+    )
+    publisher = Mock()
+    scheduler.ec_event_publisher = publisher
+
+    scheduler.reset_encoder_cache()
+
+    publisher.publish.assert_called_once()
+    batch = publisher.publish.call_args.args[0]
+    assert batch.events == [AllECCleared()]
+
+
+def test_ec_store_events_published_with_the_step_that_creates_them():
+    """A step's `ECStored` must not be advertised with an earlier step's output.
+
+    Async scheduling runs `schedule()` for the next step before the current
+    step's output arrives, so publishing whatever the cache manager queued would
+    advertise embeddings that are not cached yet.
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        max_model_len=2048,
+        encoder_cache_size=2048,
+    )
+    scheduler.encoder_cache_manager.enable_events = True
+    publisher = Mock()
+    scheduler.ec_event_publisher = publisher
+
+    request = create_requests(
+        1,
+        num_tokens=2000,
+        req_ids=["request"],
+        mm_hashes_list=[["img_a", "img_b"]],
+        mm_positions=[[PlaceholderRange(0, 576), PlaceholderRange(1200, 576)]],
+    )[0]
+    scheduler.add_request(request)
+
+    first_output = scheduler.schedule()
+    assert first_output.scheduled_encoder_inputs == {"request": [0]}
+    # Schedule the next chunk before the first one has produced its output.
+    second_output = scheduler.schedule()
+    assert second_output.scheduled_encoder_inputs == {"request": [1]}
+
+    _model_output(scheduler, first_output, [[]])
+    published = [call.args[0].events for call in publisher.publish.call_args_list]
+    assert published == [[ECStored(mm_hashes=["img_a"], medium="GPU")]]
+
+    _model_output(scheduler, second_output, [[]])
+    published = [call.args[0].events for call in publisher.publish.call_args_list]
+    assert published == [
+        [ECStored(mm_hashes=["img_a"], medium="GPU")],
+        [ECStored(mm_hashes=["img_b"], medium="GPU")],
+    ]
+
+
+def test_ec_eviction_published_when_no_tokens_are_scheduled():
+    """A rejected request can evict a cached item without running a forward pass."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        max_model_len=1024,
+        encoder_cache_size=576,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    manager = scheduler.encoder_cache_manager
+    cached, missing = create_requests(
+        2,
+        num_tokens=manager.cache_size,
+        mm_hashes_list=[["cached"], ["missing"]],
+        mm_positions=[[PlaceholderRange(0, manager.cache_size)]] * 2,
+    )
+    assert manager.can_allocate(cached, 0, manager.cache_size, 0)
+    manager.allocate(cached, 0)
+    manager.free(cached)
+    manager.enable_events = True
+    publisher = Mock()
+    scheduler.ec_event_publisher = publisher
+
+    missing.mm_features[0].data = None
+    scheduler.add_request(missing)
+    output = scheduler.schedule()
+    assert output.total_num_scheduled_tokens == 0
+    assert output.free_encoder_mm_hashes == ["cached"]
+
+    scheduler.update_from_output(output, make_empty_encoder_model_runner_output(output))
+    assert [call.args[0].events for call in publisher.publish.call_args_list] == [
+        [ECRemoved(mm_hashes=["cached"], medium="GPU")]
+    ]

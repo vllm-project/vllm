@@ -19,7 +19,8 @@ use zeromq::RouterSendHalf;
 
 use crate::client::readiness::{Readiness, RecheckGuard};
 use crate::client::state::{
-    OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver, UtilityRegistry,
+    OutputReceiver, OutputSender, RequestObserver, RequestRegistry, UtilityReceiver,
+    UtilityRegistry,
 };
 use crate::client::stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 use crate::client::{AbortCause, AbortRequest};
@@ -132,12 +133,22 @@ impl ClientInner {
         lora_name: Option<String>,
         data_parallel_rank: Option<u32>,
         stream_interval: NonZeroU32,
+        observer: Option<Box<dyn RequestObserver>>,
     ) -> Result<(EngineId, OutputReceiver)> {
         let mut registry = self.request_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
         }
-        registry.register(request_id, lora_name, data_parallel_rank, stream_interval)
+        let registered = registry.register(
+            request_id.clone(),
+            lora_name,
+            data_parallel_rank,
+            stream_interval,
+        )?;
+        if let Some(observer) = observer {
+            registry.observe(&request_id, observer);
+        }
+        Ok(registered)
     }
 
     /// Allocate the next utility `call_id` and register its waiting receiver.
