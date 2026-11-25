@@ -583,6 +583,7 @@ class KVCacheManager:
                 prefill_end=prefill_end,
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
+            self._ensure_free_blocks(required_blocks)
             full_sequence_shortfall = (
                 required_blocks - self.block_pool.get_num_free_blocks()
             )
@@ -623,8 +624,9 @@ class KVCacheManager:
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
         # additional watermark of headroom for waiting/preempted admissions.
-        available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
+        self._ensure_free_blocks(required_blocks + reserved_blocks)
+        available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         deficit = required_blocks - available_blocks
         if full_sequence_shortfall > 0:
             deficit = max(deficit, full_sequence_shortfall)
@@ -679,6 +681,11 @@ class KVCacheManager:
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)
+
+    def _ensure_free_blocks(self, num_blocks: int) -> bool:
+        """Whether `num_blocks` blocks can be taken from the pool now, after
+        freeing cached blocks a subclass manages itself."""
+        return num_blocks <= self.block_pool.get_num_free_blocks()
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.

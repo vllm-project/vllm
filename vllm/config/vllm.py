@@ -755,6 +755,7 @@ class VllmConfig:
         if (
             self.kv_transfer_config is None
             and not self.cache_config.enable_prefix_caching
+            and not self.cache_config.session_cache
         ):
             return 0
         return self.speculative_config.speculator_config.num_hash_lookahead_tokens

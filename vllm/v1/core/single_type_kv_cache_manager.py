@@ -408,13 +408,8 @@ class SingleTypeKVCacheManager(ABC):
             # num_skipped_blocks > len(new_computed_blocks).
             new_computed_blocks = new_computed_blocks[num_skipped_blocks:]
 
-        # Touch the computed blocks to make sure they won't be evicted.
-        if self.enable_caching:
-            self.block_pool.touch(new_computed_blocks)
-        else:
-            assert not any(new_computed_blocks), (
-                "Computed blocks should be empty when prefix caching is disabled"
-            )
+        # Take a reference on reused blocks so their owner cannot free them.
+        self.block_pool.touch(new_computed_blocks)
 
         # Skip blocks are padded with null blocks.
         req_blocks.extend([self._null_block] * num_skipped_blocks)
@@ -578,6 +573,15 @@ class SingleTypeKVCacheManager(ABC):
     ) -> tuple[int, KVCacheBlock, int] | None:
         """Finalize a producer partial tail when its request finishes."""
         return None
+
+    def copy_block(self, source_block: KVCacheBlock) -> KVCacheBlock:
+        """Return a new block that receives a copy of `source_block` before
+        the next forward pass. Both endpoints are retained until the copy has
+        run; the caller takes its own reference to the new block."""
+        block = self.block_pool.get_new_blocks(1)[0]
+        source_block.ref_cnt += 1
+        self._pending_cow_copies.append((source_block, block))
+        return block
 
     def _apply_cow(
         self,
@@ -1657,7 +1661,15 @@ class CircularBufferManager(SingleTypeKVCacheManager):
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
     ) -> None:
-        return
+        if not new_computed_blocks:
+            return
+        # A saved ring (session KV states of hybrid models) seeds the request's
+        # own ring: copy it in, both retained until the copy has run.
+        (source,) = new_computed_blocks
+        self.block_pool.touch([source])
+        (ring,) = self._claim_ring_block(request_id)
+        ring.ref_cnt += 1
+        self._pending_cow_copies.append((source, ring))
 
     def remove_skipped_blocks(
         self,

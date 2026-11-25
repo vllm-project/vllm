@@ -76,6 +76,10 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.session_kv_cache_manager import (
+    SessionKVCacheManager,
+    validate_session_request,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     get_kv_cache_kind,
@@ -117,6 +121,7 @@ from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
+from vllm.v1.session.resolver import SessionResolver
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -210,6 +215,13 @@ class EngineCore:
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
         )
+        self.session_resolver: SessionResolver | None = None
+        if vllm_config.cache_config.session_cache:
+            # Colocated with the store for now; they only share plain messages.
+            store = self.scheduler.kv_cache_manager  # type: ignore[attr-defined]
+            assert isinstance(store, SessionKVCacheManager)
+            self.session_resolver = SessionResolver()
+            store.connect(self.session_resolver.apply, self.session_resolver.resolve)
         self._initialize_effective_attention_block_size()
         self.use_spec_decode = vllm_config.speculative_config is not None
         self.check_for_draft_tokens = (
@@ -597,6 +609,8 @@ class EngineCore:
                 "Disabling ECTransfer for this request."
             )
 
+        if self.session_resolver is not None:
+            request.session_binding = self.session_resolver.resolve(request)
         self.scheduler.add_request(request)
         if request.abort_immediately:
             # Immediately abort so the connector's request_finished hook runs
@@ -911,6 +925,14 @@ class EngineCore:
 
     def shutdown(self):
         logger.debug_once("[shutdown] EngineCore: tearing down local resources")
+        resolver = getattr(self, "session_resolver", None)
+        if resolver is not None:
+            store = self.scheduler.kv_cache_manager  # type: ignore[attr-defined]
+            logger.info(
+                "Session KV cache stats: resolver %s, store %s",
+                resolver.stats(),
+                store.session_stats(),
+            )
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
@@ -964,6 +986,15 @@ class EngineCore:
         return self.scheduler.reset_prefix_cache(
             reset_running_requests, reset_connector
         )
+
+    def release_sessions(self, session_ids: list[str]) -> int:
+        """Free the session KV states of the given client session ids, which
+        the caller knows have ended; states other sessions still use are
+        freed once they stop. Returns the number of blocks freed now."""
+        if self.session_resolver is None:
+            return 0
+        store = self.scheduler.kv_cache_manager  # type: ignore[attr-defined]
+        return store.release(self.session_resolver.release(session_ids))
 
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.
@@ -1317,6 +1348,8 @@ class EngineCore:
         req = Request.from_engine_core_request(
             request, self.request_block_hasher, frontend_hashes
         )
+        if self.session_resolver is not None:
+            validate_session_request(req)
         if req.use_structured_output:
             # Note on thread safety: no race condition.
             # `grammar_init` is only invoked in input processing thread. For

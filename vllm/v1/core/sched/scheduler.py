@@ -381,7 +381,16 @@ class Scheduler(SchedulerInterface):
         if hash_block_size is None:
             hash_block_size = block_size
         self.hash_block_size = hash_block_size
-        self.kv_cache_manager = KVCacheManager(
+        kv_cache_manager_cls = KVCacheManager
+        if self.cache_config.session_cache:
+            from vllm.v1.core.session_kv_cache_manager import (
+                SessionKVCacheManager,
+                validate_session_cache_config,
+            )
+
+            validate_session_cache_config(vllm_config)
+            kv_cache_manager_cls = SessionKVCacheManager
+        self.kv_cache_manager = kv_cache_manager_cls(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
@@ -465,6 +474,12 @@ class Scheduler(SchedulerInterface):
             not isinstance(group.manager_config.params, MambaManager.Params)
             or group.manager_config.params.num_prefill_checkpoint_blocks > 0
             for group in kv_cache_config.kv_cache_groups
+        )
+        # Session states keep recurrent state and sliding windows only where
+        # they were saved, so a prefill chunk must end where the manager wants
+        # to save one.
+        self.stop_at_shared_prefix_boundary = bool(
+            self.cache_config.session_cache and self.kv_cache_manager.commit_points_only  # type: ignore[attr-defined]
         )
         # Fine-grained hits reuse the prompt's hash-aligned Mamba checkpoint.
         # Split there only if the backend cannot save it within the final chunk.
@@ -689,6 +704,15 @@ class Scheduler(SchedulerInterface):
         end = min((s for s in stops if start < s < end), default=end)
         return max(end - start, 0)
 
+    @staticmethod
+    def _stop_at_shared_prefix_boundary(
+        request: Request, start: int, num_new_tokens: int
+    ) -> int:
+        boundary = request.shared_prefix_boundary
+        if start < boundary < start + num_new_tokens:
+            return boundary - start
+        return num_new_tokens
+
     def _get_local_prefix_cache_hit(
         self, request: Request, max_cache_hit_length: int | None = None
     ) -> tuple[KVCacheBlocks, int, int, bool]:
@@ -858,6 +882,10 @@ class Scheduler(SchedulerInterface):
             if self.need_mamba_block_aligned_split:
                 num_new_tokens = self._mamba_block_aligned_split(
                     request, num_new_tokens
+                )
+            elif self.stop_at_shared_prefix_boundary:
+                num_new_tokens = self._stop_at_shared_prefix_boundary(
+                    request, request.num_computed_tokens, num_new_tokens
                 )
 
             # Schedule encoder inputs.
@@ -1432,6 +1460,19 @@ class Scheduler(SchedulerInterface):
                             # request must keep all 1 + num_spec rows or the
                             # sampler's row count stops matching its query rows,
                             # so drop the padding instead of shortening it.
+                            num_new_tokens = 1
+                            pad_spec_decode = False
+                    elif self.stop_at_shared_prefix_boundary:
+                        num_new_tokens = self._stop_at_shared_prefix_boundary(
+                            request,
+                            num_computed_tokens,
+                            num_new_tokens,
+                        )
+                        if (
+                            pad_spec_decode
+                            and num_new_tokens != 1 + self.num_spec_tokens
+                        ):
+                            # As for the Mamba split: drop the padding.
                             num_new_tokens = 1
                             pad_spec_decode = False
 

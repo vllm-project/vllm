@@ -270,6 +270,12 @@ class CacheConfig:
     `ModelConfig` and that value should be manually duplicated here."""
     enable_prefix_caching: bool = True
     """Whether to enable prefix caching."""
+    session_cache: bool = False
+    """Reuse KV through session-owned states instead of prefix caching. A
+    resolver matches each request's tokens against committed states and the
+    engine attaches the matched state's blocks; no block hashes are computed.
+    `--session-cache` turns prefix caching off; the two cannot be combined.
+    Experimental."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:
 
@@ -431,6 +437,7 @@ class CacheConfig:
             "is_attention_free",
             "num_gpu_blocks_override",
             "enable_prefix_caching",
+            "session_cache",
             "prefix_caching_hash_algo",
             "prefix_cache_retention_interval",
             # Prefix-caching implementation detail (doesn't affect compiled graph).

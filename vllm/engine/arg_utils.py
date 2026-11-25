@@ -573,6 +573,7 @@ class EngineArgs:
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
     )
+    session_cache: bool = CacheConfig.session_cache
     prefix_cache_retention_interval: int | None = get_field(
         CacheConfig, "prefix_cache_retention_interval"
     )
@@ -1412,6 +1413,7 @@ class EngineArgs:
         cache_group.add_argument(
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
         )
+        cache_group.add_argument("--session-cache", **cache_kwargs["session_cache"])
         cache_group.add_argument(
             "--prefix-cache-retention-interval",
             **cache_kwargs["prefix_cache_retention_interval"],
@@ -2327,6 +2329,7 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
+            session_cache=self.session_cache,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             prefix_cache_retention_interval=self.prefix_cache_retention_interval,
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
@@ -3109,7 +3112,14 @@ class EngineArgs:
                 "or produce incorrect outputs.",
             )
 
-        if self.enable_prefix_caching is None:
+        if self.session_cache:
+            if self.enable_prefix_caching:
+                raise ValueError(
+                    "--session-cache replaces prefix caching; do not also pass "
+                    "--enable-prefix-caching."
+                )
+            self.enable_prefix_caching = False
+        elif self.enable_prefix_caching is None:
             self.enable_prefix_caching = default_prefix_caching
 
             logger.debug(
