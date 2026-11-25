@@ -3,22 +3,23 @@
 """iHC (independent Hyper-Connections) layers for HY V4 (NVIDIA).
 
 iHC replaces the single residual stream of a standard transformer with
-``hc_mult`` parallel residual channels. Each decoder sub-block reduces the
-channels to one hidden state (``HYV4HCPreLayer``), runs the sub-block, then
-scatters the result back over the channels (``HYV4HCPostLayer``). The final
-``HYV4HCHeadLayer`` merges the channels before the model's output norm.
+`hc_mult` parallel residual channels. Each decoder sub-block reduces the
+channels to one hidden state (`HYV4HCPreLayer`), runs the sub-block, then
+scatters the result back over the channels (`HYV4HCPostLayer`). The final
+`HYV4HCHeadLayer` merges the channels before the model's output norm.
 
 NOTE: Each of the three steps has an optional single-kernel HPC replacement
-(``HpcIHCPre`` / ``HpcIHCPost`` / ``HpcIHCHead``). Pre and post fall back to
+(`HpcIHCPre` / `HpcIHCPost` / `HpcIHCHead`). Pre and post fall back to
 in-tree Triton kernels on CUDA when HPC is unavailable, then to the eager path.
-TODO: port the cross-layer post+pre fusion (``HpcIHCPostPre``) as well; it
-requires restructuring the decoder-layer forward scheduling.
+`IHCBoundary` fuses a sub-block's post, the next pre and its RMSNorm into one
+CUDA op; `HYV4DecoderLayer` uses it across layers when it is available.
 """
 
 import torch
 from torch import nn
 from transformers import PreTrainedConfig
 
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.hpc import HpcIHCHead, HpcIHCPost, HpcIHCPre
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.models.hy_v4.nvidia.triton_ihc import (
@@ -32,7 +33,7 @@ class HYV4HCPreLayer(nn.Module):
     """iHC pre-processing layer (2D-activation adaptation).
 
     Steps:
-        1. RMS-normalize the flattened ``[num_tokens, hc * d]`` input.
+        1. RMS-normalize the flattened `[num_tokens, hc * d]` input.
         2. Project to the pre/post gating logits.
         3. Turn the logits into sigmoid gates.
         4. Reduce over the channel dim with the pre gates.
@@ -102,11 +103,11 @@ class HYV4HCPreLayer(nn.Module):
         """Reduce the iHC channels and emit the post gates.
 
         Args:
-            x: Input of shape ``[num_tokens, hc, d]``.
+            x: Input of shape `[num_tokens, hc, d]`.
 
         Returns:
-            A tuple of the pre-gated reduction ``[num_tokens, d]`` and the post
-            gates ``[num_tokens, hc]`` consumed by `HYV4HCPostLayer`.
+            A tuple of the pre-gated reduction `[num_tokens, d]` and the post
+            gates `[num_tokens, hc]` consumed by `HYV4HCPostLayer`.
 
         """
         if self.hpc_op is not None:
@@ -181,12 +182,12 @@ class HYV4HCPostLayer(nn.Module):
         """Scatter the sub-block output back onto the iHC channels.
 
         Args:
-            x: Attention/MLP output of shape ``[num_tokens, d]``.
-            residual: Multi-channel residual ``[num_tokens, hc, d]``.
-            post: Post gates ``[num_tokens, hc]`` from `HYV4HCPreLayer`.
+            x: Attention/MLP output of shape `[num_tokens, d]`.
+            residual: Multi-channel residual `[num_tokens, hc, d]`.
+            post: Post gates `[num_tokens, hc]` from `HYV4HCPreLayer`.
 
         Returns:
-            The updated residual channels ``[num_tokens, hc, d]``.
+            The updated residual channels `[num_tokens, hc, d]`.
 
         """
         if self.hpc_op is not None:
@@ -270,10 +271,10 @@ class HYV4HCHeadLayer(nn.Module):
         """Merge the iHC channels into a single hidden state.
 
         Args:
-            x: Input of shape ``[num_tokens, hc, d]``.
+            x: Input of shape `[num_tokens, hc, d]`.
 
         Returns:
-            The merged hidden state ``[num_tokens, d]``.
+            The merged hidden state `[num_tokens, d]`.
 
         """
         if self.hpc_op is not None:
@@ -332,10 +333,10 @@ class HYV4HCLayer(nn.Module):
         return self._prepare_input_to_3d(hidden_states)
 
     def _prepare_input_to_3d(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Reshape the iHC input to ``[num_tokens, hc, h]``.
+        """Reshape the iHC input to `[num_tokens, hc, h]`.
 
-        Accepted inputs are ``[num_tokens, hc, h]`` (no-op), ``[num_tokens, h]``
-        (broadcast over the channels) and ``[num_tokens, hc * h]`` (reshape).
+        Accepted inputs are `[num_tokens, hc, h]` (no-op), `[num_tokens, h]`
+        (broadcast over the channels) and `[num_tokens, hc * h]` (reshape).
         """
         if hidden_states.dim() == 3:
             return hidden_states
@@ -367,8 +368,8 @@ class HYV4HCLayer(nn.Module):
         """Reduce the iHC channels and produce the post gates.
 
         Returns:
-            A tuple of the reduced hidden states ``[num_tokens, d]``, the post
-            gates ``[num_tokens, hc]`` (``None`` when iHC is disabled) and the
+            A tuple of the reduced hidden states `[num_tokens, d]`, the post
+            gates `[num_tokens, hc]` (`None` when iHC is disabled) and the
             residual (the untouched input).
 
         """
@@ -388,3 +389,46 @@ class HYV4HCLayer(nn.Module):
             return output_with_bias + residual
         assert post_gates is not None
         return self.hc_post(output_with_bias, residual, post_gates)
+
+
+class IHCBoundary(nn.Module):
+    """Fused iHC boundary: optional post step, then pre and RMSNorm.
+
+    With only `residual` it replaces `pre` + `norm`; given the previous
+    sub-block's output `x` and its `post_gates`, it first applies that post
+    step. Owns no parameters: it reads the weights of the pre layer and RMSNorm
+    it replaces.
+    """
+
+    def __init__(self, pre_owner: HYV4HCPreLayer, norm_owner: nn.Module) -> None:
+        super().__init__()
+        # Keep the owners out of the module tree so their weights load once.
+        object.__setattr__(self, "_pre", pre_owner)
+        object.__setattr__(self, "_norm", norm_owner)
+
+    @staticmethod
+    def supported(config: PreTrainedConfig) -> bool:
+        return ops.hy_v4_ihc_boundary_supported(config.hc_mult, config.hidden_size)
+
+    def forward(
+        self,
+        residual: torch.Tensor,
+        x: torch.Tensor | None = None,
+        post_gates: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Returns `(residual, hidden_states, post_gates)`."""
+        pre = self._pre
+        residual, hidden, post_gates, _ = ops.hy_v4_ihc_boundary(
+            residual.contiguous(),
+            None if x is None else x.contiguous(),
+            post_gates,
+            pre.hc_fn.weight,
+            pre.hc_scale,
+            pre.hc_base,
+            self._norm.weight,
+            pre.magnitude,
+            pre.hc_eps,
+            pre.layernorm_epsilon,
+            self._norm.variance_epsilon,
+        )
+        return residual, hidden, post_gates

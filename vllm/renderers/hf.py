@@ -48,8 +48,11 @@ from vllm.renderers.chat_utils import (
 from vllm.renderers.chat_utils.content_parser import (
     PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX,
 )
-from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
-from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
+from vllm.tokenizers.hf import HfTokenizer
+from vllm.transformers_utils.chat_templates import (
+    get_chat_template_fallback_path,
+    get_chat_template_override_path,
+)
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
@@ -290,6 +293,13 @@ def _try_get_processor_chat_template(
             and hasattr(processor, "chat_template")
             and (chat_template := processor.chat_template) is not None
         ):
+            if isinstance(chat_template, dict) and "default" in chat_template:
+                chat_template = chat_template["default"]
+            if not isinstance(chat_template, str):
+                raise TypeError(
+                    "Expected a str or a dict with a 'default' entry, "
+                    f"got {type(chat_template).__name__}"
+                )
             _PROCESSOR_CHAT_TEMPLATES[cache_key] = chat_template
             return chat_template
     except Exception:
@@ -315,6 +325,14 @@ def resolve_chat_template(
         # Resolve template names (e.g. "tool_use") to actual Jinja content
         # so that downstream kwargs detection can parse template variables.
         return tokenizer.get_chat_template(chat_template, tools=tools)
+
+    # Predefined templates that replace the ones shipped on HF Hub
+    path = get_chat_template_override_path(
+        model_type=model_config.hf_config.model_type,
+        tokenizer_name_or_path=tokenizer.name_or_path,
+    )
+    if path is not None:
+        return load_chat_template(path)
 
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
@@ -408,7 +426,7 @@ def _is_var_or_elems_access(
 
 
 def _attr_dotted_name(node: jinja2.nodes.Node) -> str | None:
-    """Render an attribute-assignment target like ``ns.rest`` as a dotted name."""
+    """Render an attribute-assignment target like `ns.rest` as a dotted name."""
     if isinstance(node, jinja2.nodes.NSRef):
         return f"{node.name}.{node.attr}"
     parts = []
@@ -955,13 +973,10 @@ def rebuild_mm_uuids_from_mm_data(
         "Expected all vision_chunk items to be dicts"
     )
     vision_chunks = cast(list[dict[str, Any]], vision_chunks)
-    vision_chunk_uuids = [
-        uuid_val for item in vision_chunks if (uuid_val := item.get("uuid")) is not None
-    ]
 
-    if vision_chunk_uuids:
-        mm_uuids = dict(mm_uuids)
-        mm_uuids["vision_chunk"] = vision_chunk_uuids
+    # One entry per item; None means the item is hashed by content.
+    mm_uuids = dict(mm_uuids)
+    mm_uuids["vision_chunk"] = [item.get("uuid") for item in vision_chunks]
 
     return mm_uuids
 
@@ -1036,14 +1051,6 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         config: VllmConfig,
         tokenizer: HfTokenizer | None,
     ) -> None:
-        # Ensure the og tokenizer is never modified by maybe_make_thread_pool
-        tokenizer = copy.copy(tokenizer)
-        if (
-            # Skip for mock configs and tokenizers
-            getattr(config.model_config, "enable_prompt_embeds", False)
-            and isinstance(tokenizer, HfTokenizer)
-        ):
-            _ensure_prompt_embeds_placeholder_token(tokenizer)
         super().__init__(config, tokenizer)
 
         self.use_unified_vision_chunk = getattr(
@@ -1054,17 +1061,17 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             safe_apply_chat_template, executor=self._executor
         )
 
-        if self.tokenizer is not None:
-            maybe_make_thread_pool(
-                self.tokenizer, config.model_config.renderer_num_workers + 1
-            )
+    def _prepare_tokenizer(self, tokenizer: HfTokenizer) -> None:
+        # Skip for mock configs
+        if getattr(self.model_config, "enable_prompt_embeds", False):
+            _ensure_prompt_embeds_placeholder_token(tokenizer)
 
     def _replace_executor(self) -> None:
         """Replace the inner render pool after a stuck worker.
 
         Called after a render timeout so that the stuck thread (which CPython
         cannot interrupt) does not permanently block all subsequent renders.
-        The executor *object* is kept so ``make_async`` wrappers bound at
+        The executor *object* is kept so `make_async` wrappers bound at
         init (tokenize, decode, pooling, derender) keep submitting work.
         The old inner pool is abandoned with wait=False — its thread will
         eventually finish or be reaped on process exit.
@@ -1101,6 +1108,15 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         # Only fast tokenizers expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
 
+    def _resolve_content_format(self, params: ChatParams) -> ChatTemplateContentFormat:
+        return resolve_chat_template_content_format(
+            chat_template=params.chat_template,
+            tools=params.chat_template_kwargs.get("tools"),
+            given_format=params.chat_template_content_format,
+            tokenizer=self.get_tokenizer(),
+            model_config=self.model_config,
+        )
+
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
@@ -1118,13 +1134,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
             model_config,
-            content_format=resolve_chat_template_content_format(
-                chat_template=params.chat_template,
-                tools=params.chat_template_kwargs.get("tools"),
-                given_format=params.chat_template_content_format,
-                tokenizer=tokenizer,
-                model_config=model_config,
-            ),
+            content_format=self._resolve_content_format(params),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
@@ -1241,13 +1251,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
             model_config,
-            content_format=resolve_chat_template_content_format(
-                chat_template=params.chat_template,
-                tools=params.chat_template_kwargs.get("tools"),
-                given_format=params.chat_template_content_format,
-                tokenizer=tokenizer,
-                model_config=model_config,
-            ),
+            content_format=self._resolve_content_format(params),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
         )

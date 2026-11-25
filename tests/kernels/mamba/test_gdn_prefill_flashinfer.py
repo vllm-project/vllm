@@ -71,24 +71,29 @@ def test_flashinfer_gdn_prefill_passes_cu_seqlens_through(monkeypatch):
     ),
     reason="FlashInfer GDN prefill checkpoints need SM90, SM100 or SM120.",
 )
+@pytest.mark.parametrize(
+    ("offsets", "query_lens"),
+    [
+        ([0, 128, 0, 192], [200, 50, 300]),  # 2 of 7 states used: slots
+        ([0, 128, 0, 128], [200, 50, 200]),  # all used: no slots
+    ],
+)
 @pytest.mark.parametrize("use_cp", [True, False])
 @pytest.mark.parametrize("ssm_dtype", [torch.float32, torch.bfloat16])
-def test_flashinfer_checkpoints_export_the_state_at_each_offset(use_cp, ssm_dtype):
+def test_flashinfer_checkpoints_export_the_state_at_each_offset(
+    use_cp, ssm_dtype, offsets, query_lens
+):
     """Each exported checkpoint is the state of the prefill stopped there.
 
-    The leading decode row is outside the prefill kernel. The two checkpointed
-    prefills put FlashInfer's stride (their offsets' gcd) below both offsets,
-    so the exporter must pick each state out of the shared emitted buffer;
-    the third prefill takes no checkpoint. Both FlashInfer routes are covered
-    because ``use_cp="auto"`` may take either. The conv cache has MTP's spec
-    slots after the window, which the conv kernels leave alone.
+    The leading decode row is outside the prefill kernel and the second
+    prefill takes no checkpoint. Both FlashInfer routes are covered because
+    `use_cp="auto"` may take either (slots: non-CP only). The conv cache has
+    MTP's spec slots after the window, which the conv kernels leave alone.
     """
     torch.manual_seed(0)
     device = "cuda"
     num_qk_heads, num_v_heads, head_dim, conv_dim, state_len = 2, 4, 128, 16, 3
     num_spec = 2
-    offsets = [0, 128, 0, 192]
-    query_lens = [200, 50, 300]
     state_indices = [NULL_BLOCK_ID, 3, NULL_BLOCK_ID, 5]
     num_blocks = 8
 
@@ -109,9 +114,14 @@ def test_flashinfer_checkpoints_export_the_state_at_each_offset(use_cp, ssm_dtyp
     for query_len in query_lens:
         prefill_cu.append(prefill_cu[-1] + query_len)
 
-    every_n_tokens, cu_starts, rows = plan_flashinfer_checkpoints(offsets, query_lens)
-    state_checkpoints = torch.empty(
-        cu_starts[-1], num_v_heads, head_dim, head_dim, device=device
+    every_n_tokens, cu_starts, rows, slots = plan_flashinfer_checkpoints(
+        offsets, query_lens
+    )
+    if slots is not None and use_cp:
+        pytest.skip("FlashInfer takes checkpoint slots on the non-CP route only.")
+    # NaN, so a missing write fails.
+    state_checkpoints = torch.full(
+        (2, num_v_heads, head_dim, head_dim), float("nan"), device=device
     )
     fi_chunk_gated_delta_rule(
         q=q,
@@ -127,6 +137,9 @@ def test_flashinfer_checkpoints_export_the_state_at_each_offset(use_cp, ssm_dtyp
         checkpoint_cu_starts=torch.tensor(cu_starts, device=device),
         checkpoint_every_n_tokens=every_n_tokens,
         use_cp=use_cp,
+        checkpoint_state_indices=(
+            None if slots is None else torch.tensor(slots, device=device)
+        ),
     )
 
     # The exporter sees the decode row's token in front of the prefills.

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3 index top-k (FlyDSL) against AITER's ``pa_sparse_block_topk``
+"""MiniMax-M3 index top-k (FlyDSL) against AITER's `pa_sparse_block_topk`
 block ids, bit for bit, on realistic and adversarial decode and prefill rows."""
 
 import math
@@ -71,7 +71,7 @@ def _scores(kind, heads, rows, width, nblk, gen):
 
 
 def _topk_out(heads, rows, pad):
-    """``topk_idx`` and the tensor compared: with ``pad`` a view (non-zero row
+    """`topk_idx` and the tensor compared: with `pad` a view (non-zero row
     start, larger head stride) of a larger persistent buffer, compared whole
     (nothing outside the view is written)."""
     if not pad:
@@ -111,6 +111,9 @@ SHAPES = [
     (8, 1, 200000, (200000, 262000), 4, 1),
     (4, 2, 0, (0, 0), 1, 1),  # a zero max_seq_len (dummy batch)
     (1, 1, 1, (0, 1), 1, 1),
+    (100, 4, 1 << 20, (1, 1 << 20), 1, 1),  # 100 requests, every window count
+    (16, 1, 1 << 20, (1020 * BLOCK, 1030 * BLOCK), 1, 1),  # waves 0 and 1 meet
+    (16, 1, 1 << 20, (4090 * BLOCK, 4100 * BLOCK), 1, 1),  # second trip of the waves
 ]
 KINDS = [
     "real",

@@ -70,6 +70,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -81,19 +82,21 @@ from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     HasInnerState,
     IsHybrid,
+    MambaStateShapes,
     MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
+    SupportsReplaySSM,
     _require_is_multimodal,
 )
-from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5MoeProcessingInfo,
     Qwen3_5ProcessingInfo,
 )
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.qwen3_next import (
     Qwen3NextAttention,
     Qwen3NextDecoderLayer,
@@ -118,27 +121,35 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
     sequence_parallel_chunk,
+    spec_decode_needs_target_embed,
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
+from vllm.utils.flashinfer import has_flashinfer
 
-from .ops.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
-from .ops.fused_norm_quant import FP8_DTYPE, gemma_add_rms_norm_quant
+from ..common.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
+from .ops.fused_allreduce_norm_quant import fused_allreduce_gemma_rms_norm_quant
+from .ops.fused_norm_quant import (
+    FP8_DTYPE,
+    gemma_add_rms_norm,
+    gemma_add_rms_norm_quant,
+)
 
 logger = init_logger(__name__)
 
 
 def _norm_quant_key(linear: nn.Module) -> QuantKey | None:
-    """The input quant key of ``linear`` that the fused norms can produce.
+    """The input quant key of `linear` that the fused norms can produce.
 
     Checked per call: keys are exposed after weight loading, and LoRA hides
     them (requires_unquantized_input).
     """
     key = get_input_quant_key(linear)
-    if key == kFp8StaticTensorSym:
+    if key in (kFp8StaticTensorSym, kFp8DynamicTokenSym):
         return key
     # The norm writes block scales for exactly K = hidden_size, in whole
     # 4-column scale tiles (weights only require K % 32 == 0).
@@ -175,50 +186,95 @@ def _fused_gdn_gated_rms_norm_quant(
 
 
 class Qwen3_5RMSNorm(nn.Module):
-    """Gemma-style RMS normalization backed by flashinfer kernels.
+    """Gemma-style RMSNorm: flashinfer kernels, or the Triton
+    `gemma_add_rms_norm` below SM80 / without FlashInfer (whose norm
+    module cannot JIT-build there).
 
-    When ``residual`` is given, the fused add + norm runs in place and the
-    updated ``(x, residual)`` pair is returned.
+    With `residual`, both paths update it in place; the flashinfer path
+    also updates `x` in place. Use the returned tensors.
+
+    `reduce_inputs`: in `forward_fused`, an `x` that comes with a
+    residual is the un-reduced TP partial of a row-parallel linear, and the
+    norm absorbs its all-reduce. An `x` without a residual (first decoder
+    layer, MTP layer) is always complete.
     """
 
-    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
+    def __init__(
+        self, hidden_size: int, eps: float = 1e-6, reduce_inputs: bool = False
+    ) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(hidden_size))
         set_weight_attrs(self.weight, {"dummy_weight_value": 0.0})
         self.variance_epsilon = eps
+        self.reduce_inputs = reduce_inputs
+        self.use_flashinfer = (
+            current_platform.has_device_capability(80) and has_flashinfer()
+        )
 
     def forward(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if not self.use_flashinfer:
+            y = gemma_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
+            return (y, residual) if residual is not None else y
+
         from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
 
         if residual is None:
             return gemma_rmsnorm(x, self.weight, self.variance_epsilon)
 
-        # gemma_fused_add_rmsnorm mutates x and residual in place.
         gemma_fused_add_rmsnorm(x, residual, self.weight, self.variance_epsilon)
         return x, residual
 
-    def forward_quant(
+    def forward_fused(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None,
-        linear: LinearBase,
-        key: QuantKey,
+        linear: LinearBase | None,
+        *,
         write_y: bool = False,
-    ) -> tuple[QuantizedActivation, torch.Tensor | None, torch.Tensor]:
-        """``forward`` fused with ``linear``'s input quantization ``key``.
+    ) -> tuple[QuantizedActivation | None, torch.Tensor | None, torch.Tensor]:
+        """`forward` with the preceding TP all-reduce (`reduce_inputs`)
+        and the consumer `linear`'s input quantization fused in.
 
-        x is not modified. Returns the quantized normed activation, the
-        normed activation in x's dtype when ``write_y`` (else None), and the
-        residual (x itself when ``residual`` is None).
+        When `linear`'s input quant key is supported, the normed activation
+        is quantized for it; x is then not modified.
+
+        Returns the quantized normed activation (or None), the normed
+        activation in x's dtype (when the quantized one is None, or when
+        `write_y`; else None) and the residual (x when `residual` is None).
         """
-        nvfp4 = key == kNvfp4Dynamic
-        scale = linear.input_global_scale_inv if nvfp4 else linear.input_scale
+        allreduce = self.reduce_inputs and residual is not None
+        key = None if linear is None else _norm_quant_key(linear)
+        if key is None:
+            if allreduce:
+                assert residual is not None
+                return None, *fused_allreduce_gemma_rms_norm(x, residual, self)
+            if residual is None:
+                return None, self(x), x
+            return None, *self(x, residual)
+
+        assert linear is not None
+        if key == kFp8DynamicTokenSym:
+            scale = None
+        elif key == kNvfp4Dynamic:
+            scale = linear.input_global_scale_inv
+        else:
+            scale = linear.input_scale
+        if allreduce:
+            assert residual is not None
+            out = fused_allreduce_gemma_rms_norm_quant(
+                x, residual, self.weight, self.variance_epsilon, scale, key
+            )
+            if out is not None:
+                return out
+            # No FlashInfer AR+norm (unavailable or above its workspace
+            # budget): explicit all-reduce, then the Triton norm-quant.
+            x = tensor_model_parallel_all_reduce(x)
         q, block_scale, y = gemma_add_rms_norm_quant(
-            x, residual, self.weight, self.variance_epsilon, scale, nvfp4, write_y
+            x, residual, self.weight, self.variance_epsilon, scale, key, write_y
         )
         qa = QuantizedActivation(
             data=q,
@@ -249,9 +305,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         self.layer_idx = extract_layer_index(prefix)
         is_moe_layer = config.model_type == "qwen3_5_moe_text"
         self.use_attn_reduce_scatter_for_moe = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-            and is_moe_layer
+            parallel_config.use_sequence_parallel_moe and is_moe_layer
         )
         # Defer row-parallel all-reduces to the following norm
         # (deepseek_v32 pattern); exclude PP and SP.
@@ -331,11 +385,18 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         else:
             raise ValueError(f"Invalid model_type {config.model_type}")
 
+        # The previous layer's MLP output is a partial whenever this layer's
+        # is (layer-uniform); attention output whenever its all-reduce is
+        # deferred.
         self.input_layernorm = Qwen3_5RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            reduce_inputs=self.mlp_output_is_partial,
         )
         self.post_attention_layernorm = Qwen3_5RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            reduce_inputs=self.use_fused_allreduce_norm,
         )
 
         self.layer_scale = getattr(config, "layer_scale", False)
@@ -366,37 +427,26 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             return super().forward(hidden_states, residual, positions, **kwargs)
 
         # Each norm absorbs the preceding row-parallel linear's deferred
-        # all-reduce (use_fused_allreduce_norm), or quantizes for its
-        # consumer. layer_scale commutes with the deferred all-reduce.
+        # all-reduce (reduce_inputs) and quantizes for its consumer when it
+        # can. layer_scale commutes with the deferred all-reduce.
         is_gdn = self.layer_type == "linear_attention"
         in_proj = self.linear_attn.in_proj_qkvz if is_gdn else self.self_attn.qkv_proj
-        in_proj_input = None
-        if residual is not None and self.mlp_output_is_partial:
-            hidden_states, residual = fused_allreduce_gemma_rms_norm(
-                hidden_states, residual, self.input_layernorm
-            )
-        elif (key := _norm_quant_key(in_proj)) is not None:
-            # GDN's in_proj_ba reads the unquantized normed activation.
-            in_proj_input, hidden_states, residual = self.input_layernorm.forward_quant(
-                hidden_states, residual, in_proj, key, write_y=is_gdn
-            )
-        elif residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
-
-        if not is_gdn:
-            hidden_states = self.self_attn(
-                hidden_states=hidden_states if in_proj_input is None else in_proj_input,
-                positions=positions,
-            )
-        elif in_proj_input is not None:
+        # GDN's in_proj_ba reads the unquantized normed activation.
+        in_proj_input, hidden_states, residual = self.input_layernorm.forward_fused(
+            hidden_states,
+            residual,
+            in_proj,
+            write_y=is_gdn,
+        )
+        if is_gdn:
             hidden_states = self.linear_attn.forward_cuda(
                 hidden_states, qkvz_input=in_proj_input
             )
         else:
-            hidden_states = self.linear_attn(hidden_states=hidden_states)
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states if in_proj_input is None else in_proj_input,
+                positions=positions,
+            )
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:
@@ -410,19 +460,12 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
 
         # The MoE router needs the unquantized activation.
         gate_up = self.mlp.gate_up_proj if isinstance(self.mlp, Qwen3NextMLP) else None
-        if self.use_fused_allreduce_norm:
-            hidden_states, residual = fused_allreduce_gemma_rms_norm(
-                hidden_states, residual, self.post_attention_layernorm
+        mlp_input, hidden_states, residual = (
+            self.post_attention_layernorm.forward_fused(
+                hidden_states, residual, gate_up
             )
-        elif gate_up is not None and (key := _norm_quant_key(gate_up)) is not None:
-            hidden_states, _, residual = self.post_attention_layernorm.forward_quant(
-                hidden_states, residual, gate_up, key
-            )
-        else:
-            hidden_states, residual = self.post_attention_layernorm(
-                hidden_states, residual
-            )
-        hidden_states = self.mlp(hidden_states)
+        )
+        hidden_states = self.mlp(hidden_states if mlp_input is None else mlp_input)
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:
@@ -469,10 +512,17 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
 
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        if (
+            get_pp_group().is_first_rank
+            or (config.tie_word_embeddings and get_pp_group().is_last_rank)
+            or spec_decode_needs_target_embed(vllm_config)
+        ):
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
 
         def get_layer(prefix: str):
             return Qwen3_5DecoderLayer(
@@ -553,7 +603,8 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
         full_num_tokens = positions.shape[-1]
         if self.use_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
-            assert residual is None
+            if residual is not None:
+                residual = sequence_parallel_chunk(residual)
 
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
@@ -570,6 +621,11 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             )
 
         if not get_pp_group().is_last_rank:
+            if self.use_sequence_parallel:
+                # PP transport expects full-token tensors replicated across TP ranks.
+                packed = torch.cat([hidden_states, residual], dim=-1)
+                packed = tensor_model_parallel_all_gather(packed, 0)[:full_num_tokens]
+                hidden_states, residual = packed.chunk(2, dim=-1)
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
@@ -610,6 +666,7 @@ class Qwen3_5ForCausalLMBase(
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
+    SupportsReplaySSM,
 ):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -696,17 +753,18 @@ class Qwen3_5ForCausalLMBase(
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, ...]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
+            vllm_config.cache_config.use_replayssm,
         )
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> MambaStateShapes:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
@@ -715,6 +773,7 @@ class Qwen3_5ForCausalLMBase(
             if vllm_config.speculative_config
             else 0
         )
+        cache_config = vllm_config.cache_config
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
             tp_size,
             hf_config.linear_num_key_heads,
@@ -723,6 +782,7 @@ class Qwen3_5ForCausalLMBase(
             hf_config.linear_value_head_dim,
             hf_config.linear_conv_kernel_dim,
             num_spec,
+            cache_config.replayssm_buffer_len if cache_config.use_replayssm else None,
         )
 
     @classmethod
@@ -778,7 +838,9 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
     info=Qwen3_5ProcessingInfo,
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
-class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
+class Qwen3_5ForConditionalGeneration(
+    Qwen3VLForConditionalGeneration, IsHybrid, SupportsReplaySSM
+):
     supports_multimodal_pruning = True
 
     hf_to_vllm_mapper = (
@@ -874,7 +936,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for Qwen3.5.
 
-        With mrope enabled (default for Qwen3VL-class models), ``positions``
+        With mrope enabled (default for Qwen3VL-class models), `positions`
         has shape `(3, seq_len)`, otherwise `(seq_len,)`.
         """
         if intermediate_tensors is not None:
@@ -900,17 +962,18 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, ...]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
+            vllm_config.cache_config.use_replayssm,
         )
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> MambaStateShapes:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
@@ -919,6 +982,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             if vllm_config.speculative_config
             else 0
         )
+        cache_config = vllm_config.cache_config
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
             tp_size,
             hf_config.linear_num_key_heads,
@@ -927,6 +991,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             hf_config.linear_value_head_dim,
             hf_config.linear_conv_kernel_dim,
             num_spec,
+            cache_config.replayssm_buffer_len if cache_config.use_replayssm else None,
         )
 
     @classmethod

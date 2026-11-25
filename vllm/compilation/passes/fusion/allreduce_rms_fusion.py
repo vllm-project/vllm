@@ -100,33 +100,6 @@ if hasattr(torch.ops._C, "scaled_fp4_quant"):
     STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
 # Max size of the input tensor per world size per device capability
-# to use flashinfer fused allreduce
-FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
-    90: {
-        2: 64,  # 64MB
-        4: 2,  # 2MB
-        8: 0.5,  # 0.5MB
-    },
-    100: {
-        2: 64,  # 64MB
-        4: 32,  # 32MB
-        8: 1,  # 1MB
-        16: 64,  # 64MB (mnnvl multi-node)
-    },
-    103: {
-        2: 64,  # 64MB
-        4: 64,  # 64MB
-        8: 4,  # 4MB
-        16: 64,  # 64MB (mnnvl multi-node)
-    },
-    107: {
-        2: 64,  # 64MB
-        4: 64,  # 64MB
-        8: 2,  # 2MB
-    },
-}
-
-# Max size of the input tensor per world size per device capability
 # to use flashinfer one shot fused allreduce
 # OneShot max size is at most 64MB / world size (FlashInfer restriction)
 _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[int, dict[int, float]] = {
@@ -1301,13 +1274,13 @@ class AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
     """Fuse AllReduce + RMSNorm + per-group FP8 quant into a single AITER
     custom op.
 
-    Matches the AR-side analogue of ``AiterRMSFp8GroupQuantPattern`` in
-    ``rocm_aiter_fusion.py``: ``all_reduce -> rms_norm -> group_fp8_quant``
-    fans out into ``rocm_aiter_fused_allreduce_rmsnorm_quant_per_group``.
+    Matches the AR-side analogue of `AiterRMSFp8GroupQuantPattern` in
+    `rocm_aiter_fusion.py`: `all_reduce -> rms_norm -> group_fp8_quant`
+    fans out into `rocm_aiter_fused_allreduce_rmsnorm_quant_per_group`.
 
-    Without this pattern, ``RocmAiterAllReduceFusionPass`` would fuse the
-    ``all_reduce + rms_norm`` half (PR #41825 wires that), but the trailing
-    ``rocm_aiter_group_fp8_quant`` would still launch as a separate kernel.
+    Without this pattern, `RocmAiterAllReduceFusionPass` would fuse the
+    `all_reduce + rms_norm` half (PR #41825 wires that), but the trailing
+    `rocm_aiter_group_fp8_quant` would still launch as a separate kernel.
     That standalone quant accounts for ~535us / decode step on DSv3.2 MI355X
     TP4 -- this pattern eliminates it by absorbing the quant into the AR
     epilogue. Group size 128 matches the FP8 block-scaled MM kernel used by
@@ -1379,10 +1352,10 @@ class AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
 class AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
     BasePattern, VllmPatternReplacement
 ):
-    """``fused_add`` variant of ``AiterAllreduceFusedRMSNormGroupQuantFP8Pattern``.
+    """`fused_add` variant of `AiterAllreduceFusedRMSNormGroupQuantFP8Pattern`.
 
     Targets the dominant DSv3.2-style post-attention / post-MLP path:
-    ``all_reduce -> fused_add_rms_norm -> group_fp8_quant``. Returns the
+    `all_reduce -> fused_add_rms_norm -> group_fp8_quant`. Returns the
     FP8 quant output, the residual carry-over, and the per-group scale.
     """
 
@@ -1457,26 +1430,26 @@ class AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
 class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
     BasePattern, VllmPatternReplacement
 ):
-    """Indexer-fan-out variant of ``AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern``.
+    """Indexer-fan-out variant of `AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern`.
 
     Targets the DSv3.2 post-attention / post-MLP path where the post-AR normed
-    activation has two consumers: a per-group FP8 quant for ``fused_qkv_a_proj``
-    *and* a bf16 ``rocm_unquantized_gemm`` for the indexer ``wk_weights_proj``.
+    activation has two consumers: a per-group FP8 quant for `fused_qkv_a_proj`
+    *and* a bf16 `rocm_unquantized_gemm` for the indexer `wk_weights_proj`.
     The single-consumer pattern above cannot fire when this fan-out is present,
     so without this pattern the standalone FP8 quant kernel survives unfused
     (~535us / decode step on DSv3.2 MI355X TP4).
 
-    Lowers to ``rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm``
-    (the ``emit_bf16=True`` variant of the AR+RMS+QUANT launcher, which returns
+    Lowers to `rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm`
+    (the `emit_bf16=True` variant of the AR+RMS+QUANT launcher, which returns
     FP8 quant + scales + bf16 normed activations in one kernel) and rewires the
     indexer GEMM onto the emitted bf16 norm output. The RMS output is also a
     graph output in DSv3.2's residual carry; it is returned as a pattern output
     so the matcher can substitute the bf16 norm in its place.
 
-    The trailing FP8 group-quant is matched via ``MatcherQuantFP8`` (consistent
-    with the sibling patterns above), which traces both ``QuantFP8.forward_hip``
-    and ``forward_native`` paths and so matches whichever op the call site
-    lowers to (``vllm.rocm_aiter_group_fp8_quant``).
+    The trailing FP8 group-quant is matched via `MatcherQuantFP8` (consistent
+    with the sibling patterns above), which traces both `QuantFP8.forward_hip`
+    and `forward_native` paths and so matches whichever op the call site
+    lowers to (`vllm.rocm_aiter_group_fp8_quant`).
     """
 
     def __init__(
