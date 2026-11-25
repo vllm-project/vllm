@@ -1714,7 +1714,7 @@ def test_hidden_state_extraction_group_billed_at_own_width():
     assert required < legacy_required
 
     kv_cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        vllm_config, groups, available_memory=page * 32
+        vllm_config, groups, num_blocks=32
     )
     assert kv_cache_config.num_blocks == 32
     assert {tensor.size for tensor in kv_cache_config.kv_cache_tensors} == {page * 32}
