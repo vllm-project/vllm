@@ -674,8 +674,8 @@ class KimiMoE(nn.Module):
             and self.routed_expert_down_proj is not None
             # Every weight DepMoe reads directly must be unquantized BF16.
             and all(
-                getattr(linear, "weight", None) is not None
-                and linear.weight.dtype == torch.bfloat16
+                isinstance(w := getattr(linear, "weight", None), torch.Tensor)
+                and w.dtype == torch.bfloat16
                 for linear in (
                     self.gate,
                     se.gate_up_proj,
