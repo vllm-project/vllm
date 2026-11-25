@@ -38,7 +38,7 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_dcp_kv_block_size,
     resolve_kv_cache_block_sizes,
 )
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
@@ -855,7 +855,7 @@ class UMBPStoreConnectorScheduler:
             and block_state.boundary_state_offloads
         ):
             self._add_boundary_state_plans(
-                block_state.boundary_state_offloads,
+                block_state,
                 meta,
                 set(scheduler_output.finished_req_ids),
                 set(scheduler_output.preempted_req_ids or ()),
@@ -1214,7 +1214,7 @@ class UMBPStoreConnectorScheduler:
 
     def _add_boundary_state_plans(
         self,
-        offloads: dict[str, list[tuple[int, int, int]]],
+        block_state: KVConnectorBlockState,
         meta: UMBPConnectorMetadata,
         finished: set[str],
         preempted: set[str],
@@ -1223,7 +1223,7 @@ class UMBPStoreConnectorScheduler:
         if self.codec is None:
             return
         prefix_groups = set(self.kv_cache_config.prefix_cacheable_group_ids)
-        for request_id, entries in offloads.items():
+        for request_id, entries in block_state.boundary_state_offloads.items():
             if request_id in finished or request_id in preempted:
                 logger.debug(
                     "UMBP boundary offloads dropped request=%s entries=%d: %s",
@@ -1243,19 +1243,23 @@ class UMBPStoreConnectorScheduler:
                 continue
             boundaries = sorted({boundary for _, _, boundary in entries})
             # Core hands off only state pages; a boundary inside an attention
-            # block also needs that block's page.
+            # block also needs that block's page. It comes from core's current
+            # table: the tracker's grows only with eager stores.
             pages: list[tuple[int, int, int]] = []
-            for group_id, group_blocks in zip(
-                self.kv_cache_config.prefix_cacheable_group_ids, tracker.block_ids
-            ):
+            block_ids: tuple[list[int], ...] | None = None
+            for group_id in self.kv_cache_config.prefix_cacheable_group_ids:
                 group = self.kv_cache_config.kv_cache_groups[group_id]
                 if not issubclass(group.manager_cls, FullAttentionManager):
                     continue
                 block_size = self.group_block_sizes[group_id]
                 for boundary in boundaries:
+                    if not boundary % block_size:
+                        continue
+                    if block_ids is None:
+                        block_ids = block_state.get_block_ids(request_id) or ()
                     index = boundary // block_size
-                    if boundary % block_size and index < len(group_blocks):
-                        pages.append((group_id, group_blocks[index], boundary))
+                    if group_id < len(block_ids) and index < len(block_ids[group_id]):
+                        pages.append((group_id, block_ids[group_id][index], boundary))
             plans: list[BlockTransferPlan] = []
             for group_id, block_id, boundary_tokens in [*entries, *pages]:
                 if group_id not in prefix_groups or block_id == NULL_BLOCK_ID:

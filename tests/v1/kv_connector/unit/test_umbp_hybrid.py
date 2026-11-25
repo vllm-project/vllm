@@ -51,6 +51,7 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id
+from vllm.v1.core.sched.output import KVConnectorBlockState
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     SlidingWindowManager,
@@ -855,6 +856,56 @@ def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
     assert not scheduler.has_pending_push_work()
 
 
+@pytest.mark.parametrize("lazy_offload", [False, True])
+def test_boundary_page_comes_from_the_current_block_table(lazy_offload):
+    """Lazy stores never grow the request tracker, so a boundary's attention
+    page must come from core's table, which chunked prefill may have grown."""
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config(
+            {"mode": "embedded", "lazy_offload": lazy_offload}, prefix_match_unit=4
+        ),
+        _hybrid_kv_cache_config(),
+        _SchedulerHandle([]),
+        BlockIdentityCodec(UMBPNamespace("boundary-table")),
+    )
+    request = make_request(
+        "grow",
+        num_tokens=33,
+        block_hashes=[bytes([index]) for index in range(8)],
+        block_ids=([1], [5]),
+    )
+    scheduler.update_state_after_alloc(
+        request, SimpleNamespace(get_block_ids=lambda group_ids: ([1], [5])), 0
+    )
+    scheduler.build_connector_meta(
+        make_scheduler_output(
+            new_reqs=[
+                SimpleNamespace(
+                    req_id="grow", num_computed_tokens=0, block_ids=([1], [5])
+                )
+            ],
+            scheduled_tokens={"grow": 16},
+        )
+    )
+    table = ([1, 2], [5, 6])
+    metadata = scheduler.build_connector_meta(
+        make_scheduler_output(
+            cached_reqs=SimpleNamespace(
+                req_ids=["grow"], num_computed_tokens=[16], new_block_ids=[([2], [6])]
+            ),
+            scheduled_tokens={"grow": 4},
+            block_state=KVConnectorBlockState(
+                req_ids={"grow"},
+                resolve_block_ids=lambda req_id: table,
+                boundary_state_offloads={"grow": [(1, 6, 20)]},
+            ),
+        )
+    )
+
+    stored = {(plan.group_id, plan.block_id) for plan in metadata.store_plans}
+    assert {(1, 6), (0, 2)} <= stored
+
+
 @pytest.mark.parametrize(
     "device",
     [
@@ -958,7 +1009,11 @@ def test_hybrid_boundary_restores_every_byte(socket_dir, device, request_state):
                 )
             ],
             scheduled_tokens={"tail": 12},
-            block_state=SimpleNamespace(boundary_state_offloads={"tail": [(1, 2, 12)]}),
+            block_state=KVConnectorBlockState(
+                req_ids={"tail"},
+                resolve_block_ids=lambda req_id: source_ids,
+                boundary_state_offloads={"tail": [(1, 2, 12)]},
+            ),
         )
     try:
         metadata = scheduler.build_connector_meta(output)
