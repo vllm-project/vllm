@@ -1071,6 +1071,25 @@ def test_init_parameters_keeps_declared_dtype_and_requires_grad():
     assert module.int8.dtype == torch.int8 and not module.int8.requires_grad
 
 
+def test_ignored_unexpected_patterns_match_renamed_keys():
+    """Like Transformers, `_keys_to_ignore_on_load_unexpected` matches renamed keys
+    and only drops weights nothing loads (A.X-K1's `post_mlp_layernorm` is renamed
+    into `mlp` and unused only on its dense layers)."""
+    stub = nn.Module()
+    stub.layers = nn.ModuleList([nn.Module(), nn.Module()])
+    stub.layers[0].mlp = nn.Module()
+    stub.layers[0].mlp.post_norm = nn.RMSNorm(2)
+    stub.model = SimpleNamespace(_keys_to_ignore_on_load_unexpected=[r"mlp\.post_norm"])
+    stub.hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_renaming=[WeightRenaming("post_norm", "mlp.post_norm")]
+    )
+    weights = [(f"layers.{i}.post_norm.weight", torch.ones(2)) for i in range(2)]
+
+    kept = Base._drop_ignored_unexpected(stub, iter(weights))
+
+    assert [name for name, _ in kept] == ["layers.0.post_norm.weight"]
+
+
 @pytest.mark.skipif(
     not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.22"
 )
