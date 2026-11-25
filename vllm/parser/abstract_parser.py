@@ -966,7 +966,7 @@ class DelegatingParser(Parser):
                 )
             )
 
-            if reasoning_from_this_batch:
+            if reasoning_from_this_batch is not None:
                 if delta_message is None:
                     delta_message = DeltaMessage(reasoning=reasoning_from_this_batch)
                 elif not delta_message.reasoning:

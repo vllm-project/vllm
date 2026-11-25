@@ -1330,12 +1330,6 @@ class NemoConvSubsampling(torch.nn.Module):
 
         self.conv = torch.nn.Sequential(*layers)
 
-    def get_sampling_frames(self) -> list[int]:
-        return [1, self.subsampling_factor]
-
-    def get_streaming_cache_size(self) -> list[int]:
-        return [0, self.subsampling_factor + 1]
-
     def forward(self, x: Tensor, mask: Tensor | None) -> tuple[Tensor, Tensor | None]:
         """Forward method for NeMo subsampling.
 
@@ -1529,19 +1523,6 @@ class NemoConvSubsampling(torch.nn.Module):
             ind += step
 
         return torch.cat(out_chunks, 1)
-
-    def change_subsampling_conv_chunking_factor(
-        self, subsampling_conv_chunking_factor: int
-    ) -> None:
-        if (
-            subsampling_conv_chunking_factor != -1
-            and subsampling_conv_chunking_factor != 1
-            and subsampling_conv_chunking_factor % 2 != 0
-        ):
-            raise ValueError(
-                "subsampling_conv_chunking_factor should be -1, 1, or a power of 2"
-            )
-        self.subsampling_conv_chunking_factor = subsampling_conv_chunking_factor
 
 
 def calc_length_int(
