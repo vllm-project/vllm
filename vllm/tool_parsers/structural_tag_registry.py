@@ -6,6 +6,7 @@ import json
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, TypeAlias
 
+import jsonschema
 from openai.types.responses import CustomTool, FunctionTool, ToolChoiceCustom
 from openai.types.responses.response import ToolChoice as ResponsesToolChoice
 from openai.types.responses.tool import Tool as ResponsesTool
@@ -242,12 +243,99 @@ def get_model_structural_tag(
             f"tokens and cannot apply token_suffix={token_suffix!r}"
         )
 
-    return get_xgrammar_model_structural_tag(
+    tag = get_xgrammar_model_structural_tag(
         model=model,
         tools=dumped_tools,
         tool_choice=dumped_tool_choice,
         reasoning=reasoning,
     )
+    if model in _QWEN_XML_EMPTY_CALL_MODELS:
+        _allow_qwen_xml_empty_call(tag)
+    return tag
+
+
+_QWEN_XML_EMPTY_CALL_MODELS = frozenset({"qwen_3_coder", "qwen_3_5"})
+_QWEN_XML_CALL_BEGIN = "<tool_call>\n<function="
+_QWEN_XML_CALL_END = "\n</function>\n</tool_call>"
+_QWEN_XML_EMPTY_CALL_END = "</function>\n</tool_call>"
+_SCHEMA_COMBINATORS = (
+    "anyOf",
+    "oneOf",
+    "allOf",
+    "not",
+    "if",
+    "$ref",
+    "dependentRequired",
+)
+
+
+def _accepts_empty_object(schema: Any) -> bool:
+    if isinstance(schema, bool):
+        return schema
+    if not isinstance(schema, dict):
+        return False
+    try:
+        validator_cls = jsonschema.validators.validator_for(schema)
+        return validator_cls(schema).is_valid({})
+    except Exception:
+        return False
+
+
+def _empty_call_kind(schema: Any) -> Literal["only", "optional"] | None:
+    if (
+        isinstance(schema, dict)
+        and not any(k in schema for k in _SCHEMA_COMBINATORS)
+        and schema.get("type", "object") == "object"
+        and not schema.get("required")
+        and (schema.get("minProperties") or 0) <= 0
+        and "properties" in schema
+        and not schema["properties"]
+        and not schema.get("patternProperties")
+        and schema.get("additionalProperties") in (None, False)
+    ):
+        return "only"
+    if _accepts_empty_object(schema):
+        return "optional"
+    return None
+
+
+def _allow_qwen_xml_empty_call(tag: StructuralTag) -> StructuralTag:
+    """Allow Qwen XML tools accepting `{}` to close without an extra newline."""
+
+    def visit(node: Any) -> None:
+        if isinstance(node, TagFormat):
+            content = node.content
+            if (
+                isinstance(node.begin, str)
+                and node.begin.startswith(_QWEN_XML_CALL_BEGIN)
+                and node.end == _QWEN_XML_CALL_END
+                and isinstance(content, JSONSchemaFormat)
+                and content.style == "qwen_xml"
+            ):
+                kind = _empty_call_kind(content.json_schema)
+                if kind == "only":
+                    node.content = OptionalFormat(content=ConstStringFormat(value="\n"))
+                    node.end = _QWEN_XML_EMPTY_CALL_END
+                elif kind == "optional":
+                    node.content = OrFormat(
+                        elements=[
+                            SequenceFormat(
+                                elements=[content, ConstStringFormat(value="\n")]
+                            ),
+                            ConstStringFormat(value=""),
+                        ]
+                    )
+                    node.end = _QWEN_XML_EMPTY_CALL_END
+                return
+        if isinstance(node, BaseModel):
+            for name in type(node).model_fields:
+                visit(getattr(node, name))
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                visit(item)
+
+    visit(tag.format)
+    return tag
 
 
 _TOOL_CALL_LIST_FORMATS = (

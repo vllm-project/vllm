@@ -2354,3 +2354,259 @@ def test_responses_parallel_tool_calls_false_limits_grammar_to_one_call():
     assert grammar is not None
     assert _is_grammar_accept_string(grammar, call)
     assert not _is_grammar_accept_string(grammar, call * 2)
+
+
+@pytest.mark.parametrize(
+    "tool_parser",
+    ["qwen3_coder", "qwen3_xml", "step3p5", "granite_toolcall_parser"],
+)
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["auto", "required", {"type": "function", "function": {"name": "get_time"}}],
+)
+def test_qwen_xml_empty_call_accepted_and_parsed(
+    tool_parser: str, tool_choice: ToolChoice
+):
+    """Zero-argument Qwen XML calls must close cleanly without a second newline."""
+    from vllm.parser.parser_manager import ParserManager
+
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_time",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            },
+        )
+    ]
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name=tool_parser, enable_auto_tools=True
+    )
+    assert parser_cls is not None
+    parser = parser_cls(MagicMock(), tools=tools)
+    request = ChatCompletionRequest(
+        model="m",
+        messages=[],
+        tools=[t.model_dump(exclude_none=True) for t in tools],
+        tool_choice=tool_choice,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    adjusted = parser.adjust_request(request)
+    assert adjusted.structured_outputs is not None
+    assert adjusted.structured_outputs.structural_tag is not None
+
+    grammar = Grammar.from_structural_tag(adjusted.structured_outputs.structural_tag)
+    empty_call = "<tool_call>\n<function=get_time>\n</function>\n</tool_call>"
+    two_newline_call = "<tool_call>\n<function=get_time>\n\n</function>\n</tool_call>"
+    tab_loop_call = "<tool_call>\n<function=get_time>\n\t</function>\n</tool_call>"
+    invented_arg_call = (
+        "<tool_call>\n<function=get_time>\n"
+        "<parameter=tz>UTC</parameter>\n</function>\n</tool_call>"
+    )
+
+    assert _is_grammar_accept_string(grammar, empty_call)
+    assert _is_grammar_accept_string(grammar, two_newline_call)
+    assert not _is_grammar_accept_string(grammar, tab_loop_call)
+    assert not _is_grammar_accept_string(grammar, invented_arg_call)
+
+    _, content, tool_calls = parser.parse(empty_call, adjusted, enable_auto_tools=True)
+    assert not content
+    assert tool_calls is not None
+    assert [(call.name, json.loads(call.arguments)) for call in tool_calls] == [
+        ("get_time", {})
+    ]
+
+
+@pytest.mark.parametrize("model", ["qwen_3_coder", "qwen_3_5"])
+def test_qwen_xml_empty_call_preserves_parameter_constraints(model: str):
+    """Empty calls are allowed only when `{}` satisfies the tool schema."""
+    optional_tool = ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "list_files",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        },
+    )
+    opt_grammar = Grammar.from_structural_tag(
+        get_model_structural_tag(model, [optional_tool], "required", reasoning=False)
+    )
+    assert _is_grammar_accept_string(
+        opt_grammar, "<tool_call>\n<function=list_files>\n</function>\n</tool_call>"
+    )
+    assert _is_grammar_accept_string(
+        opt_grammar,
+        "<tool_call>\n<function=list_files>\n"
+        "<parameter=path>.</parameter>\n</function>\n</tool_call>",
+    )
+    assert not _is_grammar_accept_string(
+        opt_grammar,
+        "<tool_call>\n<function=list_files>\n"
+        "<parameter=path>.</parameter></function>\n</tool_call>",
+    )
+    assert not _is_grammar_accept_string(
+        opt_grammar,
+        "<tool_call>\n<function=list_files>\n"
+        "<parameter=other>x</parameter>\n</function>\n</tool_call>",
+    )
+
+    anyof_tool = ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "ping",
+            "strict": True,
+            "parameters": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {"host": {"type": "string"}},
+                        "required": ["host"],
+                        "additionalProperties": False,
+                    },
+                ]
+            },
+        },
+    )
+    anyof_grammar = Grammar.from_structural_tag(
+        get_model_structural_tag(model, [anyof_tool], "auto", reasoning=False)
+    )
+    assert _is_grammar_accept_string(
+        anyof_grammar, "<tool_call>\n<function=ping>\n</function>\n</tool_call>"
+    )
+    assert _is_grammar_accept_string(
+        anyof_grammar,
+        "<tool_call>\n<function=ping>\n"
+        "<parameter=host>localhost</parameter>\n</function>\n</tool_call>",
+    )
+    assert not _is_grammar_accept_string(
+        anyof_grammar,
+        "<tool_call>\n<function=ping>\n"
+        "<parameter=bad>x</parameter>\n</function>\n</tool_call>",
+    )
+
+    required_tool = ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "get_weather",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+                "additionalProperties": False,
+            },
+        },
+    )
+    req_grammar = Grammar.from_structural_tag(
+        get_model_structural_tag(model, [required_tool], "required", reasoning=False)
+    )
+    assert not _is_grammar_accept_string(
+        req_grammar, "<tool_call>\n<function=get_weather>\n</function>\n</tool_call>"
+    )
+
+
+def test_qwen_xml_empty_call_non_strict_reasoning_and_single_call():
+    """Non-strict/omitted schemas, reasoning, and parallel_tool_calls=false work."""
+    non_strict_tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_time",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        )
+    ]
+    request = ChatCompletionRequest(
+        model="m",
+        messages=[],
+        tools=[t.model_dump(exclude_none=True) for t in non_strict_tools],
+        tool_choice="auto",
+        parallel_tool_calls=False,
+    )
+    grammar = _tool_calling_grammar("qwen3_coder", non_strict_tools, request)
+    assert grammar is not None
+    call = "<tool_call>\n<function=get_time>\n</function>\n</tool_call>"
+    assert _is_grammar_accept_string(grammar, call)
+    assert not _is_grammar_accept_string(grammar, call * 2)
+
+    reasoning_tag = get_model_structural_tag(
+        "qwen_3_coder", non_strict_tools, "required", reasoning=True
+    )
+    assert reasoning_tag is not None
+    reasoning_grammar = Grammar.from_structural_tag(reasoning_tag)
+    assert _is_grammar_accept_string(reasoning_grammar, "plan</think>\n\n" + call)
+
+    responses_req = ResponsesRequest.model_validate(
+        {
+            "input": "hi",
+            "tools": [{"type": "function", "name": "get_time", "strict": True}],
+            "tool_choice": "auto",
+        }
+    )
+    resp_grammar = _tool_calling_grammar(
+        "qwen3_coder", responses_req.tools, responses_req
+    )
+    assert resp_grammar is not None
+    assert _is_grammar_accept_string(resp_grammar, call)
+
+
+def test_qwen_xml_empty_call_allows_closing_token_without_tab_loop():
+    """After `<function=NAME>\n`, `</function>` is immediately legal and `\t` is not."""
+    from xgrammar import GrammarCompiler, GrammarMatcher, TokenizerInfo
+
+    vocab = [
+        "<tool_call>",
+        "<function=",
+        "get_time",
+        ">",
+        "\n",
+        "\t",
+        "</function>",
+        "</tool_call>",
+        "<|im_end|>",
+    ]
+    tokenizer_info = TokenizerInfo(vocab, stop_token_ids=[vocab.index("<|im_end|>")])
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_time",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            },
+        )
+    ]
+    tag = get_model_structural_tag("qwen_3_coder", tools, "required", reasoning=False)
+    assert tag is not None
+    compiled = GrammarCompiler(tokenizer_info).compile_structural_tag(tag)
+    matcher = GrammarMatcher(compiled)
+    for tok in ("<tool_call>", "\n", "<function=", "get_time", ">", "\n"):
+        assert matcher.accept_string(tok)
+
+    # `</function>` (idx 6) must be allowed immediately, while `\t` (idx 5) is blocked.
+    assert matcher.accept_token(vocab.index("</function>"))
+    assert matcher.accept_string("\n</tool_call>")
+    assert matcher.accept_token(vocab.index("<|im_end|>"))
+    assert matcher.is_terminated()
+
+    matcher2 = GrammarMatcher(compiled)
+    assert matcher2.accept_string("<tool_call>\n<function=get_time>\n")
+    assert not matcher2.accept_token(vocab.index("\t"))
