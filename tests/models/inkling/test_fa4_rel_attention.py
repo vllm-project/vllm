@@ -334,8 +334,8 @@ def test_score_mod_relative_attention(monkeypatch):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @pytest.mark.skipif(
-    _cap is None or _cap.major < 9,
-    reason="FA4 score-mod requires Hopper+ (SM90+)",
+    _cap is None or _cap.major < 8,
+    reason="Inkling relative attention requires SM80+ (FA4 on SM90+, Triton on SM8x)",
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(
@@ -359,8 +359,8 @@ def test_full_attention(seq_lens, num_heads, rel_extent):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @pytest.mark.skipif(
-    _cap is None or _cap.major < 9,
-    reason="FA4 score-mod requires Hopper+ (SM90+)",
+    _cap is None or _cap.major < 8,
+    reason="Inkling relative attention requires SM80+ (FA4 on SM90+, Triton on SM8x)",
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(
@@ -380,8 +380,8 @@ def test_chunked_prefill(seq_lens, num_heads, rel_extent):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @pytest.mark.skipif(
-    _cap is None or _cap.major < 9,
-    reason="FA4 score-mod requires Hopper+ (SM90+)",
+    _cap is None or _cap.major < 8,
+    reason="Inkling relative attention requires SM80+ (FA4 on SM90+, Triton on SM8x)",
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(
@@ -409,8 +409,8 @@ def test_sliding_window(seq_lens, num_heads, local_extent):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @pytest.mark.skipif(
-    _cap is None or _cap.major < 9,
-    reason="FA4 score-mod requires Hopper+ (SM90+)",
+    _cap is None or _cap.major < 8,
+    reason="Inkling relative attention requires SM80+ (FA4 on SM90+, Triton on SM8x)",
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(

@@ -34,6 +34,103 @@ def _use_sheared_bias() -> bool:
 
 
 @cache
+def _use_portable_sm80() -> bool:
+    """SM8x (Ampere/Ada) has no FA4: its score_mod path raises
+    NotImplementedError there. Use Inkling 2's paged Triton kernel instead."""
+    capability = current_platform.get_device_capability()
+    return capability is not None and capability.major == 8
+
+
+def shear_rel_logits(
+    rel_logits: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cache_seqlens: torch.Tensor,
+    rel_extent: int,
+) -> torch.Tensor:
+    """Natural `(T, H, E)` relative logits -> the sheared `(T + 128, H, E + 256)`
+    layout read by Inkling 2's paged Triton kernel: column c of token t holds
+    key `c + ceil128(past + tile_end) - (E + 256)`, with tile_end the end of
+    t's 128-row query tile clipped to its request. Static shapes and no host
+    sync, so it is safe under CUDA-graph capture."""
+    num_tokens, num_heads, extent = rel_logits.shape
+    assert extent == rel_extent
+    padded = extent + 256
+    dev = rel_logits.device
+    num_reqs = cu_seqlens_q.shape[0] - 1
+    tok = torch.arange(num_tokens, device=dev, dtype=torch.int64)
+    cu = cu_seqlens_q.to(torch.int64)
+    req = torch.searchsorted(cu[1:], tok, right=True).clamp_(max=num_reqs - 1)
+    start = cu[req]
+    q_len = cu[req + 1] - start
+    local = tok - start
+    past = cache_seqlens.to(torch.int64)[req] - q_len
+    tile_end = torch.minimum((local // 128 + 1) * 128, q_len)
+    base = (past + tile_end + 127) // 128 * 128 - padded
+    dist = (past + local)[:, None] - (
+        torch.arange(padded, device=dev, dtype=torch.int64)[None] + base[:, None]
+    )
+    valid = (dist >= 0) & (dist < extent)
+    vals = rel_logits.gather(
+        2, dist.clamp(0, extent - 1)[:, None, :].expand(num_tokens, num_heads, padded)
+    )
+    sheared = rel_logits.new_zeros((num_tokens + 128, num_heads, padded))
+    sheared[:num_tokens] = torch.where(valid[:, None, :], vals, torch.zeros_like(vals))
+    return sheared
+
+
+def _sm80_rel_attention(
+    q: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    *,
+    block_table: torch.Tensor,
+    cache_seqlens: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    max_seqlen_q: int,
+    softmax_scale: float,
+    causal: bool,
+    window_size: tuple[int, int],
+    rel_extent: int,
+    rel_logits: torch.Tensor,
+    out: torch.Tensor | None,
+) -> torch.Tensor:
+    """Inkling relative attention on SM8x through Inkling 2's paged Triton
+    kernel, on a sheared copy of the bias. Covers prefill, decode and sliding
+    windows, and is CUDA-graph safe."""
+    from vllm.models.inkling2.nvidia.ops.attention_sm90 import (
+        MODE_OUT_LSE,
+        rel_attention,
+    )
+
+    assert causal
+    is_local = window_size != (-1, -1)
+    if out is None:
+        out = torch.empty_like(q)
+    num_tokens, num_heads, _ = q.shape
+    sheared = shear_rel_logits(rel_logits, cu_seqlens_q, cache_seqlens, rel_extent)
+    out_f32 = q.new_empty(q.shape, dtype=torch.float32)
+    lse = q.new_empty((num_heads, num_tokens), dtype=torch.float32)
+    rel_attention(
+        q,
+        key_cache,
+        value_cache,
+        out_f32,
+        lse,
+        sheared,
+        block_table=block_table,
+        cache_seqlens=cache_seqlens,
+        cu_seqlens_q=cu_seqlens_q,
+        max_query_len=max_seqlen_q,
+        softmax_scale=softmax_scale,
+        window=window_size[0] + 1 if is_local else 0,
+        num_splits=1,
+        mode=MODE_OUT_LSE,
+    )
+    out.copy_(out_f32)
+    return out
+
+
+@cache
 def _get_score_mod(rel_extent: int) -> Callable:
     """Return the score modification that adds Inkling relative bias."""
     import cutlass.cute as cute
@@ -167,6 +264,22 @@ class InklingFA4RelAttentionKernel(
 
         rel_logits = rel_logits.contiguous()
         flash_attn_varlen_func: Callable[..., Any]
+        if _use_portable_sm80():
+            return _sm80_rel_attention(
+                q,
+                key_cache,
+                value_cache,
+                block_table=block_table,
+                cache_seqlens=cache_seqlens,
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                softmax_scale=softmax_scale,
+                causal=causal,
+                window_size=window_size,
+                rel_extent=rel_extent,
+                rel_logits=rel_logits,
+                out=out,
+            )
         if _use_sheared_bias():
             from vllm.third_party.tml_fa4 import (
                 flash_attn_varlen_func as tml_flash_attn_varlen_func,

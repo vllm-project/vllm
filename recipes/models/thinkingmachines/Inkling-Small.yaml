@@ -4,7 +4,7 @@ meta:
   provider: "Thinking Machines Lab"
   description: "Natively multimodal 276B-parameter MoE from Thinking Machines Lab — 12B active parameters, text/image/audio in, text out, and up to 1M context."
   date_added: 2026-07-30
-  date_updated: 2026-11-17
+  date_updated: 2026-11-25
   tasks:
     - multimodal
   performance_headline: "276B total / 12B active Inkling architecture for lower-cost, lower-latency deployment"
@@ -13,6 +13,7 @@ meta:
   hardware:
     mi300x: verified
     mi355x: verified
+    a100_4x: verified
 
 model:
   model_id: "thinkingmachines/Inkling-Small-NVFP4"
@@ -66,10 +67,12 @@ variants:
       brand: NVIDIA
     vram_minimum_gb: 180
     supported_hardware:
+      - a100_4x
       - arch:sm90
       - arch:sm100
       - arch:sm103
     tp:
+      a100_4x: 4
       hopper: 4
       b300: 1
       b200: 2
@@ -230,6 +233,13 @@ kv_offload_support:
 hardware_overrides: {}
 
 strategy_overrides:
+  # 4x A100: ~40 GiB of weights per GPU at TP4 leaves a ~67K-token KV cache.
+  single_node_tp:
+    hardware_overrides:
+      a100_4x:
+        extra_args:
+          - "--max-model-len"
+          - "65536"
   # TP+DP+EP: the tp_dp emitter renders TP<gpus/node> × DP<nodes> (dp-local 1)
   # from the node count; EP + hybrid LB and the context/batch caps ride along
   # as Hopper extra_args.
@@ -268,6 +278,8 @@ guide: |
   - **NVFP4 (default):** Requires at least 180 GB aggregated VRAM. Run W4A4 with TP1
     on B300/GB300 or TP2 on B200/GB200. On Hopper, run W4A16 with TP4 on H100
     or TP2 on H200; the MoE kernel dequantizes the NVFP4 weights to BF16 on the fly.
+    On Ampere, run W4A16 with TP4 on 4x A100 80GB and contexts up to 65,536 tokens;
+    relative attention runs on the portable Triton kernel shared with Inkling 2.
   - **BF16:** Requires at least 600 GB aggregated VRAM. Run TP4 on B300/GB200/GB300
     or AMD MI300X/MI325X/MI355X, and TP8 on B200/H200. MI355X TP4 is validated;
     direct MI300X/MI325X BF16 smoke is pending.
@@ -277,7 +289,7 @@ guide: |
 
   ## Prerequisites
 
-  - **Hardware:** B300/GB300 TP1, B200/GB200/H200 TP2, or H100 TP4 for NVFP4;
+  - **Hardware:** B300/GB300 TP1, B200/GB200/H200 TP2, or H100/A100 TP4 for NVFP4;
     B300/GB200/GB300/MI300X/MI325X/MI355X TP4 or B200/H200 TP8 for BF16;
     MI355X TP1 or MI300X/MI325X TP2 for AMD MXFP4.
   - **vLLM:** 0.26.0 or newer.
