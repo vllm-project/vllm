@@ -154,8 +154,12 @@ def test_copy_blocks_chunks_at_descriptor_cap(
     assert sum(counts) == num_layers * num_blocks
 
 
-def test_copy_blocks_noop_on_empty(monkeypatch):
+# A rank that stores no region (all of them shared) still gets store events.
+@pytest.mark.parametrize(
+    ("max_desc", "ids", "num_layers"), [(8192, [], 4), (0, [0, 1], 0)]
+)
+def test_copy_blocks_noop_on_empty(monkeypatch, max_desc, ids, num_layers):
     counts = _record_counts(monkeypatch)
-    monkeypatch.setattr(cuda_mem_ops, "_max_batch_descriptors", 8192)
-    copy_blocks([], [], _fake_params(num_layers=4))
+    monkeypatch.setattr(cuda_mem_ops, "_max_batch_descriptors", max_desc)
+    copy_blocks(ids, ids, _fake_params(num_layers=num_layers))
     assert counts == []

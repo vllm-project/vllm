@@ -54,7 +54,12 @@ from vllm.v1.simple_kv_offload.metrics import (
     MetricName,
     SimpleCPUOffloadStats,
 )
-from vllm.v1.simple_kv_offload.sizing import gpu_total_bytes, num_offload_blocks
+from vllm.v1.simple_kv_offload.sizing import (
+    gpu_total_bytes,
+    num_offload_blocks,
+    offload_capacity_blocks,
+    rank_shared_layer_bytes,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -154,6 +159,7 @@ class SimpleCPUOffloadScheduler:
         disk_capacity_bytes: int = 0,
         use_page_cache: bool = False,
         num_cpu_blocks: int | None = None,
+        share_replicated_regions: bool = False,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -172,8 +178,22 @@ class SimpleCPUOffloadScheduler:
         assert self.block_size % self.hash_block_size == 0
         # Derive a CPU KVCacheConfig from the GPU config and build a coordinator
         assert kv_cache_config is not None
+        shared_bytes_per_block = 0
+        if share_replicated_regions:
+            shared_bytes_per_block = sum(
+                rank_shared_layer_bytes(kv_cache_config, vllm_config).values()
+            )
+            if not shared_bytes_per_block:
+                logger.warning(
+                    "share_replicated_regions is set but no KV region is "
+                    "replicated across ranks; using private CPU buffers."
+                )
         self.cpu_kv_cache_config = self._derive_cpu_config(
-            kv_cache_config, offload_capacity, num_cpu_blocks
+            kv_cache_config,
+            offload_capacity,
+            num_cpu_blocks,
+            shared_bytes_per_block,
+            vllm_config.parallel_config.world_size,
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         self.prefix_cacheable_group_ids = (
@@ -280,6 +300,8 @@ class SimpleCPUOffloadScheduler:
         gpu_config: "KVCacheConfig",
         cpu_capacity_bytes: int,
         num_cpu_blocks: int | None = None,
+        shared_bytes_per_block: int = 0,
+        world_size: int = 1,
     ) -> "KVCacheConfig":
         """Derive a CPU KVCacheConfig from the GPU config.
         Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio.
@@ -291,14 +313,22 @@ class SimpleCPUOffloadScheduler:
         assert len(gpu_config.kv_cache_tensors) > 0
 
         num_gpu_blocks = gpu_config.num_blocks
-        local_capacity = (
-            num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes(gpu_config)
-        )
+        bytes_per_block = gpu_total_bytes(gpu_config) // num_gpu_blocks
+        if shared_bytes_per_block:
+            local_capacity = offload_capacity_blocks(
+                cpu_capacity_bytes, bytes_per_block, shared_bytes_per_block, world_size
+            )
+        else:
+            local_capacity = (
+                num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes(gpu_config)
+            )
         if num_cpu_blocks is None:
             num_cpu_blocks = num_offload_blocks(
                 gpu_config,
                 cpu_capacity_bytes,
-                gpu_total_bytes(gpu_config) // num_gpu_blocks,
+                bytes_per_block,
+                shared_bytes_per_block,
+                world_size,
             )
         elif (
             type(num_cpu_blocks) is not int or not 0 < num_cpu_blocks <= local_capacity

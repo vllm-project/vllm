@@ -113,6 +113,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             raise ValueError("num_cpu_blocks must be a positive integer")
 
         lazy_offload = bool(extra_config.get("lazy_offload", False))
+        share_replicated_regions = bool(
+            extra_config.get("share_replicated_regions", False)
+        )
 
         kv_offload_backend = str(extra_config.get("kv_offload_backend", "cpu"))
         if kv_offload_backend not in VALID_KV_OFFLOAD_BACKENDS:
@@ -148,6 +151,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 raise ValueError(
                     'cpu_hugepage_block_size applies only to kv_offload_backend="cpu".'
                 )
+            if share_replicated_regions:
+                raise ValueError(
+                    'share_replicated_regions applies only to kv_offload_backend="cpu".'
+                )
         else:
             ignored = [k for k in _DISK_ONLY_KEYS if k in extra_config]
             if ignored:
@@ -157,6 +164,11 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                     ", ".join(ignored),
                 )
             disk_path = None
+        if share_replicated_regions and cpu_hugepage_size is not None:
+            raise ValueError(
+                "share_replicated_regions maps the shared regions in /dev/shm and "
+                "cannot be combined with cpu_hugepage_block_size."
+            )
 
         self.scheduler_manager: SimpleCPUOffloadScheduler | None = None
         self.worker_handler: SimpleCPUOffloadWorker | None = None
@@ -202,6 +214,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 disk_capacity_bytes=disk_capacity_bytes if disk_mode else 0,
                 use_page_cache=use_page_cache if disk_mode else False,
                 num_cpu_blocks=num_cpu_blocks,
+                share_replicated_regions=share_replicated_regions,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
@@ -215,6 +228,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 use_page_cache=use_page_cache,
                 num_cpu_blocks=num_cpu_blocks,
                 cpu_hugepage_size=cpu_hugepage_size,
+                share_replicated_regions=share_replicated_regions,
             )
 
     # --- Worker-side methods ---

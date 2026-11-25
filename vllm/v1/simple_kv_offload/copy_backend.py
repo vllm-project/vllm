@@ -41,6 +41,7 @@ class DmaCopyBackend:
         device: torch.device,
         load_stream: torch.cuda.Stream,
         store_stream: torch.cuda.Stream,
+        skip_store: frozenset[str] = frozenset(),
     ) -> None:
         self._load_stream = load_stream
         self._store_stream = store_stream
@@ -48,8 +49,8 @@ class DmaCopyBackend:
         # Stores read the live KV cache -> STREAM (paired with the compute-done
         # wait in get_finished); loads read stable pinned host memory -> ANY.
         self._store_params = build_params(
-            gpu_caches,
-            cpu_caches,
+            {n: t for n, t in gpu_caches.items() if n not in skip_store},
+            {n: t for n, t in cpu_caches.items() if n not in skip_store},
             store_stream,
             src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
         )
