@@ -951,9 +951,13 @@ void launch(ConvMixParams& p, int numStack, int numQueries, int device) {
   p.stageRows = numStack + (p.xSources == 1) + (p.last != nullptr) +
                 (p.res != nullptr) + (p.resAddend != nullptr);
   int const metaBytes = p.tokensPerCta * sizeof(int4) + numQueries * kRowBytes;
+  int const smemBudget = std::min<int>(
+      kSmemBytes, int(get_device_prop()->sharedMemPerBlockOptin) - 4096);
   p.stages = std::min<int>(
-      kMaxStages, (kSmemBytes - metaBytes) / (p.stageRows * kRowBytes));
-  STD_TORCH_CHECK(p.stages >= 1);
+      kMaxStages, (smemBudget - metaBytes) / (p.stageRows * kRowBytes));
+  STD_TORCH_CHECK(p.stages >= 1,
+                  "conv_mix: this shape needs more shared memory than the "
+                  "device allows; take the fallback path here");
 
   auto seq = std::make_integer_sequence<int, kMaxStack>{};
   void (*kernel)(ConvMixParams) =
