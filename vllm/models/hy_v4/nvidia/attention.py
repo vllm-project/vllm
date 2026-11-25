@@ -49,15 +49,15 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.utils import compute_skip_topk_layers
-from vllm.models.hy_v4.nvidia.indexer_fusion import (
-    fused_indexer_k_norm_rope,
-    fused_indexer_q_rope_quant,
-)
-from vllm.models.hy_v4.nvidia.mrope import (
+from vllm.models.hy_v4.common.mrope import (
     apply_mrope,
     fused_mrope_norm,
     rope_into,
     token_rope,
+)
+from vllm.models.hy_v4.nvidia.indexer_fusion import (
+    fused_indexer_k_norm_rope,
+    fused_indexer_q_rope_quant,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
