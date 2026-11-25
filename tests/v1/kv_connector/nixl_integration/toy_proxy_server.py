@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import asyncio
 import itertools
 import logging
 import os
@@ -14,6 +15,17 @@ from fastapi.responses import StreamingResponse
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
+# Fields of a push prefiller's kv_transfer_params that hold for all its requests.
+PUSH_STATIC_PARAMS = (
+    "remote_engine_id",
+    "remote_host",
+    "remote_port",
+    "tp_size",
+    "dcp_size",
+    "pp_size",
+    "transfer_mode",
+)
 
 
 @asynccontextmanager
@@ -193,6 +205,25 @@ async def send_request_to_service(
     return response
 
 
+async def run_prefill(
+    client_info: dict, endpoint: str, req_data: dict, request_id: str
+) -> dict:
+    """Run the prefill leg and return P's kv_transfer_params."""
+    response = await send_request_to_service(
+        client_info, endpoint, req_data, request_id
+    )
+    response_json = response.json()
+    await response.aclose()  # CRITICAL: Release connection back to pool
+    kv_transfer_params = response_json.get("kv_transfer_params") or {}
+    if kv_transfer_params.get("transfer_mode") == "push":
+        client_info["push_params"] = {
+            k: kv_transfer_params[k]
+            for k in PUSH_STATIC_PARAMS
+            if k in kv_transfer_params
+        }
+    return kv_transfer_params
+
+
 async def stream_service_response(
     client_info: dict, endpoint: str, req_data: dict, request_id: str
 ):
@@ -215,32 +246,58 @@ async def _handle_completions(api: str, request: Request):
         req_data = await request.json()
         request_id = str(uuid.uuid4())
 
-        # Get the next prefill client in round-robin fashion
         prefill_client_info = get_next_client(request.app, "prefill")
-
-        # Send request to prefill service
-        response = await send_request_to_service(
-            prefill_client_info, api, req_data, request_id
-        )
-
-        # Extract the needed fields
-        response_json = response.json()
-        await response.aclose()  # CRITICAL: Release connection back to pool
-        kv_transfer_params = response_json.get("kv_transfer_params", {})
-        if kv_transfer_params:
-            req_data["kv_transfer_params"] = kv_transfer_params
-
-        # Get the next decode client in round-robin fashion
         decode_client_info = get_next_client(request.app, "decode")
-
         logger.debug("Using %s %s", prefill_client_info, decode_client_info)
 
-        # Stream response from decode service
+        prefill_task = None
+        first_chunk = None
+        push_params = prefill_client_info.get("push_params")
+        if push_params is None:
+            # Pull, or a push prefiller whose coordinates are not known yet:
+            # D needs P's response.
+            kv_transfer_params = await run_prefill(
+                prefill_client_info, api, req_data, request_id
+            )
+            if kv_transfer_params:
+                req_data["kv_transfer_params"] = kv_transfer_params
+        else:
+            # Push: D registers its blocks with P while P prefills.
+            prefill_task = asyncio.create_task(
+                run_prefill(prefill_client_info, api, req_data, request_id)
+            )
+            req_data = req_data.copy()
+            req_data["kv_transfer_params"] = {
+                **push_params,
+                "do_remote_prefill": True,
+                "do_remote_decode": False,
+                "remote_request_id": request_id,
+            }
+
+        decode_stream = stream_service_response(
+            decode_client_info, api, req_data, request_id=request_id
+        )
+
+        if prefill_task is not None:
+            # D waits for P's push, so a failed prefill must fail the request.
+            first_chunk = asyncio.ensure_future(anext(decode_stream, b""))
+            await asyncio.wait(
+                {first_chunk, prefill_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if prefill_task.done() and prefill_task.exception() is not None:
+                first_chunk.cancel()
+                await asyncio.gather(first_chunk, return_exceptions=True)
+                await prefill_task
+
         async def generate_stream():
-            async for chunk in stream_service_response(
-                decode_client_info, api, req_data, request_id=request_id
-            ):
-                yield chunk
+            try:
+                if first_chunk is not None:
+                    yield await first_chunk
+                async for chunk in decode_stream:
+                    yield chunk
+            finally:
+                if prefill_task is not None and not prefill_task.done():
+                    prefill_task.cancel()
 
         return StreamingResponse(
             generate_stream(),
