@@ -333,7 +333,7 @@ class ConvertReqIndexToGlobalIndexKernel(
                     DCP_INTERLEAVE=dcp_interleave,
                 )
             )
-        return self._trace_dispatch(self.dispatch)(
+        keys = self._trace_dispatch(self.dispatch)(
             zip_inputs(
                 dict(
                     HAS_PREFILL_WORKSPACE=False,
@@ -389,6 +389,28 @@ class ConvertReqIndexToGlobalIndexKernel(
             NUM_TOPK_TOKENS=num_topk_tokens,
             max_num_blocks_per_req=max_num_blocks_per_req,
         )
+        if dcp_size > 1 and vllm_config.attention_config.sparse_mla_shard_q:
+            from vllm.v1.attention.ops.dcp_shardq import PAGE_TOKENS, TABLE_PAGES_ALIGN
+
+            # DCP ShardQ steps remap onto the gathered context's pages, without
+            # DCP (vllm.v1.attention.ops.dcp_shardq).
+            keys.append(
+                self.dispatch(
+                    BLOCK_SIZE=PAGE_TOKENS,
+                    BLOCK_STRIDE_ROWS=PAGE_TOKENS,
+                    BLOCK_N=128,
+                    NUM_TOPK_TOKENS=num_topk_tokens,
+                    HAS_PREFILL_WORKSPACE=False,
+                    HAS_IDX_MAPPING=False,
+                    COUNT_VALID=True,
+                    COMPACT_TO_FRONT=True,
+                    DCP_SIZE=1,
+                    DCP_RANK=0,
+                    DCP_INTERLEAVE=1,
+                    max_num_blocks_per_req=TABLE_PAGES_ALIGN,
+                )
+            )
+        return keys
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)

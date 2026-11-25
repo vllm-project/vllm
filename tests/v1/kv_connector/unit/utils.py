@@ -64,6 +64,7 @@ if TYPE_CHECKING:
         _RegionPairs,
         _RemoteStage,
     )
+    from vllm.forward_context import ForwardContext
 
 EOS_TOKEN_ID = 50256
 
@@ -258,7 +259,7 @@ def create_scheduler(
     return scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
-        log_stats=True,
+        collect_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
         hash_block_size=hash_block_size,
@@ -400,6 +401,7 @@ class TestExampleConnector(ExampleConnector):
         role: KVConnectorRole,
         kv_cache_config: KVCacheConfig,
     ):
+        assert config.kv_transfer_config is not None
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
         self._connector = ExampleConnector(config, role, kv_cache_config)
         self.call_record: dict[str, int] = defaultdict(int)
@@ -524,7 +526,9 @@ class MockKVConnector(KVConnectorBase_V1):
             metadata.requests.append({"req_id": req.req_id})
         return metadata
 
-    def start_load_kv(self, kv_caches, finished_req_ids):
+    def start_load_kv(
+        self, forward_context: "ForwardContext", **kwargs: object
+    ) -> None:
         pass
 
     def wait_for_layer_load(self, layer_name):
@@ -642,7 +646,6 @@ def make_nixl_scheduler(
         sched._heartbeat_interval = kv_lease_duration // 6
         # Fields touched by build_connector_meta / request_finished:
         sched._reqs_need_recv = {}
-        sched._hisparse_host_blocks_to_recv = {}
         sched._reqs_need_send = {}
         sched._reqs_in_batch = set()
         sched._reqs_not_processed = set()
@@ -754,9 +757,11 @@ def make_moriio_writer(fake_worker: Any) -> Any:
     writer._scheduled_writes = defaultdict(int)
     writer._scheduled_layers = defaultdict(set)
     writer._sealed_writes = {}
+    writer._transfer_states = {}
     writer._deferred_tasks = []
     writer._defer_timeout = 60.0
-    writer.ensure_worker_started = lambda: None
+    # Tests execute write tasks directly, without starting a background thread.
+    writer._write_worker_started = True
     return writer
 
 

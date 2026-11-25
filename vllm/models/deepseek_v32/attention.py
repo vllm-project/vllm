@@ -601,7 +601,7 @@ class DeepseekV32Attention(MLAAttention):
         else:
             mqa_q_arg = (ql_nope[:num_actual], mqa_q[:num_actual])
 
-        shardq = getattr(attn_metadata, "shardq", None)
+        shardq = attn_metadata.shardq
         mqa_metadata = attn_metadata
         if self.use_pcp and self.impl.dcp_world_size > self.impl.pcp_world_size:
             if isinstance(mqa_q_arg, tuple):

@@ -14,7 +14,8 @@ The package is organized like `vllm.models.deepseek_v32`: this module is the
 only public entry point and dispatches on the current platform, so registry
 entries never reach into a platform subpackage.
 
-NVIDIA and ROCm are supported, the latter through `amd/`. The port also drops
+NVIDIA and ROCm are supported through `nvidia/` and `amd/`, with
+vendor-neutral code in `common/`. The port also drops
 the reference implementation's HPC/TPCP fusion paths, which depend on
 infrastructure that does not exist in this tree.
 """
@@ -23,15 +24,17 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .common.vl_model import HYV4VLForConditionalGeneration
     from .nvidia.dfly import HYV4DFlyForCausalLM
+    from .nvidia.dfly_speculator import HYV4DFlySpeculator
     from .nvidia.model import HYV4ForCausalLM
     from .nvidia.mtp import HYV4MTP
-    from .nvidia.vl_model import HYV4VLForConditionalGeneration
 
 __all__ = [
     "HYV4ForCausalLM",
     "HYV4MTP",
     "HYV4DFlyForCausalLM",
+    "HYV4DFlySpeculator",
     "HYV4VLForConditionalGeneration",
 ]
 
@@ -45,14 +48,15 @@ def __getattr__(name: str) -> Any:
 
     if current_platform.is_xpu():
         raise NotImplementedError("hy_v4 does not yet support XPU.")
+    platform = "amd" if current_platform.is_rocm() else "nvidia"
     modules = {
-        "HYV4ForCausalLM": ".amd.model"
-        if current_platform.is_rocm()
-        else ".nvidia.model",
+        "HYV4ForCausalLM": f".{platform}.model",
+        # The MTP head runs on ROCm through the NVIDIA layers it shares.
         "HYV4MTP": ".nvidia.mtp",
-        "HYV4DFlyForCausalLM": ".nvidia.dfly",
+        "HYV4DFlyForCausalLM": f".{platform}.dfly",
+        "HYV4DFlySpeculator": f".{platform}.dfly_speculator",
         "HYV4VLForConditionalGeneration": (
-            ".nvidia.vl_model" if current_platform.is_cuda_alike() else ".vl_stub"
+            ".common.vl_model" if current_platform.is_cuda_alike() else ".vl_stub"
         ),
     }
     model_cls = getattr(import_module(modules[name], __name__), name)

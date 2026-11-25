@@ -27,7 +27,7 @@ import regex as re
 import torch
 from safetensors.torch import load, load_file, safe_open
 from tqdm.auto import tqdm
-from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
 
 from vllm import envs
 from vllm.config import ModelConfig
@@ -594,6 +594,14 @@ def filter_duplicate_safetensors_files(
     if missing_files:
         raise FileNotFoundError(
             f"Weight files referenced in index but missing: {missing_files}"
+        )
+    dropped = set(hf_weights_files) - set(weight_files_in_index)
+    if any(os.path.basename(f) == SAFE_WEIGHTS_NAME for f in dropped):
+        logger.warning_once(
+            "Ignoring %s because it is not listed in %s. Other tools may load "
+            "it instead of the indexed shards.",
+            SAFE_WEIGHTS_NAME,
+            index_file,
         )
     # Take the files from the index, which may list some in a subdirectory.
     return weight_files_in_index
@@ -1337,8 +1345,10 @@ def fastsafetensors_weights_iterator(
 
 
 _ENGRAM_WEIGHT_RE = re.compile(
-    r"(?:^|\.)(?:engram\.embed\.(?:weight|scale)|"
-    r"ple\.ple_embedding\.ngram_embedding\.shard_[0-9]+\.weight)$"
+    r"(?:^|\.)(?:engram\.embed\.(?:weight|scale)|"  # DeepSeek-V4.1
+    r"engram(?:_layer)?\.multi_head_embedding\."  # HY4 Flash
+    r"embedding\.weight(?:_scale_inv)?|"  # HY4 Flash
+    r"ple\.ple_embedding\.ngram_embedding\.shard_[0-9]+\.weight)$"  # Qwen4 Exp
 )
 
 

@@ -33,6 +33,27 @@ _DEFAULT_DOTPROD_CONFIG = (192, 1, 1)
 _DEFAULT_DOTPROD_GROUPED_CONFIG = (192, 2, 1)
 
 
+def _default_config(M: int, N: int) -> tuple[int, int, int]:
+    """`(bs, token_groups, epb)` for any `(K, N)` without a tuned entry.
+
+    `_DEFAULT_DOTPROD_CONFIG` runs up to 1.9x slower than the best config
+    above M=4 on B300 and H200 (K in [2048, 8192], N in [96, 296]). There,
+    even M splits the tokens into two groups to cut accumulator registers,
+    and once N > 128 keeps half the grid busy each block takes two experts.
+    """
+    even = M % 2 == 0
+    if M <= 4:
+        return _DEFAULT_DOTPROD_CONFIG
+    if N <= 128 and even and M >= 12:
+        return _DEFAULT_DOTPROD_GROUPED_CONFIG
+    wide_grid = N > 128
+    if M <= 8:
+        return 256, 2 if even and not wide_grid else 1, 1
+    # The kernel loads both experts of a pair unguarded, so pairs need even N.
+    epb = 2 if wide_grid and N % 2 == 0 else 1
+    return (128, 2, epb) if even else (256, 1, epb)
+
+
 _TUNED_DOTPROD_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int, int]]] = {
     (6144, 128): {
         **{
@@ -58,6 +79,11 @@ _TUNED_DOTPROD_CONFIGS: dict[tuple[int, int], dict[int, tuple[int, int, int]]] =
     },
 }
 _SUPPORTED_ACTIVATION_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
+
+
+def _dotprod_config(M: int, K: int, N: int) -> tuple[int, int, int]:
+    tuned = _TUNED_DOTPROD_CONFIGS.get((K, N), {}).get(M)
+    return tuned if tuned is not None else _default_config(M, N)
 
 
 class LLFp32WGemm(VllmJitKernel["LLFp32WGemm.CompileKey"]):
@@ -92,15 +118,7 @@ class LLFp32WGemm(VllmJitKernel["LLFp32WGemm.CompileKey"]):
         N: int,
         a_dtype: torch.dtype,
     ) -> CompileKey:
-        default_config = (
-            _DEFAULT_DOTPROD_GROUPED_CONFIG
-            if N <= 128 and M >= 12 and M % 2 == 0
-            else _DEFAULT_DOTPROD_CONFIG
-        )
-        tuned_configs = _TUNED_DOTPROD_CONFIGS.get((K, N))
-        config = (
-            tuned_configs.get(M, default_config) if tuned_configs else default_config
-        )
+        config = _dotprod_config(M, K, N)
         return self.CompileKey(
             m=M,
             k=K,
