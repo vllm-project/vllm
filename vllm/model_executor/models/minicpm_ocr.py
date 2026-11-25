@@ -186,7 +186,6 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
         if self.get_image_processor().scale_resolution >= TINY_RESOLUTION:
             return []
         max_ratio = _MAX_ASPECT_RATIO["image"]
-        max_width, max_height = self._get_size_hint("image")
         sizes = [
             size
             for short in range(1, math.isqrt(TINY_PIXELS) + 1)
@@ -194,8 +193,6 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
                 short, min(max_ratio * short, (TINY_PIXELS - 1) // short) + 1
             )
             for size in (ImageSize(long, short), ImageSize(short, long))
-            if size.width <= (max_width or size.width)
-            and size.height <= (max_height or size.height)
         ]
         tokens = {size: self._get_tiny_upsize_tokens(size, "image") for size in sizes}
         most = max(tokens.values(), default=0)
@@ -230,7 +227,7 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
             ]
         )
 
-    def uses_tiny_upsize(self, size: ImageSize) -> bool:
+    def _uses_tiny_upsize(self, size: ImageSize) -> bool:
         return self._get_tiny_upsize_tokens(size, "image") > super()._get_frame_tokens(
             size, "image"
         )
@@ -316,7 +313,7 @@ class MiniCPMOcrMultiModalProcessor(MiniCPMV4_6MultiModalProcessor):
         info = self.info
         assert isinstance(info, MiniCPMOcrProcessingInfo)
         upsize = "always"
-        if mm_counts.get("image", 0) and info.uses_tiny_upsize(
+        if mm_counts.get("image", 0) and info._uses_tiny_upsize(
             info.get_image_size_with_most_features()
         ):
             upsize = "adaptive"

@@ -784,6 +784,28 @@ def test_image_budget_covers_adaptive_tiny_images(scale_resolution):
         )
 
 
+@pytest.mark.parametrize(
+    "hint", [{"width": 32, "height": 32}, {"width": 64, "height": 64}]
+)
+def test_size_hints_do_not_lower_the_adaptive_tiny_image_budget(hint):
+    model_config, processor = _ocr_processor(
+        {
+            "scale_resolution": 56,
+            "max_slice_nums": 1,
+            "images_kwargs": {"small_image_upsize": "adaptive"},
+        },
+        limit_mm_per_prompt={"image": {"count": 1, **hint}, "video": 0},
+    )
+    budget = processor.info.get_mm_max_tokens_per_item(
+        seq_len=model_config.max_model_len, mm_counts={"image": 1}
+    )
+
+    assert budget is not None
+    assert budget["image"] >= _num_embeds(
+        processor, "image", PIL.Image.new("RGB", (196, 1))
+    )
+
+
 # --------------------------------------------------------------------------
 # Model wiring
 # --------------------------------------------------------------------------
