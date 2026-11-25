@@ -615,24 +615,16 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         cmpl_tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
         chat_tok_params = ctx.build_tok_params(self.renderer.default_chat_tok_params)
 
-        if isinstance(ctx.pooling_params, Sequence):
-            logger.warning(
-                "Received a Sequence of PoolingParams in offline scoring; "
-                "skipping per-item extra_kwargs extraction because per-item "
-                "pooling params are not supported here."
-            )
-            target_params = None
-        else:
-            target_params = ctx.pooling_params
-
         # Priority for `chat_template_kwargs`:
-        # explicit `prompt_extras` > `target_params.extra_kwargs` fallback.
+        # explicit `prompt_extras` > `pooling_params.extra_kwargs` fallback.
         prompt_extras = dict(
-            ctx.build_prompt_extras(target_params, self.model_config.multimodal_config)
+            ctx.build_prompt_extras(
+                ctx.pooling_params, self.model_config.multimodal_config
+            )
         )
         fallback_chat_template_kwargs = (
-            target_params.extra_kwargs.get("chat_template_kwargs")
-            if target_params and target_params.extra_kwargs
+            ctx.pooling_params.extra_kwargs.get("chat_template_kwargs")
+            if ctx.pooling_params.extra_kwargs
             else None
         )
         if (
@@ -1003,7 +995,6 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
         request = ctx.request
         ctx.n_queries = 1
 
-        prompt_extras = ctx.prompt_extras
         scoring_data = self.valid_inputs_online(request)
 
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
@@ -1018,9 +1009,7 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
         queries = self.ensure_str(scoring_data.data_1)
         docs = self.ensure_str(scoring_data.data_2)
 
-        chat_template_kwargs = (
-            prompt_extras.get("chat_template_kwargs") if prompt_extras else None
-        )
+        chat_template_kwargs = request.chat_template_kwargs
         instruction = (
             chat_template_kwargs.get("instruction") if chat_template_kwargs else None
         )
@@ -1062,16 +1051,15 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
             scoring_data = self._truncate_scoring_data(
                 scoring_data, max_tokens_per_query, max_tokens_per_doc
             )
-        prompt_extras = ctx.pooling_params.extra_kwargs
 
-        queries = self.ensure_str(scoring_data.data_1)
-        docs = self.ensure_str(scoring_data.data_2)
-        chat_template_kwargs = (
-            prompt_extras.get("chat_template_kwargs") if prompt_extras else None
-        )
+        extra_kwargs = ctx.pooling_params.extra_kwargs or {}
+        chat_template_kwargs = extra_kwargs.get("chat_template_kwargs")
         instruction = (
             chat_template_kwargs.get("instruction") if chat_template_kwargs else None
         )
+
+        queries = self.ensure_str(scoring_data.data_1)
+        docs = self.ensure_str(scoring_data.data_2)
 
         if len(queries) == 1:
             prompts = [

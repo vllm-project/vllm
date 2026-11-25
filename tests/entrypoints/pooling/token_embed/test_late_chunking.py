@@ -62,6 +62,7 @@ def late_chunk_processor():
         is_matryoshka=False,
         hf_config=SimpleNamespace(),
         pooler_config=PoolerConfig(seq_pooling_type="MEAN", tok_pooling_type="ALL"),
+        multimodal_config=None,
     )
     processor.vllm_config = SimpleNamespace(
         model_config=processor.model_config,
