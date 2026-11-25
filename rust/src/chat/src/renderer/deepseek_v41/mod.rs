@@ -42,6 +42,10 @@ impl ChatRenderer for DeepSeekV41ChatRenderer {
             effective_template_kwargs: reasoning.template_kwargs(request),
         })
     }
+
+    fn render_completion_suffix(&self, prompt: &str, suffix: &str) -> Option<String> {
+        Some(deepseek::render_completion_suffix(prompt, suffix))
+    }
 }
 
 #[cfg(test)]
