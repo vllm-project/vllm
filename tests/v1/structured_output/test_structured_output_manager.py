@@ -14,6 +14,7 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
+import vllm.v1.structured_output.backend_guidance as backend_guidance
 import vllm.v1.structured_output.backend_xgrammar as backend_xgrammar
 from vllm.config import (
     DeviceConfig,
@@ -30,6 +31,7 @@ from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output.backend_guidance import GuidanceGrammar
 from vllm.v1.structured_output.backend_outlines import OutlinesBackend, OutlinesGrammar
 from vllm.v1.structured_output.backend_types import StructuredOutputGrammar
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend, XgrammarGrammar
@@ -923,3 +925,51 @@ def test_fill_bitmasks_batches_xgrammar(monkeypatch):
     manager._fill_bitmasks([(grammar0, 0, True, ()), (grammar1, 1, True, ())])
     batch_matcher_cls.assert_called_once_with(max_threads=1)
     assert batch_filler.batch_fill_next_token_bitmask.call_count == 2
+
+
+def test_fill_bitmasks_batches_guidance(monkeypatch):
+    manager = StructuredOutputManager.__new__(StructuredOutputManager)
+    manager._grammar_bitmask = torch.zeros((3, 2), dtype=torch.int32)
+    manager._full_mask = torch.tensor(-1, dtype=torch.int32)
+
+    executor = object()
+    executor_cls = MagicMock(return_value=executor)
+    fill_par = MagicMock()
+    monkeypatch.setattr(backend_guidance, "_executor_local", threading.local())
+    monkeypatch.setattr(
+        backend_guidance, "llguidance", SimpleNamespace(LLExecutor=executor_cls)
+    )
+    monkeypatch.setattr(
+        backend_guidance,
+        "llguidance_torch",
+        SimpleNamespace(fill_next_token_bitmask_par=fill_par),
+    )
+
+    matchers = [MagicMock(**{"get_error.return_value": ""}) for _ in range(3)]
+    grammars = [
+        GuidanceGrammar(ll_matcher=m, ll_tokenizer=object(), vocab_size=64)
+        for m in matchers
+    ]
+
+    manager._fill_bitmasks(
+        [
+            (grammars[0], 0, True, ()),
+            (grammars[1], 1, False, ()),
+            (grammars[2], 2, True, ()),
+        ]
+    )
+
+    executor_cls.assert_called_once_with(num_threads=1)
+    fill_par.assert_called_once_with(
+        executor,
+        [(matchers[0], 0), (matchers[2], 2)],
+        manager._grammar_bitmask,
+    )
+    assert manager._grammar_bitmask[1].tolist() == [-1, -1]
+    for i in (0, 2):
+        matchers[i].get_error.assert_called_once_with()
+
+    # The executor is reused on the same thread.
+    manager._fill_bitmasks([(grammars[0], 0, True, ()), (grammars[2], 2, True, ())])
+    executor_cls.assert_called_once_with(num_threads=1)
+    assert fill_par.call_count == 2
