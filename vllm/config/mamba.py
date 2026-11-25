@@ -121,14 +121,5 @@ class MambaConfig:
                     "on NVIDIA CUDA and AMD gfx950 platforms. Please do not specify "
                     "`--enable-mamba-cache-stochastic-rounding`."
                 )
-            elif (
-                self.backend == MambaBackendEnum.TRITON
-                and not current_platform.is_device_capability_family(100)
-            ):
-                raise ValueError(
-                    "Stochastic rounding for Mamba cache with triton backend requires "
-                    "compute capability 10.0 (data center Blackwell). The `cvt.rs` "
-                    "PTX instruction is not supported on your GPU. Please do not "
-                    "specify `--enable-mamba-cache-stochastic-rounding`, "
-                    "or set `--mamba-backend flashinfer`."
-                )
+            # EngineArgs checks the CUDA Triton backend with the model
+            # (VllmConfig.validate_mamba_stochastic_rounding).

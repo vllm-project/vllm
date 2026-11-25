@@ -3811,6 +3811,27 @@ class VllmConfig:
             )
         return self
 
+    def validate_mamba_stochastic_rounding(self) -> None:
+        """The Triton Mamba kernels round stochastically with cvt.rs, which
+        needs SM100. GDN ReplaySSM rounds in FlashInfer's kernels instead (in
+        software below SM100), whatever the Mamba backend. EngineArgs calls
+        this once for the user's flags; configs derived with `replace` (such as
+        MTP drafts without ReplaySSM) do not repeat it."""
+        if (
+            self.mamba_config.enable_stochastic_rounding
+            and self.mamba_config.backend == MambaBackendEnum.TRITON
+            and current_platform.is_cuda()
+            and not current_platform.is_device_capability_family(100)
+            and not _uses_gdn_replayssm(self.cache_config, self.model_config)
+        ):
+            raise ValueError(
+                "Stochastic rounding for Mamba cache with triton backend requires "
+                "compute capability 10.0 (data center Blackwell). The `cvt.rs` "
+                "PTX instruction is not supported on your GPU. Please do not "
+                "specify `--enable-mamba-cache-stochastic-rounding`, "
+                "or set `--mamba-backend flashinfer`."
+            )
+
     @model_validator(mode="after")
     def validate_gdn_replayssm(self) -> "VllmConfig":
         if not _uses_gdn_replayssm(self.cache_config, self.model_config):

@@ -2949,6 +2949,7 @@ class EngineArgs:
             watchdog_config=self.watchdog_config,
             shutdown_timeout=self.shutdown_timeout,
         )
+        config.validate_mamba_stochastic_rounding()
 
         return config
 

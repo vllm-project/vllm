@@ -51,7 +51,7 @@ from vllm.config.cache import MambaDType
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
-from vllm.config.mamba import MambaBackendEnum
+from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.config.profiler import ProfilerConfig
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field, hash_config
@@ -328,6 +328,33 @@ def test_gdn_replayssm_backend_selection(
         current_platform, "is_device_capability_family", lambda *args: sm100
     )
     assert gdn_replayssm_backend(state_dtype) == backend
+
+
+@pytest.mark.parametrize("use_replayssm", [True, False])
+def test_stochastic_rounding_below_sm100_with_triton_backend(
+    tmp_path, monkeypatch, use_replayssm
+):
+    """Below SM100 the Triton Mamba kernels cannot round stochastically, but GDN
+    ReplaySSM rounds in FlashInfer's kernels, so it needs no other Mamba backend.
+    An MTP draft config derived without ReplaySSM does not repeat the check."""
+    _clear_flashinfer_gdn_env(monkeypatch)
+    # Build the model config on the real platform: a CUDA platform would import
+    # CUDA-only attention modules on a CPU host.
+    config = _gdn_replayssm_config(tmp_path, use_replayssm=use_replayssm)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda *args: False
+    )
+    config.mamba_config = MambaConfig(enable_stochastic_rounding=True)
+    if not use_replayssm:
+        with pytest.raises(ValueError, match="requires compute capability 10.0"):
+            config.validate_mamba_stochastic_rounding()
+        return
+    config.validate_mamba_stochastic_rounding()
+    draft = replace(
+        config, cache_config=replace(config.cache_config, use_replayssm=False)
+    )
+    assert draft.mamba_config.enable_stochastic_rounding
 
 
 @pytest.mark.parametrize(

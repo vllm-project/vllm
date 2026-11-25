@@ -89,7 +89,7 @@ Remove `--speculative-config` for standard decoding. For the HMMA kernel, use `-
 - Speculative decoding supports up to seven draft tokens on the UMMA kernel, and three or seven on the HMMA kernel. Adaptive verification is not supported; set `enable_adaptive_verification` to `false`.
 - `--replayssm-buffer-len` must be 16, the default.
 - Pipeline parallelism, microbatching, and KV connectors are not supported.
-- `--enable-mamba-cache-stochastic-rounding` makes decode flushes round the FP16 state stochastically (Philox, `--mamba-cache-philox-rounds`, default 10). Prefix-cache snapshots round to nearest, because FlashInfer's GDN materializer has no stochastic rounding.
+- `--enable-mamba-cache-stochastic-rounding` makes decode flushes round the FP16 state stochastically (Philox, `--mamba-cache-philox-rounds`, default 10). BF16 state does not support it. On Hopper (FP16 state on the HMMA kernel) it needs a FlashInfer release whose HMMA kernel implements stochastic rounding, because FlashInfer 0.7.3 raises `NotImplementedError` during startup. Prefix-cache snapshots round to nearest, because FlashInfer's GDN materializer has no stochastic rounding.
 
 Qwen3.8-Flash-Next uses the Qwen4Exp architecture. Its PLE convolution cache keeps its canonical state and speculative input window. Only the GDN layers use replay rings. The Qwen4Exp MTP draft uses attention layers and keeps ReplaySSM disabled.
 
