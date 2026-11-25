@@ -42,8 +42,11 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
 
     @cached_property
     def has_draft_kv_cache(self) -> bool:
-        # Shared layers read their owner's allocation. Cache ownership is fixed
-        # for the lifetime of the loaded model.
+        """Whether draft prefill needs to populate a draft-owned KV cache.
+
+        Gemma 4's assistant reads the target model's KV cache, so it can skip
+        its prefill forward on steps that request no draft tokens.
+        """
         return any(
             layer_name in self.draft_attn_layer_names
             for tensor in self.kv_cache_config.kv_cache_tensors
