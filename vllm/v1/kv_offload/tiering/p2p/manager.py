@@ -146,18 +146,16 @@ def _request_id_from_params(role_params: dict) -> str | None:
     return request_id if isinstance(request_id, str) and request_id else None
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class P2PSourceInfo:
     """Consumer side: this request fetches from a remote (prefiller or peer)."""
 
     kv_request_id: str
     peer_id: str
     do_probe: bool  # False for remote_prefiller (PD), True for remote_kv_source
-    # Mutable per-request state; retained across decoder preemptions.
-    pd_fetch_submitted: bool = False
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class P2PDestInfo:
     """Producer side: a remote fetches this request's blocks from us.
 
@@ -199,19 +197,13 @@ def _parse_dest(kv_params: dict | None) -> P2PDestInfo | None:
     return P2PDestInfo(kv_request_id=_request_id_from_params(role))
 
 
-def _annotate_req_context(req_context: ReqContext) -> None:
-    """Parse kv_transfer_params once and cache the P2P routing state.
+@dataclass(slots=True)
+class _FetchingRequest:
+    """An unfinished consumer-side request, kept for its per-key lookups."""
 
-    Called from `on_new_request`; later calls for the same request read
-    the cached `P2PSourceInfo`/`P2PDestInfo` via `get_state` instead
-    of re-parsing.
-    """
-    source = _parse_source(req_context.kv_transfer_params)
-    if source is not None:
-        req_context.set_state(source)
-    dest = _parse_dest(req_context.kv_transfer_params)
-    if dest is not None:
-        req_context.set_state(dest)
+    source: P2PSourceInfo
+    # Retained across decoder preemptions.
+    pd_fetch_submitted: bool = False
 
 
 @dataclass(slots=True)
@@ -425,6 +417,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # kv_request_ids that hit a transport/session failure; On load lookup()
         # rejects them so the request falls back to local prefill.
         self._failed_req_ids: set[str] = set()
+        # req_id -> consumer-side request, from on_new_request until
+        # on_request_finished.
+        self._fetching: dict[str, _FetchingRequest] = {}
         # Synthetic lookup ctxs from reaped sessions still owing a
         # ``parent.on_request_finished`` (the session's failed_serves). The
         # dead session had no parent handle at teardown; these are flushed
@@ -442,9 +437,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        source = req_context.get_state(P2PSourceInfo)
-        if source is None:
+        request = self._fetching.get(req_context.req_id)
+        if request is None:
             return LookupResult.MISS
+        source = request.source
         if source.kv_request_id in self._failed_req_ids:
             return LookupResult.MISS
 
@@ -468,22 +464,21 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
         # PD stores bind to round 0. A later fetch after preemption or partial
         # promotion cannot be supplied and would wait out the PD load timeout.
-        if source.pd_fetch_submitted:
+        if request.pd_fetch_submitted:
             return LookupResult.MISS
         return LookupResult.HIT
 
     @override
     def on_new_request(self, req_context: ReqContext) -> SecondaryTierRequestContext:
-        """Parse kv_transfer_params once and open the outbound session.
+        """Parse kv_transfer_params and open the outbound session.
 
-        Parses the P2P routing state onto `req_context` (cached for the
-        later lookup/submit/finish calls). On the consumer side
-        (`remote_prefiller` for PD or `remote_kv_source` for symmetric
-        P2P), open a session toward the producer at remote_host:remote_port
-        so submit_load can issue FetchMsg as soon as it fires. On the
-        prefiller side, sessions are created when the consumer's inbound
-        connection arrives in _accept_new_peers — submit_store no longer
-        pre-creates anything.
+        On the consumer side (`remote_prefiller` for PD or
+        `remote_kv_source` for symmetric P2P), keep the routing state for
+        the later lookups and open a session toward the producer at
+        remote_host:remote_port so submit_load can issue FetchMsg as soon
+        as it fires. On the prefiller side, sessions are created when the
+        consumer's inbound connection arrives in _accept_new_peers —
+        submit_store no longer pre-creates anything.
 
         Producer-leg requests (`remote_decoder` present) ask for
         REQUEST_LEVEL: the peer needs every block of the request, not just
@@ -492,13 +487,13 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         Requests without a `remote_decoder` opt out of cascades of newly
         stored primary chunks, since there is no destination to receive them.
         """
-        _annotate_req_context(req_context)
-        source = req_context.get_state(P2PSourceInfo)
+        source = _parse_source(req_context.kv_transfer_params)
         if source is not None:
+            self._fetching[req_context.req_id] = _FetchingRequest(source)
             session = self._get_or_create_session(source.peer_id)
             if session is None:
                 self._failed_req_ids.add(source.kv_request_id)
-        dest = req_context.get_state(P2PDestInfo)
+        dest = _parse_dest(req_context.kv_transfer_params)
         if dest is not None and dest.kv_request_id:
             return SecondaryTierRequestContext(policy=OffloadPolicy.REQUEST_LEVEL)
         return SecondaryTierRequestContext(receives_stores=dest is not None)
@@ -526,8 +521,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         decoder are the same node; that session is then finished once per
         distinct kv_request_id.
         """
-        source = req_context.get_state(P2PSourceInfo)
-        dest = req_context.get_state(P2PDestInfo)
+        self._fetching.pop(req_context.req_id, None)
+        source = _parse_source(req_context.kv_transfer_params)
+        dest = _parse_dest(req_context.kv_transfer_params)
         source_id = source.kv_request_id if source is not None else None
         dest_id = dest.kv_request_id if dest is not None else None
         if source_id is None and dest_id is None:
@@ -563,7 +559,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
         assert len(keys) == len(block_ids)
 
-        dest = job_metadata.req_context.get_state(P2PDestInfo)
+        dest = _parse_dest(job_metadata.req_context.kv_transfer_params)
         logger.debug(
             "P2P %s: submit_store ENTRY job_id=%d blocks=%d "
             "remote_decoder=%s kv_request_id=%s",
@@ -636,7 +632,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         keys = list(job_metadata.keys)
         block_ids = job_metadata.chunk_ids
 
-        source = job_metadata.req_context.get_state(P2PSourceInfo)
+        source = _parse_source(job_metadata.req_context.kv_transfer_params)
         logger.debug(
             "P2P %s: submit_load ENTRY job_id=%d blocks=%d kv_request_id=%s peer=%s",
             self._local_id,
@@ -688,8 +684,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             session.ready,
         )
         session.request_blocks(job_id, kv_request_id, keys, block_ids)
-        if not source.do_probe:
-            source.pd_fetch_submitted = True
+        request = self._fetching.get(job_metadata.req_context.req_id)
+        if request is not None and not source.do_probe:
+            request.pd_fetch_submitted = True
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
@@ -1265,6 +1262,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             session.close()
         self._sessions.clear()
         self._kv_to_session.clear()
+        self._fetching.clear()
         # Surface buffered store jobs as failed so the engine doesn't
         # leak them; the manager is going away after this call.
         for batches in self._unbound_stores.values():

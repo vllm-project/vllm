@@ -38,8 +38,6 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 class _RequestCacheAccess:
     """Cache keys observed by one request, grouped in prefix order."""
 
-    owner: object
-    cache_generation: int
     key_groups: dict[int, list[OffloadKey]] = field(default_factory=dict)
     seen_keys: set[OffloadKey] = field(default_factory=set)
     inserted_keys: set[OffloadKey] = field(default_factory=set)
@@ -49,7 +47,6 @@ class _RequestCacheAccess:
     # per request: a retry of a failed offer, or a re-offer after preemption,
     # is not another use of the content.
     counted_keys: set[OffloadKey] = field(default_factory=set)
-    finished: bool = False
 
 
 class CPUOffloadingManager(OffloadingManager):
@@ -94,7 +91,9 @@ class CPUOffloadingManager(OffloadingManager):
         self.max_tracker_size: int = max_tracker_size
         self.stores_skipped_in_current_batch: int = 0
         self.allocation_sizes_in_current_batch: list[int] = []
-        self._cache_generation = 0
+        # Unfinished requests' cache accesses, by req_id. Dropped when the
+        # request finishes or the cache is reset.
+        self._request_accesses: dict[str, _RequestCacheAccess] = {}
 
         # Number of chunk references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
@@ -161,16 +160,10 @@ class CPUOffloadingManager(OffloadingManager):
             self.counts[key] = 1
 
     def _get_request_cache_access(self, req_context: ReqContext) -> _RequestCacheAccess:
-        state = req_context.get_state(_RequestCacheAccess)
-        if (
-            state is None
-            or state.owner is not self
-            or state.cache_generation != self._cache_generation
-        ):
-            state = _RequestCacheAccess(
-                owner=self, cache_generation=self._cache_generation
-            )
-            req_context.set_state(state)
+        state = self._request_accesses.get(req_context.req_id)
+        if state is None:
+            state = _RequestCacheAccess()
+            self._request_accesses[req_context.req_id] = state
         return state
 
     def _record_request_cache_access(
@@ -185,9 +178,6 @@ class CPUOffloadingManager(OffloadingManager):
         for key in keys:
             if key in state.seen_keys:
                 continue
-            assert not state.finished, (
-                "New cache keys observed after request finalization"
-            )
             group_idx = get_offload_group_idx(key)
             state.key_groups.setdefault(group_idx, []).append(key)
             state.seen_keys.add(key)
@@ -505,15 +495,9 @@ class CPUOffloadingManager(OffloadingManager):
 
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:
-        state = req_context.get_state(_RequestCacheAccess)
-        if (
-            state is None
-            or state.owner is not self
-            or state.cache_generation != self._cache_generation
-            or state.finished
-        ):
+        state = self._request_accesses.pop(req_context.req_id, None)
+        if state is None:
             return
-        state.finished = True
         key_groups = []
         for group_idx in sorted(state.key_groups):
             keys = state.key_groups[group_idx]
@@ -540,7 +524,7 @@ class CPUOffloadingManager(OffloadingManager):
         # flushes in-flight load job IDs to the workers before any new stores
         # can begin, preventing a cross-direction data race on reused offload chunk IDs.
         self._policy.clear()
-        self._cache_generation += 1
+        self._request_accesses.clear()
         self._num_evictable_cache_chunks = 0
         self._num_write_pending_chunks = 0
 

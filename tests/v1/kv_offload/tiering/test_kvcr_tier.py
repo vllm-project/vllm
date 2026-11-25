@@ -441,13 +441,15 @@ def test_kvcr_tier_batches_consecutive_completions(monkeypatch):
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
     ctx = ReqContext(req_id="req")
+    ctx_next = ReqContext(req_id="req")
     head, middle, tail, future = map(OffloadKey, (b"h", b"m", b"t", b"f"))
-    for key, end_token in ((tail, 48), (head, 16), (middle, 32), (future, 64)):
-        ctx.set_offload_key_position(key, end_token)
+    for target in (ctx, ctx_next):
+        for key, end_token in ((tail, 48), (head, 16), (middle, 32), (future, 64)):
+            target.set_offload_key_position(key, end_token)
     other = ReqContext(req_id="other")
     other.set_offload_key_position(head, 16)
     tier.submit_store(_job(7, ctx, key=tail))
-    tier.submit_load(_job(8, ctx, key=middle))
+    tier.submit_load(_job(8, ctx_next, key=middle))
     tier.submit_store(_job(9, other, key=head))
     tier.submit_load(_job(10, ctx, key=middle))
 
