@@ -90,7 +90,12 @@ class BenchmarkSelection(BaseModel):
 
 
 class EvalSelection(BaseModel):
-    """One eval entry in `spec.yaml` or a suite YAML (extra params validated in C3)."""
+    """One eval entry in `spec.yaml` or a suite YAML (extra params validated in C3).
+
+    `repeats` and `concurrency` are execution controls every eval accepts, so they
+    are typed here rather than listed in each workload's `allowed_params`. Any
+    other key is a workload param and must appear in `allowed_params`.
+    """
 
     model_config = ConfigDict(extra="allow")
 

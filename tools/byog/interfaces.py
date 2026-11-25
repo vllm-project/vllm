@@ -118,7 +118,13 @@ class PointResult:
 
 
 class PlatformAdapter(ABC):
-    """Hardware-specific server launch, cache reset, cleanup, and direct exec."""
+    """Hardware-specific server launch, cache reset, cleanup, and direct exec.
+
+    Phase 0 ships a local-subprocess NVIDIA adapter. The interface only exchanges
+    configs, a `ServerHandle` with a `base_url`, and typed results, so a later
+    adapter can run the candidate in a separate container (for PR isolation)
+    without changing the coordinator or plugins.
+    """
 
     @abstractmethod
     def detect_hardware(self) -> DetectedHardware:
@@ -179,10 +185,20 @@ class DetectedHardware:
     driver_version: str | None = None
     device_memory_used_mib: list[int] | None = None
 
+    def __post_init__(self) -> None:
+        if self.gpu_count < 0:
+            raise ValueError(f"gpu_count must be >= 0, got {self.gpu_count}.")
+
 
 @dataclass(frozen=True)
 class CleanupResult:
-    """Typed outcome of stopping a server and checking GPU VRAM release."""
+    """Typed outcome of stopping a server and checking GPU VRAM release.
+
+    `vram_reclaimed` is True when memory returned to baseline, False when it did
+    not, and None when it could not be checked (e.g. no `nvidia-smi` or MIG
+    reporting N/A). Callers that gate on cleanup, such as CI, must treat None as
+    a failure rather than a pass.
+    """
 
     terminated_pgid: bool
     vram_reclaimed: bool | None
