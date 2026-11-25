@@ -5,8 +5,7 @@
 
 use std::sync::Arc;
 
-use thiserror_ext::AsReport as _;
-use tracing::{info, warn};
+use tracing::info;
 use vllm_parser::unified::{CombinedParser, UnifiedParser};
 use vllm_text::tokenizer::DynTokenizer;
 
@@ -21,10 +20,9 @@ use crate::{Error, Result};
 /// reasoning parser selections.
 ///
 /// The selections are fixed for the server, so they are resolved and each
-/// parser is built once when the model is loaded: an explicit selection the
-/// model cannot use fails there instead of in every request, and a parser that
-/// `auto` matched by model name but cannot be built is disabled with a warning.
-/// Requests then only build the resolved parsers with their own tools.
+/// parser is built once when the model is loaded: a selection the model cannot
+/// use fails there instead of in every request. Requests then only build the
+/// resolved parsers with their own tools.
 #[derive(Clone)]
 pub struct ResolvedParsers {
     model_id: String,
@@ -55,7 +53,7 @@ enum ToolParsing {
     Parser(String),
     /// Tool parsing is turned off (`none`).
     Disabled,
-    /// `auto` found no usable tool parser for the model.
+    /// `auto` matched no tool parser for the model.
     Unavailable,
 }
 
@@ -121,57 +119,66 @@ impl ResolvedParsers {
                     reasoning: reasoning_name.unwrap_or("none").to_owned(),
                 })
             };
-            match unified {
-                Ok(name) => {
-                    info!(parser_name = name, "using unified parser");
-                    Parsers::Unified(name.to_owned())
+            let name = unified.map_err(|error| {
+                if tool_auto && reasoning_auto {
+                    unusable_auto_parser(
+                        "unified",
+                        unified_name,
+                        "--tool-call-parser none --reasoning-parser none",
+                        model_id,
+                        error,
+                    )
+                } else {
+                    error
                 }
-                Err(error) if tool_auto && reasoning_auto => {
-                    warn_unusable_auto_parser("unified", unified_name, model_id, &error);
-                    Parsers::Split {
-                        tool: ToolParsing::Unavailable,
-                        reasoning: None,
-                    }
-                }
-                Err(error) => return Err(error),
-            }
+            })?;
+            info!(parser_name = name, "using unified parser");
+            Parsers::Unified(name.to_owned())
         } else {
             let tool = match tool_name {
                 Some(name) => {
-                    match ToolParserFactory::global().create(name, &[], tokenizer.clone()) {
-                        Ok(_) => {
-                            info!(parser_name = name, "using tool parser");
-                            ToolParsing::Parser(name.to_owned())
-                        }
-                        Err(error) if tool_auto => {
-                            warn_unusable_auto_parser("tool", name, model_id, &error);
-                            ToolParsing::Unavailable
-                        }
-                        Err(error) => return Err(error),
-                    }
+                    ToolParserFactory::global().create(name, &[], tokenizer.clone()).map_err(
+                        |error| {
+                            if tool_auto {
+                                unusable_auto_parser(
+                                    "tool",
+                                    name,
+                                    "--tool-call-parser none",
+                                    model_id,
+                                    error,
+                                )
+                            } else {
+                                error
+                            }
+                        },
+                    )?;
+                    info!(parser_name = name, "using tool parser");
+                    ToolParsing::Parser(name.to_owned())
                 }
                 None if matches!(tool_call_parser, ParserSelection::None) => ToolParsing::Disabled,
                 None => ToolParsing::Unavailable,
             };
-            let reasoning = match reasoning_name {
-                Some(name) => {
-                    match ReasoningParserFactory::global().create(name, tokenizer.clone()) {
-                        Ok(_) => {
-                            info!(parser_name = name, "using reasoning parser");
-                            Some(name.to_owned())
+            if let Some(name) = reasoning_name {
+                ReasoningParserFactory::global().create(name, tokenizer.clone()).map_err(
+                    |error| {
+                        if reasoning_auto {
+                            unusable_auto_parser(
+                                "reasoning",
+                                name,
+                                "--reasoning-parser none",
+                                model_id,
+                                error,
+                            )
+                        } else {
+                            error
                         }
-                        Err(error) if reasoning_auto => {
-                            warn_unusable_auto_parser("reasoning", name, model_id, &error);
-                            None
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                None => None,
-            };
-            if reasoning.is_none() {
+                    },
+                )?;
+                info!(parser_name = name, "using reasoning parser");
+            } else {
                 info!("reasoning parsing disabled");
             }
+            let reasoning = reasoning_name.map(str::to_owned);
             Parsers::Split { tool, reasoning }
         };
 
@@ -260,15 +267,24 @@ impl ResolvedParsers {
     }
 }
 
-/// Disable a parser that `auto` matched by model name but cannot build for
-/// this model: `auto` picks a parser that fits the model, and without one the
-/// model is served without that parsing, like Python's default.
-fn warn_unusable_auto_parser(kind: &str, name: &str, model_id: &str, error: &Error) {
-    warn!(
-        model_id,
-        parser_name = name,
-        error = %error.as_report(),
-        "the {kind} parser selected automatically for this model cannot be used with it; \
-         {kind} parsing is disabled, select a parser explicitly to require one"
-    );
+/// A parser that `auto` matched by model name but cannot build for this model.
+///
+/// This refuses the start rather than serving without the parser: a managed
+/// engine gets the same selection, and would still wait for the end of
+/// reasoning that the frontend no longer parses before applying structured
+/// outputs.
+fn unusable_auto_parser(
+    kind: &'static str,
+    name: &str,
+    disable: &'static str,
+    model_id: &str,
+    error: Error,
+) -> Error {
+    Error::UnusableAutoParser {
+        kind,
+        name: name.to_owned(),
+        model_id: model_id.to_owned(),
+        disable,
+        error: Box::new(error),
+    }
 }

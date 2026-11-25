@@ -106,6 +106,17 @@ pub enum Error {
         #[source]
         error: BoxedError,
     },
+    #[error(
+        "{kind} parser `{name}` was selected automatically for model `{model_id}` but cannot be used with it; select a parser explicitly, or pass `{disable}` to disable {kind} parsing"
+    )]
+    UnusableAutoParser {
+        kind: &'static str,
+        name: String,
+        model_id: String,
+        disable: &'static str,
+        #[source]
+        error: Box<Error>,
+    },
     #[error("failed to initialize request output parser")]
     OutputParserInitialization {
         #[source]

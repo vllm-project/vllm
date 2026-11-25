@@ -650,8 +650,8 @@ mod tests {
                 ParserSelection::Auto,
                 explicit("qwen3"),
             ),
-            // An automatic match by model name that the tokenizer cannot
-            // support is disabled; the other automatic match stays.
+            // An automatic match by model name the tokenizer cannot support
+            // fails too, naming the selection that turns it off.
             load(
                 "Qwen/Qwen3-8B",
                 HF_CONFIG,
@@ -666,7 +666,7 @@ mod tests {
                 ParserSelection::Auto,
                 ParserSelection::Auto,
             ),
-            // An automatic unified match disables both.
+            // An automatic unified match is turned off by both selections.
             load(
                 "google/gemma-4-test",
                 HF_CONFIG,
@@ -732,13 +732,8 @@ mod tests {
                         ),
                     ),
                 ),
-                Ok(
-                    (
-                        Some(
-                            "qwen3_json",
-                        ),
-                        None,
-                    ),
+                Err(
+                    "reasoning parser `qwen3` was selected automatically for model `Qwen/Qwen3-8B` but cannot be used with it; select a parser explicitly, or pass `--reasoning-parser none` to disable reasoning parsing: failed to initialize reasoning parser `qwen3`: tokenizer is missing reasoning delimiter token `<think>`",
                 ),
                 Ok(
                     (
@@ -750,11 +745,8 @@ mod tests {
                         ),
                     ),
                 ),
-                Ok(
-                    (
-                        None,
-                        None,
-                    ),
+                Err(
+                    "unified parser `gemma4` was selected automatically for model `google/gemma-4-test` but cannot be used with it; select a parser explicitly, or pass `--tool-call-parser none --reasoning-parser none` to disable unified parsing: failed to initialize unified parser `gemma4`: tokenizer is missing unified parser token `<|channel>`",
                 ),
                 Err(
                     "failed to initialize unified parser `hf`: the model's tokenizer_config.json provides no response_template",

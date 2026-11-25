@@ -160,8 +160,7 @@ struct FakeChatBackend {
     has_template: bool,
     model_id: String,
     tokenizer: DynTokenizer,
-    tool_call_parser: ParserSelection,
-    reasoning_parser: ParserSelection,
+    parsers: ResolvedParsers,
 }
 
 fn fake_chat_tokenizer() -> TestTokenizer {
@@ -183,36 +182,41 @@ impl fmt::Debug for FakeChatBackend {
 
 impl FakeChatBackend {
     fn new() -> Self {
-        Self {
-            has_template: true,
-            model_id: "test-model".to_string(),
-            tokenizer: Arc::new(fake_chat_tokenizer()),
-            tool_call_parser: ParserSelection::Auto,
-            reasoning_parser: ParserSelection::Auto,
-        }
+        Self::with_model_id("test-model")
     }
 
     fn without_template() -> Self {
         Self {
             has_template: false,
-            model_id: "test-model".to_string(),
-            tokenizer: Arc::new(fake_chat_tokenizer()),
-            tool_call_parser: ParserSelection::Auto,
-            reasoning_parser: ParserSelection::Auto,
+            ..Self::new()
         }
     }
 
     fn with_model_id(model_id: impl Into<String>) -> Self {
+        let model_id = model_id.into();
+        let tokenizer: DynTokenizer = Arc::new(fake_chat_tokenizer());
+        let parsers = resolve_parsers(
+            &model_id,
+            &tokenizer,
+            ParserSelection::Auto,
+            ParserSelection::Auto,
+        );
         Self {
             has_template: true,
-            model_id: model_id.into(),
-            tokenizer: Arc::new(fake_chat_tokenizer()),
-            tool_call_parser: ParserSelection::Auto,
-            reasoning_parser: ParserSelection::Auto,
+            model_id,
+            tokenizer,
+            parsers,
         }
     }
 
+    /// Use `tokenizer`, resolving `auto` parser selections against it.
     fn with_tokenizer(mut self, tokenizer: DynTokenizer) -> Self {
+        self.parsers = resolve_parsers(
+            &self.model_id,
+            &tokenizer,
+            ParserSelection::Auto,
+            ParserSelection::Auto,
+        );
         self.tokenizer = tokenizer;
         self
     }
@@ -222,10 +226,29 @@ impl FakeChatBackend {
         tool_call_parser: ParserSelection,
         reasoning_parser: ParserSelection,
     ) -> Self {
-        self.tool_call_parser = tool_call_parser;
-        self.reasoning_parser = reasoning_parser;
+        self.parsers = resolve_parsers(
+            &self.model_id,
+            &self.tokenizer,
+            tool_call_parser,
+            reasoning_parser,
+        );
         self
     }
+}
+
+fn resolve_parsers(
+    model_id: &str,
+    tokenizer: &DynTokenizer,
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+) -> ResolvedParsers {
+    ResolvedParsers::new(
+        model_id,
+        Arc::clone(tokenizer),
+        &tool_call_parser,
+        &reasoning_parser,
+    )
+    .unwrap()
 }
 
 impl TextBackend for FakeChatBackend {
@@ -248,17 +271,19 @@ impl ChatBackend for FakeChatBackend {
         request: &mut ChatRequest,
         options: NewChatOutputProcessorOptions,
     ) -> vllm_chat::Result<DynChatOutputProcessor> {
-        let parsers = ResolvedParsers::new(
-            &self.model_id,
-            self.tokenizer(),
-            &self.tool_call_parser,
-            &self.reasoning_parser,
-        )?;
         Ok(Box::new(DefaultChatOutputProcessor::new(
             request,
-            &parsers,
+            &self.parsers,
             options.tool_strict_level,
         )?))
+    }
+
+    fn tool_call_parser_name(&self) -> Option<&str> {
+        self.parsers.tool_call_parser_name()
+    }
+
+    fn reasoning_parser_name(&self) -> Option<&str> {
+        self.parsers.reasoning_parser_name()
     }
 }
 
