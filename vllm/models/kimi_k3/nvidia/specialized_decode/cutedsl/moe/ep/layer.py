@@ -171,12 +171,7 @@ def front_gemm_tactic(tokens):
     """Split-K tactic of the packed [shared gate_up | latent down] front (15872 x 7168):
     128-row weight tiles (124 CTAs, one wave on 152 SMs) up to 64 tokens (GB300 cold L2,
     us: T19 34.4 vs 35.6 at 64-row tiles, T60 35.6 vs 38.2), else `front_tactic`."""
-    n = next(b for b in (8, 16, 32, 64, 128) if b >= tokens)
-    if n <= 32:
-        return (128, n, 1, 5)
-    if n == 64:
-        return (128, 64, 1, 4)
-    return front_tactic(tokens)
+    return front_tactic(tokens, rows=128 if tokens <= 64 else 64)
 
 
 # Up to this many tokens the split-K front beats cuBLAS on every DEP projection
