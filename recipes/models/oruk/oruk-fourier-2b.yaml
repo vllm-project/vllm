@@ -1,0 +1,156 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+
+meta:
+  title: "Oruk Fourier 2B"
+  slug: "oruk-fourier-2b"
+  provider: "Oruk"
+  description: "English speech-to-text fine-tune of Qwen3-ASR 1.7B (2.04B parameters, CC BY-NC 4.0) served natively through vLLM's OpenAI-compatible audio transcription endpoint."
+  date_added: 2026-11-25
+  date_updated: 2026-11-25
+  tasks:
+    - multimodal
+  performance_headline: "4.95% mean WER across 7 Open ASR Leaderboard English splits; single-GPU BF16 serving"
+  related_recipes:
+    - "Qwen/Qwen3-ASR-1.7B"
+  default_hardware: l40s
+  hardware:
+    l40s: verified
+
+model:
+  model_id: "oruk/oruk-fourier-2b"
+  min_vllm_version: "0.34.0"
+  architecture: dense
+  parameter_count: "2.04B"
+  active_parameters: "2.04B"
+  context_length: 65536
+  base_args:
+    - "--revision"
+    - "8c2a8871f1304aa2f634da4fb95e24438c4945b9"
+    - "--tokenizer-revision"
+    - "8c2a8871f1304aa2f634da4fb95e24438c4945b9"
+    - "--dtype"
+    - "bfloat16"
+  base_env: {}
+
+dependencies:
+  - note: "Audio extras — required for ASR audio loading and resampling (librosa, soundfile)"
+    command: 'uv pip install -U "vllm[audio]>=0.34.0"'
+  - note: "Native Hugging Face Qwen3-ASR config and processor support requires Transformers >= 5.22.2"
+    command: 'uv pip install -U "transformers>=5.22.2"'
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 5
+    description: "Native BF16 checkpoint (~4.08 GB weights); single-GPU serving verified on 24 GB A10G and 48 GB L40S"
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+troubleshooting:
+  - title: "Config or weight-loading error on flat audio_config/text_config"
+    body: |
+      `oruk/oruk-fourier-2b` uses the native Hugging Face Transformers
+      `Qwen3ASRForConditionalGeneration` schema (top-level `audio_config` and
+      `text_config`, without legacy `thinker_config`). Upgrade to
+      `vllm>=0.34.0` and `transformers>=5.22.2` (native upstream config and
+      Transformers-backend transcription support landed in vLLM #66097 and
+      #65735).
+  - title: "Audio request fails with missing audio library error"
+    body: |
+      Install the audio extras (`uv pip install -U "vllm[audio]>=0.34.0"`) so
+      `librosa` and `soundfile` are available for decoding and resampling
+      uploaded audio files.
+
+guide: |
+  ## Overview
+
+  [Oruk Fourier 2B](https://huggingface.co/oruk/oruk-fourier-2b) is a
+  2.04B-parameter English-only automatic speech recognition fine-tune of
+  `Qwen/Qwen3-ASR-1.7B` in native Hugging Face Transformers
+  `Qwen3ASRForConditionalGeneration` format. On the Open ASR Leaderboard's
+  seven public English short-form splits, Oruk reports **4.95% mean WER**
+  (vs. 5.75% for base `Qwen/Qwen3-ASR-1.7B-hf`), including 6.73% on
+  AMI-Cleaned and 6.50% on GigaSpeech-Cleaned.
+
+  Pinning `--revision` and `--tokenizer-revision` to
+  `8c2a8871f1304aa2f634da4fb95e24438c4945b9` fetches only the original BF16
+  checkpoint (`model.safetensors`, 4.08 GB) and its config/tokenizer metadata,
+  skipping alternative GGUF, ONNX, and MLX subfolder exports (`mlx/8bit/model.safetensors`)
+  that also live on `main`. Keep both revision flags matched.
+
+  ## License
+
+  Fourier 2B is released under **[CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)**
+  for noncommercial use with attribution to [Oruk](https://oruk.ai). Hosted or
+  API serving and commercial use require a separate commercial license from
+  Oruk; see the [model card license section](https://huggingface.co/oruk/oruk-fourier-2b#license).
+
+  ## Client usage
+
+  ### OpenAI-compatible Transcription API (cURL)
+
+  With the server running on port 8000, upload an English WAV or MP3 file as
+  multipart form data:
+
+  ```bash
+  curl -fsS http://127.0.0.1:8000/v1/audio/transcriptions \
+    -F "file=@recording.wav" \
+    -F "model=oruk/oruk-fourier-2b" \
+    -F "language=en" \
+    -F "response_format=json"
+  ```
+
+  ### OpenAI Python SDK
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="EMPTY")
+
+  with open("recording.wav", "rb") as audio_file:
+      transcription = client.audio.transcriptions.create(
+          model="oruk/oruk-fourier-2b",
+          file=audio_file,
+          language="en",
+      )
+  print(transcription.text)
+  ```
+
+  ## Verified runs and limitations
+
+  - **Tested hardware:** Verified end-to-end on `vllm==0.34.0` with
+    `transformers==5.22.2` on an NVIDIA L40S (48 GB) and an NVIDIA A10G
+    (24 GB), transcribing both WAV and MP3 uploads via
+    `POST /v1/audio/transcriptions` (41/41 normalized reference words matched
+    across JFK and LibriVox clips; offline batch decoded 21 s of audio in
+    0.75 s on A10G).
+  - **English only:** Set `language=en` on transcription requests; non-English
+    speech is out of scope.
+  - **Timestamps:** Word-level timestamps and `verbose_json` are not supported
+    on this endpoint path.
+  - **Short-clip memory tuning:** The checkpoint declares a 65,536-token
+    decoder context. For short dictation or file-transcription workloads on
+    smaller GPUs, adding `--max-model-len 1024` (or `4096`) and
+    `--enforce-eager` reduces startup time and KV-cache allocation.
+  - **Offline batch inference:** For in-process Python batching without an HTTP
+    server, see Oruk's [vLLM offline batch guide](https://huggingface.co/oruk/oruk-fourier-2b/tree/main/examples/vllm).
+
+  ## References
+
+  - [Model card and license](https://huggingface.co/oruk/oruk-fourier-2b)
+  - [vLLM OpenAI-compatible serving guide](https://huggingface.co/oruk/oruk-fourier-2b/tree/main/examples/licensed-serving)
+  - [vLLM offline batch guide and verification](https://huggingface.co/oruk/oruk-fourier-2b/tree/main/examples/vllm)
+  - [vLLM Qwen3-ASR upstream config support (#66097)](https://github.com/vllm-project/vllm/pull/66097)
+  - [vLLM Transformers modeling backend transcription (#65735)](https://github.com/vllm-project/vllm/pull/65735)
+  - [vLLM speech-to-text API](https://docs.vllm.ai/en/latest/serving/online_serving/speech_to_text/)
