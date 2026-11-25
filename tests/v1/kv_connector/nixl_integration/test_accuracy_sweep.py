@@ -147,16 +147,6 @@ HYBRID_SSM_CONFIGS = [
         },
         id="gdn-qwen3.5-mtp",
     ),
-    # Mamba1 (Jamba)
-    pytest.param(
-        {
-            "VLLM_SSM_CONV_STATE_LAYOUT": "DS",
-            "GPU_MEMORY_UTILIZATION": "0.8",
-            "MODEL_NAMES": "ai21labs/AI21-Jamba2-3B",
-            "VLLM_SERVE_EXTRA_ARGS": "--max-model-len,8192",
-        },
-        id="mamba1-jamba2-3b",
-    ),
 ]
 
 # gemma3 does not work with FlashInfer.

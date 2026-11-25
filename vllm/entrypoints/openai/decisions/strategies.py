@@ -1111,7 +1111,11 @@ class JointSchemaStrategy(ReadStrategy):
         result = None
         async for result in self.context.engine_client.encode(  # noqa: B007
             engine_input,
-            PoolingParams(task="token_classify", extra_kwargs={"joint_schema": schema}),
+            PoolingParams(
+                task="token_classify",
+                use_activation=True,
+                extra_kwargs={"joint_schema": schema},
+            ),
             f"{request_id}-0",
             lora_request=lora_request,
             trace_headers=trace_headers,
