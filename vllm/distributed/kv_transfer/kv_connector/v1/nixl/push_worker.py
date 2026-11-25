@@ -538,7 +538,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             meta.remote.block_ids, self._remote_physical_blocks_per_group[engine_id]
         )
         stage = self._single_remote_stage(engine_id)
-        if not stage.pairs.groups_match:
+        if not self._groups_match(engine_id):
             raise NotImplementedError(
                 "NixlPushConnector does not support different producer and "
                 "consumer cache-group layouts"

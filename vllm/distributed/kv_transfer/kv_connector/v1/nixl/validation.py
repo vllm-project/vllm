@@ -147,10 +147,7 @@ def validate_remote_agent_handshake(
     remote_physical_per_logical = max(
         nixl_agent_meta.physical_blocks_per_group, default=1
     )
-    groups_match = all(
-        stage.pairs.groups_match
-        for stage in worker._remote_stages[remote_engine_id].values()
-    )
+    groups_match = worker._groups_match(remote_engine_id)
     if not groups_match and worker._TRANSFER_MODE == "pull":
         # Blocks pair by group pair; these were never validated with a
         # remote that puts some layer in another cache group.
@@ -175,7 +172,8 @@ def validate_remote_agent_handshake(
         )
     ):
         raise NotImplementedError(
-            "DCP region pulls require matching logical and physical block sizes"
+            "Different NIXL cache-group layouts with DCP require matching "
+            "logical and physical block sizes"
         )
     if (
         worker._has_mamba

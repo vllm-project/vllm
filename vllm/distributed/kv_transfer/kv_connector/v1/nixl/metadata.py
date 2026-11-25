@@ -274,9 +274,6 @@ class ReqMeta:
     # True only when the scheduler parked the request in WAITING_FOR_REMOTE_KVS
     # and expects it in finished_recving; notify-only recvs must not be reported.
     awaiting_kvs: bool = False
-    # Worker-only, per-region physical pages to zero after a successful pull.
-    # None selects group-based completion; empty lists mean no zeroing.
-    region_blocks_to_zero: BlockIds | None = None
     # Worker-only, per-group range of the remote-sized sub-blocks of each local
     # group a pull covers. None derives it from the block counts.
     covered_sub_blocks: list[range] | None = None
