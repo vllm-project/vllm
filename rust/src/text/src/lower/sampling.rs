@@ -19,6 +19,13 @@ pub enum SamplingParamsError {
          ({prompt_len}), inclusive, got {value}"
     )]
     RoutedExpertsPromptStartOutOfRange { value: u32, prompt_len: u32 },
+    #[error("sampling distribution replay requires temperature > 0")]
+    SamplingMaskRequiresPositiveTemperature,
+    #[error(
+        "sampling distribution replay requires top_k > 0 to bound sampling mask size, \
+         reduce transfer overhead, and avoid potential OOMs"
+    )]
+    SamplingMaskRequiresPositiveTopK,
 }
 
 fn validate_frequency_penalty(value: f32) -> Result<(), SamplingParamsError> {

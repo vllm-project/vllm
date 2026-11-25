@@ -383,6 +383,9 @@ class RustFrontendProcessManager:
             args_dict["model_tag"] = model_config.model
             args_dict.setdefault("served_model_name", [model_config.served_model_name])
 
+        if model_config is not None and model_config.return_sampling_mask:
+            args_dict["return_sampling_mask"] = True
+
         # The Rust `frontend` subcommand parses --args-json via serde_json,
         # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
         # declarations on SharedRuntimeArgs fields. Forward the env-driven

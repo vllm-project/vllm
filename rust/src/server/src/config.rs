@@ -409,6 +409,8 @@ pub struct Config {
     /// Optional maximum number of top log probabilities accepted by the
     /// frontend. `None` delegates to the text layer default.
     pub max_logprobs: Option<i32>,
+    /// Validate sampling parameters for sampling-mask replay.
+    pub return_sampling_mask: bool,
     /// Minimum number of newly generated tokens batched into each streamed
     /// output after the first one. Requests can raise it with their own
     /// `stream_interval`.

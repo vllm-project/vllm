@@ -663,6 +663,7 @@ mod tests {
                 SamplingLimits {
                     max_model_len: 256,
                     max_logprobs: 20,
+                    return_sampling_mask: false,
                     model_vocab_size: 512,
                     tokenizer_vocab_size: 512,
                 },
@@ -700,6 +701,7 @@ mod tests {
                 SamplingLimits {
                     max_model_len: 256,
                     max_logprobs: 20,
+                    return_sampling_mask: false,
                     model_vocab_size: 512,
                     tokenizer_vocab_size: 512,
                 },
@@ -827,6 +829,7 @@ mod tests {
                     SamplingLimits {
                         max_model_len: 256,
                         max_logprobs: 20,
+                        return_sampling_mask: false,
                         model_vocab_size: 512,
                         tokenizer_vocab_size: 512,
                     },
@@ -975,6 +978,7 @@ mod tests {
                 SamplingLimits {
                     max_model_len: 32,
                     max_logprobs: 20,
+                    return_sampling_mask: false,
                     model_vocab_size: 512,
                     tokenizer_vocab_size: 512,
                 },
@@ -1024,6 +1028,7 @@ mod tests {
                     SamplingLimits {
                         max_model_len: 256,
                         max_logprobs: 20,
+                        return_sampling_mask: false,
                         model_vocab_size: 512,
                         tokenizer_vocab_size: 512,
                     },

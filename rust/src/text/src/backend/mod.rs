@@ -91,6 +91,8 @@ pub struct SamplingLimits {
     ///
     /// `-1` means allowing requests up to the model vocabulary size.
     pub max_logprobs: i32,
+    /// Require positive temperature and a positive top-k limit for sampling-mask replay.
+    pub return_sampling_mask: bool,
 
     /// Model vocabulary size from the model config, used to bound generated
     /// token IDs and logits-domain sampling controls.

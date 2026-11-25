@@ -740,6 +740,23 @@ async fn test_models_with_engine_outputs_and_backend_inner(
     check_request: impl FnOnce(&EngineCoreRequest) + Send + 'static,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, MockEngineTask) {
+    test_models_with_engine_outputs_and_backend_inner_with_sampling_mask(
+        engine_id,
+        outputs,
+        check_request,
+        backend,
+        false,
+    )
+    .await
+}
+
+async fn test_models_with_engine_outputs_and_backend_inner_with_sampling_mask(
+    engine_id: impl Into<EngineId>,
+    outputs: impl FnOnce(&str) -> EngineCoreOutputs + Send + 'static,
+    check_request: impl FnOnce(&EngineCoreRequest) + Send + 'static,
+    backend: Arc<dyn ChatTextBackend>,
+    return_sampling_mask: bool,
+) -> (ChatLlm, MockEngineTask) {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = engine_id.into();
@@ -768,11 +785,10 @@ async fn test_models_with_engine_outputs_and_backend_inner(
     .await
     .expect("connect client");
 
-    (
-        ChatLlm::from_shared_backend(test_llm(client), backend)
-            .with_served_model_name("test-model"),
-        engine_task,
-    )
+    let text = TextLlm::new(test_llm(client), backend.clone())
+        .with_served_model_name("test-model")
+        .with_return_sampling_mask(return_sampling_mask);
+    (ChatLlm::new(text, backend), engine_task)
 }
 
 async fn test_models_with_engine_outputs_and_backend(
@@ -1407,6 +1423,54 @@ async fn scale_out_generate_route_can_be_enabled() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_rejects_sampling_mask_requests_without_valid_sampling_bounds() {
+    let (chat, _engine_task) =
+        test_models_with_engine_outputs_and_backend_inner_with_sampling_mask(
+            b"engine-generate-sampling-mask-validation",
+            |request_id| engine_outputs_for_request(request_id, default_stream_output_specs()),
+            |_| {},
+            Arc::new(FakeChatBackend::new()),
+            true,
+        )
+        .await;
+    let mut app = build_router_with_gates(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    );
+
+    for (sampling_params, expected_message) in [
+        (
+            json!({"temperature": 0.0, "top_k": 50}),
+            "sampling distribution replay requires temperature > 0",
+        ),
+        (
+            json!({"temperature": 1.0, "top_k": 0}),
+            "sampling distribution replay requires top_k > 0 to bound sampling mask size, \
+             reduce transfer overhead, and avoid potential OOMs",
+        ),
+    ] {
+        let (status, body) = post_json(
+            &mut app,
+            "/inference/v1/generate",
+            json!({
+                "model": "model",
+                "token_ids": [1, 2],
+                "sampling_params": sampling_params,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["type"], "BadRequestError");
+        assert_eq!(body["error"]["message"], expected_message);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

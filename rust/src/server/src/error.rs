@@ -322,6 +322,24 @@ mod tests {
     }
 
     #[test]
+    fn sampling_mask_validation_maps_to_invalid_request() {
+        for error in [
+            vllm_text::SamplingParamsError::SamplingMaskRequiresPositiveTemperature,
+            vllm_text::SamplingParamsError::SamplingMaskRequiresPositiveTopK,
+        ] {
+            let api_error = text_submit_error(
+                "failed to submit completion request",
+                vllm_text::Error::SamplingParams(error),
+            );
+            assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                api_error.to_error_response().error.error_type,
+                "BadRequestError"
+            );
+        }
+    }
+
+    #[test]
     fn chat_wrapped_prompt_too_long_maps_to_invalid_request() {
         let error = vllm_chat::Error::Text(vllm_text::Error::PromptTooLong {
             max_model_len: 8192,

@@ -91,6 +91,7 @@ fn render_args_build_config_without_tls() {
         "deepseek_v32",
         "--max-logprobs",
         "-1",
+        "--return-sampling-mask",
         "--limit-mm-per-prompt",
         r#"{"image": 2, "video": {"count": 1, "num_frames": 32}}"#,
         // Set through `VLLM_SKIP_MODEL_NAME_VALIDATION`, which binds this
@@ -128,6 +129,7 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
     assert_eq!(config.max_logprobs, Some(-1));
+    assert!(config.return_sampling_mask);
     let limit = |modality| config.limit_mm_per_prompt[&modality].count();
     assert_eq!(limit(MmModality::Image), Some(2));
     assert_eq!(limit(MmModality::Video), Some(1));
@@ -279,6 +281,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         structured_outputs_config: None,
                         renderer: Auto,
                         language_model_only: false,
+                        return_sampling_mask: false,
                         max_logprobs: None,
                         stream_interval: 1,
                         max_num_queued_reqs: None,
@@ -1378,6 +1381,36 @@ fn serve_args_forward_max_logprobs_to_frontend_and_managed_engine() {
 }
 
 #[test]
+fn serve_args_forward_return_sampling_mask_to_frontend_and_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--return-sampling-mask",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert!(args.runtime.return_sampling_mask);
+
+    let frontend_config =
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
+    assert!(frontend_config.return_sampling_mask);
+
+    let engine_config = args.to_managed_engine_config(5555, &topology(&args), None);
+    expect![[r#"
+        [
+            "--return-sampling-mask",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&engine_config.python_args);
+}
+
+#[test]
 fn serve_args_resolve_auto_reasoning_parser_for_managed_engine() {
     let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
 
@@ -2373,6 +2406,7 @@ fn frontend_args_accept_json() {
                         structured_outputs_config: None,
                         renderer: Auto,
                         language_model_only: false,
+                        return_sampling_mask: false,
                         max_logprobs: None,
                         stream_interval: 1,
                         max_num_queued_reqs: None,
@@ -2806,7 +2840,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","generation_config":"vllm","revision":"release","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","generation_config":"vllm","revision":"release","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"return_sampling_mask":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
     ])
     .unwrap();
 
@@ -2826,6 +2860,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
     );
     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
     assert!(args.runtime.language_model_only);
+    assert!(args.runtime.return_sampling_mask);
     assert_eq!(args.runtime.max_logprobs, Some(-1));
     assert_eq!(args.runtime.shutdown_timeout, 3);
 }
@@ -3531,6 +3566,7 @@ fn serve_args_accept_handshake_aliases() {
                         structured_outputs_config: None,
                         renderer: Auto,
                         language_model_only: false,
+                        return_sampling_mask: false,
                         max_logprobs: None,
                         stream_interval: 1,
                         max_num_queued_reqs: None,
@@ -3860,6 +3896,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             default_mm_loras: {},
             chat_template_content_format: Auto,
             max_logprobs: None,
+            return_sampling_mask: false,
             stream_interval: 1,
             admission_limits: AdmissionLimits {
                 max_num_queued_reqs: None,
@@ -4002,6 +4039,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             default_mm_loras: {},
             chat_template_content_format: Auto,
             max_logprobs: None,
+            return_sampling_mask: false,
             stream_interval: 1,
             admission_limits: AdmissionLimits {
                 max_num_queued_reqs: None,
@@ -4257,6 +4295,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             default_mm_loras: {},
             chat_template_content_format: Auto,
             max_logprobs: None,
+            return_sampling_mask: false,
             stream_interval: 1,
             admission_limits: AdmissionLimits {
                 max_num_queued_reqs: None,
