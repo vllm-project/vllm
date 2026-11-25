@@ -21,6 +21,8 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
+    ScheduleEndContext,
+    StepResult,
     StoreTrigger,
     get_offload_group_idx,
 )
@@ -538,8 +540,15 @@ class CPUOffloadingManager(OffloadingManager):
 
         self._free_list.clear()
         self._num_allocated_chunks = 0
+        if self.events is not None:
+            # A stored event drained after the reset would announce a chunk
+            # it dropped.
+            self.events = [event for event in self.events if event.removed]
 
     @override
+    def on_schedule_end(self, context: ScheduleEndContext) -> StepResult:
+        return StepResult(events=list(self.take_events()), stats=self.get_stats())
+
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is None:
             return
