@@ -341,7 +341,9 @@ def _run_sparse_backend_vs_sdpa(
         vllm_config=vllm_config,
     )
     vllm_config.compilation_config.static_forward_context["placeholder"] = (
-        SimpleNamespace(prefill_backend=prefill_backend)
+        SimpleNamespace(
+            prefill_backend=prefill_backend, get_attn_backend=lambda: backend_cls
+        )
     )
 
     builder = backend_cls.get_builder_cls()(

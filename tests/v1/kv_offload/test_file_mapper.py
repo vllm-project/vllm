@@ -47,6 +47,7 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
         parallel=OffloadingParallelConfig(
             rank=kwargs.get("rank", 0),
             world_size=kwargs.get("world_size", 1),
+            local_world_size=kwargs.get("world_size", 1),
             tp_size=kwargs.get("tp_size", 1),
             pp_size=kwargs.get("pp_size", 1),
             pcp_size=kwargs.get("pcp_size", 1),

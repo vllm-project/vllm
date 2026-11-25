@@ -130,7 +130,7 @@ def is_quant_method_supported(quant_method: str) -> bool:
 
 
 def _test_online_quant_peak_mem_impl(
-    quantization_arg_value,
+    quantization_kwargs,
     model_name,
     expected_model_memory_gib,
     vllm_runner,
@@ -145,7 +145,7 @@ def _test_online_quant_peak_mem_impl(
         caplog_mp_spawn(logging.DEBUG) as log_holder,
         vllm_runner(
             model_name,
-            quantization=quantization_arg_value,
+            **quantization_kwargs,
             enforce_eager=True,
         ) as llm,
     ):
@@ -174,7 +174,8 @@ def _test_online_quant_peak_mem_impl(
     print(f"GPU memory used after loading weights: {model_memory_gib} GiB")
     print(f"Peak GPU memory usage while loading weights: {peak_memory_gib} GiB")
 
-    # Streaming quantization keeps each weight alive in both bf16 and fp8, so
+    # Streaming quantization keeps each weight alive in both its original and
+    # quantized form (bf16 or serialized weights, and fp8), one layer at a time, so
     # peak memory is slightly above the final model memory
     expected_peak_memory_gib = expected_model_memory_gib * 1.4
 

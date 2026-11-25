@@ -4,7 +4,6 @@
 
 import itertools
 import socket
-import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -32,9 +31,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
 )
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.request import RequestStatus
 
-from ..utils import make_moriio_writer
+from ..utils import create_request, make_moriio_writer
 
 pytestmark = pytest.mark.cpu_test
 
@@ -70,7 +71,7 @@ def _moriio_config(pp_rank, pp_size, tp_rank, tp_size, dp_rank=0, dp_size=1):
 
 @pytest.mark.parametrize(
     ("pp_size", "tp_size", "dp_size"),
-    [(1, 4, 1), (4, 1, 1), (2, 2, 1), (2, 1, 2)],
+    [(1, 4, 1), (4, 1, 1), (2, 2, 1), (2, 1, 2), (2, 2, 2)],
 )
 def test_every_stage_worker_binds_its_own_ports(pp_size, tp_size, dp_size):
     configs = [
@@ -86,7 +87,9 @@ def test_every_stage_worker_binds_its_own_ports(pp_size, tp_size, dp_size):
         assert config.notify_port == NOTIFY_PORT + config.port_offset
         if config.pp_rank == 0:
             # Stage 0 keeps the ports of a pipeline-free instance.
-            assert config.port_offset == get_port_offset(config.dp_rank, config.tp_rank)
+            assert config.port_offset == get_port_offset(
+                config.dp_rank, config.tp_rank, config.tp_size
+            )
 
         # The first stage forwards to the same worker of every later stage.
         later = [
@@ -100,9 +103,14 @@ def test_every_stage_worker_binds_its_own_ports(pp_size, tp_size, dp_size):
         )
 
 
-def _decode_scheduler(*, send: bool = False) -> MoRIIOConnectorScheduler:
+class _DecodeScheduler(MoRIIOConnectorScheduler):
+    notified: list[dict]
+    released: list[int]
+
+
+def _decode_scheduler(*, send: bool = False) -> _DecodeScheduler:
     """A decode scheduler that records its notifications, or sends them."""
-    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler = _DecodeScheduler.__new__(_DecodeScheduler)
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.is_producer = False
     scheduler.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
@@ -113,6 +121,7 @@ def _decode_scheduler(*, send: bool = False) -> MoRIIOConnectorScheduler:
     scheduler._global_dp_rank = 0
     scheduler.transfer_id_to_request_id = {}
     scheduler.request_id_to_transfer_id = {}
+    scheduler._write_recvs_in_flight = {}
     scheduler.paths = {}
     scheduler.notified = []
     scheduler.released = []
@@ -163,8 +172,8 @@ def _decode_params(shape, pp_size, tp_size, host="10.0.0.1", notify_port=NOTIFY_
     if shape == "returned by prefill":
         # What the prefill's request_finished returns, forwarded as is.
         _, params = MoRIIOConnectorScheduler.request_finished(
-            _prefill_scheduler(pp_size, tp_size, host, notify_port),  # type: ignore[arg-type]
-            SimpleNamespace(  # type: ignore[arg-type]
+            _prefill_scheduler(pp_size, tp_size, host, notify_port),
+            SimpleNamespace(
                 request_id="req",
                 kv_transfer_params={"do_remote_decode": True, "transfer_id": "tA"},
                 status=RequestStatus.FINISHED_LENGTH_CAPPED,
@@ -211,6 +220,33 @@ def test_decode_addresses_only_the_first_stage(shape, pp_size, tp_size):
     assert sorted(n["port"] for n in scheduler.notified) == first_stage
     assert all(n["block_notify_list"] == [5, 6, 7] for n in scheduler.notified)
     assert sorted(scheduler.released) == first_stage
+
+
+def test_decode_allocation_notifies_both_tp_ranks_on_remote_dp1():
+    """A TP1 decode must send its allocation to both TP2 peers on DP1."""
+    scheduler = _decode_scheduler()
+    scheduler.tp_size = 1
+    request = create_request(request_id=7, do_remote_prefill=True)
+    assert request.kv_transfer_params is not None
+    request.kv_transfer_params.update(
+        transfer_id="tA",
+        remote_host="10.0.0.1",
+        remote_notify_port=NOTIFY_PORT,
+        remote_dp_size=2,
+        remote_dp_rank=1,
+        remote_tp_size=2,
+    )
+    blocks = KVCacheBlocks(([KVCacheBlock(block_id=i) for i in (5, 6, 7)],))
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=40)
+
+    assert [
+        (n["host"], n["port"], n["transfer_id"], n["block_notify_list"])
+        for n in scheduler.notified
+    ] == [
+        ("10.0.0.1", NOTIFY_PORT + 2, "tA", [5, 6, 7]),
+        ("10.0.0.1", NOTIFY_PORT + 3, "tA", [5, 6, 7]),
+    ]
 
 
 def _free_consecutive_ports(n: int) -> list[int]:
@@ -444,16 +480,12 @@ def test_first_stage_failure_fails_the_transfer_once():
 
 def _write_done_fields(pp_rank: int, pp_size: int) -> list:
     sent = []
-    wrapper = SimpleNamespace(
-        lock=threading.Lock(),
-        done_req_ids=[],
-        done_remote_allocate_req_dict={},
-        waiting_for_transfer_complete=lambda statuses: None,
-        _mark_transfer_terminal_locked=lambda transfer_id: None,
-        send_notify=lambda *args, message_type, message_fields=None: sent.append(
-            message_fields
-        ),
-    )
+    wrapper = MoRIIOWrapper()
+
+    def send_notify(*args, message_type, message_fields=None):
+        sent.append(message_fields)
+
+    wrapper.send_notify = send_notify  # type: ignore[method-assign]
     writer = make_moriio_writer(
         SimpleNamespace(
             moriio_wrapper=wrapper, tp_rank=0, pp_rank=pp_rank, pp_size=pp_size

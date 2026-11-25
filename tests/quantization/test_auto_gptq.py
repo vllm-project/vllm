@@ -27,6 +27,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.linear import (
+    LinearBase,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.quantization.auto_gptq import (
     AutoGPTQConfig,
     AutoGPTQLinearMethod,
@@ -281,6 +285,39 @@ def test_auto_gptq_moe_quant_method_follows_checkpoint(
     assert isinstance(
         config.get_quant_method(layer, "mtp.layers.0.mlp.experts"),
         UnquantizedFusedMoEMethod,
+    )
+
+
+def test_auto_gptq_negative_dynamic_rule_excludes_matching_linears(monkeypatch):
+    """`-:` rules keep matching linears unquantized.
+
+    Block-relative `modules_in_block_to_quantize` entries also match inside the
+    excluded prefixes, so only the rule can tell those layers apart.
+    """
+    from vllm.model_executor.layers.quantization import auto_gptq
+
+    monkeypatch.setattr(auto_gptq, "verify_marlin_supported", lambda **kwargs: None)
+    layer = object.__new__(LinearBase)
+    # Block-relative names match inside the MTP prefixes too, so only the
+    # dynamic rule can tell the draft layers apart.
+    config = _gptq_config(
+        dynamic={r"-:.*mtp.*": {}},
+        modules_in_block_to_quantize=[
+            "layers.0.self_attn.q_proj",
+            "layers.0.mlp.shared_expert.gate_proj",
+        ],
+    )
+
+    for prefix in (
+        "mtp.layers.0.self_attn.q_proj",
+        "mtp.layers.0.mlp.shared_expert.gate_proj",
+    ):
+        assert isinstance(
+            config.get_quant_method(layer, prefix), UnquantizedLinearMethod
+        )
+    assert isinstance(
+        config.get_quant_method(layer, "model.layers.0.self_attn.q_proj"),
+        AutoGPTQLinearMethod,
     )
 
 

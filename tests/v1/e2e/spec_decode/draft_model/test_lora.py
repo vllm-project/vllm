@@ -81,7 +81,6 @@ def test_batch_inference_correctness(
         with vllm_runner(
             model_name,
             block_size=None,
-            trust_remote_code=True,
             tensor_parallel_size=tp_size,
             max_model_len=2048,
             max_num_seqs=4,
@@ -99,7 +98,6 @@ def test_batch_inference_correctness(
         with vllm_runner(
             model_name,
             block_size=None,
-            trust_remote_code=True,
             tensor_parallel_size=tp_size,
             speculative_config={
                 "method": method,

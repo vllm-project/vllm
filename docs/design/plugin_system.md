@@ -157,6 +157,32 @@ Every plugin has three parts:
 
 7. (optional) Implement other pluggable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
 
+#### CUDA graph capture defaults and grids
+
+Platforms using the common GPU graph manager can customize capture sizes without changing shape calculation, capture, or replay. Inherit the default methods to preserve the traditional shared grid. Override `get_cudagraph_capture_defaults(vllm_config)` to choose defaults for particular device architectures; return a `CUDAGraphCaptureDefaults` from `vllm.config.compilation` without modifying the config.
+
+- `legacy_max_tokens` defaults to 512 and bounds the initial shared grid. Its existing spacing stays in the common resolver.
+- Leave both `max_prefill_tokens` and `max_decode_requests` unset to derive prefill and decode sizes from the shared grid. Set both to select independent default grids.
+- `max_decode_tokens` optionally limits each decode graph's total tokens, including speculative tokens. The scheduler's limits still apply.
+
+Explicit deprecated `cudagraph_capture_sizes` or `max_cudagraph_capture_size` settings retain their shared-grid interpretation. Explicit prefill/decode settings take precedence over the corresponding defaults. Changing the request grid does not override the separate token budget: set `max_decode_cudagraph_capture_tokens` to override that default. Scheduler limits still apply. The common resolver retains the validation of conflicting settings and records the largest required graph for backend buffer allocation.
+
+For different spacing, override the relevant `Platform` method. The implementations inherited from `Platform` call the shared grid functions in `vllm.config.compilation`.
+
+| Method | Input and output units |
+| --- | --- |
+| `get_prefill_cudagraph_capture_grid(max_tokens, dense_head=False)` | Prefill token counts |
+| `get_decode_cudagraph_capture_grid(max_requests)` | Uniform decode request counts; also used by single-token draft decodes |
+| `get_varlen_decode_cudagraph_capture_grid(max_tokens, dense_head=False)` | Adaptive verification token counts |
+
+Grid methods receive a resolved upper bound and return positive integer sizes no larger than that bound; a zero bound requires an empty list. The common resolver sorts and deduplicates the result and rejects out-of-range sizes. Keep the methods deterministic. `dense_head=True` requests the interactivity-mode coverage of every size from 1 through `min(bound, 32)`. Explicit user-provided grids bypass the generators for that grid. Request/query-length conversion, dynamic speculation, and target/drafter semantics remain in common code.
+
+This interface changes size selection only. A platform must still supply a compatible runner, attention backend, and graph implementation. CUDA keeps its existing SM100 defaults; ROCm and XPU inherit the traditional defaults.
+
+ROCm gfx10xx previously matched the shared capability-10 check intended for NVIDIA SM100. Its defaults now use the traditional shared grid (initial ceiling 512 tokens), instead of independent grids (prefill up to 8192 tokens, decode up to `max_num_seqs` requests, and an 8192-token decode budget). To retain that wider coverage explicitly, set `max_prefill_cudagraph_capture_tokens=8192`, `max_decode_cudagraph_capture_requests` to your `max_num_seqs`, and `max_decode_cudagraph_capture_tokens=8192`. These are the former values, not tuned recommendations for gfx10xx. Scheduler limits still apply.
+
+If you already set explicit prefill/decode grids, an unset `max_decode_cudagraph_capture_tokens` no longer supplies the former 8192-token budget on gfx10xx; set it to `8192` to preserve that bound.
+
 ## Compatibility Guarantee
 
 vLLM guarantees the interface of documented plugins, such as `ModelRegistry.register_model`, will always be available for plugins to register models. However, it is the responsibility of plugin developers to ensure their plugins are compatible with the version of vLLM they are targeting. For example, `"vllm_add_dummy_model.my_llava:MyLlava"` should be compatible with the version of vLLM that the plugin targets.

@@ -85,7 +85,8 @@ class _ClientRequestState:
     unsent: list[OffloadKey] = field(default_factory=list)
     # Current lookup round. LookupMsgs carry it, each fetch closes it and
     # advances it, so every round's supply/demand/completion is isolated
-    # on the wire. PD clients never probe and stay on round 0.
+    # on the wire. PD clients never probe, but each nonempty fetch also
+    # advances the round; only the first PD fetch can be supplied.
     round_seq: int = 0
     # This id ran the symmetric lookup phase (register_lookup); a fetch
     # with keys then requires every key to be a confirmed probe. PD

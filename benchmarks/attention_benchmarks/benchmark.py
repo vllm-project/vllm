@@ -52,6 +52,8 @@ from common import (
 )
 
 from vllm.config.cache import CacheDType
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.workspace import init_workspace_manager
 
 
@@ -80,7 +82,6 @@ def run_mla_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
         config.backend,
         config,
         prefill_backend=config.prefill_backend,
-        sparse_mla_force_mqa=config.sparse_mla_force_mqa,
         **kwargs,
     )
 
@@ -1132,13 +1133,13 @@ def main():
         if prefill_backend:
             console.print(f"Prefill backend: {prefill_backend}")
         available_variants = [
-            ("dense_mha", False, "dense"),
-            ("masked_mha", False, "masked"),
-            ("mqa", True, "auto"),
+            ("dense_mha", SparseMLAPrefillRoute.DENSE_MHA),
+            ("masked_mha", SparseMLAPrefillRoute.MASKED_MHA),
+            ("mqa", SparseMLAPrefillRoute.SPARSE_MQA),
         ]
         requested_variants = getattr(args, "sparse_mla_mha_variants", None)
         if requested_variants is not None:
-            valid_variants = {label for label, _, _ in available_variants}
+            valid_variants = {label for label, _ in available_variants}
             invalid_variants = sorted(set(requested_variants) - valid_variants)
             if invalid_variants:
                 raise ValueError(
@@ -1175,7 +1176,7 @@ def main():
         total = 0
         for spec, _ in benchmark_specs:
             q_len = max(request.q_len for request in parse_batch_spec(spec))
-            for variant_label, _, _ in variants:
+            for variant_label, _ in variants:
                 if (
                     variant_label == "dense_mha"
                     and dense_mha_max_seq_len is not None
@@ -1192,7 +1193,7 @@ def main():
             for spec, num_q_heads in benchmark_specs:
                 q_len = max(request.q_len for request in parse_batch_spec(spec))
                 for backend in backends:
-                    for variant_label, force_mqa, mha_mode in variants:
+                    for variant_label, route in variants:
                         if (
                             variant_label == "dense_mha"
                             and dense_mha_max_seq_len is not None
@@ -1231,8 +1232,7 @@ def main():
                             qk_nope_head_dim=getattr(args, "qk_nope_head_dim", None),
                             qk_rope_head_dim=getattr(args, "qk_rope_head_dim", None),
                             v_head_dim=getattr(args, "v_head_dim", None),
-                            sparse_mla_force_mqa=force_mqa,
-                            sparse_mla_mha_mode=mha_mode,
+                            sparse_mla_route=route,
                             sparse_mla_dense_mha_max_seq_len=dense_mha_max_seq_len,
                             sparse_mla_topk_pattern=sparse_mla_topk_pattern,
                             prefill_backend=prefill_backend,
@@ -1250,7 +1250,6 @@ def main():
                                 backend,
                                 config,
                                 prefill_backend=prefill_backend,
-                                sparse_mla_force_mqa=force_mqa,
                             )
                         except Exception as e:
                             result = BenchmarkResult(
@@ -1282,7 +1281,7 @@ def main():
         variant_backends = []
         for num_q_heads in num_q_heads_values:
             for backend in backends:
-                for variant, _, _ in variants:
+                for variant, _ in variants:
                     label = f"{backend}_{variant}"
                     if model_sweep is not None:
                         label = model_sweep.get_label(label, num_q_heads)
@@ -1391,6 +1390,8 @@ def main():
         if prefill_backends:
             # Use first decode backend for impl construction
             decode_backend = backends[0]
+            is_sparse = AttentionBackendEnum[decode_backend].get_class().is_sparse()
+            index_topk = 2048
             total = len(prefill_backends) * len(args.batch_specs)
 
             console.print(
@@ -1400,6 +1401,15 @@ def main():
 
             with tqdm(total=total, desc="Prefill benchmarking") as pbar:
                 for spec in args.batch_specs:
+                    prefill_route = None
+                    if is_sparse:
+                        max_seq_len = max(r.kv_len for r in parse_batch_spec(spec))
+                        # Measure MHA explicitly instead of an automatic MQA fallback.
+                        prefill_route = (
+                            SparseMLAPrefillRoute.DENSE_MHA
+                            if max_seq_len <= index_topk
+                            else SparseMLAPrefillRoute.MASKED_MHA
+                        )
                     for pb in prefill_backends:
                         config = BenchmarkConfig(
                             backend=decode_backend,
@@ -1413,13 +1423,14 @@ def main():
                             profile_memory=args.profile_memory,
                             warmup_ms=args.warmup_ms,
                             prefill_backend=pb,
+                            sparse_mla_route=prefill_route,
                             kv_lora_rank=args.kv_lora_rank,
                             qk_nope_head_dim=args.qk_nope_head_dim,
                             qk_rope_head_dim=args.qk_rope_head_dim,
                             v_head_dim=args.v_head_dim,
                         )
 
-                        result = run_benchmark(config)
+                        result = run_benchmark(config, index_topk=index_topk)
 
                         # Label result with prefill backend name for display
                         labeled_config = replace(result.config, backend=pb)

@@ -18,6 +18,7 @@ steps:
   - vllm/models/deepseek_v41/quant_config.py
   - vllm/utils/humming.py
   - tests/quantization
+  - tests/single_rank_group.py
   - requirements/test/quantization_deps_cuda.txt
   commands:
   # torchao and conch are installed off the default path, so only this step sees
@@ -43,6 +44,7 @@ steps:
       - vllm/model_executor/models/qwen3_dflash.py
       - vllm/model_executor/models/utils.py
       - tests/quantization
+      - tests/single_rank_group.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - vllm/model_executor/layers/fused_moe/oracle/unquantized.py
@@ -168,6 +170,7 @@ steps:
   - vllm/models/hy_v4/
   - tests/models/quantization
   - tests/quantization/test_fp8_dequant.py
+  - tests/single_rank_group.py
   commands:
     - >-
       pytest -v -s

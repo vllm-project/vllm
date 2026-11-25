@@ -98,6 +98,7 @@ print(response["choices"][0]["token_ids"])
 - `parse_context` is ignored at other levels, so a rendered request can go to a prefill leg unchanged.
 - `logprobs` follow coupled chat. `top_logprobs` is cut to `sampling_params.logprobs`, `logprob_token_ids` is honored. When a parser hides the reasoning with `include_reasoning: false`, `logprobs`, `token_ids` and `sampling_mask` are dropped so they don't expose it.
 - `finish_reason` follows coupled chat too. It's `tool_calls` when the message has tool calls except with a named `tool_choice` or a `length` cut.
+- With a reasoning parser, `usage.completion_tokens_details.reasoning_tokens` is the reasoning parser's count summed over the choices, as on coupled chat, also with `include_reasoning: false`. In a stream it's on the final usage chunk, not on per-chunk `continuous_usage_stats` usage.
 - With `stream: true`, each choice carries a chat `delta` (`role`, `content`, `reasoning`, `tool_calls`) instead of `text`, and `finish_reason` follows coupled chat. `role` is set on the first chunk of each choice, `n > 1` is supported, and `null` fields are left out of `delta`. A chunk is sent whenever the engine output carries a parsed delta, visible token IDs, logprobs or a `finish_reason`. Parsing runs on the API server event loop, so `--api-server-count` scales it.
 - The message `role` is the generate server's `--response-role`. `parse_context` doesn't carry `messages`, `add_generation_prompt` or `echo`, so the last message's role and `echo` aren't applied. Use [`/derender`](derenderer.md) for those.
 - Cohere grounding citations aren't returned. The parser strips the citation spans from `content`, and the document map can't go over JSON in `parse_context`.
@@ -163,7 +164,7 @@ url = "http://localhost:8000/inference/v1/generate"
 # Turn 1: turn1_ids holds one <|image_pad|> for image A.
 turn1 = httpx.post(url, json={
     "token_ids": turn1_ids,
-    "content_parts": [{"type": "image_url", "url": url_a, "uuid": "img-a"}],
+    "content_parts": [{"type": "image_url", "url": url_a}],
     "sampling_params": {"max_tokens": 256},
     "return_token_ids": True,
 }).json()
@@ -175,7 +176,7 @@ turn2 = httpx.post(url, json={
         turn1["prompt_token_ids"] + turn1["choices"][0]["token_ids"] + turn2_ids
     ),
     "features": {
-        "mm_hashes": {"image": ["uuid:img-a"]},
+        "mm_hashes": turn1["mm_hashes"],
         "mm_placeholders": turn1["mm_placeholders"],
     },
     "content_parts": [{"type": "image_url", "url": url_b, "uuid": "img-b"}],
@@ -184,10 +185,11 @@ turn2 = httpx.post(url, json={
 }).json()
 ```
 
-Here `"uuid:img-a"` finds image A in the processor cache because turn 1 sent it with `uuid` `"img-a"`. The cache key of an item sent with a `uuid` is that `uuid` prefixed with `uuid:`, which keeps it apart from the content hashes vLLM computes. Two cases need a different approach:
+With `return_token_ids`, the response carries `mm_hashes` next to `mm_placeholders`: the processor cache key of each item, in the same order. Pass them back unchanged rather than building keys yourself because the key format depends on the server's options and on whether the item was sent with a `uuid`. Send the item with `kwargs_data` instead in three cases:
 
-- If the server sets `--mm-processor-kwargs` or `--media-io-kwargs`, the `uuid` is hashed with them and is no longer the cache key. Take `features` from a [render](renderer.md) response instead.
-- If the item has been evicted from the cache, the request fails. Resend the item with `kwargs_data`.
+- The item has been evicted from the cache, so a request by key fails.
+- The processor cache is disabled (`--mm-processor-cache-gb 0`), so the returned keys can't be reused.
+- The server runs the Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) which doesn't support omitting `kwargs_data` yet. It still returns `mm_hashes`.
 
 ## Aborting requests
 

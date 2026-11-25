@@ -4,7 +4,7 @@ meta:
   provider: "inclusionAI"
   description: "Ling-3.0-flash vision-language MoE model with BF16, FP8, FP4, and INT4 checkpoints"
   date_added: 2026-09-08
-  date_updated: 2026-09-08
+  date_updated: 2026-11-17
   tasks:
     - text
     - multimodal
@@ -13,8 +13,7 @@ meta:
 
 model:
   model_id: "inclusionAI/Ling-3.0-flash-VL"
-  min_vllm_version: "nightly"
-  nightly_required: true
+  min_vllm_version: "0.30.0"
   architecture: moe
   parameter_count: "124.85B"
   active_parameters: "5.51B"
@@ -92,7 +91,7 @@ guide: |
 
   ## Prerequisites
 
-  - **vLLM:** an official nightly build containing Ling-3.0-flash-VL support
+  - **vLLM:** 0.30.0 or newer, the first release containing Ling-3.0-flash-VL support
   - **Precision:** BF16, FP8, FP4, or INT4 weights with BF16 compute
   - **Context length:** 131,072 tokens
 

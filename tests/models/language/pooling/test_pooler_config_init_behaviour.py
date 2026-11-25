@@ -107,6 +107,7 @@ def test_reward_models_using_activation(
         model,
         max_model_len=1024,
         dtype=dtype,
+        trust_remote_code=True,
         pooler_config=PoolerConfig(use_activation=False),
     ) as vllm_model:
         wo_activation = vllm_model.token_classify(example_prompts)
@@ -115,6 +116,7 @@ def test_reward_models_using_activation(
         model,
         max_model_len=1024,
         dtype=dtype,
+        trust_remote_code=True,
         pooler_config=PoolerConfig(use_activation=True),
     ) as vllm_model:
         w_activation = vllm_model.token_classify(example_prompts)

@@ -685,6 +685,14 @@ def has_quark():
     return _has_module("quark")
 
 
+def has_torchcodec_image_decoding() -> bool:
+    """Whether `torchcodec.decoders.decode_image` is available."""
+    if not _has_module("torchcodec.decoders"):
+        return False
+    decoders = importlib.import_module("torchcodec.decoders")
+    return hasattr(decoders, "decode_image")
+
+
 def check_torchcodec_available():
     """Whether the optional `torchcodec` package is available."""
     try:

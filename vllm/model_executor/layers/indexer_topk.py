@@ -622,13 +622,24 @@ class SparseIndexerTopk(torch.nn.Module):
         topk_indices: torch.Tensor,
         topk_tokens: int,
     ) -> None:
+        # The kernel writes rows of topk_tokens back to back.
+        direct = topk_indices.is_contiguous()
+        out = (
+            topk_indices
+            if direct
+            else torch.empty(
+                topk_indices.shape, dtype=topk_indices.dtype, device=logits.device
+            )
+        )
         ops.top_k_per_row_decode(
             logits,
             next_n,
             seq_lens,
-            topk_indices,
+            out,
             logits.shape[0],
             logits.stride(0),
             logits.stride(1),
             topk_tokens,
         )
+        if not direct:
+            topk_indices.copy_(out)
