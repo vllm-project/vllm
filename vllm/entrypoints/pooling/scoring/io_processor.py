@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
 from vllm.exceptions import ChatTemplateResolutionError, VLLMValidationError
 from vllm.logger import init_logger
+from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.renderers import TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import (
     ChatTemplateContentFormat,
@@ -697,6 +698,14 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         if self.num_post_process_tokens:
             tok_params = reserve_tokens(tok_params, self.num_post_process_tokens)
 
+        default_media_io_kwargs = getattr(
+            self.model_config.multimodal_config, "media_io_kwargs", None
+        )
+        merged_media_io_kwargs = merge_media_io_kwargs(
+            default_media_io_kwargs,
+            prompt_extras.get("media_io_kwargs"),
+        )
+
         _, engine_prompt = self.get_score_prompt(
             data_1=render_params["data_1"],
             data_2=render_params["data_2"],
@@ -706,7 +715,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             max_tokens_per_query=render_params["max_tokens_per_query"],
             max_tokens_per_doc=render_params["max_tokens_per_doc"],
             chat_template_kwargs=prompt_extras.get("chat_template_kwargs"),
-            media_io_kwargs=prompt_extras.get("media_io_kwargs"),
+            media_io_kwargs=merged_media_io_kwargs,
         )
 
         tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
@@ -726,15 +735,16 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 "compressed_token_type_ids": compressed,
             }
 
-        prompt_extras = {
-            k: v
-            for k in ("mm_processor_kwargs", "cache_salt")
-            if (v := prompt_extras.get(k)) is not None
-        }
+        engine_prompt_extras: dict[str, Any] = {}
+        for k in ("mm_processor_kwargs", "cache_salt"):
+            if (v := prompt_extras.get(k)) is not None:
+                engine_prompt_extras[k] = v
+        if merged_media_io_kwargs is not None:
+            engine_prompt_extras["media_io_kwargs"] = merged_media_io_kwargs
 
-        if prompt_extras:
+        if engine_prompt_extras:
             target_prompt = extract_target_prompt(self.model_config, engine_prompt)
-            target_prompt.update(prompt_extras)
+            target_prompt.update(engine_prompt_extras)
 
         engine_input = self.renderer.process_for_engine(engine_prompt, arrival_time)
 
