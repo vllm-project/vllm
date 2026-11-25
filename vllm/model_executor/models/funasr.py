@@ -995,7 +995,6 @@ class FunASRForConditionalGeneration(
             self,
             {"audio": self.model.encoder.audio_encoder},
             FunASRBucketingSpec(),
-            model_type="funasr",
             additional_config=getattr(vllm_config, "additional_config", None),
         )
         logit_scale = getattr(config, "logit_scale", 1.0)

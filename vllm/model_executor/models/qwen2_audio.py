@@ -465,7 +465,6 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
             self,
             {"audio": self.audio_tower},
             Qwen2AudioBucketingSpec(),
-            model_type=config.model_type,
             additional_config=getattr(vllm_config, "additional_config", None),
         )
 

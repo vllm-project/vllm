@@ -244,8 +244,8 @@ for long clips' padding. It is opt-in and GPU-only.
 
 ### Applicability
 
-Whitelist-gated: only the adapted models below engage it. For any other model
-the config is ignored -- a warning is logged and the original forward runs, so
+Opt-in per model: only the adapted models below declare a bucketing spec. For
+any other model the config is ignored -- the original forward runs unchanged, so
 setting the keys is always safe.
 
 | Model | Encoder type |

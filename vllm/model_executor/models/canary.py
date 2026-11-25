@@ -618,7 +618,6 @@ class CanaryForConditionalGeneration(
             self,
             {"audio": self.model.encoder},
             CanaryBucketingSpec(),
-            model_type=config.model_type,
             additional_config=getattr(vllm_config, "additional_config", None),
         )
 

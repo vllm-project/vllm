@@ -482,7 +482,6 @@ class FireRedASR2ForConditionalGeneration(
             self,
             {"audio": self.model.encoder.audio_encoder},
             FireRedASR2BucketingSpec(),
-            model_type="fireredasr2",
             additional_config=getattr(vllm_config, "additional_config", None),
         )
 

@@ -1061,7 +1061,6 @@ class GlmAsrForConditionalGeneration(
             self,
             {"audio": self.audio_tower},
             GlmAsrBucketingSpec(),
-            model_type=config.model_type,
             additional_config=getattr(vllm_config, "additional_config", None),
         )
 

@@ -2277,7 +2277,6 @@ class CohereAsrForConditionalGeneration(
             self,
             {"audio": self.model.encoder},
             CohereASRBucketingSpec(),
-            model_type=config.model_type,
             additional_config=getattr(vllm_config, "additional_config", None),
         )
 

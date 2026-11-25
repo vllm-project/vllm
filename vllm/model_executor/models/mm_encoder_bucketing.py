@@ -38,14 +38,12 @@ Numerics are classified per encoder class:
   and off by default.
 
 The feature is opt-in via `additional_config.audio_bucket_seconds` (a ladder of
-seconds, e.g. `[2, 4, 8, 16, 30]`) and engages only for models that are both
-listed in `_VERIFIED_FOR_BUCKETING` (the maintainers' gate restricting the
-feature to adapted models) and declare an `EncoderBucketingSpec` carrying the
-model's own length/crop semantics and frame-rate knobs. Setting
+seconds, e.g. `[2, 4, 8, 16, 30]`) and engages only for models that declare an
+`EncoderBucketingSpec` carrying the model's own length/crop semantics and
+frame-rate knobs; declaring the spec is the opt-in. Setting
 `additional_config.audio_bucket_budget` additionally enables compute-budget
 merging, which keeps each encoder call's compute inside a band (see
-`EncoderBucketing`). A model still being
-adapted stays off until maintainers verify it and add it to the whitelist. With
+`EncoderBucketing`). With
 the feature off, no shim is installed and the original forward runs untouched
 (byte-identical); a per-batch waste gate keeps bucketing from ever computing more
 than the untouched forward.
@@ -66,45 +64,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 _CONFIG_KEY = "audio_bucket_seconds"
-_CONFIG_PATH = f"additional_config.{_CONFIG_KEY}"
 _CONFIG_KEY_BUDGET = "audio_bucket_budget"
-_CONFIG_PATH_BUDGET = f"additional_config.{_CONFIG_KEY_BUDGET}"
-# Retired in favor of the compute-budget band; still recognized to warn.
-_LEGACY_KEY_MIN_SIZE = "audio_bucket_min_size"
-
-# Losslessness levels a whitelisted model may guarantee for its crop (see the
-# module docstring): bit-exact for mask-aware encoders, output-lossless-within-
-# a-1-frame-grid for unmasked + relative-PE encoders. Approx is the escape hatch
-# for mixed models (e.g. FunASR: bit-exact main encoder + unmasked adaptor).
-LOSSLESS_BIT_EXACT = "bit_exact"
-LOSSLESS_OUTPUT_LE_1FRAME = "output_le_1frame"
-LOSSLESS_APPROX = "approx"
-
-# Model types verified for length bucketing, mapped to their losslessness level.
-# This is the gate that restricts the feature to models that have been adapted
-# (see the module docstring). A model must be listed here AND declare an
-# `EncoderBucketingSpec` for bucketing to engage; a model still being adapted
-# stays off until maintainers add it here. This keeps the feature from ever
-# silently corrupting an unadapted encoder just because the config is set.
-_VERIFIED_FOR_BUCKETING: dict[str, str] = {
-    "qwen2_audio": LOSSLESS_BIT_EXACT,
-    "canary": LOSSLESS_BIT_EXACT,
-    "fireredasr2": LOSSLESS_BIT_EXACT,
-    "cohere_asr": LOSSLESS_BIT_EXACT,
-    "funasr": LOSSLESS_APPROX,
-    # Mask-less attention encoder (output frame counts exact, values
-    # approximate): frame counts derive from the true lengths and are
-    # strictly rung-independent, but values drift (encoder-output cos ~0.98
-    # vs the full window) because unmasked padding still participates in
-    # softmax. WER impact measured at +3 words / 7083 (see
-    # glmasr_validation.md).
-    "glmasr": LOSSLESS_OUTPUT_LE_1FRAME,
-    # Same class as glmasr: token counts derive from the true lengths
-    # (strictly rung-independent) but the Shaw-relative block attention is
-    # mask-less over batch padding, so values drift.
-    "granite_speech": LOSSLESS_OUTPUT_LE_1FRAME,
-}
-
 
 # ---------------------------------------------------------- fixed-window shim
 #
@@ -204,14 +164,23 @@ def _ladder_seconds(
     if raw is None:
         return None
     if not isinstance(raw, (list, tuple)):
-        raise ValueError(f"{_CONFIG_PATH} must be a list of seconds, got {raw!r}")
+        raise ValueError(
+            f"additional_config.{_CONFIG_KEY} must be a list of seconds, "
+            f"got {raw!r}"
+        )
     values: list[float] = []
     for item in raw:
         if isinstance(item, bool) or not isinstance(item, (int, float)):
-            raise ValueError(f"{_CONFIG_PATH} entries must be numbers, got {item!r}")
+            raise ValueError(
+                f"additional_config.{_CONFIG_KEY} entries must be numbers, "
+                f"got {item!r}"
+            )
         value = float(item)
         if not math.isfinite(value) or value <= 0:
-            raise ValueError(f"{_CONFIG_PATH} entries must be > 0, got {item!r}")
+            raise ValueError(
+                f"additional_config.{_CONFIG_KEY} entries must be > 0, "
+                f"got {item!r}"
+            )
         values.append(value)
     seconds = sorted(set(values))
     return tuple(seconds) if seconds else None
@@ -226,8 +195,7 @@ def _compute_budget(
     oversized groups split into balanced chunks and under-filled groups fold
     into their larger neighbor while the merged call stays within the budget.
     The fold trigger is derived (`budget // 6`); sweeping it at c=8/32/128
-    changed throughput and TTFT by under 2%, so it is not a knob. The retired
-    `audio_bucket_min_size` key is ignored (a warning is logged).
+    changed throughput and TTFT by under 2%, so it is not a knob.
 
     Args:
         additional_config: The `VllmConfig.additional_config` mapping in effect.
@@ -248,9 +216,15 @@ def _compute_budget(
     if raw is None:
         return None
     if isinstance(raw, bool) or not isinstance(raw, int):
-        raise ValueError(f"{_CONFIG_PATH_BUDGET} must be a positive int, got {raw!r}")
+        raise ValueError(
+            f"additional_config.{_CONFIG_KEY_BUDGET} must be a positive "
+            f"int, got {raw!r}"
+        )
     if raw <= 0:
-        raise ValueError(f"{_CONFIG_PATH_BUDGET} must be > 0, got {raw!r}")
+        raise ValueError(
+            f"additional_config.{_CONFIG_KEY_BUDGET} must be > 0, "
+            f"got {raw!r}"
+        )
     return raw
 
 
@@ -531,16 +505,14 @@ def install_encoder_bucketing(
     encoders: Mapping[str, nn.Module],
     spec: EncoderBucketingSpec,
     *,
-    model_type: str,
     additional_config: Mapping[str, object] | None = None,
 ) -> None:
     """Install variable-length encoder shims and register the bucketer.
 
     The encoder-owning model passes its encoder(s) as a `label -> module` mapping
-    and its `EncoderBucketingSpec` from its constructor. Bucketing engages only
-    on GPU execution paths (GPU-only: the GPU encoder runner is the sole
-    consumer), when the model is in `_VERIFIED_FOR_BUCKETING` (the gate
-    restricting the feature to adapted models), the spec is declared, and
+    and its `EncoderBucketingSpec` from its constructor; declaring the spec is
+    what opts the model in. Bucketing engages only on GPU execution paths
+    (GPU-only: the GPU encoder runner is the sole consumer) and when
     `additional_config.audio_bucket_seconds` is set. When it engages, any encoder
     with a fixed-window recipe gets the variable-length shim so rung inputs are
     accepted, and the bucketer is registered on `model` for
@@ -551,7 +523,6 @@ def install_encoder_bucketing(
         model: The encoder-owning model to register the bucketer on.
         encoders: `label -> encoder module` map declared by the model.
         spec: The model's length/crop semantics and frame-rate knobs.
-        model_type: The model's `model_type`, checked against the whitelist.
         additional_config: The `VllmConfig.additional_config` mapping carrying
             the opt-in bucketing ladder.
 
@@ -575,17 +546,7 @@ def install_encoder_bucketing(
             )
 
     ladder = None
-    lossless = None
     compute_budget = _compute_budget(additional_config)
-    if isinstance(additional_config, Mapping) and (
-        additional_config.get(_LEGACY_KEY_MIN_SIZE) is not None
-    ):
-        logger.warning(
-            "additional_config.%s is no longer supported and is ignored; "
-            "use additional_config.%s instead.",
-            _LEGACY_KEY_MIN_SIZE,
-            _CONFIG_KEY_BUDGET,
-        )
     seconds = _ladder_seconds(additional_config)
     if seconds is not None and not _gpu_execution_supported():
         logger.warning(
@@ -596,27 +557,17 @@ def install_encoder_bucketing(
         )
         seconds = None
     if seconds is not None:
-        lossless = _VERIFIED_FOR_BUCKETING.get(model_type)
-        if lossless is None:
-            logger.warning(
-                "Encoder length bucketing requested for model_type %r, which is "
-                "not verified for bucketing; leaving it disabled. Only adapted "
-                "models are safe here. Verified: %s",
-                model_type,
-                sorted(_VERIFIED_FOR_BUCKETING),
+        frames_per_second = spec.frames_per_second
+        if not isinstance(frames_per_second, int):
+            raise RuntimeError("EncoderBucketingSpec must set frames_per_second")
+        if not isinstance(spec.context_margin, int):
+            raise RuntimeError(
+                "EncoderBucketingSpec must set context_margin "
+                "(0 is a valid explicit margin)"
             )
-        else:
-            frames_per_second = spec.frames_per_second
-            if not isinstance(frames_per_second, int):
-                raise RuntimeError("EncoderBucketingSpec must set frames_per_second")
-            if not isinstance(spec.context_margin, int):
-                raise RuntimeError(
-                    "EncoderBucketingSpec must set context_margin "
-                    "(0 is a valid explicit margin)"
-                )
-            ladder = LengthBucketingConfig(
-                _rungs_from_seconds(seconds, frames_per_second, spec.align_to)
-            )
+        ladder = LengthBucketingConfig(
+            _rungs_from_seconds(seconds, frames_per_second, spec.align_to)
+        )
 
     manifest: list[tuple[nn.Module, object]] = []
     if ladder is not None:
@@ -639,11 +590,9 @@ def install_encoder_bucketing(
     model._encoder_bucketing_manifest = manifest
     if ladder is not None:
         logger.info(
-            "Encoder length bucketing enabled over rungs %s for modules %s "
-            "(lossless level: %s)",
+            "Encoder length bucketing enabled over rungs %s for modules %s.",
             ladder.buckets,
             list(encoders),
-            lossless,
         )
     else:
         logger.info(

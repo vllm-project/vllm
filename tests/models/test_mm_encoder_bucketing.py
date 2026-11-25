@@ -249,7 +249,6 @@ def test_install_wires_shim_and_uninstall_restores_forward():
                 model,
                 {"audio": tower},
                 _Spec(),
-                model_type="qwen2_audio",
                 additional_config={"audio_bucket_seconds": [1, 2]},
             )
         assert isinstance(tower.forward, functools.partial)  # variable-length shim
@@ -273,33 +272,12 @@ def test_install_disabled_keeps_original_forward():
         model,
         {"audio": tower},
         _Spec(),
-        model_type="qwen2_audio",
         additional_config=None,
     )
     batch = _batch([50, 200], 250)
     rungs = _rungs_via_runner(model, batch, 2)
     assert len(rungs) == 1 and rungs[0][1] is batch  # no bucketing engages
     assert tower.forward == original_forward  # no shim when the feature is off
-
-
-def test_install_unverified_model_type_is_blocked():
-    # The whitelist restricts usage: a model not on it never buckets, even with
-    # the config on -- it may still need adaptation before the crop is lossless.
-    model = _Model()
-    tower = model.audio_tower
-    original_forward = tower.forward
-    with _gpu_worker():
-        install_encoder_bucketing(
-            model,
-            {"audio": tower},
-            _Spec(),
-            model_type="some_unadapted_model",
-            additional_config={"audio_bucket_seconds": [1, 2]},
-        )
-    batch = _batch([50, 200], 250)
-    rungs = _rungs_via_runner(model, batch, 2)
-    assert len(rungs) == 1 and rungs[0][1] is batch  # no bucketing engages
-    assert tower.forward == original_forward  # no shim, no bucketing
 
 
 def test_install_gpu_only_gate_blocks_non_gpu_worker():
@@ -319,7 +297,6 @@ def test_install_gpu_only_gate_blocks_non_gpu_worker():
             model,
             {"audio": tower},
             _Spec(),
-            model_type="qwen2_audio",
             additional_config={"audio_bucket_seconds": [1, 2]},
         )
     finally:
@@ -334,19 +311,6 @@ def test_install_gpu_only_gate_blocks_non_gpu_worker():
 def test_rungs_from_seconds_aligns_to_multiple():
     assert _rungs_from_seconds((2.0, 4.0), 10, align_to=8) == (24, 40)
     assert _rungs_from_seconds((2.0,), 10) == (20,)  # align_to=1 disables it
-
-
-def test_whitelist_carries_lossless_level():
-    from vllm.model_executor.models.mm_encoder_bucketing import (
-        _VERIFIED_FOR_BUCKETING,
-        LOSSLESS_BIT_EXACT,
-        LOSSLESS_OUTPUT_LE_1FRAME,
-    )
-
-    assert _VERIFIED_FOR_BUCKETING["qwen2_audio"] == LOSSLESS_BIT_EXACT
-    # GLM-ASR's attention is mask-less: output frame counts are exact but
-    # values drift, so it is whitelisted at the output-counts-only level.
-    assert _VERIFIED_FOR_BUCKETING["glmasr"] == LOSSLESS_OUTPUT_LE_1FRAME
 
 
 def test_bucket_accepts_list_shaped_crop():
