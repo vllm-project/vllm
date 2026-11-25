@@ -31,8 +31,26 @@
    "error_contains": "[DONE]"
   },
   "known_gap": {
-   "python": "#64703",
-   "rust": "#65301"
+   "python": {
+    "pr": "#64703",
+    "got": {
+     "success": true,
+     "itl": 2,
+     "text": "aaa",
+     "output_tokens": 3,
+     "prompt_len": 7
+    }
+   },
+   "rust": {
+    "pr": "#65301",
+    "got": {
+     "success": true,
+     "itl": 2,
+     "text": "aaa",
+     "output_tokens": 3,
+     "prompt_len": 7
+    }
+   }
   }
  },
  {
@@ -46,8 +64,26 @@
    "error_contains": "[DONE]"
   },
   "known_gap": {
-   "python": "#64703",
-   "rust": "#65301"
+   "python": {
+    "pr": "#64703",
+    "got": {
+     "success": true,
+     "itl": 0,
+     "text": "a",
+     "output_tokens": 0,
+     "prompt_len": 100
+    }
+   },
+   "rust": {
+    "pr": "#65301",
+    "got": {
+     "success": true,
+     "itl": 0,
+     "text": "a",
+     "output_tokens": 0,
+     "prompt_len": 100
+    }
+   }
   }
  },
  {
@@ -63,7 +99,16 @@
    "error_contains": "generation failed"
   },
   "known_gap": {
-   "rust": "#65301"
+   "rust": {
+    "pr": "#65301",
+    "got": {
+     "success": true,
+     "itl": 0,
+     "text": "a",
+     "output_tokens": 0,
+     "prompt_len": 100
+    }
+   }
   }
  },
  {
@@ -79,8 +124,26 @@
    "error_contains": "generation failed"
   },
   "known_gap": {
-   "python": "#64703",
-   "rust": "#65301"
+   "python": {
+    "pr": "#64703",
+    "got": {
+     "success": true,
+     "itl": 0,
+     "text": "a",
+     "output_tokens": 0,
+     "prompt_len": 100
+    }
+   },
+   "rust": {
+    "pr": "#65301",
+    "got": {
+     "success": true,
+     "itl": 0,
+     "text": "a",
+     "output_tokens": 0,
+     "prompt_len": 100
+    }
+   }
   }
  },
  {
@@ -95,7 +158,13 @@
    "error_contains": "generation failed"
   },
   "known_gap": {
-   "rust": "#65301"
+   "rust": {
+    "pr": "#65301",
+    "got": {
+     "success": false,
+     "error_contains": "Never received a valid chunk to calculate TTFT. This response will be marked as failed!"
+    }
+   }
   }
  },
  {
@@ -135,7 +204,13 @@
    "output_tokens": 2
   },
   "known_gap": {
-   "python": "#64143"
+   "python": {
+    "pr": "#64143",
+    "got": {
+     "success": false,
+     "error_contains": "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)"
+    }
+   }
   }
  },
  {
@@ -154,7 +229,13 @@
    "output_tokens": 2
   },
   "known_gap": {
-   "python": "#64143"
+   "python": {
+    "pr": "#64143",
+    "got": {
+     "success": false,
+     "error_contains": "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)"
+    }
+   }
   }
  },
  {
@@ -174,6 +255,29 @@
   }
  },
  {
+  "name": "openai/crlf_one_chunk",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\r\n\r\ndata: {\"choices\":[{\"text\":\"a\"}]}\r\n\r\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\r\n\r\ndata: [DONE]\r\n\r\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2,
+   "prompt_len": 7
+  },
+  "known_gap": {
+   "python": {
+    "pr": "#61534",
+    "got": {
+     "success": false,
+     "error_contains": "Never received a valid chunk to calculate TTFT.This response will be marked as failed!"
+    }
+   }
+  }
+ },
+ {
   "name": "openai/cr_only",
   "backend": "openai",
   "chunks": [
@@ -187,6 +291,29 @@
    "itl": 1,
    "text": "aa",
    "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai/cr_only_one_chunk",
+  "backend": "openai",
+  "chunks": [
+   "data: {\"choices\":[{\"text\":\"a\"}]}\r\rdata: {\"choices\":[{\"text\":\"a\"}]}\r\rdata: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\r\rdata: [DONE]\r\r"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2,
+   "prompt_len": 7
+  },
+  "known_gap": {
+   "python": {
+    "pr": "#61534",
+    "got": {
+     "success": false,
+     "error_contains": "Never received a valid chunk to calculate TTFT.This response will be marked as failed!"
+    }
+   }
   }
  },
  {
@@ -268,8 +395,20 @@
    "output_tokens": 2
   },
   "known_gap": {
-   "python": "#64143",
-   "rust": "unfiled"
+   "python": {
+    "pr": "#64143",
+    "got": {
+     "success": false,
+     "error_contains": "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)"
+    }
+   },
+   "rust": {
+    "pr": "#67538",
+    "got": {
+     "success": false,
+     "error_contains": "Never received a valid chunk to calculate TTFT. This response will be marked as failed!"
+    }
+   }
   }
  },
  {
@@ -288,7 +427,13 @@
    "prompt_len": 7
   },
   "known_gap": {
-   "python": "unfiled"
+   "python": {
+    "pr": "#67618",
+    "got": {
+     "output_tokens": 0,
+     "prompt_len": 100
+    }
+   }
   }
  },
  {
@@ -307,7 +452,12 @@
    "prompt_len": 100
   },
   "known_gap": {
-   "python": "unfiled"
+   "python": {
+    "pr": "#67537",
+    "got": {
+     "prompt_len": 0
+    }
+   }
   }
  },
  {
@@ -404,8 +554,26 @@
    "error_contains": "[DONE]"
   },
   "known_gap": {
-   "python": "#64703",
-   "rust": "#65301"
+   "python": {
+    "pr": "#64703",
+    "got": {
+     "success": true,
+     "itl": 2,
+     "text": "aaa",
+     "output_tokens": 3,
+     "prompt_len": 7
+    }
+   },
+   "rust": {
+    "pr": "#65301",
+    "got": {
+     "success": true,
+     "itl": 2,
+     "text": "aaa",
+     "output_tokens": 3,
+     "prompt_len": 7
+    }
+   }
   }
  },
  {
@@ -419,8 +587,26 @@
    "error_contains": "[DONE]"
   },
   "known_gap": {
-   "python": "#64703",
-   "rust": "#65301"
+   "python": {
+    "pr": "#64703",
+    "got": {
+     "success": true,
+     "itl": 0,
+     "text": "a",
+     "output_tokens": 0,
+     "prompt_len": 100
+    }
+   },
+   "rust": {
+    "pr": "#65301",
+    "got": {
+     "success": true,
+     "itl": 0,
+     "text": "a",
+     "output_tokens": 0,
+     "prompt_len": 100
+    }
+   }
   }
  },
  {
@@ -436,7 +622,16 @@
    "error_contains": "generation failed"
   },
   "known_gap": {
-   "rust": "#65301"
+   "rust": {
+    "pr": "#65301",
+    "got": {
+     "success": true,
+     "itl": 0,
+     "text": "a",
+     "output_tokens": 0,
+     "prompt_len": 100
+    }
+   }
   }
  },
  {
@@ -452,8 +647,26 @@
    "error_contains": "generation failed"
   },
   "known_gap": {
-   "python": "#64703",
-   "rust": "#65301"
+   "python": {
+    "pr": "#64703",
+    "got": {
+     "success": true,
+     "itl": 0,
+     "text": "a",
+     "output_tokens": 0,
+     "prompt_len": 100
+    }
+   },
+   "rust": {
+    "pr": "#65301",
+    "got": {
+     "success": true,
+     "itl": 0,
+     "text": "a",
+     "output_tokens": 0,
+     "prompt_len": 100
+    }
+   }
   }
  },
  {
@@ -468,7 +681,13 @@
    "error_contains": "generation failed"
   },
   "known_gap": {
-   "rust": "#65301"
+   "rust": {
+    "pr": "#65301",
+    "got": {
+     "success": false,
+     "error_contains": "Never received a valid chunk to calculate TTFT. This response will be marked as failed!"
+    }
+   }
   }
  },
  {
@@ -508,7 +727,13 @@
    "output_tokens": 2
   },
   "known_gap": {
-   "python": "#64143"
+   "python": {
+    "pr": "#64143",
+    "got": {
+     "success": false,
+     "error_contains": "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)"
+    }
+   }
   }
  },
  {
@@ -527,7 +752,13 @@
    "output_tokens": 2
   },
   "known_gap": {
-   "python": "#64143"
+   "python": {
+    "pr": "#64143",
+    "got": {
+     "success": false,
+     "error_contains": "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)"
+    }
+   }
   }
  },
  {
@@ -547,6 +778,29 @@
   }
  },
  {
+  "name": "openai-chat/crlf_one_chunk",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\r\n\r\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\r\n\r\ndata: [DONE]\r\n\r\n"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2,
+   "prompt_len": 7
+  },
+  "known_gap": {
+   "python": {
+    "pr": "#61534",
+    "got": {
+     "success": false,
+     "error_contains": "Never received a valid chunk to calculate TTFT.This response will be marked as failed!"
+    }
+   }
+  }
+ },
+ {
   "name": "openai-chat/cr_only",
   "backend": "openai-chat",
   "chunks": [
@@ -560,6 +814,29 @@
    "itl": 1,
    "text": "aa",
    "output_tokens": 2
+  }
+ },
+ {
+  "name": "openai-chat/cr_only_one_chunk",
+  "backend": "openai-chat",
+  "chunks": [
+   "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\r\rdata: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\r\rdata: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\r\rdata: [DONE]\r\r"
+  ],
+  "expect": {
+   "success": true,
+   "itl": 1,
+   "text": "aa",
+   "output_tokens": 2,
+   "prompt_len": 7
+  },
+  "known_gap": {
+   "python": {
+    "pr": "#61534",
+    "got": {
+     "success": false,
+     "error_contains": "Never received a valid chunk to calculate TTFT.This response will be marked as failed!"
+    }
+   }
   }
  },
  {
@@ -641,8 +918,20 @@
    "output_tokens": 2
   },
   "known_gap": {
-   "python": "#64143",
-   "rust": "unfiled"
+   "python": {
+    "pr": "#64143",
+    "got": {
+     "success": false,
+     "error_contains": "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)"
+    }
+   },
+   "rust": {
+    "pr": "#67538",
+    "got": {
+     "success": false,
+     "error_contains": "Never received a valid chunk to calculate TTFT. This response will be marked as failed!"
+    }
+   }
   }
  },
  {
@@ -661,7 +950,13 @@
    "prompt_len": 7
   },
   "known_gap": {
-   "python": "unfiled"
+   "python": {
+    "pr": "#67618",
+    "got": {
+     "output_tokens": 0,
+     "prompt_len": 100
+    }
+   }
   }
  },
  {
@@ -680,7 +975,12 @@
    "prompt_len": 100
   },
   "known_gap": {
-   "python": "unfiled"
+   "python": {
+    "pr": "#67537",
+    "got": {
+     "prompt_len": 0
+    }
+   }
   }
  },
  {
@@ -1195,7 +1495,13 @@
    "text": "aa"
   },
   "known_gap": {
-   "python": "#61534"
+   "python": {
+    "pr": "#61534",
+    "got": {
+     "success": false,
+     "error_contains": "Never received a token delta to calculate TTFT.This response will be marked as failed!"
+    }
+   }
   }
  },
  {
@@ -1229,7 +1535,12 @@
    "prompt_len": 100
   },
   "known_gap": {
-   "python": "unfiled"
+   "python": {
+    "pr": "#67537",
+    "got": {
+     "prompt_len": 0
+    }
+   }
   }
  },
  {

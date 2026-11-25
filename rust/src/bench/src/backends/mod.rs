@@ -366,7 +366,9 @@ mod tests {
     /// `tests/benchmarks/test_stream_conformance.py`.
     const STREAM_CASES: &str = include_str!("../../../../../tests/benchmarks/stream_cases.json");
 
-    /// Serve the chunks over a raw socket, one write each, then close.
+    /// Serve the chunks as one HTTP chunk each, all in a single write, then
+    /// close. The client gets one read per HTTP chunk however TCP delivers
+    /// the bytes, so a case's split points are exactly the fixture's.
     fn spawn_case_server(chunks: Vec<Vec<u8>>) -> std::net::SocketAddr {
         use std::io::{BufRead, BufReader, Read, Write};
 
@@ -387,15 +389,16 @@ mod tests {
                 }
             }
             reader.read_exact(&mut vec![0; content_length]).unwrap();
-            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
-                        connection: close\r\n\r\n";
-            stream.write_all(head.as_bytes()).unwrap();
+            let mut response = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                                 transfer-encoding: chunked\r\nconnection: close\r\n\r\n"
+                .to_vec();
             for chunk in chunks {
-                stream.write_all(&chunk).unwrap();
-                stream.flush().unwrap();
-                // Keep each chunk a separate read on the client.
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                response.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+                response.extend_from_slice(&chunk);
+                response.extend_from_slice(b"\r\n");
             }
+            response.extend_from_slice(b"0\r\n\r\n");
+            stream.write_all(&response).unwrap();
         });
         addr
     }
@@ -415,19 +418,24 @@ mod tests {
         }
     }
 
-    fn case_mismatches(expect: &serde_json::Value, output: &RequestFuncOutput) -> Vec<String> {
-        let got = serde_json::json!({
+    fn case_observed(output: &RequestFuncOutput) -> serde_json::Value {
+        serde_json::json!({
             "success": output.success,
             "itl": output.itl.len(),
             "text": output.generated_text,
             "output_tokens": output.output_tokens,
             "prompt_len": output.prompt_len,
-        });
+            "error": output.error,
+        })
+    }
+
+    fn case_mismatches(expect: &serde_json::Value, got: &serde_json::Value) -> Vec<String> {
+        let error = got["error"].as_str().unwrap();
         let mut bad = Vec::new();
         for (key, want) in expect.as_object().unwrap() {
             if key == "error_contains" {
-                if !output.error.contains(want.as_str().unwrap()) {
-                    bad.push(format!("error {:?} lacks {want}", output.error));
+                if !error.contains(want.as_str().unwrap()) {
+                    bad.push(format!("error {error:?} lacks {want}"));
                 }
             } else if key != "success" && expect["success"] == false {
                 continue;
@@ -436,6 +444,42 @@ mod tests {
             }
         }
         bad
+    }
+
+    /// The `known_gap` entry `got` that describes this output.
+    fn case_gap_got(expect: &serde_json::Value, got: &serde_json::Value) -> serde_json::Value {
+        let fields = ["itl", "text", "output_tokens", "prompt_len"];
+        let mut record = serde_json::Map::new();
+        if got["success"] == true && expect["success"] == false {
+            record.insert("success".into(), true.into());
+            for key in fields {
+                record.insert(key.into(), got[key].clone());
+            }
+        } else if got["success"] == false {
+            let error = got["error"].as_str().unwrap();
+            let last = error.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("");
+            record.insert("success".into(), false.into());
+            record.insert("error_contains".into(), last.into());
+        } else {
+            for key in fields {
+                if expect.get(key).is_some_and(|want| &got[key] != want) {
+                    record.insert(key.into(), got[key].clone());
+                }
+            }
+        }
+        record.into()
+    }
+
+    fn case_gap_expect(
+        expect: &serde_json::Value,
+        gap_got: &serde_json::Value,
+    ) -> serde_json::Value {
+        let mut merged = expect.as_object().unwrap().clone();
+        merged.extend(gap_got.as_object().unwrap().clone());
+        if gap_got["success"] == true {
+            merged.remove("error_contains");
+        }
+        merged.into()
     }
 
     #[tokio::test]
@@ -463,16 +507,29 @@ mod tests {
                 ..Default::default()
             };
             let output = get_backend(kind).unwrap().send_request(&input, &client).await.unwrap();
-            let bad = case_mismatches(&case["expect"], &output);
+            let got = case_observed(&output);
+            let bad = case_mismatches(&case["expect"], &got);
 
-            match case["known_gap"].get("rust").and_then(|g| g.as_str()) {
-                // Strict: closing the gap must also remove it from the case file.
-                Some(gap) if bad.is_empty() => failures.push(format!(
-                    "{name}: rust now meets this case; drop its known_gap ({gap})"
-                )),
-                Some(_) => {}
+            match case["known_gap"].get("rust") {
                 None if !bad.is_empty() => failures.push(format!("{name}: {}", bad.join("; "))),
                 None => {}
+                // Strict: closing the gap must also remove it from the case file.
+                Some(gap) if bad.is_empty() => failures.push(format!(
+                    "{name}: rust now meets this case; drop its known_gap ({})",
+                    gap["pr"]
+                )),
+                // Every field the gap does not name must still match `expect`.
+                Some(gap)
+                    if !case_mismatches(&case_gap_expect(&case["expect"], &gap["got"]), &got)
+                        .is_empty() =>
+                {
+                    failures.push(format!(
+                        "{name}: known_gap.rust.got no longer matches ({}); got\t{}",
+                        gap["pr"],
+                        case_gap_got(&case["expect"], &got)
+                    ))
+                }
+                Some(_) => {}
             }
         }
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));

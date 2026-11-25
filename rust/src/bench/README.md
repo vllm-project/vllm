@@ -860,8 +860,9 @@ The Rust implementation matches Python `vllm bench serve` in:
   recorded SSE streams and the result both clients must report for each
   (success, ITL sample count, text, token counts). `test_stream_cases` in
   `src/backends/mod.rs` and `tests/benchmarks/test_stream_conformance.py` run
-  the same file; a case lists a client under `known_gap` until that client
-  meets it
+  the same file, handing the client one read per fixture chunk. A case lists a
+  client under `known_gap`, with the values that client reports instead, until
+  that client meets it
 
 ## Environment Variables
 
