@@ -4,9 +4,9 @@
 pool behind `/tokenize` work for longer than
 `VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT` must succeed.
 
-The renderer pool has one worker by default and serves chat-template renders
-and prompt tokenization. The render timeout covers the render, not its wait in
-the pool queue.
+The test pins the renderer pool to one worker, which serves chat-template
+renders and prompt tokenization. The render timeout covers the render, not its
+wait in the pool queue.
 """
 
 import time
@@ -30,8 +30,11 @@ CHAT_DELAY_S = 0.3
 @pytest.fixture(scope="module")
 def server():
     env_dict = {"VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT": str(RENDER_TIMEOUT_S)}
+    # One worker, so that the tokenization requests queue in front of the chat
+    # render (the async renderer has 4 workers by default).
+    server_args = ["--enforce-eager", "--renderer-num-workers", "1"]
     with RemoteOpenAIServer(
-        MODEL_NAME, ["--enforce-eager"], env_dict=env_dict
+        MODEL_NAME, server_args, env_dict=env_dict
     ) as remote_server:
         yield remote_server
 
