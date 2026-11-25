@@ -9229,6 +9229,60 @@ def test_ec_producer_republishes_runner_hit_after_cpu_eviction(ec_role):
         connector.shutdown()
 
 
+@pytest.mark.parametrize("cpu_blocks", [1, 2])
+def test_ec_republish_preserves_selected_cpu_load(cpu_blocks):
+    """A runner hit can only republish using space left after pinning loads."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        use_ec_connector=True,
+        ec_role="ec_both",
+    )
+    config = scheduler.vllm_config
+    ec_config = config.ec_transfer_config
+    width = config.model_config.get_inputs_embeds_size()
+    ec_config.ec_connector = "ECCPUConnector"
+    ec_config.mm_encoder_output_widths = {"image": width}
+    ec_config.ec_connector_extra_config = {
+        "ec_cpu_bytes": cpu_blocks * width * config.model_config.dtype.itemsize,
+    }
+    connector = ECCPUConnector(config, ECConnectorRole.SCHEDULER)
+    scheduler.ec_connector = connector
+    cpu_hashes = ["cpu-only", "evictable"][:cpu_blocks]
+    seed, request = create_requests(
+        num_requests=2,
+        num_tokens=8,
+        mm_hashes_list=[cpu_hashes, ["cpu-only", "runner-only"]],
+        mm_positions=[
+            [PlaceholderRange(offset=i, length=1) for i in range(cpu_blocks)],
+            [PlaceholderRange(offset=i, length=1) for i in range(2)],
+        ],
+    )
+
+    try:
+        for i in range(cpu_blocks):
+            connector.update_state_after_alloc(seed, i)
+        assert connector.build_connector_meta(None).saves.keys() == set(cpu_hashes)
+        connector.update_connector_output(
+            ECConnectorOutput(
+                ec_connector_worker_meta=ECCPUWorkerMetadata(completed_saves=cpu_hashes)
+            )
+        )
+        manager = scheduler.encoder_cache_manager
+        manager.allocate(request, 1)
+        manager.free(request)
+
+        scheduler.add_request(request)
+        output = scheduler.schedule()
+
+        assert output.num_scheduled_tokens == {request.request_id: 8}
+        assert output.scheduled_encoder_inputs == {}
+        metadata = output.ec_connector_metadata
+        assert metadata.loads.keys() == {"cpu-only"}
+        assert metadata.saves.keys() == ({"runner-only"} if cpu_blocks == 2 else set())
+    finally:
+        connector.shutdown()
+
+
 def test_encoder_instance_defers_stop_until_prompt_is_consumed():
     """An encoder instance must not finish a request that has not encoded yet.
 

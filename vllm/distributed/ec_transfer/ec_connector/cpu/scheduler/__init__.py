@@ -65,6 +65,7 @@ class ECCPUScheduler:
 
         # mm_hash → block IDs allocated this step for GPU→mmap saves.
         self._pending_saves: dict[str, list[int]] = {}
+        self._pending_republishes: dict[str, MultiModalFeatureSpec] = {}
         # mm_hash → (transfer_id, block IDs, shape) to load from mmap→GPU.
         self._pending_loads: dict[str, tuple[int, list[int], tuple[int, int]]] = {}
 
@@ -533,8 +534,7 @@ class ECCPUScheduler:
         block_size = self._region.block_size_bytes
         return (size_bytes + block_size - 1) // block_size
 
-    def _prepare_save(self, request: "Request", index: int) -> None:
-        feature = request.mm_features[index]
+    def _prepare_save(self, feature: "MultiModalFeatureSpec") -> None:
         mm_hash = feature.identifier
         if self._is_producer and self._cache.get(mm_hash) is None:
             shape = (
@@ -546,11 +546,13 @@ class ECCPUScheduler:
                 self._pending_saves[mm_hash] = list(entry.block_ids)
 
     def update_state_after_cache_hit(self, request: "Request", index: int) -> None:
-        self._prepare_save(request, index)
+        if self._is_producer:
+            feature = request.mm_features[index]
+            self._pending_republishes[feature.identifier] = feature
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
-        self._prepare_save(request, index)
         feature = request.mm_features[index]
+        self._prepare_save(feature)
         mm_hash = feature.identifier
         if self._is_consumer and mm_hash not in self._pending_loads:
             entry = self._cache.get(mm_hash)
@@ -567,10 +569,22 @@ class ECCPUScheduler:
                 self._load_acks[transfer_id] = (mm_hash, self._expected_load_reports)
 
     def build_connector_meta(
-        self, scheduler_output: "SchedulerOutput"
+        self, scheduler_output: "SchedulerOutput | None"
     ) -> ECCPUConnectorMetadata:
         meta = ECCPUConnectorMetadata()
         if self._is_producer:
+            if self._pending_republishes:
+                freed_hashes = (
+                    set(scheduler_output.free_encoder_mm_hashes)
+                    if scheduler_output is not None
+                    else set()
+                )
+                # Wait until update_state_after_alloc has pinned this step's
+                # CPU loads before a republish can evict entries.
+                for mm_hash, feature in self._pending_republishes.items():
+                    if mm_hash not in freed_hashes:
+                        self._prepare_save(feature)
+                self._pending_republishes.clear()
             if self._nixl_enabled and self._producer_session is not None:
                 self._producer_session.poll_step()
             meta.saves = self._pending_saves
@@ -682,6 +696,7 @@ class ECCPUScheduler:
 
     def shutdown(self) -> None:
         self._pending_saves.clear()
+        self._pending_republishes.clear()
         self._pending_loads.clear()
         self._load_acks.clear()
         self._deferred_since.clear()
