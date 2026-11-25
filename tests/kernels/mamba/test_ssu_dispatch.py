@@ -168,7 +168,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
             )
             for names in layer_names
         ],
-        slots * (2 * spec.page_size_bytes + 24),
+        num_blocks=slots,
     )
     pages = allocate_kv_cache(config, torch.device("cuda"), layout)
     caches = {}

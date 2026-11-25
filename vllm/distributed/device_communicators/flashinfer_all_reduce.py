@@ -40,6 +40,15 @@ try:
 except ImportError:
     pass
 
+try:
+    from flashinfer.comm.mnnvl import (
+        all_ranks_support_mnnvl,  # type: ignore[import-not-found]
+        is_mnnvl_fabric_supported,
+    )
+except (ImportError, AttributeError):
+    all_ranks_support_mnnvl = None  # type: ignore[assignment]
+    is_mnnvl_fabric_supported = None  # type: ignore[assignment]
+
 # Workspace for standalone allreduce and non-quant ar+rms fusion
 _fi_ar_workspace = None
 # Extra workspace for quant fusion patterns. This may use either the primary
@@ -51,6 +60,30 @@ _fi_ar_quant_workspace = None
 _fi_ar_workspace_failed = False
 _fi_ar_quant_workspace_failed = False
 _fi_ar_workspace_groups: dict[int, ProcessGroup] = {}
+
+
+# TODO: remove this guard once flashinfer gates explicit backend="mnnvl" with
+# a fabric-state probe itself (its auto-path vote only checks the local
+# multicast device attribute, which cannot detect IB-only multi-node).
+def _mnnvl_group_supported(
+    world_size: int, comm_backend: Any, group: ProcessGroup
+) -> bool:
+    """Collectively check cross-node fabric support before allocating a workspace."""
+    if is_mnnvl_fabric_supported is None or all_ranks_support_mnnvl is None:
+        # Older FlashInfer versions retain the attempt-and-check behavior.
+        return True
+    if _node_count(group) == 1:
+        return True
+
+    try:
+        local_supported = is_mnnvl_fabric_supported(
+            torch.accelerator.current_device_index()
+        )
+    except Exception as e:
+        logger.debug_once("MNNVL fabric probe failed: %s", e)
+        # Still join the collective vote below or other ranks deadlock.
+        local_supported = False
+    return all_ranks_support_mnnvl(local_supported, world_size, comm_backend)
 
 
 def _get_tuned_standalone_max_size(
@@ -82,6 +115,16 @@ def _create_workspace(
     comm_backend = TorchDistBackend(group=group)
     rng_state = random.getstate()
     try:
+        if backend == "mnnvl" and not _mnnvl_group_supported(
+            world_size, comm_backend, group
+        ):
+            logger.warning_once(
+                "Skipping FlashInfer MNNVL allreduce workspace creation: the "
+                "group spans multiple nodes without NVLink fabric support "
+                "(check `nvidia-smi -q | grep -i fabric`). Fused allreduce "
+                "will fall back to unfused allreduce + rmsnorm."
+            )
+            return None
         random.seed(int.from_bytes(os.urandom(16), byteorder="big"))
         # Creation may run lazily inside the first sync-checked forward (e.g.
         # with enforce_eager, which skips warmup).
