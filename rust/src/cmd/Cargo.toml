@@ -19,6 +19,7 @@ educe.workspace = true
 itertools.workspace = true
 mimalloc.workspace = true
 native-tls-vendored = { workspace = true, optional = true }
+rlimit.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_path_to_error.workspace = true
@@ -39,6 +40,7 @@ vllm-tracing.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
