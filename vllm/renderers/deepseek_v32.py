@@ -11,13 +11,13 @@ from vllm.renderers.chat_utils import (
 from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
 from vllm.utils.async_utils import make_async
 
-from .base import BaseRenderer
+from .hf import BaseHfRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
 
 
-class DeepseekV32Renderer(BaseRenderer[DeepseekV32Tokenizer]):
+class DeepseekV32Renderer(BaseHfRenderer[DeepseekV32Tokenizer]):
     def __init__(
         self,
         config: VllmConfig,

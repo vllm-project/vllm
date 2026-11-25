@@ -6,7 +6,7 @@ import queue
 from pathlib import Path
 from typing import TypeAlias, TypeVar
 
-from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
+from transformers import AutoTokenizer, BatchEncoding, PythonBackend, TokenizersBackend
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
@@ -16,6 +16,20 @@ from .protocol import TokenizerLike
 HfTokenizer: TypeAlias = PythonBackend | TokenizersBackend
 _T = TypeVar("_T", bound=TokenizerLike)
 logger = init_logger(__name__)
+
+
+def encode_with_special_tokens_mask(
+    tokenizer: TokenizerLike, text: str, **kwargs
+) -> BatchEncoding:
+    """Encode text with a best-effort mask of tokenizer-added special tokens."""
+    kwargs["return_special_tokens_mask"] = True
+    try:
+        return tokenizer(text, **kwargs)
+    except (TypeError, NotImplementedError):
+        kwargs.pop("return_special_tokens_mask")
+        encoding = copy.copy(tokenizer(text, **kwargs))
+        encoding.pop("special_tokens_mask", None)
+        return encoding
 
 
 class ThreadSafeHFTokenizerMixin:

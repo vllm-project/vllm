@@ -437,16 +437,6 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 tokenizer=tokenizer,
                 vocab_size=vocab_size,
             )
-        elif backend_name == "lm-format-enforcer":
-            from vllm.v1.structured_output.backend_lm_format_enforcer import (
-                LMFormatEnforcerBackend,
-            )
-
-            backend = LMFormatEnforcerBackend(
-                vllm_config=vllm_config,
-                tokenizer=tokenizer,
-                vocab_size=vocab_size,
-            )
         else:
             raise ValueError(f"Unsupported structured output backend: {backend_name}")
 

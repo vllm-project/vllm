@@ -104,7 +104,7 @@ from vllm.renderers.chat_utils import (
 from vllm.tokenizers.hf import HfTokenizer
 from vllm.utils.async_utils import make_async
 
-from .base import BaseRenderer
+from .hf import BaseHfRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
@@ -745,7 +745,7 @@ def _build_render_config(
     return fmt, config
 
 
-class CohereRenderer(BaseRenderer[HfTokenizer]):
+class CohereRenderer(BaseHfRenderer[HfTokenizer]):
     """Renderer that templates Cohere prompts via the melody Rust bindings.
 
     Tokenization is delegated to the standard HF tokenizer; only the
