@@ -63,7 +63,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import fetch_image
-from vllm.outputs import RequestOutput
+from vllm.outputs import EmbeddingOutput, RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.repo_utils import with_retry
@@ -1191,9 +1191,10 @@ class VllmRunner:
         for req_output in req_outputs:
             prompt_str = req_output.prompt
             prompt_ids = req_output.prompt_token_ids
+            assert prompt_ids is not None
             req_sample_output_ids: list[list[int]] = []
             req_sample_output_strs: list[str] = []
-            req_logprobs = []
+            req_logprobs: list[dict[int, Logprob] | None] = []
             if req_output.prompt_logprobs:
                 req_logprobs.extend(req_output.prompt_logprobs)
             for sample in req_output.outputs:
@@ -1375,7 +1376,10 @@ class VllmRunner:
         returned_outputs = []
         for output in outputs:
             token_ids = [x.tokens for x in output.sequences]
-            texts = [x.text for x in output.sequences]
+            texts: list[str] = []
+            for x in output.sequences:
+                assert x.text is not None
+                texts.append(x.text)
             returned_outputs.append((token_ids, texts))
         return returned_outputs
 
@@ -1395,7 +1399,11 @@ class VllmRunner:
         inputs = self.get_inputs(prompts, images=images, videos=videos, audios=audios)
 
         req_outputs = self.llm.embed(inputs, *args, **kwargs)
-        return [req_output.outputs.embedding for req_output in req_outputs]
+        embeddings: list[list[float]] = []
+        for req_output in req_outputs:
+            assert isinstance(req_output.outputs, EmbeddingOutput)
+            embeddings.append(req_output.outputs.embedding)
+        return embeddings
 
     def token_embed(self, prompts: list[str]) -> list[list[float]]:
         req_outputs = self.llm.encode(prompts, pooling_task="token_embed")

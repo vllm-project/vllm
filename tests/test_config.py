@@ -88,6 +88,11 @@ from vllm.v1.worker.gpu.spec_decode.xpress.config import XPressSpeculatorConfig
 DEVICE_TYPE = current_platform.device_type
 
 
+def validate_mamba_cached_kernel(config: VllmConfig) -> None:
+    # mypy sees the @model_validator as a descriptor proxy, not a callable
+    VllmConfig.validate_mamba_cached_kernel(config)  # type: ignore[operator]
+
+
 def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch):
     calls = []
 
@@ -207,9 +212,9 @@ def test_flashinfer_replayssm_validates_config(
     )
     if error:
         with pytest.raises(ValueError, match=error):
-            VllmConfig.validate_mamba_cached_kernel(config)
+            validate_mamba_cached_kernel(config)
     else:
-        VllmConfig.validate_mamba_cached_kernel(config)
+        validate_mamba_cached_kernel(config)
 
 
 @pytest.mark.parametrize(
@@ -248,9 +253,9 @@ def test_triton_replayssm_spec_decode_validates_config(
     )
     if error:
         with pytest.raises(ValueError, match=error):
-            VllmConfig.validate_mamba_cached_kernel(config)
+            validate_mamba_cached_kernel(config)
     else:
-        VllmConfig.validate_mamba_cached_kernel(config)
+        validate_mamba_cached_kernel(config)
 
 
 @pytest.mark.parametrize(
@@ -489,30 +494,30 @@ def test_kda_recoverssm_derivation_is_revalidated():
         kv_transfer_config=None,
     )
 
-    VllmConfig.validate_mamba_cached_kernel(config)
+    validate_mamba_cached_kernel(config)
     assert config.cache_config.use_replayssm
     assert config.cache_config.use_kda_recoverssm
 
     config.cache_config.enable_prefix_caching = True
-    VllmConfig.validate_mamba_cached_kernel(config)
+    validate_mamba_cached_kernel(config)
     config.cache_config.enable_prefix_caching = False
 
     config.model_config.architecture = "NemotronHForCausalLM"
     config.mamba_config.backend = MambaBackendEnum.FLASHINFER
-    VllmConfig.validate_mamba_cached_kernel(config)
+    validate_mamba_cached_kernel(config)
     assert not config.cache_config.use_kda_recoverssm
 
     config.model_config.architecture = "KimiLinearForCausalLM"
     config.mamba_config.backend = MambaBackendEnum.TRITON
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
-        VllmConfig.validate_mamba_cached_kernel(config)
+        validate_mamba_cached_kernel(config)
 
     # Ordinary Triton ReplaySSM keeps its pre-existing PP support surface.
     config.model_config.architecture = "NemotronHForCausalLM"
     config.num_speculative_tokens = 0
     config.cache_config.use_kda_recoverssm = False
-    VllmConfig.validate_mamba_cached_kernel(config)
+    validate_mamba_cached_kernel(config)
 
 
 @pytest.mark.parametrize("supported", [True, False])
@@ -821,6 +826,7 @@ def test_monokernel_and_decode_backend_are_one_switch(monokernel, extra):
         additional_config=dict(extra),
     )
     assert config.kernel_config.monokernel
+    assert isinstance(config.additional_config, dict)
     assert config.additional_config["decode_backend"] == "latency_specialized"
     assert (
         config.compile_factors()
@@ -831,6 +837,7 @@ def test_monokernel_and_decode_backend_are_one_switch(monokernel, extra):
 def test_default_config_enables_neither_switch():
     config = VllmConfig()
     assert not config.kernel_config.monokernel
+    assert isinstance(config.additional_config, dict)
     assert "decode_backend" not in config.additional_config
 
 
@@ -1085,6 +1092,7 @@ def test_hisparse_connector_preserves_explicit_attention_config(monkeypatch):
             disable_hybrid_kv_cache_manager=False,
         ),
     )
+    assert config.attention_config.hisparse_config is not None
     assert config.attention_config.hisparse_config.device_buffer_size == 512
 
 
@@ -2585,6 +2593,7 @@ def test_engram_model_support(
     VllmConfig._resolve_and_verify_engram_config(resolved)
     assert (resolved.engram_config is not None) == supported
     if supported:
+        assert resolved.engram_config is not None
         assert resolved.engram_config.cpu_offload is True
 
 
@@ -2682,6 +2691,7 @@ def test_engram_draft_config_validates_target(monkeypatch, target_has_ple, expli
         VllmConfig._resolve_and_verify_engram_config(config)
         assert (config.engram_config is not None) == target_has_ple
         if target_has_ple:
+            assert config.engram_config is not None
             assert config.engram_config.cpu_offload is True
 
 
@@ -3842,6 +3852,7 @@ def test_get_pooling_config_from_args():
 def test_default_seq_pooling_type(model_id, default_pooling_type, pooling_type):
     model_config = ModelConfig(model_id)
     assert model_config._model_info.default_seq_pooling_type == default_pooling_type
+    assert model_config.pooler_config is not None
     assert model_config.pooler_config.seq_pooling_type == pooling_type
 
 
@@ -3855,6 +3866,7 @@ def test_default_seq_pooling_type(model_id, default_pooling_type, pooling_type):
 def test_default_tok_pooling_type(model_id, default_pooling_type, pooling_type):
     model_config = ModelConfig(model_id)
     assert model_config._model_info.default_tok_pooling_type == default_pooling_type
+    assert model_config.pooler_config is not None
     assert model_config.pooler_config.tok_pooling_type == pooling_type
 
 
@@ -3901,6 +3913,7 @@ def test_get_bert_tokenization_sentence_transformer_config():
 
     bert_bge_model_config = bge_model_config._get_encoder_config()
 
+    assert bert_bge_model_config is not None
     assert bert_bge_model_config["max_seq_length"] == 512
     assert bert_bge_model_config["do_lower_case"]
 
@@ -4654,12 +4667,15 @@ def test_vllm_config_defaults_are_none():
         # Use the global optimization level defaults
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[opt_level]
 
+        compilation_defaults = default_config["compilation_config"]
+        assert isinstance(compilation_defaults, dict)
+
         # Verify that all pass_config values are None before defaults are applied
-        for pass_k in default_config["compilation_config"]["pass_config"]:
+        for pass_k in compilation_defaults["pass_config"]:
             assert getattr(config.compilation_config.pass_config, pass_k) is None
 
         # Verify that other config values are None before defaults are applied
-        for k in default_config["compilation_config"]:
+        for k in compilation_defaults:
             if k != "pass_config":
                 assert getattr(config.compilation_config, k) is None
 
@@ -4748,7 +4764,9 @@ def test_vllm_config_defaults(model_id, compilation_config, optimization_level):
     default_config = OPTIMIZATION_LEVEL_TO_CONFIG[optimization_level]
 
     # Verify pass_config defaults (nested under compilation_config)
-    pass_config_dict = default_config["compilation_config"]["pass_config"]
+    compilation_config_dict = default_config["compilation_config"]
+    assert isinstance(compilation_config_dict, dict)
+    pass_config_dict = compilation_config_dict["pass_config"]
     for pass_k, pass_v in pass_config_dict.items():
         actual = getattr(vllm_config.compilation_config.pass_config, pass_k)
         expected = pass_v(vllm_config) if callable(pass_v) else pass_v
@@ -4757,7 +4775,6 @@ def test_vllm_config_defaults(model_id, compilation_config, optimization_level):
         )
 
     # Verify other compilation_config defaults
-    compilation_config_dict = default_config["compilation_config"]
     for k, v in compilation_config_dict.items():
         if k == "pass_config":
             continue
@@ -4946,7 +4963,7 @@ def test_scheduler_config_init():
     with pytest.raises(ValidationError):
         # Positional InitVars missing
         # (InitVars cannot have defaults otherwise they will become attributes)
-        SchedulerConfig()
+        SchedulerConfig()  # type: ignore[call-arg]
 
     with pytest.raises(AttributeError):
         # InitVar does not become an attribute
@@ -5581,14 +5598,14 @@ def test_invalid_watermark_key_file_is_rejected_without_quoting_it(tmp_path, con
     key_file.write_text(content)
 
     with pytest.raises(ValidationError, match="decimal integer") as error:
-        WatermarkConfig(key_file=str(key_file))
+        WatermarkConfig(key_file=str(key_file))  # type: ignore[call-arg]
 
     assert content not in str(error.value).replace(str(key_file), "")
 
 
 def test_missing_watermark_key_file_is_rejected(tmp_path):
     with pytest.raises(ValidationError, match="Cannot read watermark key file"):
-        WatermarkConfig(key_file=str(tmp_path / "missing"))
+        WatermarkConfig(key_file=str(tmp_path / "missing"))  # type: ignore[call-arg]
 
 
 @patch("vllm.config.ModelConfig")
@@ -5844,7 +5861,9 @@ def test_ir_op_priority_str():
 
     with pytest.raises(pydantic.ValidationError):
         # must be list of only strings
-        priority_config = IrOpPriorityConfig(rms_norm=["vllm_c", 4, "native"])
+        priority_config = IrOpPriorityConfig(
+            rms_norm=["vllm_c", 4, "native"]  # type: ignore[list-item]
+        )
 
 
 def test_ir_op_priority_ctx():

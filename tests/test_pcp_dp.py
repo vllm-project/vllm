@@ -115,7 +115,7 @@ def test_ag_rs_dispatch_and_combine_use_dp_pcp_sizes(monkeypatch, enable_ep):
         lambda: SimpleNamespace(dp_metadata=metadata),
     )
     with metadata.sp_local_sizes(1, pcp_size=2, use_ep=enable_ep):
-        hidden_states, _, _ = manager.dispatch(
+        hidden_states, _, _, *_ = manager.dispatch(
             torch.tensor(local_tokens),
             torch.ones(len(local_tokens)),
             torch.zeros(len(local_tokens)),
@@ -158,4 +158,5 @@ def test_expanded_slot_mapping_keeps_pcp_prefill_padding(monkeypatch):
     )
     assert calls == [1, 1]
     assert cache_kv.shape == (4, 2)
+    assert cache_slots is not None
     assert cache_slots.tolist() == [3, 4, 8, -1]

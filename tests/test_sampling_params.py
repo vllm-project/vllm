@@ -299,5 +299,6 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     shared = [custom, (None, "value", 1.5)]
     extra_args = {"first": shared, "second": shared}
     params = SamplingParams(extra_args=extra_args)
+    assert params.extra_args is not None
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]

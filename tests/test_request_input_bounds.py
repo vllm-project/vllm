@@ -188,6 +188,7 @@ def test_routed_experts_offset_validated_before_engine_submission(offset):
     request = InputProcessor.process_inputs(
         processor, "valid", prompt, params, ("generate",)
     )
+    assert request.sampling_params is not None
     assert (
         request.sampling_params.routed_experts_prompt_start
         == params.routed_experts_prompt_start
