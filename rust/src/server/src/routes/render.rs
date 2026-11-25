@@ -227,12 +227,8 @@ pub(crate) async fn render_completion<S: RenderContext>(
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
-    let text_requests = lower_completion_request(
-        body,
-        &lora_resolution,
-        request_context,
-        state.text_processor(),
-    )?;
+    let text_requests =
+        lower_completion_request(body, &lora_resolution, request_context, state.as_ref())?;
     for text_request in &text_requests {
         validate_max_output_tokens(
             "max_tokens",
