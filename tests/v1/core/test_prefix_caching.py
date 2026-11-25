@@ -896,7 +896,8 @@ def test_hisparse_import_promotion_keeps_cached_prefixes():
     )
 
     coordinator.finish_host_import(imported.request_id, failed=False)
-    assert coordinator.build_offload_command().page_transfers
+    command = coordinator.build_offload_command()
+    assert command is not None and command.page_transfers
 
     again = make_request("again", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256)
     _, num_computed, _ = manager.get_computed_blocks(again)
@@ -2598,6 +2599,36 @@ def test_prefill(hash_fn):
         free_block_queue.fake_free_list_tail.prev_free_block
         is free_block_queue.fake_free_list_head
     )
+
+
+def test_extend_cached_prefix():
+    """Probes only the blocks after the given prefix, and stops before the last
+    token, which is always recomputed."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 20),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    prompt = [i for i in range(4) for _ in range(block_size)] + [4]
+    req = make_request("req", prompt, block_size, sha256)
+    assert manager.extend_cached_prefix(req, 0) == 0
+
+    def cache_prefix(req_id: str, num_tokens: int) -> None:
+        writer = make_request(req_id, prompt[:num_tokens], block_size, sha256)
+        assert manager.allocate_slots(writer, num_tokens) is not None
+
+    cache_prefix("a", 33)
+    assert manager.extend_cached_prefix(req, 0) == 32
+    cache_prefix("b", 49)
+    assert manager.extend_cached_prefix(req, 32) == 48
+    assert manager.extend_cached_prefix(req, 48) == 48
+
+    cache_prefix("c", 65)
+    assert manager.extend_cached_prefix(req, 48) == 64
+    req_64 = make_request("req_64", prompt[:64], block_size, sha256)
+    assert manager.extend_cached_prefix(req_64, 0) == 48
 
 
 def test_prefill_hybrid_model():
