@@ -405,7 +405,7 @@ def test_compressed_tensors_fp8_kv_override_guarded_by_sm90(
     assert attn.kv_cache_dtype == expected_dtype
     assert cache_config.cache_dtype == expected_dtype
     warning = (
-        "does not support FP8 attention kernels (SM90+ required)" in caplog_vllm.text
+        "no FP8 attention kernel is available for the selected backend" in caplog_vllm.text
     )
     assert warning == expect_warning
 
