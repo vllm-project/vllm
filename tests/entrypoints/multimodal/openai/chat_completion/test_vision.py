@@ -564,6 +564,50 @@ async def test_chat_rejects_unsupported_image_format(
         )
 
 
+def test_chat_shares_decoded_image_budget():
+    side = 128
+    image_urls = [
+        encode_image_url(Image.new("RGB", (side, side), color), format=image_format)
+        for color, image_format in (("red", "PNG"), ("blue", "WEBP"))
+    ]
+    # Each image is charged four bytes per pixel.
+    decoded_limit = 6 * side * side
+    args = [
+        "--max-model-len",
+        "2048",
+        "--enforce-eager",
+        "--trust-remote-code",
+        "--limit-mm-per-prompt",
+        '{"image": 2}',
+        *ROCM_EXTRA_ARGS,
+    ]
+    with (
+        RemoteOpenAIServer(
+            MODEL_NAME,
+            args,
+            env_dict={"VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES": str(decoded_limit)},
+        ) as server,
+        server.get_client() as client,
+    ):
+
+        def complete(urls):
+            return client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=dummy_messages_from_image_url(urls),
+                max_completion_tokens=1,
+                temperature=0.0,
+            )
+
+        for image_url in image_urls:
+            assert complete(image_url).choices
+
+        with pytest.raises(
+            openai.BadRequestError,
+            match=f"VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES={decoded_limit}",
+        ):
+            complete(image_urls)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)

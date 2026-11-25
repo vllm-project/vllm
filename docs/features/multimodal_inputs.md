@@ -1156,7 +1156,10 @@ vLLM decodes image bytes with one of these backends:
 | Backend | Description |
 | --- | --- |
 | `pil` (default) | Pillow, returns PIL images |
-| `torchcodec` | TorchCodec for JPEG, PNG, WebP and AVIF, returning CHW `uint8` tensors; Pillow for everything else |
+| `torchcodec` | TorchCodec for eligible JPEG, PNG, and WebP images, returning CHW `uint8` tensors. Other supported images use Pillow. |
+
+Both backends use the same image format allowlist. AVIF, BLP, and ICO images
+are rejected before decoding.
 
 ```bash
 vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
