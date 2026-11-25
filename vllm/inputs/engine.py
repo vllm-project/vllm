@@ -164,7 +164,6 @@ def mm_input(
     *,
     prompt: str | None = None,
     cache_salt: str | None = None,
-    skip_mm_cache: bool = False,
 ) -> MultiModalInput:
     inputs = MultiModalInput(
         type="multimodal",
@@ -178,9 +177,6 @@ def mm_input(
         inputs["prompt"] = prompt
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
-    if skip_mm_cache:
-        inputs["skip_mm_cache"] = True
-
     return inputs
 
 
