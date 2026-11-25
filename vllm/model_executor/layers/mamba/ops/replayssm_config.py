@@ -50,12 +50,47 @@ def _gdn_decode(is_blackwell):
     return 64, 1, 3, 2
 
 
+# GDN spec configs are (block_v, num_warps, nk, num_stages), swept on
+# B300 at the Qwen3.5 geometry. The head_k_dim gate matters: these tuples
+# regress badly at K=64, which the default covers instead.
+_GDN_SPEC_VERIFY_BLACKWELL = {
+    2: (128, 2, 4, 3),
+    4: (128, 2, 4, 3),
+    6: (128, 2, 8, 4),
+    8: (128, 2, 8, 4),
+}
+_GDN_SPEC_FLUSH_BLACKWELL = {
+    2: (64, 1, 8, 4),
+    4: (64, 1, 8, 4),
+    6: (64, 1, 8, 2),
+    8: (64, 1, 8, 2),
+}
+
+
+def _gdn_spec_default(max_spec_len):
+    return 64, 1, (4 if max_spec_len >= 6 else 2), 2
+
+
+def _gdn_spec_verify(max_spec_len, head_k_dim, is_blackwell):
+    if is_blackwell and head_k_dim == 128:
+        return _GDN_SPEC_VERIFY_BLACKWELL.get(
+            max_spec_len, _gdn_spec_default(max_spec_len)
+        )
+    return _gdn_spec_default(max_spec_len)
+
+
+def _gdn_spec_flush(max_spec_len, head_k_dim, is_blackwell):
+    if is_blackwell and head_k_dim == 128:
+        return _GDN_SPEC_FLUSH_BLACKWELL.get(
+            max_spec_len, _gdn_spec_default(max_spec_len)
+        )
+    return _gdn_spec_default(max_spec_len)
+
+
 def get_replayssm_config(kernel: str, **shape) -> tuple:
     """Return the launch config for `kernel` (override > tuned default).
 
-    kernel: "mamba2_output_only" or "gdn_decode". `shape` carries the keying
-    dims (dstate; `L` for the buffer length, default 16); hardware is
-    auto-detected.
+    Hardware is auto-detected.
     """
     if kernel in _overrides:
         return _overrides[kernel]
@@ -64,4 +99,8 @@ def get_replayssm_config(kernel: str, **shape) -> tuple:
         return _mamba2_output_only(shape["dstate"], shape.get("L", 16), bw)
     if kernel == "gdn_decode":
         return _gdn_decode(bw)
+    if kernel == "gdn_spec_verify":
+        return _gdn_spec_verify(shape["max_spec_len"], shape["head_k_dim"], bw)
+    if kernel == "gdn_spec_flush":
+        return _gdn_spec_flush(shape["max_spec_len"], shape["head_k_dim"], bw)
     raise ValueError(f"unknown ReplaySSM kernel config key: {kernel}")

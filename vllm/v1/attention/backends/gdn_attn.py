@@ -248,8 +248,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 self.compilation_config.max_cudagraph_capture_size,
             )
 
+        self.use_replayssm: bool = (
+            vllm_config.cache_config.use_replayssm
+            and not vllm_config.cache_config.use_kda_recoverssm
+        )
+        self.num_state_indices = 1 if self.use_replayssm else self.num_spec + 1
         self.spec_state_indices_tensor: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs, self.num_spec + 1),
+            (self.decode_cudagraph_max_bs, self.num_state_indices),
             dtype=torch.int32,
             device=device,
         )
@@ -289,10 +294,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             device=device,
         )
 
-        self.use_replayssm: bool = (
-            vllm_config.cache_config.use_replayssm
-            and not vllm_config.cache_config.use_kda_recoverssm
-        )
         self.replayssm_buffer_len: int | None = (
             vllm_config.cache_config.replayssm_buffer_len
             if self.use_replayssm
@@ -437,7 +438,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             # Capture batches also have seq_len == query_len, but are not
             # prefills.
             if m.is_prefilling is not None:
-                no_prior_state &= m.is_prefilling
+                if self.use_replayssm and self.use_spec_decode:
+                    # The runner resets the replay history for every prefill row.
+                    no_prior_state = m.is_prefilling
+                else:
+                    no_prior_state &= m.is_prefilling
             else:
                 no_prior_state = torch.zeros_like(no_prior_state)
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
@@ -516,7 +521,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 # Padded sequences trail the spec decodes, so slice them off
                 # rather than gather with the host mask (an H2D copy + a kernel).
                 spec_state_indices_tensor = block_table_tensor[
-                    :num_spec_decodes, : self.num_spec + 1
+                    :num_spec_decodes, : self.num_state_indices
                 ]
                 non_spec_state_indices_tensor = None
                 # Padded sequences are always at the back, so the first
@@ -537,7 +542,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 spec_token_indx = index[num_non_spec_tokens:]
 
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks_cpu, : self.num_spec + 1
+                    spec_sequence_masks_cpu, : self.num_state_indices
                 ]
                 non_spec_state_indices_tensor = block_table_tensor[
                     non_spec_sequence_masks_cpu, 0
@@ -856,9 +861,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_indices = non_spec_indices[m.num_decodes :]
         elif m.num_prefills == 0:
             # Same as build(): padded sequences trail the spec decodes.
-            spec_indices = blk_table[: m.num_spec_decodes, : self.num_spec + 1]
+            spec_indices = blk_table[: m.num_spec_decodes, : self.num_state_indices]
         else:
-            spec_indices = blk_table[masks, : self.num_spec + 1]
+            spec_indices = blk_table[masks, : self.num_state_indices]
             non_spec_indices = prefill_indices = blk_table[~masks, 0]
 
         if self._stage_spec_decode(

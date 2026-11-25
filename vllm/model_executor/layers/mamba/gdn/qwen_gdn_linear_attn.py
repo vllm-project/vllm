@@ -94,6 +94,9 @@ from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
 from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp import (
     fused_gdn_decode_post_conv_mtp_triton,
 )
+from vllm.third_party.flash_linear_attention.ops.gdn_replayssm_spec_decode import (
+    gdn_replayssm_spec_decode,
+)
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.utils.math_utils import cdiv
 from vllm.utils.multi_stream_utils import execute_in_parallel
@@ -944,6 +947,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # enabled, the paged GDN page grows to 5 tensors and the non-spec decode
         # branch decodes through fused_recurrent_gated_delta_rule_replayssm.
         self.use_replayssm = self.cache_config.use_replayssm
+        self.use_replayssm_trackers = self.use_replayssm and self.num_spec > 0
         if self.use_replayssm and (
             reason := self._replayssm_unsupported_reason(vllm_config, self.beta_scale)
         ):
@@ -968,8 +972,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> str | None:
         if beta_scale != 1.0:
             return "does not support scaled beta (linear_allow_neg_eigval)"
-        if vllm_config.num_speculative_tokens > 0:
-            return "does not support speculative decoding yet"
+        if (
+            vllm_config.num_speculative_tokens
+            and vllm_config.cache_config.enable_prefix_caching
+        ):
+            return "speculative decoding requires --no-enable-prefix-caching"
         if vllm_config.mamba_config.backend != MambaBackendEnum.TRITON:
             return "requires --mamba-backend triton"
         if vllm_config.mamba_config.enable_stochastic_rounding:
@@ -1059,6 +1066,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _fused_gdn_decode_unsupported_reason(
         self, vllm_config: VllmConfig
     ) -> str | None:
+        if (
+            vllm_config.cache_config.use_replayssm
+            and vllm_config.num_speculative_tokens
+        ):
+            return "ReplaySSM speculative decoding uses the Triton kernel"
         conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()[:2]
         if (
             self.beta_scale != 1.0
@@ -2068,7 +2080,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 ],
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=spec_query_start_loc,
-                max_query_len=spec_state_indices_tensor.size(-1),
+                max_query_len=(
+                    self.num_spec + 1
+                    if self.use_replayssm
+                    else spec_state_indices_tensor.size(-1)
+                ),
                 validate_data=False,
             )
 
@@ -2139,8 +2155,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
-
         # Split mixed non-spec-decode+prefill to process independently
         split_non_spec = (
             spec_sequence_masks is None
@@ -2205,7 +2219,40 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2. Recurrent attention
 
         # 2.1: Process the multi-query part
-        if spec_sequence_masks is not None:
+        if spec_sequence_masks is not None and self.use_replayssm:
+            assert mixed_qkv_spec is not None
+            assert spec_query_start_loc is not None
+            assert spec_state_indices_tensor is not None
+            assert self.replayssm_buffer_len is not None
+            rows = attn_metadata.num_spec_decodes
+            out = mixed_qkv_spec.new_empty(
+                (
+                    mixed_qkv_spec.size(0),
+                    self.num_v_heads // self.tp_size,
+                    self.head_v_dim,
+                )
+            )
+            gdn_replayssm_spec_decode(
+                mixed_qkv_spec,
+                a_spec,
+                b_spec,
+                self.A_log,
+                self.dt_bias,
+                ssm_state,
+                self_kv_cache[2],
+                self_kv_cache[3],
+                self_kv_cache[4],
+                out,
+                spec_query_start_loc[: rows + 1],
+                spec_state_indices_tensor[:rows, 0],
+                self._replayssm_prev_num_accepted,
+                self._replayssm_ring_start,
+                self.replayssm_buffer_len,
+                self.num_spec + 1,
+            )
+            core_attn_out_spec, last_recurrent_state = out.unsqueeze(0), None
+        elif spec_sequence_masks is not None:
+            query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -2344,7 +2391,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
             # Init cache
             scatter_states(ssm_state, last_recurrent_state, prefill_state_indices)
-            if self.use_replayssm and self._plans_replayssm_decode:
+            if (
+                self.use_replayssm
+                and not self.use_replayssm_trackers
+                and self._plans_replayssm_decode
+            ):
                 # Cached decode appends to the ring that prefill leaves empty.
                 self._replayssm_ring_start.index_fill_(
                     0, prefill_state_indices.long(), 0

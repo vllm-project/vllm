@@ -12,7 +12,10 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.gdn_attn import (
+    GDNAttentionMetadata,
+    GDNAttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadata,
     Mamba2AttentionMetadataBuilder,
@@ -346,16 +349,22 @@ class MambaHybridModelState(DefaultModelState):
                 (
                     metadata
                     for metadata in attn_metadata.values()
-                    if isinstance(metadata, Mamba2AttentionMetadata)
+                    if isinstance(
+                        metadata, (Mamba2AttentionMetadata, GDNAttentionMetadata)
+                    )
                 ),
                 None,
             )
             # Autotune dummy runs and draft capture can omit Mamba metadata.
             if mamba_metadata is not None:
                 self._replayssm_query_start_loc = input_batch.query_start_loc
-                replayssm_prefilling = (
-                    torch.arange(num_reqs, device="cpu") >= mamba_metadata.num_decodes
-                )
+                if isinstance(mamba_metadata, GDNAttentionMetadata):
+                    replayssm_prefilling = is_prefilling
+                else:
+                    replayssm_prefilling = (
+                        torch.arange(num_reqs, device="cpu")
+                        >= mamba_metadata.num_decodes
+                    )
                 async_tensor_h2d(
                     replayssm_prefilling, out=self._is_prefilling_gpu[:num_reqs]
                 )

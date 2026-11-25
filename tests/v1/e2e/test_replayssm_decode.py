@@ -79,7 +79,6 @@ FLASHINFER_MODELS = [
 MODELS = [
     pytest.param(MAMBA2_MODEL, marks=large_gpu_mark(min_gb=40)),
 ]
-# GDN ReplaySSM covers standard decode only.
 GDN_MODELS = [
     pytest.param(GDN_MODEL, marks=large_gpu_mark(min_gb=40)),
     pytest.param(QWEN4_EXP_MODEL, marks=qwen4_exp_marks),
@@ -163,6 +162,20 @@ def test_replayssm_decode_matches_baseline(
 ):
     _check_replayssm_parity(
         vllm_runner, model_name, prompts=prompts, speculative_config=speculative_config
+    )
+
+
+@large_gpu_mark(min_gb=40)
+def test_replayssm_gdn_spec_decode_matches_baseline(vllm_runner):
+    _check_replayssm_parity(
+        vllm_runner,
+        GDN_MODEL,
+        speculative_config={
+            "method": "ngram",
+            "num_speculative_tokens": 3,
+            "prompt_lookup_max": 3,
+        },
+        prompts=[PROMPTS[0], "a b c d e f g a b c d e f g a b c d e f g a b c"],
     )
 
 

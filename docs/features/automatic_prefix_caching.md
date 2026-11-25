@@ -75,7 +75,9 @@ vllm serve nvidia/Qwen3.5-122B-A10B-NVFP4 \
     --enable-prefix-caching
 ```
 
-Speculative decoding, `--enable-mamba-cache-stochastic-rounding`, and a `--replayssm-buffer-len` above 32 are not supported. ReplaySSM pays off at serving batch sizes. On one GB300, Qwen3.5-122B-A10B-NVFP4 decodes 1.1–1.3x faster at 64–512 concurrent requests, and Qwen3.8-Flash-Next-NVFP4 1.1–1.2x faster at 256–512; with a single request both are 3–7% slower.
+For Qwen3.5 speculative decoding, use `--no-enable-prefix-caching` and set `--replayssm-buffer-len` to at least one plus the number of draft tokens. GDN ReplaySSM supports buffer lengths up to 32 and requires stochastic rounding to be disabled.
+
+Standard decoding benefits at serving batch sizes. On one GB300, Qwen3.5-122B-A10B-NVFP4 decodes 1.1–1.3x faster at 64–512 concurrent requests, and Qwen3.8-Flash-Next-NVFP4 1.1–1.2x faster at 256–512; with a single request both are 3–7% slower.
 
 The replay rings add 8–9% of an FP32 SSM state to each request's state with the default 16-token buffer. Where the existing padding of the Mamba page cannot hold them, the attention block grows and the KV cache holds up to 7% fewer tokens. With BF16 models the rings keep the cached inputs in FP16, which is more precise than BF16 but has a smaller range.
 
