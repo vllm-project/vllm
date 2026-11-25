@@ -30,6 +30,7 @@ from tests.v1.kv_connector.unit.utils import (
     create_request,
     create_scheduler,
     create_vllm_config,
+    make_kv_cache_config,
     set_mtp_config,
 )
 from tests.v1.spec_decode.utils import attach_speculator_config
@@ -622,7 +623,7 @@ def _on_handoff(scheduler: OffloadingConnectorScheduler) -> OnHandoffStoreHandle
 
 
 def _partial_tail_store_jobs(
-    scheduler: OffloadingConnectorScheduler, scheduler_output: Any
+    scheduler: OffloadingConnectorScheduler, scheduler_output: SchedulerOutput
 ) -> dict[int, TransferJob]:
     handler = _on_handoff(scheduler)
     sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_HANDOFF)
@@ -662,12 +663,11 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
         lambda keys, req_context, trigger: generate_store_output(keys)
     )
 
-    output = SimpleNamespace(
-        kv_connector_block_state=KVConnectorBlockState(
-            req_ids=set(),
-            resolve_block_ids={}.__getitem__,
-            boundary_state_offloads={"req": [(1, 99, 28)]},
-        )
+    output = SchedulerOutput.make_empty()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids=set(),
+        resolve_block_ids={}.__getitem__,
+        boundary_state_offloads={"req": [(1, 99, 28)]},
     )
     jobs = _partial_tail_store_jobs(scheduler, output)
 
@@ -730,12 +730,11 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
         lambda keys, req_context, trigger: generate_store_output(keys)
     )
 
-    output = SimpleNamespace(
-        kv_connector_block_state=KVConnectorBlockState(
-            req_ids=set(),
-            resolve_block_ids={}.__getitem__,
-            boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]},
-        )
+    output = SchedulerOutput.make_empty()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids=set(),
+        resolve_block_ids={}.__getitem__,
+        boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]},
     )
     jobs = _partial_tail_store_jobs(scheduler, output)
 
@@ -1020,12 +1019,11 @@ def test_partial_tail_store_addresses_each_group_block_size_under_dcp():
 
     # boundary 44 = last hash boundary of a 46-token prompt: inside the second
     # full-attention block (idx 1) and the third recurrent block (idx 2)
-    output = SimpleNamespace(
-        kv_connector_block_state=KVConnectorBlockState(
-            req_ids=set(),
-            resolve_block_ids={}.__getitem__,
-            boundary_state_offloads={"req": [(1, 99, 44)]},
-        )
+    output = SchedulerOutput.make_empty()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids=set(),
+        resolve_block_ids={}.__getitem__,
+        boundary_state_offloads={"req": [(1, 99, 44)]},
     )
     jobs = _partial_tail_store_jobs(scheduler, output)
 
@@ -1064,12 +1062,11 @@ def test_partial_tail_store_skips_aligned_boundary_under_dcp():
         generate_store_output(keys)
     )
     # 64 is a full-attention chunk boundary: handled by the aligned path only
-    output = SimpleNamespace(
-        kv_connector_block_state=KVConnectorBlockState(
-            req_ids=set(),
-            resolve_block_ids={}.__getitem__,
-            boundary_state_offloads={"req": [(1, 99, 64)]},
-        )
+    output = SchedulerOutput.make_empty()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids=set(),
+        resolve_block_ids={}.__getitem__,
+        boundary_state_offloads={"req": [(1, 99, 64)]},
     )
     jobs = _partial_tail_store_jobs(scheduler, output)
     assert len(jobs) == 1
@@ -1092,16 +1089,13 @@ def _dcp_partial_tail_store(
     scheduler.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
     )
-    return _partial_tail_store_jobs(
-        scheduler,
-        SimpleNamespace(
-            kv_connector_block_state=KVConnectorBlockState(
-                req_ids=set(),
-                resolve_block_ids={}.__getitem__,
-                boundary_state_offloads={"req": handoff},
-            )
-        ),
+    output = SchedulerOutput.make_empty()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids=set(),
+        resolve_block_ids={}.__getitem__,
+        boundary_state_offloads={"req": handoff},
     )
+    return _partial_tail_store_jobs(scheduler, output)
 
 
 @pytest.mark.cpu_test
@@ -2685,12 +2679,11 @@ def test_partially_stored_handoff_is_reported():
     req_status.group_states[1].block_ids[:] = [0, 21]
     _as_mock(scheduler.manager.prepare_store).side_effect = _consume_at_most([1])
 
-    output = SimpleNamespace(
-        kv_connector_block_state=KVConnectorBlockState(
-            req_ids=set(),
-            resolve_block_ids={}.__getitem__,
-            boundary_state_offloads={"req": [(1, 99, 28)]},
-        )
+    output = SchedulerOutput.make_empty()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids=set(),
+        resolve_block_ids={}.__getitem__,
+        boundary_state_offloads={"req": [(1, 99, 28)]},
     )
     jobs = _partial_tail_store_jobs(scheduler, output)
 
@@ -7284,14 +7277,12 @@ class TestMambaHybridOffloadServing:
         req_status.group_states[0].block_ids[:] = list(range(1, n_full + 1))
         req_status.group_states[1].block_ids[:] = list(range(101, 101 + n_mamba + 1))
 
-        out = SimpleNamespace(
-            num_scheduled_tokens={"A": self.PROMPT_TOKENS},
-            finished_req_ids=set(),
-            kv_connector_block_state=KVConnectorBlockState(
-                req_ids=set(),
-                resolve_block_ids={}.__getitem__,
-                boundary_state_offloads={"A": [(1, 101, self.MAMBA_BLOCK)]},
-            ),
+        out = SchedulerOutput.make_empty()
+        out.num_scheduled_tokens = {"A": self.PROMPT_TOKENS}
+        out.kv_connector_block_state = KVConnectorBlockState(
+            req_ids=set(),
+            resolve_block_ids={}.__getitem__,
+            boundary_state_offloads={"A": [(1, 101, self.MAMBA_BLOCK)]},
         )
         _partial_tail_store_jobs(scheduler, out)
         _store_jobs(scheduler, out)
@@ -7315,6 +7306,301 @@ class TestMambaHybridOffloadServing:
 
     def test_stored_mamba_checkpoint_is_reusable(self):
         assert self._roundtrip_served_tokens(self._make_scheduler()) == 16
+
+
+def _make_sparse_mamba_offload_engine(
+    offload_prompt_only=False, *, store_threshold=0, async_scheduling=False
+):
+    config = create_vllm_config(
+        block_size=16,
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 1 << 20,
+            "offload_prompt_only": offload_prompt_only,
+            "store_threshold": store_threshold,
+        },
+    )
+    config.scheduler_config.async_scheduling = async_scheduling
+    config.cache_config.prefix_cache_retention_interval = 0
+    caches = make_kv_cache_config(
+        block_size=16, mamba_enabled=True, enable_prefix_caching=True
+    )
+    caches.prefix_cache_retention_interval = 0
+    caches.cache_hit_alignment_tokens = 16
+    init_none_hash(sha256)
+    return create_scheduler(config, kv_cache_config=caches, hash_block_size=16)
+
+
+def _sparse_mamba_runner_output(request, completed_stores=()):
+    result = create_model_runner_output(
+        [request],
+        token_id=request.num_tokens,
+        kv_connector_worker_meta=OffloadingWorkerMetadata(
+            completed_jobs=dict.fromkeys(completed_stores, 1),
+        ),
+    )
+    if request.num_computed_tokens < request.num_tokens:
+        result.sampled_token_ids = [[]]
+    return result
+
+
+def _finish_sparse_mamba_producer(engine, max_offload_tokens=None, max_tokens=56):
+    producer = Request(
+        "producer",
+        list(range(52)),
+        SamplingParams(
+            max_tokens=max_tokens,
+            extra_args={
+                "kv_transfer_params": {"max_offload_tokens": max_offload_tokens}
+            }
+            if max_offload_tokens is not None
+            else None,
+        ),
+        None,
+        block_hasher=get_request_block_hasher(16, sha256),
+    )
+    engine.add_request(producer)
+    for _ in range(64):
+        output = engine.schedule()
+        meta = output.kv_connector_metadata
+        assert isinstance(meta, OffloadingConnectorMetadata)
+        engine.update_from_output(
+            output, _sparse_mamba_runner_output(producer, meta.store_jobs)
+        )
+        if producer.is_finished():
+            return producer
+    pytest.fail("producer did not finish after crossing the 96-token boundary")
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "prompt_only,write_limit,attention_tokens,external_tokens,max_tokens",
+    [
+        (False, None, 96, 96, 56),
+        (True, None, 48, 48, 56),
+        (False, 80, 80, 48, 56),
+        (False, None, 96, 48, 45),
+    ],
+)
+def test_sparse_mamba_decode_checkpoint_roundtrip(
+    prompt_only, write_limit, attention_tokens, external_tokens, max_tokens
+):
+    """Resume the last retained decode state after clearing GPU prefix keys."""
+    engine = _make_sparse_mamba_offload_engine(prompt_only)
+    try:
+        producer = _finish_sparse_mamba_producer(engine, write_limit, max_tokens)
+        for _ in range(4):
+            if not engine.has_requests():
+                break
+            output = engine.schedule()
+            meta = output.kv_connector_metadata
+            assert isinstance(meta, OffloadingConnectorMetadata)
+            engine.update_from_output(
+                output,
+                create_model_runner_output(
+                    [],
+                    finished_sending=meta.finished_store_reqs,
+                    kv_connector_worker_meta=OffloadingWorkerMetadata(
+                        completed_jobs=dict.fromkeys(meta.store_jobs, 1),
+                    ),
+                ),
+            )
+        assert not engine.has_requests()
+
+        connector = engine.connector
+        assert isinstance(connector, OffloadingConnector)
+        manager = connector.scheduler.manager
+        assert isinstance(manager, CPUOffloadingManager)
+        context = ReqContext(req_id="probe")
+
+        def cpu_hit(group, boundary):
+            key = make_offload_key(producer.block_hashes[boundary // 16 - 1], group)
+            return manager.lookup(key, context) is LookupResult.HIT
+
+        assert cpu_hit(1, 48)
+        assert all(cpu_hit(0, t) for t in range(16, attention_tokens + 1, 16))
+        assert not any(cpu_hit(0, t) for t in range(attention_tokens + 16, 97, 16))
+
+        followup = Request(
+            "followup",
+            [*producer.all_token_ids, 200, 201],
+            SamplingParams(max_tokens=1),
+            None,
+            block_hasher=get_request_block_hasher(16, sha256),
+        )
+        _, gpu_hit, _ = engine.kv_cache_manager.get_computed_blocks(followup)
+        assert gpu_hit == 96
+        assert engine.reset_prefix_cache(reset_connector=False)
+        engine.add_request(followup)
+        output = engine.schedule()
+        meta = output.kv_connector_metadata
+        assert isinstance(meta, OffloadingConnectorMetadata)
+        [(job_id, job)] = meta.load_jobs.items()
+        assert job.req_id == followup.request_id and not job.sync
+        assert followup.prefill_stats is not None
+        assert followup.prefill_stats.num_local_cached_tokens == 0
+        assert followup.prefill_stats.num_external_cached_tokens == external_tokens
+        assert job.dst_spec.group_sizes == [external_tokens // 16, 1]
+        assert job.dst_spec.block_indices == [0, external_tokens // 16 - 1]
+        assert cpu_hit(1, 96) == (external_tokens == 96)
+        assert not cpu_hit(1, 64) and not cpu_hit(1, 80)
+        engine.update_from_output(
+            output,
+            create_model_runner_output(
+                [],
+                finished_recving={followup.request_id},
+                kv_connector_worker_meta=OffloadingWorkerMetadata(
+                    completed_jobs={job_id: 1}
+                ),
+            ),
+        )
+        recomputed_tokens = 0
+        for _ in range(4):
+            resume = engine.schedule()
+            recomputed_tokens += resume.num_scheduled_tokens[followup.request_id]
+            engine.update_from_output(resume, _sparse_mamba_runner_output(followup))
+            if followup.is_finished():
+                break
+        assert followup.is_finished()
+        assert recomputed_tokens == followup.num_prompt_tokens - external_tokens
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "outcome", ["failure", "reset_pending", "reset_in_flight", "not_admitted"]
+)
+def test_sparse_mamba_decode_checkpoint_releases_source(outcome):
+    """Retain the store source until a copy is discarded or has completed."""
+    engine = _make_sparse_mamba_offload_engine(
+        store_threshold=2 if outcome == "not_admitted" else 0
+    )
+    try:
+        producer = _finish_sparse_mamba_producer(engine)
+        block_hash = producer.block_hashes[5]
+        block_ids = engine.kv_cache_manager.get_block_ids(producer.request_id)
+        source_id = block_ids[1][5]
+        assert source_id != 0
+        assert not engine.reset_prefix_cache(reset_connector=False)
+
+        connector = engine.connector
+        assert isinstance(connector, OffloadingConnector)
+        manager = connector.scheduler.manager
+        context = ReqContext(req_id="probe")
+        key = make_offload_key(block_hash, 1)
+        if outcome in ("reset_pending", "not_admitted"):
+            if outcome == "reset_pending":
+                assert engine.reset_connector_cache()
+            release = engine.schedule()
+            assert not release.kv_connector_metadata.store_jobs
+        else:
+            output = engine.schedule()
+            jobs = output.kv_connector_metadata.store_jobs
+            [job_id] = [
+                job_id
+                for job_id, job in jobs.items()
+                if job.src_spec.block_ids.tolist() == [source_id]
+            ]
+            assert manager.lookup(key, context) is LookupResult.HIT_PENDING
+            other_jobs = set(jobs) - {job_id}
+            _report_jobs(engine, output, other_jobs)
+            assert not engine.reset_prefix_cache(reset_connector=False)
+            if outcome == "reset_in_flight":
+                assert engine.reset_connector_cache()
+                flush = engine.schedule()
+                assert job_id in flush.kv_connector_metadata.jobs_to_flush
+                assert not flush.kv_connector_metadata.finished_store_reqs
+                _report_jobs(engine, flush, {job_id})
+            else:
+                engine.update_from_output(
+                    engine.schedule(),
+                    create_model_runner_output(
+                        [],
+                        kv_connector_worker_meta=OffloadingWorkerMetadata(
+                            completed_jobs={job_id: 1}, failed_jobs={job_id}
+                        ),
+                    ),
+                )
+
+            release = engine.schedule()
+
+        assert not engine.reset_prefix_cache(reset_connector=False)
+        meta = release.kv_connector_metadata
+        assert isinstance(meta, OffloadingConnectorMetadata)
+        assert meta.finished_store_reqs == {producer.request_id}
+        assert connector.has_pending_block_frees()
+        queued = engine.schedule()
+        assert not queued.kv_connector_metadata.finished_store_reqs
+        assert connector.has_pending_block_frees()
+        engine.update_from_output(
+            release,
+            create_model_runner_output([], finished_sending=meta.finished_store_reqs),
+        )
+        assert not connector.has_pending_block_frees()
+        assert manager.lookup(key, context) is LookupResult.MISS
+        assert engine.reset_prefix_cache(reset_connector=False)
+        assert not engine.has_requests()
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.cpu_test
+def test_sparse_mamba_decode_checkpoint_skips_in_flight_stop():
+    """An EOS with a later decode still in flight leaves only the prompt state."""
+    engine = _make_sparse_mamba_offload_engine(async_scheduling=True)
+    try:
+        producer = create_request(num_tokens=52, block_size=16, max_tokens=64)
+        engine.add_request(producer)
+        for _ in range(64):
+            output = engine.schedule()
+            meta = output.kv_connector_metadata
+            assert isinstance(meta, OffloadingConnectorMetadata)
+            engine.update_from_output(
+                output, _sparse_mamba_runner_output(producer, meta.store_jobs)
+            )
+            if producer.num_computed_tokens == 107:
+                break
+        assert producer.num_computed_tokens == 107
+        assert producer.num_in_flight_tokens == 0
+
+        stop_step = engine.schedule()
+        later_step = engine.schedule()
+        assert stop_step.num_scheduled_tokens == {producer.request_id: 1}
+        assert later_step.num_scheduled_tokens == {producer.request_id: 1}
+        engine.update_from_output(
+            stop_step,
+            create_model_runner_output(
+                [producer],
+                use_eos=True,
+                kv_connector_worker_meta=OffloadingWorkerMetadata(
+                    completed_jobs=dict.fromkeys(
+                        stop_step.kv_connector_metadata.store_jobs, 1
+                    )
+                ),
+            ),
+        )
+        assert producer.status == RequestStatus.FINISHED_STOPPED
+        assert producer.num_in_flight_tokens == 1
+        connector = engine.connector
+        assert isinstance(connector, OffloadingConnector)
+        assert not connector.has_pending_block_frees()
+
+        _report_jobs(
+            engine, later_step, set(later_step.kv_connector_metadata.store_jobs)
+        )
+        finish = engine.schedule()
+        _report_jobs(engine, finish, set(finish.kv_connector_metadata.store_jobs))
+        assert not engine.has_requests()
+        manager = connector.scheduler.manager
+        context = ReqContext(req_id="probe")
+        prompt_key = make_offload_key(producer.block_hashes[2], 1)
+        decode_key = make_offload_key(producer.block_hashes[5], 1)
+        assert manager.lookup(prompt_key, context) is LookupResult.HIT
+        assert manager.lookup(decode_key, context) is LookupResult.MISS
+    finally:
+        engine.shutdown()
 
 
 def _make_real_dcp_offload_scheduler(cache_hit_alignment=4, hash_size=4):

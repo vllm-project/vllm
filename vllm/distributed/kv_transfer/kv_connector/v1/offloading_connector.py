@@ -143,7 +143,11 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
-        return self.connector_worker.get_finished(finished_req_ids)
+        finished_sending, finished_recving = self.connector_worker.get_finished(
+            finished_req_ids
+        )
+        finished_sending.update(self._connector_metadata.finished_store_reqs)
+        return finished_sending, finished_recving
 
     def get_transfer_results(
         self, finished_req_ids: set[str]
@@ -223,13 +227,16 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_connector_output(connector_output)
 
+    def has_pending_block_frees(self) -> bool:
+        return self.scheduler.has_pending_block_frees()
+
     def request_finished(
         self,
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.request_finished(request)
+        return self.connector_scheduler.request_finished(request, (block_ids,))
 
     def request_finished_all_groups(
         self,
@@ -237,7 +244,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.request_finished(request)
+        return self.connector_scheduler.request_finished(request, block_ids)
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         assert self.connector_scheduler is not None

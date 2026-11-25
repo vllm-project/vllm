@@ -64,11 +64,18 @@ class OnHandoffStoreHandler(StoreTriggerHandler):
     ) -> None:
         block_state = scheduler_output.kv_connector_block_state
         handoffs = block_state.boundary_state_offloads if block_state else None
-        if not handoffs:
-            return
-        self._build_aligned_boundary_store_jobs(handoffs, req_states, sink)
-        if self._config.supports_partial_tail:
-            self._build_partial_tail_store_jobs(handoffs, req_states, sink)
+        if handoffs:
+            self._build_aligned_boundary_store_jobs(handoffs, req_states, sink)
+            if self._config.supports_partial_tail:
+                self._build_partial_tail_store_jobs(handoffs, req_states, sink)
+
+        finished_handoffs = {}
+        for req_id in scheduler_output.finished_req_ids:
+            req_status = req_states.get(req_id)
+            if req_status is not None and req_status.finished_decode_states:
+                finished_handoffs[req_id] = req_status.finished_decode_states
+        if finished_handoffs:
+            self._build_aligned_boundary_store_jobs(finished_handoffs, req_states, sink)
 
     def _build_aligned_boundary_store_jobs(
         self,
