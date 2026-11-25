@@ -1944,6 +1944,20 @@ class FlashInferImpl(AttentionImpl):
         self.cache_dtype = kv_cache_dtype
         self.is_kvcache_nvfp4 = kv_cache_dtype.startswith("nvfp4")
         self.is_kvcache_fp8_k_nvfp4_v = kv_cache_dtype == "fp8_k_nvfp4_v"
+        self.stage_mixed_prefill = (
+            self.is_kvcache_fp8_k_nvfp4_v
+            and envs.VLLM_FLASHINFER_MIXED_KV_QMUL
+            and envs.VLLM_FLASHINFER_MIXED_KV_QMUL_PREFILL == "staged"
+        )
+        if self.stage_mixed_prefill and (
+            force_use_trtllm_attention() is False
+            or not supports_trtllm_attention(is_prefill=True)
+        ):
+            raise ValueError(
+                "Staged mixed prefill requires FlashInfer TRTLLM FP8 attention"
+            )
+        if self.stage_mixed_prefill:
+            logger.info_once("Mixed QMUL decode with bounded FP8 staged prefill")
         self.uses_nvfp4_cache = self.is_kvcache_nvfp4 or self.is_kvcache_fp8_k_nvfp4_v
         self.kv_cache_dtype = "nvfp4" if self.is_kvcache_nvfp4 else kv_cache_dtype
         if self.is_kvcache_fp8_k_nvfp4_v and sliding_window is not None:
@@ -2277,8 +2291,31 @@ class FlashInferImpl(AttentionImpl):
                     key_data = key_data.transpose(1, 2)
                     value_data = value_data.transpose(1, 2)
                     value_scales = value_scales.transpose(1, 2)
+                q_fp8 = self.maybe_quant_query(query, FP8_DTYPE, layer._q_scale)
+                if self.stage_mixed_prefill and attn_metadata.num_prefills:
+                    from vllm.v1.attention.ops.flashinfer_mixed_kv_prefill import (
+                        maybe_staged_prefill,
+                    )
+
+                    if maybe_staged_prefill(
+                        q_fp8,
+                        key_data,
+                        value_data,
+                        value_scales,
+                        batch.block_table,
+                        batch.seq_lens,
+                        batch.query_start_loc,
+                        output,
+                        max_q_len=batch.max_query_len,
+                        num_decodes=attn_metadata.num_decodes,
+                        num_decode_tokens=attn_metadata.num_decode_tokens,
+                        qk_scale=self.bmm1_scale,
+                        v_scale=self.bmm2_scale,
+                        get_workspace=_get_trtllm_workspace_buffer,
+                    ):
+                        return output_padded
                 paged_fp8_k_nvfp4_v_fmha(
-                    self.maybe_quant_query(query, FP8_DTYPE, layer._q_scale),
+                    q_fp8,
                     key_data,
                     value_data,
                     value_scales,
