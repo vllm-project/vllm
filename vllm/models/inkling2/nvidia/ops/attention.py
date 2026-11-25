@@ -30,6 +30,11 @@ from .attention_sm90 import MODE_GATED, MODE_PARTIAL, rel_attention
 _FA4_TILE_M = 256
 _FA4_SM_FLOPS_PER_US = 10e6
 _FA4_MERGE_BYTES_PER_US = 4e6
+# `plan_attention`'s small-launch path (fewer than 512 query rows over all KV
+# heads) splits the keys `8192 // num_tokens` ways, capped at this; those
+# launches have under 64 query tokens, so no longer `max_seqlen_q` reaches it.
+_SMALL_LAUNCH_NUM_SPLITS = 128
+_SMALL_LAUNCH_MAX_SEQLEN_Q = 64
 
 
 def plan_attention(
@@ -241,6 +246,39 @@ class Inkling2FA4RelAttentionKernel(
                 out=torch.empty_like(q, dtype=torch.float32),
                 lse=torch.empty(num_heads, total_q, dtype=torch.float32, device=device),
             )
+            if (
+                key.split_kv
+                and key.num_warps_bucket is not None
+                and key.max_seqlen_q <= _SMALL_LAUNCH_MAX_SEQLEN_Q
+            ):
+                # tml_fa4 compiles its split-combine kernel per power-of-two
+                # split bucket (and `max_seqlen_q`): the two-way split above
+                # leaves the bucket of `plan_attention`'s small-launch split
+                # count to compile on the first short prompt.
+                self.kernel(
+                    q,
+                    key_cache,
+                    value_cache,
+                    block_table=int_tensor(num_reqs, 1),
+                    cache_seqlens=int_tensor(num_reqs),
+                    cu_seqlens_q=int_tensor(num_reqs + 1),
+                    max_seqlen_q=key.max_seqlen_q,
+                    softmax_scale=key.head_dim**-0.5,
+                    window_size=window_size,
+                    sheared_bias=torch.empty(
+                        total_q + 128,
+                        num_heads,
+                        key.rel_extent + 256,
+                        dtype=key.dtype,
+                        device=device,
+                    ),
+                    num_splits=_SMALL_LAUNCH_NUM_SPLITS,
+                    use_scheduler=True,
+                    out=torch.empty_like(q, dtype=torch.float32),
+                    lse=torch.empty(
+                        num_heads, total_q, dtype=torch.float32, device=device
+                    ),
+                )
 
     def __call__(self, *args: Any, **kwargs: Any) -> None:
         self.kernel(*args, **kwargs)
@@ -438,7 +476,11 @@ def _lg2(x):
     )
 
 
-@triton.jit
+# `num_tokens` (the batch's rows, padded to a graph size) and
+# `num_actual_tokens` take every value serving produces; they only index and
+# bound rows, so without specialization the kernel compiles once per split
+# plan instead of once per (==1, %16==0, other) class of each.
+@triton.jit(do_not_specialize=["num_tokens", "num_actual_tokens"])
 def _rel_decode_combine_kernel(
     OPart,
     LsePart,

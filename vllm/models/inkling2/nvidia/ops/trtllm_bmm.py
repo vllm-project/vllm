@@ -81,6 +81,13 @@ def configs(nvfp4: bool, tile_n: int) -> dict[str, tuple[int, int]]:
 # Token tile by batch size (tokens up to the first entry): tiles above the
 # mean rows per expert pay off once the routing is skewed.
 _TILES = ((8, 8), (128, 16), (384, 32), (768, 64), (4096, 128), (1 << 31, 256))
+# At the largest tile (batches above the CUDA-graph-captured prefill sizes run
+# eagerly at their exact token count) `max_ctas` is rounded up to a multiple
+# of this. The routing kernel takes it as a constexpr, so this leaves it a
+# handful of variants over the eager token range instead of one per 32 tokens,
+# each compiled during the first request that reaches it. The extra tiles are
+# launched idle (`tiles` bounds the GEMMs) and cost a few MiB of padded rows.
+_LARGE_TILE_CTAS_GRANULE = 128
 # Kernel of each (format, tile) for the gate/up and down projections.
 _KERNELS = {
     (True, 8): ("t128x8x512_s5_et128x8_m128x8x64_c1x1x1_rM_TN_transOut_schPd",) * 2,
@@ -141,6 +148,9 @@ def expert_plan(
     # Tiles if the local rows fill as many experts as possible, then pile up.
     rows = tokens * topk
     max_ctas = min(num_experts, rows) + (rows - min(num_experts, rows)) // tile
+    if tile >= _TILES[-1][1]:
+        granule = _LARGE_TILE_CTAS_GRANULE
+        max_ctas = -(-max_ctas // granule) * granule
     if not use_sm100_kernels():
         # No TRT-LLM-gen kernels (Hopper): only `route`'s layout.
         return ExpertPlan(tile, max_ctas, (0, 0))
