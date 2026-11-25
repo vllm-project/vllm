@@ -106,6 +106,11 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 
 CPU offload requires a GPU with UVA support;
 vLLM fails fast when it is unavailable.
+The exception is Qwen4Exp on NVIDIA GPUs, for example under NVIDIA
+Confidential Computing. It keeps the table in host memory and copies each
+step's rows to the GPU before the forward, as
+[disk offload](#disk-offload-qwen4exp) does. Each DP replica then keeps its
+own table, even with `dp_shared_memory`.
 
 ## Disk offload (Qwen4Exp)
 
