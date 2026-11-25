@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from functools import cached_property
 from typing import Any
 
 import torch
@@ -38,6 +39,15 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         )
 
         self.inputs_embeds: torch.Tensor | None = None
+
+    @cached_property
+    def has_draft_kv_cache(self) -> bool:
+        # Shared layers read their owner's allocation. Cache ownership is fixed
+        # for the lifetime of the loaded model.
+        return any(
+            not self.draft_attn_layer_names.isdisjoint(tensor.layers)
+            for tensor in self.kv_cache_config.kv_cache_tensors
+        )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
