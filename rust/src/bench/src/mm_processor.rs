@@ -236,6 +236,7 @@ async fn run_mm_processor_with_engine(
         model_name: args.model.clone(),
         client_index: 0,
         engine_stats_enabled: true,
+        enable_fault_tolerance: false,
     })
     .await
     .context("failed to connect to engine core")?;

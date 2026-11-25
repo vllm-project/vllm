@@ -21,6 +21,9 @@ use crate::error::{Error, Result, bail_invalid_client_config};
 use crate::metrics::EngineSleepState;
 use crate::prompt_block_hasher::PromptBlockHasher;
 use crate::protocol::dtype::ModelDtype;
+use crate::protocol::fault_tolerance::{
+    FaultToleranceRequest, FaultToleranceResult, FaultToleranceStatusResponse,
+};
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::EngineCoreRequest;
@@ -102,6 +105,15 @@ impl TransportMode {
             | Self::Bootstrapped {
                 data_parallel_size, ..
             } => *data_parallel_size,
+        }
+    }
+
+    /// Return the number of engines connected to this frontend.
+    pub fn engine_count(&self) -> usize {
+        match self {
+            Self::HandshakeOwner { engine_count, .. } | Self::Bootstrapped { engine_count, .. } => {
+                *engine_count
+            }
         }
     }
 
@@ -194,6 +206,9 @@ pub struct EngineCoreClientConfig {
     /// `SchedulerStats` nor request lifecycle events, so frontend metrics
     /// derived from them are not exported.
     pub engine_stats_enabled: bool,
+    /// Whether fault tolerance is enabled (`--enable-fault-tolerance`).
+    /// Requires a single engine per frontend (external load balancer mode).
+    pub enable_fault_tolerance: bool,
 }
 
 impl EngineCoreClientConfig {
@@ -215,12 +230,20 @@ impl EngineCoreClientConfig {
             model_name: String::new(),
             client_index: 0,
             engine_stats_enabled: true,
+            enable_fault_tolerance: false,
         }
     }
 
     /// Validate the client topology before opening any transport sockets.
     pub fn validate(&self) -> Result<()> {
-        self.transport_mode.validate()
+        self.transport_mode.validate()?;
+        if self.enable_fault_tolerance && self.transport_mode.engine_count() != 1 {
+            bail_invalid_client_config!(
+                "fault tolerance requires a single engine per frontend (external load balancer mode), got engine_count={}",
+                self.transport_mode.engine_count()
+            );
+        }
+        Ok(())
     }
 
     /// Set the model name used by frontend-side metrics and diagnostics.
@@ -238,6 +261,12 @@ impl EngineCoreClientConfig {
     /// Set whether the connected engines record stats.
     pub fn with_engine_stats_enabled(mut self, engine_stats_enabled: bool) -> Self {
         self.engine_stats_enabled = engine_stats_enabled;
+        self
+    }
+
+    /// Enable or disable fault tolerance on this client.
+    pub fn with_fault_tolerance(mut self, enable_fault_tolerance: bool) -> Self {
+        self.enable_fault_tolerance = enable_fault_tolerance;
         self
     }
 
@@ -434,6 +463,8 @@ impl EngineCoreClient {
             config.model_name.clone(),
             config.client_index,
             config.engine_stats_enabled,
+            config.enable_fault_tolerance,
+            config.transport_mode.engine_start_index(),
             &engines,
         ));
         let input_watch_task =
@@ -692,6 +723,51 @@ impl EngineCoreClient {
     /// checkpoint, or while a weight update has not finished successfully.
     pub fn subscribe_readiness(&self) -> tokio::sync::watch::Receiver<bool> {
         self.inner.readiness().subscribe()
+    }
+
+    /// Return whether fault tolerance is enabled on this client.
+    pub fn fault_tolerance_enabled(&self) -> bool {
+        self.inner.fault_tolerance_enabled()
+    }
+
+    /// Return whether fault tolerance is enabled and the managed engine is
+    /// currently not `"healthy"`.
+    pub fn is_faulted(&self) -> bool {
+        self.inner.is_faulted()
+    }
+
+    /// Return the cached fault-tolerance status entry of the primary managed
+    /// engine, if present.
+    pub fn fault_tolerance_engine_status(
+        &self,
+    ) -> Option<serde_json::Map<String, serde_json::Value>> {
+        self.inner.fault_tolerance_engine_status()
+    }
+
+    /// Return the current fault-tolerance status payload for
+    /// `GET /v1/fault_tolerance/status`.
+    pub fn fault_tolerance_status(&self) -> FaultToleranceStatusResponse {
+        self.inner.fault_tolerance_status()
+    }
+
+    /// Subscribe to fault-tolerance status changes (engine pushes and recovery
+    /// state transitions).
+    pub fn subscribe_fault_tolerance_status(
+        &self,
+    ) -> tokio::sync::watch::Receiver<FaultToleranceStatusResponse> {
+        self.inner.subscribe_fault_tolerance_status()
+    }
+
+    /// Execute a fault-tolerance recovery instruction to completion, matching
+    /// Python's `AsyncMPClient.handle_fault`.
+    pub async fn handle_fault(&self, ft_request: FaultToleranceRequest) -> FaultToleranceResult {
+        self.inner.handle_fault(ft_request).await
+    }
+
+    /// Dispatch a fault-tolerance recovery instruction in the background on the
+    /// client's runtime so HTTP callers can return `202 Accepted` immediately.
+    pub fn spawn_handle_fault(&self, ft_request: FaultToleranceRequest) {
+        self.inner.spawn_handle_fault(ft_request);
     }
 }
 

@@ -166,6 +166,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         model_name: metrics_model_name.clone(),
         client_index: 0,
         engine_stats_enabled: !config.disable_log_stats,
+        enable_fault_tolerance: config.api_server_options.enable_fault_tolerance,
     })
     .await
     .context("failed to connect to engine core")?;

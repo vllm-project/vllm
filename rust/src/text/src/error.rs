@@ -124,7 +124,10 @@ impl Error {
         matches!(
             self,
             Self::Llm(
-                LlmError::Unavailable { .. } | LlmError::QueueFull | LlmError::PrefillBacklogFull
+                LlmError::Unavailable { .. }
+                    | LlmError::QueueFull
+                    | LlmError::PrefillBacklogFull
+                    | LlmError::EngineFaulted
             )
         )
     }
