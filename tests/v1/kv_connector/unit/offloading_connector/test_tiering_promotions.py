@@ -27,6 +27,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+    OffloadingConnector,
+)
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -34,6 +37,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
+from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
 
 BS = 4  # tokens per block, and per offloaded chunk
 MAX_STEPS = 40
@@ -107,7 +111,11 @@ def _run(layout, prompt_chunks, expected_hit_tokens):
         hash_block_size=BS if mixed else None,
     )
     try:
-        manager = scheduler.connector.connector_scheduler.manager
+        connector = scheduler.connector
+        assert isinstance(connector, OffloadingConnector)
+        assert connector.connector_scheduler is not None
+        manager = connector.connector_scheduler.manager
+        assert isinstance(manager, TieringOffloadingManager)
         secondary = manager.secondary_tiers[0]
         assert isinstance(secondary, ExampleSecondaryTierManager)
         secondary.chunks = _HoldsEverything()
