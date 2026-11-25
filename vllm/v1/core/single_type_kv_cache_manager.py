@@ -1173,9 +1173,10 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             alignment_tokens=alignment_tokens,
         )
 
-        # The number of contiguous blocks needed for a prefix cache hit.
+        # The number of contiguous blocks needed for a prefix cache hit: every
+        # block the hit retains (see get_num_skipped_tokens).
         sliding_window_contiguous_blocks = cdiv(
-            manager_config.params.sliding_window - 1, block_size
+            cls.sliding_window_reach(manager_config), block_size
         )
 
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
@@ -1258,7 +1259,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # drops a block that could serve a hit.
             return None
 
-        need = cdiv(manager_config.params.sliding_window - 1, block_size)
+        need = cdiv(cls.sliding_window_reach(manager_config), block_size)
 
         mask = [False] * (end_block - start_block)
 
