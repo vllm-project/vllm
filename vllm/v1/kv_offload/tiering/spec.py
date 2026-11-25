@@ -100,6 +100,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     """
 
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    SHARED_REGION_PER_RANK = False
 
     @classmethod
     @override
@@ -335,6 +336,12 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         super().__init__(config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
+        if self.async_init:
+            logger.warning(
+                "async_init is not supported with TieringOffloadingSpec yet; "
+                "setting the CPU tier up now"
+            )
+            self.async_init = False
 
         # Parse secondary tier configurations
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
@@ -560,7 +567,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         if self.secondary_tier_configs and self.config.parallel.world_size > 1:
             _reject_workers_across_nodes()
-        world_size = self.config.parallel.world_size
         worker_index = self.config.parallel.rank
         worker_mmap = SharedOffloadRegion(
             engine_id=self._engine_id,
@@ -569,11 +575,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             kv_bytes_per_chunk=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
             num_segments=REGION_SEGMENTS,
-            # Every worker maps the same bytes in the replicated layout, so
-            # each pre-faults only its share.
-            populate_shard=(
-                (worker_index, world_size) if self.replicated_layout else None
-            ),
+            populate_shard=self._replicated_prefault_shard,
         )
         try:
             if self.config.canonical_layout:

@@ -95,6 +95,7 @@ impl ManagedEngineArgs {
         handshake_port: u16,
         limit_mm_per_prompt: Option<String>,
         hf_overrides: Option<String>,
+        override_generation_config: Option<String>,
         structured_outputs_config: Option<String>,
         topology: &DataParallelTopology,
         client_handshake_address: Option<String>,
@@ -147,6 +148,10 @@ impl ManagedEngineArgs {
         if let Some(hf_overrides) = hf_overrides {
             python_args.push("--hf-overrides".to_string());
             python_args.push(hf_overrides);
+        }
+        if let Some(override_generation_config) = override_generation_config {
+            python_args.push("--override-generation-config".to_string());
+            python_args.push(override_generation_config);
         }
         if let Some(structured_outputs_config) = structured_outputs_config {
             python_args.push("--structured-outputs-config".to_string());
@@ -406,7 +411,7 @@ fn parse_dotted_value(value: &str) -> Value {
 
 /// Python's `human_readable_int`: `1k` is 1,000, `1K` is 1,024 and `25.6k` is
 /// 25,600; a binary suffix takes no decimals.
-fn parse_human_readable_int(value: &str) -> Option<i64> {
+pub fn parse_human_readable_int(value: &str) -> Option<i64> {
     let value = value.trim();
     let suffixed = value.char_indices().last().and_then(|(index, suffix)| {
         let multiplier = match suffix {

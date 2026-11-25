@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Annotated, Any, Literal, TypeAlias
+from dataclasses import dataclass
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -182,7 +183,7 @@ class MultiModalFeatures(BaseModel):
         if self.mm_metadata is not None and set(self.mm_metadata) != modalities:
             raise ValueError("mm_metadata must use the same modalities as mm_hashes")
 
-        flattened_ranges: list[tuple[int, int]] = []
+        spans: dict[tuple[int, int], list[tuple[str, list[bool] | None]]] = {}
         for modality in modalities:
             num_hashes = len(self.mm_hashes[modality])
             num_placeholders = len(self.mm_placeholders[modality])
@@ -205,17 +206,29 @@ class MultiModalFeatures(BaseModel):
                 raise ValueError(
                     f"{modality} mm_metadata and mm_hashes must have the same length"
                 )
-            flattened_ranges.extend(
-                (placeholder.offset, placeholder.offset + placeholder.length)
-                for placeholder in self.mm_placeholders[modality]
-            )
-
-        flattened_ranges.sort()
-        for (_, end), (next_offset, _) in zip(flattened_ranges, flattened_ranges[1:]):
-            if next_offset < end:
-                raise ValueError(
-                    "mm_placeholders must be globally non-overlapping and sorted"
+            for placeholder in self.mm_placeholders[modality]:
+                spans.setdefault((placeholder.offset, placeholder.length), []).append(
+                    (modality, placeholder.is_embed)
                 )
+
+        # Placeholders must not overlap, except that items of different
+        # modalities may share one span when they embed disjoint positions:
+        # Qwen2.5-Omni and Qwen3-Omni place a video and its audio track this
+        # way with `use_audio_in_video`.
+        end = 0
+        for (offset, length), items in sorted(spans.items()):
+            masks = [is_embed or [True] * length for _, is_embed in items]
+            if (
+                offset < end
+                or len({modality for modality, _ in items}) < len(items)
+                or any(sum(position) > 1 for position in zip(*masks))
+            ):
+                raise ValueError(
+                    "mm_placeholders must be non-overlapping, except that items "
+                    "of different modalities may share one span with disjoint "
+                    "is_embed masks"
+                )
+            end = offset + length
         return self
 
 
@@ -263,10 +276,12 @@ class GenerateRequest(BaseModel):
     placeholders. With `features`, these placeholders must follow the
     last `features` range, which is left as is."""
 
+    _metadata_only_requires_ec: ClassVar[bool] = True
+
     @model_validator(mode="after")
     def _require_ec_for_metadata_only(self) -> "GenerateRequest":
         features = self.features
-        if features is None:
+        if features is None or not self._metadata_only_requires_ec:
             return self
         if not _has_serialized_mm_items(features.mm_metadata):
             return self
@@ -375,6 +390,7 @@ class GenerateRequest(BaseModel):
     _response_mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = (
         PrivateAttr(default=None)
     )
+    _response_mm_hashes: dict[str, list[str]] | None = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -464,6 +480,17 @@ class GenerateRequest(BaseModel):
             max_total_tokens=None,
             max_output_tokens=0,
         )
+
+
+class RenderedGenerateRequest(GenerateRequest):
+    """A `GenerateRequest` produced by `/render`.
+
+    `ec_transfer_params` come from the encode response, so a render with
+    `mm_payload="metadata"` cannot have them yet. `/inference/v1/generate`
+    still validates the request it receives as a `GenerateRequest`.
+    """
+
+    _metadata_only_requires_ec: ClassVar[bool] = False
 
 
 class GenerateLogProb(BaseModel):
@@ -597,6 +624,10 @@ class GenerateStreamResponseBase(BaseModel):
     usage: UsageInfo | None = Field(default=None)
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    mm_hashes: dict[str, list[str]] | None = None
+    """Per-modality processor cache keys, parallel to `mm_placeholders`. Pass
+    back with `mm_placeholders` as `features` to reuse the items without
+    `kwargs_data`."""
     metrics: PerRequestMetrics | None = None
 
 
@@ -640,6 +671,10 @@ class GenerateResponseBase(BaseModel):
     prompt_token_id_logprobs: str | None = None
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+    mm_hashes: dict[str, list[str]] | None = None
+    """Per-modality processor cache keys, parallel to `mm_placeholders`. Pass
+    back with `mm_placeholders` as `features` to reuse the items without
+    `kwargs_data`."""
     metrics: PerRequestMetrics | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
@@ -667,6 +702,14 @@ class GenerateTextResponse(GenerateResponseBase):
 class GenerateDerenderResponse(GenerateResponseBase):
     output_mode: Literal["derender"] = "derender"
     choices: list[GenerateDerenderChoice]
+
+
+@dataclass
+class RenderedGenerateResponse:
+    """The JSON of a non-streaming `GenerateResponse`, as parts to send
+    without joining them into one copy."""
+
+    parts: list[bytes]
 
 
 def output_mode_or_tokens(value: Any) -> Any:
