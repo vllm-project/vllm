@@ -539,11 +539,11 @@ class InputProcessor:
                 sampling_params.update_from_tokenizer(self.tokenizer)
 
             num_all_stop = len(sampling_params.all_stop_token_ids)
-            if num_all_stop > MAX_NUM_STOP_TOKEN_IDS:
+            if sampling_params.min_tokens > 0 and num_all_stop > MAX_NUM_STOP_TOKEN_IDS:
                 raise VLLMValidationError(
-                    f"Too many stop token IDs after merging EOS: "
-                    f"{num_all_stop}. "
-                    f"The max size is {MAX_NUM_STOP_TOKEN_IDS}.",
+                    f"Too many stop token IDs including EOS: {num_all_stop}. "
+                    f"The max size with min_tokens > 0 is "
+                    f"{MAX_NUM_STOP_TOKEN_IDS}.",
                     parameter="stop_token_ids",
                     value=num_all_stop,
                 )
