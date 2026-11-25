@@ -1,0 +1,8 @@
+schema_version: 1
+name: smoke
+description: Phase 0 smoke suite (GSM8K eval).
+evals:
+  - name: gsm8k
+    num_questions: 6
+    repeats: 1
+    concurrency: [1]

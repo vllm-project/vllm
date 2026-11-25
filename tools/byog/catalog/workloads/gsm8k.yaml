@@ -1,0 +1,27 @@
+schema_version: 1
+name: gsm8k
+kind: eval
+description: >-
+  Phase 0 example 5-shot GSM8K eval over /v1/completions (canonical lm-eval
+  GSM8K lands in Phase 1 P1.2).
+execution_mode: server
+lifecycle: reset_cache
+platforms: [nvidia]
+entrypoint: tools.byog.executor.evals.gsm8k:GSM8KEvalRunner
+protocol_version: "1.0"
+defaults:
+  train_source: https://vllm-public-assets.s3.us-west-2.amazonaws.com/ci-datasets/gsm8k/train.jsonl
+  train_sha256: 17f347dc51477c50d4efb83959dbb7c56297aba886e5544ee2aaed3024813465
+  test_source: https://vllm-public-assets.s3.us-west-2.amazonaws.com/ci-datasets/gsm8k/test.jsonl
+  test_sha256: 3730d312f6e3440559ace48831e51066acaca737f6eabec99bccb9e4b3c39d14
+  dataset_revision: vllm-ci-gsm8k-v1
+  num_questions: 20
+  num_shots: 5
+  repeats: 1
+  concurrency: [1]
+  max_tokens: 256
+  temperature: 0.0
+allowed_params:
+  - num_questions
+  - repeats
+  - concurrency
