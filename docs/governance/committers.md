@@ -22,9 +22,12 @@ Sorted alphabetically by GitHub handle:
 - [@DarkLight1337](https://github.com/DarkLight1337): Multimodality, API server
 - [@dllehr-amd](https://github.com/dllehr-amd): AMD integration
 - [@esmeetu](https://github.com/esmeetu): developer marketing, community
+- [@gau-nernst](https://github.com/gau-nernst): Kernels and performance
 - [@gshtras](https://github.com/gshtras): ROCm / AMD GPU integration
+- [@gty111](https://github.com/gty111): Multimodal EPD, encoder cache transfer
 - [@Harry-Chen](https://github.com/Harry-Chen): Build, CI, CUDA architecture
 - [@heheda12345](https://github.com/heheda12345): Hybrid memory allocator
+- [@hickeyma](https://github.com/hickeyma): API server
 - [@hmellor](https://github.com/hmellor): Hugging Face integration, documentation
 - [@hongxiayang](https://github.com/hongxiayang): AMD GPU / ROCm integration
 - [@houseroad](https://github.com/houseroad): Engine core and Llama models
@@ -48,12 +51,15 @@ Sorted alphabetically by GitHub handle:
 - [@sfeng33](https://github.com/sfeng33): Tool use and reasoning parser
 - [@shen-shanshan](https://github.com/shen-shanshan): AMD GPU / ROCm integration, multimodality, ViT CUDA graph
 - [@simon-mo](https://github.com/simon-mo): Project lead, API entrypoints, community
+- [@taneem-ibrahim](https://github.com/taneem-ibrahim): Pooling models
 - [@tdoublep](https://github.com/tdoublep): State space models
 - [@tjtanaa](https://github.com/tjtanaa): AMD GPU integration
 - [@tlrmchlsmth](https://github.com/tlrmchlsmth): Kernels and performance, distributed, disagg
 - [@tomeras91](https://github.com/tomeras91): MoE, Mamba, Ray
 - [@vadiklyutiy](https://github.com/vadiklyutiy): CI, performance, kernels
 - [@WoosukKwon](https://github.com/WoosukKwon): Project lead, engine core
+- [@wangxiyuan](https://github.com/wangxiyuan): Platform, KV cache, Mooncake
+- [@wzhao18](https://github.com/wzhao18): Kernels and performance, KV offloading
 - [@xinli-sw](https://github.com/xinli-sw): Quantization and model support
 - [@xuechendi](https://github.com/xuechendi): Intel CPU/XPU integration, KV connector
 - [@yaochengji](https://github.com/yaochengji): TPU integration
@@ -112,11 +118,15 @@ If you have PRs touching the area, please feel free to ping the area owner for r
     - @tlrmchlsmth, @youkaichao
 - Multimodality engine and memory management: core scheduling and memory management concerning vision, audio, and video inputs.
     - @ywang96, @DarkLight1337
+- EC Connector: Transfers multimodal encoder outputs between encoder and prefill workers.
+    - @gty111
 
 ### Model Implementations
 
 - Model Interface: The `nn.Module` interface and implementation for various models
     - @zhuohan123, @mgoin, @simon-mo, @houseroad, @ywang96 (multimodality), @jeejeelee (lora)
+- Pooling models: Embeddings, classification, reward modeling, and scoring
+    - @noooop, @taneem-ibrahim
 - Logits Processors / Sampler: The provided sampler class and pluggable logits processors
     - @njhill, @houseroad
 - Custom Layers: Utility layers in vLLM such as rotary embedding and rms norms
@@ -173,9 +183,10 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 ### External Kernels Integration
 
 - FlashAttention: @LucasWilkinson, @MatthewBonanni
-- FlashInfer: @LucasWilkinson, @mgoin, @WoosukKwon, @MatthewBonanni
+- FlashInfer: @LucasWilkinson, @mgoin, @WoosukKwon, @MatthewBonanni, @wzhao18
 - Blackwell Kernels: @mgoin, @yewentao256
 - DeepEP/DeepGEMM: @mgoin, @yewentao256
+- FlashKDA: @gau-nernst
 
 ### Integrations
 
@@ -185,8 +196,8 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 
 ### Hardware
 
-- Plugin Interface: @youkaichao, @Yikun
-- NVIDIA GPU: @pavanimajety
+- Plugin Interface: @youkaichao, @Yikun, @wangxiyuan
+- NVIDIA GPU: @pavanimajety, @wzhao18
 - AMD GPU: @gshtras, @tjtanaa, @hongxiayang, @shen-shanshan, @AndreasKaratzas
 - Intel CPU/GPU: @jikunshang, @bigPYJ1151, @xuechendi
 - Google TPU: @yaochengji

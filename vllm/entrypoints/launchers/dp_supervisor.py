@@ -141,7 +141,11 @@ def _build_device_ids(args: argparse.Namespace, local_rank: int) -> list[int | s
     var (e.g. CUDA_VISIBLE_DEVICES), so integer IDs must stay env-relative
     here rather than being translated to physical IDs.
     """
-    devices_per_rank = args.tensor_parallel_size * args.pipeline_parallel_size
+    devices_per_rank = (
+        args.tensor_parallel_size
+        * args.pipeline_parallel_size
+        * args.prefill_context_parallel_size
+    )
     start = local_rank * devices_per_rank
     stop = start + devices_per_rank
     device_ids = getattr(args, "device_ids", None)
@@ -200,7 +204,7 @@ async def _probe_endpoint(
                 # vLLM returns 503 on EngineDeadError, so we should return
                 # immediately if vLLM responds with a non-200 status code.
                 return response.status == HTTPStatus.OK
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        except (TimeoutError, aiohttp.ClientError) as e:
             # Allow retry of connection errors.
             logger.debug(
                 "Probe attempt %d/%d failed on port %d: %r",

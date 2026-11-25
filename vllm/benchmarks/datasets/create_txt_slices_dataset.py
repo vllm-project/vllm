@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Convert a plain-text file (local path or URL) into a JSONL dataset
-compatible with ``CustomDataset`` (``--dataset-name custom``), by 
+compatible with `CustomDataset` (`--dataset-name custom`), by 
 randomly slicing the tokenized text into prompts.
 
-Each line of the output JSONL contains a ``prompt`` (decoded from a random
-slice of the tokenized source text) and an ``output_tokens`` count.
+Each line of the output JSONL contains a `prompt` (decoded from a random
+slice of the tokenized source text) and an `output_tokens` count.
 
 Usage
 -----
 ::
 
     python -m vllm.benchmarks.datasets.create_txt_slices_dataset \\
-        --input  sonnet.txt \\
-        --output sonnet_dataset.jsonl \\
+        --input  corpus.txt \\
+        --output dataset.jsonl \\
         --tokenizer gpt2 \\
         --num-prompts 1000 \\
         --input-len 1024 \\
@@ -23,7 +23,7 @@ The resulting JSONL file can then be used with the serving benchmark::
 
     python -m vllm.benchmarks.serve \\
         --dataset-name custom \\
-        --dataset-path sonnet_dataset.jsonl \\
+        --dataset-path dataset.jsonl \\
         ...
 """
 

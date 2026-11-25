@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Json;
@@ -8,8 +9,10 @@ use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use vllm_metrics::METRICS;
 
 use crate::error::{ApiError, invalid_request};
+use crate::routes::weight_checker::{mismatches, weight_checksums};
 use crate::state::AppState;
 use crate::utils::utility_call_error;
 
@@ -26,6 +29,7 @@ pub(crate) struct UpdateWeightsRequest {
 #[derive(Default, Deserialize)]
 pub(crate) struct FinishWeightUpdateRequest {
     weight_version: Option<String>,
+    baseline: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Deserialize)]
@@ -36,6 +40,15 @@ pub(crate) struct UpdateWeightVersionRequest {
 #[derive(Serialize)]
 pub(crate) struct MessageResponse {
     message: &'static str,
+}
+
+#[derive(Serialize)]
+pub(crate) struct FinishWeightUpdateResponse {
+    message: &'static str,
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
+    matched: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mismatches: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -62,6 +75,7 @@ pub async fn init_weight_transfer_engine(
         )
     })?;
 
+    let _recorder = METRICS.api_server.record_weight_operation("init");
     state
         .engine_core_client()
         .init_weight_transfer_engine(init_info)
@@ -73,10 +87,27 @@ pub async fn init_weight_transfer_engine(
     }))
 }
 
+/// Release the trainer connection without shutting down inference.
+pub async fn shutdown_weight_transfer_engine(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<MessageResponse>, ApiError> {
+    let _recorder = METRICS.api_server.record_weight_operation("shutdown");
+    state
+        .engine_core_client()
+        .shutdown_weight_transfer_engine()
+        .await
+        .map_err(|error| utility_call_error("shutdown_weight_transfer_engine", error))?;
+
+    Ok(Json(MessageResponse {
+        message: "Weight transfer shut down",
+    }))
+}
+
 /// Start a weight update transaction.
 pub async fn start_weight_update(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<MessageResponse>, ApiError> {
+    let _recorder = METRICS.api_server.record_weight_operation("start");
     state
         .engine_core_client()
         .start_weight_update()
@@ -92,6 +123,7 @@ pub async fn start_weight_update(
 pub async fn start_draft_weight_update(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<MessageResponse>, ApiError> {
+    let _recorder = METRICS.api_server.record_weight_operation("start_draft");
     state
         .engine_core_client()
         .start_draft_weight_update()
@@ -122,6 +154,7 @@ pub async fn update_weights(
             )
         })?;
 
+    let _recorder = METRICS.api_server.record_weight_operation("update");
     state
         .engine_core_client()
         .update_weights(update_info)
@@ -133,15 +166,16 @@ pub async fn update_weights(
     }))
 }
 
-/// Finish a weight update transaction and optionally set the weight version.
+/// Finish a weight update; with a baseline, also compare the weights against it.
 pub async fn finish_weight_update(
     State(state): State<Arc<AppState>>,
     body: Result<Option<Json<FinishWeightUpdateRequest>>, JsonRejection>,
-) -> Result<Json<MessageResponse>, ApiError> {
-    // HTTPVLLMWeightSyncClient omits the body when no version is supplied.
+) -> Result<Json<FinishWeightUpdateResponse>, ApiError> {
+    // HTTPVLLMWeightSyncClient omits the body when no field is supplied.
     let request = body?.map(|Json(request)| request).unwrap_or_default();
 
     let client = state.engine_core_client();
+    let _recorder = METRICS.api_server.record_weight_operation("finish");
     client
         .finish_weight_update()
         .await
@@ -152,9 +186,15 @@ pub async fn finish_weight_update(
             .await
             .map_err(|error| utility_call_error("set_weight_version", error))?;
     }
+    let mismatches = match request.baseline {
+        Some(baseline) => Some(mismatches(&weight_checksums(client).await?, &baseline)),
+        None => None,
+    };
 
-    Ok(Json(MessageResponse {
+    Ok(Json(FinishWeightUpdateResponse {
         message: "Weight update finished",
+        matched: mismatches.as_ref().map(Vec::is_empty),
+        mismatches,
     }))
 }
 

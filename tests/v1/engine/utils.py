@@ -134,9 +134,12 @@ def _create_random_top_token_test_vector(
     if sampled_token_id in choice_tensor[1:]:
         # Use 1-based rank to match the top-k rank convention used by the
         # consumer (logprobs.py assigns ranks starting from 1).
-        sampled_token_rank = (choice_tensor[1:] == sampled_token_id).nonzero(
-            as_tuple=True
-        )[0].item() + 1
+        sampled_token_rank = (
+            int(
+                (choice_tensor[1:] == sampled_token_id).nonzero(as_tuple=True)[0].item()
+            )
+            + 1
+        )
     else:
         # If not found, assign a random int between num_logprobs and 50700
         sampled_token_rank = random.randint(num_logprobs, 50700)
@@ -194,23 +197,6 @@ def _create_random_top_token_test_matrix(
             prompt_token_ranks[rdx] = random.randint(shape[1], 50700)
 
     return matrix, prompt_token_ranks
-
-
-def decode_token(
-    tok_id: int,
-    tokenizer: PythonBackend,
-) -> str:
-    """Reproduce the process of detokenizing a token for testing purposes.
-
-    Args:
-      tok_id: token id to detokenize
-      tokenizer: tokenizer to use for detokenization
-
-    Returns:
-      string representation of token
-
-    """
-    return tokenizer.convert_ids_to_tokens(tok_id)
 
 
 def generate_dummy_sample_logprobs(
@@ -312,7 +298,7 @@ def generate_dummy_prompt_logprobs_tensors(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class DummyOutputProcessorTestVectors:
     """Dummy test vectors for output processor tests."""
 

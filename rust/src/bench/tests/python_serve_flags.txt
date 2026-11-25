@@ -69,6 +69,7 @@
 --random-mm-bucket-config
 --random-mm-limit-mm-per-prompt
 --random-mm-num-mm-items-range-ratio
+--random-mm-video-encode-fps
 --random-output-len
 --random-prefix-len
 --random-range-ratio
@@ -86,9 +87,6 @@
 --sharegpt-output-len
 --skip-chat-template
 --skip-tokenizer-init
---sonnet-input-len
---sonnet-output-len
---sonnet-prefix-len
 --spec-bench-category
 --spec-bench-output-len
 --speed-bench-category

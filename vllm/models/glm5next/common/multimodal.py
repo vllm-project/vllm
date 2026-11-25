@@ -1,23 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.3-Flash vision tower and multimodal processor."""
+"""GLM-5.3-Flash vision tower and encoder profiling inputs."""
 
+import math
 from collections.abc import Mapping
-from functools import cached_property, partial
+from functools import partial
 
 import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
 
+from vllm import _custom_ops as ops
+from vllm import envs
+from vllm.config import SchedulerConfig
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     parallel_state,
 )
 from vllm.distributed import utils as dist_utils
+from vllm.inputs import MultiModalInput, mm_input
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
+from vllm.model_executor.layers.fusion.mm_input_norm import IdentityInputNorm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -27,11 +33,10 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.models.glm4_1v import (
-    Glm4vMultiModalProcessor,
     Glm4vProcessingInfo,
 )
+from vllm.model_executor.models.qwen2_vl import _create_qwen2vl_field_factory
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -40,8 +45,16 @@ from vllm.model_executor.models.vision import (
     get_vit_attn_backend,
     is_vit_use_data_parallel,
 )
-from vllm.models.common.ops import fused_q_kv_rmsnorm
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.cache import BaseMultiModalProcessorCache
+from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
+from vllm.multimodal.parse import ImageSize
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    ProcessorInputs,
+    TimingContext,
+)
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
@@ -167,7 +180,6 @@ class Glm5NextVisionAttention(nn.Module):
             scale=self.hidden_size_per_attention_head**-0.5,
             prefix=f"{prefix}.attn",
         )
-        self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         seq_len, bs, _ = qkv.shape
@@ -185,36 +197,31 @@ class Glm5NextVisionAttention(nn.Module):
         self,
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb_cos: torch.Tensor,
-        rotary_pos_emb_sin: torch.Tensor,
+        rotary_pos_emb_cos_sin: torch.Tensor,
+        rotary_positions: torch.Tensor,
         max_seqlen: torch.Tensor | None = None,
+        sequence_lengths: torch.Tensor | None = None,  # Only used for FlashInfer
     ) -> torch.Tensor:
         x, _ = self.qkv(x)
-        q, k, v = self.split_qkv(x)
-
-        # P1: fused q/k RMSNorm (two distinct weights, one launch; fp32, bit-identical).
-        q_shape, k_shape = q.shape, k.shape
-        q_flat = q.reshape(-1, self.head_dim)
-        k_flat = k.reshape(-1, self.head_dim)
-        q, k = fused_q_kv_rmsnorm(
-            q_flat,
-            k_flat,
+        num_heads = self.num_attention_heads_per_partition
+        # q/k RMSNorm and RoPE in place in qkv, in fp32 with one rounding.
+        ops.fused_qk_norm_rope(
+            x.view(-1, x.shape[-1]),
+            num_heads,
+            num_heads,
+            num_heads,
+            self.head_dim,
+            self.q_norm.variance_epsilon,
             self.q_norm.weight,
             self.k_norm.weight,
-            self.q_norm.variance_epsilon,
+            rotary_pos_emb_cos_sin,
+            is_neox=True,
+            position_ids=rotary_positions,
         )
-        q = q.view(q_shape)
-        k = k.view(k_shape)
-
-        q, k, v = (rearrange(t, "s b ... -> b s ...").contiguous() for t in (q, k, v))
-        if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
-            qk_concat = torch.cat([q, k], dim=0)
-            qk_rotated = self.apply_rotary_emb(
-                qk_concat,
-                rotary_pos_emb_cos,
-                rotary_pos_emb_sin,
-            )
-            q, k = torch.chunk(qk_rotated, 2, dim=0)
+        q, k, v = (rearrange(t, "s b ... -> b s ...") for t in self.split_qkv(x))
+        if self.attn.attn_backend == AttentionBackendEnum.FLASHINFER:
+            # FlashInfer's cu_seqlens expect contiguous q/k and v as a view into qkv.
+            q, k = q.contiguous(), k.contiguous()
 
         context_layer = self.attn(
             query=q,
@@ -222,6 +229,7 @@ class Glm5NextVisionAttention(nn.Module):
             value=v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
         context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
 
@@ -264,21 +272,28 @@ class Glm5NextVisionBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        residual: torch.Tensor | None,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb_cos: torch.Tensor,
-        rotary_pos_emb_sin: torch.Tensor,
+        rotary_pos_emb_cos_sin: torch.Tensor,
+        rotary_positions: torch.Tensor,
         max_seqlen: int | None = None,
-    ) -> torch.Tensor:
-        x_attn = self.attn(
-            self.norm1(x),
+        sequence_lengths: torch.Tensor | None = None,  # Only used for FlashInfer
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if residual is None:
+            residual = x
+            x = self.norm1(x)
+        else:
+            x, residual = self.norm1(x, residual)
+        x = self.attn(
+            x,
             cu_seqlens=cu_seqlens,
-            rotary_pos_emb_cos=rotary_pos_emb_cos,
-            rotary_pos_emb_sin=rotary_pos_emb_sin,
+            rotary_pos_emb_cos_sin=rotary_pos_emb_cos_sin,
+            rotary_positions=rotary_positions,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
-        x_fused_norm, residual = self.norm2(x, residual=x_attn)
-        x = residual + self.mlp(x_fused_norm)
-        return x
+        x, residual = self.norm2(x, residual)
+        return self.mlp(x), residual
 
 
 class Glm5NextPatchMerger(nn.Module):
@@ -351,6 +366,7 @@ class Glm5NextVisionTransformer(nn.Module):
         vision_config,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -384,12 +400,13 @@ class Glm5NextVisionTransformer(nn.Module):
             in_channels=in_channels,
             hidden_size=self.hidden_size,
         )
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
-            max_position=8192,
+            max_position=text_config.max_position_embeddings,
             is_neox_style=True,
             rope_parameters={"partial_rotary_factor": 0.5},
         )
@@ -473,23 +490,10 @@ class Glm5NextVisionTransformer(nn.Module):
 
         cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
 
-        pos_ids = pos_ids.to(cos.device, non_blocking=True)
+        pos_ids = async_tensor_h2d(pos_ids, device=cos.device)
         cos_combined = cos[pos_ids].flatten(1)
         sin_combined = sin[pos_ids].flatten(1)
         return cos_combined, sin_combined, pos_ids
-
-    def compute_attn_mask_seqlen(
-        self,
-        cu_seqlens: torch.Tensor,
-    ) -> torch.Tensor | None:
-        max_seqlen = None
-        if self.attn_backend in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA,
-            AttentionBackendEnum.TRITON_ATTN,
-        }:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        return max_seqlen
 
     def prepare_encoder_metadata(
         self,
@@ -564,42 +568,38 @@ class Glm5NextVisionTransformer(nn.Module):
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         # patchify
-        x = x.to(device=self.device, dtype=self.dtype)
+        x = self.input_norm(x.to(device=self.device), self.dtype)
         x = self.patch_embed(x)
 
-        if encoder_metadata is not None:
-            # Encoder CUDA-graph path (PR #49852): rotary/cu_seqlens/max_seqlen are
-            # precomputed by prepare_encoder_metadata (which uses rot_pos_emb exactly
-            # as the eager rebuild does), so reuse them and skip the per-call CPU
-            # rebuild (the low-GPU-util culprit on multimodal workloads).
-            rotary_pos_emb_cos = encoder_metadata["rotary_pos_emb_cos"]
-            rotary_pos_emb_sin = encoder_metadata["rotary_pos_emb_sin"]
-            cu_seqlens = encoder_metadata["cu_seqlens"]
-            max_seqlen = encoder_metadata["max_seqlen"]
-        else:
-            if isinstance(grid_thw, list):
-                grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
-            rotary_pos_emb_cos, rotary_pos_emb_sin, _ = self.rot_pos_emb(grid_thw)
-            cu_seqlens = torch.repeat_interleave(
-                grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-            ).cumsum(dim=0, dtype=torch.int32)
-            cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
-            cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
-            max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
+        if encoder_metadata is None:
+            if not isinstance(grid_thw, list):
+                grid_thw = grid_thw.tolist()
+            encoder_metadata = self.prepare_encoder_metadata(grid_thw)
+        rotary_pos_emb_cos_sin = torch.cat(
+            [
+                encoder_metadata["rotary_pos_emb_cos"],
+                encoder_metadata["rotary_pos_emb_sin"],
+            ],
+            dim=-1,
+        )
+        rotary_positions = torch.arange(x.shape[0], device=x.device)
 
         # transformers
         x = x.unsqueeze(1)
+        residual = None
         for blk in self.blocks:
-            x = blk(
+            x, residual = blk(
                 x,
-                cu_seqlens=cu_seqlens,
-                rotary_pos_emb_cos=rotary_pos_emb_cos,
-                rotary_pos_emb_sin=rotary_pos_emb_sin,
-                max_seqlen=max_seqlen,
+                residual,
+                cu_seqlens=encoder_metadata["cu_seqlens"],
+                rotary_pos_emb_cos_sin=rotary_pos_emb_cos_sin,
+                rotary_positions=rotary_positions,
+                max_seqlen=encoder_metadata["max_seqlen"],
+                sequence_lengths=encoder_metadata["sequence_lengths"],
             )
 
         # adapter
-        x = self.post_layernorm(x)
+        x, _ = self.post_layernorm(x, residual)
         x = x.view(-1, self.spatial_merge_size, self.spatial_merge_size, x.shape[-1])
         x = x.permute(0, 3, 1, 2)
         x = self.downsample(x).view(-1, self.out_hidden_size)
@@ -612,36 +612,35 @@ class Glm5NextVisionTransformer(nn.Module):
 
 
 class Glm5NextProcessingInfo(Glm4vProcessingInfo):
-    """Wires up the vLLM-native processor for the multimodal checkpoint.
+    """Token-budget geometry for the multimodal checkpoint.
 
-    The checkpoint's ``processor_config.json`` declares a custom ``processor_class``
-    and stores its image/video processor configs inline (no standalone
-    ``preprocessor_config.json``), so ``AutoProcessor`` cannot resolve the
-    config. We bypass it and build our own ``Glm5NextProcessor``
-    (``vllm/transformers_utils/processors/glm5next.py``), a port of the
-    training-side pipeline that no longer imports transformers' GLM processor
-    classes. The port applies ``patch_expand_factor`` (checkpoint ships 1)
-    inside ``smart_resize``'s spatial factor.
+    This checkpoint's `processor_config.json` ships the token-budget style
+    (`min_image_tokens` / `max_image_tokens`) with no `size` key, so the
+    inherited Glm4v `size.longest_edge` path does not apply.
     """
 
-    @cached_property
-    def _glm5_hf_processor(self):
-        from vllm.transformers_utils.processors.glm5next import Glm5NextProcessor
+    @staticmethod
+    def _alignment_factor(proc) -> int:
+        """Spatial factor canvases align to, as `smart_resize` takes it."""
+        return proc.patch_size * proc.merge_size * proc.patch_expand_factor
 
-        return Glm5NextProcessor.from_pretrained(self.ctx.model_config.model)
-
-    def get_hf_processor(self, **kwargs: object):
-        return self._glm5_hf_processor
+    @classmethod
+    def _pixels_per_token(cls, proc) -> int:
+        """Pixels one vision token covers, matching `smart_resize`'s own
+        `temporal_factor * factor ** 2`."""
+        return proc.temporal_patch_size * cls._alignment_factor(proc) ** 2
 
     def _processor_pixel_budget(self, proc) -> tuple[int, int]:
-        from vllm.transformers_utils.processors.glm5next import _pixel_budget
-
-        return _pixel_budget(
-            proc.min_image_tokens,
-            proc.max_image_tokens,
-            proc.patch_size,
-            proc.merge_size,
-            proc.temporal_patch_size,
+        """(min_pixels, max_pixels) from the processor's token bounds."""
+        if proc.min_image_tokens is None or proc.max_image_tokens is None:
+            raise ValueError(
+                "min_image_tokens and max_image_tokens must be provided by "
+                "processor_config.json (or per-call kwargs)."
+            )
+        pixels_per_token = self._pixels_per_token(proc)
+        return (
+            proc.min_image_tokens * pixels_per_token,
+            proc.max_image_tokens * pixels_per_token,
         )
 
     def _get_image_max_pixels(self) -> int:
@@ -656,6 +655,55 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
             return int(override)
         return self._processor_pixel_budget(self.get_hf_processor().video_processor)[1]
 
+    def _get_max_video_frames(self, max_tokens: int) -> int:
+        image_processor = self.get_hf_processor().image_processor
+        temporal_factor = image_processor.temporal_patch_size
+        factor = self._alignment_factor(image_processor)
+        max_pixels = self._get_video_max_pixels()
+        # Each temporal group needs at least one aligned spatial patch.
+        max_frames = max_pixels // factor**2
+        max_frames = min(
+            max_frames,
+            max_tokens * temporal_factor // image_processor.patch_expand_factor**2,
+        )
+        width, height = self.get_image_size_with_most_features()
+        best_frames, best_tokens = temporal_factor, 0
+        for num_frames in range(temporal_factor, max_frames + 1, temporal_factor):
+            _, num_tokens = self._get_vision_info(
+                image_width=width,
+                image_height=height,
+                num_frames=num_frames,
+                max_image_pixels=max_pixels,
+            )
+            if best_tokens < num_tokens <= max_tokens:
+                best_frames, best_tokens = num_frames, num_tokens
+                if best_tokens == max_tokens:
+                    break
+        return best_frames
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        # The inherited square probe strands budget whenever the token
+        # ceiling is not a perfect square: with max_image_tokens=8000 the
+        # square refits to 2492x2492 (89x89 = 7921 tokens) while a
+        # 2240x2800 canvas reaches 80x100 = 8000, so the encoder cache came
+        # up short of the processor's own maximum and refused valid images
+        # (#59539). Factor the ceiling exactly instead of probing a square.
+        vision_config = self.get_hf_config().vision_config
+        factor = (
+            vision_config.patch_size
+            * vision_config.spatial_merge_size
+            * self.get_hf_processor().image_processor.patch_expand_factor
+        )
+        pixels_per_token = vision_config.temporal_patch_size * factor * factor
+        max_tokens = max(1, self._get_image_max_pixels() // pixels_per_token)
+        short_side = math.isqrt(max_tokens)
+        while max_tokens % short_side:
+            short_side -= 1
+        return ImageSize(
+            width=(max_tokens // short_side) * factor,
+            height=short_side * factor,
+        )
+
     def _get_vision_info(
         self,
         *,
@@ -668,13 +716,14 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         """GLM-5.3-Flash canvas geometry for token budgeting and dummy inputs.
 
         The inherited Glm4v path resolves the pixel budget from
-        ``size.longest_edge`` and resizes with GLM-4V's ``smart_resize``. This
-        checkpoint's ``processor_config.json`` ships the token-budget style
-        (``min_image_tokens`` / ``max_image_tokens``) with no ``size`` key, and
-        the alignment factor carries ``patch_expand_factor`` — resolve both
-        from the vLLM-native processor so profiling matches runtime geometry.
+        `size.longest_edge` and resizes with GLM-4V's `smart_resize`. This
+        checkpoint ships token bounds instead, and the alignment factor carries
+        `patch_expand_factor` — resolve both from the processor so profiling
+        matches runtime geometry.
         """
-        from vllm.transformers_utils.processors.glm5next import smart_resize
+        from transformers.models.glm5_next.image_processing_glm5_next import (
+            smart_resize,
+        )
 
         vision_config = self.get_hf_config().vision_config
         patch_size = vision_config.patch_size
@@ -682,22 +731,23 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         temporal_patch_size = vision_config.temporal_patch_size
 
         image_processor = self.get_hf_processor().image_processor
-        factor = patch_size * merge_size * image_processor.patch_expand_factor
-        # Keep the profiling search viable when the caller's budget is below
-        # one aligned canvas of the requested duration.
-        max_image_pixels = max(max_image_pixels, temporal_patch_size * factor * factor)
+        factor = self._alignment_factor(image_processor)
+        temporal_factor = image_processor.temporal_patch_size
+        # `smart_resize` denominates its bounds in vision tokens.
+        max_image_tokens = max(
+            max_image_pixels // self._pixels_per_token(image_processor), 1
+        )
 
         if do_resize:
-            t = num_frames if num_frames > temporal_patch_size else temporal_patch_size
+            t = num_frames if num_frames > temporal_factor else temporal_factor
             resized_height, resized_width = smart_resize(
-                t=t,
-                h=image_height,
-                w=image_width,
-                t_factor=temporal_patch_size,
-                h_factor=factor,
-                w_factor=factor,
+                num_frames=t,
+                height=image_height,
+                width=image_width,
+                temporal_factor=temporal_factor,
+                factor=factor,
                 min_pixels=1,
-                max_pixels=max_image_pixels,
+                max_pixels=max_image_tokens,
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:
@@ -714,19 +764,119 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
         return preprocessed_size, num_vision_tokens
 
 
-class Glm5NextMultiModalProcessor(Glm4vMultiModalProcessor):
-    """The vLLM-native ``Glm5NextProcessor`` extracts image/video features
-    only and passes the prompt text through unchanged, so prompt expansion
-    (image token repeat, video frame/timestamp structure) is owned by vLLM's
-    prompt-update machinery — the inherited ``_get_prompt_updates`` builds
-    the replacement content and the placeholder scan validates against
-    exactly that."""
+_RUST_FRONTEND_REQUIRED = (
+    "GLM-5.3-Flash multimodal preprocessing requires the Rust frontend. "
+    "Serve with VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3-Flash "
+    "or vllm-rs serve zai-org/GLM-5.3-Flash. "
+    "For Python text-only inference, set limit_mm_per_prompt="
+    "{'image': 0, 'video': 0}."
+)
 
-    def _hf_processor_applies_updates(
+
+class Glm5NextProfilingInputsBuilder(BaseDummyInputsBuilder[Glm5NextProcessingInfo]):
+    def get_dummy_text(self, mm_counts):
+        return ""
+
+    def get_dummy_mm_data(self, seq_len, mm_counts, mm_options):
+        raise ValueError(_RUST_FRONTEND_REQUIRED)
+
+
+class Glm5NextProfilingProcessor(BaseMultiModalProcessor[Glm5NextProcessingInfo]):
+    """Generate synthetic encoder inputs; Rust owns media preprocessing."""
+
+    def __init__(
         self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
+        info: Glm5NextProcessingInfo,
+        dummy_inputs: BaseDummyInputsBuilder[Glm5NextProcessingInfo],
+    ) -> None:
+        if not envs.VLLM_USE_RUST_FRONTEND:
+            raise ValueError(_RUST_FRONTEND_REQUIRED)
+        super().__init__(info, dummy_inputs)
+
+    def apply(
+        self, inputs: ProcessorInputs, timing_ctx: TimingContext
+    ) -> MultiModalInput:
+        raise ValueError(_RUST_FRONTEND_REQUIRED)
+
+    def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
+        return _create_qwen2vl_field_factory(
+            self.info.get_hf_config().vision_config.spatial_merge_size
+        )(hf_inputs)
+
+    def _get_prompt_updates(self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs):
+        raise ValueError(_RUST_FRONTEND_REQUIRED)
+
+    def get_dummy_mm_inputs(
+        self,
+        mm_counts: Mapping[str, int],
+        *,
+        cache: BaseMultiModalProcessorCache | None = None,
+        scheduler_config: SchedulerConfig | None = None,
+    ) -> MultiModalInput:
+        info = self.info
+        vision_config = info.get_hf_config().vision_config
+        seq_len = info.ctx.model_config.max_model_len
+        if scheduler_config is not None and scheduler_config.enable_chunked_prefill:
+            seq_len = min(seq_len, scheduler_config.max_num_batched_tokens)
+
+        width, height = info.get_image_size_with_most_features()
+        patch_size = vision_config.patch_size
+        temporal_patch_size = vision_config.temporal_patch_size
+        patch_dim = vision_config.in_channels * temporal_patch_size * patch_size**2
+        data = {}
+        placeholders = {}
+        hashes = {}
+        prompt_ids: list[int] = []
+        for modality, count in mm_counts.items():
+            if count == 0:
+                continue
+            if modality == "image":
+                num_frames = 1
+                max_pixels = info._get_image_max_pixels()
+                pixel_key = "pixel_values"
+            elif modality == "video":
+                num_frames = info.get_num_frames_with_most_features(seq_len, count)
+                max_pixels = info._get_video_max_pixels()
+                pixel_key = "pixel_values_videos"
+            else:
+                raise ValueError(f"Unsupported modality: {modality}")
+
+            size, num_tokens = info._get_vision_info(
+                image_width=width,
+                image_height=height,
+                num_frames=num_frames,
+                max_image_pixels=max_pixels,
+            )
+            grid = (
+                max(1, math.ceil(num_frames / temporal_patch_size)),
+                size.height // patch_size,
+                size.width // patch_size,
+            )
+            data[f"{modality}_grid_thw"] = torch.tensor(
+                [grid] * count, dtype=torch.long, device="cpu"
+            )
+            data[pixel_key] = torch.zeros(
+                (math.prod(grid) * count, patch_dim), dtype=torch.float32, device="cpu"
+            )
+            placeholders[modality] = [
+                PlaceholderRange(
+                    offset=len(prompt_ids) + i * num_tokens, length=num_tokens
+                )
+                for i in range(count)
+            ]
+            hashes[modality] = [
+                f"glm5next-profiling-{modality}-{i}" for i in range(count)
+            ]
+            prompt_ids.extend(
+                [info.get_hf_config().image_token_id] * num_tokens * count
+            )
+
+        prompt_ids.extend([0] * max(0, seq_len - len(prompt_ids)))
+        return mm_input(
+            prompt_token_ids=prompt_ids,
+            mm_kwargs=MultiModalKwargsItems.from_hf_inputs(
+                data, self._get_mm_fields_config(data, {})
+            ),
+            mm_hashes=hashes,
+            mm_placeholders=placeholders,
+        )

@@ -7,6 +7,7 @@ from collections import deque
 from collections.abc import Iterable, Iterator
 from enum import Enum
 
+from vllm.v1.metrics.iteration_workload import QueuedWorkloadTally
 from vllm.v1.request import Request
 
 
@@ -41,7 +42,7 @@ class RequestQueue(ABC):
         pass
 
     @abstractmethod
-    def prepend_requests(self, requests: "RequestQueue") -> None:
+    def prepend_requests(self, requests: Iterable[Request]) -> None:
         """Prepend all requests from another queue to the front of this
         queue."""
         pass
@@ -93,7 +94,7 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
         """Prepend a request to the front of the queue."""
         self.appendleft(request)
 
-    def prepend_requests(self, requests: RequestQueue) -> None:
+    def prepend_requests(self, requests: Iterable[Request]) -> None:
         """Prepend all requests from another queue to the front of this
         queue.
 
@@ -163,7 +164,7 @@ class PriorityRequestQueue(RequestQueue):
         front. Requests are ordered by (priority, arrival_time)."""
         self.add_request(request)
 
-    def prepend_requests(self, requests: RequestQueue) -> None:
+    def prepend_requests(self, requests: Iterable[Request]) -> None:
         """Add all requests from another queue according to priority policy.
 
         Note: In a priority queue, there is no concept of prepending to the
@@ -197,11 +198,67 @@ class PriorityRequestQueue(RequestQueue):
             yield heapq.heappop(heap_copy)
 
 
-def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
-    """Create request queue based on scheduling policy."""
+class TalliedRequestQueue(RequestQueue):
+    """A queue that reports the requests entering and leaving it to a tally."""
+
+    def __init__(self, queue: RequestQueue, tally: QueuedWorkloadTally) -> None:
+        self._queue = queue
+        self._tally = tally
+
+    def add_request(self, request: Request) -> None:
+        self._queue.add_request(request)
+        self._tally.add(self, request)
+
+    def pop_request(self) -> Request:
+        request = self._queue.pop_request()
+        self._tally.discard(self, request)
+        return request
+
+    def peek_request(self) -> Request:
+        return self._queue.peek_request()
+
+    def prepend_request(self, request: Request) -> None:
+        self._queue.prepend_request(request)
+        self._tally.add(self, request)
+
+    def prepend_requests(self, requests: Iterable[Request]) -> None:
+        requests = list(requests)
+        self._queue.prepend_requests(requests)
+        for request in requests:
+            self._tally.add(self, request)
+
+    def remove_request(self, request: Request) -> None:
+        self._queue.remove_request(request)
+        self._tally.discard(self, request)
+
+    def remove_requests(self, requests: Iterable[Request]) -> None:
+        requests = set(requests)
+        self._queue.remove_requests(requests)
+        for request in requests:
+            self._tally.discard(self, request)
+
+    def __bool__(self) -> bool:
+        return bool(self._queue)
+
+    def __len__(self) -> int:
+        return len(self._queue)
+
+    def __iter__(self) -> Iterator[Request]:
+        return iter(self._queue)
+
+
+def create_request_queue(
+    policy: SchedulingPolicy, tally: QueuedWorkloadTally | None = None
+) -> RequestQueue:
+    """Create request queue based on scheduling policy.
+
+    With a tally, the queue reports the requests entering and leaving it.
+    """
+    queue: RequestQueue
     if policy == SchedulingPolicy.PRIORITY:
-        return PriorityRequestQueue()
+        queue = PriorityRequestQueue()
     elif policy == SchedulingPolicy.FCFS:
-        return FCFSRequestQueue()
+        queue = FCFSRequestQueue()
     else:
         raise ValueError(f"Unknown scheduling policy: {policy}")
+    return queue if tally is None else TalliedRequestQueue(queue, tally)

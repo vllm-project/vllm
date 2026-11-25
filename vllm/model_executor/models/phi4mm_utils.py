@@ -12,15 +12,6 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 
-class BlockBase(nn.Module):
-    """Block abstract module."""
-
-    def __init__(self, input_size: int, output_size: int) -> None:
-        super().__init__()
-        self.input_size = input_size
-        self.output_size = output_size
-
-
 def get_activation(name: str = "relu") -> torch.nn.Module:
     """Select an activation function by name.
 
@@ -1130,7 +1121,7 @@ class NemoConvSubsampling(torch.nn.Module):
             in_channels = conv_channels
             layers.append(activation)
 
-            for i in range(self._sampling_num - 1):
+            for _ in range(self._sampling_num - 1):
                 if self.is_causal:
                     layers.append(
                         CausalConv2D(
@@ -1181,7 +1172,7 @@ class NemoConvSubsampling(torch.nn.Module):
                 self._right_padding = (self._kernel_size - 1) // 2
                 self._max_cache_len = 0
 
-            for i in range(self._sampling_num):
+            for _ in range(self._sampling_num):
                 if self.is_causal:
                     layers.append(
                         CausalConv2D(
@@ -1338,12 +1329,6 @@ class NemoConvSubsampling(torch.nn.Module):
             raise ValueError(f"Not valid sub-sampling: {subsampling}!")
 
         self.conv = torch.nn.Sequential(*layers)
-
-    def get_sampling_frames(self) -> list[int]:
-        return [1, self.subsampling_factor]
-
-    def get_streaming_cache_size(self) -> list[int]:
-        return [0, self.subsampling_factor + 1]
 
     def forward(self, x: Tensor, mask: Tensor | None) -> tuple[Tensor, Tensor | None]:
         """Forward method for NeMo subsampling.
@@ -1539,19 +1524,6 @@ class NemoConvSubsampling(torch.nn.Module):
 
         return torch.cat(out_chunks, 1)
 
-    def change_subsampling_conv_chunking_factor(
-        self, subsampling_conv_chunking_factor: int
-    ) -> None:
-        if (
-            subsampling_conv_chunking_factor != -1
-            and subsampling_conv_chunking_factor != 1
-            and subsampling_conv_chunking_factor % 2 != 0
-        ):
-            raise ValueError(
-                "subsampling_conv_chunking_factor should be -1, 1, or a power of 2"
-            )
-        self.subsampling_conv_chunking_factor = subsampling_conv_chunking_factor
-
 
 def calc_length_int(
     lengths: int,
@@ -1574,37 +1546,6 @@ def calc_length_int(
         length_f = (length_f + add_pad) / stride + one
         length_f = math.ceil(length_f) if ceil_mode else math.floor(length_f)
     return int(length_f)
-
-
-####  multihead attention starts here
-class AttModule(nn.Module):
-    """Attention abstraction module."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.export_mode = False
-
-    def set_export(self, mode: bool = True) -> None:
-        """Set the export mode."""
-        self.export_mode = mode
-
-    def forward(
-        self,
-        x: Tensor,
-        memory: Tensor | None = None,
-        pos_emb: Tensor | None = None,
-        att_mask: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor | None, Tensor | None]:
-        """AttModule forward.
-
-        Args:
-            x: input tensor.
-            memory: memory tensor.
-            pos_emb: positional encoder embedding.
-            att_mask: attention mask tensor.
-
-        """
-        return x, memory, pos_emb, att_mask
 
 
 def masked_softmax(
@@ -1642,7 +1583,7 @@ class MultiHeadedAttention(nn.Module):
             NOTE: this will NOT be used in ONNX decoding due to a lack of
             support.  In that case, we use the original attention
             implementation, which shows no regression.
-            default: False.
+            default: True.
         n_value: int, optional
             if set to values other than -1, use a different dimension for
             value. With the default value (i.e. -1), it is backward compatible.
@@ -1666,7 +1607,7 @@ class MultiHeadedAttention(nn.Module):
         attention_inner_dim: int = -1,
         glu_type: str = "swish",
         bias_in_glu: bool = True,
-        use_pt_scaled_dot_product_attention: bool = False,
+        use_pt_scaled_dot_product_attention: bool = True,
         n_value: int = -1,
         group_size: int = 1,
     ) -> None:
@@ -1690,7 +1631,6 @@ class MultiHeadedAttention(nn.Module):
         self.linear_v = nn.Linear(n_value, attention_inner_dim // group_size)
         self.linear_out = nn.Linear(attention_inner_dim // group_size, n_value)
 
-        self.attn = torch.jit.Attribute(None, Tensor | None)
         self.dropout = nn.Dropout(p=dropout_rate)
         self.dropout_rate = dropout_rate
         self.use_pt_scaled_dot_product_attention = use_pt_scaled_dot_product_attention
@@ -1798,8 +1738,6 @@ class MultiHeadedAttention(nn.Module):
                 scores = scores + relative_attention_bias
 
             attn = masked_softmax(scores, mask)  # (batch, head, time1, time2)
-
-            self.attn = attn
 
             p_attn = self.dropout(attn)
             x = torch.matmul(p_attn.to(v.dtype), v)  # (batch, head, time1, d_k)

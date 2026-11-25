@@ -23,7 +23,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers import BaseImageProcessor, BatchFeature, PreTrainedConfig
+from transformers import (
+    AutoModel,
+    BaseImageProcessor,
+    BatchFeature,
+    PaddleOCRTextConfig,
+    PaddleOCRTextModel,
+    PreTrainedConfig,
+)
 from transformers.activations import GELUActivation
 from transformers.image_utils import ChannelDimension
 from transformers.modeling_outputs import (
@@ -31,6 +38,10 @@ from transformers.modeling_outputs import (
 )
 from transformers.utils import torch_int
 
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import parallel_state
@@ -71,13 +82,12 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .ernie45 import Ernie4_5ForCausalLM
 from .interfaces import MultiModalEmbeddings, SupportsMRoPE, SupportsMultiModal
 from .siglip import SiglipMLP
 from .utils import (
     AutoWeightsLoader,
-    PPMissingLayer,
     WeightsMapper,
+    init_vllm_registered_model,
     maybe_prefix,
 )
 from .vision import get_vit_attn_backend
@@ -258,28 +268,18 @@ class PaddleOCRVLMultiModalProcessor(
             hf_kwargs,
         )
 
-    def _postprocess_hf_mm_data(
-        self,
-        hf_data: Mapping[str, object],
-        hf_kwargs: Mapping[str, object],
-        processed_data: BatchFeature,
-    ) -> BatchFeature:
-        if not hf_data:
-            return processed_data
-
-        num_patches_per_image = processed_data["image_grid_thw"].prod(-1)
-        processed_data["pixel_values"] = processed_data["pixel_values"].split(
-            num_patches_per_image.tolist()
-        )
-        return processed_data
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
+        image_grid_sizes = image_grid_thw.prod(-1)
+
         return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
+            pixel_values=MultiModalFieldConfig.flat_from_sizes(
+                "image", image_grid_sizes
+            ),
             image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
 
@@ -347,12 +347,12 @@ class Projector(nn.Module):
     ) -> torch.Tensor:
         m1, m2 = self.merge_kernel_size
         if isinstance(image_features, (list, tuple)):
-            processed_features = list()
-            for image_feature, image_grid in zip(image_features, image_grid_thw):
-                image_feature = self.pre_norm(image_feature)
-                t, h, w = image_grid
-
-                image_feature = rearrange(
+            # Norm and MLP are per-token, so run them once over all images;
+            # only the 2x2 merge depends on each image's grid.
+            sizes = [image_feature.shape[0] for image_feature in image_features]
+            normed_features = self.pre_norm(torch.cat(image_features)).split(sizes)
+            merged_features = [
+                rearrange(
                     image_feature,
                     "(t h p1 w p2) d -> (t h w) (p1 p2 d)",
                     t=t,
@@ -361,12 +361,13 @@ class Projector(nn.Module):
                     w=w // m2,
                     p2=m2,
                 )
-                hidden_states = self.linear_1(image_feature)
-                hidden_states = self.act(hidden_states)
-                hidden_states = self.linear_2(hidden_states)
-                processed_features.append(hidden_states)
+                for image_feature, (t, h, w) in zip(normed_features, image_grid_thw)
+            ]
+            hidden_states = self.linear_1(torch.cat(merged_features))
+            hidden_states = self.act(hidden_states)
+            hidden_states = self.linear_2(hidden_states)
 
-            return processed_features
+            return hidden_states.split([f.shape[0] for f in merged_features])
 
         dims = image_features.shape[:-1]
         dim = image_features.shape[-1]
@@ -383,7 +384,7 @@ class PaddleOCRImagePixelInputs(TensorSchema):
     type: Literal["pixel_values"]
     pixel_values: Annotated[
         torch.Tensor,
-        TensorShape("bn", "p", 3, "patch_size", "patch_size", dynamic_dims={"p"}),
+        TensorShape("np", 3, "patch_size", "patch_size"),
     ]
     image_grid_thw: Annotated[
         torch.Tensor,
@@ -454,27 +455,6 @@ class SiglipVisionEmbeddings(nn.Module):
 
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
         return patch_pos_embed
-
-    def fetch_position_embedding_lfu_cache(
-        self, embeddings: torch.Tensor, h: int, w: int, max_cache: int = 20
-    ):
-        grid = (h, w)
-        if grid in self.cache_position_embedding:
-            self.cache_position_count[grid] += 1
-            return self.cache_position_embedding[grid]
-
-        if len(self.cache_position_embedding) >= max_cache:
-            min_hit_grid = min(
-                self.cache_position_count,
-                key=self.cache_position_count.__getitem__,
-            )
-            self.cache_position_count.pop(min_hit_grid)
-            self.cache_position_embedding.pop(min_hit_grid)
-
-        position_embedding = self.interpolate_pos_encoding(embeddings, h, w, True)
-        self.cache_position_count[grid] = 1
-        self.cache_position_embedding[grid] = position_embedding
-        return position_embedding
 
     def forward(
         self,
@@ -679,6 +659,15 @@ class SigLIPRotaryEmbedding(nn.Module):
         return freqs
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "hidden_states": 1,
+        "cu_seqlens": 0,
+        "rotary_pos_emb": 0,
+    },
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class SiglipEncoderLayer(nn.Module):
     def __init__(
         self,
@@ -811,10 +800,10 @@ class SiglipEncoder(nn.Module):
         if cu_seqlens is None:
             raise ValueError("cu_seqlens cannot be None for SiglipEncoder.")
         if not isinstance(cu_seqlens, torch.Tensor):
-            cu_seqlens = async_tensor_h2d(cu_seqlens, dtype=torch.int32, device=device)
-        else:
-            cu_seqlens = cu_seqlens.to(device=device, non_blocking=True)
+            cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32)
 
+        # Computed before the H2D copy: the attention wrappers call `.item()`
+        # on it, which would sync on every layer for a device tensor.
         max_seqlen = None
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
@@ -822,6 +811,11 @@ class SiglipEncoder(nn.Module):
             AttentionBackendEnum.TRITON_ATTN,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+
+        if cu_seqlens.is_cpu:
+            cu_seqlens = async_tensor_h2d(cu_seqlens, dtype=torch.int32, device=device)
+        else:
+            cu_seqlens = cu_seqlens.to(device=device, non_blocking=True)
 
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
@@ -970,13 +964,6 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        if hasattr(config, "text_config"):
-            text_config = config.text_config.to_dict()
-            unsafe_keys = ["model_type", "architectures", "tie_word_embeddings"]
-            for key in unsafe_keys:
-                text_config.pop(key, None)
-            config.update(text_config)
-
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -987,17 +974,22 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
-            self.mlp_AR = Projector(config, config.vision_config)
+            self.mlp_AR = Projector(config.text_config, config.vision_config)
 
         with self._mark_language_model(vllm_config):
-            self.language_model = Ernie4_5ForCausalLM(
+            # TODO: Remove this shim when PaddleOCR-VL is migrated after
+            # https://github.com/huggingface/transformers/pull/50671.
+            AutoModel.register(
+                PaddleOCRTextConfig,
+                PaddleOCRTextModel,
+                exist_ok=True,
+            )
+            self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
+                hf_config=config.text_config,
+                architectures=["TransformersForCausalLM"],
                 prefix=maybe_prefix(prefix, "language_model"),
             )
-
-            for layer in self.language_model.model.layers:
-                if not isinstance(layer, PPMissingLayer):
-                    layer.self_attn.rotary_emb.is_neox_style = True
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -1125,55 +1117,43 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         )
 
     def encode_image(
-        self, pixel_values: torch.Tensor, image_grid_thw: torch.Tensor
+        self,
+        pixel_values: torch.Tensor,
+        image_grid_thw: list[tuple[int, int, int]],
     ) -> torch.Tensor:
+        """Encode the flat patches of all images in one vision tower call."""
         pixel_values = pixel_values.type(self.visual.dtype)
-        siglip_position_ids = list()
-        image_grid_hws = list()
-        cu_seqlens = [0]
+        seq_lens = [math.prod(grid) for grid in image_grid_thw]
 
-        thw_tuple = tuple(image_grid_thw.tolist())
-        numel = np.prod(thw_tuple)
-        image_grid_hws.append(thw_tuple)
-        image_position_ids = torch.arange(numel) % np.prod(thw_tuple[1:])
-        siglip_position_ids.append(image_position_ids)
-        cu_seqlens.append(cu_seqlens[-1] + numel)
-
-        # Both are built on the host; concat straight into a pinned buffer
-        # so the H2D copy stays non-blocking.
+        # Built on the host; concat straight into a pinned buffer so the
+        # H2D copy stays non-blocking.
         siglip_position_ids = torch.concat(
-            siglip_position_ids,
+            [
+                torch.arange(seq_len) % (h * w)
+                for seq_len, (_, h, w) in zip(seq_lens, image_grid_thw)
+            ],
             dim=0,
-            out=torch.empty(
-                sum(t.numel() for t in siglip_position_ids),
-                dtype=torch.int64,
-                pin_memory=PIN_MEMORY,
-            ),
+            out=torch.empty(sum(seq_lens), dtype=torch.int64, pin_memory=PIN_MEMORY),
         ).to(pixel_values.device, non_blocking=True)
-        cu_seqlens = async_tensor_h2d(
-            cu_seqlens, dtype=torch.int32, device=pixel_values.device
-        )
+        # One segment per image so that images never attend to each other.
+        cu_seqlens = torch.from_numpy(np.cumsum([0, *seq_lens], dtype=np.int32))
 
-        vision_outputs = self.visual(
+        return self.visual(
             pixel_values=pixel_values,
-            image_grid_thw=image_grid_hws,
+            image_grid_thw=image_grid_thw,
             position_ids=siglip_position_ids,
             interpolate_pos_encoding=True,
             cu_seqlens=cu_seqlens,
         )
-        return vision_outputs
 
     def _process_image_input(
         self, image_input: PaddleOCRImagePixelInputs
     ) -> MultiModalEmbeddings:
-        pixel_values = image_input.pixel_values
         image_grid_thw = image_input.image_grid_thw
-        vision_outputs = tuple(
-            self.encode_image(pixel, grid).squeeze(0)
-            for pixel, grid in zip(pixel_values, image_grid_thw)
-        )
-        image_embeds = self.mlp_AR(vision_outputs, image_grid_thw)
-        return image_embeds
+        grids = [tuple(grid) for grid in image_grid_thw.tolist()]
+        vision_outputs = self.encode_image(image_input.pixel_values, grids).squeeze(0)
+        vision_outputs = vision_outputs.split([math.prod(grid) for grid in grids])
+        return self.mlp_AR(vision_outputs, image_grid_thw)
 
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)

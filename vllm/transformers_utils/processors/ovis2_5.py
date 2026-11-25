@@ -7,6 +7,7 @@ import numpy as np
 import PIL
 import torch
 from transformers import BatchFeature
+from transformers.image_transforms import to_pil_image
 from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
@@ -355,8 +356,8 @@ class Ovis2_5Processor(ProcessorMixin):
 
         image_placeholders = [start_token, self.get_token_value("visual_atom")]
         if grid[0] * grid[1] > 1:
-            for r in range(grid[0]):
-                for c in range(grid[1]):
+            for _ in range(grid[0]):
+                for _ in range(grid[1]):
                     image_placeholders.append(self.get_token_value("visual_atom"))
 
         image_placeholders.append(end_token)
@@ -399,6 +400,8 @@ class Ovis2_5Processor(ProcessorMixin):
                 images = [images]
         elif video is not None:
             is_video = True
+            if isinstance(video, torch.Tensor):
+                video = video.cpu().numpy()
             # type of video in dummy_mm_data is np.ndarray
             if isinstance(video, np.ndarray):
                 images = []
@@ -414,6 +417,7 @@ class Ovis2_5Processor(ProcessorMixin):
             max_pixels if max_pixels is not None else MAX_PIXELS,
             min_pixels if min_pixels is not None else MIN_PIXELS,
         )
+        images = [to_pil_image(image) for image in images]
         images = [
             image.convert("RGB") if do_convert_rgb and image.mode != "RGB" else image
             for image in images

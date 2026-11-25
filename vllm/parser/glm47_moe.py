@@ -6,7 +6,7 @@ GLM-4.7 uses XML-like tool calls::
 
     <tool_call>func_name<arg_key>key</arg_key><arg_value>value</arg_value></tool_call>
 
-The function name can be followed directly by the first ``<arg_key>`` tag,
+The function name can be followed directly by the first `<arg_key>` tag,
 and tool calls may have no arguments.
 """
 
@@ -14,19 +14,24 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import regex as re
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
+    ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     Transition,
 )
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -48,33 +53,144 @@ GLM_TURN_BOUNDARIES = frozenset(
     ("<|system|>", "<|user|>", "<|assistant|>", "<|observation|>")
 )
 
-_ARG_RE = re.compile(
-    r"<arg_key>(?P<key>.*?)</arg_key>\s*"
-    r"<arg_value>(?P<value>.*?)</arg_value>",
-    re.DOTALL,
-)
-_PARTIAL_ARG_RE = re.compile(
-    r"<arg_key>(?P<key>.*?)</arg_key>\s*"
-    r"<arg_value>(?P<value>.*)$",
-    re.DOTALL,
-)
+_VALUE_START_RE = re.compile(r"\s*" + re.escape(ARG_VALUE_START))
 
 
-def _glm47_arg_converter(raw_args: str, partial: bool) -> str:
+def _find_arg(text: str, pos: int) -> tuple[int, int, int] | None:
+    """Locate the first argument whose key starts at or after `pos`.
+
+    Returns the start and end of the key and the start of the value. The key
+    runs to the first `</arg_key>` that is followed by `<arg_value>`. When
+    the first `<arg_key>` has no such end, no later one has either, so each
+    call scans the text once.
+    """
+    start = text.find(ARG_KEY_START, pos)
+    if start < 0:
+        return None
+    key_start = start + len(ARG_KEY_START)
+    key_end = text.find(ARG_KEY_END, key_start)
+    while key_end >= 0:
+        value_start = _VALUE_START_RE.match(text, key_end + len(ARG_KEY_END))
+        if value_start is not None:
+            return key_start, key_end, value_start.end()
+        key_end = text.find(ARG_KEY_END, key_end + 1)
+    return None
+
+
+def _closed_args(text: str, pos: int) -> Iterator[tuple[int, str, str, int]]:
+    """Yield `(start, key, value, end)` for each closed argument from `pos`."""
+    while (arg := _find_arg(text, pos)) is not None:
+        key_start, key_end, value_start = arg
+        value_end = text.find(ARG_VALUE_END, value_start)
+        if value_end < 0:
+            return
+        pos = value_end + len(ARG_VALUE_END)
+        yield (
+            key_start - len(ARG_KEY_START),
+            text[key_start:key_end],
+            text[value_start:value_end],
+            pos,
+        )
+
+
+class _ClosedArgs:
+    """Closed key/value pairs of a raw argument text, reused by longer texts.
+
+    Raw arguments only grow while a call streams, so a parse of a text that
+    extends `text` resumes after its last closed value.
+    """
+
+    __slots__ = ("text", "params", "outside")
+
+    def __init__(self) -> None:
+        self.text = ""  # raw text up to the end of the last closed value
+        self.params: dict[str, object] = {}
+        self.outside = ""  # text of ``self.text`` outside the closed pairs
+
+
+def _glm47_parse_args(
+    raw_args: str, partial: bool, closed: _ClosedArgs | None = None
+) -> tuple[dict[str, object], str | None]:
+    """Return the arguments and the key of the open trailing value, if any."""
     params: dict[str, object] = {}
+    outside: list[str] = []
+    pos = 0
+    if closed is not None and raw_args.startswith(closed.text):
+        params.update(closed.params)
+        outside.append(closed.outside)
+        pos = len(closed.text)
+    start = pos
 
-    for match in _ARG_RE.finditer(raw_args):
-        params[match.group("key").strip()] = match.group("value")
+    for arg_start, key, value, end in _closed_args(raw_args, pos):
+        outside.append(raw_args[pos:arg_start])
+        params[key.strip()] = value
+        pos = end
 
+    if closed is not None and pos > start:
+        closed.text = raw_args[:pos]
+        closed.params = dict(params)
+        closed.outside = "".join(outside)
+
+    open_key = None
     if partial:
-        remaining = _ARG_RE.sub("", raw_args)
-        match = _PARTIAL_ARG_RE.search(remaining)
-        if match:
-            key = match.group("key").strip()
+        remaining = "".join(outside) + raw_args[pos:]
+        arg = _find_arg(remaining, 0)
+        if arg is not None:
+            key_start, key_end, value_start = arg
+            key = remaining[key_start:key_end].strip()
             if key:
-                params[key] = match.group("value")
+                params[key] = remaining[value_start:]
+                open_key = key
 
-    return json.dumps(params, ensure_ascii=False)
+    return params, open_key
+
+
+def _glm47_arg_converter(
+    raw_args: str, partial: bool, closed: _ClosedArgs | None = None
+) -> str:
+    return json.dumps(
+        _glm47_parse_args(raw_args, partial, closed)[0], ensure_ascii=False
+    )
+
+
+def _glm47_arg_value_extender(
+    raw_args: str, closed: _ClosedArgs | None = None
+) -> ArgValueExtender | None:
+    # The open value runs to the end of raw_args and is the last JSON value,
+    # so a delta appends its JSON-escaped text unless it closes the value.
+    params, open_key = _glm47_parse_args(raw_args, partial=True, closed=closed)
+    if open_key is None or next(reversed(params)) != open_key:
+        return None
+
+    keep = len(ARG_VALUE_END) - 1
+    tail = raw_args[-keep:]
+
+    def extend(delta: str) -> str | None:
+        nonlocal tail
+        text = tail + delta
+        if ARG_VALUE_END in text:
+            return None
+        tail = text[-keep:]
+        return json.dumps(delta, ensure_ascii=False)[1:-1]
+
+    return extend
+
+
+def _glm53_always_thinks(tokenizer: TokenizerLike) -> bool:
+    # GLM-5.3 keeps the GLM-4.x prompt and tool-call format but replaces the
+    # enable_thinking toggle with an always-on "Reasoning Effort:" header, so
+    # its generation prompt always opens <think> and the model output carries
+    # no opening tag.
+    template = getattr(tokenizer, "chat_template", None)
+    return (
+        isinstance(template, str)
+        and "[gMASK]<sop>" in template
+        and "Reasoning Effort:" in template
+        and "enable_thinking" not in template
+        and "<tool_call>" in template
+        and "<arg_key>" in template
+        and "<arg_value>" in template
+    )
 
 
 @functools.cache
@@ -174,6 +290,8 @@ def glm47_moe_config(thinking: bool = True) -> ParserEngineConfig:
         },
         turn_boundary_tokens=GLM_TURN_BOUNDARIES,
         arg_converter=_glm47_arg_converter,
+        arg_structural_chars=frozenset(">"),
+        arg_value_extender=_glm47_arg_value_extender,
         stream_arg_deltas=True,
         tool_args_json=False,
         validate_tool_names=True,
@@ -192,6 +310,16 @@ class Glm47MoeParser(ParserEngine):
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         thinking = chat_kwargs.get("thinking", None)
         enable_thinking = chat_kwargs.get("enable_thinking", None)
+        if (thinking is False or enable_thinking is False) and _glm53_always_thinks(
+            tokenizer
+        ):
+            logger.warning_once(
+                "Ignoring enable_thinking/thinking: the GLM-5.3 chat template "
+                "has no thinking switch, so reasoning is always on and "
+                "disabling extraction would leak it into the content."
+            )
+            thinking = None
+            enable_thinking = None
         self.thinking_enabled = (
             True
             if thinking is None and enable_thinking is None
@@ -202,6 +330,13 @@ class Glm47MoeParser(ParserEngine):
             glm47_moe_config(thinking=self.thinking_enabled),
         )
         super().__init__(tokenizer, tools, **kwargs)
+        # Each streaming conversion resumes after the last closed pair.
+        if self._arg_converter is _glm47_arg_converter:
+            closed = _ClosedArgs()
+            self._arg_converter = functools.partial(_glm47_arg_converter, closed=closed)
+            self._arg_value_extender = functools.partial(
+                _glm47_arg_value_extender, closed=closed
+            )
 
     def _emit_name_delta(self, idx: int, deltas, name: str | None) -> None:
         if name is not None:
