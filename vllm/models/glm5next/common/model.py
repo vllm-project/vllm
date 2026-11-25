@@ -1319,7 +1319,10 @@ class Glm5NextForCausalLM(
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
-        tp_size = parallel_config.tensor_parallel_size
+        tp_size = (
+            parallel_config.tensor_parallel_size
+            * parallel_config.prefill_context_parallel_size
+        )
         num_spec = (
             vllm_config.speculative_config.num_speculative_tokens
             if vllm_config.speculative_config

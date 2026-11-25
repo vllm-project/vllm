@@ -35,6 +35,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
+from vllm.v1.attention.ops.pcp import PCPTokenMapping
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 # FlashInfer's GDN prefill emits states every N tokens, N a multiple of its
@@ -117,6 +118,8 @@ class GDNAttentionMetadata:
     num_spec_decodes: int
     num_spec_decode_tokens: int
     num_actual_tokens: int
+
+    pcp: PCPTokenMapping | None = None
 
     checkpoint: MambaPrefillCheckpointMetadata | None = None
     flashinfer_checkpoint_plan: GDNFlashInferCheckpointPlan | None = None
@@ -245,7 +248,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if self.compilation_config.max_cudagraph_capture_size is not None:
             self.decode_cudagraph_max_bs = min(
                 self.decode_cudagraph_max_bs,
-                self.compilation_config.max_cudagraph_capture_size,
+                self.compilation_config.max_cudagraph_capture_size
+                * vllm_config.parallel_config.prefill_context_parallel_size,
             )
 
         self.spec_state_indices_tensor: torch.Tensor = torch.empty(

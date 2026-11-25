@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
+from functools import partial
 from itertools import groupby, product
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
@@ -986,7 +987,12 @@ def prepare_inputs_to_capture(
     # In summary: We always generate attention metadata for both FULL and PIECEWISE
     # CUDA graphs, setting for_capture=True for FULL graphs, and for_capture=False
     # for PIECEWISE graphs, to ensure correct execution and capture.
-    attn_metadata = model_state.prepare_attn(
+    prepare_metadata = (
+        partial(pcp_manager.build_attn_metadata, model_state)
+        if pcp_manager is not None
+        else model_state.prepare_attn
+    )
+    attn_metadata = prepare_metadata(
         input_batch,
         CUDAGraphMode.NONE,
         input_block_tables,

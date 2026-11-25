@@ -1,10 +1,90 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
+
 import torch
 
 from vllm.distributed.parallel_state import (
     get_pcp_group,
     get_tp_group,
+)
+from vllm.forward_context import get_forward_context
+from vllm.utils.torch_utils import direct_register_custom_op
+
+
+@dataclass
+class PCPTokenMapping:
+    """Index and padding masks mapping between rank-local and causal global tokens."""
+
+    restore_indices: torch.Tensor
+    restore_mask: torch.Tensor
+    local_indices: torch.Tensor
+    local_mask: torch.Tensor
+
+
+def pcp_causal_gather(
+    hidden_states: torch.Tensor, pcp_size: int, layer_name: str
+) -> torch.Tensor:
+    gathered = get_pcp_group().all_gather(hidden_states.contiguous(), dim=0)
+    metadata = get_forward_context().attn_metadata
+    if metadata is None:
+        return gathered
+    assert isinstance(metadata, dict)
+    if layer_name not in metadata:
+        return gathered
+    pcp = getattr(metadata[layer_name], "pcp", None)
+    if pcp is None:
+        return gathered
+    mask_shape = (-1,) + (1,) * (hidden_states.ndim - 1)
+    return gathered.index_select(0, pcp.restore_indices).masked_fill(
+        ~pcp.restore_mask.view(mask_shape), 0
+    )
+
+
+def pcp_causal_gather_fake(
+    hidden_states: torch.Tensor, pcp_size: int, layer_name: str
+) -> torch.Tensor:
+    return hidden_states.new_empty(
+        (hidden_states.shape[0] * pcp_size, *hidden_states.shape[1:])
+    )
+
+
+def pcp_causal_scatter(
+    output: torch.Tensor, pcp_size: int, layer_name: str
+) -> torch.Tensor:
+    output = get_pcp_group().all_reduce(output)
+    metadata = get_forward_context().attn_metadata
+    if metadata is None:
+        return output[: output.shape[0] // pcp_size].clone()
+    assert isinstance(metadata, dict)
+    if layer_name not in metadata:
+        return output[: output.shape[0] // pcp_size].clone()
+    pcp = getattr(metadata[layer_name], "pcp", None)
+    if pcp is None:
+        return output[: output.shape[0] // pcp_size].clone()
+    mask_shape = (-1,) + (1,) * (output.ndim - 1)
+    return output.index_select(0, pcp.local_indices).masked_fill(
+        ~pcp.local_mask.view(mask_shape), 0
+    )
+
+
+def pcp_causal_scatter_fake(
+    output: torch.Tensor, pcp_size: int, layer_name: str
+) -> torch.Tensor:
+    return output.new_empty((output.shape[0] // pcp_size, *output.shape[1:]))
+
+
+direct_register_custom_op(
+    op_name="pcp_causal_gather",
+    op_func=pcp_causal_gather,
+    mutates_args=[],
+    fake_impl=pcp_causal_gather_fake,
+)
+direct_register_custom_op(
+    op_name="pcp_causal_scatter",
+    op_func=pcp_causal_scatter,
+    mutates_args=[],
+    fake_impl=pcp_causal_scatter_fake,
 )
 
 
@@ -76,15 +156,16 @@ def maybe_gather_mla_latent_cache_inputs(
     if not use_pcp or num_decode_tokens is None:
         return kv_c_normed, k_pe, slot_mapping
     assert slot_mapping is not None
-    num_tokens = kv_c_normed.shape[0]
-    k_pe_flat = k_pe.reshape(num_tokens, -1)
+    k_pe_flat = k_pe.flatten(start_dim=1)
     (cache_kv_c, cache_k_pe_flat), cache_slot_mapping = _gather_prefill_cache_inputs(
         (kv_c_normed, k_pe_flat),
         slot_mapping,
         num_decode_tokens,
         pcp_shard_decode_requests,
     )
-    cache_k_pe = cache_k_pe_flat.view(-1, *k_pe.shape[1:])
+    # GLM MLA has no separate positional key channels. With a zero-width
+    # trailing dimension, the token count cannot be inferred from numel().
+    cache_k_pe = cache_k_pe_flat.view(cache_kv_c.shape[0], *k_pe.shape[1:])
     return cache_kv_c, cache_k_pe, cache_slot_mapping
 
 

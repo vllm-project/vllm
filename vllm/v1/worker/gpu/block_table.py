@@ -223,7 +223,9 @@ class BlockTables:
         )
         return tuple(bt[:num_reqs_padded] for bt in out)
 
-    def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
+    def get_dummy_block_tables(
+        self, num_reqs: int, valid_state_slots: bool = False
+    ) -> tuple[torch.Tensor, ...]:
         # NOTE(woosuk): The output may be used for CUDA graph capture.
         # Therefore, this method must return the persistent tensor
         # with the same memory address as that used during the model's forward pass,
@@ -237,7 +239,16 @@ class BlockTables:
             block_table[:num_rows].zero_()
         # Profiling may populate the returned rows with valid block IDs.
         self._num_dirty_rows = num_reqs
-        return tuple(block_table[:num_reqs] for block_table in self.input_block_tables)
+        block_tables = tuple(
+            block_table[:num_reqs] for block_table in self.input_block_tables
+        )
+        if valid_state_slots and block_tables:
+            state_slots = torch.arange(
+                1, num_reqs + 1, dtype=torch.int32, device=block_tables[0].device
+            )
+            for block_table in block_tables:
+                block_table[:, 0].copy_(state_slots)
+        return block_tables
 
     def clear_input_block_tables(self) -> None:
         for block_table in self.input_block_tables:

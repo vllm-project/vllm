@@ -196,6 +196,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.replayssm_utils import get_replayssm_block_copy_tensors
 from vllm.v1.worker.utils import (
+    AttentionGroup,
     KVBlockZeroer,
     clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
@@ -1724,17 +1725,64 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self, input_batch: InputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         block_table_provider = self.pcp_manager or self.block_tables
-        block_tables = block_table_provider.get_dummy_block_tables(input_batch.num_reqs)
-        if valid_state_slots:
-            state_slots = torch.arange(
-                1, input_batch.num_reqs + 1, dtype=torch.int32, device=self.device
-            )
-            for block_table in block_tables:
-                block_table[:, 0].copy_(state_slots)
+        block_tables = block_table_provider.get_dummy_block_tables(
+            input_batch.num_reqs, valid_state_slots=valid_state_slots
+        )
         slot_mappings = block_table_provider.get_dummy_slot_mappings(
             input_batch.num_tokens
         )
         return block_tables, slot_mappings
+
+    def preprocess_state(
+        self,
+        input_batch: InputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+    ) -> None:
+        if self.pcp_manager is not None:
+            self.pcp_manager.preprocess_state(
+                self.model_state,
+                input_batch,
+                block_tables,
+                self.kv_cache_config,
+                self.req_states.num_computed_tokens.gpu,
+            )
+            return
+        self.model_state.preprocess_state(
+            input_batch,
+            block_tables,
+            self.kv_cache_config,
+            self.req_states.num_computed_tokens.gpu,
+        )
+
+    def build_attn_metadata(
+        self,
+        input_batch: InputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        for_capture: bool = False,
+    ) -> dict[str, Any]:
+        if self.pcp_manager is not None:
+            return self.pcp_manager.build_attn_metadata(
+                self.model_state,
+                input_batch,
+                cudagraph_mode,
+                block_tables,
+                slot_mappings,
+                attn_groups,
+                self.kv_cache_config,
+                for_capture=for_capture,
+            )
+        return self.model_state.prepare_attn(
+            input_batch,
+            cudagraph_mode,
+            block_tables,
+            slot_mappings,
+            attn_groups,
+            self.kv_cache_config,
+            for_capture=for_capture,
+        )
 
     def sample(
         self,
@@ -1968,12 +2016,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # boundaries before the forward. Runs only on real batches, and
             # before model_state.prepare_attn gathers num_accepted_tokens so the
             # boundary reset is visible to the attention metadata.
-            self.model_state.preprocess_state(
-                input_batch,
-                block_tables,
-                self.kv_cache_config,
-                self.req_states.num_computed_tokens.gpu,
-            )
+            self.preprocess_state(input_batch, block_tables)
 
             if self.lora_config:
                 # Activate LoRA adapters.
@@ -2007,7 +2050,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch.input_ids.random_(0, self.vocab_size)
             if self.pcp_manager is not None:
                 input_batch = self.pcp_manager.prepare_inputs_for_capture_or_profile(
-                    input_batch
+                    input_batch, batch_desc
                 )
             if skip_attn_for_dummy_run:
                 assert batch_desc.cg_mode != CUDAGraphMode.FULL, (
@@ -2077,13 +2120,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     [g for g in groups if not isinstance(g.kv_cache_spec, MambaSpec)]
                     for groups in attn_groups
                 ]
-            attn_metadata = self.model_state.prepare_attn(
+            attn_metadata = self.build_attn_metadata(
                 input_batch,
                 batch_desc.cg_mode,
                 block_tables,
                 slot_mappings,
                 attn_groups,
-                self.kv_cache_config,
                 # FULL replay reads capture-time metadata buffers. Re-stage them
                 # from the zeroed dummy block tables instead of retaining state
                 # indices from the previous real batch.

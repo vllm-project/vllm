@@ -3,6 +3,7 @@
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from copy import copy
 from dataclasses import dataclass, field, replace
 from itertools import product as iprod
 from typing import Any
@@ -258,6 +259,13 @@ class KVBlockZeroer:
             self.zero_block_ids([0])
 
 
+def uses_global_pcp_batch(group: "AttentionGroup") -> bool:
+    """Whether a group builds metadata on the global causal batch under PCP."""
+    return isinstance(group.kv_cache_spec, MambaSpec) or bool(
+        getattr(group.backend, "uses_global_pcp_batch", False)
+    )
+
+
 @dataclass(eq=False, slots=True)
 class AttentionGroup:
     backend: type[AttentionBackend]
@@ -274,6 +282,9 @@ class AttentionGroup:
     # Persistent per ubatch: CUDA graphs capture the mapped block table.
     kernel_block_table: torch.Tensor | None = None
     kernel_block_offsets: torch.Tensor | None = None
+    # Global causal write companion group when local query scoring and global
+    # cache writes use distinct layouts under PCP.
+    pcp_write_group: "AttentionGroup | None" = None
     # When ubatching is enabled we will have a metadata builder for each ubatch
     # so that if they use internal persistent buffers for cudagraphs, and they
     # won't have to worry about conflicting with the other ubatches.
@@ -289,6 +300,17 @@ class AttentionGroup:
         num_metadata_builders: int = 1,
         kv_cache_group: KVCacheGroup | None = None,
     ):
+        pcp_size = getattr(
+            vllm_config.parallel_config, "prefill_context_parallel_size", 1
+        )
+        global_max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        if pcp_size > 1 and not uses_global_pcp_batch(self):
+            # DualChunkSwap can publish two query rows for each request. Both
+            # builders and mapped kernel block tables must own this capacity
+            # before capture; resizing their views would invalidate graph pointers.
+            vllm_config = copy(vllm_config)
+            vllm_config.scheduler_config = copy(vllm_config.scheduler_config)
+            vllm_config.scheduler_config.max_num_seqs *= 2
         spec = self.kv_cache_spec
         if kernel_block_size is not None and isinstance(spec, AttentionSpec):
             # A backend in a packed KV cache group may need smaller blocks than
@@ -305,7 +327,12 @@ class AttentionGroup:
                 kernel_block_size
             )
         builder_cls = self.backend.get_builder_cls()
-        builder_kwargs = {}
+        builder_kwargs: dict[str, Any] = {}
+        if pcp_size > 1 and getattr(
+            builder_cls, "uses_pcp_global_write_builder", False
+        ):
+            builder_kwargs["global_max_num_seqs"] = global_max_num_seqs
+        width = 0
         if builder_cls.requires_block_table_width or self.kernel_block_size is not None:
             assert kv_cache_group is not None
             max_num_blocks = kv_cache_group.max_num_blocks_per_req(vllm_config)
@@ -337,6 +364,30 @@ class AttentionGroup:
             )
             for _ in range(num_metadata_builders)
         ]
+        write_builders = [
+            write_builder
+            for builder in self.metadata_builders
+            if (write_builder := getattr(builder, "pcp_write_metadata_builder", None))
+            is not None
+        ]
+        if write_builders:
+            write_max_seqs = write_builders[0].vllm_config.scheduler_config.max_num_seqs
+            self.pcp_write_group = replace(
+                self,
+                metadata_builders=write_builders,
+                kernel_block_table=(
+                    None
+                    if self.kernel_block_table is None
+                    else torch.zeros(
+                        len(write_builders),
+                        write_max_seqs,
+                        width,
+                        dtype=torch.int32,
+                        device=device,
+                    )
+                ),
+                pcp_write_group=None,
+            )
 
     def build_metadata(
         self,

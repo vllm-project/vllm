@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -12,17 +12,29 @@ from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
+from vllm.v1.attention.ops.pcp import PCPTokenMapping
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
 )
+from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.utils import AttentionGroup, uses_global_pcp_batch
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
     from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class PCPMambaContext:
+    mamba_batch: InputBatch
+    block_tables: tuple[torch.Tensor, ...]
+    slot_mappings: torch.Tensor
+    token_mapping: PCPTokenMapping
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +84,7 @@ class PCPManager:
         dcp_rank: int = 0,
         cp_interleave: int = 1,
         moe_gathers_tokens: bool = False,
+        has_mamba: bool = False,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
@@ -80,6 +93,29 @@ class PCPManager:
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
         self.shard_decode_requests = shard_decode_requests
+        self.has_mamba = has_mamba
+        self.mamba_context: PCPMambaContext | None = None
+        self._mamba_buffers = (
+            InputBuffers(max_num_reqs, max_num_tokens, device)
+            if has_mamba and max_num_reqs is not None and max_num_tokens is not None
+            else None
+        )
+        self._mamba_mapping = (
+            PCPTokenMapping(
+                restore_indices=torch.zeros(
+                    max_num_tokens * pcp_world_size, dtype=torch.long, device=device
+                ),
+                restore_mask=torch.zeros(
+                    max_num_tokens * pcp_world_size, dtype=torch.bool, device=device
+                ),
+                local_indices=torch.zeros(
+                    max_num_tokens, dtype=torch.long, device=device
+                ),
+                local_mask=torch.zeros(max_num_tokens, dtype=torch.bool, device=device),
+            )
+            if has_mamba and max_num_tokens is not None
+            else None
+        )
 
         self._global_batch: InputBatch | None = None
         self._local_batch: InputBatch | None = None
@@ -135,7 +171,7 @@ class PCPManager:
         self._global_batch_slot_mappings = (
             torch.empty(
                 num_kv_cache_groups,
-                max_num_tokens,
+                max_num_tokens * (pcp_world_size if self.has_mamba else 1),
                 dtype=torch.int64,
                 device=device,
             )
@@ -163,6 +199,21 @@ class PCPManager:
         pcp_size = parallel_config.prefill_context_parallel_size
         if pcp_size <= 1:
             return
+
+        if getattr(model_config, "is_hybrid", False):
+            from vllm.platforms import current_platform
+
+            if (
+                getattr(model_config.hf_text_config, "model_type", None)
+                != "glm5_next_text"
+            ):
+                raise NotImplementedError(
+                    "Head-sharded Mamba PCP currently supports GLM-5.3-Flash."
+                )
+            if not current_platform.is_cuda():
+                raise NotImplementedError("Head-sharded GLM Kpool PCP requires CUDA.")
+            if parallel_config.decode_context_parallel_size > 1:
+                raise NotImplementedError("GLM Kpool does not support PCP+DCP.")
 
         if not model_config.use_mla:
             raise NotImplementedError("MRV2 PCP currently supports MLA models only.")
@@ -192,7 +243,7 @@ class PCPManager:
             and parallel_config.decode_context_parallel_size == 1
             and cudagraph_mode != CUDAGraphMode.NONE
             and getattr(model_config.hf_text_config, "model_type", None)
-            not in ("deepseek_v32", "glm_moe_dsa")
+            not in ("deepseek_v32", "glm_moe_dsa", "glm5_next_text")
         ):
             raise NotImplementedError(
                 "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2 "
@@ -673,6 +724,7 @@ class PCPManager:
                 real_dcp_local_seq_lens_cpu_upper_bound
             )
 
+        self.mamba_context = None
         self._local_batch = replace(
             input_batch,
             req_ids=local_req_ids,
@@ -709,6 +761,11 @@ class PCPManager:
             max_seq_len_np=None,
             has_prefill=local_has_prefill,
             decode_graph_eligible=not local_has_prefill,
+            max_query_len=(
+                batch_desc.max_query_len or batch_desc.uniform_token_count
+                if batch_desc.cg_mode == CUDAGraphMode.FULL
+                else input_batch.max_query_len
+            ),
             prefill_runs_as_decode_np=None,
             input_ids=input_buffers.input_ids[:num_local_tokens_padded],
             positions=input_buffers.positions[:num_local_tokens_padded],
@@ -718,17 +775,142 @@ class PCPManager:
             cu_num_logits_np=cu_num_logits_np,
             prompt_lens=None,
         )
+        if self.has_mamba:
+            self._prepare_mamba_context(self._local_batch, global_batch)
         return self._local_batch
 
+    def _mamba_padded_shape(
+        self,
+        local_reqs: int,
+        local_tokens: int,
+        max_query_len: int | None,
+    ) -> tuple[int, int]:
+        assert self._mamba_buffers is not None
+        factor = self.pcp_world_size if self.shard_decode_requests else 1
+        max_tokens = local_tokens * factor
+        if self._max_num_tokens is not None:
+            max_tokens = min(max_tokens, self._max_num_tokens)
+        if max_query_len is not None:
+            reqs = min(
+                self._mamba_buffers.max_num_reqs,
+                local_reqs * factor,
+                max(1, max_tokens // max_query_len),
+            )
+            return reqs, min(max_tokens, reqs * max_query_len)
+        reqs = min(
+            self._mamba_buffers.max_num_reqs,
+            local_reqs * factor,
+            max_tokens,
+        )
+        return reqs, max_tokens
+
+    def _prepare_mamba_context(
+        self, local_batch: InputBatch, global_batch: InputBatch, *, dummy: bool = False
+    ) -> None:
+        buffers = self._mamba_buffers
+        mapping = self._mamba_mapping
+        assert buffers is not None and mapping is not None
+        assert self._block_tables is not None
+        assert self._global_batch_slot_mappings is not None
+        local_tokens = local_batch.num_tokens_after_padding
+        gathered_tokens = local_tokens * self.pcp_world_size
+        bucket_reqs, bucket_tokens = self._mamba_padded_shape(
+            local_batch.num_reqs_after_padding,
+            local_tokens,
+            local_batch.max_query_len,
+        )
+        num_reqs = global_batch.num_reqs
+        padded_reqs = max(num_reqs, bucket_reqs)
+        padded_tokens = max(global_batch.num_tokens, bucket_tokens)
+        query_start_loc = buffers.query_start_loc[: padded_reqs + 1]
+        query_start_loc[: num_reqs + 1].copy_(
+            global_batch.query_start_loc[: num_reqs + 1]
+        )
+        query_start_loc[num_reqs + 1 :].copy_(global_batch.query_start_loc[num_reqs])
+        query_start_loc_np = np.full(padded_reqs + 1, global_batch.num_tokens, np.int32)
+        query_start_loc_np[: num_reqs + 1] = global_batch.query_start_loc_np[
+            : num_reqs + 1
+        ]
+        seq_lens = buffers.seq_lens[:padded_reqs]
+        seq_lens[:num_reqs].copy_(global_batch.seq_lens[:num_reqs])
+        seq_lens[num_reqs:].zero_()
+        seq_lens_cpu = torch.zeros(padded_reqs, dtype=torch.int32)
+        seq_lens_cpu[:num_reqs].copy_(global_batch.seq_lens_cpu_upper_bound[:num_reqs])
+        positions = buffers.positions[:padded_tokens]
+        positions[: global_batch.num_tokens].copy_(
+            global_batch.positions[: global_batch.num_tokens]
+        )
+        positions[global_batch.num_tokens :].zero_()
+
+        restore_indices = mapping.restore_indices[:gathered_tokens]
+        restore_mask = mapping.restore_mask[:gathered_tokens]
+        local_indices = mapping.local_indices[:local_tokens]
+        local_mask = mapping.local_mask[:local_tokens]
+        restore_indices.zero_()
+        restore_mask.zero_()
+        local_indices.zero_()
+        local_mask.zero_()
+        if dummy:
+            restore_indices[: global_batch.num_tokens].copy_(
+                torch.arange(global_batch.num_tokens, device=self.device)
+            )
+            start = self.pcp_rank * local_tokens if self.shard_decode_requests else 0
+            local_indices.copy_(
+                torch.arange(start, start + local_tokens, device=self.device)
+            )
+        else:
+            assert self._hidden_restore_idx is not None
+            assert self._local_gather_idx is not None
+            restore_indices[: self._hidden_restore_idx.numel()].copy_(
+                self._hidden_restore_idx
+            )
+            local_indices.copy_(self._local_gather_idx)
+        restore_mask[: global_batch.num_tokens].fill_(True)
+        local_mask[: local_batch.num_tokens].fill_(True)
+        if dummy:
+            # A capture bucket can exceed the global request capacity. Such
+            # local rows have no recurrent output after the global batch is
+            # capped; do not expose their uninitialized padding to the model.
+            local_mask.logical_and_(local_indices < global_batch.num_tokens)
+        mamba_batch = replace(
+            global_batch,
+            num_reqs_after_padding=padded_reqs,
+            num_tokens_after_padding=padded_tokens,
+            query_start_loc=query_start_loc,
+            query_start_loc_np=query_start_loc_np,
+            seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens_cpu,
+            positions=positions,
+        )
+        self.mamba_context = PCPMambaContext(
+            mamba_batch=mamba_batch,
+            block_tables=tuple(self._block_tables.input_block_tables),
+            slot_mappings=self._global_batch_slot_mappings[:, :padded_tokens],
+            token_mapping=PCPTokenMapping(
+                restore_indices, restore_mask, local_indices, local_mask
+            ),
+        )
+
     def prepare_inputs_for_capture_or_profile(
-        self, input_batch: InputBatch
+        self,
+        input_batch: InputBatch,
+        batch_desc: "BatchExecutionDescriptor | None" = None,
     ) -> InputBatch:
         """Stage a capture or dummy batch in persistent PCP input buffers."""
+        self.mamba_context = None
         input_buffers = self.input_buffers
         num_reqs = input_batch.num_reqs_after_padding
         num_tokens = input_batch.num_tokens_after_padding
+        max_query_len = input_batch.max_query_len
+        if (
+            max_query_len is None
+            and batch_desc is not None
+            and batch_desc.cg_mode == CUDAGraphMode.FULL
+        ):
+            max_query_len = batch_desc.max_query_len or batch_desc.uniform_token_count
         input_batch = replace(
             input_batch,
+            max_query_len=max_query_len,
             input_ids=input_buffers.input_ids[:num_tokens].copy_(input_batch.input_ids),
             positions=input_buffers.positions[:num_tokens].copy_(input_batch.positions),
             is_padding=self.moe_is_padding(
@@ -739,6 +921,18 @@ class PCPManager:
             ),
             seq_lens=input_buffers.seq_lens[:num_reqs].copy_(input_batch.seq_lens),
         )
+        if self.has_mamba and self._block_tables is not None:
+            assert self._mamba_buffers is not None
+            global_reqs, global_tokens = self._mamba_padded_shape(
+                num_reqs, num_tokens, max_query_len
+            )
+            dummy_global_batch = InputBatch.make_dummy(
+                global_reqs,
+                global_tokens,
+                self._mamba_buffers,
+                max_query_len=max_query_len,
+            )
+            self._prepare_mamba_context(input_batch, dummy_global_batch, dummy=True)
         return input_batch
 
     def moe_is_padding(self, is_padding: torch.Tensor) -> torch.Tensor:
@@ -750,11 +944,32 @@ class PCPManager:
         out.view(self.pcp_world_size, -1).copy_(is_padding)
         return out
 
-    def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
+    def get_dummy_block_tables(
+        self, num_reqs: int, valid_state_slots: bool = False
+    ) -> tuple[torch.Tensor, ...]:
         assert self._local_block_tables is not None
-        return tuple(
+        if self.has_mamba:
+            assert self._block_tables is not None
+            num_mamba_reqs = (
+                self.mamba_context.mamba_batch.num_reqs
+                if self.mamba_context is not None
+                else num_reqs
+            )
+            self._block_tables.get_dummy_block_tables(
+                num_mamba_reqs, valid_state_slots=valid_state_slots
+            )
+            assert self._global_batch_slot_mappings is not None
+            self._global_batch_slot_mappings.fill_(PAD_SLOT_ID)
+        block_tables = tuple(
             block_table[:num_reqs].zero_() for block_table in self._local_block_tables
         )
+        if valid_state_slots and block_tables:
+            state_slots = torch.arange(
+                1, num_reqs + 1, dtype=torch.int32, device=self.device
+            )
+            for block_table in block_tables:
+                block_table[:, 0].copy_(state_slots)
+        return block_tables
 
     def prepare_attn(
         self, input_batch: InputBatch
@@ -768,19 +983,116 @@ class PCPManager:
             out=self._local_block_tables,
             out_ptrs=self._local_block_table_ptrs,
         )
+        if self.mamba_context is not None:
+            mamba_batch = self.mamba_context.mamba_batch
+            self._block_tables.gather_block_tables(
+                mamba_batch.idx_mapping,
+                mamba_batch.num_reqs_after_padding,
+            )
         slot_mappings = self.prepare_slot_mappings()
         return block_tables, slot_mappings
+
+    def preprocess_state(
+        self,
+        model_state: ModelState,
+        input_batch: InputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        kv_cache_config: KVCacheConfig,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        if self.mamba_context is not None:
+            input_batch = self.mamba_context.mamba_batch
+            block_tables = self.mamba_context.block_tables
+        model_state.preprocess_state(
+            input_batch,
+            block_tables,
+            kv_cache_config,
+            num_computed_tokens,
+        )
+
+    def build_attn_metadata(
+        self,
+        model_state: ModelState,
+        input_batch: InputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
+    ) -> dict[str, Any]:
+        context = self.mamba_context
+        if context is None:
+            return model_state.prepare_attn(
+                input_batch,
+                cudagraph_mode,
+                block_tables,
+                slot_mappings,
+                attn_groups,
+                kv_cache_config,
+                for_capture=for_capture,
+            )
+
+        recurrent_groups = [
+            [g for g in groups if uses_global_pcp_batch(g)] for groups in attn_groups
+        ]
+        attention_groups = [
+            [g for g in groups if not uses_global_pcp_batch(g)]
+            for groups in attn_groups
+        ]
+        for global_groups, local_groups in zip(recurrent_groups, attention_groups):
+            for group in local_groups:
+                if group.pcp_write_group is not None:
+                    global_groups.append(group.pcp_write_group)
+        metadata = model_state.prepare_attn(
+            input_batch,
+            cudagraph_mode,
+            block_tables,
+            slot_mappings,
+            attention_groups,
+            kv_cache_config,
+            for_capture=for_capture,
+        )
+        mamba_batch = context.mamba_batch
+        recurrent_metadata = model_state.prepare_attn(
+            mamba_batch,
+            cudagraph_mode,
+            context.block_tables,
+            context.slot_mappings[
+                :,
+                : (
+                    mamba_batch.num_tokens_after_padding
+                    if cudagraph_mode == CUDAGraphMode.FULL
+                    else mamba_batch.num_tokens
+                ),
+            ],
+            recurrent_groups,
+            kv_cache_config,
+            for_capture=for_capture,
+        )
+        for name, value in recurrent_metadata.items():
+            value.pcp = context.token_mapping
+            if name in metadata:
+                value.positions = mamba_batch.positions
+                metadata[name].write_metadata = value
+                metadata[name].pcp = context.token_mapping
+            else:
+                metadata[name] = value
+        return metadata
 
     def prepare_slot_mappings(self) -> torch.Tensor:
         assert self._block_tables is not None
         assert self._global_batch_slot_mappings is not None
         assert self._global_batch is not None
+        assert self._padded_gather_idx is not None
         global_batch = self._global_batch
         global_batch_slot_mappings = self._block_tables.compute_slot_mappings(
             global_batch.idx_mapping,
             global_batch.query_start_loc,
             global_batch.positions,
-            global_batch.num_tokens,
+            self._padded_gather_idx.numel()
+            if self.has_mamba
+            else global_batch.num_tokens,
             out=self._global_batch_slot_mappings,
         )
         return self._convert_to_gathered_slot_mappings(global_batch_slot_mappings)
@@ -929,4 +1241,5 @@ def maybe_build_pcp_manager(
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
         # Without EP all2all kernels, MoERunner all-gathers PCP tokens to route.
         moe_gathers_tokens=not parallel_config.enable_expert_parallel,
+        has_mamba=vllm_config.model_config.is_hybrid,
     )

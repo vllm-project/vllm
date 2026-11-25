@@ -423,6 +423,7 @@ class _SM90State:
 @dataclass
 class FlashInferMLASparseSM90Metadata(FlashInferMLASparseMetadata):
     state: _SM90State | None = None
+    num_mqa_rows: int | None = None
 
 
 class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
@@ -556,6 +557,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
                 num_rows, kv_lens, common_attn_metadata, metadata.req_id_per_token
             )
         metadata.state = self.state
+        metadata.num_mqa_rows = num_rows
         return metadata
 
 
@@ -613,12 +615,25 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
             )
         q_nope, q_rope = q
         num_tokens = q_rope.shape[0]
+        active_tokens = (
+            num_tokens
+            if attn_metadata.num_mqa_rows is None
+            else min(attn_metadata.num_mqa_rows, num_tokens)
+        )
+        if active_tokens == 0:
+            return (
+                q_nope.new_zeros((num_tokens, self.num_heads, self.kv_lora_rank)),
+                None,
+            )
+        q_nope_active = q_nope[:active_tokens]
         # NoPE models hand a zero-width rope tensor through; rope MLA hands
         # the real 64-dim part. The kernel takes both as-is.
-        q_pe = q_rope.reshape(num_tokens, self.num_heads, self.qk_rope_head_dim)
+        q_pe = q_rope[:active_tokens].reshape(
+            active_tokens, self.num_heads, self.qk_rope_head_dim
+        )
 
         assert self.topk_indices_buffer is not None
-        topk_indices = self.topk_indices_buffer[:num_tokens]
+        topk_indices = self.topk_indices_buffer[:active_tokens]
         kv_c_and_k_pe_cache, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
@@ -626,7 +641,7 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
         # entries at [0, valid_count), -1 past it — exactly the prefix the
         # planned per-row lengths address.
         topk_slots, _ = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token[:num_tokens],
+            attn_metadata.req_id_per_token[:active_tokens],
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
@@ -652,5 +667,9 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
             if self.use_fp8_kv_cache
             else {}
         )
-        out = state.wrapper.run(q_nope, q_pe, ckv, kpe, **scale_kwargs)
+        active_out = state.wrapper.run(q_nope_active, q_pe, ckv, kpe, **scale_kwargs)
+        if active_tokens == num_tokens:
+            return active_out, None
+        out = active_out.new_zeros((num_tokens, self.num_heads, self.kv_lora_rank))
+        out[:active_tokens].copy_(active_out)
         return out, None

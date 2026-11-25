@@ -40,10 +40,18 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         self.inputs_embeds: torch.Tensor | None = None
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        prefill_mode = cudagraph_mode
+        if (
+            self.vllm_config.model_config.is_hybrid
+            and self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+        ):
+            # Target verification and multi-step draft decode retain their graphs.
+            # Draft prefill changes between the PCP-local and global batch layouts.
+            prefill_mode = CUDAGraphMode.NONE
         self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
             self.vllm_config,
             self.device,
-            cudagraph_mode,
+            prefill_mode,
             self.vllm_config.get_decode_cudagraph_query_lens(
                 self.num_speculative_steps + 1
             ),
