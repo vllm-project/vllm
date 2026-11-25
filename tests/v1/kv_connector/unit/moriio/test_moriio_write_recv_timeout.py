@@ -11,6 +11,7 @@ with a Mamba/KDA state group.
 
 import time
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +26,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOMode,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
+    MoRIIOConnector,
+    MoRIIOConnectorScheduler,
     MoRIIOConnectorWorker,
 )
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
@@ -94,14 +97,27 @@ class _Clock:
         return getattr(time, name)
 
 
-def _make_consumer_worker() -> MoRIIOConnectorWorker:
+def _moriio_scheduler(scheduler) -> MoRIIOConnectorScheduler:
+    assert isinstance(scheduler.connector, MoRIIOConnector)
+    assert scheduler.connector.connector_scheduler is not None
+    return scheduler.connector.connector_scheduler
+
+
+@dataclass
+class _Inbox:
+    """What the prefill has sent one worker since its last report."""
+
+    write_done: set[str] = field(default_factory=set)  # request ids
+    write_failed: set[str] = field(default_factory=set)  # transfer ids
+
+
+def _make_consumer_worker(inbox: _Inbox) -> MoRIIOConnectorWorker:
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.is_producer = False
     worker.mode = MoRIIOMode.WRITE
-    worker.write_failed = set()  # transfer ids of producer write_failed messages
 
     def pop_failed_write_req_ids():
-        failed, worker.write_failed = worker.write_failed, set()
+        failed, inbox.write_failed = inbox.write_failed, set()
         return list(failed)
 
     worker.moriio_wrapper = SimpleNamespace(
@@ -111,10 +127,9 @@ def _make_consumer_worker() -> MoRIIOConnectorWorker:
     # Absent on main, where the reproducer runs too.
     tracker = getattr(moriio_connector, "_WriteRecvTimeoutTracker", None)
     worker._write_recv_tracker = tracker() if tracker else None
-    worker.write_done = set()
 
     def get_finished():
-        done, worker.write_done = worker.write_done, set()
+        done, inbox.write_done = inbox.write_done, set()
         return set(), done
 
     worker.get_finished = get_finished  # type: ignore[method-assign]
@@ -128,16 +143,18 @@ class _Engine:
         self.clock = _Clock()
         monkeypatch.setattr(moriio_connector, "time", self.clock)
         config = create_moriio_config(role="kv_consumer", block_size=BLOCK_SIZE)
+        assert config.kv_transfer_config is not None
         config.kv_transfer_config.kv_connector_extra_config["write_recv_timeout"] = (
             TIMEOUT_S
         )
         kv_cache_config = _kv_cache_config(layout)
         self.scheduler = create_scheduler(config, kv_cache_config=kv_cache_config)
         self.num_groups = len(kv_cache_config.kv_cache_groups)
-        connector = self.scheduler.connector.connector_scheduler
+        connector = _moriio_scheduler(self.scheduler)
         monkeypatch.setattr(connector, "send_notify_block", lambda **kwargs: None)
         self.pool = self.scheduler.kv_cache_manager.block_pool
-        self.workers = [_make_consumer_worker() for _ in range(TP_SIZE)]
+        self.inboxes = [_Inbox() for _ in range(TP_SIZE)]
+        self.workers = [_make_consumer_worker(inbox) for inbox in self.inboxes]
         self.aggregator = KVOutputAggregator.from_connector(
             self.scheduler.connector, TP_SIZE
         )
@@ -153,8 +170,8 @@ class _Engine:
         for rank, worker in enumerate(self.workers):
             worker.start_load_kv(out.kv_connector_metadata)
             if ranks is None or rank in ranks:
-                worker.write_done |= write_done
-                worker.write_failed |= write_failed
+                self.inboxes[rank].write_done |= write_done
+                self.inboxes[rank].write_failed |= write_failed
             results = worker.get_transfer_results()
             outputs.append(
                 create_model_runner_output(
@@ -201,16 +218,15 @@ def test_dead_prefill_does_not_leave_its_request_waiting(consumer_role, monkeypa
     clock = _Clock()
     monkeypatch.setattr(moriio_connector, "time", clock)
     config = create_moriio_config(role="kv_consumer", block_size=BLOCK_SIZE)
+    assert config.kv_transfer_config is not None
     config.kv_transfer_config.kv_connector_extra_config["write_recv_timeout"] = (
         TIMEOUT_S
     )
     scheduler = create_scheduler(config)
     monkeypatch.setattr(
-        scheduler.connector.connector_scheduler,
-        "send_notify_block",
-        lambda **kwargs: None,
+        _moriio_scheduler(scheduler), "send_notify_block", lambda **kwargs: None
     )
-    worker = _make_consumer_worker()
+    worker = _make_consumer_worker(_Inbox())
 
     def step():
         out = scheduler.schedule()
@@ -319,5 +335,5 @@ def test_timer_runs_only_on_a_pure_consumer(consumer_role, role, timed):
     """A kv_both scheduler acts as a consumer, but its workers run as producers
     and never report a timed-out receive, so its timer stays off."""
     config = create_moriio_config(role=role, block_size=BLOCK_SIZE)
-    connector = create_scheduler(config).connector.connector_scheduler
+    connector = _moriio_scheduler(create_scheduler(config))
     assert (connector._write_recv_timeout is not None) == timed
