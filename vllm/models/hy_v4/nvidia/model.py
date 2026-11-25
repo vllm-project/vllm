@@ -42,7 +42,6 @@ from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_ma
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -67,8 +66,13 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.models.hy_v4.nvidia.mrope import set_token_rope
-from vllm.models.hy_v4.weight_utils import HYV4_MLP_MAPPER, HYV4_WEIGHTS_MAPPER
+from vllm.models.hy_v4.common.mrope import set_token_rope
+from vllm.models.hy_v4.weight_utils import (
+    HYV4_MLP_MAPPER,
+    HYV4_PACKED_MODULES_MAPPING,
+    HYV4_WEIGHTS_MAPPER,
+    remap_block_fp8_scale,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -648,15 +652,7 @@ class HYV4Model(nn.Module):
             if is_expert or is_pp_missing_parameter(name, self):
                 continue
 
-            if (
-                isinstance(self.quant_config, Fp8Config)
-                and self.quant_config.weight_block_size is not None
-                and name.endswith(".scale")
-            ):
-                name = name.removesuffix(".scale") + ".weight_scale_inv"
-                if weight.dtype == torch.uint8:
-                    # UINT8 stores UE8M0 exponents, not numeric scales.
-                    weight = weight.view(torch.float8_e8m0fnu)
+            name, weight = remap_block_fp8_scale(name, weight, self.quant_config)
 
             if name not in params_dict:
                 if ".indexer." not in name:
@@ -686,11 +682,7 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             ".kv_a_proj_with_mqa": (".fused_qkv_a_proj", 1),
         }
     )
-    packed_modules_mapping = {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        # MLA runs both latent down-projections as one GEMM.
-        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
-    }
+    packed_modules_mapping = HYV4_PACKED_MODULES_MAPPING
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

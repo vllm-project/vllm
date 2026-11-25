@@ -415,9 +415,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
 
-        # NOTE(Chen): kernel requires num_local_head to be a multiple of 64.
-        # Pad from q's head count, not self.num_heads: under DCP the heads are
-        # all-gathered before this.
+        # DCP can all-gather heads before this call.
         if actual_num_heads is None:
             actual_num_heads = q.shape[1]
         padded_num_heads = (
@@ -425,13 +423,21 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
             // self.prefill_padding
             * self.prefill_padding
         )
+        use_small_heads = self._should_use_bf16_small_head_kernel(
+            num_tokens, actual_num_heads
+        )
+        kernel_heads = actual_num_heads if use_small_heads else padded_num_heads
         # q_concat_buffer may already include the kernel-required padding.
         # The sink remains defined only for the real query heads.
         attn_sink = self._sinks_for_query(
-            q[:, :actual_num_heads], head_dim=1, kernel_heads=padded_num_heads
+            q[:, :actual_num_heads], head_dim=1, kernel_heads=kernel_heads
         )
 
-        if q.shape[1] < padded_num_heads:
+        if use_small_heads:
+            q = q[:, :actual_num_heads]
+            if out is not None:
+                out = out[:, :actual_num_heads]
+        elif q.shape[1] < padded_num_heads:
             logger.warning_once(
                 f"Padding num_heads from {actual_num_heads} to "
                 f"{padded_num_heads} for BF16 sparse prefill kernel"
