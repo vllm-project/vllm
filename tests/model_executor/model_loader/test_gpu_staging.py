@@ -167,6 +167,30 @@ def test_loader_config(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "is_cuda,extra_config,load_strategy,expected",
+    [
+        (True, {}, None, True),
+        (True, {}, "prefetch", True),
+        (True, {"gpu_staging": False}, None, False),
+        (True, {"enable_multithread_load": True}, None, False),
+        (True, {}, "eager", False),
+        (False, {}, None, False),
+    ],
+)
+def test_loader_default(monkeypatch, is_cuda, extra_config, load_strategy, expected):
+    # On by default on CUDA; off, without an error, where it can't apply.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(default_loader.current_platform, "is_cuda", lambda: is_cuda)
+    loader = DefaultModelLoader(
+        LoadConfig(
+            safetensors_load_strategy=load_strategy,
+            model_loader_extra_config=extra_config,
+        )
+    )
+    assert loader.gpu_staging is expected
+
+
+@pytest.mark.parametrize(
     "tp,ep,expected", [(1, False, False), (2, True, False), (2, False, True)]
 )
 def test_loader_guard(monkeypatch, tp, ep, expected):

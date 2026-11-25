@@ -1,24 +1,33 @@
 # Loading Safetensors Weights Through the GPU (GPU Staging)
 
-GPU staging is an opt-in mode of the default safetensors loader that reads
-checkpoint tensors straight to the GPU, so that the weight loaders slice, pad
-and copy them on the GPU instead of on the CPU. It speeds up loading with
-tensor parallelism, where every rank reads whole tensors and keeps only its
-shard. It is off by default.
+GPU staging is a mode of the default safetensors loader that reads checkpoint
+tensors straight to the GPU, so that the weight loaders slice, pad and copy
+them on the GPU instead of on the CPU. It speeds up loading with tensor
+parallelism, where every rank reads whole tensors and keeps only its shard.
 
-## Enabling
+## When it is used
+
+It is on by default on CUDA when all of these hold:
+
+- `--tensor-parallel-size` is greater than 1 and expert parallelism is off
+  (it measured no faster at TP 1 or with `--enable-expert-parallel`);
+- the load format is `safetensors` (or `auto` resolving to it), with the
+  `lazy` or `prefetch` `--safetensors-load-strategy` or none;
+- `enable_multithread_load` is not set.
+
+Otherwise weights load as before.
+
+## Turning it off or on
 
 ```bash
+# Off:
 vllm serve <model> --tensor-parallel-size 8 \
-    --model-loader-extra-config '{"gpu_staging": true}'
+    --model-loader-extra-config '{"gpu_staging": false}'
 ```
 
-It works with the default `safetensors` load format and the `lazy` or
-`prefetch` `--safetensors-load-strategy` (or none), and can't be combined with
-`enable_multithread_load`. It needs CUDA.
-
-With `--tensor-parallel-size 1` or `--enable-expert-parallel`, the option is
-ignored (with one log line): it measured no faster there.
+`{"gpu_staging": true}` asks for it explicitly: it then also applies on other
+platforms that expose CUDA devices, and raises an error at startup when the
+load strategy or `enable_multithread_load` rules it out.
 
 ## How it works
 

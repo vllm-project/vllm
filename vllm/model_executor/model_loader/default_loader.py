@@ -43,6 +43,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     resolve_mm_encoder_only_lm_prefixes,
     safetensors_weights_iterator,
 )
+from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
@@ -137,21 +138,30 @@ class DefaultModelLoader(BaseModelLoader):
         )
 
         # Read checkpoint tensors straight to the GPU, so that the weight
-        # loaders slice them there (see gpu_staging.py).
-        self.gpu_staging = extra_config.get("gpu_staging", False)
-        if not isinstance(self.gpu_staging, bool):
+        # loaders slice them there (see gpu_staging.py). On by default on
+        # CUDA where it applies; {"gpu_staging": false} turns it off, and an
+        # explicit true is an error where it can't apply.
+        gpu_staging = extra_config.get("gpu_staging")
+        if gpu_staging is not None and not isinstance(gpu_staging, bool):
             raise ValueError(
-                f"gpu_staging must be a bool, got {type(self.gpu_staging).__name__}"
+                f"gpu_staging must be a bool, got {type(gpu_staging).__name__}"
             )
-        if self.gpu_staging and (
-            enable_multithread_load
-            or load_config.safetensors_load_strategy not in (None, "lazy", "prefetch")
-            or not torch.cuda.is_available()
-        ):
+        supported = (
+            not enable_multithread_load
+            and load_config.safetensors_load_strategy in (None, "lazy", "prefetch")
+            and torch.cuda.is_available()
+        )
+        if gpu_staging and not supported:
             raise ValueError(
                 "gpu_staging needs CUDA and the default safetensors iterator "
                 "(lazy or prefetch strategy, no enable_multithread_load)."
             )
+        self.gpu_staging_requested = gpu_staging is True
+        self.gpu_staging = (
+            supported and current_platform.is_cuda()
+            if gpu_staging is None
+            else gpu_staging
+        )
 
         # The multi-thread loader ignores safetensors_load_strategy, so reject
         # the combination instead of silently dropping the requested strategy.
@@ -445,10 +455,11 @@ class DefaultModelLoader(BaseModelLoader):
             # Without tensor-parallel slicing of what each rank reads, there is
             # little CPU work to move to the GPU: staging measured no faster
             # at TP=1 and slightly slower with expert parallelism.
-            logger.info_once(
-                "gpu_staging is ignored: it only speeds up loading with "
-                "tensor_parallel_size > 1 and without expert parallelism."
-            )
+            if self.gpu_staging_requested:
+                logger.info_once(
+                    "gpu_staging is ignored: it only speeds up loading with "
+                    "tensor_parallel_size > 1 and without expert parallelism."
+                )
             return False
         return True
 
