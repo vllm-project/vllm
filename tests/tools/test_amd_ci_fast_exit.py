@@ -204,12 +204,17 @@ def test_a_timed_out_test_dumps_the_stacks_of_its_child_processes(tmp_path):
     assert err.count("[amd-ci] ---- pid") == 2
     assert err.count("[amd-ci] kernel wait channels: ") == 2
     assert "end of child process stacks" in err
-    # py-spy needs ptrace permission for these processes; some CI pods lack it.
-    if shutil.which("py-spy") and not any(reason in err for reason in NO_PTRACE):
+    # Only the AMD CI image pins a py-spy for its interpreter. py-spy also needs
+    # ptrace permission for these processes; some CI pods lack it.
+    may_trace = not any(reason in err for reason in NO_PTRACE)
+    if IMAGE_LIB.exists() and shutil.which("py-spy") and may_trace:
         assert "hang_in_child" in err and "hang_in_grandchild" in err, err
 
 
-@pytest.mark.skipif(shutil.which("py-spy") is None, reason="needs py-spy")
+@pytest.mark.skipif(
+    not IMAGE_LIB.exists() or shutil.which("py-spy") is None,
+    reason="needs the AMD CI image, which pins py-spy",
+)
 def test_py_spy_reads_this_interpreter(tmp_path):
     """The child stack dump needs a py-spy that knows this Python: an older one
     fails with "Failed to find python version" and the dump has no stacks.
