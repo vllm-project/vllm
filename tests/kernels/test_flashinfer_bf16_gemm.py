@@ -265,14 +265,14 @@ def test_flashinfer_cutedsl_bf16_cuda_graph_uses_tuned_tactics(
     inputs = {m: _bf16(m, k) for m in (8, 24, 64)}
     for x in inputs.values():
         gemm(None, x, weight)  # compile outside capture
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         outputs = {m: gemm(None, x, weight) for m, x in inputs.items()}
     for x in inputs.values():
         x.copy_(_bf16(*x.shape))
     graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Eager warm-up and capture hit the tuned tactics; M = 64 stays on torch.
     assert [call[0] for call in flashinfer_mm_calls] == [8, 24, 8, 24]
