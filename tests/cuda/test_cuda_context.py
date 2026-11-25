@@ -29,8 +29,10 @@ def run_cuda_test_in_thread(device_input, expected_device_id):
         if valid_before:
             return (
                 False,
-                "CUDA context should not exist in new thread, "
-                f"got device {device_before}",
+                (
+                    "CUDA context should not exist in new thread, "
+                    f"got device {device_before}"
+                ),
             )
 
         # Test setting CUDA context
@@ -70,7 +72,9 @@ class TestSetCudaContext:
             success, message = future.result(timeout=30)
         assert success, message
 
-    @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
+    @pytest.mark.skipif(
+        not current_platform.is_cuda_alike(), reason="CUDA/ROCm not available"
+    )
     def test_set_cuda_context_invalid_device_type(self):
         """Test error handling for invalid device type."""
         with pytest.raises(ValueError, match="Expected a cuda device"):

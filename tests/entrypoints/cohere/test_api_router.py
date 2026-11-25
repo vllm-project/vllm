@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for ``vllm/entrypoints/cohere/api_router.py``.
+"""Unit tests for `vllm/entrypoints/cohere/api_router.py`.
 
 Covers:
 
-* The optional-import guard: ``attach_router`` is a no-op when the
-  ``cohere`` SDK isn't installed.
-* The env-var opt-in gate: ``attach_router`` is a no-op unless
-  ``VLLM_ENABLE_COHERE_API=1`` is set.
+* The optional-import guard: `attach_router` is a no-op when the
+  `cohere` SDK isn't installed.
+* The env-var opt-in gate: `attach_router` is a no-op unless
+  `VLLM_ENABLE_COHERE_API=1` is set.
 * The router wiring: response shapes (JSON + SSE), error translation,
-  and the ``cohere_serving_chat_v2 is None`` fallback (501 Not
+  and the `cohere_serving_chat_v2 is None` fallback (501 Not
   Implemented).
-* The render route (``POST /cohere/v2/chat/render``): that the v2 body
-  reaches :class:`ServingRender` as a converted ``ChatCompletionRequest``
-  and that the resulting ``GenerateRequest`` is returned verbatim.
+* The render route (`POST /cohere/v2/chat/render`): that the v2 body
+  reaches `ServingRender` as a converted `ChatCompletionRequest`
+  and that the resulting `GenerateRequest` is returned verbatim.
 """
 
 import json
@@ -32,8 +32,14 @@ from vllm.entrypoints.cohere.protocol import (
     AssistantMessageResponse,
     CohereChatV2Response,
 )
-from vllm.entrypoints.cohere.serving import CohereServingChatV2
-from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
+from vllm.entrypoints.cohere.serving import (
+    _API_SERVER_ONLY_TEMPLATE_KWARGS,
+    CohereServingChatV2,
+)
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    GenerateRequest,
+    ReasoningParserKwargs,
+)
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.serve.exception_handling.handlers.http import (
     http_exception_handler,
@@ -44,7 +50,7 @@ from vllm.entrypoints.serve.exception_handling.handlers.validation import (
 from vllm.entrypoints.serve.exception_handling.handlers.vllm_error import (
     vllm_error_handler,
 )
-from vllm.exceptions import VLLMError
+from vllm.exceptions import VLLMError, VLLMValidationError
 from vllm.sampling_params import SamplingParams
 
 
@@ -52,9 +58,9 @@ from vllm.sampling_params import SamplingParams
 def _enable_cohere_api(monkeypatch):
     """Auto-enable the Cohere API gate for every test in this module.
 
-    The endpoint is opt-in in production (``VLLM_ENABLE_COHERE_API=1``);
+    The endpoint is opt-in in production (`VLLM_ENABLE_COHERE_API=1`);
     every test in this file exercises the enabled path *except* the
-    dedicated gate test in :class:`TestEnvVarGate`, which unsets the
+    dedicated gate test in `TestEnvVarGate`, which unsets the
     flag inside the test body.
     """
     monkeypatch.setenv("VLLM_ENABLE_COHERE_API", "1")
@@ -66,13 +72,13 @@ def _enable_cohere_api(monkeypatch):
 
 
 class _Handler:
-    """Minimal stand-in for :class:`CohereServingChatV2` used by the
-    router. Each test sets ``self.result`` to either:
+    """Minimal stand-in for `CohereServingChatV2` used by the
+    router. Each test sets `self.result` to either:
 
-    * a :class:`CohereChatV2Response` (non-streaming JSON path);
+    * a `CohereChatV2Response` (non-streaming JSON path);
     * an async generator yielding SSE frames (streaming path);
-    * an :class:`ErrorResponse` (error envelope path); or
-    * an exception (router-level 500 path).
+    * an `ErrorResponse` (error envelope path); or
+    * an exception (router-level error path).
     """
 
     def __init__(self, result):
@@ -85,34 +91,42 @@ class _Handler:
 
 
 class _RenderChatHandler:
-    """Stand-in for :class:`CohereServingChatV2` on the render route.
+    """Stand-in for `CohereServingChatV2` on the render route.
 
-    Only ``to_chat_completion_request`` is reachable from
-    ``/cohere/v2/chat/render``, and it delegates to the real conversion
+    Only `to_chat_completion_request` is reachable from
+    `/cohere/v2/chat/render`, and it delegates to the real conversion
     classmethod (which needs no engine or tokenizer) so the tests
-    exercise the actual v2 -> ``ChatCompletionRequest`` translation
+    exercise the actual v2 -> `ChatCompletionRequest` translation
     rather than a stub of it.
     """
 
     def to_chat_completion_request(self, request):
         return CohereServingChatV2._convert_v2_to_chat_completion(request)
 
+    def _engine_chat_template_kwargs(self, chat_template_kwargs):
+        return CohereServingChatV2._engine_chat_template_kwargs(
+            self,  # type: ignore[arg-type]
+            chat_template_kwargs,
+        )
+
 
 class _RenderHandler:
-    """Minimal stand-in for :class:`ServingRender`.
+    """Minimal stand-in for `ServingRender`.
 
-    Records the ``ChatCompletionRequest`` it was handed so tests can
-    assert on the conversion, and returns ``self.result`` - either a
-    :class:`GenerateRequest`, an :class:`ErrorResponse`, or an exception
+    Records the `ChatCompletionRequest` it was handed so tests can
+    assert on the conversion, and returns `self.result` - either a
+    `GenerateRequest`, an `ErrorResponse`, or an exception
     to raise.
     """
 
     def __init__(self, result):
         self.result = result
         self.seen_request = None
+        self.seen_kwargs_filter = None
 
-    async def render_chat_request(self, request):
+    async def render_chat_request(self, request, engine_chat_template_kwargs=None):
         self.seen_request = request
+        self.seen_kwargs_filter = engine_chat_template_kwargs
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
@@ -149,9 +163,9 @@ def _build_render_app(
 def _build_app_with_vllm_handlers(handler: _Handler | None) -> FastAPI:
     """Build a FastAPI app that mirrors the real vLLM setup by installing
     validation, HTTP, and vLLM exception handlers. The
-    :class:`CohereErrorEnvelopeMiddleware` registered by ``attach_router``
-    is expected to translate any resulting vLLM ``ErrorResponse`` body
-    into the ``CohereError`` wire shape.
+    `CohereErrorEnvelopeMiddleware` registered by `attach_router`
+    is expected to translate any resulting vLLM `ErrorResponse` body
+    into the `CohereError` wire shape.
     """
     app = FastAPI()
     # ``validation_exception_handler`` reads ``req.app.state.args``; the
@@ -180,22 +194,22 @@ def _minimal_request_body() -> dict:
 
 
 class TestOptionalCohereImport:
-    """``attach_router`` probes for the SDK once at module load (because
-    the route handler uses types imported from ``cohere``) and stashes
-     the result in ``_SDK_AVAILABLE``. Tests simulate the "SDK missing"
+    """`attach_router` probes for the SDK once at module load (because
+    the route handler uses types imported from `cohere`) and stashes
+     the result in `_SDK_AVAILABLE`. Tests simulate the "SDK missing"
     state by flipping that flag for the duration of the test.
 
-    ``attach_router`` checks the env-var gate before the SDK probe, so
+    `attach_router` checks the env-var gate before the SDK probe, so
     the SDK-missing branch is only reachable when the operator opts in
-    via ``VLLM_ENABLE_COHERE_API=1``. The flag-off-and-SDK-missing case
+    via `VLLM_ENABLE_COHERE_API=1`. The flag-off-and-SDK-missing case
     below exists to pin down that ordering — the flag-off short-circuits
     """
 
     def test_flag_off_and_sdk_missing_stays_silent_about_sdk(self, monkeypatch, caplog):
         """Flag off doesn't do SDK-missing check.
 
-        When the operator hasn't opted in, ``attach_router`` must not
-        warn about the ``cohere`` SDK being missing: they never asked
+        When the operator hasn't opted in, `attach_router` must not
+        warn about the `cohere` SDK being missing: they never asked
         for the endpoint, so surfacing the SDK gap is misleading noise.
         Only the flag-off DEBUG message should fire.
         """
@@ -215,8 +229,8 @@ class TestOptionalCohereImport:
 
     def test_flag_on_but_sdk_missing_logs_warning(self, monkeypatch, caplog):
         """Misconfiguration path: the operator explicitly opted into the
-        endpoint via ``VLLM_ENABLE_COHERE_API=1`` (already set by the
-        autouse fixture) but forgot to install ``cohere``.
+        endpoint via `VLLM_ENABLE_COHERE_API=1` (already set by the
+        autouse fixture) but forgot to install `cohere`.
         """
         monkeypatch.setattr(api_router_mod, "_SDK_AVAILABLE", False)
 
@@ -250,9 +264,9 @@ class TestOptionalCohereImport:
 
 
 class TestEnvVarGate:
-    """The Cohere v2 endpoint is opt-in via ``VLLM_ENABLE_COHERE_API``.
+    """The Cohere v2 endpoint is opt-in via `VLLM_ENABLE_COHERE_API`.
 
-    Even with the SDK installed, :func:`attach_router` must skip route
+    Even with the SDK installed, `attach_router` must skip route
     registration and middleware installation unless the env flag is
     set. The autouse fixture on this module enables the flag by
     default, so each test here explicitly disables it.
@@ -359,9 +373,25 @@ class TestEndpoint:
         body = r.json()
         assert body == {"message": "kaboom"}
 
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            VLLMValidationError("bad temperature", parameter="temperature"),
+            ValueError("bad temperature"),
+        ],
+        ids=["vllm_validation_error", "value_error"],
+    )
+    def test_handler_client_error_returns_400_envelope(self, exc):
+        """Client-caused handler errors are 4xx, matching the OpenAI routes."""
+        app = _build_app(handler=_Handler(exc))
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat", json=_minimal_request_body())
+        assert r.status_code == HTTPStatus.BAD_REQUEST
+        assert "bad temperature" in r.json()["message"]
+
     def test_non_json_content_type_rejected(self):
-        """The ``validate_json_request`` dependency raises
-        ``RequestValidationError`` (HTTP 422) for non-JSON content
+        """The `validate_json_request` dependency raises
+        `RequestValidationError` (HTTP 422) for non-JSON content
         types, matching the behavior of the other vLLM API routers.
         """
         app = _build_app(handler=None)
@@ -390,10 +420,10 @@ class TestEndpoint:
 
 
 class TestRenderEndpoint:
-    """``POST /cohere/v2/chat/render`` is the Cohere counterpart to
-    ``POST /v1/chat/completions/render``: it converts the v2 body to a
-    ``ChatCompletionRequest`` and hands it to the shared
-    ``ServingRender``, returning the resulting ``GenerateRequest``
+    """`POST /cohere/v2/chat/render` is the Cohere counterpart to
+    `POST /v1/chat/completions/render`: it converts the v2 body to a
+    `ChatCompletionRequest` and hands it to the shared
+    `ServingRender`, returning the resulting `GenerateRequest`
     instead of running generation.
 
     The route therefore spans *two* app-state handlers, and these tests
@@ -429,11 +459,11 @@ class TestRenderEndpoint:
         assert GenerateRequest.model_validate(body).token_ids == [5, 6, 7]
 
     def test_cohere_request_surface_survives_conversion(self):
-        """The point of routing through ``CohereServingChatV2`` rather
+        """The point of routing through `CohereServingChatV2` rather
         than asking callers to pre-convert: Cohere-only fields
-        (``documents``, ``safety_mode``, ``citation_options``) must land
-        in ``chat_template_kwargs`` so the rendered prompt matches what
-        ``/cohere/v2/chat`` would have produced.
+        (`documents`, `safety_mode`, `citation_options`) must land
+        in `chat_template_kwargs` so the rendered prompt matches what
+        `/cohere/v2/chat` would have produced.
         """
         render_handler = _RenderHandler(_generate_request())
         app = _build_render_app(_RenderChatHandler(), render_handler)
@@ -458,6 +488,29 @@ class TestRenderEndpoint:
         assert kwargs["documents"][0]["id"] == "doc-1"
         # The conversion lower-cases safety_mode for the renderer.
         assert kwargs["safety_mode"] == "strict"
+
+    def test_api_server_only_kwargs_not_forwarded(self):
+        """As on `/cohere/v2/chat`, the engine's reasoning parser and the
+        derender `parse_context` must not receive the template kwargs that
+        only the API server reads. Their tuple keys can't be JSON encoded."""
+        kwargs = {
+            "safety_mode": "strict",
+            **dict.fromkeys(_API_SERVER_ONLY_TEMPLATE_KWARGS, {(0, 0): "x"}),
+        }
+        result = _generate_request()
+        result.reasoning_parser_kwargs = ReasoningParserKwargs(
+            chat_template_kwargs=kwargs
+        )
+        render_handler = _RenderHandler(result)
+        app = _build_render_app(_RenderChatHandler(), render_handler)
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat/render", json=_minimal_request_body())
+        assert r.status_code == HTTPStatus.OK
+        assert r.json()["reasoning_parser_kwargs"] == {
+            "chat_template_kwargs": {"safety_mode": "strict"}
+        }
+        assert render_handler.seen_kwargs_filter is not None
+        assert render_handler.seen_kwargs_filter(kwargs) == {"safety_mode": "strict"}
 
     def test_501_when_chat_handler_missing(self):
         app = _build_render_app(None, _RenderHandler(_generate_request()))
@@ -495,10 +548,10 @@ class TestRenderEndpoint:
         assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
         assert r.json() == {"message": "tokenizer exploded"}
 
-    def test_conversion_exception_returns_500_envelope(self):
-        """Conversion runs inside the same ``try`` as the render call, so
-        a bad v2 body that slips past Pydantic still yields the Cohere
-        error envelope rather than an unhandled 500 with vLLM's shape.
+    def test_conversion_client_error_returns_400_envelope(self):
+        """Conversion runs inside the same `try` as the render call, so
+        a bad v2 body that slips past Pydantic still yields a 4xx in the
+        Cohere error envelope rather than an unhandled 500 with vLLM's shape.
         """
 
         class _Boom:
@@ -508,7 +561,7 @@ class TestRenderEndpoint:
         app = _build_render_app(_Boom(), _RenderHandler(_generate_request()))
         with TestClient(app) as client:
             r = client.post("/cohere/v2/chat/render", json=_minimal_request_body())
-        assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert r.status_code == HTTPStatus.BAD_REQUEST
         assert r.json() == {"message": "unconvertible message"}
 
     def test_invalid_body_returns_422(self):
@@ -528,11 +581,11 @@ class TestRenderEndpoint:
 
 class TestCohereErrorEnvelope:
     """When the app installs vLLM's global exception handlers, validation
-    and HTTP errors escape as ``ErrorResponse`` bodies before the route
-    handler runs. The middleware installed by ``attach_router`` must
-    normalise those bodies to the ``CohereError`` shape declared on the
-    endpoint's OpenAPI ``responses`` map so schema-conformance tests
-    (``test_openai_schema.py``) don't see a mismatch on ``/cohere/*``
+    and HTTP errors escape as `ErrorResponse` bodies before the route
+    handler runs. The middleware installed by `attach_router` must
+    normalise those bodies to the `CohereError` shape declared on the
+    endpoint's OpenAPI `responses` map so schema-conformance tests
+    (`test_openai_schema.py`) don't see a mismatch on `/cohere/*`
     responses.
     """
 
@@ -551,6 +604,21 @@ class TestCohereErrorEnvelope:
         assert "error" not in body
         assert "message" in body
         assert isinstance(body["message"], str) and body["message"]
+
+    @pytest.mark.parametrize("path", ["/cohere/v2/chat", "/cohere/v2/chat/render"])
+    def test_required_tool_choice_without_tools_returns_400(self, path):
+        """Reject an impossible tool choice before reaching either handler."""
+        app = _build_app_with_vllm_handlers(handler=None)
+        with TestClient(app) as client:
+            response = client.post(
+                path,
+                json={**_minimal_request_body(), "tool_choice": "REQUIRED"},
+            )
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        body = response.json()
+        assert "error" not in body
+        assert "REQUIRED" in body["message"]
+        assert "tools" in body["message"]
 
     def test_http_error_body_is_cohere_shaped(self):
         # A raised ``HTTPException`` from anywhere in the request cycle

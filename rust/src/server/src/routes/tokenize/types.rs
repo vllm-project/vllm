@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_with::DefaultOnNull;
 use validator::{Validate, ValidationErrors};
 use vllm_chat::{ChatOptions, ChatRequest, ResolvedToolContext, SamplingParams};
 use vllm_text::output::TextDecodeOptions;
@@ -15,6 +16,7 @@ use crate::error::ApiError;
 use crate::routes::openai::chat_completions::convert::{
     convert_message, convert_tools, normalize_generation_prompt_mode,
 };
+use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
     ChatMessage, Normalizable, Tool, default_true, validate_messages,
 };
@@ -28,6 +30,7 @@ pub enum TokenizeRequest {
     Completion(TokenizeCompletionRequest),
 }
 
+#[serde_with::serde_as]
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenizeCompletionRequest {
     pub model: Option<String>,
@@ -35,6 +38,7 @@ pub struct TokenizeCompletionRequest {
     #[serde(default = "default_true")]
     pub add_special_tokens: bool,
     #[serde(default)]
+    #[serde_as(as = "DefaultOnNull")]
     pub return_token_strs: bool,
 }
 
@@ -63,6 +67,7 @@ impl TokenizeCompletionRequest {
     }
 }
 
+#[serde_with::serde_as]
 #[derive(Debug, Clone, Deserialize, Validate)]
 pub struct TokenizeChatRequest {
     pub model: Option<String>,
@@ -75,11 +80,14 @@ pub struct TokenizeChatRequest {
     #[serde(default)] // chat default is FALSE (template adds specials)
     pub add_special_tokens: bool,
     #[serde(default)]
+    #[serde_as(as = "DefaultOnNull")]
     pub return_token_strs: bool,
     #[serde(default)]
     pub chat_template: Option<String>,
     #[serde(default)]
     pub chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// Output format to include in model-specific chat rendering.
+    pub response_format: Option<Box<ResponseFormat>>,
     #[serde(default)]
     pub tools: Option<Vec<Tool>>,
 }
@@ -94,6 +102,13 @@ impl TokenizeChatRequest {
     /// tokenize never generates.
     pub fn into_chat_request(self, request_id: String) -> Result<ChatRequest, ApiError> {
         let messages: Vec<_> = self.messages.into_iter().map(convert_message).try_collect()?;
+        let response_format =
+            self.response_format.map(serde_json::to_value).transpose().map_err(|error| {
+                ApiError::invalid_request(
+                    format!("failed to serialize response_format: {error}"),
+                    Some("response_format"),
+                )
+            })?;
         let generation_prompt_mode = normalize_generation_prompt_mode(
             Some(self.add_generation_prompt),
             self.continue_final_message,
@@ -113,7 +128,7 @@ impl TokenizeChatRequest {
                 generation_prompt_mode,
                 chat_template: self.chat_template,
                 reasoning_effort: None,
-                response_format: None,
+                response_format,
                 template_kwargs: self.chat_template_kwargs.unwrap_or_default(),
             },
             tool_context,
@@ -127,6 +142,7 @@ impl TokenizeChatRequest {
             data_parallel_rank: None,
             session_id: None,
             lora_request: None,
+            return_prompt_text: false,
         })
     }
 }
@@ -171,11 +187,52 @@ impl Normalizable for DetokenizeRequest {}
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use expect_test::expect;
     use serde_json::json;
-    use vllm_chat::ChatTool;
+    use vllm_chat::{ChatRenderer, ChatTool, KimiK3ChatRenderer, KimiK3Variant};
+    use vllm_tokenizer::{Tokenizer as _, test_utils::TestTokenizer};
 
     use super::*;
     use crate::routes::openai::utils::types::{ChatMessage, MessageContent};
+
+    #[test]
+    fn tokenize_response_format_reaches_kimi_k3_prompt() {
+        let tokenizer = Arc::new(TestTokenizer::new());
+        let renderer =
+            KimiK3ChatRenderer::new(tokenizer.clone(), Default::default(), KimiK3Variant::K3);
+        let prompts: Vec<_> = [
+            json!({"type": "json_object"}),
+            json!({"type": "json_schema", "json_schema": {
+                "name": "answer", "schema": {"type": "boolean"}, "strict": true,
+            }}),
+            Value::Null,
+        ]
+        .into_iter()
+        .map(|response_format| {
+            let request: TokenizeRequest = serde_json::from_value(json!({
+                "messages": [{"role": "user", "content": "Answer"}],
+                "response_format": response_format,
+                "chat_template_kwargs": {"enable_thinking": false},
+            }))
+            .unwrap();
+            let TokenizeRequest::Chat(request) = request else {
+                panic!("expected chat tokenization");
+            };
+            let request = request.into_chat_request("tokenize-test".into()).unwrap();
+            let prompt = renderer.render(&request).unwrap().prompt.into_token_ids().unwrap();
+            tokenizer.decode(&prompt, false).unwrap()
+        })
+        .collect();
+        expect![[r#"
+            [
+                "<|open|>message role=\"user\"<|sep|>Answer<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"system\" type=\"response-format\"<|sep|>The system is invoked with `response_format=json_object`.\nYour response must be raw JSON data without markdown code blocks (```json) or any additional formatting.<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>response<|sep|>",
+                "<|open|>message role=\"user\"<|sep|>Answer<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"system\" type=\"response-format\"<|sep|>The system is invoked with `response_format=json_schema`.\nYour response must be raw JSON data without markdown code blocks (```json) or any additional formatting.\nThe JSON data must match the following schema:\n```json\n{\"type\":\"boolean\"}\n```<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>response<|sep|>",
+                "<|open|>message role=\"user\"<|sep|>Answer<|close|>message<|sep|><|end_of_msg|><|open|>message role=\"assistant\"<|sep|><|open|>response<|sep|>",
+            ]
+        "#]].assert_debug_eq(&prompts);
+    }
 
     #[test]
     fn tokenize_request_converts_openai_tools() {
@@ -215,8 +272,34 @@ mod tests {
                     "properties": {"city": {"type": "string"}},
                 }),
                 strict: None,
+                defer_loading: None,
             }]
         );
+    }
+
+    /// Python declares `return_token_strs` as `bool | None` on both bodies, so
+    /// an explicit `null` means `false` instead of matching neither variant.
+    #[test]
+    fn null_return_token_strs_means_false() {
+        let request: TokenizeRequest = serde_json::from_value(json!({
+            "prompt": "hi",
+            "return_token_strs": null,
+        }))
+        .expect("completion body with `return_token_strs: null` is accepted");
+        let TokenizeRequest::Completion(req) = request else {
+            panic!("prompt body should parse as the completion variant");
+        };
+        assert!(!req.return_token_strs);
+
+        let request: TokenizeRequest = serde_json::from_value(json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "return_token_strs": null,
+        }))
+        .expect("chat body with `return_token_strs: null` is accepted");
+        let TokenizeRequest::Chat(req) = request else {
+            panic!("messages body should parse as the chat variant");
+        };
+        assert!(!req.return_token_strs);
     }
 
     #[test]
@@ -233,6 +316,7 @@ mod tests {
             return_token_strs: false,
             chat_template: None,
             chat_template_kwargs: None,
+            response_format: None,
             tools: None,
         };
 

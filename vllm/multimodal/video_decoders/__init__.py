@@ -7,8 +7,12 @@ from typing import Any, Literal
 from .base import (
     PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
     PYNVVIDEOCODEC_VIDEO_BACKEND,
+    SampledFramesCharge,
     VideoSourceMetadata,
     VideoTargetMetadata,
+    charge_frame_copies,
+    charge_sampled_frames,
+    charging_sampled_frames,
     check_frame_pixel_limit,
 )
 
@@ -23,6 +27,9 @@ _BACKEND_OPTION_DEFAULTS: dict[str, dict[str, Any]] = {
     },
     PYNVVIDEOCODEC_VIDEO_BACKEND: {
         "hw_decoders": PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
+        "max_width": None,
+        "max_height": None,
+        "keyframe_sampling": None,
     },
     "deepstream": {
         "pool_size": None,
@@ -46,7 +53,7 @@ def incompatible_backend_options(
     old_backend: str | None,
     new_backend: str,
 ) -> set[str]:
-    """Option names accepted by ``old_backend`` but not by ``new_backend``."""
+    """Option names accepted by `old_backend` but not by `new_backend`."""
     old = _BACKEND_OPTION_DEFAULTS.get(old_backend or "", {})
     new = _BACKEND_OPTION_DEFAULTS.get(new_backend, {})
     return old.keys() - new.keys()
@@ -110,9 +117,13 @@ def decode_video(
 __all__ = [
     "PYNVVIDEOCODEC_DEFAULT_HW_DECODERS",
     "PYNVVIDEOCODEC_VIDEO_BACKEND",
+    "SampledFramesCharge",
     "VideoDecoderBackend",
     "VideoSourceMetadata",
     "VideoTargetMetadata",
+    "charge_frame_copies",
+    "charge_sampled_frames",
+    "charging_sampled_frames",
     "check_frame_pixel_limit",
     "decode_video",
     "incompatible_backend_options",

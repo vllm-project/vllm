@@ -63,7 +63,7 @@ def consume_hidden_states(path: str) -> float:
     Returns a single float: the grand mean of all hidden state values.
     This forces the benchmark to actually read and reduce the data.
 
-    Uses :func:`load_hidden_states` which acquires a shared flock,
+    Uses `load_hidden_states` which acquires a shared flock,
     blocking (without polling) until the async writer releases its
     exclusive lock.
     """
@@ -326,7 +326,7 @@ def main():
     parser.add_argument("--layers", type=int, nargs="+", default=[1, 2, 3, 4])
     parser.add_argument("--skip-baseline", action="store_true")
     parser.add_argument("--skip-extract", action="store_true")
-    parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    parser.add_argument("--gpu-memory-utilization", type=float, default=None)
     parser.add_argument("--max-num-batched-tokens", type=int, default=None)
     parser.add_argument("--max-cudagraph-capture-size", type=int, default=None)
     parser.add_argument("--max-model-len", type=int, default=None)
@@ -405,7 +405,7 @@ def main():
 
     if not args.skip_baseline and not args.skip_extract:
         slowdown = baseline["tokens_per_s"] / extract["tokens_per_s"]
-        print("Extraction slowdown factor: {:.2f}x".format(slowdown))
+        print(f"Extraction slowdown factor: {slowdown:.2f}x")
 
 
 if __name__ == "__main__":

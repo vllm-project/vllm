@@ -1,0 +1,44 @@
+--- a/deep_ep/include/deep_ep/common/comm.cuh
++++ b/deep_ep/include/deep_ep/common/comm.cuh
+@@ -155,17 +155,24 @@
+         (gridDim.x > 1) ? cooperative_groups::this_grid().sync() : __syncthreads();
+     }
+ 
++    const int num_signal_qps = kFlushStores ? static_cast<int>(nccl_dev_comm.ginContextCount) : 1;
++
+     if (sm_idx == 0) {
+-        // Use QP 0 to do barrier
++        // Completion must publish puts from every context; arrival barriers publish no data.
+         const auto team = (std::is_same_v<team_t, ncclTeamTagWorld>) ?
+             ncclTeamWorld(nccl_dev_comm) : ncclTeamRail(nccl_dev_comm);
+-        const ncclGin gin(nccl_dev_comm, 0, NCCL_GIN_RESOURCE_SHARING_CTA);
+-        for (int i = thread_idx; i < kNumRanks; i += kNumThreads)
+-            gin.signal(team, i, ncclGin_SignalInc{static_cast<ncclGinSignal_t>(rank_idx)});
++        for (int i = thread_idx; i < num_signal_qps * kNumRanks; i += kNumThreads) {
++            const int context_idx = i / kNumRanks;
++            const int peer_idx = i - context_idx * kNumRanks;
++            const ncclGin gin(nccl_dev_comm, context_idx, NCCL_GIN_RESOURCE_SHARING_CTA);
++            gin.signal(team, peer_idx, ncclGin_SignalInc{static_cast<ncclGinSignal_t>(rank_idx)});
++        }
+ 
+         // TODO(NCCL): Using the official NCCL wait signal API, after they added timeout check.
+-        for (int i = thread_idx; i < kNumRanks; i += kNumThreads) {
+-            const auto signal_idx = static_cast<ncclGinSignal_t>(i);
++        for (int i = thread_idx; i < num_signal_qps * kNumRanks; i += kNumThreads) {
++            const int context_idx = i / kNumRanks;
++            const auto signal_idx = static_cast<ncclGinSignal_t>(i - context_idx * kNumRanks);
++            const ncclGin gin(nccl_dev_comm, context_idx, NCCL_GIN_RESOURCE_SHARING_CTA);
+             const auto shadow_ptr = gin.getSignalShadowPtr(signal_idx);
+             const auto target = ++(*shadow_ptr);
+ 
+@@ -177,8 +184,8 @@
+                     return true;
+ 
+                 if (is_last_check) {
+-                    printf("DeepEP Gin barrier timeout, tag: %d, scaleout: %d, scaleup: %d, thread: %d, "
+-                           "signal: %lu, target: %lu\n", kTag, scaleout_rank_idx, scaleup_rank_idx, thread_idx, signal, target);
++                    printf("DeepEP Gin barrier timeout, tag: %d, scaleout: %d, scaleup: %d, thread: %d, context: %d, "
++                           "signal: %lu, target: %lu\n", kTag, scaleout_rank_idx, scaleup_rank_idx, thread_idx, context_idx, signal, target);
+                 }
+                 return false;
+             });

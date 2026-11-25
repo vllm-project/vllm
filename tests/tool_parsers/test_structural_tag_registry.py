@@ -7,7 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from openai.types.responses import ToolChoiceFunction
+from openai.types.responses import CustomTool, ToolChoiceFunction
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
 from xgrammar import Grammar, StructuralTag
 from xgrammar import get_model_structural_tag as get_xgrammar_builtin_structural_tag
@@ -21,7 +21,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.utils import construct_tool_dicts
+from vllm.exceptions import VLLMValidationError
 from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.parser_manager import ParserManager
 from vllm.parser.plamo3 import (
     BEGIN_TOOL_ARGUMENTS,
     BEGIN_TOOL_NAME,
@@ -45,7 +48,10 @@ from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
-from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
+from vllm.tool_parsers.llama_json_engine_tool_parser import (
+    LlamaJsonEngineToolParser,
+)
+from vllm.tool_parsers.longcat_tool_parser import LongcatFlashToolParser
 from vllm.tool_parsers.mimo_tool_parser import MiMoToolParser
 from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
 from vllm.tool_parsers.plamo3_engine_tool_parser import Plamo3EngineToolParser
@@ -201,6 +207,130 @@ def test_get_model_structural_tag_supports_all_xgrammar_builtins(
     )
 
     assert isinstance(tag, StructuralTag)
+
+
+_MCP_TOOL = {"type": "mcp", "server_label": "docs", "server_url": "http://mcp"}
+
+
+def _namespace_tool(strict: bool | None = None) -> dict[str, Any]:
+    lookup = {
+        "type": "function",
+        "name": "lookup",
+        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}},
+    }
+    if strict is not None:
+        lookup["strict"] = strict
+    return {"type": "namespace", "name": "crm", "description": "", "tools": [lookup]}
+
+
+def _hermes_call(name: str) -> str:
+    return (
+        f'<tool_call>\n{{"name": "{name}", "arguments": {{"id": "1"}}}}\n</tool_call>'
+    )
+
+
+@pytest.mark.parametrize("model", sorted(SUPPORTED_STRUCTURAL_TAG_MODELS))
+def test_no_structural_tag_without_function_tools(model: str):
+    """Builtin tools never reach the prompt, so there is nothing to constrain."""
+    request = ResponsesRequest.model_validate(
+        {"input": "hi", "tools": [_MCP_TOOL, {"type": "web_search"}]}
+    )
+
+    tag = get_model_structural_tag(
+        model=model,
+        tools=request.tools,
+        tool_choice="auto",
+        reasoning=False,
+        strict_level=ToolStrictLevel.FUNCTION,
+    )
+
+    assert tag is None
+    with pytest.raises(VLLMValidationError, match="no function tool"):
+        get_model_structural_tag(
+            model=model,
+            tools=request.tools,
+            tool_choice="required",
+            reasoning=False,
+        )
+
+
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+def test_structural_tag_allows_exactly_the_prompt_tools(tool_choice: str):
+    """The grammar lets the model call every tool its prompt lists, and no other."""
+    request = ResponsesRequest.model_validate(
+        {
+            "input": "hi",
+            "tools": [
+                {"type": "function", "name": "get_weather", "parameters": {}},
+                _namespace_tool(),
+                _MCP_TOOL,
+            ],
+        }
+    )
+    tool_dicts = construct_tool_dicts(request.tools, tool_choice)
+    assert tool_dicts is not None
+    prompt_names = [tool["function"]["name"] for tool in tool_dicts]
+
+    tag = get_model_structural_tag(
+        model="hermes",
+        tools=request.tools,
+        tool_choice=tool_choice,
+        reasoning=False,
+        strict_level=ToolStrictLevel.FUNCTION,
+    )
+
+    assert prompt_names == ["get_weather", "crm__lookup"]
+    assert tag is not None
+    grammar = Grammar.from_structural_tag(json.dumps(tag.model_dump()))
+    for name in prompt_names:
+        assert _is_grammar_accept_string(grammar, _hermes_call(name))
+    assert not _is_grammar_accept_string(grammar, _hermes_call("docs"))
+
+
+def test_strict_namespace_function_enables_auto_structural_tag():
+    request = ResponsesRequest.model_validate(
+        {"input": "hi", "tools": [_namespace_tool(strict=True)]}
+    )
+
+    tag = get_model_structural_tag(
+        model="hermes", tools=request.tools, tool_choice="auto", reasoning=False
+    )
+
+    assert tag is not None
+    grammar = Grammar.from_structural_tag(json.dumps(tag.model_dump()))
+    assert _is_grammar_accept_string(grammar, _hermes_call("crm__lookup"))
+
+
+def test_harmony_structural_tag_keeps_builtin_tools():
+    """Harmony can call builtin tools, so they still shape its grammar."""
+    request = ResponsesRequest.model_validate(
+        {"input": "hi", "tools": [{"type": "web_search"}]}
+    )
+
+    tag = get_model_structural_tag(
+        model="harmony",
+        tools=request.tools,
+        tool_choice="required",
+        reasoning=False,
+    )
+
+    assert tag is not None
+
+
+def test_glm47_default_level_allows_builtin_only_tools(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """GLM-4.7's default FUNCTION level must not reject builtin-only tools."""
+    monkeypatch.setattr(envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", True)
+
+    class TestParser(DelegatingParser):
+        tool_parser_cls = Glm47MoeModelToolParser
+
+    request = ResponsesRequest.model_validate({"input": "hi", "tools": [_MCP_TOOL]})
+    parser = TestParser(MagicMock(), tools=None)
+    parser._reasoning_parser = MagicMock(adjust_request=lambda request: request)
+
+    assert parser.adjust_request(request).structured_outputs is None
 
 
 def test_get_model_structural_tag_supports_vllm_hermes(
@@ -483,7 +613,7 @@ def _as_strict(tools: list[ChatCompletionToolsParam]) -> list[ChatCompletionTool
 
 def _k3_grammar(tool_choice, tools=None, *, strict: bool = True):
     """Build the K3 grammar; tools are strict by default so the typed
-    argument channel is exercised (an unset ``strict`` leaves arguments free)."""
+    argument channel is exercised (an unset `strict` leaves arguments free)."""
     tools = tools if tools is not None else _k3_tools_by_name()
     tag = get_model_structural_tag(
         model="kimi_k3",
@@ -659,6 +789,19 @@ def test_get_model_structural_tag_supports_named_tool_choice(
     assert isinstance(tag, StructuralTag)
 
 
+def test_glm_4_7_forced_custom_tool_uses_function_shim():
+    tools = [CustomTool(type="custom", name="emit_command", description="Emit.")]
+    tag = get_model_structural_tag(
+        model="glm_4_7",
+        tools=tools,
+        tool_choice="required",
+        reasoning=False,
+    )
+
+    assert isinstance(tag, StructuralTag)
+    assert "emit_command" in tag.model_dump_json()
+
+
 @pytest.mark.parametrize(
     ("parser_cls", "model"),
     [
@@ -670,7 +813,7 @@ def test_get_model_structural_tag_supports_named_tool_choice(
         (Glm47MoeModelToolParser, "glm_4_7"),
         (Hermes2ProToolParser, "hermes"),
         (KimiK2ToolParser, "kimi"),
-        (Llama3JsonToolParser, "llama"),
+        (LlamaJsonEngineToolParser, "llama"),
         (MinimaxM2ToolParser, "minimax"),
         (Qwen3EngineToolParser, "qwen_3_coder"),
         (Step3p5ToolParser, "qwen_3_coder"),
@@ -704,6 +847,7 @@ def test_step3p5_forced_tool_choice_round_trips_native_xml(
     parser = StepParser(MagicMock(), tools=sample_tools)
     request = parser.adjust_request(request)
 
+    assert request.structured_outputs is not None
     assert request.structured_outputs.json is None
     grammar = Grammar.from_structural_tag(request.structured_outputs.structural_tag)
     # Rendered exactly as the Step-3.5/3.7 chat templates render tool calls.
@@ -718,6 +862,47 @@ def test_step3p5_forced_tool_choice_round_trips_native_xml(
     _, content, tool_calls = parser.parse(output, request, enable_auto_tools=True)
 
     assert not content
+    assert tool_calls is not None
+    assert [(call.name, json.loads(call.arguments)) for call in tool_calls] == [
+        ("get_weather", {"city": "Dallas"})
+    ]
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["required", {"type": "function", "function": {"name": "get_weather"}}],
+)
+def test_longcat_forced_tool_choice_round_trips_native_tags(
+    sample_tools: list[ChatCompletionToolsParam], tool_choice
+):
+    """Forced LongCat calls must use <longcat_tool_call>, not Hermes tags."""
+
+    class LongcatParser(DelegatingParser):
+        tool_parser_cls = LongcatFlashToolParser
+
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=[tool.model_dump(exclude_none=True) for tool in sample_tools],
+        tool_choice=tool_choice,
+    )
+    parser = LongcatParser(MagicMock(), tools=sample_tools)
+    request = parser.adjust_request(request)
+
+    assert request.structured_outputs is not None
+    grammar = Grammar.from_structural_tag(request.structured_outputs.structural_tag)
+    # Rendered exactly as the LongCat-Flash chat template renders tool calls.
+    output = (
+        '<longcat_tool_call>\n{"name": "get_weather", '
+        '"arguments": {"city": "Dallas"}}\n</longcat_tool_call>'
+    )
+    assert _is_grammar_accept_string(grammar, output)
+    assert not _is_grammar_accept_string(grammar, output.replace("longcat_", ""))
+
+    _, content, tool_calls = parser.parse(output, request, enable_auto_tools=True)
+
+    assert not content
+    assert tool_calls is not None
     assert [(call.name, json.loads(call.arguments)) for call in tool_calls] == [
         ("get_weather", {"city": "Dallas"})
     ]
@@ -810,6 +995,7 @@ def test_native_format_parser_skips_json_schema_constraint_responses(
 
     out = parser.adjust_request(request)
 
+    assert isinstance(out, ResponsesRequest)
     assert out.structured_outputs is None
     assert out.text is None
 
@@ -1152,7 +1338,7 @@ def test_tool_strict_level_function_pins_envelope_only(
     model: str,
     sample_tools: list[ChatCompletionToolsParam],
 ):
-    """The request's own tools stay untouched; unset ``strict`` stays free."""
+    """The request's own tools stay untouched; unset `strict` stays free."""
     tag = get_model_structural_tag(
         model=model,
         tools=sample_tools,
@@ -1200,7 +1386,7 @@ def test_tool_strict_level_function_keeps_client_strict_tools_strict(
 
 @pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
 def test_absent_strict_is_not_pinned_next_to_a_strict_tool(model: str):
-    """A strict tool must not drag a neighbour with unset ``strict`` into
+    """A strict tool must not drag a neighbour with unset `strict` into
     schema enforcement."""
     weather = ChatCompletionToolsParam(
         type="function",
@@ -1255,7 +1441,7 @@ def test_forced_tool_choice_pins_schema_only_for_strict_tools(
     sample_tools_strict: list[ChatCompletionToolsParam],
 ):
     """Required / named always constrain the call; the argument schema
-    follows the per-tool ``strict`` (or the parameter level)."""
+    follows the per-tool `strict` (or the parameter level)."""
     free = get_model_structural_tag(
         model=model,
         tools=sample_tools,
@@ -1312,6 +1498,36 @@ def test_tool_strict_level_from_name():
         ToolStrictLevel.from_name("strict")
     with pytest.raises(ValueError, match="expected one of auto, function, parameter"):
         ToolStrictLevel.from_name("off")
+
+
+@pytest.mark.parametrize("required", [False, True])
+@pytest.mark.parametrize("token_suffix", ["", ":6124c78e"])
+def test_hy_v4_preserves_whitespace_in_argument_keys(
+    sample_tools, required, token_suffix
+):
+    """Argument names must match the schema exactly, including whitespace."""
+    sample_tools[0].function.parameters = {
+        "type": "object",
+        "properties": {" count ": {"type": "integer"}},
+        "required": [" count "] if required else [],
+    }
+    tag = get_model_structural_tag(
+        "hy_v4",
+        sample_tools,
+        "required",
+        reasoning=False,
+        token_suffix=token_suffix,
+    )
+    grammar = Grammar.from_structural_tag(tag)
+    call = (
+        f"<tool_calls{token_suffix}><tool_call{token_suffix}>get_weather"
+        f"<arg_key{token_suffix}> count </arg_key{token_suffix}>"
+        f"<arg_value{token_suffix}>2</arg_value{token_suffix}>"
+        f"</tool_call{token_suffix}></tool_calls{token_suffix}>"
+    )
+
+    assert _is_grammar_accept_string(grammar, call)
+    assert not _is_grammar_accept_string(grammar, call.replace(" count ", "count"))
 
 
 # ---------------------------------------------------------------------------
@@ -1426,6 +1642,65 @@ def test_glm47_non_strict_auto_accepts_valid_tool_calls(body: str):
 def test_glm47_non_strict_auto_rejects_invalid(body: str):
     grammar = _glm47_shallow_grammar("auto", auto=True)
     assert not _is_grammar_accept_string(grammar, body)
+
+
+def _glm47_container_tools() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "read_files",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "files": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {"path": {"type": "string"}},
+                            },
+                        },
+                        "options": {"type": "object"},
+                        "limit": {"type": ["integer", "null"]},
+                    },
+                },
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        # a Windows path copied with bare backslashes is not valid JSON
+        ("files", r'[{"path": "D:\SVILUPPO\docs\PLAN.md"}]'),
+        # an over-escaped quote leaves a JSON string open; </arg_value> still ends it
+        ("files", r'[{"path\": "docs/PLAN.md"}]'),
+        ("files", '[{"path": "docs/PLAN.md"}]'),
+        ("options", '{"recursive": true}'),
+        ("limit", "20"),
+        ("limit", "null"),
+    ],
+)
+def test_glm47_non_strict_container_values_accept_model_text(key: str, value: str):
+    grammar = _glm47_shallow_grammar("auto", _glm47_container_tools(), auto=True)
+    assert _is_grammar_accept_string(
+        grammar, _glm47_call("read_files", _glm47_arg(key, value))
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("limit", "twenty"),
+        ("files", "[<arg_key>x</arg_key>]"),
+    ],
+)
+def test_glm47_non_strict_container_tools_reject_invalid(key: str, value: str):
+    grammar = _glm47_shallow_grammar("auto", _glm47_container_tools(), auto=True)
+    assert not _is_grammar_accept_string(
+        grammar, _glm47_call("read_files", _glm47_arg(key, value))
+    )
 
 
 def test_glm47_non_strict_required_requires_at_least_one_call():
@@ -1773,6 +2048,7 @@ def test_glm47_responses_request_attaches_shallow_tag(
 
     out = parser.adjust_request(request)
 
+    assert isinstance(out, ResponsesRequest)
     assert out.structured_outputs is not None
     assert out.structured_outputs.structural_tag is not None
     assert out.text is None
@@ -1810,6 +2086,34 @@ def test_glm47_operator_level_overrides_parser_default(
         "content"
     ]
     assert content["json_schema"] == sample_tools[0].function.parameters
+
+
+@pytest.mark.parametrize(
+    ("tool_strict_level", "constrained"), [(None, True), ("auto", False)]
+)
+def test_glm47_default_level_applies_only_when_the_level_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+    tool_strict_level: str | None,
+    constrained: bool,
+):
+    monkeypatch.setattr(envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", True)
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="glm47",
+        enable_auto_tools=True,
+        tool_strict_level=tool_strict_level,
+    )
+    assert parser_cls is not None
+    request = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=[tool.model_dump(exclude_none=True) for tool in sample_tools],
+        tool_choice="auto",
+    )
+
+    out = parser_cls(MagicMock(), tools=sample_tools).adjust_request(request)
+
+    assert (out.structured_outputs is not None) is constrained
 
 
 def test_glm47_required_with_non_strict_tools_attaches_shallow_tag(
@@ -1906,22 +2210,28 @@ _SINGLE_CALL_CASES = [
     (
         "mimo",
         "",
-        "<tool_call><function=get_weather><parameter=city>Paris</parameter>"
-        "</function></tool_call>",
+        (
+            "<tool_call><function=get_weather><parameter=city>Paris</parameter>"
+            "</function></tool_call>"
+        ),
         "",
     ),
     (
         "hermes",
         "",
-        '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}'
-        "\n</tool_call>",
+        (
+            '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}'
+            "\n</tool_call>"
+        ),
         "",
     ),
     (
         "qwen3_xml",
         "",
-        "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n"
-        "</parameter>\n</function>\n</tool_call>",
+        (
+            "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n"
+            "</parameter>\n</function>\n</tool_call>"
+        ),
         "",
     ),
     (
@@ -1945,6 +2255,7 @@ def _tool_calling_grammar(
     parser_cls = ParserManager.get_parser(
         tool_parser_name=tool_parser, enable_auto_tools=True
     )
+    assert parser_cls is not None
     adjusted = parser_cls(MagicMock(), tools=tools).adjust_request(request)
     structured_outputs = adjusted.structured_outputs
     if structured_outputs is None or structured_outputs.structural_tag is None:

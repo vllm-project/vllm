@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, get_type_hints, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, get_type_hints, overload
 
 import torch
+from huggingface_hub.errors import StrictDataclassError
+from PIL import Image as PILImage
 from typing_extensions import TypeVar
 
+from vllm import envs
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
@@ -41,6 +45,71 @@ else:
     TokenizeParams = object
 
 logger = init_logger(__name__)
+
+_profiling_media: ContextVar[bool] = ContextVar("_profiling_media", default=False)
+
+
+@contextmanager
+def profiling_media() -> Iterator[None]:
+    """Exclude internally generated profiling inputs from request limits."""
+    token = _profiling_media.set(True)
+    try:
+        yield
+    finally:
+        _profiling_media.reset(token)
+
+
+def is_profiling_media() -> bool:
+    return _profiling_media.get()
+
+
+def validate_video_preprocessing_budget(size_bytes: int) -> None:
+    limit = envs.VLLM_MAX_MEDIA_PREPROCESSING_BYTES
+    if limit > 0 and size_bytes > limit and not is_profiling_media():
+        raise VLLMValidationError(
+            f"Video preprocessing exceeds VLLM_MAX_MEDIA_PREPROCESSING_BYTES={limit}.",
+            parameter="video",
+        )
+
+
+def estimate_video_pixel_element_size(
+    video: object, processor: Any, kwargs: Mapping[str, object]
+) -> int:
+    if kwargs.get("do_rescale", processor.do_rescale) or kwargs.get(
+        "do_normalize", processor.do_normalize
+    ):
+        return 4
+    frames = video if isinstance(video, list) else [video]
+    element_sizes = []
+    for frame in frames:
+        if isinstance(frame, torch.Tensor):
+            element_sizes.append(frame.element_size())
+        elif isinstance(frame, PILImage.Image):
+            element_sizes.append(1)
+        else:
+            itemsize = getattr(frame, "itemsize", None)
+            element_sizes.append(itemsize if isinstance(itemsize, int) else 4)
+    return max(element_sizes, default=4)
+
+
+def get_video_frame_dimensions(video: Any) -> tuple[int, int, int]:
+    frames = video if isinstance(video, list) else [video[0]]
+    height = width = channels = 0
+    for frame in frames:
+        if isinstance(frame, PILImage.Image):
+            frame_width, frame_height = frame.size
+            frame_channels = len(frame.getbands())
+        else:
+            shape = frame.shape
+            if shape[-1] in (1, 3, 4):
+                frame_height, frame_width, frame_channels = shape
+            else:
+                frame_channels, frame_height, frame_width = shape
+        height = max(height, frame_height)
+        width = max(width, frame_width)
+        channels = max(channels, frame_channels)
+    return height, width, max(channels, 3)
+
 
 # HuggingFace processors accept a shared flat namespace in addition to the
 # nested processor kwarg scopes ``text_kwargs`` / ``images_kwargs`` /
@@ -82,12 +151,12 @@ def _resolve_mm_processor_kwargs(
 ) -> dict[str, object]:
     """Resolve flat processor kwargs into HuggingFace processor kwarg scopes.
 
-    With ``supported_mm_processor_kwargs``, each scope lists the flat keys it
+    With `supported_mm_processor_kwargs`, each scope lists the flat keys it
     supports. Matching flat keys are routed to every scope that supports them,
     existing scoped values take precedence, and keys not supported by any scope
     remain flat.
 
-    Without ``supported_mm_processor_kwargs``, flat keys already represented in
+    Without `supported_mm_processor_kwargs`, flat keys already represented in
     at least one existing mapping-valued scope are removed from the shared flat
     namespace; all other flat keys are left unchanged because there is no
     information to determine which scopes should receive them.
@@ -167,7 +236,7 @@ def _resolve_mm_processor_kwargs(
     return resolved
 
 
-@dataclass
+@dataclass(slots=True)
 class TimingContext:
     """Helper class to record execution times during multi-modal processing."""
 
@@ -210,7 +279,7 @@ _C = TypeVar("_C", bound=PreTrainedConfig, default=PreTrainedConfig)
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class InputProcessingContext:
     """Contains information about the model which may be used to
     modify the inputs.
@@ -379,15 +448,15 @@ class InputProcessingContext:
         *,
         supported_mm_processor_kwargs: Mapping[str, set[str]] | None = None,
     ) -> dict[str, Any]:
-        """Merge configured and request ``mm_processor_kwargs``.
+        """Merge configured and request `mm_processor_kwargs`.
 
-        When ``supported_mm_processor_kwargs`` is provided, flat keys are matched
+        When `supported_mm_processor_kwargs` is provided, flat keys are matched
         against the keys supported by each HuggingFace processor kwarg scope.
         Matching flat keys are routed to every scope that supports them and
         removed from the shared flat namespace; keys not supported by any scope
         remain flat.
 
-        Without ``supported_mm_processor_kwargs``, flat keys already represented
+        Without `supported_mm_processor_kwargs`, flat keys already represented
         in at least one existing mapping-valued scope are removed from the shared
         flat namespace; all other flat keys are left unchanged because there is
         no information to determine which scopes should receive them.
@@ -398,6 +467,23 @@ class InputProcessingContext:
             merged,
             supported_mm_processor_kwargs=supported_mm_processor_kwargs,
         )
+
+    def get_hf_processor_kwargs(
+        self,
+        hf_processor: ProcessorMixin,
+        kwargs: Mapping[str, object],
+        *,
+        scope: Literal["images_kwargs", "videos_kwargs"],
+    ) -> dict[str, Any]:
+        """Resolve the kwargs the Hugging Face processor passes to a modality."""
+        try:
+            return hf_processor._merge_kwargs(
+                hf_processor.valid_processor_kwargs,
+                tokenizer_init_kwargs=hf_processor.tokenizer.init_kwargs,
+                **self.get_merged_mm_kwargs(kwargs),
+            )[scope]
+        except (AttributeError, TypeError, StrictDataclassError) as exc:
+            raise ValueError("Invalid multimodal processor kwargs.") from exc
 
     def call_hf_processor(
         self,
@@ -422,9 +508,12 @@ class InputProcessingContext:
 
         try:
             output = hf_processor(**data, **allowed_kwargs)
+        except VLLMValidationError:
+            raise
         except Exception as exc:
             msg = (
                 f"Failed to apply {type(hf_processor).__name__} "
+                f"({type(exc).__name__}: {exc}) "
                 f"on data={data} with kwargs={allowed_kwargs}"
             )
 
@@ -450,6 +539,9 @@ class InputProcessingContext:
 class BaseProcessingInfo:
     """Base class to provide the information necessary for data processing."""
 
+    default_mm_limits: ClassVar[Mapping[str, int]] = {}
+    """Per-modality item caps applied when the operator sets no explicit count."""
+
     def __init__(self, ctx: InputProcessingContext) -> None:
         super().__init__()
 
@@ -470,6 +562,18 @@ class BaseProcessingInfo:
         specific kwargs from model config or user inputs.
         """
         return self.ctx.get_hf_processor(**kwargs)
+
+    def get_video_frame_limits(self) -> dict[str, int]:
+        """The `max_frames`/`min_frames` of the HF video processor, which the
+        video loader samples to; empty for models without one."""
+        if "video" not in self.supported_mm_limits:
+            return {}
+        video_processor = getattr(self.get_hf_processor(), "video_processor", None)
+        return {
+            k: v
+            for k in ("max_frames", "min_frames")
+            if (v := getattr(video_processor, k, None)) is not None
+        }
 
     def get_supported_mm_processor_kwargs(self) -> dict[str, set[str]]:
         """Return supported kwarg names for each HF processor kwargs scope."""
@@ -503,7 +607,7 @@ class BaseProcessingInfo:
         self,
         mm_kwargs: Mapping[str, object],
     ) -> dict[str, Any]:
-        """Merge configured and request ``mm_processor_kwargs``.
+        """Merge configured and request `mm_processor_kwargs`.
 
         Flat kwargs are routed into the HuggingFace processor kwarg scopes that
         support them after the configured/request merge. When a routed flat value
@@ -596,6 +700,11 @@ class BaseProcessingInfo:
         allowed_limits = dict[str, int]()
         for modality, supported_limit in self.supported_mm_limits.items():
             user_limit = mm_config.get_limit_per_prompt(modality)
+            configured_limit = mm_config.limit_per_prompt.get(modality)
+            if configured_limit is None or configured_limit.count is None:
+                user_limit = min(
+                    user_limit, self.default_mm_limits.get(modality, user_limit)
+                )
 
             allowed_limits[modality] = (
                 user_limit
@@ -625,6 +734,12 @@ class BaseProcessingInfo:
 
             raise VLLMValidationError(msg, parameter=modality)
 
+    def validate_num_input_items(
+        self, modality: str, num_items: int, *, is_embedding: bool
+    ) -> None:
+        """Validate a modality count with its input representation available."""
+        self.validate_num_items(modality, num_items)
+
     def parse_mm_data(
         self,
         mm_data: MultiModalDataDict,
@@ -648,6 +763,11 @@ class BaseProcessingInfo:
                             f"You must set `--enable-mm-embeds` to input "
                             f"`{modality}_embeds`"
                         )
+                    if not mm_config.is_mm_embeds_enabled(modality):
+                        raise ValueError(
+                            f"`{modality}_embeds` inputs are disabled via "
+                            f"`--limit-mm-per-prompt`"
+                        )
                     if mm_config.get_limit_per_prompt(modality) == 0:
                         logger.debug(
                             "Skipping count validation for modality "
@@ -655,7 +775,13 @@ class BaseProcessingInfo:
                             modality,
                         )
                         continue
-                self.validate_num_items(modality, len(items))
+                self.validate_num_input_items(
+                    modality,
+                    len(items),
+                    is_embedding=isinstance(
+                        items, (EmbeddingItems, DictEmbeddingItems)
+                    ),
+                )
 
         return mm_items
 

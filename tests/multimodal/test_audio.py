@@ -9,12 +9,15 @@ import pytest
 import torch
 
 from vllm.multimodal.audio import (
+    _MAX_TORCHAUDIO_KERNEL_ELEMS,
     MONO_AUDIO_SPEC,
     PASSTHROUGH_AUDIO_SPEC,
     AudioResampler,
     AudioSpec,
     ChannelReduction,
+    _bounded_resample_rates,
     _get_torchaudio_resampler,
+    _polyphase_kernel_elems,
     normalize_audio,
     resample_audio_pyav,
     resample_audio_scipy,
@@ -149,6 +152,86 @@ def test_audio_resampler_torchaudio(dummy_audio):
     assert np.isfinite(out_down).all()
 
 
+_STANDARD_CAPTURE_RATES = (
+    8000,
+    11025,
+    16000,
+    22050,
+    24000,
+    32000,
+    44100,
+    48000,
+    88200,
+    96000,
+    192000,
+)
+
+
+@pytest.mark.parametrize("orig_sr", _STANDARD_CAPTURE_RATES)
+@pytest.mark.parametrize("target_sr", (16000, 24000, 44100, 48000))
+def test_bounded_resample_rates_keeps_standard_pairs(orig_sr, target_sr):
+    assert _bounded_resample_rates(orig_sr, target_sr) == (orig_sr, target_sr)
+
+
+@pytest.mark.parametrize(
+    ("orig_sr", "target_sr"),
+    [
+        (16001, 16000),
+        (44101, 16000),
+        (22051, 16000),
+        (48001, 16000),
+    ],
+)
+def test_bounded_resample_rates_caps_coprime_kernel(orig_sr, target_sr):
+    assert _polyphase_kernel_elems(orig_sr, target_sr) > _MAX_TORCHAUDIO_KERNEL_ELEMS
+    bounded_orig, bounded_target = _bounded_resample_rates(orig_sr, target_sr)
+    assert (
+        _polyphase_kernel_elems(bounded_orig, bounded_target)
+        <= _MAX_TORCHAUDIO_KERNEL_ELEMS
+    )
+
+
+def test_bounded_resample_rates_rejects_non_positive():
+    with pytest.raises(ValueError, match="positive integers"):
+        _bounded_resample_rates(0, 16000)
+    with pytest.raises(ValueError, match="positive integers"):
+        _bounded_resample_rates(16000, -1)
+
+
+def test_coprime_header_rate_does_not_build_unbounded_kernel(dummy_audio):
+    with patch("vllm.multimodal.audio._get_torchaudio_resampler") as mock_get:
+        out = resample_audio_torchaudio(dummy_audio, orig_sr=16001, target_sr=16000)
+        mock_get.assert_not_called()
+        np.testing.assert_array_equal(out, dummy_audio)
+
+
+def test_parser_coprime_header_rate_does_not_build_unbounded_kernel():
+    from vllm.multimodal.parse import MultiModalDataParser
+
+    audio = np.zeros(1600, dtype=np.float32)
+    parser = MultiModalDataParser(target_sr=16000)
+    with patch("vllm.multimodal.audio._get_torchaudio_resampler") as mock_get:
+        result = parser._parse_audio_data((audio, 16001))
+        mock_get.assert_not_called()
+        assert result is not None
+        np.testing.assert_array_equal(result.get(0), audio)
+
+
+def test_parser_near_standard_rate_uses_bounded_kernel():
+    from vllm.multimodal.parse import MultiModalDataParser
+
+    audio = np.zeros(1600, dtype=np.float32)
+    parser = MultiModalDataParser(target_sr=16000)
+    with patch("vllm.multimodal.audio._get_torchaudio_resampler") as mock_get:
+        mock_get.return_value.return_value.numpy.return_value = audio
+        parser._parse_audio_data((audio, 44101))
+        mock_get.assert_called_once()
+        orig_sr, target_sr = mock_get.call_args[0]
+        assert (
+            _polyphase_kernel_elems(orig_sr, target_sr) <= _MAX_TORCHAUDIO_KERNEL_ELEMS
+        )
+
+
 def test_resample_audio_torchaudio_caches_kernel():
     # The sinc kernel is rebuilt per (orig_sr, target_sr) pair; repeated
     # requests at the same pair must reuse the cached one.
@@ -216,17 +299,19 @@ class TestNormalizeAudio:
         assert result.ndim == 1
         torch.testing.assert_close(result, torch.tensor([0.0, 1.0]))
 
-    def test_mono_passthrough_for_1d_numpy(self):
-        """1D numpy array should pass through unchanged with mono spec."""
-        mono = np.array([1.0, 2.0, 3.0], dtype=np.float32)
-        result = normalize_audio(mono, MONO_AUDIO_SPEC)
+    @pytest.mark.parametrize("shape", [(3,), (1, 3), (3, 1), (1, 1)])
+    def test_mono_passthrough_for_numpy(self, shape):
+        """Mono output is 1D, including audio with an explicit channel axis."""
+        mono = np.arange(max(shape), dtype=np.float32)
+        result = normalize_audio(mono.reshape(shape), MONO_AUDIO_SPEC)
         assert result.ndim == 1
         np.testing.assert_array_equal(result, mono)
 
-    def test_mono_passthrough_for_1d_torch(self):
-        """1D torch tensor should pass through unchanged with mono spec."""
-        mono = torch.tensor([1.0, 2.0, 3.0])
-        result = normalize_audio(mono, MONO_AUDIO_SPEC)
+    @pytest.mark.parametrize("shape", [(3,), (1, 3), (3, 1), (1, 1)])
+    def test_mono_passthrough_for_torch(self, shape):
+        """Mono output is 1D, including audio with an explicit channel axis."""
+        mono = torch.arange(max(shape), dtype=torch.float32)
+        result = normalize_audio(mono.reshape(shape), MONO_AUDIO_SPEC)
         assert result.ndim == 1
         torch.testing.assert_close(result, mono)
 
@@ -410,8 +495,9 @@ class TestMultiModalDataParserChannelNormalization:
         # When target_channels=None, stereo audio should be preserved
         assert audio_item.ndim == 2, f"Expected 2D stereo audio, got {audio_item.ndim}D"
 
-    def test_parser_mono_passthrough_when_target_channels_1(self):
-        """Parser should pass through mono audio unchanged when target_channels=1."""
+    @pytest.mark.parametrize("shape", [(16000,), (1, 16000), (16000, 1)])
+    def test_parser_mono_passthrough_when_target_channels_1(self, shape):
+        """Mono layouts must preserve samples and report the waveform length."""
         from vllm.multimodal.parse import MultiModalDataParser
 
         # Create parser with mono normalization enabled
@@ -420,17 +506,20 @@ class TestMultiModalDataParserChannelNormalization:
             target_channels=1,
         )
 
-        # Create mono audio (already 1D)
-        mono_audio = np.random.randn(16000).astype(np.float32)
+        mono_audio = np.linspace(-1.0, 1.0, 16000, dtype=np.float32)
 
         # Parse audio data
-        result = parser._parse_audio_data((mono_audio, 16000))
+        result = parser.parse_mm_data({"audio": (mono_audio.reshape(shape), 16000)})[
+            "audio"
+        ]
 
         # Check that result is still mono (1D)
         assert result is not None
         audio_item = result.get(0)
         assert audio_item.ndim == 1
         assert audio_item.shape == (16000,)
+        assert len(audio_item) == 16000
+        np.testing.assert_array_equal(audio_item, mono_audio)
 
     def test_parser_with_target_channels_2(self):
         """Parser should reduce 6-channel to 2-channel when target_channels=2."""

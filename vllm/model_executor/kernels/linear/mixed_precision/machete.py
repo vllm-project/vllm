@@ -36,17 +36,21 @@ class MacheteLinearKernel(MPLinearKernel):
         if c.weight_type not in query_machete_supported_quant_types(c.zero_points):
             return (
                 False,
-                f"Quant type ({c.weight_type}) not supported by "
-                "Machete, supported types are: "
-                f"{query_machete_supported_quant_types(c.zero_points)}",
+                (
+                    f"Quant type ({c.weight_type}) not supported by "
+                    "Machete, supported types are: "
+                    f"{query_machete_supported_quant_types(c.zero_points)}"
+                ),
             )
 
         if c.group_size not in query_machete_supported_group_sizes(c.act_type):
             return (
                 False,
-                f"Group size ({c.group_size}) not supported by "
-                "Machete, supported group sizes are: "
-                f"{query_machete_supported_group_sizes(c.act_type)}",
+                (
+                    f"Group size ({c.group_size}) not supported by "
+                    "Machete, supported group sizes are: "
+                    f"{query_machete_supported_group_sizes(c.act_type)}"
+                ),
             )
 
         return check_machete_supports_shape(

@@ -6,6 +6,7 @@ Compares chunk_kda against a naive recurrent reference (float32).
 Uses torch.rand for q/k/v to match FLA's test pattern.
 """
 
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
@@ -18,9 +19,10 @@ from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointMe
 from vllm.model_executor.layers.mamba.kda_checkpoint import (
     FlashKDAPrefillCheckpointExporter,
 )
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
-from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
-    gather_initial_states,
+from vllm.models.kimi_k3.amd.ops.third_party.kda import (
+    chunk_kda_with_fused_gate as chunk_kda_with_fused_gate_amd,
 )
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda as fused_recurrent_kda_amd,
@@ -45,6 +47,7 @@ from vllm.models.kimi_k3.nvidia.model import KimiLinearForCausalLM
 from vllm.models.kimi_k3.nvidia.ops import recoverssm as recoverssm_ops
 from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
     KDARecoverSSMCommitContext,
+    KDARecoverSSMRecords,
     kda_recoverssm_verify,
 )
 from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
@@ -58,7 +61,9 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     fused_recurrent_kda as fused_recurrent_kda_nvidia,
 )
 from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops.kda import chunk_kda as fla_chunk_kda
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.flashinfer import flashinfer_fused_kda_decode
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
@@ -75,7 +80,7 @@ PACKED_DECODE_IMPLS = {
     "nvidia": fused_recurrent_kda_packed_decode,
     "amd": fused_recurrent_kda_packed_decode_amd,
 }
-SPEC_DECODE_IMPLS = {
+SPEC_DECODE_IMPLS: dict[str, Callable[..., tuple[torch.Tensor, torch.Tensor]]] = {
     "nvidia": fused_recurrent_kda_nvidia,
     "amd": fused_recurrent_kda_amd,
 }
@@ -134,35 +139,15 @@ def test_kda_recoverssm_config_state_layout():
         speculative_config=SimpleNamespace(num_speculative_tokens=2),
     )
 
+    # The verify records are kept outside the KV cache: the Mamba page holds the
+    # stock conv and SSM state.
     assert KimiLinearForCausalLM.get_mamba_state_dtype_from_config(vllm_config) == (
         torch.bfloat16,
         torch.float32,
-        torch.float32,
-        torch.bfloat16,
     )
-    assert KimiLinearForCausalLM.get_mamba_state_shape_from_config(vllm_config)[2:] == (
-        (4, 3, 32),
-        (4, 3, 64),
-    )
-
-
-@torch.inference_mode()
-def test_gather_initial_states_correctness():
-    row_size = 8 * 128 * 128
-    storage = torch.randn(5, row_size + 256, dtype=torch.float32, device=DEVICE)
-    state = storage[:, :row_size].view(5, 8, 128, 128)
-    assert not state.is_contiguous()
-    assert state[0].is_contiguous()
-    indices = torch.tensor([4, 1, 3], dtype=torch.int32, device=DEVICE)
-    has_initial_state = torch.tensor([True, False, True], device=DEVICE)
-
-    expected = state[indices].clone()
-    expected[~has_initial_state] = 0
-
-    torch.testing.assert_close(
-        gather_initial_states(state, indices, has_initial_state),
-        expected,
-    )
+    assert KimiLinearForCausalLM.get_mamba_state_shape_from_config(
+        vllm_config
+    ) == MambaStateShapeCalculator.kda_state_shape(1, 4, 32, num_spec=2)
 
 
 def naive_recurrent_kda(
@@ -692,8 +677,10 @@ def test_kda_spec_decode_correctness(
         pytest.param(True, False, None, True, id="aligned"),
     ],
 )
+@pytest.mark.parametrize("accepted", [(2, 8), (3, 4), (5, 8)])
 @torch.inference_mode()
 def test_kda_recoverssm_verify_and_group_commit(
+    accepted: tuple[int, int],
     monkeypatch: pytest.MonkeyPatch,
     lower_bound: float | None,
     use_request_indices: bool,
@@ -738,7 +725,6 @@ def test_kda_recoverssm_verify_and_group_commit(
     state_indices = torch.tensor(
         [5, 6] if align_mode else [1, 2], dtype=torch.int32, device=DEVICE
     )
-    accepted = [2, 8]
     if use_request_indices:
         global_num_accepted = torch.tensor(
             [0, accepted[0], 0, accepted[1]],
@@ -798,29 +784,17 @@ def test_kda_recoverssm_verify_and_group_commit(
             else (num_blocks, history_len + query_len - 1, conv_dim)
         )
         conv_state = torch.randn(conv_shape, dtype=torch.bfloat16, device=DEVICE)
-        correction_cache = torch.empty(
-            num_blocks,
+        records = KDARecoverSSMRecords.allocate(
+            global_num_accepted.shape[0],
             num_heads,
             query_len,
             dim,
-            dtype=torch.float32,
-            device=DEVICE,
-        )
-        kg_cache = torch.empty(
-            num_blocks,
-            num_heads,
-            query_len,
-            2 * dim,
-            dtype=torch.bfloat16,
-            device=DEVICE,
+            torch.bfloat16,
+            DEVICE,
         )
         layer = SimpleNamespace(
-            kv_cache=(
-                conv_state,
-                checkpoint,
-                correction_cache,
-                kg_cache,
-            ),
+            kv_cache=(conv_state, checkpoint),
+            recoverssm_records=records,
             A_log=A_log,
             dt_bias=dt_bias,
             local_num_heads=num_heads,
@@ -841,8 +815,7 @@ def test_kda_recoverssm_verify_and_group_commit(
             dt_bias=dt_bias,
             lower_bound=lower_bound,
             checkpoint_state=checkpoint,
-            correction_cache=correction_cache,
-            kg_cache=kg_cache,
+            records=records,
             query_start_loc=query_start_loc,
             state_indices=state_indices,
             spec_query_len=query_len,
@@ -891,7 +864,9 @@ def test_kda_recoverssm_verify_and_group_commit(
             if align_mode:
                 assert block_table is not None
                 row = request_indices[seq_idx] if use_request_indices else seq_idx
-                final_block = block_table[row, (4 + commit_len) // 8]
+                final_block = block_table[
+                    row, {2: 0, 3: 0, 4: 0, 5: 1, 8: 1}[commit_len]
+                ]
             committed_states[final_block] = committed_state.transpose(-1, -2)
             if align_mode and 4 + commit_len >= 8:
                 _, boundary_state = naive_recurrent_kda(
@@ -944,7 +919,7 @@ def test_kda_recoverssm_verify_and_group_commit(
             if align_mode:
                 assert block_table is not None
                 row = request_indices[seq_idx] if use_request_indices else seq_idx
-                block = block_table[row, (4 + commit_len) // 8]
+                block = block_table[row, {2: 0, 3: 0, 4: 0, 5: 1, 8: 1}[commit_len]]
             source_block = state_indices[seq_idx] if align_mode else block
             if conv_state_dim_first:
                 actual_conv = layer.kv_cache[0][block, :, :history_len]
@@ -1799,3 +1774,108 @@ def test_flashkda_checkpoint_correctness(state_dtype: torch.dtype, tolerance: fl
     )
     torch.testing.assert_close(conv_state[1], q[0, 13:16].flatten(1).transpose(0, 1))
     torch.testing.assert_close(recurrent_state[1], checkpoint_state[0])
+
+
+def _kda_gate(raw_g, A_log, g_bias, lower_bound):
+    return lower_bound * torch.sigmoid(
+        A_log.exp()[None, None, :, None] * (raw_g.float() + g_bias[None, None])
+    )
+
+
+def _fla_chunk_kda(*, raw_g, raw_beta, A_log, g_bias, lower_bound, **kwargs):
+    # Bailing V3 gates outside the shared FLA entry point.
+    return fla_chunk_kda(
+        g=_kda_gate(raw_g, A_log, g_bias, lower_bound),
+        beta=raw_beta.float().sigmoid(),
+        **kwargs,
+    )
+
+
+def _amd_chunk_kda_with_fused_gate(**kwargs):
+    # Its tensor descriptors need a scratch allocator off ROCm.
+    set_triton_allocator(torch.device(DEVICE))
+    return chunk_kda_with_fused_gate_amd(**kwargs)
+
+
+# Kimi-K3 and Kimi-Linear (NVIDIA), Kimi-Linear (ROCm), Bailing V3.
+TRITON_CHECKPOINT_IMPLS: dict[str, Callable[..., tuple[torch.Tensor, torch.Tensor]]] = {
+    "kimi_nvidia": chunk_kda_with_fused_gate,
+    "kimi_amd": _amd_chunk_kda_with_fused_gate,
+    "fla": _fla_chunk_kda,
+}
+
+
+@pytest.mark.parametrize("impl", TRITON_CHECKPOINT_IMPLS)
+@pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
+@torch.inference_mode()
+def test_triton_kda_checkpoint_correctness(state_dtype: torch.dtype, impl: str):
+    """The Triton chunk path stores each row's chunk-aligned checkpoint, leaves
+    rows without one untouched, and keeps its output and final state."""
+    lower_bound = -3.0
+    H, D = 2, 128
+    torch.manual_seed(5)
+    cu_seqlens_list = [0, 200, 330, 400, 600]
+    offsets = [128, 64, 0, 192]
+    T, N = cu_seqlens_list[-1], len(offsets)
+    q, k, v, raw_g = [
+        torch.randn(1, T, H, D, dtype=torch.bfloat16, device=DEVICE) for _ in range(4)
+    ]
+    raw_beta = torch.randn(1, T, H, dtype=torch.bfloat16, device=DEVICE)
+    A_log = torch.randn(H, dtype=torch.float32, device=DEVICE) * 0.5
+    dt_bias = torch.randn(H, D, dtype=torch.float32, device=DEVICE) * 0.1
+    initial_state = torch.randn(N, H, D, D, dtype=torch.float32, device=DEVICE)
+    cu_seqlens = torch.tensor(cu_seqlens_list, dtype=torch.int32, device=DEVICE)
+
+    def run(**checkpoint_kwargs):
+        return TRITON_CHECKPOINT_IMPLS[impl](
+            q=q,
+            k=k,
+            v=v.clone(),
+            raw_g=raw_g,
+            raw_beta=raw_beta,
+            A_log=A_log,
+            g_bias=dt_bias,
+            lower_bound=lower_bound,
+            initial_state=initial_state,
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+            cu_seqlens=cu_seqlens,
+            **checkpoint_kwargs,
+        )
+
+    out, final_state = run()
+    checkpoint_state = torch.full(
+        (N, H, D, D), float("nan"), dtype=state_dtype, device=DEVICE
+    )
+    checkpoint_out, checkpoint_final_state = run(
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=torch.tensor(offsets, dtype=torch.int32, device=DEVICE),
+    )
+    torch.testing.assert_close(checkpoint_out, out)
+    torch.testing.assert_close(checkpoint_final_state, final_state)
+    assert checkpoint_state[offsets.index(0)].isnan().all()
+
+    gate = _kda_gate(raw_g, A_log, dt_bias, lower_bound)
+    beta = raw_beta.float().sigmoid()
+    q_norm = l2norm_fwd(q.contiguous())
+    k_norm = l2norm_fwd(k.contiguous())
+    for i, offset in enumerate(offsets):
+        if offset == 0:
+            continue
+        tokens = slice(cu_seqlens_list[i], cu_seqlens_list[i] + offset)
+        _, expected = naive_recurrent_kda(
+            q_norm[:, tokens],
+            k_norm[:, tokens],
+            v[:, tokens],
+            gate[:, tokens],
+            beta[:, tokens],
+            initial_state=initial_state[i : i + 1].transpose(-1, -2),
+            output_final_state=True,
+        )
+        assert expected is not None
+        assert_close(
+            f"checkpoint{i}",
+            expected[0].transpose(-1, -2).to(state_dtype),
+            checkpoint_state[i],
+            0.005,
+        )

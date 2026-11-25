@@ -15,6 +15,12 @@ from vllm.model_executor.kernels.linear import (
     init_mxfp6_linear_kernel,
     init_mxfp8_linear_kernel,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    expose_input_quant_key,
+)
+from vllm.model_executor.layers.quantization.input_hadamard import (
+    InputHadamardFusable,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
@@ -44,7 +50,7 @@ from .quark_scheme import QuarkScheme
 logger = init_logger(__name__)
 
 
-class QuarkOCP_MX(QuarkScheme):
+class QuarkOCP_MX(QuarkScheme, InputHadamardFusable):
     ocp_mx_linear: MxFp6LinearKernel | MxFp4LinearKernel | Mxfp8LinearKernel
     supported_activation_quant_keys = [*_ACTIVATION_QUANT_KEY_MAP.values(), None]
     supported_weight_quant_keys = [*_WEIGHT_QUANT_KEY_MAP.values()]
@@ -127,8 +133,8 @@ class QuarkOCP_MX(QuarkScheme):
     def _expanding_scale_loader(self, weight_loader: Callable) -> Callable:
         """Expand a 2-D block scale to one row per weight row.
 
-        A ``block_size=[R, 32]`` export carries one e8m0 value per R weight
-        rows; the kernels want one per row. At ``R == 1`` the layouts already
+        A `block_size=[R, 32]` export carries one e8m0 value per R weight
+        rows; the kernels want one per row. At `R == 1` the layouts already
         coincide, so the loader is passed through untouched.
         """
         if self.scale_block_rows == 1:
@@ -149,8 +155,6 @@ class QuarkOCP_MX(QuarkScheme):
         return 70
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
-
         self.ocp_mx_linear.process_weights_after_loading(layer)
 
     def create_weights(
@@ -246,8 +250,11 @@ class QuarkOCP_MX(QuarkScheme):
             )
         elif self.weight_quant_key == kMxfp8Static:
             self.ocp_mx_linear = init_mxfp8_linear_kernel(
-                weight_shape=layer.weight.shape
+                weight_shape=layer.weight.shape,
+                activation_quant_key=self.activation_quant_key,
             )
+            if current_platform.is_rocm():
+                expose_input_quant_key(layer, self.ocp_mx_linear)
         else:
             raise NotImplementedError(
                 "No OCP MX linear kernel for weight_quant_key="
@@ -262,3 +269,8 @@ class QuarkOCP_MX(QuarkScheme):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.ocp_mx_linear.apply_weights(layer, x, bias)
+
+    def fuse_input_hadamard(self, layer: torch.nn.Module, size: int) -> bool:
+        if isinstance(self.ocp_mx_linear, MxFp4LinearKernel):
+            return self.ocp_mx_linear.fuse_input_hadamard(size)
+        return False

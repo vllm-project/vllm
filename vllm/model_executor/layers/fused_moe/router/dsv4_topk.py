@@ -12,6 +12,17 @@ _TOPK = 6
 # https://github.com/sgl-project/sglang/blob/main/python/sglang/jit_kernel/moe_fused_gate.py
 
 
+def dsv4_topk_platform_supported() -> bool:
+    """CUDA, and on ROCm only gfx950, the one ROCm arch it is validated on."""
+    if current_platform.is_cuda():
+        return True
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        return on_gfx950()
+    return False
+
+
 def can_use_dsv4_topk(
     gating_output: torch.Tensor,
     correction_bias: torch.Tensor | None,
@@ -20,7 +31,7 @@ def can_use_dsv4_topk(
     indices_dtype: torch.dtype,
 ) -> bool:
     return (
-        current_platform.is_cuda()
+        dsv4_topk_platform_supported()
         and gating_output.dtype == torch.float32
         and gating_output.ndim == 2
         and gating_output.shape[1] in (256, 384)
@@ -31,16 +42,17 @@ def can_use_dsv4_topk(
         and correction_bias.is_contiguous()
         and topk == _TOPK
         and renormalize
-        and indices_dtype in (torch.int32, torch.uint32, torch.int64)
+        and indices_dtype in (torch.int32, torch.int64)
     )
 
 
-if current_platform.is_cuda():
+if dsv4_topk_platform_supported():
 
     @triton.jit
     def _dsv4_topk_kernel(
         gating_output_ptr,
         correction_bias_ptr,
+        is_padding_ptr,
         topk_weights_ptr,
         topk_ids_ptr,
         routed_scaling_factor,
@@ -49,6 +61,7 @@ if current_platform.is_cuda():
         image_sentinel_lo,
         NUM_EXPERTS: tl.constexpr,
         BLOCK_N: tl.constexpr,
+        HAS_PADDING: tl.constexpr,
         HAS_VL: tl.constexpr,
         launch_pdl: tl.constexpr,
     ):
@@ -106,6 +119,11 @@ if current_platform.is_cuda():
         output_mask = topk_offsets < 6
         output_offsets = row * 6 + topk_offsets
 
+        if HAS_PADDING:
+            is_padding = tl.load(is_padding_ptr + row)
+            selected_weights = tl.where(is_padding, 0.0, selected_weights)
+            selected_ids = tl.where(is_padding, -1, selected_ids)
+
         if launch_pdl:
             tl.extra.cuda.gdc_launch_dependents()
 
@@ -118,11 +136,20 @@ def dsv4_topk(
     correction_bias: torch.Tensor,
     indices_dtype: torch.dtype,
     routed_scaling_factor: float,
+    is_padding: torch.Tensor | None = None,
     input_ids: torch.Tensor | None = None,
     bias_vl: torch.Tensor | None = None,
     image_sentinel_lo: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens, num_experts = gating_output.shape
+    if is_padding is not None:
+        assert is_padding.dtype == torch.bool
+        assert is_padding.shape == (num_tokens,)
+        assert is_padding.device == gating_output.device
+        assert is_padding.is_contiguous()
+        assert indices_dtype in (torch.int32, torch.int64), (
+            "Padding requires a signed indices dtype for the -1 sentinel."
+        )
     has_vl = bias_vl is not None and image_sentinel_lo > 0
     if bias_vl is not None:
         assert input_ids is not None, "bias_vl routing requires input_ids"
@@ -136,6 +163,7 @@ def dsv4_topk(
         _dsv4_topk_kernel[(num_tokens,)](
             gating_output,
             correction_bias,
+            is_padding,
             topk_weights,
             topk_ids,
             routed_scaling_factor,
@@ -144,6 +172,7 @@ def dsv4_topk(
             image_sentinel_lo,
             NUM_EXPERTS=num_experts,
             BLOCK_N=triton.next_power_of_2(num_experts),
+            HAS_PADDING=is_padding is not None,
             HAS_VL=has_vl,
             num_warps=1,
             launch_pdl=current_platform.is_arch_support_pdl(),

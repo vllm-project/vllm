@@ -204,7 +204,7 @@ def test_nvfp4_emulation_support_check_rejects_bias_and_lora(
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         activation=MoEActivation.SILU,
         in_dtype=torch.bfloat16,
-        device="cuda",
+        device=current_platform.device_type,
         routing_method=RoutingMethodType.TopK,
         **config_kwargs,
     )
@@ -864,3 +864,60 @@ def test_nvfp4_dense_emulation(
         torch.testing.assert_close(actual, saved, atol=0, rtol=0)
     assert torch.equal(layer.weight, original_weight)
     assert torch.equal(layer.weight_scale.view(torch.uint8), original_scale)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("invert_global_scales", [True, False])
+@pytest.mark.parametrize("experts_per_chunk", [1, 2, 3, 8])
+def test_dequantize_nvfp4_moe_weights_chunked_matches_full(
+    experts_per_chunk: int, invert_global_scales: bool, monkeypatch
+) -> None:
+    """Chunked dequantization must equal the single-chunk dequantization exactly.
+
+    5 experts cover one expert per chunk, a smaller last chunk (2, 3) and a
+    chunk larger than the number of experts (8).
+    """
+    set_random_seed(0)
+    device = torch.device(current_platform.device_type)
+    num_experts, hidden, inter, group = 5, 64, 32, 16
+
+    def packed(rows: int, cols: int) -> torch.Tensor:
+        return torch.randint(
+            0, 256, (num_experts, rows, cols // 2), dtype=torch.uint8, device=device
+        )
+
+    def block_scale(rows: int, cols: int) -> torch.Tensor:
+        scale = torch.rand(num_experts, rows, cols // group, device=device) * 4 + 0.5
+        return scale.to(torch.float8_e4m3fn)
+
+    w13_packed, w13_scale = packed(2 * inter, hidden), block_scale(2 * inter, hidden)
+    w2_packed, w2_scale = packed(hidden, inter), block_scale(hidden, inter)
+    w13_global = torch.rand(num_experts, 2, device=device) + 0.5
+    w2_global = torch.rand(num_experts, device=device) + 0.5
+
+    args = (w13_packed, w13_scale, w13_global, w2_packed, w2_scale, w2_global)
+    dtype = torch.float32
+    # The default chunk budget holds all experts at once.
+    ((_, expected_w13, expected_w2),) = (
+        nvfp4_emulation_utils.dequantize_nvfp4_moe_weights(
+            *args, dtype, invert_global_scales=invert_global_scales
+        )
+    )
+
+    expert_bytes = dtype.itemsize * 2 * (w13_packed[0].numel() + w2_packed[0].numel())
+    monkeypatch.setattr(
+        nvfp4_emulation_utils,
+        "_DEQUANT_CHUNK_BYTES",
+        experts_per_chunk * expert_bytes,
+    )
+    chunks = list(
+        nvfp4_emulation_utils.dequantize_nvfp4_moe_weights(
+            *args, dtype, invert_global_scales=invert_global_scales
+        )
+    )
+
+    expected_starts = list(range(0, num_experts, experts_per_chunk))
+    assert [c[0].start for c in chunks] == expected_starts
+    assert chunks[-1][0].stop == num_experts
+    assert torch.equal(torch.cat([c[1] for c in chunks]), expected_w13)
+    assert torch.equal(torch.cat([c[2] for c in chunks]), expected_w2)

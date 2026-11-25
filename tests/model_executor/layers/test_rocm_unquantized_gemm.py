@@ -17,6 +17,15 @@ if current_platform.is_cuda():
 from vllm.model_executor.layers import utils
 
 
+def _on_gfx11() -> bool:
+    """gfx11 check that is safe to evaluate at collection time on any platform."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx11
+
+    return on_gfx11()
+
+
 @pytest.mark.parametrize("m", [1, 128])
 def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch, m):
     x = torch.randn(1, 64, dtype=torch.float16)
@@ -145,6 +154,101 @@ def test_rocm_unquantized_gemm_rejects_unsupported_skinny_layouts(
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
 
 
+def _row_stride_padded(weight: torch.Tensor, pad: int) -> torch.Tensor:
+    """A weight whose row stride is offset by `pad` elements, as produced by
+    `maybe_pad_weight_avoid_cache_aliasing`."""
+    padded = torch.nn.functional.pad(weight, (0, pad))[..., :-pad]
+    assert padded.shape == weight.shape
+    assert padded.stride() == (weight.shape[1] + pad, 1)
+    return padded
+
+
+def test_rocm_unquantized_gemm_wvsplitk_accepts_row_stride_padded_weight(monkeypatch):
+    # wvSplitK reads the weight row stride, so a row-stride-padded weight must
+    # still reach it instead of falling back to torch.nn.functional.linear.
+    x = torch.randn(4, 1024, dtype=torch.float16)
+    weight = _row_stride_padded(torch.randn(128, 1024, dtype=torch.float16), 64)
+
+    monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
+    monkeypatch.setattr(utils.rocm_aiter_ops, "is_tgemm_enabled", lambda: False)
+    monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx11", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
+    monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
+
+    wvsplitk_mock = MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t())
+    monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+    ref = torch.nn.functional.linear(x, weight, None)
+
+    wvsplitk_mock.assert_called_once()
+    assert wvsplitk_mock.call_args.args[0].stride() == weight.stride()
+    assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize(
+    "k,element_size,expected",
+    [
+        (4096, 2, 64),  # 8192 B row stride, aliases
+        (12288, 2, 64),  # 24576 B row stride, aliases
+        (1024, 2, 64),  # smallest aliasing bf16/fp16 K
+        (2560, 2, 0),  # 5120 B, no aliasing
+        (11008, 2, 0),  # 22016 B, no aliasing
+        (2048, 1, 128),  # fp8: 2048 B, aliases, twice the pad
+        (512, 4, 32),  # fp32: 2048 B, aliases, half the pad
+    ],
+)
+def test_cache_aliasing_pad_elems(k, element_size, expected):
+    assert utils.cache_aliasing_pad_elems(k, element_size) == expected
+
+
+def test_maybe_pad_weight_avoid_cache_aliasing_skips_non_gfx11(monkeypatch):
+    # Padding is gfx11-only, even for a K whose row stride would alias there.
+    monkeypatch.setattr(utils.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx11", lambda: False)
+
+    weight = torch.randn(128, 4096, dtype=torch.bfloat16)
+    assert utils.maybe_pad_weight_avoid_cache_aliasing(weight) is weight
+
+
+def test_maybe_pad_weight_avoid_cache_aliasing(monkeypatch):
+    monkeypatch.setattr(utils.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx11", lambda: True)
+
+    weight = torch.randn(128, 4096, dtype=torch.bfloat16)
+    padded = utils.maybe_pad_weight_avoid_cache_aliasing(weight)
+
+    assert padded.shape == weight.shape
+    assert padded.stride() == (4096 + 64, 1)
+    assert torch.equal(padded, weight)
+    # Idempotent: the padded stride no longer aliases, so a second call is a no-op
+    # and preserves the pointer captured by any graph.
+    repadded = utils.maybe_pad_weight_avoid_cache_aliasing(padded)
+    assert repadded.data_ptr() == padded.data_ptr()
+
+
+@pytest.mark.parametrize(
+    "weight",
+    [
+        torch.randn(128, 2560, dtype=torch.bfloat16),  # no aliasing
+        torch.randn(2560, 128, dtype=torch.bfloat16).t(),  # not contiguous
+        torch.randn(2, 128, 4096, dtype=torch.bfloat16),  # not 2D
+    ],
+)
+def test_maybe_pad_weight_avoid_cache_aliasing_skips(monkeypatch, weight):
+    monkeypatch.setattr(utils.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx11", lambda: True)
+
+    assert (
+        utils.maybe_pad_weight_avoid_cache_aliasing(weight).data_ptr()
+        == weight.data_ptr()
+    )
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only kernel test")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_rocm_unquantized_gemm_noncontiguous_activation_real_kernel(monkeypatch, dtype):
@@ -164,17 +268,36 @@ def test_rocm_unquantized_gemm_noncontiguous_activation_real_kernel(monkeypatch,
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
 
 
-@pytest.mark.parametrize("m", [1, 128])
-def test_rocm_unquantized_gemm_gfx1x_n_gt_5_falls_back(monkeypatch, m):
-    # wvSplitK skinny GEMM handles n in [1, 5] (see PR #40687); n > 5 must
-    # fall back to torch.nn.functional.linear.
-    x = torch.randn(6, 64, dtype=torch.float16)
+@pytest.mark.skipif(
+    not _on_gfx11(), reason="cache-aliasing padding only applies on gfx11"
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_rocm_unquantized_gemm_padded_weight_real_kernel(monkeypatch, dtype):
+    x = torch.randn(4, 4096, device="cuda", dtype=dtype)
+    weight = _row_stride_padded(torch.randn(128, 4096, device="cuda", dtype=dtype), 64)
+
+    monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
+    original_wvsplitk = utils.ops.wvSplitK
+    wvsplitk_mock = MagicMock(side_effect=original_wvsplitk)
+    monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, None)
+    ref = torch.nn.functional.linear(x, weight, None)
+
+    wvsplitk_mock.assert_called_once()
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+
+
+def _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_rdna4, n, m):
+    x = torch.randn(n, 64, dtype=torch.float16)
     weight = torch.randn(m, 64, dtype=torch.float16)
 
     monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
+    monkeypatch.setattr(utils.rocm_aiter_ops, "is_tgemm_enabled", lambda: False)
     monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_rdna4", lambda: is_rdna4)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
     monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
@@ -183,10 +306,72 @@ def test_rocm_unquantized_gemm_gfx1x_n_gt_5_falls_back(monkeypatch, m):
     monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
     llmm1_mock = MagicMock(side_effect=lambda w, x_view, _: x_view @ w.t())
     monkeypatch.setattr(utils.ops, "LLMM1", llmm1_mock)
+    swmmac_mock = MagicMock(
+        side_effect=lambda x_view, w, _m, _cu_count, _bias: x_view @ w.t()
+    )
+    monkeypatch.setattr(utils.ops, "swmmac_gemm", swmmac_mock)
 
     out = utils.rocm_unquantized_gemm_impl(x, weight, None)
     ref = torch.nn.functional.linear(x, weight, None)
 
+    wvsplitk_mock.assert_not_called()
+    llmm1_mock.assert_not_called()
+    swmmac_mock.assert_not_called()
+    assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize("m", [1, 128])
+def test_rocm_unquantized_gemm_gfx1x_n_gt_5_falls_back(monkeypatch, m):
+    # wvSplitK skinny GEMM handles n in [1, 5] (see PR #40687); n > 5 must
+    # fall back to torch.nn.functional.linear.
+    _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_rdna4=False, n=6, m=m)
+
+
+@pytest.mark.parametrize("m", [1, 128])
+def test_rocm_unquantized_gemm_gfx120x_n_gt_8_falls_back(monkeypatch, m):
+    # SWMMAC skinny GEMM handles n in [5, 8] on gfx120x (see PR #45559);
+    # n > 8 must fall back to torch.nn.functional.linear.
+    _check_rocm_unquantized_gemm_falls_back(monkeypatch, is_rdna4=True, n=9, m=m)
+
+
+@pytest.mark.parametrize("noncontiguous_operand", ["weight", "bias"])
+def test_rocm_unquantized_gemm_gfx120x_swmmac_rejects_unsupported_layouts(
+    monkeypatch, noncontiguous_operand
+):
+    x = torch.randn(6, 64, dtype=torch.float16)
+    weight = torch.randn(128, 64, dtype=torch.float16)
+    bias = torch.randn(128, dtype=torch.float16)
+    if noncontiguous_operand == "weight":
+        weight = torch.randn(64, 128, dtype=torch.float16).t()
+        assert not weight.is_contiguous()
+    else:
+        bias = torch.randn(256, dtype=torch.float16)[::2]
+        assert not bias.is_contiguous()
+
+    monkeypatch.setattr(utils, "use_aiter_triton_gemm", lambda *args: False)
+    monkeypatch.setattr(utils.rocm_aiter_ops, "is_tgemm_enabled", lambda: False)
+    monkeypatch.setattr(utils.envs, "VLLM_ROCM_USE_SKINNY_GEMM", True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_rdna4", lambda: True)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx11", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx1250", lambda: False)
+    monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
+
+    swmmac_mock = MagicMock(
+        side_effect=lambda x_view, w, _m, _cu_count, _bias: x_view @ w.t()
+    )
+    monkeypatch.setattr(utils.ops, "swmmac_gemm", swmmac_mock)
+    wvsplitk_mock = MagicMock()
+    monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
+    llmm1_mock = MagicMock()
+    monkeypatch.setattr(utils.ops, "LLMM1", llmm1_mock)
+
+    out = utils.rocm_unquantized_gemm_impl(x, weight, bias)
+    ref = torch.nn.functional.linear(x, weight, bias)
+
+    swmmac_mock.assert_not_called()
     wvsplitk_mock.assert_not_called()
     llmm1_mock.assert_not_called()
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)

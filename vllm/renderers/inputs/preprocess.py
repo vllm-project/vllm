@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.config import ModelConfig
-    from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+    from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
 
 @overload

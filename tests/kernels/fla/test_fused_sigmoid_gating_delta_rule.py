@@ -19,8 +19,9 @@ DEVICE = current_platform.device_type
 @pytest.mark.parametrize("num_reqs", [1, 2, 4])
 @pytest.mark.parametrize("num_k_heads", [16])
 @pytest.mark.parametrize("num_v_heads", [32])
-@pytest.mark.parametrize("head_k_dim", [128])
-@pytest.mark.parametrize("head_v_dim", [128])
+@pytest.mark.parametrize(
+    "head_k_dim,head_v_dim,beta_scale", [(128, 128, 1.0), (96, 192, 2.0)]
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_fused_sigmoid_gating_delta_rule_update_non_spec(
     tp_size: int,
@@ -29,6 +30,7 @@ def test_fused_sigmoid_gating_delta_rule_update_non_spec(
     num_v_heads: int,
     head_k_dim: int,
     head_v_dim: int,
+    beta_scale: float,
     dtype: torch.dtype,
 ) -> None:
     torch.set_default_device(DEVICE)
@@ -61,12 +63,12 @@ def test_fused_sigmoid_gating_delta_rule_update_non_spec(
     # Entry 0 is reserved as NULL_BLOCK_ID (CUDA graph padding), so valid
     # state indices start at 1.
     ssm_state = torch.rand(
-        total_entries + 1, num_v_heads, head_k_dim, head_v_dim, dtype=dtype
+        total_entries + 1, num_v_heads, head_v_dim, head_k_dim, dtype=dtype
     )
     state_indices = (torch.randperm(total_entries, dtype=torch.int32) + 1)[:num_tokens]
     cu_seqlens = torch.arange(0, num_tokens + 1, dtype=torch.int32)
 
-    beta = b.sigmoid()
+    beta = b.float().sigmoid() * beta_scale
     g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)
     core_attn_out_ref, last_recurrent_state_ref = fused_recurrent_gated_delta_rule(
         q=query,
@@ -82,6 +84,7 @@ def test_fused_sigmoid_gating_delta_rule_update_non_spec(
     )
 
     core_attn_out, last_recurrent_state = fused_sigmoid_gating_delta_rule_update(
+        beta_scale=beta_scale,
         A_log=A_log,
         a=a,
         b=b,
@@ -106,8 +109,9 @@ def test_fused_sigmoid_gating_delta_rule_update_non_spec(
 @pytest.mark.parametrize("num_reqs", [1, 2, 4])
 @pytest.mark.parametrize("num_k_heads", [16])
 @pytest.mark.parametrize("num_v_heads", [32])
-@pytest.mark.parametrize("head_k_dim", [128])
-@pytest.mark.parametrize("head_v_dim", [128])
+@pytest.mark.parametrize(
+    "head_k_dim,head_v_dim,beta_scale", [(128, 128, 1.0), (96, 192, 2.0)]
+)
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_fused_sigmoid_gating_delta_rule_update_spec(
@@ -117,6 +121,7 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
     num_v_heads: int,
     head_k_dim: int,
     head_v_dim: int,
+    beta_scale: float,
     num_speculative_tokens: int,
     dtype: torch.dtype,
 ) -> None:
@@ -149,7 +154,7 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
     # Entry 0 is reserved as NULL_BLOCK_ID (CUDA graph padding), so valid
     # state indices start at 1.
     ssm_state = torch.rand(
-        total_entries + 1, num_v_heads, head_k_dim, head_v_dim, dtype=dtype
+        total_entries + 1, num_v_heads, head_v_dim, head_k_dim, dtype=dtype
     )
     state_indices = (torch.randperm(total_entries, dtype=torch.int32) + 1)[
         :num_tokens
@@ -161,7 +166,7 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
         0, num_tokens + 1, num_speculative_tokens + 1, dtype=torch.int32
     )
 
-    beta = b.sigmoid()
+    beta = b.float().sigmoid() * beta_scale
     g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)
     core_attn_out_ref, last_recurrent_state_ref = fused_recurrent_gated_delta_rule(
         q=query,
@@ -178,6 +183,7 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
     )
 
     core_attn_out, last_recurrent_state = fused_sigmoid_gating_delta_rule_update(
+        beta_scale=beta_scale,
         A_log=A_log,
         a=a,
         b=b,

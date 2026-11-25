@@ -19,6 +19,7 @@ from transformers.models.qwen2_vl import (
     Qwen2VLProcessor,
     Qwen2VLVideoProcessor,
 )
+from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessorKwargs
 
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -80,6 +81,11 @@ class OpenCUAProcessingInfo(Qwen2VLProcessingInfo):
 
 
 class OpenCUAProcessor(Qwen2VLProcessor):
+    @classmethod
+    def get_attributes(cls) -> list[str]:
+        # `__init__` builds the image and video processors from `vision_config`
+        return ["image_processor", "tokenizer", "video_processor"]
+
     def check_argument_for_proper_class(self, attribute_name: str, arg: object) -> None:
         if attribute_name == "tokenizer":
             return
@@ -124,9 +130,16 @@ class OpenCUAProcessor(Qwen2VLProcessor):
             if not isinstance(images, list):
                 images = [images]
             if len(images) > 0:
-                image_inputs = self.image_processor(
-                    images, return_tensors=return_tensors or "pt"
+                output_kwargs = self._merge_kwargs(
+                    Qwen2VLProcessorKwargs,
+                    tokenizer_init_kwargs=self.tokenizer.init_kwargs,
+                    **kwargs,
                 )
+                images_kwargs = {
+                    **output_kwargs["images_kwargs"],
+                    "return_tensors": return_tensors or "pt",
+                }
+                image_inputs = self.image_processor(images, **images_kwargs)
 
         combined_inputs = {**text_inputs, **image_inputs}
 
@@ -217,6 +230,7 @@ class OpenCUAForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
     )
 
     supports_encoder_tp_data = True
+    supports_mm_device_do_normalize = False
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

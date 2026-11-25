@@ -4,6 +4,7 @@
 
 # Added by the IBM Team, 2025
 from collections.abc import Iterable
+from itertools import islice
 
 import torch
 from torch import nn
@@ -42,16 +43,17 @@ from .interfaces import (
     HasInnerState,
     IsHybrid,
     SupportsLoRA,
-    SupportsMambaPrefixCaching,
     SupportsPP,
     SupportsQuant,
 )
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 
 
@@ -320,10 +322,6 @@ class GraniteMoeHybridAttention(nn.Module):
 
 
 ALL_DECODER_LAYER_TYPES = {
-    # Transformers < 5.13.0
-    "attention": GraniteMoeHybridAttentionDecoderLayer,
-    "mamba": GraniteMoeHybridMambaDecoderLayer,
-    # Transformers >= 5.13.0
     "full_attention": GraniteMoeHybridAttentionDecoderLayer,
     "linear_attention": GraniteMoeHybridMambaDecoderLayer,
 }
@@ -344,10 +342,17 @@ class GraniteMoeHybridModel(nn.Module):
 
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-        )
+        if (
+            get_pp_group().is_first_rank
+            or (config.tie_word_embeddings and get_pp_group().is_last_rank)
+            or spec_decode_needs_target_embed(vllm_config)
+        ):
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
         self.embedding_multiplier = config.embedding_multiplier
 
         def get_layer(prefix: str):
@@ -369,7 +374,10 @@ class GraniteMoeHybridModel(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        if get_pp_group().is_last_rank:
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -394,10 +402,7 @@ class GraniteMoeHybridModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        num_attn = 0
-        for i, layer in enumerate(self.layers):
-            if isinstance(layer, GraniteMoeHybridAttentionDecoderLayer):
-                num_attn += 1
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions=positions, hidden_states=hidden_states, residual=residual
             )
@@ -455,14 +460,12 @@ class GraniteMoeHybridModel(nn.Module):
             loaded_params.add(n)
 
         def _load_shard(n, p, shard_id):
-            # Skip layers on other devices.
-            if not is_pp_missing_parameter(n, self):
-                param = params_dict[n]
-                weight_loader = getattr(param, "weight_loader", None)
-                if not callable(weight_loader):
-                    raise TypeError(f"{n} requires a shard-aware weight loader")
-                weight_loader(param, p, shard_id)
-                loaded_params.add(n)
+            param = params_dict[n]
+            weight_loader = getattr(param, "weight_loader", None)
+            if not callable(weight_loader):
+                raise TypeError(f"{n} requires a shard-aware weight loader")
+            weight_loader(param, p, shard_id)
+            loaded_params.add(n)
 
         def _load_expert(n, p, name, shard_id, expert_id):
             if n not in params_dict:
@@ -486,10 +489,6 @@ class GraniteMoeHybridModel(nn.Module):
                     name_mapped, params_dict
                 )
 
-                # Skip layers on other devices.
-                if is_pp_missing_parameter(name_mapped, self):
-                    continue
-
                 param = params_dict[name_mapped]
                 weight_loader = param.weight_loader
                 success = False
@@ -509,6 +508,10 @@ class GraniteMoeHybridModel(nn.Module):
             return None
 
         for n, p in weights:
+            # Renames below keep the `layers.N.` prefix, so one check covers them.
+            if is_pp_missing_parameter(n, self):
+                continue
+
             if "A_log" in n:
                 n = n.replace("A_log", "A")
 
@@ -591,7 +594,6 @@ class GraniteMoeHybridForCausalLM(
     SupportsPP,
     IsHybrid,
     SupportsQuant,
-    SupportsMambaPrefixCaching,
 ):
     packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
@@ -647,6 +649,7 @@ class GraniteMoeHybridForCausalLM(
             head_dim=hf_config.mamba_d_head,
             state_size=hf_config.mamba_d_state,
             conv_kernel=hf_config.mamba_d_conv,
+            num_spec=vllm_config.num_speculative_tokens,
         )
 
     @classmethod
@@ -668,14 +671,17 @@ class GraniteMoeHybridForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=self.quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
-        if config.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+            if config.tie_word_embeddings:
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(
             config.vocab_size,
             config.vocab_size,

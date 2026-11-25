@@ -14,22 +14,22 @@ import torch
 from cutlass import BFloat16, Float32, Int64, const_expr
 from cutlass.cute.runtime import from_dlpack
 
-from .primitives import (
+from vllm.models.common.ops.moe_tail_fusion.primitives import (
     CUDAGraphCompatibleWrapper,
     bf16x2_to_u32,
     bf16x4_to_packed_u32x2,
     bf16x8_to_packed_u32x4,
     fma_f32_bf16,
-    sanitize_negative_zero,
     sanitize_negative_zero_u32,
     sanitize_negative_zero_u32x2,
+    sanitize_negative_zero_u32x4,
     store_global_u32,
     store_global_u32x2,
     store_global_u32x4,
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SkinnyConfig:
     block_size: int = 224
     outputs_per_block: int = 2
@@ -283,7 +283,7 @@ class FusedAddMulticastSkinnyGemm:
                         packed,
                     )
                 else:
-                    packed = sanitize_negative_zero(
+                    packed = sanitize_negative_zero_u32x4(
                         bf16x8_to_packed_u32x4(fused.load())
                     )
                     store_global_u32x4(

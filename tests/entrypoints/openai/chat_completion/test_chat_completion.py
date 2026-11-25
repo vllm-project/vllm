@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
+from vllm.tokenizers import get_tokenizer
 
 # any model with a chat template defined in tokenizer_config should work here
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -20,6 +21,7 @@ def default_server_args():
         "--max-num-seqs",
         "128",
         "--enforce-eager",
+        "--enable-per-request-metrics",
     ]
 
 
@@ -247,3 +249,104 @@ async def test_kv_transfer_prompt_token_ids_streaming(client: openai.AsyncOpenAI
     # streamed text-out, reconstructed from deltas, with generated token ids.
     assert content
     assert delta_token_ids
+
+
+@pytest.mark.asyncio
+async def test_kv_transfer_prompt_token_ids_return_prompt_text(
+    client: openai.AsyncOpenAI,
+):
+    """`return_prompt_text` returns the rendered prompt, so the ids are
+    ignored and `messages` is rendered."""
+    baseline = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=TOKEN_IN_MESSAGES,
+        max_completion_tokens=1,
+        extra_body={"return_token_ids": True, "return_prompt_text": True},
+    )
+    assert baseline.model_extra["prompt_text"]
+
+    decode = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=TOKEN_IN_MESSAGES,
+        max_completion_tokens=1,
+        extra_body={
+            "kv_transfer_params": {"prompt_token_ids": baseline.prompt_token_ids},
+            "return_prompt_text": True,
+        },
+    )
+    assert decode.model_extra["prompt_text"] == baseline.model_extra["prompt_text"]
+
+
+def _assert_complete_timing_metrics(metrics: object) -> None:
+    assert isinstance(metrics, dict)
+    timing_fields = {
+        "time_to_first_token_ms",
+        "generation_time_ms",
+        "queue_time_ms",
+        "mean_itl_ms",
+        "tokens_per_second",
+    }
+    assert timing_fields <= metrics.keys()
+    assert all(metrics[field] >= 0 for field in timing_fields)
+
+
+@pytest.mark.asyncio
+async def test_per_request_metrics_non_streaming(client: openai.AsyncOpenAI):
+    response = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Count to four."}],
+        max_completion_tokens=4,
+        temperature=0,
+        extra_body={"min_tokens": 4},
+    )
+
+    metrics = response.model_extra.get("metrics")
+    _assert_complete_timing_metrics(metrics)
+    assert metrics["time_to_first_content_token_ms"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty_content", [False, True])
+async def test_per_request_metrics_on_final_usage_chunk(
+    client: openai.AsyncOpenAI, empty_content: bool
+):
+    stream = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Say hello."}],
+        max_completion_tokens=1,
+        temperature=0,
+        stream=True,
+        stream_options={"include_usage": True},
+        extra_body=(
+            {"allowed_token_ids": [get_tokenizer(MODEL_NAME).eos_token_id]}
+            if empty_content
+            else {"min_tokens": 1}
+        ),
+    )
+
+    chunks = [chunk async for chunk in stream]
+    assert len(chunks) > 1
+    for chunk in chunks[:-1]:
+        assert chunk.usage is None
+        assert "metrics" not in (chunk.model_extra or {})
+
+    usage_chunk = chunks[-1]
+    assert usage_chunk.usage is not None
+    assert usage_chunk.choices == []
+    metrics = (usage_chunk.model_extra or {}).get("metrics")
+    assert isinstance(metrics, dict)
+    assert metrics["time_to_first_token_ms"] >= 0
+    if empty_content:
+        assert not any(
+            chunk.choices and chunk.choices[0].delta.content for chunk in chunks
+        )
+        assert metrics.get("time_to_first_content_token_ms") is None
+    else:
+        assert (
+            metrics["time_to_first_content_token_ms"]
+            == metrics["time_to_first_token_ms"]
+        )
+    assert metrics["generation_time_ms"] >= 0
+    assert metrics["queue_time_ms"] >= 0
+    assert metrics["tokens_per_second"] >= 0
+    assert "mean_itl_ms" not in metrics

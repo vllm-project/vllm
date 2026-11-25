@@ -5,6 +5,7 @@
 
 pub mod output_grammar;
 pub mod reasoning;
+pub(crate) mod schema;
 pub mod tool;
 pub mod unified;
 pub(crate) mod utils;

@@ -26,6 +26,8 @@ def scaled_mm_kernel(
     scale_b_ptr,
     c_ptr,
     bias_ptr,
+    azp_adj_ptr,
+    azp_ptr,
     M,
     N,
     K,
@@ -136,6 +138,17 @@ def scaled_mm_kernel(
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
+    # Asymmetric int8: subtract the zero-point term while the accumulator is
+    # still exact int32, giving A_q @ B_q - azp * azp_adj. Without a per-token
+    # azp, azp_adj already has the per-tensor azp folded in.
+    if azp_adj_ptr is not None:
+        azp_adj = tl.load(azp_adj_ptr + offsets_bn, mask=masks_bn, other=0)
+        if azp_ptr is not None:
+            azp = tl.load(azp_ptr + offsets_am, mask=masks_am, other=0)
+            accumulator -= azp[:, None] * azp_adj[None, :]
+        else:
+            accumulator -= azp_adj[None, :]
+
     # Apply scale at end.
     masks_scale_a = masks_scale_am[:, None] & (tl.arange(0, 1) < 1)[:, None]
     scale_a = tl.load(scale_a_ptrs[:, None], masks_scale_a)
@@ -150,16 +163,16 @@ def scaled_mm_kernel(
     scale_b = scale_b.broadcast_to((BLOCK_SIZE_N, 1))
     accumulator = scale_b.T * accumulator.to(tl.float32)
 
-    # Convert to output format.
-    c = accumulator.to(c_ptr.type.element_ty)
-
-    # Add bias, it's already in output format, so add it after conversion.
+    # Add bias in accumulator dtype for less rounding error.
     if bias_ptr:
         offsets_bias = offsets_bn
         bias_ptrs = bias_ptr + offsets_bias
         bias_mask = offsets_bias < N
         bias = tl.load(bias_ptrs, bias_mask)
-        c += bias
+        accumulator += bias
+
+    # Convert to output format.
+    c = accumulator.to(c_ptr.type.element_ty)
 
     # Save output
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
@@ -174,6 +187,8 @@ def scaled_mm_kernel(
 
 # input   - [M, K]
 # weight - [K, N]
+# azp_adj - [1, N] int32 weight column sums (azp folded in when azp is None)
+# azp     - [M, 1] int32 per-token zero points, or None
 def triton_scaled_mm(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -186,6 +201,8 @@ def triton_scaled_mm(
     block_size_k: int = 32,
     use_heuristic=True,
     use_td: bool | None = None,
+    azp_adj: torch.Tensor | None = None,
+    azp: torch.Tensor | None = None,
 ) -> torch.Tensor:
     M, K = input.shape
     N = weight.shape[1]
@@ -193,6 +210,8 @@ def triton_scaled_mm(
     assert N > 0 and K > 0 and M > 0
     assert weight.shape[0] == K
     assert input.dtype == weight.dtype
+    assert azp_adj is None or (azp_adj.dtype == torch.int32 and azp_adj.numel() == N)
+    assert azp is None or (azp.dtype == torch.int32 and azp.numel() == M)
 
     scale_a = scale_a.reshape(-1, 1) if scale_a.dim() <= 1 else scale_a
     scale_b = scale_b.reshape(-1, 1) if scale_b.dim() <= 1 else scale_b
@@ -224,6 +243,8 @@ def triton_scaled_mm(
             tile_shape = (64, 128, 128)
         else:
             tile_shape = (128, 128, 128)
+    else:
+        tile_shape = (block_size_m, block_size_n, block_size_k)
 
     block_size_m, block_size_n, block_size_k = tile_shape
 
@@ -260,6 +281,8 @@ def triton_scaled_mm(
         scale_b,
         result,
         bias,
+        azp_adj,
+        azp,
         M,
         N,
         K,

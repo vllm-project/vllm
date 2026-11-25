@@ -4,14 +4,15 @@
 from __future__ import annotations
 
 import ast
+import copy
 import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TypedDict
+from urllib.parse import unquote
 
 import regex as re
 
 import vllm.envs as envs
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -23,6 +24,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
@@ -39,21 +41,21 @@ logger = init_logger(__name__)
 
 
 class ToolSchema(TypedDict):
-    """A tool as seen by this parser (built by the wrapper from ``request.tools``)."""
+    """A tool as seen by this parser (built by the wrapper from `request.tools`)."""
 
     name: str
     parameters: dict[str, Any] | None  # JSON Schema, or None
 
 
 class ToolCallDict(TypedDict):
-    """One extracted tool call. ``arguments`` is a JSON-encoded string."""
+    """One extracted tool call. `arguments` is a JSON-encoded string."""
 
     name: str
     arguments: str
 
 
 class ExtractResult(TypedDict):
-    """Return of ``extract_tool_calls`` (non-streaming)."""
+    """Return of `extract_tool_calls` (non-streaming)."""
 
     tools_called: bool
     content: str | None
@@ -63,8 +65,8 @@ class ExtractResult(TypedDict):
 class StreamToolCall(TypedDict):
     """One streaming tool-call delta.
 
-    ``new`` is True only on the chunk that first emits this tool's name -- the
-    wrapper mints an id + sets type on that chunk only. ``arguments`` is the
+    `new` is True only on the chunk that first emits this tool's name -- the
+    wrapper mints an id + sets type on that chunk only. `arguments` is the
     incremental JSON diff (or None).
     """
 
@@ -75,10 +77,10 @@ class StreamToolCall(TypedDict):
 
 
 class StreamDelta(TypedDict):
-    """Return of ``extract_tool_calls_streaming``.
+    """Return of `extract_tool_calls_streaming`.
 
     A single engine delta can carry content plus every tool call that was
-    drained from the buffer (batched decode), so ``tool_calls`` is not limited
+    drained from the buffer (batched decode), so `tool_calls` is not limited
     to one entry.
     """
 
@@ -95,12 +97,12 @@ def detect_token_suffix(tokenizer: TokenizerLike) -> str:
         tokenizer: Tokenizer of the served checkpoint.
 
     Returns:
-        The suffix including its leading colon (e.g. ``":6124c78e"``), or ``""``
+        The suffix including its leading colon (e.g. `":6124c78e"`), or `""`
         when the checkpoint uses unsuffixed tokens.
 
     Raises:
         RuntimeError: The tokenizer declares the structural tokens through
-            ``model_specific_special_tokens``, which transformers 5 no longer
+            `model_specific_special_tokens`, which transformers 5 no longer
             round-trips.
 
     """
@@ -157,6 +159,9 @@ _TYPE_ALIASES: dict[str, str] = {
 # which uses param_type.startswith("int"), startswith("uint"), etc.
 _INTEGER_PREFIXES: tuple[str, ...] = ("int", "uint", "long", "short", "unsigned")
 _NUMBER_PREFIXES: tuple[str, ...] = ("num", "float")
+_SCHEMA_TYPE_KEYS: tuple[str, ...] = ("type", "anyOf", "oneOf")
+_MAX_REF_HOPS = 3
+_MAX_ANCHOR_DEPTH = 8
 
 
 def _normalize_type(raw_type: str) -> str:
@@ -178,20 +183,184 @@ def _normalize_type(raw_type: str) -> str:
     return raw_type
 
 
+def _is_ref_type(schema: Any) -> bool:
+    """Return whether a schema expresses its type only through `$ref`."""
+    return (
+        isinstance(schema, dict)
+        and isinstance(schema.get("$ref"), str)
+        and not any(schema.get(key) for key in _SCHEMA_TYPE_KEYS)
+    )
+
+
+def _resolve_json_pointer(root_schema: Any, pointer: str) -> Any:
+    """Resolve a local JSON Pointer against the parameter schema."""
+    if pointer == "":
+        return root_schema
+    if not pointer.startswith("/"):
+        return None
+
+    target = root_schema
+    for raw_token in pointer[1:].split("/"):
+        token = unquote(raw_token).replace("~1", "/").replace("~0", "~")
+        if isinstance(target, dict):
+            if token not in target:
+                return None
+            target = target[token]
+        elif isinstance(target, list):
+            if not token.isdigit() or int(token) >= len(target):
+                return None
+            target = target[int(token)]
+        else:
+            return None
+    return target
+
+
+def _find_schema_anchor(
+    root_schema: Any,
+    anchor: str,
+) -> dict[str, Any] | None:
+    """Find a local JSON Schema anchor with bounded traversal."""
+    stack: list[tuple[Any, int]] = [(root_schema, 0)]
+    visited: set[int] = set()
+    while stack:
+        node, depth = stack.pop()
+        if depth > _MAX_ANCHOR_DEPTH or id(node) in visited:
+            continue
+        visited.add(id(node))
+        if isinstance(node, dict):
+            if node.get("$anchor") == anchor:
+                return node
+            children = list(node.values())
+        elif isinstance(node, list):
+            children = node
+        else:
+            continue
+        stack.extend((child, depth + 1) for child in children)
+    return None
+
+
+def _resolve_local_schema_ref(
+    root_schema: dict[str, Any],
+    ref: str,
+) -> dict[str, Any] | None:
+    """Resolve a same-document pointer, root reference, or anchor."""
+    base, separator, fragment = ref.partition("#")
+    # Never fetch external schema documents from the parsing path.
+    if not separator or base:
+        return None
+    if fragment == "" or fragment.startswith("/"):
+        target = _resolve_json_pointer(root_schema, fragment)
+    else:
+        target = _find_schema_anchor(root_schema, unquote(fragment))
+    return target if isinstance(target, dict) else None
+
+
+def _resolve_ref_type(
+    schema: dict[str, Any],
+    root_schema: dict[str, Any],
+    seen_refs: frozenset[str] = frozenset(),
+    ref_hops: int = 0,
+) -> dict[str, Any]:
+    """Resolve a reference to type information, without mutating the schema."""
+    ref = schema.get("$ref")
+    if not isinstance(ref, str):
+        return {}
+    if ref in seen_refs:
+        logger.warning_once(
+            "Cyclic JSON Schema $ref '%s'; treating it as untyped.", ref
+        )
+        return {}
+    if ref_hops >= _MAX_REF_HOPS:
+        logger.warning_once(
+            "JSON Schema $ref chain exceeded %d hops at '%s'; treating it as untyped.",
+            _MAX_REF_HOPS,
+            ref,
+        )
+        return {}
+
+    target = _resolve_local_schema_ref(root_schema, ref)
+    if target is None:
+        logger.warning_once(
+            "Could not resolve local JSON Schema $ref '%s'; treating it as untyped.",
+            ref,
+        )
+        return {}
+
+    type_schema = {
+        key: copy.deepcopy(target[key]) for key in _SCHEMA_TYPE_KEYS if target.get(key)
+    }
+    if type_schema:
+        return (
+            _resolve_union_ref_types(
+                type_schema, root_schema, seen_refs | {ref}, ref_hops + 1
+            )
+            or type_schema
+        )
+    if _is_ref_type(target):
+        return _resolve_ref_type(target, root_schema, seen_refs | {ref}, ref_hops + 1)
+    return {}
+
+
+def _resolve_union_ref_types(
+    schema: dict[str, Any],
+    root_schema: dict[str, Any],
+    seen_refs: frozenset[str] = frozenset(),
+    ref_hops: int = 0,
+) -> dict[str, Any] | None:
+    """Resolve reference-only branches of `anyOf` and `oneOf`."""
+    resolved_schema: dict[str, Any] | None = None
+    for union_key in ("anyOf", "oneOf"):
+        branches = schema.get(union_key)
+        if not isinstance(branches, list):
+            continue
+        if not any(_is_ref_type(branch) for branch in branches):
+            continue
+        if resolved_schema is None:
+            resolved_schema = copy.deepcopy(schema)
+        for index, branch in enumerate(resolved_schema[union_key]):
+            if not _is_ref_type(branch):
+                continue
+            resolved_branch = _resolve_ref_type(
+                branch, root_schema, seen_refs, ref_hops
+            )
+            if resolved_branch:
+                resolved_schema[union_key][index] = resolved_branch
+    return resolved_schema
+
+
 def _get_arg_schema(
     function_name: str,
     arg_key: str,
     tools: list[ToolSchema] | None,
 ) -> dict[str, Any]:
-    """Look up a specific argument's property schema from the tools list."""
+    """Look up an argument and resolve its local schema type references."""
     if tools is None:
         return {}
     for tool in tools:
-        if tool.get("name") == function_name:
-            parameters = tool.get("parameters")
-            if parameters is None:
-                return {}
-            return parameters.get("properties", {}).get(arg_key, {})
+        if tool.get("name") != function_name:
+            continue
+        parameters = tool.get("parameters")
+        if not isinstance(parameters, dict):
+            return {}
+        properties = parameters.get("properties")
+        if not isinstance(properties, dict):
+            return {}
+        arg_schema = properties.get(arg_key, {})
+        if not isinstance(arg_schema, dict):
+            return {}
+        try:
+            if _is_ref_type(arg_schema):
+                return _resolve_ref_type(arg_schema, parameters) or arg_schema
+            return _resolve_union_ref_types(arg_schema, parameters) or arg_schema
+        except Exception as exc:
+            logger.warning_once(
+                "Failed to resolve the schema type for argument '%s' (%s: %s); "
+                "treating it as untyped.",
+                arg_key,
+                type(exc).__name__,
+                exc,
+            )
+            return {}
     logger.warning_once("No tool named '%s'.", function_name)
     return {}
 
@@ -199,11 +368,10 @@ def _get_arg_schema(
 def _get_schema_options(arg_schema: dict[str, Any]) -> list[dict[str, Any]]:
     """Normalize any property schema into a list of sub-schemas.
     - has type (single type) → return [arg_schema]
-    - anyOf  → return the anyOf list
-    - oneOf  → return the oneOf list
+    - anyOf / oneOf → recursively expand union branches
     - fallback → [{"type": "string"}]
 
-    Note: single ``type`` has the highest priority.
+    Note: single `type` has the highest priority.
     """
     if "type" in arg_schema:
         type_val = arg_schema["type"]
@@ -215,10 +383,14 @@ def _get_schema_options(arg_schema: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(type_val, list):
             return [{"type": t} for t in type_val]
         return [arg_schema]
-    if "anyOf" in arg_schema:
-        return arg_schema["anyOf"]
-    if "oneOf" in arg_schema:
-        return arg_schema["oneOf"]
+    for union_key in ("anyOf", "oneOf"):
+        if union_key in arg_schema:
+            # A resolved reference may itself expose a union or type array.
+            return [
+                option
+                for branch in arg_schema[union_key]
+                for option in _get_schema_options(branch)
+            ]
 
     return [{"type": "string"}]
 
@@ -229,19 +401,25 @@ def _get_types(arg_schema: dict[str, Any]) -> set[str]:
     return {_normalize_type(s.get("type", "string")) for s in schemas} - {"null"}
 
 
+def _allows_null(arg_schema: dict[str, Any]) -> bool:
+    """Return whether the property schema admits a null value."""
+    return any(
+        _normalize_type(schema.get("type", "string")) == "null"
+        for schema in _get_schema_options(arg_schema)
+    )
+
+
 def _is_only_string_type(
     function_name: str,
     arg_key: str,
     tools: list[ToolSchema] | None,
 ) -> bool:
-    """Return True if the parameter's type set is exactly {"string"}.
+    """Stream partial values only for non-nullable pure strings.
 
-    Only pure string types get partial value streaming; compound types like
-    anyOf(string | array) do not, since the partial value might end up being a
-    JSON array or object.
+    A quoted prefix cannot grow into an unquoted null, array, or object.
     """
-    types = _get_types(_get_arg_schema(function_name, arg_key, tools))
-    return types == {"string"}
+    arg_schema = _get_arg_schema(function_name, arg_key, tools)
+    return _get_types(arg_schema) == {"string"} and not _allows_null(arg_schema)
 
 
 def _try_parse_bool(value: str) -> bool | None:
@@ -301,10 +479,13 @@ def _parse_value(
     """Unified argument value parser with anyOf/oneOf support.
 
     Fallthrough chain:
-        bool → int → number(wildcard_number)
+        null → bool → int → number(wildcard_number)
         → json.loads for array/object → string → _deserialize
     """
-    types = _get_types(_get_arg_schema(function_name, arg_key, tools))
+    arg_schema = _get_arg_schema(function_name, arg_key, tools)
+    types = _get_types(arg_schema)
+    if value == "null" and _allows_null(arg_schema):
+        return None
 
     # 1. Try bool
     if "boolean" in types:
@@ -352,15 +533,17 @@ class HYV4ToolExtractor:
     delegated to the module-level utilities above.
 
     Streaming has two entry paths sharing one incremental argument parser,
-    selected by the ``guided`` flag of :meth:`extract_tool_calls_streaming`:
+    selected by the `guided` flag of `extract_tool_calls_streaming`:
     normal / auto tool choice detects markers on atomic token ids so ordinary
-    ``<`` in content is never withheld, while structural-tag guided decoding
+    `<` in content is never withheld, while structural-tag guided decoding
     detects them on the string level because the grammar may split a marker
     across sub-word tokens.
     """
 
     def __init__(self, vocab: dict[str, int], token_suffix: str, strict: bool):
         self._strict = strict
+        self._guided_content_len = 0
+        self._bare_tool_call = False
 
         # Kept so the wrapper can build a matching structural tag for
         # constrained decoding without re-scanning the tokenizer vocab.
@@ -376,6 +559,8 @@ class HYV4ToolExtractor:
 
         # State fields for incremental argument streaming
         self._completed_args: dict = {}  # closed {key: parsed_value}
+        # Keep duplicate occurrences so streamed JSON prefixes remain stable.
+        self._completed_arg_pairs: list[tuple[str, Any]] = []
         self._current_arg_key: str | None = None  # key being collected
         self._current_arg_is_string: bool = False  # is current arg pure string?
         self._streamed_json_len: int = 0  # bytes of JSON already sent
@@ -532,43 +717,51 @@ class HYV4ToolExtractor:
         model_output: str,
         tools: list[ToolSchema] | None,
     ) -> ExtractResult:
-        # sanity check; avoid unnecessary processing
-        if self.tool_calls_start_token not in model_output:
+        start = model_output.find(self.tool_calls_start_token)
+        bare_start = model_output.find(self.tool_call_start_token)
+        bare_tool_call = bare_start != -1 and (start == -1 or bare_start < start)
+        parse_output = model_output
+        if bare_tool_call:
+            start = bare_start
+            # Recover only the outer envelope; validate the inner tags as usual.
+            parse_output = self.tool_calls_start_token + model_output[start:]
+            if self.tool_calls_end_token not in parse_output:
+                parse_output += self.tool_calls_end_token
+        elif start == -1:
             return ExtractResult(
                 tools_called=False, content=model_output, tool_calls=[]
             )
-        else:
-            try:
-                if self._strict:
-                    tool_calls = self._extract_tool_calls_strict(model_output, tools)
-                else:
-                    tool_calls = self._extract_tool_calls(model_output, tools)
-                if not tool_calls:
-                    raise ValueError("No valid tool calls extracted.")
 
-                s_index = model_output.find(self.tool_calls_start_token)
-                content = model_output[:s_index] if s_index != -1 else model_output
-                return ExtractResult(
-                    tools_called=True,
-                    content=content if content else None,
-                    tool_calls=tool_calls,
-                )
+        try:
+            if self._strict:
+                tool_calls = self._extract_tool_calls_strict(parse_output, tools)
+            else:
+                tool_calls = self._extract_tool_calls(parse_output, tools)
+            if not tool_calls:
+                raise ValueError("No valid tool calls extracted.")
 
-            except Exception:
-                logger.warning(
-                    "HYV4ToolExtractor detected malformed tool output; "
-                    "falling back to raw content."
-                )
-                return ExtractResult(
-                    tools_called=False,
-                    content=model_output,
-                    tool_calls=[],
-                )
+            content = model_output[:start]
+            return ExtractResult(
+                tools_called=True,
+                content=content if content else None,
+                tool_calls=tool_calls,
+            )
+        except Exception:
+            logger.warning(
+                "HYV4ToolExtractor detected malformed tool output; "
+                "falling back to raw content."
+            )
+            return ExtractResult(
+                tools_called=False,
+                content=model_output,
+                tool_calls=[],
+            )
 
     def _reset_streaming_tool_state(self):
         """Reset the streaming state for a single tool call."""
         self._streaming_tool_name = None
         self._completed_args = {}
+        self._completed_arg_pairs = []
         self._current_arg_key = None
         self._current_arg_is_string = False
         self._streamed_json_len = 0
@@ -588,11 +781,11 @@ class HYV4ToolExtractor:
         """Consume one engine delta and emit content / tool-call deltas.
 
         Two entry paths share the same incremental argument parser:
-        - ``guided=False`` (normal / auto tool choice): the structural markers
+        - `guided=False` (normal / auto tool choice): the structural markers
           arrive as atomic tokenizer tokens, so detection is done on token ids
-          and ordinary ``<`` in model content is never withheld.
-        - ``guided=True`` (structural-tag constrained decoding): the grammar
-          only constrains strings, so ``<tool_calls...>`` may be split across
+          and ordinary `<` in model content is never withheld.
+        - `guided=True` (structural-tag constrained decoding): the grammar
+          only constrains strings, so `<tool_calls...>` may be split across
           sub-word tokens and must be detected on the string level.
 
         Args:
@@ -615,41 +808,42 @@ class HYV4ToolExtractor:
         tool_calls: list[StreamToolCall] = []
 
         if guided:
-            # Guided path: a structural-tag grammar constrains strings, not
-            # token ids, so the atomic ``tool_calls_start_token_id`` never
-            # appears in the token stream and an id-based check would
-            # misclassify every tool delta as plain content.
+            # Structural-tag decoding may split either start marker across tokens.
             marker = self.tool_calls_start_token
             marker_pos = current_text.find(marker)
+            bare_pos = current_text.find(self.tool_call_start_token)
+            bare_tool_call = bare_pos != -1 and (
+                marker_pos == -1 or bare_pos < marker_pos
+            )
+            if bare_tool_call:
+                self._bare_tool_call = True
+                marker = self.tool_call_start_token
+                marker_pos = bare_pos
 
             if marker_pos == -1:
-                # Marker not seen yet. The tail of ``current_text`` might still
-                # be a partial prefix of the marker split across deltas; hold
-                # that tail back and only stream the safe portion as content.
-                safe_end = len(current_text) - partial_tag_overlap(current_text, marker)
-                # Emit only the newly-arrived, safe content (delta relative to
-                # what was previously streamed).
-                content = current_text[len(previous_text) : safe_end]
+                hold = max(
+                    partial_tag_overlap(current_text, start_marker)
+                    for start_marker in (
+                        self.tool_calls_start_token,
+                        self.tool_call_start_token,
+                    )
+                )
+                safe_end = len(current_text) - hold
+                # Release withheld text once it no longer matches a marker.
+                content = current_text[self._guided_content_len : safe_end]
+                self._guided_content_len = safe_end
                 return StreamDelta(
                     content=content if content else None,
                     tool_calls=[],
                 )
 
-            # Marker present. Stream any content that precedes it (only the
-            # part we have not already emitted), then buffer the tool payload.
-            #
-            # The payload is everything after the marker in the *full* text. We
-            # keep the buffer in sync with it by only appending the portion that
-            # arrived in this delta, mirroring the incremental ``+=`` semantics
-            # while remaining correct when the marker itself was split across
-            # sub-word tokens.
-            content_end = marker_pos
-            content = current_text[len(previous_text) : content_end]
-
-            payload_start = marker_pos + len(marker)
-            # How much of the payload had already been buffered before this
-            # delta.
+            content = current_text[self._guided_content_len : marker_pos]
+            self._guided_content_len = marker_pos
+            payload_start = marker_pos if bare_tool_call else marker_pos + len(marker)
             prev_payload_len = max(len(previous_text) - payload_start, 0)
+            if bare_tool_call and len(previous_text) < marker_pos + len(marker):
+                # Include the complete bare marker, not only its newest suffix.
+                prev_payload_len = 0
             new_payload = current_text[payload_start + prev_payload_len :]
             self._buffer += new_payload
 
@@ -660,10 +854,33 @@ class HYV4ToolExtractor:
             # structural markers as single tokenizer tokens. Pass ordinary
             # content through exactly as decoded, including comparison
             # operators such as ``<``.
-            if self.tool_calls_start_token_id not in current_token_ids:
+            if (
+                self.current_tool_id < 0
+                and self.tool_calls_start_token_id not in current_token_ids
+                and self.tool_call_start_token_id not in current_token_ids
+            ):
                 return StreamDelta(content=delta_text, tool_calls=[])
 
-            if self.tool_calls_start_token in delta_text:
+            if (
+                self.current_tool_id < 0
+                and self.tool_call_start_token_id not in previous_token_ids
+                and self.tool_call_start_token in delta_text
+            ):
+                outer_pos = current_text.find(self.tool_calls_start_token)
+                inner_pos = current_text.find(self.tool_call_start_token)
+                self._bare_tool_call = outer_pos == -1 or inner_pos < outer_pos
+
+            if self._bare_tool_call:
+                if self.tool_call_start_token_id not in previous_token_ids:
+                    before, marker, rest = delta_text.partition(
+                        self.tool_call_start_token
+                    )
+                    self._buffer += marker + rest
+                    if before:
+                        content_delta = before
+                else:
+                    self._buffer += delta_text
+            elif self.tool_calls_start_token in delta_text:
                 text_parts = delta_text.split(self.tool_calls_start_token)
                 self._buffer += text_parts[-1]
                 if text_parts[0]:
@@ -673,7 +890,8 @@ class HYV4ToolExtractor:
 
         # Encountered finish, extract valid arguments
         if (
-            current_text.find(self.tool_call_end_token + self.tool_calls_end_token)
+            not self._bare_tool_call
+            and current_text.find(self.tool_call_end_token + self.tool_calls_end_token)
             != -1
             and self._buffer.find(self.tool_call_end_token) == -1
         ):
@@ -700,8 +918,13 @@ class HYV4ToolExtractor:
             name_new = False
             pending_name: str | None = None
             if self._streaming_tool_name is None:
-                arg_idx = cur_text.find(self.arg_key_start_token, start_idx)
                 end_idx = cur_text.find(self.tool_call_end_token, start_idx)
+                # A later call's arguments must not delimit this call's name.
+                arg_idx = cur_text.find(
+                    self.arg_key_start_token,
+                    start_idx,
+                    end_idx if end_idx != -1 else len(cur_text),
+                )
                 if arg_idx == -1 and end_idx == -1:
                     # tool name not yet complete; keep buffering from
                     # tool_call_start
@@ -750,10 +973,17 @@ class HYV4ToolExtractor:
             # string argument; in that case the current tool name is still set
             # and the buffer has not been consumed, so continuing would spin on
             # the same buffer forever.
-            if self._streaming_tool_name is None and self._buffer.startswith(
-                self.tool_call_start_token
-            ):
-                continue
+            if self._streaming_tool_name is None:
+                if self._bare_tool_call:
+                    # Skip separators only after a call, never inside a value.
+                    self._buffer = self._buffer.lstrip()
+                    while self._buffer.startswith(
+                        (self.tool_calls_start_token, self.tool_calls_end_token)
+                    ):
+                        end = self._buffer.index(">") + 1
+                        self._buffer = self._buffer[end:].lstrip()
+                if self._buffer.startswith(self.tool_call_start_token):
+                    continue
             break
 
         if content_delta is not None or tool_calls:
@@ -785,11 +1015,11 @@ class HYV4ToolExtractor:
         Strategy:
         - Track completed args and emit each one as a JSON fragment.
         - For string-typed args, stream the value character-by-character.
-        - Withhold the closing ``}`` until ``</tool_call>`` is seen.
+        - Withhold the closing `}` until `</tool_call>` is seen.
 
         We build JSON manually via fragments rather than using json.dumps
         with a cursor, because json.dumps of partial-vs-full string values
-        produces incompatible prefixes (e.g. ``""}`` vs ``"Hello"}``).
+        produces incompatible prefixes (e.g. `""}` vs `"Hello"}`).
         """
         buf = self._buffer
         is_complete = self.tool_call_end_token in buf
@@ -804,12 +1034,13 @@ class HYV4ToolExtractor:
 
         # --- scan all fully closed kv pairs ---
         arg_pairs = self.func_args_regex.findall(args_text)
-        for key, value in arg_pairs:
-            key = key.strip()
-            if key not in self._completed_args:
-                self._completed_args[key] = _parse_value(
-                    value, self._streaming_tool_name or "", key, tools
-                )
+        for key, value in arg_pairs[len(self._completed_arg_pairs) :]:
+            # Property names are exact schema keys, including whitespace.
+            parsed_value = _parse_value(
+                value, self._streaming_tool_name or "", key, tools
+            )
+            self._completed_arg_pairs.append((key, parsed_value))
+            self._completed_args[key] = parsed_value
 
         # --- detect partial (unclosed) kv at the tail ---
         last_closed_end = 0
@@ -827,9 +1058,7 @@ class HYV4ToolExtractor:
                 ak_start + len(self.arg_key_start_token),
             )
             if ak_end != -1:
-                partial_key = tail[
-                    ak_start + len(self.arg_key_start_token) : ak_end
-                ].strip()
+                partial_key = tail[ak_start + len(self.arg_key_start_token) : ak_end]
                 self._current_arg_key = partial_key
                 self._current_arg_is_string = _is_only_string_type(
                     self._streaming_tool_name or "",
@@ -858,7 +1087,7 @@ class HYV4ToolExtractor:
         # We construct JSON manually so we can precisely control
         # what gets sent incrementally.
         snapshot_parts: list[str] = []
-        for k, v in self._completed_args.items():
+        for k, v in self._completed_arg_pairs:
             k_json = json.dumps(k, ensure_ascii=False)
             v_json = json.dumps(v, ensure_ascii=False)
             snapshot_parts.append(f"{k_json}: {v_json}")
@@ -880,9 +1109,17 @@ class HYV4ToolExtractor:
 
         if is_complete:
             # Tool call finished - send everything remaining.
-            # Build final snapshot with proper JSON (all values closed).
+            # Preserve duplicate occurrences; JSON consumers use the last value.
             final_args = dict(self._completed_args)
-            final_json = json.dumps(final_args, ensure_ascii=False)
+            final_json = (
+                "{"
+                + ", ".join(
+                    f"{json.dumps(k, ensure_ascii=False)}: "
+                    f"{json.dumps(v, ensure_ascii=False)}"
+                    for k, v in self._completed_arg_pairs
+                )
+                + "}"
+            )
             if self._streamed_json_len < len(final_json):
                 argument_diff = final_json[self._streamed_json_len :]
             self._streamed_json_len = len(final_json)
@@ -960,11 +1197,11 @@ def _tools_to_plain(tools) -> list[ToolSchema] | None:
 
 
 class HYV4ToolParser(ToolParser):
-    """vLLM adapter around :class:`HYV4ToolExtractor`.
+    """vLLM adapter around `HYV4ToolExtractor`.
 
     Converts the extractor's plain dicts to vLLM protocol objects, mints
-    tool-call ids, and mirrors ``prev_tool_call_arr`` /
-    ``streamed_args_for_tool`` so the serving layer sees live state.
+    tool-call ids, and mirrors `prev_tool_call_arr` /
+    `streamed_args_for_tool` so the serving layer sees live state.
     """
 
     # HYV4 emits its own <tool_calls>/<tool_call>/<arg_key>/<arg_value>
@@ -996,11 +1233,11 @@ class HYV4ToolParser(ToolParser):
     ) -> StructuralTag | None:
         """Build a structural tag matching HYV4's tool tokens.
 
-        Overridden only to pass the per-checkpoint ``token_suffix`` through to
+        Overridden only to pass the per-checkpoint `token_suffix` through to
         the builder; everything else follows the base implementation.
 
         Named (forced) tool choice is constrained with the same structural tag:
-        because ``supports_required_and_named`` is False, required *and* named
+        because `supports_required_and_named` is False, required *and* named
         requests are parsed by the HYV4 extractor, which only recognizes the HYV4
         structural tokens -- the default JSON guided-decoding path would make
         the model emit JSON the extractor silently drops.
@@ -1008,7 +1245,7 @@ class HYV4ToolParser(ToolParser):
         Args:
             request: The request being adjusted.
             reasoning: Whether the grammar also covers the reasoning phase.
-            strict_level: Server-side floor from ``--tool-strict-level``.
+            strict_level: Server-side floor from `--tool-strict-level`.
 
         Returns:
             The structural tag, or None when structural tagging does not apply.
@@ -1062,9 +1299,9 @@ class HYV4ToolParser(ToolParser):
     def _is_guided(request: ChatCompletionRequest) -> bool:
         """Whether a structural tag constrains this request's decoding.
 
-        ``get_structural_tag`` only applies to required / named tool choice and
+        `get_structural_tag` only applies to required / named tool choice and
         the serving layer records the result on the request. A structural tag
-        constrains strings rather than token ids, so the ``<tool_calls>`` marker
+        constrains strings rather than token ids, so the `<tool_calls>` marker
         can arrive split across sub-word tokens and must be detected on the
         string level.
 

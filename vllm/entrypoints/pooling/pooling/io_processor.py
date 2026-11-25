@@ -4,12 +4,11 @@ from collections.abc import Sequence
 from typing import Any
 
 from vllm import PoolingParams, PoolingRequestOutput
-from vllm.logger import init_logger
 from vllm.plugins.io_processors import get_io_processor
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 
 from ..base.io_processor import PoolingIOProcessor
-from ..typing import (
+from ..types import (
     AnyOfflineInputsContext,
     AnyRenderParam,
     EncodeCMPLRenderParams,
@@ -20,8 +19,6 @@ from ..typing import (
     RequestFactory,
 )
 from .protocol import IOProcessorRequest, IOProcessorResponse
-
-logger = init_logger(__name__)
 
 
 class UnsupportedCombinedTaskIOProcessor(PoolingIOProcessor):
@@ -84,7 +81,9 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
         ]
         num_requests = len(parsed_prompts)
 
-        tok_params = ctx.request.build_tok_params(self.model_config)
+        tok_params = ctx.request.build_tok_params(
+            self.model_config, self.renderer.default_cmpl_tok_params
+        )
 
         pooling_params = self.io_processor.merge_pooling_params()
         if pooling_params.task is None:
@@ -117,23 +116,7 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
             ctx.final_res_batch,
             request_id=ctx.request_id,
         )
-
-        if callable(
-            output_to_response := getattr(self.io_processor, "output_to_response", None)
-        ):
-            logger.warning_once(
-                "`IOProcessor.output_to_response` is deprecated. To ensure "
-                "consistency between offline and online APIs, "
-                "`IOProcessorResponse` will become a transparent wrapper "
-                "around output data from v0.19 onwards.",
-            )
-
-            if hasattr(output, "request_id") and output.request_id is None:
-                output.request_id = ctx.request_id  # type: ignore
-
-            ctx.response = output_to_response(output)  # type: ignore
-        else:
-            ctx.response = IOProcessorResponse(request_id=ctx.request_id, data=output)
+        ctx.response = IOProcessorResponse(request_id=ctx.request_id, data=output)
 
     #######################################
     # offline APIs

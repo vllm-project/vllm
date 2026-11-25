@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unified (prefill + decode) Triton attention kernel for TurboQuant.
 
-Structure is ported from ``vllm/v1/attention/ops/triton_unified_attention.py``
+Structure is ported from `vllm/v1/attention/ops/triton_unified_attention.py`
 (the AITER unified attention kernel already upstreamed into vLLM). Only the K
 and V load sites are replaced: instead of reading raw fp16 keys/values from
 two contiguous caches, this kernel reads TurboQuant-packed bytes from a single
@@ -10,16 +10,16 @@ combined cache and dequantizes on the fly inside the tile loop.
 
 Benefits over the v1/v2 decode-only kernels:
 
-1. GQA heads are stacked into ``BLOCK_M`` and the Q·K and P·V ops are proper
-   ``tl.dot`` tensor-core operations (MFMA on MI300X).
-2. The same kernel handles decode (``BLOCK_Q=1``) and prefill
-   (``BLOCK_Q>1``) -- no more Python per-request for-loop for continuation
+1. GQA heads are stacked into `BLOCK_M` and the Q·K and P·V ops are proper
+   `tl.dot` tensor-core operations (MFMA on MI300X).
+2. The same kernel handles decode (`BLOCK_Q=1`) and prefill
+   (`BLOCK_Q>1`) -- no more Python per-request for-loop for continuation
    chunks.
 3. Only the subset of features exercised by the current TQ paths is kept
    (causal, GQA). Sinks / softcap / ALiBi / sliding-window / qq-bias /
    mm-prefix are deferred to follow-ups.
 
-This is an opt-in v3 path behind ``VLLM_TQ_DECODE_V3``.
+This is an opt-in v3 path behind `VLLM_TQ_DECODE_V3`.
 """
 
 from __future__ import annotations
@@ -864,9 +864,9 @@ def _get_layout(D: int, mse_bits: int, value_quant_bits: int) -> dict[str, int]:
 
 
 def _get_pair_lut(centroids: torch.Tensor) -> torch.Tensor:
-    """Return a fresh pair-LUT for ``centroids`` on each call.
+    """Return a fresh pair-LUT for `centroids` on each call.
 
-    Previously cached by ``(data_ptr, device)`` — that key is unsafe
+    Previously cached by `(data_ptr, device)` — that key is unsafe
     because the CUDA allocator can reuse freed addresses for different
     centroid tensors, yielding a stale (wrong-values) LUT. The LUT is tiny
     (N*N*2 fp32, ~2KB at N=16) so unconditional rebuild is essentially
@@ -903,31 +903,31 @@ def triton_turboquant_unified_attention(
 ) -> torch.Tensor:
     """Launch unified TQ attention (v3).
 
-    ``query`` carries *raw* query vectors. For the MSE-key path the query
-    has to be rotated by ``PiT`` before it can be multiplied against the
-    (already-rotated) stored K. By default (``fuse_q_rot=True``) that
+    `query` carries *raw* query vectors. For the MSE-key path the query
+    has to be rotated by `PiT` before it can be multiplied against the
+    (already-rotated) stored K. By default (`fuse_q_rot=True`) that
     rotation is done inside the attention kernel prologue as a single
     small MFMA — no extra dispatch, no HBM round-trip. Setting
-    ``fuse_q_rot=False`` restores the original launcher path (fp32 rocBLAS
+    `fuse_q_rot=False` restores the original launcher path (fp32 rocBLAS
     GEMM + casts + .contiguous()), which is kept as an A/B toggle for
     bench harnesses; numerical results match the fused path to within a
     few ulp of fp32 round-off. The FP8-key path never rotates Q regardless
     of this flag.
 
-    ``tile_size`` defaults to ``32`` for prefill (``max_query_len > 1``) and
-    ``16`` for pure decode (``max_query_len == 1``). Callers may override.
+    `tile_size` defaults to `32` for prefill (`max_query_len > 1`) and
+    `16` for pure decode (`max_query_len == 1`). Callers may override.
 
     Dispatch rule:
-      * Prefill / chunked-prefill (any query block with ``BLOCK_Q > 1``) and
-        ``num_tokens > num_seqs``: 2D kernel (plenty of CTAs already).
-      * Pure decode with long KV: 3D split-KV kernel + ``reduce_segments``
+      * Prefill / chunked-prefill (any query block with `BLOCK_Q > 1`) and
+        `num_tokens > num_seqs`: 2D kernel (plenty of CTAs already).
+      * Pure decode with long KV: 3D split-KV kernel + `reduce_segments`
         for extra parallelism; this is the same pattern v2 uses.
-      * ``force_2d=True``: force the 2D path regardless (used by the
+      * `force_2d=True`: force the 2D path regardless (used by the
         apples-to-apples bench to isolate pure TQ dequant overhead).
 
-    ``num_kv_splits`` controls the 3D-split segment count (default ``16``).
+    `num_kv_splits` controls the 3D-split segment count (default `16`).
 
-    Returns ``output`` of shape ``[num_tokens, Hq, D]`` in ``query.dtype``.
+    Returns `output` of shape `[num_tokens, Hq, D]` in `query.dtype`.
     """
     assert query.dim() == 3, f"query must be [N, Hq, D], got {query.shape}"
     num_tokens, Hq, D = query.shape
@@ -1297,13 +1297,13 @@ def triton_turboquant_decode_attention_soa(
     max_num_kv_splits: int = 32,
     sinks: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Decode-only convenience wrapper around ``triton_turboquant_unified_attention``.
+    """Decode-only convenience wrapper around `triton_turboquant_unified_attention`.
 
-    Treats a rank-3 ``[B, Hq, D]`` query as one token per request (query_len = 1)
-    and synthesizes a ``query_start_loc`` of ``[0, 1, 2, ..., B]``.
-    ``max_num_kv_splits`` is forwarded to the unified launcher as the 3D
-    split-KV segment count (capped per-call against ``max_seq_len``).
-    ``sinks`` (optional ``[Hq]`` fp32) are forwarded to the kernel which
+    Treats a rank-3 `[B, Hq, D]` query as one token per request (query_len = 1)
+    and synthesizes a `query_start_loc` of `[0, 1, 2, ..., B]`.
+    `max_num_kv_splits` is forwarded to the unified launcher as the 3D
+    split-KV segment count (capped per-call against `max_seq_len`).
+    `sinks` (optional `[Hq]` fp32) are forwarded to the kernel which
     folds them into the softmax denominator via the init-time trick.
     """
     del mid_o_buf, lse_buf, buf_holder

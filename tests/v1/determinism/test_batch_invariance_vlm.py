@@ -9,12 +9,19 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
-from utils import _extract_step_logprobs, skip_if_not_cuda
+from utils import _extract_step_logprobs, skip_if_not_cuda_alike
 
 from vllm import LLM, SamplingParams
 from vllm.inputs import TextPrompt
+from vllm.platforms import current_platform
+from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+from vllm.v1.attention.ops.vit_attn_wrappers import vit_flash_attn_wrapper
 
 VLM_TEST_MODEL = os.getenv("VLLM_VLM_TEST_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
+skip_if_not_vision_fa3 = pytest.mark.skipif(
+    not current_platform.is_cuda() or get_flash_attn_version(head_size=64) != 3,
+    reason="Requires vision FlashAttention 3 on Hopper",
+)
 
 IMAGE_PROMPT = (
     "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
@@ -89,7 +96,53 @@ def _assert_batch_invariant(llm: LLM, inputs: list[TextPrompt], sampling) -> Non
         )
 
 
-@skip_if_not_cuda
+@skip_if_not_vision_fa3
+def test_vision_fa3_batch_invariance() -> None:
+    """Packing a shorter sequence must preserve the target's attention bits."""
+    target_len = 1024
+    packed_len = target_len + 256
+    rng = torch.Generator(device="cuda").manual_seed(1234)
+    qkv = [
+        torch.randn(
+            (1, packed_len, 16, 64), dtype=torch.bfloat16, device="cuda", generator=rng
+        )
+        for _ in range(3)
+    ]
+    max_seqlen = torch.tensor(target_len, dtype=torch.int32, device="cpu")
+
+    outputs = []
+    for offsets in ([0, target_len], [0, target_len, packed_len]):
+        q, k, v = (tensor[:, : offsets[-1]] for tensor in qkv)
+        outputs.append(
+            vit_flash_attn_wrapper(
+                q,
+                k,
+                v,
+                batch_size=1,
+                is_rocm_aiter=False,
+                fa_version=3,
+                cu_seqlens=torch.tensor(offsets, dtype=torch.int32, device="cuda"),
+                max_seqlen=max_seqlen,
+            )
+        )
+    solo, packed = outputs
+    torch.testing.assert_close(
+        solo.view(torch.int16), packed[:, :target_len].view(torch.int16), rtol=0, atol=0
+    )
+
+
+@skip_if_not_vision_fa3
+def test_vision_fa3_mixed_image_batch_invariance(monkeypatch: pytest.MonkeyPatch):
+    """A shorter image must preserve the larger image request's logprobs."""
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    inputs: list[TextPrompt] = [
+        {"prompt": IMAGE_PROMPT, "multi_modal_data": {"image": _make_image(seed, size)}}
+        for seed, size in [(42, 512), (256, 256)]
+    ]
+    _run_vlm_batch_invariance(inputs, "FLASH_ATTN", enforce_eager=True)
+
+
+@skip_if_not_cuda_alike
 @pytest.mark.parametrize("input_type", ["image", "video"])
 @pytest.mark.parametrize("mm_encoder_attn_backend", ["FLASH_ATTN", "TORCH_SDPA"])
 def test_vlm_batch_invariance_bs1_vs_bsN(
@@ -98,19 +151,24 @@ def test_vlm_batch_invariance_bs1_vs_bsN(
     monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
-    _run_vlm_batch_invariance(input_type, mm_encoder_attn_backend, enforce_eager=True)
+    _run_vlm_batch_invariance(
+        _make_inputs(input_type, num_reqs=4),
+        mm_encoder_attn_backend,
+        enforce_eager=True,
+    )
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 def test_vlm_batch_invariance_default_execution(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
-    _run_vlm_batch_invariance("image", "FLASH_ATTN", enforce_eager=False)
+    _run_vlm_batch_invariance(
+        _make_inputs("image", num_reqs=4), "FLASH_ATTN", enforce_eager=False
+    )
 
 
 def _run_vlm_batch_invariance(
-    input_type: str, mm_encoder_attn_backend: str, enforce_eager: bool
+    inputs: list[TextPrompt], mm_encoder_attn_backend: str, enforce_eager: bool
 ) -> None:
-    inputs = _make_inputs(input_type, num_reqs=4)
     sampling = SamplingParams(
         temperature=0.0,
         max_tokens=8,
@@ -126,7 +184,6 @@ def _run_vlm_batch_invariance(
         max_num_seqs=16,
         max_model_len=4096,
         max_num_batched_tokens=2048,
-        gpu_memory_utilization=0.85,
         enable_prefix_caching=False,
         mm_processor_cache_gb=0,
         mm_encoder_attn_backend=mm_encoder_attn_backend,

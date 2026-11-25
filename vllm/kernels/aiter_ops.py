@@ -7,7 +7,9 @@ from torch import Tensor
 from torch.library import Library
 
 from vllm import ir
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import direct_register_custom_op
 
 current_platform.import_kernels()
@@ -34,13 +36,30 @@ direct_register_aiter_op = functools.partial(
 AITER_SUPPORTED = is_aiter_found()
 """Most kernels in this file are supported if AITER is installed."""
 
+AITER_ROTARY_SUPPORTED = is_aiter_found_and_supported()
+"""AITER rotary kernels need a supported ROCm arch; enablement is by priority."""
+
+
+def aiter_rotary_supported_args(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> bool:
+    # AITER's Triton RoPE needs full rotary and a power-of-2 head size.
+    return (
+        cos_sin_cache.shape[-1] == head_size and next_power_of_2(head_size) == head_size
+    )
+
 
 def flatten_to_2d_is_free(x: Tensor) -> bool:
-    """Whether ``x.reshape(-1, x.shape[-1])`` is a view with unit-stride rows.
+    """Whether `x.reshape(-1, x.shape[-1])` is a view with unit-stride rows.
 
     The AITER norm kernels only take dense 2D inputs, so the wrappers below
-    flatten the leading dims with ``Tensor.reshape``, which silently falls back
-    to ``contiguous()`` when the flattened shape is not expressible with the
+    flatten the leading dims with `Tensor.reshape`, which silently falls back
+    to `contiguous()` when the flattened shape is not expressible with the
     existing strides, adding a whole-tensor device copy that costs more than
     the kernel saves. A strided last dim flattens without a copy but not into a
     dense buffer, so it is rejected too.
@@ -57,8 +76,8 @@ def flatten_to_2d_is_free(x: Tensor) -> bool:
     return True
 
 
-rms_no_var_16bit_only = (
-    lambda x, weight, epsilon, variance_size=None: variance_size is None
+rms_no_var_16bit_only = lambda x, weight, epsilon, variance_size=None: (
+    variance_size is None
     and x.dtype in (torch.float16, torch.bfloat16)
     and (weight is None or weight.dtype == x.dtype)
     and flatten_to_2d_is_free(x)
@@ -100,8 +119,8 @@ def _rms_norm_fake(x: Tensor, weight: Tensor, variance_epsilon: float) -> Tensor
 direct_register_aiter_op(
     op_name="rms_norm", op_func=_rms_norm_impl, fake_impl=_rms_norm_fake
 )
-rms_add_no_var_16bit_only = (
-    lambda x, x_residual, weight, epsilon, variance_size=None: variance_size is None
+rms_add_no_var_16bit_only = lambda x, x_residual, weight, epsilon, variance_size=None: (
+    variance_size is None
     and x.dtype in (torch.float16, torch.bfloat16)
     and (weight is None or weight.dtype == x.dtype)
     and flatten_to_2d_is_free(x)
@@ -136,6 +155,7 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
     residual: torch.Tensor,
     weight: torch.Tensor,
     variance_epsilon: float,
+    gemma_norm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter import rmsnorm2d_fwd_with_add
 
@@ -157,6 +177,7 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
         residual_out,  # residual output
         weight,
         variance_epsilon,
+        gemma_norm=gemma_norm,
     )
     return out.reshape(x_shape), residual_out.reshape(residual_shape)
 
@@ -166,6 +187,7 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
     residual: torch.Tensor,
     weight: torch.Tensor,
     variance_epsilon: float,
+    gemma_norm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     residual_out = torch.empty_like(residual)
     out = torch.empty_like(x)
@@ -177,3 +199,81 @@ direct_register_aiter_op(
     op_func=_rocm_aiter_rmsnorm2d_fwd_with_add_impl,
     fake_impl=_rocm_aiter_rmsnorm2d_fwd_with_add_fake,
 )
+
+
+def _rotary_embedding_impl(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> tuple[Tensor, Tensor]:
+    # Out-of-place, so lowering needs no defensive copies of query/key.
+    from aiter.ops.triton.rope.rope import rope_cached_thd_positions_2c_fwd
+
+    num_tokens = positions.numel()
+    cos, sin = cos_sin_cache.chunk(2, dim=-1)
+    query_out, key_out = rope_cached_thd_positions_2c_fwd(
+        query.view(num_tokens, -1, head_size),
+        key.view(num_tokens, -1, head_size),
+        cos,
+        sin,
+        positions.view(num_tokens),
+        0 if is_neox else 1,
+        reuse_freqs_front_part=True,
+        nope_first=False,
+    )
+    return query_out.view(query.shape), key_out.view(key.shape)
+
+
+def _rotary_embedding_fake(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> tuple[Tensor, Tensor]:
+    return torch.empty_like(query), torch.empty_like(key)
+
+
+direct_register_aiter_op(
+    op_name="rotary_embedding",
+    op_func=_rotary_embedding_impl,
+    fake_impl=_rotary_embedding_fake,
+)
+
+
+def rotary_embedding_functional(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> tuple[Tensor, Tensor]:
+    return torch.ops.vllm_aiter.rotary_embedding(
+        positions, query, key, head_size, cos_sin_cache, is_neox
+    )
+
+
+@ir.ops.rotary_embedding.register_impl(
+    "aiter",
+    supported=AITER_ROTARY_SUPPORTED,
+    supports_args=aiter_rotary_supported_args,
+    inplace=True,
+    functional_impl=rotary_embedding_functional,
+)
+def rotary_embedding(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    cos_sin_cache: Tensor,
+    is_neox: bool,
+) -> tuple[Tensor, Tensor]:
+    torch.ops.vllm.rocm_aiter_triton_rotary_embedding(
+        positions, query, key, head_size, cos_sin_cache, is_neox
+    )
+    return query, key

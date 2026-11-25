@@ -12,6 +12,7 @@ addressing it checks.
 import itertools
 import types
 
+import numpy as np
 import pytest
 import torch
 
@@ -22,6 +23,9 @@ if not current_platform.is_rocm():
 
 from vllm.config import CUDAGraphMode
 from vllm.models.deepseek_v41.amd.rocm import (
+    _compute_global_topk_ragged_indices_and_indptr_old,
+    _mxfp4_decode_row_lens,
+    _pack_topk_ragged_from_lens,
     rocm_mxfp4_indexer_k_store,
     rocm_mxfp4_indexer_q_quant,
 )
@@ -32,11 +36,13 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerPrefillChunkMetadata,
 )
 from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
+    DecodeRowShard,
     RocmMxfp4IndexerMetadata,
     native_decode,
     plan_gather_launches,
     plan_prefill_chunks,
 )
+from vllm.v1.attention.ops import rocm_aiter_mla_sparse
 from vllm.v1.attention.ops import rocm_paged_mxfp4_indexer as ops
 from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
@@ -173,7 +179,7 @@ def _scores(q, w, keys):
 
 
 def _assert_topk(row, scores, k):
-    """``row`` is a top-k of the entries of ``scores`` above -inf, up to the
+    """`row` is a top-k of the entries of `scores` above -inf, up to the
     fp32 reduce order."""
     valid = scores > float("-inf")
     want = min(k, int(valid.sum()))
@@ -201,12 +207,14 @@ def _block_maxima(scores):
 def _forward_context(monkeypatch, metadata):
     context = types.SimpleNamespace(
         attn_metadata={"indexer": metadata},
+        no_compile_layers={"indexer": types.SimpleNamespace(gather_shardq_topk=True)},
         cudagraph_runtime_mode=CUDAGraphMode.NONE,
     )
-    monkeypatch.setattr(ops, "get_forward_context", lambda: context)
+    for module in (ops, rocm_aiter_mla_sparse):
+        monkeypatch.setattr(module, "get_forward_context", lambda: context)
 
 
-def _decode_metadata(case, rows, ratio, query_lens):
+def _decode_metadata(case, rows, ratio, query_lens, world=1, rank=0):
     lens = torch.tensor([(p + 1) // ratio for _, p in rows], dtype=torch.int32)
     lens = lens.to(DEVICE)
     block_table = case.block_table[[req for req, _ in rows]].contiguous()
@@ -214,6 +222,11 @@ def _decode_metadata(case, rows, ratio, query_lens):
     next_n = max(query_lens)
     context_lens = (torch.tensor(case.seq_lens, dtype=torch.int32) // ratio).to(DEVICE)
     native = native_decode(lens, block_table, query_lens, next_n, context_lens)
+    unit = 1 if native is None else native.next_n
+    shard = DecodeRowShard.plan(len(rows), unit, world, rank, 2 * len(rows))
+    step_lens = lens
+    if shard is not None:
+        lens, block_table, native = shard.narrow(lens, block_table, native)
     schedule = torch.empty(
         ops.rocm_mxfp4_decode_schedule_words(HEADS, HEAD_DIM, entries, next_n),
         dtype=torch.int32,
@@ -229,17 +242,21 @@ def _decode_metadata(case, rows, ratio, query_lens):
         num_prefill_tokens=0,
         decode=types.SimpleNamespace(block_table=block_table, seq_lens=lens[:, None]),
         decode_row_lens=lens,
+        decode_step_row_lens=step_lens,
         decode_block_ends=(lens + CAND_BLOCK - 1) // CAND_BLOCK,
         decode_native=native,
         decode_schedule=ops.build_rocm_mxfp4_decode_schedule(
             lens, HEADS, HEAD_DIM, entries, schedule, MAX_LEN // ratio, native
         ),
+        decode_shard=shard,
     )
 
 
 def _prefill_metadata(
-    case, rows, ratio, chunk_bounds, query_start_loc, gather_rows, gather
+    case, rows, ratio, chunk_bounds, query_start_loc, gather_rows, gather, split=None
 ):
+    """`split`: (ShardQ split, this rank's token indices) when `rows` and
+    the bounds are a rank's tokens, numbered compactly."""
     chunks = []
     for req_lo, req_hi, t0, t1 in chunk_bounds:
         ends = torch.tensor(
@@ -253,9 +270,11 @@ def _prefill_metadata(
                 cu_seq_lens=torch.zeros(1, dtype=torch.int32, device=DEVICE),
                 token_to_seq=torch.zeros(1, dtype=torch.int32, device=DEVICE),
                 total_seq_lens=1,
+                max_seqlen_k=int(ends.max()),
                 token_start=t0,
                 token_end=t1,
                 num_reqs=req_hi - req_lo,
+                req_start=req_lo,
             )
         )
     seq_lens = torch.tensor(case.seq_lens)
@@ -278,7 +297,12 @@ def _prefill_metadata(
         num_decode_tokens=0,
         num_prefills=len(case.seq_lens),
         num_prefill_tokens=len(rows),
-        prefill=types.SimpleNamespace(chunks=chunks),
+        prefill=types.SimpleNamespace(
+            chunks=chunks,
+            shardq_split=split and split[0],
+            shardq_gather_indices=split and split[1],
+            shardq_rows=None,
+        ),
         prefill_plans=plans,
         gather_launches=plan_gather_launches(chunks, plans, gather_rows),
     )
@@ -317,17 +341,52 @@ def test_topk_matches_torch_on_both_kernels(rows, width, k):
         assert int((got == -1).sum()) == k - n
 
 
-def _run_layers(monkeypatch, case, rows, metadata):
+def _assert_packs_from_row_lens(out, md, block_table, block_size):
+    """The decode ragged top-k packed in one launch from the step's row bounds
+    equals the counted 4-launch path."""
+    n = md.num_decode_tokens
+    if n == 0:
+        return
+    args = (
+        torch.arange(n, dtype=torch.int32, device=DEVICE),
+        block_table,
+        block_size,
+        torch.ones(n, dtype=torch.bool, device=DEVICE),
+    )
+    row_lens = _mxfp4_decode_row_lens({"indexer": md}, "indexer")
+    got = _pack_topk_ragged_from_lens(out[:n], row_lens, *args)
+    assert got is not None
+    want = _compute_global_topk_ragged_indices_and_indptr_old(out[:n], *args)
+    nnz = int(want[1][-1])
+    assert torch.equal(got[1], want[1]) and torch.equal(got[2], want[2])
+    assert torch.equal(got[0][:nnz], want[0][:nnz])
+
+
+def _run_layers(
+    monkeypatch, case, rows, metadata, k=TOPK, pad=0, pool_blocks=POOL_BLOCKS
+):
     """Ratio-2 dense layer, the candidate source, and a consumer both ways;
     each checked against the torch reference."""
     num_rows = len(rows)
     q, q_scale, weights, q_ref = _queries(num_rows)
-    hidden = torch.empty(num_rows, 1, device=DEVICE)
+    hidden = torch.empty(num_rows + pad, 1, device=DEVICE)
 
     def topk_buffer():
-        return torch.full((num_rows + 2, TOPK), 7, dtype=torch.int32, device=DEVICE)
+        return torch.full((num_rows + pad + 2, k), 7, dtype=torch.int32, device=DEVICE)
 
-    _forward_context(monkeypatch, metadata(2))
+    def assert_tail(out):
+        assert bool((out[num_rows : num_rows + pad] == -1).all())
+        assert bool((out[num_rows + pad :] == 7).all())
+
+    def assert_packs_from_row_lens(out, md, ratio):
+        if md.decode is None:
+            return
+        _assert_packs_from_row_lens(
+            out, md, md.decode.block_table, case.cache[ratio].shape[1]
+        )
+
+    dense = metadata(2)
+    _forward_context(monkeypatch, dense)
     out = topk_buffer()
     ops.rocm_mxfp4_sparse_attn_indexer(
         hidden,
@@ -336,7 +395,7 @@ def _run_layers(monkeypatch, case, rows, metadata):
         q,
         q_scale,
         weights,
-        TOPK,
+        k,
         HEAD_DIM,
         MAX_LEN // 2,
         out,
@@ -345,11 +404,15 @@ def _run_layers(monkeypatch, case, rows, metadata):
     for i, (req, pos) in enumerate(rows):
         end = (pos + 1) // 2
         keys = case.keys(2, req, end)
-        _assert_topk(out[i], _scores(q_ref[i], weights[i], keys), TOPK)
+        _assert_topk(out[i], _scores(q_ref[i], weights[i], keys), k)
+    assert_tail(out)
+    assert_packs_from_row_lens(out, dense, 2)
 
     source = metadata(1)
     _forward_context(monkeypatch, source)
-    pool = torch.full((num_rows + 2, POOL_BLOCKS), 5, dtype=torch.int32, device=DEVICE)
+    pool = torch.full(
+        (num_rows + pad + 2, pool_blocks), 5, dtype=torch.int32, device=DEVICE
+    )
     out = topk_buffer()
     ops.rocm_mxfp4_sparse_attn_indexer(
         hidden,
@@ -358,7 +421,7 @@ def _run_layers(monkeypatch, case, rows, metadata):
         q,
         q_scale,
         weights,
-        TOPK,
+        k,
         HEAD_DIM,
         MAX_LEN,
         out,
@@ -370,12 +433,14 @@ def _run_layers(monkeypatch, case, rows, metadata):
     allowed = []
     for i, (req, pos) in enumerate(rows):
         scores = _scores(q_ref[i], weights[i], case.keys(1, req, pos + 1))
-        _assert_topk(out[i], scores, TOPK)
-        _assert_topk(pool[i], _block_maxima(scores), POOL_BLOCKS)
+        _assert_topk(out[i], scores, k)
+        _assert_topk(pool[i], _block_maxima(scores), pool_blocks)
         mask = torch.zeros_like(scores, dtype=torch.bool)
         for block in pool[i][pool[i] >= 0].tolist():
             mask[block * CAND_BLOCK : (block + 1) * CAND_BLOCK] = True
         allowed.append(torch.where(mask, scores, float("-inf")))
+    assert_tail(out)
+    assert_packs_from_row_lens(out, source, 1)
 
     pa = ops._aiter()
     build = pa.build_candidate_gather
@@ -401,17 +466,19 @@ def _run_layers(monkeypatch, case, rows, metadata):
                 q,
                 q_scale,
                 weights,
-                TOPK,
+                k,
                 HEAD_DIM,
                 MAX_LEN,
                 out,
                 1,
                 pool,
                 CAND_BLOCK,
-                POOL_BLOCKS * CAND_BLOCK,
+                pool_blocks * CAND_BLOCK,
             )
             for i in range(num_rows):
-                _assert_topk(out[i], allowed[i], TOPK)
+                _assert_topk(out[i], allowed[i], k)
+            assert_tail(out)
+            assert_packs_from_row_lens(out, consumer, 1)
         if gather:
             launches = len(consumer.gather_launches) + (consumer.decode is not None)
             assert len(builds) == launches
@@ -481,6 +548,43 @@ def test_prefill_layers_match_reference(
     )
 
 
+@pytest.mark.parametrize("k", [TOPK, 512, 1024])
+@pytest.mark.parametrize("step, pad", [("decode", 3), ("mixed", 0), ("mixed", 3)])
+def test_decode_rows_skip_the_fill_in_mixed_and_padded_steps(monkeypatch, step, pad, k):
+    set_random_seed(0)
+    dec_lens = [900, 1500, 610, 0]
+    pre_lens, new_tokens = ([760, 450], [60, 40]) if step == "mixed" else ([], [])
+    case = _Case(dec_lens + pre_lens, 128)
+    nd = len(dec_lens)
+    rows = [(req, n - 1 if n else -1) for req, n in enumerate(dec_lens)]
+    rows += [
+        (nd + r, n - q + i)
+        for r, (n, q) in enumerate(zip(pre_lens, new_tokens))
+        for i in range(q)
+    ]
+    query_start_loc = [
+        *range(nd + 1),
+        *(nd + t for t in itertools.accumulate(new_tokens)),
+    ]
+
+    def metadata(ratio, gather=True):
+        md = _decode_metadata(case, rows[:nd], ratio, [1] * nd)
+        md.num_decodes = nd
+        if pre_lens:
+            chunk = [(nd, len(case.seq_lens), nd, len(rows))]
+            pre = _prefill_metadata(
+                case, rows, ratio, chunk, query_start_loc, 1 << 20, gather
+            )
+            md.prefill, md.prefill_plans = pre.prefill, pre.prefill_plans
+            md.gather_launches = pre.gather_launches
+            md.num_prefills = len(pre_lens)
+            md.num_prefill_tokens = len(rows) - nd
+        return md
+
+    pool_blocks = max(POOL_BLOCKS, 2 * k // CAND_BLOCK)
+    _run_layers(monkeypatch, case, rows, metadata, k, pad, pool_blocks)
+
+
 def _rope_gptj(x, cos_sin, positions):
     """GPT-J RoPE on the last 64 dims, as the indexer rotates Q and K: bf16 in
     and out."""
@@ -526,7 +630,7 @@ def _topk_indices(q, weights, keys, ends, k):
 
 
 def _recall(selected, reference):
-    """Per row, the fraction of the reference top-k that ``selected`` picked."""
+    """Per row, the fraction of the reference top-k that `selected` picked."""
     return (selected[:, :, None] == reference[:, None, :]).any(1).float().mean(1)
 
 
@@ -597,3 +701,201 @@ def test_selection_from_bf16_matches_torch(monkeypatch, step, ratio, block):
         )
         agree.append(_recall(out[mine], ref))
     assert torch.cat(agree).mean().item() >= 0.99
+
+
+@pytest.mark.parametrize("world", [2, 4, 8])
+@pytest.mark.parametrize(
+    "query_lens",
+    [[7] * 8 + [0], [7] * 8 + [0] * 2, [7, 3, 5, 1, 6, 2, 4] * 5 + [0]],
+    ids=["below-gate", "native-padded", "flat-padded"],
+)
+def test_decode_row_shard_matches_replicated(monkeypatch, world, query_lens):
+    set_random_seed(0)
+    next_n = max(query_lens)
+    case = _Case([q and 24 + 211 * i % 1500 for i, q in enumerate(query_lens)], 128)
+    rows = [
+        (req, n - q + j if q else -1)
+        for req, (n, q) in enumerate(zip(case.seq_lens, query_lens))
+        for j in range(q or next_n)
+    ]
+    num_rows = len(rows)
+    q, q_scale, weights, _ = _queries(num_rows)
+    hidden = torch.empty(num_rows, 1, device=DEVICE)
+
+    def layers(tp, rank, pool):
+        def run(op, ratio, *args, **kwargs):
+            metadata = _decode_metadata(case, rows, ratio, query_lens, tp, rank)
+            metadata.decode_use_gather = True
+            _forward_context(monkeypatch, metadata)
+            out = torch.arange(2 * num_rows * TOPK, device=DEVICE).int().view(-1, TOPK)
+            op(
+                hidden,
+                "indexer",
+                case.cache[ratio],
+                q,
+                q_scale,
+                weights,
+                TOPK,
+                HEAD_DIM,
+                MAX_LEN // ratio,
+                out,
+                *args,
+                **kwargs,
+            )
+            return out
+
+        return [
+            run(ops.rocm_mxfp4_sparse_attn_indexer, 2, compress_ratio=2),
+            run(
+                ops.rocm_mxfp4_sparse_attn_indexer,
+                1,
+                compress_ratio=1,
+                candidate_blocks=pool,
+                candidate_block_size=CAND_BLOCK,
+                candidate_write=True,
+            ),
+            run(
+                ops.rocm_mxfp4_sparse_mqa_indexer,
+                1,
+                1,
+                pool,
+                CAND_BLOCK,
+                POOL_BLOCKS * CAND_BLOCK,
+            ),
+        ]
+
+    def sets(t):
+        return t.sort(dim=-1).values
+
+    pool = torch.empty(2 * num_rows, POOL_BLOCKS, dtype=torch.int32, device=DEVICE)
+    ref = layers(1, 0, pool)
+    shard = _decode_metadata(case, rows, 1, query_lens, world).decode_shard
+    assert (shard is not None) == (num_rows >= 64)
+    span = 0 if shard is None else shard.span
+    sent: list[list[torch.Tensor]] = [[] for _ in range(world)]
+    for exchange in (False, True):
+        gathered: list[torch.Tensor] = [torch.cat(layer) for layer in zip(*sent)]
+        for rank in range(world):
+            pending = iter(gathered)
+
+            def all_gather(local, dim, rank=rank, exchange=exchange, pending=pending):
+                local = local.view(torch.int32)
+                assert dim == 0 and local.shape == (span, TOPK)
+                if not exchange:
+                    sent[rank].append(local.clone())
+                    return local.new_zeros(world * span, TOPK).view(torch.float32)
+                out = next(pending).clone()
+                out[rank * span : (rank + 1) * span] = local
+                return out.view(torch.float32)
+
+            group = types.SimpleNamespace(all_gather=all_gather)
+            monkeypatch.setattr(ops, "get_tp_group", lambda group=group: group)
+            outs = layers(world, rank, torch.randint_like(pool, 0, 200))
+            assert len(sent[rank]) == (3 if shard else 0)
+            if exchange:
+                for got, want, ratio in zip(outs, ref, (2, 1, 1)):
+                    assert torch.equal(sets(got), sets(want))
+                    _assert_packs_from_row_lens(
+                        got,
+                        _decode_metadata(case, rows, ratio, query_lens, world, rank),
+                        case.block_table[[req for req, _ in rows]],
+                        case.cache[ratio].shape[1],
+                    )
+
+
+@pytest.mark.parametrize("world", [2, 4])
+@pytest.mark.parametrize("gather", [True, False], ids=["gather", "dense"])
+def test_prefill_shardq_split_matches_replicated(monkeypatch, world, gather):
+    """Each TP rank scores its ShardQ tokens: the ratio-2 layer, the candidate
+    source, and a consumer whose candidate rows of other ranks hold junk must
+    select what the replicated run selects for them, and the exchange puts
+    every row back in token order. Rows compare as sets: the top-k order
+    within a row depends on the batch shape."""
+    from vllm.v1.attention.ops.shardq import ShardQSplit, zigzag_split
+
+    set_random_seed(0)
+    # The first request is too short to reach every rank.
+    seq_lens, new_tokens = [1400, 900, 1600], [2, 500, 1600]
+    chunk_bounds = [(0, 2, 0, 502), (2, 3, 502, 1302), (2, 3, 1302, 2102)]
+    case = _Case(seq_lens, 128)
+    rows = [
+        (req, n - q + i)
+        for req, (n, q) in enumerate(zip(seq_lens, new_tokens))
+        for i in range(q)
+    ]
+    num_rows = len(rows)
+    query_start_loc = [0, *itertools.accumulate(new_tokens)]
+    q, q_scale, weights, _ = _queries(num_rows)
+    hidden = torch.empty(num_rows, 1, device=DEVICE)
+    token_ids, counts = zigzag_split(np.array(new_tokens), world)
+    split = ShardQSplit(0, token_ids, counts)
+
+    def layers(tokens, pool):
+        """The three layers over `tokens` (all rows when None)."""
+        meta_rows, bounds, qsl, shardq = rows, chunk_bounds, query_start_loc, None
+        if tokens is not None:
+            meta_rows = [rows[t] for t in tokens]
+            compact = np.searchsorted(tokens, [b[2:] for b in chunk_bounds])
+            bounds = [
+                (lo, hi, t0, t1)
+                for (lo, hi, _, _), (t0, t1) in zip(chunk_bounds, compact)
+                if t1 > t0
+            ]
+            qsl = np.searchsorted(tokens, query_start_loc).tolist()
+            shardq = (split, torch.from_numpy(tokens).to(DEVICE))
+
+        def run(op, ratio, *args, **kwargs):
+            metadata = _prefill_metadata(
+                case, meta_rows, ratio, bounds, qsl, 128, gather, shardq
+            )
+            _forward_context(monkeypatch, metadata)
+            out = torch.full((num_rows, TOPK), 7, dtype=torch.int32, device=DEVICE)
+            op(hidden, "indexer", case.cache[ratio], q, q_scale, weights, TOPK,
+               HEAD_DIM, MAX_LEN // ratio, out, *args, **kwargs)  # fmt: skip
+            return out
+
+        return (
+            run(ops.rocm_mxfp4_sparse_attn_indexer, 2, compress_ratio=2),
+            run(
+                ops.rocm_mxfp4_sparse_attn_indexer,
+                1,
+                compress_ratio=1,
+                candidate_blocks=pool,
+                candidate_block_size=CAND_BLOCK,
+                candidate_write=True,
+            ),
+            run(
+                ops.rocm_mxfp4_sparse_mqa_indexer,
+                1,
+                1,
+                pool,
+                CAND_BLOCK,
+                POOL_BLOCKS * CAND_BLOCK,
+            ),
+        )
+
+    def sets(t):
+        return t.sort(dim=-1).values
+
+    ref_pool = torch.empty(num_rows, POOL_BLOCKS, dtype=torch.int32, device=DEVICE)
+    ref = layers(None, ref_pool)
+    for rank in range(world):
+        start = counts[:rank].sum()
+        tokens = token_ids[start : start + counts[rank]]
+        mine = torch.from_numpy(tokens).to(DEVICE)
+        gathered: list[torch.Tensor] = []
+
+        def all_gatherv(local, dim, sizes, gathered=gathered):
+            gathered.append(local.clone())
+            # The other ranks' rows, so the exchange can be checked whole.
+            return ref[len(gathered) - 1][torch.from_numpy(token_ids).to(DEVICE)]
+
+        group = types.SimpleNamespace(rank_in_group=rank, all_gatherv=all_gatherv)
+        monkeypatch.setattr(rocm_aiter_mla_sparse, "get_tp_group", lambda g=group: g)
+        pool = torch.randint(0, 200, ref_pool.shape, dtype=torch.int32, device=DEVICE)
+        outs = layers(tokens, pool)
+        assert len(gathered) == 3
+        for local, out, want in zip(gathered, outs, ref):
+            assert torch.equal(sets(local), sets(want[mine]))
+            assert torch.equal(sets(out), sets(want))
+        assert torch.equal(sets(pool[: len(tokens)]), sets(ref_pool[mine]))

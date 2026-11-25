@@ -6,13 +6,108 @@ from unittest.mock import Mock
 
 import huggingface_hub.constants
 import pytest
+import torch
 from huggingface_hub.utils import LocalEntryNotFoundError
 
+import vllm.model_executor.model_loader.weight_utils as weight_utils
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     drop_checkpoint_cache,
+    initialize_single_dummy_weight,
+    load_attention_sink,
     maybe_remap_kv_scale_name,
 )
+from vllm.platforms import current_platform
+
+
+@pytest.mark.parametrize(
+    "checkpoint_heads,runtime_heads,tp_size",
+    [(8, 4, 2), (8, 8, 1), (8, 6, 2), (16, 12, 4)],
+)
+def test_attention_sink_loader_shapes(
+    monkeypatch, checkpoint_heads, runtime_heads, tp_size
+):
+    """Each rank loads its checkpoint heads and disables only padded heads."""
+    monkeypatch.setattr(
+        weight_utils, "get_tensor_model_parallel_world_size", lambda: tp_size
+    )
+    checkpoint = torch.arange(checkpoint_heads, dtype=torch.float32)
+    for tp_rank in range(tp_size):
+        monkeypatch.setattr(
+            weight_utils, "get_tensor_model_parallel_rank", lambda rank=tp_rank: rank
+        )
+        param = torch.nn.Parameter(torch.zeros(runtime_heads), requires_grad=False)
+        load_attention_sink(param, checkpoint)
+        local_heads = checkpoint.chunk(tp_size)[tp_rank]
+        expected = torch.cat(
+            (
+                local_heads,
+                torch.full((runtime_heads - local_heads.numel(),), -torch.inf),
+            )
+        )
+        assert torch.equal(param, expected)
+
+
+@pytest.mark.parametrize(
+    "checkpoint_shape,runtime_shape,error",
+    [
+        ((2, 4), (4,), RuntimeError),
+        ((8,), (2, 2), AssertionError),
+        ((7,), (4,), ValueError),
+        ((8,), (3,), AssertionError),
+    ],
+)
+def test_attention_sink_loader_rejects_invalid_shapes(
+    monkeypatch, checkpoint_shape, runtime_shape, error
+):
+    """Invalid sink shapes fail before changing the runtime parameter."""
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_rank", lambda: 0)
+    param = torch.nn.Parameter(torch.ones(runtime_shape), requires_grad=False)
+    with pytest.raises(error):
+        load_attention_sink(param, torch.zeros(checkpoint_shape))
+    assert torch.equal(param, torch.ones(runtime_shape))
+
+
+@pytest.mark.parametrize("param_dtype", [torch.bfloat16, torch.float32])
+def test_attention_sink_loader_keeps_param_dtype(monkeypatch, param_dtype):
+    """A checkpoint dtype different from the runtime parameter is cast, not copied."""
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_rank", lambda: 0)
+    param = torch.nn.Parameter(torch.zeros(4, dtype=param_dtype), requires_grad=False)
+    load_attention_sink(param, torch.arange(4, dtype=torch.float32))
+    assert param.dtype == param_dtype
+    assert torch.equal(param.float(), torch.arange(4, dtype=torch.float32))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
+def test_attention_sink_loader_accepts_cpu_checkpoint(monkeypatch):
+    """Sinks are normally loaded from CPU checkpoints into device parameters."""
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_rank", lambda: 1)
+    param = torch.nn.Parameter(
+        torch.full((6,), 123.0, device="cuda"), requires_grad=False
+    )
+    # The test suite sets the default device, so pin the checkpoint to CPU.
+    checkpoint = torch.arange(8, dtype=torch.float32, device="cpu")
+    load_attention_sink(param, checkpoint)
+    assert param.device.type == "cuda"
+    expected = torch.arange(4, 8, dtype=torch.float32, device="cpu")
+    assert torch.equal(param[:4].cpu(), expected)
+    assert torch.isinf(param[4:]).all() and (param[4:] < 0).all()
+
+
+@pytest.mark.parametrize(
+    "num_heads,dtype", [(4, torch.float32), (8, torch.bfloat16), (6, None)]
+)
+def test_make_attention_sink_registers_loader_and_padding(num_heads, dtype):
+    """The factory is the single place that creates and registers a sink."""
+    sink = weight_utils.make_attention_sink(num_heads, dtype)
+    assert sink.shape == (num_heads,)
+    assert sink.dtype == (dtype or torch.get_default_dtype())
+    assert sink.requires_grad is False
+    assert torch.isinf(sink).all() and (sink < 0).all()
+    assert sink.weight_loader is load_attention_sink
 
 
 def test_download_weights_from_hf():
@@ -293,18 +388,147 @@ class TestKvCacheScaleMapper:
             == "model.layers.0.self_attn.attn.k_scale"
         )
 
+    @pytest.mark.parametrize(
+        "name,expected",
+        [
+            ("transformer.h.0.attn.k_scale", "transformer.h.0.attn.attn.k_scale"),
+            # deprecated fused kv_scale
+            ("transformer.h.0.attn.kv_scale", "transformer.h.0.attn.attn.k_scale"),
+            # already in vLLM form -> unchanged
+            (
+                "transformer.h.0.attn.attn.k_scale",
+                "transformer.h.0.attn.attn.k_scale",
+            ),
+            # other weights untouched
+            (
+                "transformer.h.0.attn.k_proj.weight",
+                "transformer.h.0.attn.k_proj.weight",
+            ),
+        ],
+    )
+    def test_attention_named_attn(self, name, expected):
+        """Scales on an HF attention module named `attn` (e.g. GPT-J) must
+        reach the nested vLLM `Attention`, which the default rule skips because
+        the names already end in `.attn.k_scale`."""
+        from vllm.model_executor.models.transformers.base import (
+            NESTED_ATTN_SCALE_MAPPER,
+        )
 
+        # AutoWeightsLoader does `mapper |= cache_scale_mapper`
+        combined = NESTED_ATTN_SCALE_MAPPER | self._mapper()
+        assert combined._map_name(name) == expected
+
+
+@pytest.mark.parametrize(
+    ("index", "calls"),
+    [
+        (
+            (
+                '{"weight_map": {"a": "tensors/nested.safetensors", '
+                '"b": "tensors/missing.safetensors"}}'
+            ),
+            2,
+        ),
+        ("{", 1),
+    ],
+)
 @pytest.mark.parametrize("fails", [False, True])
 def test_drop_checkpoint_cache_releases_local_weight_files(
-    tmp_path, monkeypatch, fails
+    tmp_path, monkeypatch, fails, index, calls
 ):
-    """Evict only weights; cache eviction errors must not prevent loading."""
-    for name in ("weights.safetensors", "config.json"):
+    """Evict only weights, also the ones the index lists under tensors/; cache
+    eviction errors and a broken index must not prevent loading."""
+    (tmp_path / "tensors").mkdir()
+    for name in ("weights.safetensors", "tensors/nested.safetensors", "config.json"):
         (tmp_path / name).touch()
+    (tmp_path / "model.safetensors.index.json").write_text(index)
     fadvise = Mock(side_effect=OSError("cache eviction failed") if fails else None)
     monkeypatch.setattr("os.posix_fadvise", fadvise)
     drop_checkpoint_cache(str(tmp_path))
-    fadvise.assert_called_once()
+    assert fadvise.call_count == calls
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2fnuz,
+    ],
+)
+def test_dummy_fp8_weight_uses_full_range(dtype):
+    """FP8 weights get random finite codes across the range, as real checkpoints
+    use it: a narrow range lets power-capped GPUs run GEMMs faster than real
+    weights do, which skews dummy-weight benchmarks."""
+    params = [torch.empty(1 << 16, dtype=dtype) for _ in range(2)]
+    for param in params:
+        initialize_single_dummy_weight(param, name="weight")
+    values = params[0].float()
+    assert values.isfinite().all()
+    assert values.abs().max() >= torch.finfo(dtype).max / 2
+    assert params[0].view(torch.uint8).unique().numel() > 240
+    assert torch.equal(params[0].view(torch.uint8), params[1].view(torch.uint8))
+
+
+def test_dummy_fp8_weight_keeps_explicit_range():
+    """An explicit range still samples uniformly within it."""
+    param = torch.empty(4096, dtype=torch.float8_e4m3fn)
+    initialize_single_dummy_weight(param, low=-0.5, high=0.5)
+    assert param.float().abs().max() <= 0.5
+
+
+@pytest.mark.parametrize(
+    ("dtype", "name"),
+    [(torch.float8_e8m0fnu, "weight_scale_inv"), (torch.uint8, "w13_weight_scale")],
+)
+def test_dummy_e8m0_scale_is_fixed_exponent(dtype, name):
+    """E8M0 scales, including uint8-stored ones, get a finite 2**-7."""
+    param = torch.empty(64, dtype=dtype)
+    initialize_single_dummy_weight(param, name=name)
+    assert (param.view(torch.uint8) == 120).all()
+
+
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.int8, torch.float4_e2m1fn_x2])
+def test_dummy_packed_weight_gets_random_bytes(dtype):
+    """Packed weights are filled deterministically instead of left uninitialized."""
+    # Some backends can't fill packed FP4 directly, so view zeroed bytes.
+    params = [torch.zeros(4096, dtype=torch.uint8).view(dtype) for _ in range(2)]
+    for param in params:
+        initialize_single_dummy_weight(param, name="w13_weight")
+    raw = params[0].view(torch.uint8)
+    assert raw.unique().numel() > 250
+    assert torch.equal(raw, params[1].view(torch.uint8))
+
+
+@pytest.mark.skipif(current_platform.is_rocm(), reason="ROCm zeroes integer params")
+def test_dummy_wide_integer_param_is_untouched():
+    """Wider integer params may be indices, so random values are unsafe."""
+    param = torch.arange(16, dtype=torch.int32)
+    initialize_single_dummy_weight(param, name="g_idx")
+    assert torch.equal(param, torch.arange(16, dtype=torch.int32))
+
+
+def test_dummy_norm_weights_are_neutral(default_vllm_config):
+    """Dummy norms stay identity-like, keeping activations at a realistic scale."""
+    from vllm.model_executor.layers.layernorm import (
+        GemmaRMSNorm,
+        LayerNorm,
+        RMSNorm,
+        RMSNormGated,
+    )
+
+    expected = {
+        RMSNorm(16): {"weight": 1.0},
+        GemmaRMSNorm(16): {"weight": 0.0},
+        LayerNorm(16): {"weight": 1.0, "bias": 0.0},
+        RMSNormGated(16): {"weight": 1.0},
+    }
+    for norm, values in expected.items():
+        for name, param in norm.named_parameters():
+            param.data.uniform_(-5, 5)
+            initialize_single_dummy_weight(param, name=name)
+            assert torch.all(param == values[name]), (type(norm).__name__, name)
 
 
 if __name__ == "__main__":
