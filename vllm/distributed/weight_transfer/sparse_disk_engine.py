@@ -9,6 +9,7 @@ it applies the new files there and copies that whole part into the model.
 """
 
 import bisect
+import contextlib
 import json
 import math
 import time
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 import torch
-from safetensors import safe_open
+from safetensors import SafetensorError, safe_open
 from safetensors.torch import save
 
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -38,6 +39,7 @@ from vllm.utils.torch_utils import set_default_torch_num_threads
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.model_executor.model_loader.reload.plan import Box
 
 logger = init_logger(__name__)
 
@@ -56,11 +58,9 @@ _FORMAT = "sparse_disk/1"
 _INT_VIEWS = {1: torch.int8, 2: torch.int16, 4: torch.int32, 8: torch.int64}
 # Most patch elements mapped to the host copy at a time.
 _APPLY_CHUNK = 1 << 24
-# A checkpoint tensor's part: (start, stop) per dimension.
-_Box = tuple[tuple[int, int], ...]
 
 
-def _numel(box: _Box) -> int:
+def _numel(box: "Box") -> int:
     return math.prod(b - a for a, b in box)
 
 
@@ -119,12 +119,19 @@ def save_sparse_patches(
             }
             for p in group
         ]
+    data = save(tensors, {"format": _FORMAT, "patches": json.dumps(entries)})
     # Created exclusively and written in place, as `save_file` may rename a
     # temporary file, which object-store mounts cannot do. A version is applied
     # only after this returns, and a file cut short by a crash fails to open.
     path = patch_file(patch_dir, version)
-    with open(path, "xb") as f:
-        f.write(save(tensors, {"format": _FORMAT, "patches": json.dumps(entries)}))
+    f = open(path, "xb")  # noqa: SIM115
+    try:
+        with f:
+            f.write(data)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+        raise
     return path
 
 
@@ -175,6 +182,8 @@ class SparseDiskWeightTransferEngine(
         self._init_info: SparseDiskWeightTransferInitInfo | None = None
         self._files: list[str] = []
         self._copy: _HostCopy | None = None
+        # The version the model holds; it outlives the copy.
+        self._loaded = 0
 
     def init_transfer_engine(self, init_info: SparseDiskWeightTransferInitInfo) -> None:
         """Check that the model can load through a load plan from its startup
@@ -185,12 +194,22 @@ class SparseDiskWeightTransferEngine(
         )
         from vllm.model_executor.model_loader.reload import check_plannable
 
+        load_format = self.vllm_config.load_config.load_format
         loader = get_model_loader(self.vllm_config.load_config)
-        if type(loader) is not DefaultModelLoader:
+        if type(loader) is not DefaultModelLoader or load_format in (
+            "fastsafetensors",
+            "instanttensor",
+        ):
             raise ValueError(
-                "sparse_disk builds its copy from the checkpoint files and needs "
-                f"the default loader, not load_format="
-                f"{self.vllm_config.load_config.load_format!r}"
+                "sparse_disk builds its copy from the checkpoint files on the host "
+                f"and needs the default loader, not load_format={load_format!r}"
+            )
+        if self._init_info is None:
+            self._loaded = init_info.base_version
+        elif init_info.base_version != self._init_info.base_version:
+            raise ValueError(
+                f"this server started from version {self._init_info.base_version}, "
+                f"not {init_info.base_version}; restart it from that checkpoint"
             )
         if getattr(self.model, "secondary_weights", ()):
             raise ValueError("sparse_disk does not support secondary weight sources")
@@ -228,24 +247,24 @@ class SparseDiskWeightTransferEngine(
                 "Sparse disk weight transfer engine not initialized. "
                 "Call init_transfer_engine() first."
             )
-        version = init_info.base_version if self._copy is None else self._copy.version
-        if update_info.version < version:
+        newest = max(self._loaded, self._copy.version if self._copy else 0)
+        if update_info.version < newest:
             raise RuntimeError(
-                f"the host copy is at version {version}, newer than "
+                f"this server has applied version {newest}, newer than "
                 f"{update_info.version}; versions only move forward"
             )
         if self._copy is None:
-            self._copy = _HostCopy(self, version)
+            self._copy = _HostCopy(self, init_info.base_version)
         copy = self._copy
         with set_default_torch_num_threads():
             while copy.version < update_info.version:
                 path = patch_file(init_info.patch_dir, copy.version + 1)
                 started = time.perf_counter()
-                with safe_open(path, framework="pt") as f:
-                    try:
+                try:
+                    with safe_open(path, framework="pt") as f:
                         writes = copy.map(f)
-                    except ValueError as e:
-                        raise ValueError(f"{path}: {e}") from e
+                except (ValueError, SafetensorError) as e:
+                    raise ValueError(f"{path}: {e}") from e
                 try:
                     copy.write(writes)
                 except BaseException:
@@ -256,6 +275,7 @@ class SparseDiskWeightTransferEngine(
         if self.device.type != "cpu":
             torch.accelerator.empty_cache()  # the mapping's temporaries
         copy.load(self.model)
+        self._loaded = copy.version
 
     def shutdown(self) -> None:
         from vllm.v1.kv_offload.cpu.host_register import host_unregister
@@ -299,7 +319,7 @@ class _HostCopy:
         ]
         self.plan = plan_loads(model, meta)
         # name -> [(box, offset into its dtype's buffer)]
-        self.parts: dict[str, list[tuple[_Box, int]]] = {}
+        self.parts: dict[str, list[tuple[Box, int]]] = {}
         sizes: dict[torch.dtype, int] = {}
         for m in meta:
             for box in self.plan.get_boxes(m.name) or ():
@@ -334,7 +354,7 @@ class _HostCopy:
             time.perf_counter() - started,
         )
 
-    def _views(self, name: str) -> list[tuple[_Box, torch.Tensor]]:
+    def _views(self, name: str) -> list[tuple["Box", torch.Tensor]]:
         parts = self.parts.get(name, ())
         flat = self.buffers[self.catalog[name][1]] if parts else None
         return [(box, flat[o : o + _numel(box)]) for box, o in parts]  # type: ignore[index]

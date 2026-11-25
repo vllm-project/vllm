@@ -1575,6 +1575,19 @@ def test_sparse_disk_updates_equal_a_cold_start_on_the_patched_checkpoint_cpu(
         p.data.fill_(0)  # as level 2 sleep discards them
     server.catch_up(2)
     assert _bits(server.model) == expected
+    with pytest.raises(ValueError, match="started from version 0"):
+        server.init_weight_transfer_engine(
+            {"patch_dir": str(patch_dir), "base_version": 2}
+        )
+    server.init_weight_transfer_engine({"patch_dir": str(patch_dir)})  # reconnect
+    v2, hidden = patch_file(patch_dir, 2), tmp_path / "v2"
+    v2.rename(hidden)
+    with pytest.raises(FileNotFoundError):
+        server.catch_up(2)  # the rebuilt copy stops at version 1
+    hidden.rename(v2)
+    for older in (0, 1):  # would roll the model back
+        with pytest.raises(RuntimeError, match="only move forward"):
+            server.catch_up(older)
     newer = tmp_path / "newer"
     _write_sparse_disk_checkpoint(newer, _dense_patch(base, _SPARSE_DISK_VERSIONS[:1]))
     for start, base_version in ((checkpoint, 0), (newer, 1)):
@@ -1619,8 +1632,11 @@ def _rewrite_patch_file(path, edit):
         ),
     ],
 )
-def test_sparse_disk_bad_file_changes_nothing_cpu(_sparse_disk, bad, edit, error):
-    """A file with one bad patch is refused before any write."""
+def test_sparse_disk_bad_file_is_refused_before_any_write_cpu(
+    _sparse_disk, bad, edit, error
+):
+    """A file with one bad patch is refused before it writes the host copy, so
+    a new update to the last version restores the model."""
     _, patch_dir, server = _sparse_disk
     expected = _bits(server.model)
     good = _sparse_test_patch("b", [1], [3.0], torch.float32, (2, 2))
@@ -1630,8 +1646,7 @@ def test_sparse_disk_bad_file_changes_nothing_cpu(_sparse_disk, bad, edit, error
     server.start_weight_update()
     with pytest.raises(ValueError, match=error):
         server.update_weights({"version": 3})
-    server.update_weights({"version": 2})
-    server.finish_weight_update()
+    server.catch_up(2)  # a failed update ends the worker's session
     assert _bits(server.model) == expected
 
 
