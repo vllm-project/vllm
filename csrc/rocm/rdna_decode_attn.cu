@@ -1147,8 +1147,8 @@ struct Decode {
       if (last) {
         if (cooperative) {
           committedMask[(startGeneration + 1) & 1] = 0;
-          __hip_atomic_store(generation, startGeneration + 1, __ATOMIC_RELEASE,
-                             __HIP_MEMORY_SCOPE_AGENT);
+          __scoped_atomic_store_n(generation, startGeneration + 1,
+                                  __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
         }
         counters[group] = 0;
       } else if (cooperative) {

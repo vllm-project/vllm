@@ -1930,15 +1930,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
                        (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
           int adr_ = mindx + M * nindx_ / 4;
-          __hip_atomic_store(&cntr[adr_], 0, __ATOMIC_RELAXED,
-                             __HIP_MEMORY_SCOPE_AGENT);
+          __scoped_atomic_store_n(&cntr[adr_], 0, __ATOMIC_RELAXED,
+                                  __MEMORY_SCOPE_DEVICE);
           for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
             for (uint32_t j = 0; j < 4; j++) {
               int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
                           (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
               int adr = mindx + M * nindx;
-              __hip_atomic_store(&glbl[adr], 0, __ATOMIC_RELAXED,
-                                 __HIP_MEMORY_SCOPE_AGENT);
+              __scoped_atomic_store_n(&glbl[adr], 0, __ATOMIC_RELAXED,
+                                      __MEMORY_SCOPE_DEVICE);
             }
           }
         }
@@ -1972,15 +1972,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
             int adr_ = mindx + M * nindx_ / 4;
-            __hip_atomic_store(&cntr[adr_], 0, __ATOMIC_RELAXED,
-                               __HIP_MEMORY_SCOPE_AGENT);
+            __scoped_atomic_store_n(&cntr[adr_], 0, __ATOMIC_RELAXED,
+                                    __MEMORY_SCOPE_DEVICE);
             for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
               for (uint32_t j = 0; j < 4; j++) {
                 int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
                             (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
                 int adr = mindx + M * nindx;
-                __hip_atomic_store(&glbl[adr], 0, __ATOMIC_RELAXED,
-                                   __HIP_MEMORY_SCOPE_AGENT);
+                __scoped_atomic_store_n(&glbl[adr], 0, __ATOMIC_RELAXED,
+                                        __MEMORY_SCOPE_DEVICE);
               }
             }
           }
@@ -2148,12 +2148,12 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
       if (DTRMNSTC) {
         flt4 flt4_ = {.s8 = sum4[nt][0]};
-        __hip_atomic_store((float2*)&glbl[g_adr + M * N * (m0 / Mmod)],
-                           flt4_.f2[0], __ATOMIC_RELAXED,
-                           __HIP_MEMORY_SCOPE_AGENT);
-        __hip_atomic_store((float2*)&glbl[g_adr + 2 + M * N * (m0 / Mmod)],
-                           flt4_.f2[1], __ATOMIC_RELAXED,
-                           __HIP_MEMORY_SCOPE_AGENT);
+        __scoped_atomic_store((float2*)&glbl[g_adr + M * N * (m0 / Mmod)],
+                              &flt4_.f2[0], __ATOMIC_RELAXED,
+                              __MEMORY_SCOPE_DEVICE);
+        __scoped_atomic_store((float2*)&glbl[g_adr + 2 + M * N * (m0 / Mmod)],
+                              &flt4_.f2[1], __ATOMIC_RELAXED,
+                              __MEMORY_SCOPE_DEVICE);
       } else {
         for (uint32_t j = 0; j < 4; j++)
           atomicAdd((&glbl[g_adr + j]), sum4[nt][0][j]);
