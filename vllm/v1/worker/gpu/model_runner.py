@@ -326,12 +326,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.use_aux_hidden_state_outputs = (
                 self.speculative_config.uses_aux_hidden_states
             )
-        # A KV consumer's scheduler returns a request's blocks to the pool once it
-        # has this step's output, and a connector may write them right away, off
-        # this stream: the output must then also wait for the drafter's KV writes.
+        # When a connector receives KV, the scheduler returns a request's blocks
+        # once it has this step's output and a load may refill them off this
+        # stream: the output must then also wait for the drafter's KV writes.
         kv_transfer_config = self.vllm_config.kv_transfer_config
         self._fence_drafter = self.speculator is not None and (
-            kv_transfer_config is not None and kv_transfer_config.is_kv_consumer
+            kv_transfer_config is not None and kv_transfer_config.receives_kv
         )
 
         # Draft tokens propagation - for spec-dec + struct outputs.

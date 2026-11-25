@@ -156,6 +156,14 @@ class KVTransferConfig:
     def is_kv_consumer(self) -> bool:
         return any(role in get_args(KVConsumer) for role in self._connector_roles())
 
+    @property
+    def receives_kv(self) -> bool:
+        """Whether a connector may write KV into this instance's blocks: a
+        consumer, or a producer that NIXL's bidirectional_kv_xfer pulls into."""
+        return self.is_kv_consumer or bool(
+            self.get_from_extra_config("bidirectional_kv_xfer", False)
+        )
+
     def _connector_roles(self) -> list[str | None]:
         """The kv_role of each connector. MultiConnector does not pass its own
         kv_role to its connectors, so only theirs count."""
