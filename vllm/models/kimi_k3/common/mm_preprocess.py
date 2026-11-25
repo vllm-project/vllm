@@ -10,7 +10,7 @@ import torch
 from transformers import BatchFeature
 
 from vllm.config.multimodal import ImageDummyOptions, MultiModalDummyOptions
-from vllm.inputs import MultiModalDataDict
+from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -28,14 +28,22 @@ from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
     cached_encode,
 )
+from vllm.multimodal.processing.processor import (
+    MultiModalPromptUpdates,
+    PlaceholderFeaturesInfo,
+)
 from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.transformers_utils.processor import cached_get_image_processor
-from vllm.transformers_utils.processors.kimi_k3 import KimiK3Processor
+from vllm.transformers_utils.processors.kimi_k3 import (
+    KimiK3Processor,
+    encode_k3_text_prompt,
+)
 from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
     KimiK25FusedVisionProcessor,
 )
@@ -313,6 +321,56 @@ class KimiK3DummyInputsBuilder(BaseDummyInputsBuilder[KimiK3ProcessingInfo]):
 
 class KimiK3MultiModalProcessor(BaseMultiModalProcessor[KimiK3ProcessingInfo]):
     """Image-only multi-modal processor for Kimi-K3."""
+
+    def _encode_text_prompt(self, text: str) -> list[int]:
+        return encode_k3_text_prompt(
+            self.info.get_tokenizer(),
+            text,
+            self.info.get_hf_config().image_placeholder,
+        )
+
+    def __call__(
+        self,
+        prompt: str | list[int],
+        *args: Any,
+        **kwargs: Any,
+    ) -> MultiModalInput:
+        if isinstance(prompt, str):
+            prompt = self._encode_text_prompt(prompt)
+        return super().__call__(prompt, *args, **kwargs)
+
+    def get_dummy_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: MultiModalDummyOptions,
+    ) -> ProcessorInputs:
+        inputs = super().get_dummy_inputs(seq_len, mm_counts, mm_options)
+        inputs.prompt = self._encode_text_prompt(
+            self.dummy_inputs.get_dummy_text(mm_counts)
+        )
+        return inputs
+
+    def _apply_prompt_updates(
+        self,
+        token_ids: list[int],
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        """Apply the prompt updates at token level only.
+
+        K3 token ids cannot be rebuilt from their decoded text (see
+        `KimiK3Renderer`), so there is no text fallback: an image without a
+        placeholder in the token ids is an error.
+        """
+        new_token_ids, match_result, placeholders = (
+            self._apply_token_matches_with_placeholders(token_ids, mm_prompt_updates)
+        )
+        self._matched_updates_from_result(mm_prompt_updates, match_result)
+        return new_token_ids, {
+            modality: modality_placeholders
+            for modality, modality_placeholders in placeholders.items()
+            if modality_placeholders
+        }
 
     def _get_mm_fields_config(
         self,
