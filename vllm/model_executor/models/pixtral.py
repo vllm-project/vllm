@@ -439,7 +439,7 @@ class PixtralEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         )
         # Graph replays only handle pixel inputs, not precomputed embeddings.
         mm_config = self.multimodal_config
-        pixels_only = mm_config is None or not mm_config.enable_mm_embeds
+        pixels_only = mm_config is None or not mm_config.is_mm_embeds_enabled("image")
         return EncoderCudaGraphConfig(
             modalities=["image"] if graph_safe and pixels_only else [],
             buffer_keys=[

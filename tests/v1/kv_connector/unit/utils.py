@@ -64,6 +64,7 @@ if TYPE_CHECKING:
         _RegionPairs,
         _RemoteStage,
     )
+    from vllm.forward_context import ForwardContext
 
 EOS_TOKEN_ID = 50256
 
@@ -193,19 +194,13 @@ def create_vllm_config(
     )
 
 
-def set_mtp_config(
-    config: VllmConfig,
-    num_lookahead: int = 1,
-    *,
-    disable_lookahead_block_hashes: bool = False,
-) -> None:
+def set_mtp_config(config: VllmConfig, num_lookahead: int = 1) -> None:
     """Configure test MTP without loading a separate draft model."""
     assert config.model_config is not None
     config.model_config.hf_config.n_predict = num_lookahead
     spec = SpeculativeConfig(
         model="ngram",
         num_speculative_tokens=num_lookahead,
-        disable_lookahead_block_hashes=disable_lookahead_block_hashes,
     )
     spec.method = "mtp"
     spec.draft_model_config = config.model_config
@@ -264,7 +259,7 @@ def create_scheduler(
     return scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
-        log_stats=True,
+        collect_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
         hash_block_size=hash_block_size,
@@ -406,6 +401,7 @@ class TestExampleConnector(ExampleConnector):
         role: KVConnectorRole,
         kv_cache_config: KVCacheConfig,
     ):
+        assert config.kv_transfer_config is not None
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
         self._connector = ExampleConnector(config, role, kv_cache_config)
         self.call_record: dict[str, int] = defaultdict(int)
@@ -530,7 +526,9 @@ class MockKVConnector(KVConnectorBase_V1):
             metadata.requests.append({"req_id": req.req_id})
         return metadata
 
-    def start_load_kv(self, kv_caches, finished_req_ids):
+    def start_load_kv(
+        self, forward_context: "ForwardContext", **kwargs: object
+    ) -> None:
         pass
 
     def wait_for_layer_load(self, layer_name):
@@ -558,7 +556,7 @@ def make_kv_cache_config(
     mamba_enabled: bool = False,
     sw_size: int = 128,
     num_blocks: int = 100,
-    mamba_cache_mode: Literal["align", "none"] = "none",
+    enable_prefix_caching: bool = False,
 ) -> KVCacheConfig:
     kv_cache_groups = [
         make_kv_cache_group(
@@ -595,7 +593,7 @@ def make_kv_cache_config(
                     dtypes=(torch.float16,),
                 ),
                 MambaManager,
-                MambaManager.config(mamba_cache_mode=mamba_cache_mode),
+                MambaManager.config(enable_prefix_caching=enable_prefix_caching),
             )
         )
     return KVCacheConfig(
@@ -632,6 +630,7 @@ def make_nixl_scheduler(
     sched.kv_cache_config.hash_block_size = 16
     sched.vllm_config = SimpleNamespace(
         num_prefill_lookahead_tokens=0,
+        num_reprefillable_tokens=0,
         num_hash_lookahead_tokens=0,
         cache_config=CacheConfig(block_size=16),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
@@ -642,11 +641,11 @@ def make_nixl_scheduler(
         sched._heartbeat_by_engine = {}
         sched._heartbeat_req_engine = {}
         sched._last_heartbeat_time = 0.0
+        sched._new_heartbeat_reqs = set()
         sched._kv_lease_duration = kv_lease_duration
         sched._heartbeat_interval = kv_lease_duration // 6
         # Fields touched by build_connector_meta / request_finished:
         sched._reqs_need_recv = {}
-        sched._hisparse_host_blocks_to_recv = {}
         sched._reqs_need_send = {}
         sched._reqs_in_batch = set()
         sched._reqs_not_processed = set()
@@ -712,6 +711,7 @@ def make_nixl_push_scheduler(
     vllm_config.parallel_config.decode_context_parallel_size = 1
     vllm_config.cache_config = CacheConfig(block_size=16)
     vllm_config.num_prefill_lookahead_tokens = 0
+    vllm_config.num_reprefillable_tokens = 0
     vllm_config.num_hash_lookahead_tokens = 0
     sched.vllm_config = vllm_config
 
@@ -731,6 +731,7 @@ def make_nixl_push_scheduler(
     sched._heartbeat_by_engine = {}
     sched._heartbeat_req_engine = {}
     sched._last_heartbeat_time = 0.0
+    sched._new_heartbeat_reqs = set()
     sched.blocks_per_sw = []
 
     return sched
@@ -756,9 +757,11 @@ def make_moriio_writer(fake_worker: Any) -> Any:
     writer._scheduled_writes = defaultdict(int)
     writer._scheduled_layers = defaultdict(set)
     writer._sealed_writes = {}
+    writer._transfer_states = {}
     writer._deferred_tasks = []
     writer._defer_timeout = 60.0
-    writer.ensure_worker_started = lambda: None
+    # Tests execute write tasks directly, without starting a background thread.
+    writer._write_worker_started = True
     return writer
 
 

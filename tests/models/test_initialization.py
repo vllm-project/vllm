@@ -3,6 +3,7 @@
 
 import gc
 from collections.abc import Generator
+from contextlib import nullcontext
 from functools import partial
 from unittest.mock import patch
 
@@ -199,15 +200,53 @@ def can_initialize(
         ):
             pytest.skip("Step5 DSA requires CUDA SM90 or SM103")
 
+    if model_arch in (
+        "Inkling2ForConditionalGeneration",
+        "Inkling2LoopForConditionalGeneration",
+        "Inkling2DSparkModel",
+    ):
+        from vllm.platforms import current_platform
+
+        if not (
+            current_platform.is_cuda()
+            and (
+                current_platform.is_device_capability_family(100)
+                or current_platform.is_device_capability(90)
+                or current_platform.is_device_capability_family(120)
+            )
+        ):
+            pytest.skip("Inkling2 requires Hopper or Blackwell")
+
     if model_arch == "DeepseekV4ForConditionalGeneration":
         from vllm.platforms import current_platform
 
         if not (current_platform.is_cuda() or current_platform.is_rocm()):
             pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
 
+    from vllm.platforms import current_platform
+
+    # Flash runs on CUDA and on ROCm gfx950; other platforms must reject it.
+    initialization_result = nullcontext()
+    if model_arch in (
+        "HYV4FlashForCausalLM",
+        "HYV4FlashVLForConditionalGeneration",
+        "HYV4DFlyModel",
+    ):
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950
+
+            if not on_gfx950():
+                initialization_result = pytest.raises(
+                    NotImplementedError, match="gfx950"
+                )
+        elif not current_platform.is_cuda():
+            initialization_result = pytest.raises(
+                NotImplementedError, match="HYV4 Flash requires NVIDIA CUDA"
+            )
     with (
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
         monkeypatch.context() as m,
+        initialization_result,
     ):
         if requires_spawn_multiprocessing() or model_arch == "Glm5NextForCausalLM":
             # The EngineCore subprocess re-imports the class and does not
@@ -250,7 +289,7 @@ def can_initialize(
             speculative_config={
                 "model": model_info.speculative_model,
                 "method": model_info.speculative_method,
-                "num_speculative_tokens": 1,
+                "num_speculative_tokens": model_info.num_speculative_tokens,
             }
             if model_info.speculative_model
             else None,

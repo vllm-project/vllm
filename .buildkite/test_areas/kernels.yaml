@@ -169,11 +169,11 @@ steps:
       - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
       - vllm/models/deepseek_v4/common/ops/
       - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
-      - csrc/topk.cu
-      - csrc/persistent_topk.cuh
-      - csrc/sampled_topk.cuh
-      - csrc/topk_histogram_4096.cuh
-      - csrc/topk_histogram_4096_overflow.cuh
+      - csrc/attention/dsa/topk/topk.cu
+      - csrc/attention/dsa/topk/persistent_topk.cuh
+      - csrc/attention/dsa/topk/sampled_topk.cuh
+      - csrc/attention/dsa/topk/topk_histogram_4096.cuh
+      - csrc/attention/dsa/topk/topk_histogram_4096_overflow.cuh
       - vllm/model_executor/layers/indexer_topk.py
       - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
       - tests/kernels/test_top_k_per_row.py
@@ -209,6 +209,19 @@ steps:
       - tests/kernels/test_bf16x3_router_gemm_rocm.py
       commands:
       - pytest -v -s kernels/test_bf16x3_router_gemm_rocm.py
+
+- label: ":nvidia: (H100) FlashInfer CuTe-DSL SM90 MoE"
+  key: kernels-flashinfer-cutedsl-sm90-moe-h100
+  automatic_shard: true
+  timeout_in_minutes: 30
+  device: h100
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutedsl_sm90_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/unquantized.py
+  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
+  - tests/kernels/moe/test_flashinfer_cutedsl_sm90_moe.py
+  commands:
+    - pytest -v -s kernels/moe/test_flashinfer_cutedsl_sm90_moe.py
 
 - label: ":nvidia: (B200) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-b200
@@ -441,9 +454,11 @@ steps:
           kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
           kernels/test_fused_quant_activation.py
           kernels/test_gemm_rs_ar.py
+          kernels/test_hy_v4_flash_kernels.py
           kernels/test_kpool_decode_update_batched.py
           kernels/test_minimax_m3_amd_ops.py
           kernels/test_minimax_m3_sparse_attn_fp8_scale.py
+          kernels/test_muse_spark_rocm_decode_moe.py
           kernels/test_muse_spark_router_bf16x3.py
           kernels/test_onednn.py
           kernels/test_relu2_fp8_quant.py
@@ -660,9 +675,13 @@ steps:
   num_devices: 1
   timeout_in_minutes: 50
   source_file_dependencies:
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
+  - csrc/quantization/activation_kernels.cu
   - csrc/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - tests/kernels/moe
+  - tests/single_rank_group.py
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/model_loader/reload/
   - vllm/models/muse_spark/common/
@@ -684,6 +703,7 @@ steps:
       - csrc/quantization/w8a8/cutlass/moe/
       - csrc/moe/
       - tests/kernels/moe
+      - tests/single_rank_group.py
       - vllm/model_executor/layers/fused_moe/
       - vllm/models/muse_spark/common/
       - vllm/models/muse_spark/nvidia/
@@ -711,6 +731,7 @@ steps:
   - vllm/model_executor/layers/mamba/gdn
   - vllm/models/qwen3_5/
   - vllm/model_executor/layers/mamba/ops
+  - vllm/third_party/flash_linear_attention/ops/fused_recurrent_replayssm.py
   - vllm/triton_utils/allocation.py
   - vllm/triton_utils/tensor_descriptor.py
   - vllm/v1/attention/backends/gdn_attn.py
@@ -736,6 +757,9 @@ steps:
   device: h100
   num_devices: 1
   source_file_dependencies:
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
+  - csrc/quantization/activation_kernels.cu
   - cmake/external_projects/deepgemm.cmake
   - tools/build_deepgemm_C.py
   - tools/setup_deepgemm_pythons.sh
@@ -743,11 +767,14 @@ steps:
   - vllm/utils/deep_gemm.py
   - vllm/model_executor/layers/fused_moe
   - vllm/model_executor/layers/quantization
+  - vllm/model_executor/warmup/deep_gemm_warmup.py
   - tests/kernels/quantization/test_block_fp8.py
   - tests/kernels/moe/test_deepgemm.py
   - tests/kernels/moe/test_batched_deepgemm.py
   - tests/kernels/attention/test_deepgemm_attention.py
   - tests/quantization/test_cutlass_w4a16.py
+  - tests/model_executor/test_deep_gemm_warmup.py
+  - tests/kernels/moe/test_deep_gemm_mega_moe.py
   commands:
     - python3 ../tools/check_wheel_deepgemm.py
     - pytest -v -s kernels/quantization/test_block_fp8.py
@@ -755,6 +782,8 @@ steps:
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
     - pytest -v -s quantization/test_cutlass_w4a16.py
+    - pytest -v -s model_executor/test_deep_gemm_warmup.py
+    - pytest -v -s kernels/moe/test_deep_gemm_mega_moe.py -k fp8_block_sm90_matches_reference
   mirror:
     amd:
       automatic_shard: true
@@ -863,7 +892,9 @@ steps:
   - csrc/quantization/w8a8/cutlass/moe/
   - vllm/model_executor/layers/fusion/
   - vllm/model_executor/kernels/linear/nvfp4/
+  - vllm/model_executor/kernels/linear/mxfp8/flashinfer.py
   - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutedsl_batched_moe.py
   - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py
   - vllm/model_executor/layers/fused_moe/oracle/nvfp4.py
@@ -895,13 +926,19 @@ steps:
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   - tests/kernels/test_top_k_per_row.py
-  - csrc/fused_mqa_topk/
+  - csrc/attention/dsa/fused_mqa_topk/
   - tests/kernels/attention/test_fused_mqa_topk.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
   - tests/kernels/quantization/test_block_fp8.py
+  - tests/kernels/quantization/test_flashinfer_mxfp8_unaligned_n.py
+  - tests/kernels/quantization/test_flashinfer_mxfp8_trtllm.py
+  - tests/kernels/moe/test_cutedsl_moe.py
   - tests/models/quantization/test_nvfp4.py
   - vllm/model_executor/kernels/linear/nvfp4/
   - vllm/model_executor/layers/quantization/compressed_tensors/transform/
+  - vllm/models/muse_spark/nvidia/muse_moe_runner.py
+  - tests/kernels/moe/muse_spark_utils.py
+  - tests/kernels/moe/test_muse_spark_trtllm_moe.py
   commands:
     - nvidia-smi
     - python3 examples/basic/offline_inference/chat.py
@@ -919,8 +956,11 @@ steps:
     - pytest -v -s tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
     - pytest -v -s tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+    - pytest -v -s tests/kernels/quantization/test_flashinfer_mxfp8_unaligned_n.py
+    - pytest -v -s tests/kernels/quantization/test_flashinfer_mxfp8_trtllm.py
     - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
+    - pytest -v -s tests/kernels/moe/test_muse_spark_trtllm_moe.py
     - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
     - pytest -v -s tests/models/quantization/test_nvfp4.py
     - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
@@ -1068,6 +1108,20 @@ steps:
 #       source_file_dependencies:
 #       - vllm/platforms/rocm.py
 #       - tools/benchmark_helion_kernels.py
+
+- label: ":nvidia: (DGX Spark) MoE Kernels"
+  key: kernels-moe-test-dgx-spark
+  automatic_shard: true
+  timeout_in_minutes: 25
+  device: dgx-spark
+  num_devices: 1
+  depends_on:
+  - arm64-image-build
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/fused_moe.py
+  - tests/kernels/moe/test_moe.py
+  commands:
+  - pytest -v -s kernels/moe/test_moe.py
 
 - label: ":nvidia: (H100) [Nightly] FP8 MoE Kernels"
   key: kernels-fp8-moe-test-1xh100

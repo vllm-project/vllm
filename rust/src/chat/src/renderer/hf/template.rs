@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{self};
 use thiserror::Error as ThisError;
 use vllm_text::backend::hf::HfSpecialTokens;
+use vllm_tokenizer::parse_checkpoint_json;
 
 use super::developer::DeveloperRole;
 use super::error::TemplateError;
@@ -71,6 +72,8 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
 
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
     env.add_filter("tojson", hf_tojson_filter);
+    env.add_filter("length", length);
+    env.add_filter("count", length);
     env.add_function("__hf_generation", render_generation);
     env.add_function("strftime_now", |format: String| {
         chrono::Local::now().format(&format).to_string()
@@ -78,6 +81,16 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
     env.add_function("raise_exception", raise_exception);
 
     Ok(env)
+}
+
+/// Jinja2's `length` filter (alias `count`), which is Python's `len`: an
+/// undefined value has length 0, so templates may guard an absent `tools` with
+/// `tools | length > 0`. Other values keep MiniJinja's behavior.
+fn length(value: &Value) -> std::result::Result<usize, MinijinjaError> {
+    if value.is_undefined() {
+        return Ok(0);
+    }
+    minijinja::filters::length(value)
 }
 
 /// Error source attached by [`raise_exception`], so that an exception thrown
@@ -140,7 +153,7 @@ pub fn load_chat_template(template_path: &Path) -> Result<Option<String>> {
         }
 
         let json_value =
-            serde_json::from_str(&content).map_err(TemplateError::ParseTemplateJson)?;
+            parse_checkpoint_json(&content).map_err(TemplateError::ParseTemplateJson)?;
         let json_template =
             serde_json::from_value(json_value).map_err(|_| TemplateError::InvalidTemplateJson)?;
 
@@ -391,6 +404,31 @@ mod tests {
             None,
             "expected a jinja render error, got: {error:?}"
         );
+    }
+
+    #[test]
+    fn test_length_of_undefined_is_zero() {
+        // The tools guard of `examples/tool_chat_template_hermes.jinja`.
+        let template = compile(
+            "{% if tools is iterable and tools | length > 0 %}tools{% else %}none{% endif %} \
+             {{ missing | count }} {{ [1, 2] | length }}"
+                .to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+        assert_eq!(
+            template.apply(TemplateContext::default()).unwrap(),
+            "none 0 2"
+        );
+
+        // Like Python's `len(None)`, `none` still has no length.
+        let template = compile(
+            "{{ none | length }}".to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+        let error = template.apply(TemplateContext::default()).unwrap_err();
+        expect!["failed to render jinja template: invalid operation: cannot calculate length of value of type none (in chat:1)"].assert_eq(&error.to_report_string());
     }
 
     /// Each turn costs a fixed number of instructions, like a chat template's message loop.

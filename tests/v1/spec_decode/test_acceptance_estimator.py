@@ -250,6 +250,53 @@ def test_refit_survives_a_position_with_no_observations():
     )
 
 
+def test_refit_rejects_a_non_finite_slope_step():
+    """Discard an infinite slope step while still updating valid intercepts."""
+    device = current_platform.device_type
+    estimator = OnlineAcceptanceEstimator(MAX_NUM_REQS, NUM_STEPS, device)
+    estimator.REFIT_INTERVAL = 1
+    # These nonnegative moments lose L2 in fp32, making a - sum(b*b/c) zero.
+    estimator.info[:] = 2.0**16
+    estimator.grad[:, 0] = 2.0**15 + 1.0
+    estimator.grad[:, 1] = 2.0**15
+    estimator.counts[:] = 2.0**18
+    before_slope = estimator.slope.clone()
+    before_intercepts = estimator.intercepts.clone()
+    expected_intercepts = before_intercepts + (
+        estimator.grad[:, 1] / (estimator.info[:, 2] + estimator.L2)
+    ) * (estimator.counts / (estimator.counts + estimator.DAMPING_OBSERVATIONS))
+
+    empty = torch.empty(0, dtype=torch.int32, device=device)
+    estimator.step(empty, empty, empty)
+
+    torch.testing.assert_close(estimator.slope, before_slope, rtol=0, atol=0)
+    torch.testing.assert_close(estimator.intercepts, expected_intercepts)
+
+
+@pytest.mark.parametrize("gradient", [float("inf"), float("-inf"), float("nan")])
+def test_refit_rejects_only_non_finite_intercept_steps(gradient: float):
+    """A bad intercept step must not suppress updates at healthy positions."""
+    device = current_platform.device_type
+    estimator = OnlineAcceptanceEstimator(MAX_NUM_REQS, NUM_STEPS, device)
+    estimator.REFIT_INTERVAL = 1
+    estimator.info[:, 2] = 1.0
+    estimator.grad[:, 1] = 0.5
+    estimator.grad[0, 1] = gradient
+    estimator.counts[:] = estimator.DAMPING_OBSERVATIONS
+    before_slope = estimator.slope.clone()
+    expected_intercepts = estimator.intercepts.clone()
+    expected_intercepts[1:] += 0.25 / (1.0 + estimator.L2)
+
+    empty = torch.empty(0, dtype=torch.int32, device=device)
+    estimator.step(empty, empty, empty)
+
+    torch.testing.assert_close(estimator.slope, before_slope, rtol=0, atol=0)
+    torch.testing.assert_close(
+        estimator.intercepts[:1], expected_intercepts[:1], rtol=0, atol=0
+    )
+    torch.testing.assert_close(estimator.intercepts[1:], expected_intercepts[1:])
+
+
 def test_step_damping_scales_with_the_evidence():
     """A round moves a coefficient in proportion to the samples behind it.
 
