@@ -322,11 +322,18 @@ silu_and_mul_scaled_nvfp4_experts_quantize = _lazy_import_wrapper(
 scaled_fp4_grouped_quantize = _lazy_import_wrapper(
     "flashinfer", "scaled_fp4_grouped_quantize"
 )
+mxfp8_grouped_quantize = _lazy_import_wrapper("flashinfer", "mxfp8_grouped_quantize")
+silu_and_mul_mxfp8_experts_quantize = _lazy_import_wrapper(
+    "flashinfer", "silu_and_mul_mxfp8_experts_quantize"
+)
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer.fp4_quantization", "block_scale_interleave"
 )
 flashinfer_cute_dsl_fused_moe_nvfp4 = _lazy_import_wrapper(
     "flashinfer", "cute_dsl_fused_moe_nvfp4"
+)
+flashinfer_cute_dsl_fused_moe_bf16 = _lazy_import_wrapper(
+    "flashinfer", "cute_dsl_fused_moe_bf16"
 )
 flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
     "flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"
@@ -801,6 +808,16 @@ def has_flashinfer_localized_moe() -> bool:
         "localized_allow_nonlocalized",
     }
     return required <= params.keys()
+
+
+@functools.cache
+def has_flashinfer_cutedsl_moe_bf16() -> bool:
+    """Return `True` if FlashInfer's SM90 CuTe-DSL unquantized fused MoE
+    (`cute_dsl_fused_moe_bf16`) is available."""
+    if not has_flashinfer_cutedsl():
+        return False
+    mod = _get_submodule("flashinfer")
+    return mod is not None and hasattr(mod, "cute_dsl_fused_moe_bf16")
 
 
 @functools.cache
@@ -1487,9 +1504,12 @@ __all__ = [
     "flashinfer_fp4_quantize",
     "silu_and_mul_scaled_nvfp4_experts_quantize",
     "scaled_fp4_grouped_quantize",
+    "mxfp8_grouped_quantize",
+    "silu_and_mul_mxfp8_experts_quantize",
     "nvfp4_block_scale_interleave",
     "flashinfer_cute_dsl_fused_moe_nvfp4",
     "has_flashinfer_localized_moe",
+    "flashinfer_cute_dsl_fused_moe_bf16",
     "flashinfer_b12x_fused_moe",
     "flashinfer_get_hybrid_num_tokens_buckets",
     "flashinfer_convert_sf_to_mma_layout",
@@ -1510,6 +1530,7 @@ __all__ = [
     "has_flashinfer_recurrent_kda",
     "has_flashinfer_fused_kda_decode",
     "has_flashinfer_cutedsl_moe_nvfp4",
+    "has_flashinfer_cutedsl_moe_bf16",
     "has_flashinfer_bf16_fp4",
     "has_flashinfer_b12x_moe",
     "has_flashinfer_b12x_gemm",
