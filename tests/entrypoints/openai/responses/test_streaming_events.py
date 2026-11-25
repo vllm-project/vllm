@@ -7,6 +7,7 @@ import random
 import pytest
 from openai.types.responses import (
     CustomTool,
+    NamespaceTool,
     ResponseCustomToolCall,
     ResponseFunctionWebSearch,
     ResponseStreamEvent,
@@ -401,3 +402,41 @@ class TestToolSearchStreaming:
         assert done.arguments == {"query": "jira"}
         assert (added.id, added.call_id) == (done.id, done.call_id)
         assert done.id.startswith("tsc_")
+
+    def test_namespace_function_named_tool_search_stays_a_function_call(self):
+        processor = SimpleStreamingEventProcessor(
+            tools=[
+                ToolSearchTool(type="tool_search", execution="client"),
+                NamespaceTool(
+                    type="namespace",
+                    name="catalog",
+                    description="Catalog",
+                    tools=[
+                        {
+                            "type": "function",
+                            "name": "tool_search",
+                            "parameters": {"type": "object"},
+                        }
+                    ],
+                ),
+            ]
+        )
+        events = _run_through_processor(
+            processor,
+            DeltaMessage(
+                tool_calls=[
+                    _make_tool_call(0, name="catalog__tool_search", arguments="{}")
+                ]
+            ),
+        )
+        events += _run_through_processor(
+            processor,
+            DeltaMessage(
+                tool_calls=[_make_tool_call(1, name="tool_search", arguments="{}")]
+            ),
+        )
+        events += processor.close_current()
+
+        done = [e.item for e in events if e.type == "response.output_item.done"]
+        assert [item.type for item in done] == ["function_call", "tool_search_call"]
+        assert (done[0].namespace, done[0].name) == ("catalog", "tool_search")

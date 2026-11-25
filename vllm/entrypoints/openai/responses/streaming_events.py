@@ -1402,7 +1402,7 @@ class SimpleStreamingEventProcessor:
                 call_name.namespace,
                 call_name.name in self.custom_tool_names,
                 tool_call.id,
-                call_name.name in self.tool_search_names,
+                tool_call.function.name in self.tool_search_names,
             )
         return handlers.open_fn(self.state)
 

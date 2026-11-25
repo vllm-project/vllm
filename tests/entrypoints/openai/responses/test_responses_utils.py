@@ -1173,3 +1173,55 @@ class TestToolSearch:
         assert [tool["name"] for tool in loaded] == ["jira_search", "github__open_pr"]
         assert loaded[0]["parameters"] == self.JIRA["parameters"]
         assert "defer_loading" not in loaded[0]
+
+    GITHUB = {
+        "type": "namespace",
+        "name": "github",
+        "description": "GitHub",
+        "tools": [
+            {
+                "type": "function",
+                "name": "open_pr",
+                "description": "Open a PR",
+                "parameters": {"type": "object"},
+            }
+        ],
+    }
+
+    def _search_result(self, tool_reference_names):
+        messages = construct_chat_messages_with_tool_call(
+            [
+                {
+                    "type": "tool_search_call",
+                    "call_id": "call_1",
+                    "arguments": {"query": "jira"},
+                },
+                {
+                    "type": "tool_search_output",
+                    "call_id": "call_1",
+                    "tools": [self.JIRA, self.GITHUB],
+                },
+            ],
+            tool_reference_names=tool_reference_names,
+        )
+        return messages[-1]["content"]
+
+    def test_declared_tools_are_sent_as_tool_reference(self):
+        # Template renders tool_reference and is given both functions.
+        content = self._search_result(frozenset({"jira_search", "github__open_pr"}))
+        assert content == [
+            {"type": "tool_reference", "name": "jira_search"},
+            {"type": "tool_reference", "name": "github__open_pr"},
+        ]
+
+    @pytest.mark.parametrize(
+        "tool_reference_names",
+        [None, frozenset(), frozenset({"jira_search"})],
+        ids=["template_lacks_it", "no_declared_tools", "one_undeclared"],
+    )
+    def test_schema_lines_otherwise(self, tool_reference_names):
+        # References and schema lines are never mixed in one result.
+        content = self._search_result(tool_reference_names)
+        assert isinstance(content, str)
+        names = [json.loads(line)["name"] for line in content.splitlines()]
+        assert names == ["jira_search", "github__open_pr"]

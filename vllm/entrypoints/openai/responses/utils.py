@@ -3,7 +3,7 @@
 
 import json
 from collections.abc import Iterable
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import partial_json_parser
 from openai.types.chat import (
@@ -15,6 +15,7 @@ from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool,
 )
 from openai.types.responses import (
+    FunctionTool,
     ResponseCustomToolCall,
     ResponseFunctionToolCall,
     ResponseOutputItem,
@@ -82,25 +83,66 @@ def decode_tool_search_arguments(arguments: str) -> object:
         return arguments
 
 
-def render_loaded_tools(tools: Iterable[Any]) -> str:
-    """Tool-message text for a `tool_search_output`: one schema per line.
-
-    Each loaded function is written the way the chat template is given
-    functions (namespace members as `<namespace>__<name>`), so the model can
-    call it by that name. Tool types that cannot be loaded are skipped.
-    """
+def _loaded_function_tools(
+    tools: Iterable[Any],
+) -> list[ChatCompletionToolsParam | FunctionTool]:
+    """The functions a `tool_search_output` loads, named as the model sees
+    them (namespace members as `<namespace>__<name>`). Tool types that cannot
+    be loaded are skipped."""
     loadable = [
         tool
         for tool in map(RESPONSES_TOOL_ADAPTER.validate_python, tools)
         if tool.type in TOOL_SEARCH_LOADABLE_TYPES
     ]
+    return get_function_tools(loadable)
+
+
+def _function_tool_name(tool: ChatCompletionToolsParam | FunctionTool) -> str:
+    if isinstance(tool, ChatCompletionToolsParam):
+        return tool.function.name
+    return tool.name
+
+
+def has_tool_search_output(request_input: str | list[Any]) -> bool:
+    return not isinstance(request_input, str) and any(
+        _item_type(item) == "tool_search_output" for item in request_input
+    )
+
+
+def render_loaded_tools(tools: Iterable[Any]) -> str:
+    """Tool-message text for a `tool_search_output`: one schema per line.
+
+    Each loaded function is written the way the chat template is given
+    functions, so the model can call it by that name.
+    """
     lines = []
-    for function_tool in get_function_tools(loadable):
+    for function_tool in _loaded_function_tools(tools):
         schema = function_tool.model_dump(
             exclude_none=True, exclude={"defer_loading", "strict"}
         )
         lines.append(json.dumps(schema, ensure_ascii=False))
     return "\n".join(lines)
+
+
+def tool_search_output_content(
+    tools: Iterable[Any], tool_reference_names: frozenset[str] | None
+) -> str | list[dict[str, str]]:
+    """Tool-message content for a `tool_search_output`.
+
+    `tool_reference_names` is set when the chat template renders
+    `tool_reference` parts (GLM-5.3 prints each referenced definition from
+    `tools`) and holds the functions the template is given. If every loaded
+    function is one of them, the result is one `tool_reference` part per
+    function, as `/v1/messages` sends tool search results. Otherwise it is one
+    schema line per function: the template cannot expand a reference to a
+    function it is not given, and GLM-5.3 renders only the references when the
+    first part is one, so the two are not mixed.
+    """
+    if tool_reference_names:
+        names = [_function_tool_name(t) for t in _loaded_function_tools(tools)]
+        if names and all(name in tool_reference_names for name in names):
+            return [{"type": "tool_reference", "name": name} for name in names]
+    return render_loaded_tools(tools)
 
 
 def make_tool_search_call(
@@ -384,6 +426,7 @@ def construct_input_messages(
     request_input: str | list[ResponseInputOutputItem],
     prev_msg: list[ChatCompletionMessageParam] | None = None,
     prev_response_output: list[ResponseOutputItem] | None = None,
+    tool_reference_names: frozenset[str] | None = None,
 ):
     messages: list[ChatCompletionMessageParam] = []
     if request_instructions:
@@ -418,22 +461,28 @@ def construct_input_messages(
     if isinstance(request_input, str):
         messages.append({"role": "user", "content": request_input})
     else:
-        input_messages = construct_chat_messages_with_tool_call(request_input)
+        input_messages = construct_chat_messages_with_tool_call(
+            request_input, tool_reference_names=tool_reference_names
+        )
         messages.extend(input_messages)
     return messages
 
 
 def construct_chat_messages_with_tool_call(
     input_messages: list[ResponseInputOutputItem],
+    tool_reference_names: frozenset[str] | None = None,
 ) -> list[ChatCompletionMessageParam]:
     """Build chat messages from response items.
 
     Some chat messages span multiple response items (e.g., reasoning + tool calls).
+    See `tool_search_output_content` for `tool_reference_names`.
     """
     messages: list[ChatCompletionMessageParam] = []
     for item in input_messages:
         message = _construct_message_from_response_item(
-            item, prev_msg=messages[-1] if messages else None
+            item,
+            prev_msg=messages[-1] if messages else None,
+            tool_reference_names=tool_reference_names,
         )
         if message is not None:
             messages.append(message)
@@ -444,6 +493,7 @@ def construct_chat_messages_with_tool_call(
 def _construct_message_from_response_item(
     item: ResponseInputOutputItem,
     prev_msg: ChatCompletionMessageParam | None = None,
+    tool_reference_names: frozenset[str] | None = None,
 ) -> ChatCompletionMessageParam | None:
     """Returns a new message or None. If `None`, `prev_msg` might be updated.
     If `prev_msg` is `None`, a new message is always returned.
@@ -573,7 +623,13 @@ def _construct_message_from_response_item(
         output = _item_dict(item)
         return ChatCompletionToolMessageParam(
             role="tool",
-            content=render_loaded_tools(output.get("tools") or []),
+            # tool_reference parts are a vLLM content part type.
+            content=cast(
+                Any,
+                tool_search_output_content(
+                    output.get("tools") or [], tool_reference_names
+                ),
+            ),
             tool_call_id=output.get("call_id")
             or output.get("id")
             or make_tool_call_id(),

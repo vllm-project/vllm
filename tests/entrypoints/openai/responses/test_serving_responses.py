@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import json
 from collections import deque
 from contextlib import AsyncExitStack, asynccontextmanager
 from types import SimpleNamespace
@@ -414,6 +415,91 @@ async def test_online_renderer_renders_non_harmony_responses_with_explicit_histo
     assert preprocess_kwargs["default_template_content_format"] == "string"
     assert preprocess_kwargs["default_template_kwargs"]["server_default"] == "kept"
     assert preprocess_kwargs["default_template_kwargs"]["request_default"] == "kept"
+
+
+_REFERENCE_TEMPLATE = "{{ m.content.0.type == 'tool_reference' }}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chat_template", "content_format", "exclude_tools", "expected"),
+    [
+        (
+            _REFERENCE_TEMPLATE,
+            "openai",
+            False,
+            [{"type": "tool_reference", "name": "jira_search"}],
+        ),
+        ("{{ messages }}", "openai", False, None),
+        # Parts would be flattened to their names.
+        (_REFERENCE_TEMPLATE, "string", False, None),
+        # tool_choice="none" with the tools left out of the template.
+        (_REFERENCE_TEMPLATE, "openai", True, None),
+    ],
+    ids=[
+        "template_renders_tool_reference",
+        "template_does_not",
+        "string_content_format",
+        "tools_excluded",
+    ],
+)
+async def test_online_renderer_tool_search_output_follows_template(
+    monkeypatch: pytest.MonkeyPatch,
+    chat_template,
+    content_format,
+    exclude_tools,
+    expected,
+):
+    import vllm.renderers.online_renderer as online_renderer_module
+    from vllm.renderers.hf import HfRenderer
+
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = None
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    renderer.model_config = MockModelConfig()
+    renderer.renderer = MagicMock(spec=HfRenderer)
+    renderer.renderer.tokenizer = MagicMock()
+    renderer.exclude_tools_when_tool_choice_none = exclude_tools
+    monkeypatch.setattr(
+        online_renderer_module,
+        "resolve_chat_template",
+        MagicMock(return_value=chat_template),
+    )
+    monkeypatch.setattr(
+        online_renderer_module,
+        "resolve_chat_template_content_format",
+        MagicMock(return_value=content_format),
+    )
+    monkeypatch.setattr(
+        renderer,
+        "preprocess_chat",
+        AsyncMock(return_value=([], [tokens_input([1, 2])])),
+    )
+    jira = {
+        "type": "function",
+        "name": "jira_search",
+        "defer_loading": True,
+        "parameters": {"type": "object", "properties": {}},
+    }
+    request = ResponsesRequest(
+        input=[
+            {"type": "tool_search_call", "call_id": "c1", "arguments": {}},
+            {"type": "tool_search_output", "call_id": "c1", "tools": [jira]},
+        ],
+        tools=[{"type": "tool_search", "execution": "client"}, jira],
+        tool_choice="none" if exclude_tools else "auto",
+    )
+
+    result = await renderer.render_responses(request)
+
+    assert not isinstance(result, ErrorResponse)
+    content = result.messages[-1]["content"]
+    if expected is None:
+        assert json.loads(content)["name"] == "jira_search"
+    else:
+        assert content == expected
 
 
 _REUSED_IDS = [10, 20, 30]
