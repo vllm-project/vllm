@@ -306,13 +306,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     truncation_side: Literal["left", "right"] | None = Field(
         default=None,
         description=(
-            "Which side to truncate from when truncate_prompt_tokens is active. "
-            "'right' keeps the first N tokens. "
-            "'left' keeps the last N tokens. "
+            "'left' truncates from the start. 'right' truncates from the end. "
             "Special tokens that the tokenizer adds when add_special_tokens is set "
-            "(such as BOS) are kept and count toward N, unless there are more of "
-            "them than N. Tokens from the chat template are part of the text and "
-            "can be cut. Multimodal prompts are sliced without this exception."
+            "(such as BOS) are kept and take slots within the truncate_prompt_tokens "
+            "limit, unless there are more of them than the limit. Tokens from the "
+            "chat template are part of the text and can be cut. Multimodal prompts "
+            "are sliced without this exception."
         ),
     )
     prompt_logprobs: int | None = None

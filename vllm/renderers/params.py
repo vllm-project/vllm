@@ -195,14 +195,14 @@ class TokenizeParams:
     truncation_side: Literal["left", "right"] | None = None
     """
     Which side to truncate from when `truncate_prompt_tokens` is active:
-    - `"right"` keeps the first N tokens (truncate from the end).
-    - `"left"`  keeps the last  N tokens (truncate from the start).
+    - `"left"`  truncates from the start.
+    - `"right"` truncates from the end.
     - `None`    falls back to the tokenizer default.
 
     With `"left"` or `"right"`, special tokens that the tokenizer adds to a text
-    prompt count toward N and are kept, unless there are more of them than N.
-    Token-ID prompts, multimodal prompts and cross-encoder query/document pairs
-    are sliced without this exception.
+    prompt take slots within the limit and are kept, unless there are more of
+    them than the limit. Token-ID prompts, multimodal prompts and cross-encoder
+    query/document pairs are sliced without this exception.
     """
 
     do_lower_case: bool = False
