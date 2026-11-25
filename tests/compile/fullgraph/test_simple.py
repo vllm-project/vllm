@@ -18,7 +18,6 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ...utils import create_new_process_for_each_test
 
@@ -185,8 +184,6 @@ def test_simple_piecewise_compile(backend, intermediate_unbacked, monkeypatch):
 
 @torch.inference_mode()
 def test_simple_inductor_graph_partition(monkeypatch):
-    if not is_torch_equal_or_newer("2.9.0.dev"):
-        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
     # disable compile cache so that we run separately for different splitting_ops
     # and get the expected number of cudagraphs captured.
