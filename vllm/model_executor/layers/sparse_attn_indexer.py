@@ -544,16 +544,13 @@ def _localized_candidate_source_topk(
     candidate_blocks: torch.Tensor,
     candidate_block_size: int,
 ) -> bool:
-    """The candidate source layer's decode with the die split and deferred
-    candidates: the token top-k runs per locality domain and is merged, and
-    the join of both domains' scores runs with the deferred candidate work
-    (selection and expansion), off the critical path.
-
-    Only on calls whose candidates are deferred (VLLM_INDEXER_OVERLAP, FULL
-    CUDA graph decode); otherwise the join would stay on the critical path,
-    and the caller takes the scan, join and stock top-k path. Candidate blocks
-    are bit-identical to that path's; kept tokens have the same score
-    multiset. Returns False, without launching anything, for that path.
+    """The candidate source layer's die-split decode: the token top-k runs per
+    locality domain and is merged, and the join of both domains' scores runs
+    with the deferred candidate work (selection and expansion), off the
+    critical path. Only when the candidates are deferred (VLLM_INDEXER_OVERLAP,
+    FULL CUDA graph decode): otherwise returns False without launching
+    anything, and the caller runs the scan, join and stock top-k, whose
+    candidate blocks this matches bit for bit (kept tokens: same scores).
     """
     from vllm.v1.attention.ops.indexer_localize import scan
 
@@ -1356,19 +1353,24 @@ def sparse_attn_indexer(
 
                 indexer_overlap.defer_stock_topk(stock_scan_topk, (*q, decode_weights))
                 return topk_indices_buffer
-            if whole_rows and localized is not None:
+            logits = None
+            if (
+                localized is not None
+                and dcp_world_size == 1
+                and decode_metadata.global_seq_lens is None
+            ):
                 from vllm.v1.attention.ops.indexer_localize import scan
 
-                # Per-domain scan and top-k, then the merge; no full-length
+                selector = get_indexer_topk(topk_backend)
+                topk_out = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+                # Per-domain scan and top-k, then the merge: no full-length
                 # scores (VLLM_INDEXER_LOCALIZE).
                 if (
-                    candidate_blocks is None
+                    whole_rows
+                    and candidate_blocks is None
                     and (
                         domain_topk := scan.localized_topk_backend(
-                            get_indexer_topk(topk_backend),
-                            num_padded_tokens,
-                            max_model_len,
-                            topk_tokens,
+                            selector, num_padded_tokens, max_model_len, topk_tokens
                         )
                     )
                     is not None
@@ -1382,13 +1384,14 @@ def sparse_attn_indexer(
                         decode_metadata.indices,
                         topk_tokens,
                         attn_metadata_narrowed.max_seq_len,
-                        topk_indices_buffer[:num_padded_tokens, :topk_tokens],
+                        topk_out,
                         topk_backend=domain_topk,
                     )
                 ):
                     return topk_indices_buffer
                 if (
-                    candidate_write
+                    whole_rows
+                    and candidate_write
                     and candidate_blocks is not None
                     and _localized_candidate_source_topk(
                         attn_metadata_narrowed,
@@ -1400,22 +1403,14 @@ def sparse_attn_indexer(
                         logits_dtype,
                         topk_backend,
                         topk_tokens,
-                        topk_indices_buffer[:num_padded_tokens, :topk_tokens],
+                        topk_out,
                         candidate_blocks,
                         candidate_block_size,
                     )
                 ):
                     return topk_indices_buffer
-            logits = None
-            if (
-                localized is not None
-                and dcp_world_size == 1
-                and decode_metadata.global_seq_lens is None
-            ):
-                from vllm.v1.attention.ops.indexer_localize import scan
-
-                # One scan per locality domain and a join; the join may
-                # already write the FP32 scores the top-k wants.
+                # Else one scan per domain and a join, which may already write
+                # the FP32 scores the top-k wants.
                 logits = scan.localized_paged_mqa_logits(
                     localized,
                     q,
@@ -1425,10 +1420,8 @@ def sparse_attn_indexer(
                     max_model_len,
                     logits_dtype,
                     decode_metadata.indices,
-                    lambda bf16: (
-                        not get_indexer_topk(topk_backend).takes_bf16_logits(
-                            bf16, topk_tokens, bf16.shape[0]
-                        )
+                    lambda t: (
+                        not selector.takes_bf16_logits(t, topk_tokens, t.shape[0])
                     ),
                 )
             if logits is None:

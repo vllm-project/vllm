@@ -80,12 +80,10 @@ extern "C" __global__ __launch_bounds__(THREADS) void indexer_localize_merge(
   int first = (tid - die * HALF) * ELEMS;
 #pragma unroll
   for (int z = 0; z < HIST_ZERO_ITERS; z++) {
-    if (z * THREADS + tid < HIST_WORDS) {
-      hist[z * THREADS + tid] = 0;
-    }
+    if (z * THREADS + tid < HIST_WORDS) hist[z * THREADS + tid] = 0;
   }
   if (tid == 0) {
-    rng[0] = 4294967295u;
+    rng[0] = 0xffffffffu;
     rng[1] = 0;
     rng[2] = 0;
   }
@@ -113,7 +111,7 @@ extern "C" __global__ __launch_bounds__(THREADS) void indexer_localize_merge(
   __syncthreads();
 #pragma unroll
   for (int e = 0; e < ELEMS; e++) {
-    int c = ((cols[e]) > (0) ? (cols[e]) : (0));
+    int c = max(cols[e], 0);
 #if SCORE_F32
     keys[e] = reinterpret_cast<unsigned int*>(s_row)[c];
 #else
@@ -122,24 +120,24 @@ extern "C" __global__ __launch_bounds__(THREADS) void indexer_localize_merge(
   }
 #pragma unroll
   for (int e = 0; e < ELEMS; e++) {
-    int c = ((cols[e]) > (0) ? (cols[e]) : (0));
+    int c = max(cols[e], 0);
     maps[e] = m_row[c >> LOG2_PAGE_ROWS];
   }
   // Order-preserving unsigned keys; the range of this CTA's valid keys.
-  unsigned int k_lo = 4294967295u;
+  unsigned int k_lo = 0xffffffffu;
   unsigned int k_hi = 0;
   int n_ok = 0;
 #pragma unroll
   for (int e = 0; e < ELEMS; e++) {
 #if SCORE_F32
-    keys[e] = keys[e] ^ ((unsigned int)((int)keys[e] >> 31) | 2147483648u);
+    keys[e] = keys[e] ^ ((unsigned int)((int)keys[e] >> 31) | 0x80000000u);
 #else
-    unsigned int b16 = keys[e] & 65535;
-    keys[e] = (b16 ^ (32768 | -(b16 >> 15) & 32767)) << 16;
+    unsigned int b16 = keys[e] & 0xffff;
+    keys[e] = (b16 ^ (0x8000 | -(b16 >> 15) & 0x7fff)) << 16;
 #endif
     if (cols[e] >= 0) {
-      k_lo = ((k_lo) < (keys[e]) ? (k_lo) : (keys[e]));
-      k_hi = ((k_hi) > (keys[e]) ? (k_hi) : (keys[e]));
+      k_lo = min(k_lo, keys[e]);
+      k_hi = max(k_hi, keys[e]);
       n_ok += 1;
     }
   }
@@ -168,10 +166,8 @@ extern "C" __global__ __launch_bounds__(THREADS) void indexer_localize_merge(
   // prefix of [lo, hi], 8 bits per pass: pf/pm are the selected prefix and
   // its mask, need the keys still to take within the prefix.
   int top = 31 - __clz(lo ^ hi);
-  unsigned int pm = 4294967295u;
-  if (top >= 0) {
-    pm = 4294967294u << (unsigned int)top;
-  }
+  unsigned int pm = 0xffffffffu;
+  if (top >= 0) pm = 0xfffffffeu << (unsigned int)top;
   unsigned int pf = lo & pm;
   int need = TOP_K;
   int n_pass = (top - KEY_LSB + 8) / 8;
@@ -181,11 +177,9 @@ extern "C" __global__ __launch_bounds__(THREADS) void indexer_localize_merge(
     need = nvalid;
     n_pass = 0;
   }
-  if (top < 0) {
-    n_pass = 0;
-  }
+  if (top < 0) n_pass = 0;
   for (int p = 0; p < n_pass; p++) {
-    int lsb = ((top - 8 * p - 7) > (KEY_LSB) ? (top - 8 * p - 7) : (KEY_LSB));
+    int lsb = max(top - 8 * p - 7, KEY_LSB);
     unsigned int sh = (unsigned int)lsb;
     unsigned int dmask = 255 >> (unsigned int)(8 - (top - 8 * p - lsb + 1));
     int hb = p * 256;
@@ -193,14 +187,12 @@ extern "C" __global__ __launch_bounds__(THREADS) void indexer_localize_merge(
     int n_lead = 0;
 #pragma unroll
     for (int e = 0; e < ELEMS; e++) {
-      if (cols[e] >= 0) {
-        if ((keys[e] & pm) == pf) {
-          unsigned int dg = keys[e] >> sh & dmask;
-          if (dg == lead) {
-            n_lead += 1;
-          } else {
-            atomicAdd(&hist[hb + (int)dg], 1);
-          }
+      if (cols[e] >= 0 && (keys[e] & pm) == pf) {
+        unsigned int dg = keys[e] >> sh & dmask;
+        if (dg == lead) {
+          n_lead += 1;
+        } else {
+          atomicAdd(&hist[hb + (int)dg], 1);
         }
       }
     }
@@ -208,10 +200,8 @@ extern "C" __global__ __launch_bounds__(THREADS) void indexer_localize_merge(
     asm volatile("redux.sync.add.s32 %0, %1, 0xffffffff;"
                  : "=r"(n_lead_w)
                  : "r"(n_lead));
-    if (lane == 0) {
-      if (n_lead_w > 0) {
-        atomicAdd(&hist[hb + (int)lead], (unsigned int)n_lead_w);
-      }
+    if (lane == 0 && n_lead_w > 0) {
+      atomicAdd(&hist[hb + (int)lead], (unsigned int)n_lead_w);
     }
     __syncthreads();
     if (warp == 0) {
@@ -226,37 +216,25 @@ extern "C" __global__ __launch_bounds__(THREADS) void indexer_localize_merge(
       }
       unsigned int suf = own;
       unsigned int up_0 = __shfl_down_sync(0xFFFFFFFF, suf, 1, 32);
-      if (lane + 1 < 32) {
-        suf += up_0;
-      }
+      if (lane + 1 < 32) suf += up_0;
       unsigned int up_1 = __shfl_down_sync(0xFFFFFFFF, suf, 2, 32);
-      if (lane + 2 < 32) {
-        suf += up_1;
-      }
+      if (lane + 2 < 32) suf += up_1;
       unsigned int up_2 = __shfl_down_sync(0xFFFFFFFF, suf, 4, 32);
-      if (lane + 4 < 32) {
-        suf += up_2;
-      }
+      if (lane + 4 < 32) suf += up_2;
       unsigned int up_3 = __shfl_down_sync(0xFFFFFFFF, suf, 8, 32);
-      if (lane + 8 < 32) {
-        suf += up_3;
-      }
+      if (lane + 8 < 32) suf += up_3;
       unsigned int up_4 = __shfl_down_sync(0xFFFFFFFF, suf, 16, 32);
-      if (lane + 16 < 32) {
-        suf += up_4;
-      }
+      if (lane + 16 < 32) suf += up_4;
       unsigned int hit = __ballot_sync(0xFFFFFFFF, (int)suf >= need);
       unsigned int run = suf - own;
       if (lane == 31 - __clz(hit)) {
 #pragma unroll
         for (int i = 0; i < 8; i++) {
           int j = 7 - i;
-          if ((int)run < need) {
-            if ((int)(run + bins[j]) >= need) {
-              ctl[0] = lane * 8 + j;
-              ctl[1] = (int)run;
-              ctl[2] = (int)bins[j];
-            }
+          if ((int)run < need && (int)(run + bins[j]) >= need) {
+            ctl[0] = lane * 8 + j;
+            ctl[1] = (int)run;
+            ctl[2] = (int)bins[j];
           }
           run += bins[j];
         }
@@ -266,9 +244,7 @@ extern "C" __global__ __launch_bounds__(THREADS) void indexer_localize_merge(
     need = need - ctl[1];
     pf = pf | (unsigned int)ctl[0] << sh;
     pm = pm | dmask << sh;
-    if (ctl[2] == need) {
-      break;
-    }
+    if (ctl[2] == need) break;
   }
   // Output slots: keys above the selected prefix first, then keys within it
   // in candidate order until need are taken (counts packed 16 + 16 bits).
@@ -277,50 +253,32 @@ extern "C" __global__ __launch_bounds__(THREADS) void indexer_localize_merge(
 #pragma unroll
   for (int e = 0; e < ELEMS; e++) {
     if (cols[e] >= 0) {
-      if ((keys[e] & pm) > pf) {
-        n_above += 1;
-      }
-      if ((keys[e] & pm) == pf) {
-        n_in += 1;
-      }
+      if ((keys[e] & pm) > pf) n_above += 1;
+      if ((keys[e] & pm) == pf) n_in += 1;
     }
   }
   unsigned int mine = n_above | n_in << 16;
   unsigned int incl = mine;
   unsigned int prev_0 = __shfl_up_sync(0xFFFFFFFF, incl, 1, 32);
-  if (lane >= 1) {
-    incl += prev_0;
-  }
+  if (lane >= 1) incl += prev_0;
   unsigned int prev_1 = __shfl_up_sync(0xFFFFFFFF, incl, 2, 32);
-  if (lane >= 2) {
-    incl += prev_1;
-  }
+  if (lane >= 2) incl += prev_1;
   unsigned int prev_2 = __shfl_up_sync(0xFFFFFFFF, incl, 4, 32);
-  if (lane >= 4) {
-    incl += prev_2;
-  }
+  if (lane >= 4) incl += prev_2;
   unsigned int prev_3 = __shfl_up_sync(0xFFFFFFFF, incl, 8, 32);
-  if (lane >= 8) {
-    incl += prev_3;
-  }
+  if (lane >= 8) incl += prev_3;
   unsigned int prev_4 = __shfl_up_sync(0xFFFFFFFF, incl, 16, 32);
-  if (lane >= 16) {
-    incl += prev_4;
-  }
-  if (lane == 31) {
-    wtot[warp] = incl;
-  }
+  if (lane >= 16) incl += prev_4;
+  if (lane == 31) wtot[warp] = incl;
   __syncthreads();
   unsigned int w_prev = 0;
-  if (lane < warp) {
-    w_prev = wtot[lane];
-  }
+  if (lane < warp) w_prev = wtot[lane];
   unsigned int w_base;
   asm volatile("redux.sync.add.u32 %0, %1, 0xffffffff;"
                : "=r"(w_base)
                : "r"(w_prev));
   unsigned int base = w_base + incl - mine;
-  int a_run = (int)(base & 65535);
+  int a_run = (int)(base & 0xffff);
   int b_run = (int)(base >> 16);
 #pragma unroll
   for (int e = 0; e < ELEMS; e++) {
@@ -328,26 +286,22 @@ extern "C" __global__ __launch_bounds__(THREADS) void indexer_localize_merge(
     int val = (maps[e] << LOG2_PAGE_ROWS) + (col & PAGE_MASK);
     if (col >= 0) {
       if ((keys[e] & pm) > pf) {
-        orow[a_run + ((b_run) < (need) ? (b_run) : (need))] = val;
+        orow[a_run + min(b_run, need)] = val;
         a_run += 1;
       } else if ((keys[e] & pm) == pf) {
-        if (b_run < need) {
-          orow[a_run + b_run] = val;
-        }
+        if (b_run < need) orow[a_run + b_run] = val;
         b_run += 1;
       }
     }
   }
   __syncthreads();
-  int kept = ((nvalid) < (TOP_K) ? (nvalid) : (TOP_K));
+  int kept = min(nvalid, TOP_K);
   int* d_row = dst + ((long long)row * (long long)dst_stride);
   int at = tid * 4;
   if (at < TOP_K) {
     int words[4];
 #pragma unroll
-    for (int i = 0; i < 4; i++) {
-      words[i] = ((at + i < kept) ? orow[at + i] : -1);
-    }
+    for (int i = 0; i < 4; i++) words[i] = at + i < kept ? orow[at + i] : -1;
     __builtin_assume(__isGlobal(d_row));
     *reinterpret_cast<int4*>(d_row + at) =
         make_int4(words[0], words[1], words[2], words[3]);

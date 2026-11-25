@@ -5,14 +5,13 @@
 // several indexer cache groups in one launch.
 //
 // Per group it writes each decode row's request pages split by locality domain
-// into compact per-domain block tables (lbt0/lbt1), the row's per-domain context
-// lengths (llen0/llen1), the join map, the per-domain local-to-request page maps
-// (inv0/inv1), the 64-entry zero pads after each domain's list (valid ids for
-// DeepGEMM's prefetch), the reset of rows num_rows..cap (lengths 0, 64 zeros),
-// and both domains' DeepGEMM paged-MQA-logits schedules
-// ((sms + 1) x 2 int32: a port of DeepGEMM 2.8.1's
-// sm100_paged_mqa_logits_metadata with SPLIT_KV = 384, BLOCK_Q = 4 and the
-// domain's SM count). Other entries are not written.
+// into compact per-domain block tables (lbt0/lbt1) followed by 64 zeros (valid
+// ids for DeepGEMM's prefetch), the row's per-domain context lengths
+// (llen0/llen1), the join map, the per-domain local-to-request page maps
+// (inv0/inv1), the reset of rows num_rows..cap (lengths 0, 64 zeros), and both
+// domains' DeepGEMM paged-MQA-logits schedules ((sms + 1) x 2 int32: a port of
+// DeepGEMM 2.8.1's sm100_paged_mqa_logits_metadata with SPLIT_KV = 384,
+// BLOCK_Q = 4 and the domain's SM count). Other entries are not written.
 //
 // Requests (DeepGEMM's varlen form): consecutive rows with the same index are
 // one request, whose rows see one more key each (speculative decoding).
@@ -59,9 +58,8 @@ struct Group {
   const int* bt;           // [num_rows, bt_stride] block ids
   const int* lens;         // [num_rows] context rows per decode row
   const signed char* dom;  // [num_pages] page -> domain (0/1)
-  const int* indices;  // [num_rows] request id per decode row (DeepGEMM varlen
-                       // indices)
-  int* lbt0;           // [cap, out_stride] die-0 compact block table
+  const int* indices;      // [num_rows] request id per decode row
+  int* lbt0;               // [cap, out_stride] die-0 compact block table
   int* lbt1;
   int* inv0;  // [cap, out_stride] die-d local page -> request page
   int* inv1;
@@ -75,8 +73,7 @@ struct Group {
   i64 bt_stride;
   i64 out_stride;
   i64 jmap_stride;
-  i64 dom_q0;  // dom_k > 0: domain(b) = ((dom_q0 + b) / dom_k) & 1 (= the dom
-               // table, checked on the host)
+  i64 dom_q0;  // dom_k > 0: domain(b) = ((dom_q0 + b) / dom_k) & 1
   int R;       // page rows
   int width;   // block-table width (pages)
   int cap;     // rows of the output buffers
@@ -86,7 +83,6 @@ struct Group {
   int reset_begin;  // reset blocks [reset_begin, reset_end)
   int reset_end;
   int dom_k;  // 0: read the dom table
-  int pad0;
 };
 
 struct Params {
@@ -94,8 +90,6 @@ struct Params {
   int num_groups;
   int sms0;
   int sms1;
-  int rows_max;  // max num_rows over the groups (dynamic smem = 16 * rows_max
-                 // bytes)
 };
 
 static_assert(sizeof(Group) == 192, "Group layout");
@@ -228,8 +222,7 @@ static __device__ void schedules(const Group& G, int sms0, int sms1,
                                  u32* pf, int* s_warp) {
   const int tid = threadIdx.x;
   const int T = G.num_rows;
-  // Request runs: token t starts a request if t == 0 or indices[t] != indices[t
-  // - 1].
+  // Request runs: token t starts one if t == 0 or indices[t] != indices[t - 1].
   int base = 0;
   for (int t0 = 0; t0 < T; t0 += kThreads) {
     const int t = t0 + tid;
@@ -309,14 +302,14 @@ static __device__ void schedules_warp(const Group& G, int sms0, int sms1,
   const u32 S = (u32)(warp ? sms1 : sms0);
   const int prev = __shfl_up_sync(full, idx, 1);
   const bool is = lane < T && (lane == 0 || idx != prev);
-  const u32 starts =
-      __ballot_sync(full, is);  // bit t: token t starts a request
+  // Bit t: token t starts a request.
+  const u32 starts = __ballot_sync(full, is);
   const int nreq = __popc(starts);
   // lane i < nreq holds request i: its first token, token count, cost
   const bool live = lane < nreq;
   const u32 st = live ? (u32)(__fns(starts, 0, lane + 1)) : (u32)T;
-  const u32 upto =
-      (live && st < 31u) ? ((2u << st) - 1u) : 0xffffffffu;  // bits 0..st
+  // Bits 0..st.
+  const u32 upto = (live && st < 31u) ? ((2u << st) - 1u) : 0xffffffffu;
   const u32 after = live ? (starts & ~upto) : 0u;  // starts after this one
   const u32 en = live ? (after ? (u32)(__ffs(after) - 1) : (u32)T) : (u32)T;
   const u32 nq = en - st;
@@ -390,9 +383,8 @@ static __device__ void schedule_block(const Group& G, int sms0, int sms1,
   u32* s_id = pf;      // [T] request index, then
   u32* s_np = pf;      // [T] pages of the split
   if (tid == 0) s_misc[4] = (int)(ld_relaxed_u32(G.state) + 1u);
-  const int idx = (T <= 32 && (tid & 31) < T)
-                      ? G.indices[tid & 31]
-                      : 0;  // warps 0-1 use it (T <= 32 path)
+  // Warps 0-1 use it (T <= 32 path).
+  const int idx = (T <= 32 && (tid & 31) < T) ? G.indices[tid & 31] : 0;
   for (int r = tid; r < T; r += kThreads) s_id[r] = (u32)G.indices[r];
   __syncthreads();
   for (int r = tid; r < T; r += kThreads) {
@@ -470,8 +462,8 @@ static __device__ void split_block(const Group& G, int item, int* s_warp,
   const int np_row = (L_row + R - 1) / R;
   const int nchr = (npages + kChunk - 1) / kChunk;
   const int last_c = (nchr > 0 ? nchr : 1) - 1;
-  if (c > last_c)
-    return;  // past the request's pages: nothing to write (block-uniform)
+  // Past the request's pages: nothing to write (block-uniform).
+  if (c > last_c) return;
 
   const i64 rout = (i64)r * G.out_stride;
   const i64 rj = (i64)r * G.jmap_stride;
@@ -489,8 +481,8 @@ static __device__ void split_block(const Group& G, int item, int* s_warp,
     n1 += one[k] ? 1 : 0;
   }
   int chunk_n1;
-  const int t1 =
-      block_excl_scan(n1, s_warp, chunk_n1);  // its barriers publish s_misc[4]
+  // Its barriers publish s_misc[4].
+  const int t1 = block_excl_scan(n1, s_warp, chunk_n1);
   const u32 tag = (u32)s_misc[4];
   const u64* fl = G.flags + (i64)r * G.nch;
   // An empty request's block is not waited for, so it may read the epoch after

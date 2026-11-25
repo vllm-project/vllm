@@ -2,20 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Die-local decode scan, top-k and merge of the sparse-attention indexer.
 
-Each locality domain's green-context stream runs the unchanged DeepGEMM
+Each locality domain's green-context stream runs DeepGEMM's
 `fp8_fp4_paged_mqa_logits` over the indexer pages in its own memory (the
-compact block table, context lengths and schedule `build.py` made for the
-domain), with DeepGEMM's programmatic dependent launch off for these
-launches. Then either:
+inputs `build.py` made for the domain). Then either:
 
-* `localized_paged_mqa_topk`: each domain runs the top-k the stock selector
-  picks (`cooperative_topk`, or `persistent_topk` above 64 rows) on its
-  compact scores, and one kernel (`merge.cu`) merges the 2 x K candidates into
-  the K request-local token positions: the same selected score multiset as the
-  single-launch scan and top-k (ties may pick other tokens); or
-* `localized_paged_mqa_logits`: one kernel joins both domains' compact scores
-  into the full-length score array with the stock layout, bit-identical to
-  the single-launch scan, for consumers that need the whole array.
+* `localized_paged_mqa_topk`: each domain runs the stock selector's top-k on
+  its scores, and `merge.cu` merges the 2 x K candidates into the K
+  request-local token positions (the stock top-k's score multiset; ties may
+  pick other tokens); or
+* `localized_paged_mqa_logits`: one kernel joins both domains' scores into the
+  stock full-length score array, bit-identical to the single-launch scan.
 """
 
 import ctypes
@@ -27,6 +23,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers import indexer_overlap
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.ops.indexer_localize.build import (
     LocalizedDecodeMetadata,
     ensure_built,
@@ -37,17 +34,19 @@ from vllm.v1.attention.ops.indexer_localize.placement import find_buffer
 logger = init_logger(__name__)
 
 
-def _view_matches(loc: LocalizedDecodeMetadata, kv_cache: torch.Tensor) -> bool:
-    """Whether the layer's cache view has the group's page geometry.
-
-    The page count may differ from the builder's view (the extensible KV
-    cache grows after capture and some models keep the view they first saw);
-    page `p` starts at `data_ptr + p * stride` either way and block ids stay
-    below the live page count, so only the rows, the stride and the
-    allocation matter.
-    """
+def _matches(
+    loc: LocalizedDecodeMetadata,
+    q: tuple[torch.Tensor, torch.Tensor | None],
+    kv_cache: torch.Tensor,
+) -> bool:
+    """Whether a decode call has the localized metadata's rows and page
+    geometry. The page count may differ from the builder's cache view (the
+    extensible KV cache grows after capture, and some models keep the view
+    they first saw); block ids stay below the live page count, so only the
+    rows, the stride and the allocation matter."""
     return (
-        kv_cache.shape[1] == loc.page_rows
+        q[0].shape[0] * q[0].shape[1] == loc.seq_lens[0].shape[0]
+        and kv_cache.shape[1] == loc.page_rows
         and kv_cache.stride(0) * kv_cache.element_size() == loc.page_stride
         and find_buffer(kv_cache.data_ptr()) is not None
     )
@@ -63,22 +62,17 @@ def _scan(
     logits_dtype: torch.dtype,
     indices: torch.Tensor | None,
 ) -> torch.Tensor:
-    """One domain's DeepGEMM scan, on the current (the domain's) stream."""
-    from vllm.utils.deep_gemm import (
-        fp8_fp4_paged_mqa_logits,
-        get_num_sms,
-        get_pdl,
-        set_num_sms,
-        set_pdl,
-    )
+    """One domain's DeepGEMM scan on the current (the domain's) stream, with
+    the domain's SM count and programmatic dependent launch off."""
+    from vllm.utils import deep_gemm as dg
 
-    num_sms = get_num_sms()
-    set_num_sms(loc.resources.sms[domain])
-    pdl = get_pdl()
+    num_sms = dg.get_num_sms()
+    dg.set_num_sms(loc.resources.sms[domain])
+    pdl = dg.get_pdl()
     if pdl:
-        set_pdl(False)
+        dg.set_pdl(False)
     try:
-        return fp8_fp4_paged_mqa_logits(
+        return dg.fp8_fp4_paged_mqa_logits(
             q,
             kv_cache,
             weights,
@@ -90,9 +84,9 @@ def _scan(
             indices=indices,
         )
     finally:
-        set_num_sms(num_sms)
+        dg.set_num_sms(num_sms)
         if pdl:
-            set_pdl(True)
+            dg.set_pdl(True)
 
 
 # ---------------------------------------------------------------------------
@@ -271,8 +265,7 @@ def localized_paged_mqa_logits(
     the consumer upcasts them), or None when this call cannot be localized
     (the caller runs the stock scan).
     """
-    rows = q[0].shape[0] * q[0].shape[1]
-    if not _view_matches(loc, kv_cache) or rows != loc.seq_lens[0].shape[0]:
+    if not _matches(loc, q, kv_cache):
         logger.warning_once(
             "Die-local indexer: a decode scan does not match its localized "
             "metadata; stock scan for it."
@@ -302,8 +295,7 @@ _MERGE_PAGE_ROWS = (64, 128)
 def _merge_smem_bytes(topk: int, threads: int, score_f32: bool) -> int:
     """`SMEM_TOTAL` of merge.cu."""
     hist = 4 * (1024 if score_f32 else 512)
-    end = hist + 32 + 4 * (threads // 32) + 4 * topk
-    return -(-end // 128) * 128
+    return round_up(hist + 32 + 4 * (threads // 32) + 4 * topk, 128)
 
 
 def _merge_kernel(
@@ -332,10 +324,9 @@ def _merge_kernel(
 def prepare_merge(
     topk: int, logits_dtype: torch.dtype, page_rows: int, device_index: int
 ) -> None:
-    """Compile the CUDA merge for a shape ahead of its first use, outside any
-    CUDA graph capture."""
-    if not torch.cuda.is_current_stream_capturing():
-        _merge_kernel(topk, logits_dtype == torch.float32, page_rows, device_index)
+    """Compile the CUDA merge for a shape ahead of its first use (a no-op
+    inside a CUDA graph capture)."""
+    _merge_kernel(topk, logits_dtype == torch.float32, page_rows, device_index)
 
 
 def _merge_fits(
@@ -370,44 +361,27 @@ def merge_candidates(
     assert kernel is not None and _merge_fits(idx, loc.inv_maps, topk_out)
     assert o0.stride() == o1.stride() and o0.stride(1) == 1 and o0.stride(0) < 2**31
     threads = _MERGE_THREADS[topk_tokens]
-
-    def ptr(t: torch.Tensor) -> ctypes.c_uint64:
-        return ctypes.c_uint64(t.data_ptr())
-
-    kernel.launch(
-        topk_out.shape[0],
-        threads,
-        _merge_smem_bytes(topk_tokens, threads, score_f32),
-        [
-            ptr(o0),
-            ptr(o1),
-            ctypes.c_int32(o0.stride(0)),
-            ptr(idx[0]),
-            ptr(idx[1]),
-            ctypes.c_int32(idx[0].stride(0)),
-            ptr(loc.inv_maps[0]),
-            ptr(loc.inv_maps[1]),
-            ctypes.c_int32(loc.inv_maps[0].stride(0)),
-            ptr(topk_out),
-            ctypes.c_int32(topk_out.stride(0)),
-        ],
-        torch.cuda.current_stream(),
-    )
+    # Per array: both domains' pointers (dst has one) and the row stride.
+    args: list[ctypes.c_uint64 | ctypes.c_int32] = []
+    for ts in ((o0, o1), idx, loc.inv_maps, (topk_out,)):
+        args += [ctypes.c_uint64(t.data_ptr()) for t in ts]
+        args.append(ctypes.c_int32(ts[0].stride(0)))
+    smem = _merge_smem_bytes(topk_tokens, threads, score_f32)
+    kernel.launch(topk_out.shape[0], threads, smem, args)
 
 
 def localized_topk_backend(
     selector: Any, rows: int, max_model_len: int, topk_tokens: int
 ) -> str | None:
     """The top-k each domain runs on its scores: the kernel the stock selector
-    would run on these BF16 scores, when it can run on a domain's SMs (no CTA
-    waits for CTAs it cannot see). That is `cooperative_topk` (clusters, no
-    grid sync) and, above 64 rows, `persistent_topk`, which then launches one
-    CTA per row. None for any other kernel."""
+    would run on these BF16 scores, if it runs on a domain's SMs (no CTA waits
+    for CTAs it cannot see): `cooperative_topk` (clusters, no grid sync) or,
+    above 64 rows, `persistent_topk` (one CTA per row). Else None."""
     from vllm.model_executor.layers.indexer_topk import AUTO_COOPERATIVE_MAX_ROWS
 
     probe = torch.empty_strided(
         (rows, max_model_len),
-        (-(-max_model_len // 64) * 64, 1),
+        (round_up(max_model_len, 64), 1),
         dtype=torch.bfloat16,
         device="meta",
     )
@@ -476,9 +450,8 @@ def localized_paged_mqa_topk(
     """
     rows = q[0].shape[0] * q[0].shape[1]
     if (
-        not _view_matches(loc, kv_cache)
+        not _matches(loc, q, kv_cache)
         or logits_dtype not in (torch.bfloat16, torch.float32)
-        or rows != loc.seq_lens[0].shape[0]
         or topk_out.shape[0] != rows
     ):
         logger.warning_once(

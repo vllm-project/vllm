@@ -15,37 +15,30 @@ VLLM_INDEXER_LOCALIZE=1 VLLM_INDEXER_OVERLAP=1 vllm serve <Kimi K3.1 or DeepSeek
 ## Die-local indexer (`VLLM_INDEXER_LOCALIZE`)
 
 On GPUs whose memory and SMs form two locality domains (dies), such as NVIDIA
-Rubin, a die reads its own memory faster than the other die's. In decode, the
-indexer scans every cached index key of every request, so it is bound by memory
+Rubin, a die reads its own memory faster than the other die's, and the decode
+indexer, which scans every cached index key of every request, is bound by memory
 bandwidth. With `VLLM_INDEXER_LOCALIZE=1`:
 
-- The KV cache is placed in runs of whole KV blocks, close to 32 MiB each, that
-  alternate between the two locality domains. Block ids and the cache-insert
-  kernels are unchanged; this applies to the extensible KV cache (the default)
-  and to the plain allocation.
+- The KV cache (extensible or plain) is placed in runs of whole KV blocks, close
+  to 32 MiB each, that alternate between the two locality domains. Block ids and
+  the cache-insert kernels are unchanged.
 - Every decode step, one kernel (captured in the decode CUDA graph) splits each
   request's index-key pages by domain and builds both domains' DeepGEMM
   schedules.
 - Each domain's SMs (a green context per domain) scan the pages in their own
   memory with DeepGEMM's `fp8_fp4_paged_mqa_logits`. With top-k 512, 1024 or
-  2048, each domain also runs the stock selector's top-k (`cooperative_topk` up
-  to 64 rows, `persistent_topk` above) on its own scores and one kernel merges
-  the two candidate lists; otherwise the two score arrays are joined into the
-  stock full-length array and the stock top-k runs.
+  2048, each domain also runs the stock selector's top-k on its own scores and
+  one kernel merges the two candidate lists; otherwise the two score arrays are
+  joined into the stock full-length array and the stock top-k runs.
 - A decode batch takes the die split only when each domain's top-k fits in one
-  round of CTAs on the domain's SMs: at most as many rows as the domain holds
-  clusters of the top-k's size at once (16, 8, 4 or 2 CTAs per row up to 4, 8,
-  33 or 64 rows, then 1), as CUDA's occupancy query reports for the domain's
-  green context. On VR200 (100 SMs per domain) that is 1-23, 34-50 and 65-100
-  rows; other batches run the stock indexer. The rule depends only on the row
-  count, which a FULL CUDA graph fixes per captured batch size.
+  round of CTAs on the domain's SMs, as CUDA's occupancy query reports for the
+  domain's green context. On VR200 (100 SMs per domain) that is 1-23, 34-50 and
+  65-100 rows; other batches run the stock indexer. The rule depends only on the
+  row count, which a FULL CUDA graph fixes per captured batch size.
 
-With speculative decoding, a request has one decode row per query token (the
-last accepted token and the draft tokens), and each row sees one key more than
-the one before. DeepGEMM reads the page list of a request's first row and scans
-as far as its last row needs, so the build splits each request's pages once, up
-to its last row, gives every row of the request the same per-domain page lists,
-and gives each row its own per-domain lengths.
+With speculative decoding, a request has one decode row per query token, each
+seeing one key more than the one before: the build splits the request's pages
+once, up to its last row, and gives each row its own per-domain lengths.
 
 The scores are bit-identical to the single-launch scan, and the kept tokens have
 the same score multiset as the stock top-k (ties may keep other tokens). The CUDA
@@ -54,10 +47,10 @@ under a second.
 
 Requirements: a GPU with two locality domains, DeepGEMM, `cuda-bindings` 13.4 or
 later (driver API and NVRTC), and a PyTorch build with locality-domain green
-contexts and `torch.cuda.execute_on_streams` (nightly from 2026-10-08, 2.16).
-Where any of these is missing, vLLM logs why and runs the stock indexer. The die
-split and the KV cache placement are also off for models whose class does not
-set `supports_localized_indexer` (today Kimi K3 / K3.1 and DeepSeek-V4.1), with
+contexts and `torch.cuda.execute_on_streams` (2.16). Where any of these is
+missing, vLLM logs why and runs the stock indexer. The die split and the KV cache
+placement are also off for models whose class does not set
+`supports_localized_indexer` (today Kimi K3 / K3.1 and DeepSeek-V4.1), with
 decode or prefill context parallelism, a KV connector, and with the CuMem
 allocator on a plain (non-extensible) KV cache.
 

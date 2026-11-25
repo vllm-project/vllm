@@ -2,14 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CUDA kernels of the die-local indexer, compiled at runtime with NVRTC.
 
-`build.cu` (the per-step build), `merge.cu` (the merge of both domains'
-top-k candidates) and `topk_shape.cu` (the top-k's CTA shape, for occupancy
-queries) ship as source. Each configuration is compiled for the
-current device at first use, once per process, and loaded with
-`cuLibraryLoadData`, whose kernel handle launches in any context: on full-GPU
-streams and on the locality domains' green-context streams alike. A launch is
-one `cuLaunchKernel` on the given stream, so CUDA graphs capture it like any
-other kernel.
+The `.cu` sources ship with vLLM; each configuration is compiled for the
+current device at first use and loaded with `cuLibraryLoadData`, whose kernel
+handle launches in any context: on full-GPU streams and on the locality
+domains' green-context streams alike. A launch is one `cuLaunchKernel` on the
+current stream, so CUDA graphs capture it like any other kernel.
 """
 
 import ctypes
@@ -86,17 +83,13 @@ class CudaKernel:
         arch = f"sm_{major}{minor}{'a' if major >= 9 else ''}"
         start = time.perf_counter()
         self._cubin = compile_source(source, arch, defines)
-        self.compile_seconds = time.perf_counter() - start
+        seconds = time.perf_counter() - start
         self._library = _check(
             cu.cuLibraryLoadData(self._cubin, None, None, 0, None, None, 0)
         )
         self._kernel = _check(cu.cuLibraryGetKernel(self._library, name.encode()))
         logger.debug(
-            "Compiled %s %s for %s in %.2f s",
-            source,
-            dict(defines),
-            arch,
-            self.compile_seconds,
+            "Compiled %s %s for %s in %.2f s", source, dict(defines), arch, seconds
         )
 
     def launch(
@@ -105,27 +98,14 @@ class CudaKernel:
         block: int,
         smem: int,
         args: Sequence[ctypes._SimpleCData | ctypes.Structure],
-        stream: torch.cuda.Stream,
     ) -> None:
-        """Launch a 1-D grid on `stream`; `args` in the kernel's order."""
+        """Launch a 1-D grid on the current stream; `args` in kernel order."""
         from cuda.bindings import driver as cu
 
         ptrs = (ctypes.c_void_p * len(args))(*(ctypes.addressof(a) for a in args))
-        _check(
-            cu.cuLaunchKernel(
-                self._kernel,
-                grid,
-                1,
-                1,
-                block,
-                1,
-                1,
-                smem,
-                stream.cuda_stream,
-                ctypes.addressof(ptrs),
-                0,
-            )
-        )
+        stream = torch.cuda.current_stream().cuda_stream
+        config = (grid, 1, 1, block, 1, 1, smem, stream)
+        _check(cu.cuLaunchKernel(self._kernel, *config, ctypes.addressof(ptrs), 0))
 
     def max_active_clusters(
         self,
@@ -143,22 +123,11 @@ class CudaKernel:
 
         dev = _check(cu.cuDeviceGet(device_index))
         attr = cu.CUfunction_attribute
-        _check(
-            cu.cuKernelSetAttribute(
-                attr.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                smem,
-                self._kernel,
-                dev,
-            )
-        )
-        _check(
-            cu.cuKernelSetAttribute(
-                attr.CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED,
-                1,
-                self._kernel,
-                dev,
-            )
-        )
+        for name, value in (
+            (attr.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem),
+            (attr.CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED, 1),
+        ):
+            _check(cu.cuKernelSetAttribute(name, value, self._kernel, dev))
         config = cu.CUlaunchConfig()
         config.gridDimX, config.gridDimY, config.gridDimZ = 1, cluster, 1
         config.blockDimX, config.blockDimY, config.blockDimZ = block, 1, 1

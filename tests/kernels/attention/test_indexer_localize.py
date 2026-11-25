@@ -40,7 +40,7 @@ def _resources(num_sms: int | None = None) -> placement.DomainResources:
     device = _device()
     total = torch.cuda.get_device_properties(device).multi_processor_count
     half = num_sms or total // 2
-    return placement.DomainResources(device.index, [], [half, half], total, [])
+    return placement.DomainResources(device.index, [], [half, half], total)
 
 
 @pytest.fixture(scope="module")
@@ -58,8 +58,9 @@ def domains() -> placement.DomainResources | None:
 
 
 def _row_pages(rows: int, pages: int, page_rows: int, gen: torch.Generator):
-    """Each row's pages split between the domains: the local-to-row page maps
-    and the join map ((local column << 1) | domain per row page)."""
+    """Metadata for the merge and join kernels: each row's pages split between
+    the domains, as local-to-row page maps and the join map ((local column <<
+    1) | domain per row page)."""
     device = _device()
     order = torch.argsort(torch.rand(rows, 2 * pages, generator=gen, device=device))
     inv = [order[:, :pages].int().contiguous(), order[:, pages:].int().contiguous()]
@@ -67,7 +68,18 @@ def _row_pages(rows: int, pages: int, page_rows: int, gen: torch.Generator):
     local = torch.arange(pages, dtype=torch.int32, device=device).expand(rows, -1)
     for d in range(2):
         jmap.scatter_(1, inv[d].long(), local * page_rows * 2 + d)
-    return inv, jmap
+    meta = build.LocalizedDecodeMetadata(
+        page_rows=page_rows,
+        capacity=rows,
+        block_tables=[],
+        seq_lens=[],
+        schedules=[],
+        join_map=jmap,
+        inv_maps=inv,
+        page_stride=0,
+        resources=_resources(),
+    )
+    return inv, meta
 
 
 @pytest.fixture(scope="module")
@@ -128,7 +140,7 @@ def test_merge_kernel_matches_reference(nvrtc, topk, score_dtype, page_rows):
     gen = torch.Generator(device=device).manual_seed(topk + page_rows)
     rows, pages = 8, 4 * topk // page_rows
     width = pages * page_rows
-    inv, jmap = _row_pages(rows, pages, page_rows, gen)
+    inv, loc = _row_pages(rows, pages, page_rows, gen)
     # Few distinct scores, so the K-th largest is tied.
     scores = [
         (torch.randint(-64, 64, (rows, width), generator=gen, device=device) / 8).to(
@@ -143,17 +155,6 @@ def test_merge_kernel_matches_reference(nvrtc, topk, score_dtype, page_rows):
         # Short rows have fewer than K candidates.
         cols[d, topk // 3 :] = -1
         idx.append(cols.contiguous())
-    loc = build.LocalizedDecodeMetadata(
-        page_rows=page_rows,
-        capacity=rows,
-        block_tables=[],
-        seq_lens=[],
-        schedules=[],
-        join_map=jmap,
-        inv_maps=inv,
-        page_stride=0,
-        resources=_resources(),
-    )
     assert scan._merge_kernel(
         topk, score_dtype == torch.float32, page_rows, device.index
     ), "the CUDA merge does not build"
@@ -190,7 +191,7 @@ def test_join_matches_reference(page_rows, out_dtype, far):
     rows, pages = 6, 40
     width = 2 * pages * page_rows
     stride = math.ceil(width / 1536) * 1536  # DeepGEMM's row alignment
-    inv, jmap = _row_pages(rows, pages, page_rows, gen)
+    inv, loc = _row_pages(rows, pages, page_rows, gen)
     compact = [
         torch.randn(rows, stride, generator=gen, device=device).to(torch.bfloat16)
         for _ in range(2)
@@ -207,17 +208,6 @@ def test_join_matches_reference(page_rows, out_dtype, far):
         [0, 1, page_rows, 7 * page_rows + 5, width - 3, width],
         dtype=torch.int32,
         device=device,
-    )
-    loc = build.LocalizedDecodeMetadata(
-        page_rows=page_rows,
-        capacity=rows,
-        block_tables=[],
-        seq_lens=[],
-        schedules=[],
-        join_map=jmap,
-        inv_maps=inv,
-        page_stride=0,
-        resources=_resources(),
     )
     ref = torch.full((rows, width), -9.0, dtype=out_dtype, device=device)
     for r in range(rows):
@@ -490,6 +480,18 @@ def _cache_config(num_blocks: int, page_bytes: int, layers: int) -> KVCacheConfi
     return KVCacheConfig(num_blocks, [tensor], [])
 
 
+def _layer1_pages(
+    buf: torch.Tensor, config: KVCacheConfig, page_rows: int, row_bytes: int
+) -> torch.Tensor:
+    """Layer 1's pages of a `_cache_config` cache: `[blocks, rows, bytes]`."""
+    return torch.as_strided(
+        buf.view(torch.uint8),
+        (config.num_blocks, page_rows, row_bytes),
+        (config.kv_cache_tensors[0].block_stride, row_bytes, 1),
+        storage_offset=page_rows * row_bytes,
+    )
+
+
 @pytest.mark.parametrize(
     "arch,opted_in",
     [
@@ -508,26 +510,40 @@ def test_models_opt_in_to_die_local_indexer(arch, opted_in):
     assert getattr(model_cls, "supports_localized_indexer", False) is opted_in
 
 
-@pytest.mark.parametrize("extensible", [False, True])
-def test_kv_cache_granules_live_in_their_planned_domain(domains, extensible):
+@pytest.mark.parametrize("case", ["plain", "extensible", "domain_1_full"])
+def test_kv_cache_granules_live_in_their_planned_domain(domains, monkeypatch, case):
     """Every committed granule of the KV cache is in the locality domain of
-    its midpoint's run, and the page-to-domain table follows the plan."""
+    its midpoint's run, and the page-to-domain table follows the plan. When
+    domain 1 is full, its runs are created anywhere on the device instead, so
+    the extensible KV cache still commits; domain 0's runs keep their
+    placement."""
     from cuda.bindings import driver as cu
 
     from vllm.utils.extensible_tensor import granule_size
     from vllm.v1.kv_cache_layout import KVCacheLayout
     from vllm.v1.worker.extensible_kv_cache import ExtensibleKVCache
 
+    domain_type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN
+    if case == "domain_1_full":
+        real_create = cu.cuMemCreate
+
+        def create(nbytes, prop, flags):
+            loc = prop.location
+            if loc.type == domain_type and loc.localized.localityDomainId == 1:
+                return cu.CUresult.CUDA_ERROR_OUT_OF_MEMORY, None
+            return real_create(nbytes, prop, flags)
+
+        monkeypatch.setattr(cu, "cuMemCreate", create)
     device = _device()
     page_rows, row_bytes = 64, 132
     config = _cache_config(6000, page_rows * row_bytes, 4)
     size = config.kv_cache_tensors[0].size
     kv_cache = None
-    allocate = None
-    if extensible:
+    if case != "plain":
         kv_cache = ExtensibleKVCache(config, device, KVCacheLayout.BLHNC)
-        allocate = kv_cache.allocate
-    allocate = placement.localized_kv_allocate(config, device, allocate)
+    allocate = placement.localized_kv_allocate(
+        config, device, None if kv_cache is None else kv_cache.allocate
+    )
     assert allocate is not None
     buf = allocate(size)
     if kv_cache is not None:
@@ -541,21 +557,19 @@ def test_kv_cache_granules_live_in_their_planned_domain(domains, extensible):
     granule = granule_size(device.index)
     for g in range(size // granule):
         handle = cu.cuMemRetainAllocationHandle(base + g * granule + granule // 2)[1]
-        prop = cu.cuMemGetAllocationPropertiesFromHandle(handle)[1]
+        location = cu.cuMemGetAllocationPropertiesFromHandle(handle)[1].location
         cu.cuMemRelease(handle)
-        assert (
-            prop.location.type
-            == cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN
-        )
         planned = ((g * granule + granule // 2) // run_bytes) % 2
-        assert prop.location.localized.localityDomainId == planned, g
+        if case == "domain_1_full" and planned == 1:
+            device_type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
+            assert location.type == device_type, g
+        else:
+            assert location.type == domain_type, g
+            assert location.localized.localityDomainId == planned, g
+    buf.fill_(1)
+    assert int(buf.view(torch.uint8).sum()) == size
 
-    view = torch.as_strided(
-        buf.view(torch.uint8),
-        (config.num_blocks, page_rows, row_bytes),
-        (block_bytes, row_bytes, 1),
-        storage_offset=page_rows * row_bytes,
-    )
+    view = _layer1_pages(buf, config, page_rows, row_bytes)
     table = placement.page_domain_table(view)
     assert table is not None
     mid = view.data_ptr() - base + torch.arange(config.num_blocks) * block_bytes
@@ -566,67 +580,13 @@ def test_kv_cache_granules_live_in_their_planned_domain(domains, extensible):
     assert k > 0 and torch.equal((((q0 + pages) // k) % 2).to(torch.int8), table)
 
 
-def test_kv_cache_run_goes_anywhere_when_its_domain_is_full(domains, monkeypatch):
-    """A run whose locality domain is full is created on the device instead,
-    so the extensible KV cache still commits; the other domain's runs keep
-    their placement."""
-    from cuda.bindings import driver as cu
-
-    from vllm.utils.extensible_tensor import granule_size
-    from vllm.v1.kv_cache_layout import KVCacheLayout
-    from vllm.v1.worker.extensible_kv_cache import ExtensibleKVCache
-
-    real_create = cu.cuMemCreate
-    domain_type = cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN
-
-    def create(nbytes, prop, flags):
-        loc = prop.location
-        if loc.type == domain_type and loc.localized.localityDomainId == 1:
-            return cu.CUresult.CUDA_ERROR_OUT_OF_MEMORY, None
-        return real_create(nbytes, prop, flags)
-
-    monkeypatch.setattr(cu, "cuMemCreate", create)
-    device = _device()
-    page_rows, row_bytes = 64, 132
-    config = _cache_config(6000, page_rows * row_bytes, 4)
-    size = config.kv_cache_tensors[0].size
-    kv_cache = ExtensibleKVCache(config, device, KVCacheLayout.BLHNC)
-    allocate = placement.localized_kv_allocate(config, device, kv_cache.allocate)
-    assert allocate is not None
-    buf = allocate(size)
-    kv_cache.commit(config.num_blocks)
-    found = placement.find_buffer(buf.data_ptr())
-    assert found is not None
-    base, _, run_bytes, _ = found
-
-    granule = granule_size(device.index)
-    for g in range(size // granule):
-        handle = cu.cuMemRetainAllocationHandle(base + g * granule + granule // 2)[1]
-        prop = cu.cuMemGetAllocationPropertiesFromHandle(handle)[1]
-        cu.cuMemRelease(handle)
-        if ((g * granule + granule // 2) // run_bytes) % 2 == 0:
-            assert prop.location.type == domain_type, g
-            assert prop.location.localized.localityDomainId == 0, g
-        else:
-            assert (
-                prop.location.type == cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
-            ), g
-    buf.fill_(1)
-    assert int(buf.view(torch.uint8).sum()) == size
-
-
 def _fill_index_cache(kv: torch.Tensor, key_bytes: int, gen: torch.Generator):
     """Random valid index keys (FP8 without NaN codes, or any MXFP4 byte)
     with unit UE8M0 scales."""
     pages, page_rows, row_bytes = kv.shape
     flat = torch.as_strided(kv, (pages, page_rows * row_bytes), (kv.stride(0), 1))
     data = torch.randint(
-        0,
-        256,
-        (pages, page_rows * row_bytes),
-        dtype=torch.uint8,
-        generator=gen,
-        device=kv.device,
+        0, 256, flat.shape, dtype=torch.uint8, generator=gen, device=kv.device
     )
     if key_bytes == 128:  # FP8: no NaN
         data.masked_fill_((data & 0x7F) == 0x7F, 0)
@@ -671,13 +631,7 @@ class _DecodeCase:
         allocate = placement.localized_kv_allocate(config, device, None)
         assert allocate is not None
         self.buffer = allocate(config.kv_cache_tensors[0].size)
-        block_bytes = config.kv_cache_tensors[0].block_stride
-        kv = torch.as_strided(
-            self.buffer.view(torch.uint8),
-            (num_blocks, page_rows, row_bytes),
-            (block_bytes, row_bytes, 1),
-            storage_offset=page_rows * row_bytes,
-        )
+        kv = _layer1_pages(self.buffer, config, page_rows, row_bytes)
         _fill_index_cache(kv, key_bytes, gen)
         self.kv = kv_cache_as_quant_view(kv, dim, fp4)
         vllm_config = VllmConfig()
@@ -747,6 +701,25 @@ class _DecodeCase:
     def q(self) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.q_values, self.q_scale
 
+    def localize(self, rows: int) -> build.LocalizedDecodeMetadata | None:
+        return self.localizer.build(self.block_table, self.seq_lens, self.indices, rows)
+
+    def join(self, loc: build.LocalizedDecodeMetadata, fp32: bool) -> torch.Tensor:
+        """The die-split scan and join, FP32 or in the scan's dtype."""
+        out = scan.localized_paged_mqa_logits(
+            loc,
+            self.q,
+            self.kv,
+            self.weights,
+            self.seq_lens,
+            self.max_model_len,
+            self.logits_dtype,
+            self.indices,
+            lambda t: fp32,
+        )
+        assert out is not None
+        return out
+
 
 def _assert_same_scores(out: torch.Tensor, ref: torch.Tensor, lens: torch.Tensor):
     assert out.shape == ref.shape and out.stride() == ref.stride()
@@ -772,20 +745,12 @@ def _assert_same_kept_scores(
 @pytest.mark.parametrize(
     "fp4,page_rows,topk,requests,rows_per_request",
     [
-        (False, 64, 2048, 4, 1),
-        (False, 64, 2048, 2, 4),
-        (True, 64, 512, 4, 1),
-        (True, 64, 512, 12, 4),
-        (True, 128, 512, 4, 1),
-        (True, 128, 512, 16, 5),
-    ],
-    ids=[
-        "kimi_k3",
-        "kimi_k3_4_tokens",
-        "deepseek_v4_c2",
-        "deepseek_v4_c2_4_tokens",
-        "deepseek_v4_c1",
-        "deepseek_v4_c1_80_rows",
+        pytest.param(False, 64, 2048, 4, 1, id="kimi_k3"),
+        pytest.param(False, 64, 2048, 2, 4, id="kimi_k3_4_tokens"),
+        pytest.param(True, 64, 512, 4, 1, id="deepseek_v4_c2"),
+        pytest.param(True, 64, 512, 12, 4, id="deepseek_v4_c2_4_tokens"),
+        pytest.param(True, 128, 512, 4, 1, id="deepseek_v4_c1"),
+        pytest.param(True, 128, 512, 16, 5, id="deepseek_v4_c1_80_rows"),
     ],
 )
 def test_localized_decode_matches_single_launch(
@@ -798,7 +763,7 @@ def test_localized_decode_matches_single_launch(
     graph replayed over new queries."""
     case = _DecodeCase(fp4, page_rows, requests, 96 * 1024, rows_per_request)
     rows = case.seq_lens.shape[0]
-    meta = case.localizer.build(case.block_table, case.seq_lens, case.indices, rows)
+    meta = case.localize(rows)
     assert meta is not None, "the localizer refused the batch"
     # A row count whose per-domain top-k needs a second round takes the stock
     # indexer.
@@ -807,32 +772,11 @@ def test_localized_decode_matches_single_launch(
     second_round = next(
         n for n in range(1, 256) if not build.use_die_split(n, capacity)
     )
-    assert (
-        case.localizer.build(
-            case.block_table, case.seq_lens, case.indices, second_round
-        )
-        is None
-    )
+    assert case.localize(second_round) is None
     ref = case.stock()
     for want_fp32 in (False, True):
-
-        def upcast(scores: torch.Tensor, fp32: bool = want_fp32) -> bool:
-            return fp32
-
-        out = scan.localized_paged_mqa_logits(
-            meta,
-            case.q,
-            case.kv,
-            case.weights,
-            case.seq_lens,
-            case.max_model_len,
-            case.logits_dtype,
-            case.indices,
-            upcast,
-        )
-        assert out is not None
         expected = as_fp32_logits(ref, case.seq_lens.view(-1)) if want_fp32 else ref
-        _assert_same_scores(out, expected, case.seq_lens)
+        _assert_same_scores(case.join(meta, want_fp32), expected, case.seq_lens)
 
     selector = get_indexer_topk("auto")
     max_seq_len = int(case.seq_lens.max())
@@ -920,7 +864,7 @@ def test_candidate_source_matches_stock(domains, candidate_stream, rows_per_requ
     case = _DecodeCase(True, 128, 4, 96 * 1024, rows_per_request)
     rows = case.seq_lens.shape[0]
     device = case.seq_lens.device
-    loc = case.localizer.build(case.block_table, case.seq_lens, case.indices, rows)
+    loc = case.localize(rows)
     assert loc is not None
 
     def int32(*shape: int) -> torch.Tensor:
@@ -983,18 +927,7 @@ def test_candidate_source_matches_stock(domains, candidate_stream, rows_per_requ
     assert bool((kept == -3).all())
     # The stock path, eagerly, as in the warmup step before each capture.
     scores = case.stock()
-    joined = scan.localized_paged_mqa_logits(
-        loc,
-        case.q,
-        case.kv,
-        case.weights,
-        case.seq_lens,
-        case.max_model_len,
-        case.logits_dtype,
-        case.indices,
-        lambda t: False,
-    )
-    assert joined is not None
+    joined = case.join(loc, fp32=False)
     ref_candidates = int32(rows, topk_blocks)
     select_candidate_blocks(
         joined,

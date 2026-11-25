@@ -3,21 +3,15 @@
 """Per-step decode metadata of the die-local indexer.
 
 Every decode step, each indexer cache group needs its requests' pages split
-by locality domain (compact per-domain block tables, per-domain context
-lengths, a join map and local-to-request page maps) and both domains'
-DeepGEMM schedules. Decode rows are DeepGEMM's varlen form: one row per query
-token, consecutive rows of one request sharing its index; with speculative
-decoding a request has several rows, each seeing one key more than the one
-before. Every row of a request gets the request's page lists, cut at its last
-row, and its own per-domain lengths.
-
-The indexer metadata builder only records the inputs (its persistent block
-table, lengths and request indices); the first localized scan of the forward
-launches one kernel (`build.cu`) that builds every recorded group, so FULL
-CUDA graphs capture it and nothing runs between graphs.
+by locality domain and both domains' DeepGEMM schedules (`build.cu` describes
+the outputs and the rows of speculative decoding). The metadata builder only
+records the inputs (its persistent buffers); the forward's first localized
+scan launches one kernel that builds every recorded group, so FULL CUDA graphs
+capture it and nothing runs between graphs.
 """
 
 import ctypes
+import functools
 import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -26,7 +20,8 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.attention.ops.indexer_localize.kernels import get_kernel
+from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.ops.indexer_localize.kernels import CudaKernel, get_kernel
 from vllm.v1.attention.ops.indexer_localize.placement import (
     NUM_DOMAINS,
     DomainResources,
@@ -43,43 +38,17 @@ _THREADS = 256
 _BUILD_CHUNK = 1024
 _RESET_ROWS = 8
 _MAX_GROUPS = 4
-# The schedule block keeps 16 bytes per row in shared memory.
-_MAX_ROWS = 2048
 
 
 # ---------------------------------------------------------------------------
 # Build kernel launcher
 # ---------------------------------------------------------------------------
-_PTRS = (
-    "bt",
-    "lens",
-    "dom",
-    "indices",
-    "lbt0",
-    "lbt1",
-    "inv0",
-    "inv1",
-    "jmap",
-    "llen0",
-    "llen1",
-    "sched0",
-    "sched1",
-    "flags",
-    "state",
-)
-_I64 = ("bt_stride", "out_stride", "jmap_stride", "dom_q0")
-_I32 = (
-    "R",
-    "width",
-    "cap",
-    "num_rows",
-    "nch",
-    "split_begin",
-    "reset_begin",
-    "reset_end",
-    "dom_k",
-    "pad0",
-)
+# The fields of build.cu's `Group`: pointers, 64-bit and 32-bit integers.
+_PTRS = ["bt", "lens", "dom", "indices", "lbt0", "lbt1", "inv0", "inv1", "jmap"]
+_PTRS += ["llen0", "llen1", "sched0", "sched1", "flags", "state"]
+_I64 = ["bt_stride", "out_stride", "jmap_stride", "dom_q0"]
+_I32 = ["R", "width", "cap", "num_rows", "nch", "split_begin", "reset_begin"]
+_I32 += ["reset_end", "dom_k"]
 
 
 class _Group(ctypes.Structure):
@@ -91,12 +60,8 @@ class _Group(ctypes.Structure):
 
 
 class _Params(ctypes.Structure):
-    _fields_ = [
-        ("g", _Group * _MAX_GROUPS),
-        ("num_groups", ctypes.c_int32),
-        ("sms0", ctypes.c_int32),
-        ("sms1", ctypes.c_int32),
-        ("rows_max", ctypes.c_int32),
+    _fields_ = [("g", _Group * _MAX_GROUPS)] + [
+        (n, ctypes.c_int32) for n in ("num_groups", "sms0", "sms1")
     ]
 
 
@@ -130,7 +95,7 @@ class _GroupArgs:
 
 
 def _num_chunks(width: int) -> int:
-    return max(1, -(-width // _BUILD_CHUNK))
+    return max(1, cdiv(width, _BUILD_CHUNK))
 
 
 def _pack(groups: list[_GroupArgs], sms: list[int]) -> tuple[_Params, int, int]:
@@ -142,47 +107,27 @@ def _pack(groups: list[_GroupArgs], sms: list[int]) -> tuple[_Params, int, int]:
         blocks += 1 + g.num_rows * _num_chunks(g.width)
     for i, g in enumerate(groups):
         G = p.g[i]
-        num_reset = -(-max(0, g.cap - g.num_rows) // _RESET_ROWS)
-        G.reset_begin, G.reset_end = blocks, blocks + num_reset
-        blocks += num_reset
-        tensors = (
-            g.bt,
-            g.lens,
-            g.dom,
-            g.indices,
-            g.lbt[0],
-            g.lbt[1],
-            g.inv[0],
-            g.inv[1],
-            g.jmap,
-            g.llen[0],
-            g.llen[1],
-            g.sched[0],
-            g.sched[1],
-            g.flags,
-            g.state,
-        )
+        G.reset_begin = blocks
+        blocks += cdiv(max(0, g.cap - g.num_rows), _RESET_ROWS)
+        G.reset_end = blocks
+        tensors = [g.bt, g.lens, g.dom, g.indices, *g.lbt, *g.inv, g.jmap]
+        tensors += [*g.llen, *g.sched, g.flags, g.state]
         for name, t in zip(_PTRS, tensors):
             setattr(G, name, t.data_ptr())
-        G.bt_stride = g.bt.stride(0)
-        G.out_stride = g.lbt[0].stride(0)
+        G.bt_stride, G.out_stride = g.bt.stride(0), g.lbt[0].stride(0)
         G.jmap_stride = g.jmap.stride(0)
         G.R, G.width, G.cap, G.num_rows = g.R, g.width, g.cap, g.num_rows
-        G.nch = _num_chunks(g.width)
-        G.dom_q0, G.dom_k = g.dom_q0, g.dom_k
+        G.nch, G.dom_q0, G.dom_k = _num_chunks(g.width), g.dom_q0, g.dom_k
     p.num_groups = len(groups)
     p.sms0, p.sms1 = sms
-    p.rows_max = max(g.num_rows for g in groups)
-    return p, blocks, 16 * p.rows_max
+    # The schedule block keeps 16 bytes per row in shared memory.
+    return p, blocks, 16 * max(g.num_rows for g in groups)
 
 
 class _BuildKernel:
     """Launches `build.cu` for up to `_MAX_GROUPS` groups at once."""
 
-    def __init__(self, device_index: int):
-        kernel = get_kernel("build.cu", "indexer_localize_build", (), device_index)
-        if kernel is None:
-            raise RuntimeError("the build kernel is unavailable")
+    def __init__(self, kernel: CudaKernel):
         self._kernel = kernel
         # Packed parameters per list of _GroupArgs, checked by identity: the
         # localizers keep one _GroupArgs per set of tensors.
@@ -202,19 +147,13 @@ class _BuildKernel:
                     if all(r() is not None for r in e[0])
                 }
         _, params, grid, smem = entry
-        self._kernel.launch(grid, _THREADS, smem, [params], torch.cuda.current_stream())
+        self._kernel.launch(grid, _THREADS, smem, [params])
 
 
-_BUILD_KERNELS: dict[int, _BuildKernel | None] = {}
-
-
+@functools.cache
 def _build_kernel(device_index: int) -> _BuildKernel | None:
-    if device_index not in _BUILD_KERNELS:
-        try:
-            _BUILD_KERNELS[device_index] = _BuildKernel(device_index)
-        except RuntimeError:
-            _BUILD_KERNELS[device_index] = None
-    return _BUILD_KERNELS[device_index]
+    kernel = get_kernel("build.cu", "indexer_localize_build", (), device_index)
+    return None if kernel is None else _BuildKernel(kernel)
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +169,6 @@ def topk_ctas_per_row(num_rows: int) -> int:
     return 1
 
 
-_TOPK_CLUSTER_SIZES = (16, 8, 4, 2, 1)
 _CAPACITY: dict[int, dict[int, int] | None] = {}
 
 
@@ -247,18 +185,15 @@ def topk_cluster_capacity(res: DomainResources) -> dict[int, int] | None:
         if kernel is not None:
             # Dynamic shared memory up to the opt-in limit: one CTA per SM, as
             # the top-k's own shared memory gives it.
-            smem = torch.cuda.get_device_properties(
-                res.device
-            ).shared_memory_per_block_optin
+            props = torch.cuda.get_device_properties(res.device)
+            smem = props.shared_memory_per_block_optin
             try:
                 capacity = {
                     cluster: min(
-                        kernel.max_active_clusters(
-                            cluster, 1024, smem, stream, res.device
-                        )
-                        for stream in res.streams
+                        kernel.max_active_clusters(cluster, 1024, smem, s, res.device)
+                        for s in res.streams
                     )
-                    for cluster in _TOPK_CLUSTER_SIZES
+                    for cluster in (16, 8, 4, 2, 1)
                 }
             except Exception as e:  # noqa: BLE001 - the caller falls back
                 logger.warning(
@@ -278,10 +213,8 @@ def use_die_split(num_rows: int, capacity: Mapping[int, int]) -> bool:
     rows as every domain's SMs hold clusters of the top-k's size at once
     (`capacity`, from `topk_cluster_capacity`). A second round costs about
     one CTA's fixed time, 7-9 us on VR200, more than the die split saves
-    there. The rule may depend only on the row count: a FULL CUDA graph fixes
-    the path per captured batch size, so it must not depend on context
-    lengths. The localizer sizes its buffers for the largest batch this
-    accepts.
+    there. A FULL CUDA graph fixes the path per captured batch size, so the
+    rule depends only on the row count, never on context lengths.
     """
     return num_rows <= capacity.get(topk_ctas_per_row(num_rows), 0)
 
@@ -300,15 +233,13 @@ def _row_ranges(rows: list[int]) -> str:
 # ---------------------------------------------------------------------------
 # Localizer
 # ---------------------------------------------------------------------------
+@dataclass(eq=False)
 class _PendingBuild:
     """A group's build, recorded by its metadata builder for the forward's
     first localized scan."""
 
-    __slots__ = ("args", "done")
-
-    def __init__(self, args: _GroupArgs):
-        self.args = args
-        self.done = False
+    args: _GroupArgs
+    done: bool = False
 
 
 # Builds recorded since the last launch, per device and localizer.
@@ -373,7 +304,6 @@ class IndexerDecodeLocalizer:
         self.width = width
         self.page_rows = page_rows
         self.res = get_domain_resources(device)
-        self.disabled = self.res is None
         # Buffers for the largest batch the policy sends to the die split.
         accepted = []
         self._capacity: dict[int, int] = {}
@@ -388,16 +318,20 @@ class IndexerDecodeLocalizer:
                 _row_ranges(accepted) or "no",
             )
         self.max_rows = max(accepted, default=0)
-        self.disabled |= self.max_rows == 0
+        self.disabled = (
+            self.res is None
+            or _build_kernel(self.res.device) is None
+            or self.max_rows == 0
+        )
         self._key: Any = None
         self._dom_table: torch.Tensor | None = None
         self._dom_plan = (0, 0)
         self.page_stride = 0
         self._bufs: dict[str, Any] | None = None
+        # The build kernel's copy of the page-to-domain table, and its source.
+        self._dom: torch.Tensor | None = None
+        self._dom_src: torch.Tensor | None = None
         self._args: dict[tuple, tuple] = {}
-        self._warned = False
-        if self.res is not None and _build_kernel(self.res.device) is None:
-            self.disabled = True
 
     def _disable(self, reason: str) -> None:
         self.disabled = True
@@ -430,11 +364,9 @@ class IndexerDecodeLocalizer:
         tables = []
         for name in self.layer_names:
             kv = self._layer_cache(name)
-            if kv is None:
-                return False
-            table = page_domain_table(kv)
-            if table is None:
-                # Not in a localized allocation (yet).
+            # None: not in a localized allocation (yet).
+            table = None if kv is None else page_domain_table(kv)
+            if kv is None or table is None:
                 return False
             if kv.shape[1] != self.page_rows:
                 self._disable(f"{kv.shape[1]} page rows, expected {self.page_rows}")
@@ -460,6 +392,7 @@ class IndexerDecodeLocalizer:
         return True
 
     def _buffers(self) -> dict[str, Any]:
+        """The group's persistent outputs, named as `_GroupArgs` fields."""
         if self._bufs is None:
             assert self.res is not None
             rows, width, device = self.max_rows, self.width, self.device
@@ -468,39 +401,35 @@ class IndexerDecodeLocalizer:
                 return torch.zeros(shape, dtype=dtype, device=device)
 
             self._bufs = dict(
-                bt=[zeros(rows, width) for _ in range(NUM_DOMAINS)],
-                lens=[zeros(rows, 1) for _ in range(NUM_DOMAINS)],
+                lbt=[zeros(rows, width) for _ in range(NUM_DOMAINS)],
+                llen=[zeros(rows, 1) for _ in range(NUM_DOMAINS)],
                 sched=[zeros(s + 1, 2) for s in self.res.sms],
                 jmap=zeros(rows, width),
                 inv=[zeros(rows, width) for _ in range(NUM_DOMAINS)],
                 flags=zeros(rows * _num_chunks(width), dtype=torch.int64),
                 state=zeros(4),
-                # The kernel's page-to-domain table: a captured launch keeps
-                # its address, so it is updated in place.
-                dom=None,
-                dom_src=None,
             )
         return self._bufs
 
-    def _kernel_dom(self, bufs: dict[str, Any]) -> torch.Tensor:
+    def _kernel_dom(self) -> torch.Tensor:
+        """The page-to-domain table the build kernel reads, updated in place:
+        captured builds keep its address and size."""
         table = self._dom_table
         assert table is not None
-        if bufs["dom_src"] is not table:
-            dom = bufs["dom"]
-            if dom is None or dom.numel() < table.numel():
-                if dom is not None:
-                    # Captured builds keep the old table's address and size.
-                    raise RuntimeError(
-                        "Die-local indexer: the indexer cache grew from "
-                        f"{dom.numel()} to {table.numel()} pages after its "
-                        "page-to-domain table was first used."
-                    )
-                dom = bufs["dom"] = torch.empty(
+        if self._dom_src is not table:
+            if self._dom is None:
+                self._dom = torch.empty(
                     max(1, table.numel()), dtype=torch.int8, device=table.device
                 )
-            dom[: table.numel()].copy_(table)
-            bufs["dom_src"] = table
-        return bufs["dom"]
+            elif self._dom.numel() < table.numel():
+                raise RuntimeError(
+                    "Die-local indexer: the indexer cache grew from "
+                    f"{self._dom.numel()} to {table.numel()} pages after its "
+                    "page-to-domain table was first used."
+                )
+            self._dom[: table.numel()].copy_(table)
+            self._dom_src = table
+        return self._dom
 
     def build(
         self,
@@ -511,51 +440,25 @@ class IndexerDecodeLocalizer:
     ) -> LocalizedDecodeMetadata | None:
         """Record this step's inputs; None runs the stock indexer instead.
 
-        The inputs must be the builder's persistent buffers: the build kernel
-        reads them when the forward's first localized scan launches it.
+        The inputs are the builder's persistent varlen buffers (an int32 block
+        table `width` pages wide, and int32 lengths and request indices, one
+        per row): the build kernel reads them when the forward's first
+        localized scan launches it.
         """
-        if self.disabled:
+        if (
+            self.disabled
+            or not use_die_split(num_rows, self._capacity)
+            or not self._resolve()
+            or not 0 < num_rows <= self.max_rows
+        ):
             return None
         assert self.res is not None
-        if not use_die_split(num_rows, self._capacity) or not self._resolve():
-            return None
         lens = seq_lens.reshape(-1)
-        if (
-            not 0 < num_rows <= min(self.max_rows, _MAX_ROWS)
-            or block_table.shape[1] > self.width
-            or block_table.stride(-1) != 1
-            or block_table.dtype != torch.int32
-            or lens.numel() != num_rows
-            or lens.dtype != torch.int32
-            or not lens.is_contiguous()
-            or indices.dtype != torch.int32
-            or not indices.is_contiguous()
-            or indices.numel() < num_rows
-        ):
-            if not self._warned:
-                self._warned = True
-                logger.warning(
-                    "Die-local indexer: unsupported decode batch (%d rows of at "
-                    "most %d, width %d of at most %d); stock indexer for it.",
-                    num_rows,
-                    min(self.max_rows, _MAX_ROWS),
-                    block_table.shape[1],
-                    self.width,
-                )
-            return None
         bufs = self._buffers()
-        dom = self._kernel_dom(bufs)
+        dom = self._kernel_dom()
         q0, k = self._dom_plan
-        key = (
-            num_rows,
-            block_table.data_ptr(),
-            block_table.stride(0),
-            lens.data_ptr(),
-            indices.data_ptr(),
-            dom.data_ptr(),
-            q0,
-            k,
-        )
+        ptrs = tuple(t.data_ptr() for t in (block_table, lens, indices, dom))
+        key = (num_rows, block_table.stride(0), q0, k, *ptrs)
         entry = self._args.get(key)
         if entry is None:
             args = _GroupArgs(
@@ -563,13 +466,7 @@ class IndexerDecodeLocalizer:
                 lens=lens,
                 dom=dom,
                 indices=indices[:num_rows],
-                lbt=bufs["bt"],
-                inv=bufs["inv"],
-                jmap=bufs["jmap"],
-                llen=bufs["lens"],
-                sched=bufs["sched"],
-                flags=bufs["flags"],
-                state=bufs["state"],
+                **bufs,
                 R=self.page_rows,
                 width=self.width,
                 cap=self.max_rows,
@@ -580,8 +477,8 @@ class IndexerDecodeLocalizer:
             meta = LocalizedDecodeMetadata(
                 page_rows=self.page_rows,
                 capacity=self.max_rows,
-                block_tables=[b[:num_rows] for b in bufs["bt"]],
-                seq_lens=[x[:num_rows] for x in bufs["lens"]],
+                block_tables=[b[:num_rows] for b in bufs["lbt"]],
+                seq_lens=[x[:num_rows] for x in bufs["llen"]],
                 schedules=list(bufs["sched"]),
                 join_map=bufs["jmap"][:num_rows],
                 inv_maps=[x[:num_rows] for x in bufs["inv"]],
@@ -604,8 +501,6 @@ def maybe_make_decode_localizer(
     """
     vllm_config = builder.vllm_config
     reason = unsupported_config_reason(vllm_config)
-    if reason is None and (builder.dcp_world_size > 1 or builder.use_pcp):
-        reason = "decode or prefill context parallelism"
     if reason is not None:
         logger.warning_once(
             "VLLM_INDEXER_LOCALIZE does not support %s; using the stock sparse "

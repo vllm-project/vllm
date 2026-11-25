@@ -1152,11 +1152,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB", "2048")
     ),
     # Die-local sparse-attention indexer decode on GPUs with two memory
-    # locality domains (Rubin): the KV cache alternates between the domains in
-    # 32 MiB runs and each domain's SMs score, select and merge the indexer
-    # pages in its own memory. Kimi K3.1 and DeepSeek-V4.1 only; falls back to
-    # the stock indexer, with a warning, where unsupported. Default: off.
-    # See docs/features/sparse_indexer_locality.md.
+    # locality domains (Rubin): the KV cache alternates between the domains and
+    # each domain scans and selects the indexer pages in its own memory. Kimi
+    # K3.1 and DeepSeek-V4.1; the stock indexer runs, with a warning, where
+    # unsupported. Default: off. See docs/features/sparse_indexer_locality.md.
     "VLLM_INDEXER_LOCALIZE": lambda: bool(int(os.getenv("VLLM_INDEXER_LOCALIZE", "0"))),
     # Overlap the sparse-attention indexer's decode top-k with independent work
     # of the same layer in FULL CUDA graph decode steps (Kimi K3.1 and

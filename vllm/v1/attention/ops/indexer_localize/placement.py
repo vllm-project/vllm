@@ -14,7 +14,7 @@ import math
 import threading
 import weakref
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -53,14 +53,13 @@ def unsupported_config_reason(vllm_config: Any) -> str | None:
 
 @dataclass(frozen=True)
 class DomainResources:
-    """Green-context streams of a device's locality domains."""
+    """Green-context streams of a device's locality domains (the contexts stay
+    alive in `get_locality_domain_contexts`'s cache)."""
 
     device: int
     streams: list[torch.cuda.Stream]
     sms: list[int]
     total_sms: int
-    # Streams hold weak references to their contexts.
-    contexts: list[Any] = field(repr=False)
 
 
 _RESOURCES: dict[int, DomainResources | None] = {}
@@ -86,21 +85,16 @@ def _unsupported_reason(device_index: int) -> str | None:
     return None
 
 
-def get_domain_resources(device: torch.device | int) -> DomainResources | None:
+def get_domain_resources(device: torch.device) -> DomainResources | None:
     """Per-domain green-context streams of `device`, created once.
 
     The first call must come before CUDA graph capture (it comes from the KV
     cache allocation). Returns None, after one warning, when the device or
     the installed stack cannot split the decode scan by locality domain.
     """
-    if isinstance(device, torch.device):
-        idx = (
-            device.index
-            if device.index is not None
-            else torch.accelerator.current_device_index()
-        )
-    else:
-        idx = int(device)
+    idx = device.index
+    if idx is None:
+        idx = torch.accelerator.current_device_index()
     with _LOCK:
         if idx in _RESOURCES:
             return _RESOURCES[idx]
@@ -116,7 +110,6 @@ def get_domain_resources(device: torch.device | int) -> DomainResources | None:
                     total_sms=torch.cuda.get_device_properties(
                         idx
                     ).multi_processor_count,
-                    contexts=list(domains.contexts),
                 )
         except Exception as e:  # noqa: BLE001 - never break startup over this
             reason = f"{type(e).__name__}: {e}"
@@ -174,14 +167,11 @@ def _block_bytes(kv_cache_config: Any) -> int | None:
 
 def _place_by_domain(buffer: ExtensibleTensor, run_bytes: int) -> None:
     """Create each granule `buffer` commits from now on in the locality domain
-    of its midpoint's run.
-
-    A domain can run out before the device does; a run that does not fit its
-    domain is then created anywhere on the device, and the sparse indexer
-    reads its pages remotely (same results, less locality).
-
-    cuda-bindings is used for `cuMemCreate`: it resolves the driver entry
-    point that accepts locality-domain locations.
+    of its midpoint's run, with cuda-bindings' `cuMemCreate` (it resolves the
+    driver entry point that accepts locality-domain locations). A domain can
+    fill up before the device does: a run that does not fit its domain is
+    then created anywhere on the device, and the indexer reads its pages
+    remotely (same results, less locality).
     """
     from cuda.bindings import driver as cu
 
@@ -302,7 +292,6 @@ def localized_kv_allocate(
             try:
                 buffer.resize_segments_([size], zero_new=True)
             except RuntimeError as e:
-                # One domain can run out before the device does.
                 _forget(buffer.base_ptr)
                 del buffer
                 logger.warning(
@@ -357,13 +346,10 @@ def page_domain_table(
 
 def page_domain_plan(kv: torch.Tensor) -> tuple[int, int]:
     """`(q0, k)` with `table[b] == ((q0 + b) // k) % 2` for every page `b`
-    of `page_domain_table(kv)`.
-
-    The table is `((off + b * stride) // run) % 2`; with `run` a whole number
-    `k` of page strides and `off = q0 * stride + r0` (`r0 < stride`) that is
-    `((q0 + b) // k) % 2`. Verified against the table computed on the host (no
-    GPU sync); `(0, 0)` when it does not hold, and the build kernel then reads
-    the table.
+    of `page_domain_table(kv)`, or `(0, 0)` (the build kernel then reads the
+    table). The table is `((off + b * stride) // run) % 2`; with `run` a whole
+    number `k` of page strides and `off = q0 * stride + r0` (`r0 < stride`)
+    that is `((q0 + b) // k) % 2`, verified against the table on the host.
     """
     buf = find_buffer(kv.data_ptr())
     table = page_domain_table(kv, device="cpu")
