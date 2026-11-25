@@ -117,6 +117,9 @@ class TokensPrompt(_PromptOptions):
     prompt: NotRequired[str]
     """The prompt text corresponding to the token IDs, if available."""
 
+    prompt_echo_mask: NotRequired[list[bool]]
+    """Whether each prompt token is represented in the rebuilt echo text."""
+
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 
