@@ -1,8 +1,7 @@
 # Sparse Indexer Overlap
 
 An opt-in decode optimization for the sparse-attention indexer of Kimi K3.1 and
-DeepSeek-V4.1 (DeepSeek Sparse Attention). It is off by default; unset, vLLM
-runs the stock indexer.
+DeepSeek-V4.1 (DeepSeek Sparse Attention), off by default.
 
 | Environment variable | Default | What it does |
 | -------------------- | ------- | ------------ |

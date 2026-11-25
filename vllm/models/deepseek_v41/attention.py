@@ -1075,19 +1075,16 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         positions: torch.Tensor,
         attn_out: "torch.Tensor | QuantizedActivation",
     ) -> None:
-        """`_prepare_and_attn` with the same ops and inputs on other streams.
+        """`_prepare_and_attn` with the same ops and inputs, on other streams:
 
-        - main: the compressor, then the index K (`wk` and store), then the
-          indexer op (scan and top-k), then sparse attention;
-        - aux 1: the index Q (indexer `wq_b`, RoPE and quantization), beside
-          the index K; main joins it before the indexer op;
-        - aux 0: the main query (`wq_b`, q norm, RoPE and SWA KV insert) and
-          the compressed KV insert, beside the indexer op; main joins it
-          right before sparse attention, their only reader.
+        - main: compressor, index K (`wk` and store), indexer op, attention;
+        - aux 1: index Q (indexer `wq_b`, RoPE, quantization) beside the index
+          K, joined before the indexer op;
+        - aux 0: main query (`wq_b`, q norm, RoPE, SWA KV insert) and compressed
+          KV insert beside the indexer op, joined before attention, their only reader.
 
-        The inputs the aux streams read (qr, kv, latent, positions) stay
-        referenced here until those joins. The short-context branch of
-        `DeepseekV4Indexer.forward` is eager-only, so it never applies here.
+        The aux streams' inputs stay referenced until the joins. The eager-only
+        short-context branch of `DeepseekV4Indexer.forward` never applies here.
         """
         attn_metadata = get_forward_context().attn_metadata
         indexer = self.indexer
@@ -1097,15 +1094,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         main = torch.cuda.current_stream()
         latent: torch.Tensor | None = None
         if indexer.owns_k or compressor is not None:
-            start = torch.cuda.Event()
-            start.record(main)
-            aux1.wait_event(start)
+            aux1.wait_stream(main)
             with torch.cuda.stream(aux1):
                 index_q, index_q_scale, index_weights = indexer.forward_q(
                     qr, qr_scale, indexer_weights, positions, self.indexer_rotary_emb
                 )
-                index_q_done = torch.cuda.Event()
-                index_q_done.record(aux1)
+            index_q_done = aux1.record_event()
             if compressor is not None:
                 latent = compressor(kv_score, positions)
             if indexer.owns_k:
@@ -1116,9 +1110,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 qr, qr_scale, indexer_weights, positions, self.indexer_rotary_emb
             )
 
-        fork = torch.cuda.Event()
-        fork.record(main)
-        aux0.wait_event(fork)
+        aux0.wait_stream(main)
         with torch.cuda.stream(aux0):
             q = self._wq_b_proj(qr, qr_scale).view(
                 -1, self.n_local_heads, self.head_dim
@@ -1126,14 +1118,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
             if compressor is not None:
                 compressor.insert_cache(latent, positions, self.rotary_emb)
-            attn_inputs_ready = torch.cuda.Event()
-            attn_inputs_ready.record(aux0)
+        attn_inputs_ready = aux0.record_event()
         logger.info_once("Sparse indexer overlap: reordered attention front end.")
 
-        if index_q is not None:
-            assert index_weights is not None
-            q_quant = (index_q, index_q_scale) if index_q_scale is not None else index_q
-            indexer.indexer_op(hidden_states, q_quant, None, index_weights)
+        assert index_q is not None and index_weights is not None
+        q_quant = (index_q, index_q_scale) if index_q_scale is not None else index_q
+        indexer.indexer_op(hidden_states, q_quant, None, index_weights)
         main.wait_event(attn_inputs_ready)
         self.forward_mqa(q, kv, positions, attn_out)
 

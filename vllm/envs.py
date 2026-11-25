@@ -1152,8 +1152,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Overlap the sparse-attention indexer's decode top-k with independent work
     # of the same layer in FULL CUDA graph decode steps (Kimi K3.1 and
-    # DeepSeek-V4.1). Default: off.
-    # See docs/features/sparse_indexer_locality.md.
+    # DeepSeek-V4.1). See docs/features/sparse_indexer_locality.md.
     "VLLM_INDEXER_OVERLAP": lambda: bool(int(os.getenv("VLLM_INDEXER_OVERLAP", "0"))),
     # KV context length each adaptive-verification profiling request pretends to
     # carry, so the profiled step reads a realistic amount of cache.

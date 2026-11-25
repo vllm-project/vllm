@@ -151,8 +151,6 @@ class SparseMQAIndexer(nn.Module):
         assert isinstance(metadata, DeepseekV41SparseIndexerMetadata), (
             "SparseMQAIndexer needs DeepseekV41SparseIndexerBackend metadata"
         )
-        # The first reader of the candidates and of the sparse-scan inputs
-        # built from them waits for deferred candidate work, if any.
         indexer_overlap.join_candidates()
         assert k is None, "the model writes the indexer K cache"
         if self.use_fp4_cache:
@@ -211,18 +209,13 @@ class SparseMQAIndexer(nn.Module):
             assert decode_rows is not None and decode_rows.block_table is not None
             assert decode_rows.row_indices is not None
             num_rows = decode_rows.row_ke.shape[0]
-            if (
-                num_rows > 0
-                and decode_rows.kernel_metadata is None
-                and indexer_overlap.take_expanded(decode_rows)
-            ):
-                # The deferred candidate work expanded these rows; their
-                # schedule is built here because DeepGEMM cannot create the
-                # candidate stream's schedule workspace inside a capture.
-                decode_rows.kernel_metadata = decode_schedule(
-                    self, decode_rows, sparse_block_kv, decode_rows.sparse_indices
-                )
             if num_rows > 0:
+                if indexer_overlap.take_expanded(decode_rows):
+                    # Expanded on the candidate stream, whose DeepGEMM schedule
+                    # workspace cannot be created in a capture: build the schedule.
+                    decode_rows.kernel_metadata = decode_schedule(
+                        self, decode_rows, sparse_block_kv, decode_rows.sparse_indices
+                    )
                 decode_rows.kernel_metadata = sparse_mqa_logits_paged_decode(
                     q_values[:num_rows].unsqueeze(1),
                     q_scale[:num_rows].unsqueeze(1),
@@ -252,10 +245,9 @@ def expand_decode_candidates(
     sparse_block_kv: int,
     scratch: bool = False,
 ) -> torch.Tensor:
-    """Expand the decode rows' candidate blocks into DeepGEMM sparse block ids
-    in `rows.sparse_indices` / `rows.end` and return the block ids: the first
-    step of `sparse_mqa_logits_paged_decode`, same kernel and inputs. With
-    `scratch`, expand zero candidates into private outputs instead."""
+    """The first step of `sparse_mqa_logits_paged_decode`: expand the decode
+    rows' candidate blocks into `rows.sparse_indices` / `rows.end` and return
+    the former; with `scratch`, zero candidates into private outputs instead."""
     candidates = candidate_blocks[: rows.row_ke.shape[0]]
     sparse_indices, end = rows.sparse_indices, rows.end
     if scratch:
@@ -278,9 +270,8 @@ def decode_schedule(
     sparse_block_kv: int,
     sparse_indices: torch.Tensor,
 ) -> torch.Tensor:
-    """The DeepGEMM schedule of `op`'s decode rows over their expanded
-    `sparse_indices`: the second step of `sparse_mqa_logits_paged_decode`,
-    which reuses it when given it as `kernel_metadata`."""
+    """The second step of `sparse_mqa_logits_paged_decode`: the DeepGEMM
+    schedule of `op`'s decode rows over `sparse_indices`."""
     assert rows.block_table is not None and rows.row_indices is not None
     return get_paged_sparse_mqa_logits_metadata(
         rows.row_ke,

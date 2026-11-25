@@ -2,22 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Overlap of the sparse-attention indexer with independent same-layer work.
 
-Enabled by `VLLM_INDEXER_OVERLAP`, and only while a FULL CUDA graph is
-captured for a decode batch: an eager segment of a breakable (piecewise)
-graph cannot wait on an event recorded inside a captured segment, and eager
-steps keep the stock order. The moved kernels and their inputs are
-unchanged, so the outputs are bit-identical to the stock order.
+Enabled by `VLLM_INDEXER_OVERLAP`, and only while a FULL CUDA graph of a decode
+batch is captured: an eager segment of a breakable (piecewise) graph cannot
+wait on an event recorded inside a captured segment. The moved kernels and
+their inputs are unchanged, so the outputs are bit-identical.
 
-Deferred top-k (Kimi K3.1): the attention layer asks for it right before
-calling the indexer. The indexer op then runs its scan and top-k on another
-stream (one high-priority stream) and returns without joining. The
-layer issues the work that does not read the kept tokens, and records the
-index group's ready event on the stream that writes them; the index group's
-remap is their first reader.
+Deferred top-k (Kimi K3.1): the indexer op runs its scan and top-k on another
+stream and returns without joining; the index group's conversion, the first
+reader of the kept tokens, waits for them.
 
 Deferred candidates (DeepSeek-V4.1): the candidate source layer selects its
-candidate blocks, and expands them into the sparse block ids its first
-consumer would build first, on a side stream; that consumer joins.
+candidate blocks, and expands them into its first consumer's sparse block ids,
+on a side stream that the consumers join.
 """
 
 import threading
@@ -46,15 +42,14 @@ def full_cuda_graph_capture() -> bool:
 
 def decode_only(metadata: Any) -> bool:
     return (
-        metadata is not None
-        and getattr(metadata, "num_prefills", 1) == 0
+        getattr(metadata, "num_prefills", 1) == 0
         and getattr(metadata, "num_decodes", 0) > 0
     )
 
 
 def captured_decode_metadata(layer_name: str) -> Any:
-    """The metadata of `layer_name` while a FULL CUDA graph of a decode-only
-    batch is captured, else None."""
+    """`layer_name`'s metadata while a FULL CUDA graph of a decode-only batch is
+    captured, else None."""
     if not full_cuda_graph_capture():
         return None
     from vllm.forward_context import get_forward_context
@@ -67,9 +62,8 @@ def captured_decode_metadata(layer_name: str) -> Any:
 
 
 def index_group_joins_topk(impl: Any, metadata: Any, num_tokens: int) -> bool:
-    """Whether sparse attention reads the top-k only through its index
-    group's conversion (`_convert_once`), the one reader that waits for a
-    deferred top-k."""
+    """Whether sparse attention reads the top-k only through its index group's
+    conversion (`_convert_once`), the one reader that waits for a deferred top-k."""
     from vllm.model_executor.layers.attention.sparse_mla_attention import (
         SparseMLACommonImpl,
     )
@@ -88,9 +82,7 @@ def index_group_joins_topk(impl: Any, metadata: Any, num_tokens: int) -> bool:
     )
 
 
-# ---------------------------------------------------------------------------
-# Deferred top-k
-# ---------------------------------------------------------------------------
+# Deferred top-k.
 _deferred = threading.local()
 _stock_stream: torch.cuda.Stream | None = None
 
@@ -98,39 +90,31 @@ _stock_stream: torch.cuda.Stream | None = None
 def request_deferred_topk() -> None:
     """Called right before an indexer call whose top-k may land late."""
     _deferred.requested = True
-    _deferred.stream = None
-    _deferred.keep = None
+    _deferred.stream = _deferred.keep = None
 
 
 def consume_deferred_topk_request() -> bool:
-    """Called by the indexer op: whether this call may return before its
-    top-k is written (`set_deferred_topk` then says where it lands)."""
+    """Called by the indexer op: whether it may return before its top-k is
+    written (it then says where with `set_deferred_topk`)."""
     requested = getattr(_deferred, "requested", False)
     _deferred.requested = False
     return requested and full_cuda_graph_capture()
 
 
 def set_deferred_topk(stream: torch.cuda.Stream, keep: tuple) -> None:
-    """The indexer op deferred its top-k: it is written on `stream`, which
-    reads `keep`, tensors allocated on the caller's stream."""
-    _deferred.stream = stream
-    _deferred.keep = keep
+    """The top-k is written on `stream`, which reads `keep`."""
+    _deferred.stream, _deferred.keep = stream, keep
     logger.info_once("Sparse indexer overlap: deferred top-k active.")
 
 
 def defer_stock_topk(work: Callable[[], None], keep: tuple) -> None:
-    """Run the stock scan and top-k `work` on the stock indexer's stream,
-    after the caller's work so far, without joining.
-
-    The stream has high priority: its top-k is on the critical path, and the
-    work moved beside it competes for the SMs the scan leaves free.
-    """
+    """Run the stock scan and top-k `work` after the current stream's work, on a
+    high-priority stream, without joining: the top-k is on the critical path and
+    the work moved beside it competes for the SMs the scan leaves free."""
     global _stock_stream
     if _stock_stream is None:
         _stock_stream = torch.cuda.Stream(priority=-1)
-    start = torch.cuda.Event()
-    start.record(torch.cuda.current_stream())
-    _stock_stream.wait_event(start)
+    _stock_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(_stock_stream):
         work()
     set_deferred_topk(_stock_stream, keep)
@@ -138,35 +122,26 @@ def defer_stock_topk(work: Callable[[], None], keep: tuple) -> None:
 
 def take_deferred_topk() -> tuple[torch.cuda.Stream | None, tuple | None]:
     """After the indexer call: the stream that writes its top-k (None if the
-    call joined) and the tensors that stream reads. The caller keeps those
-    referenced until its stream has waited for the top-k, so the caching
-    allocator cannot hand their memory to it while that work still runs."""
-    stream = getattr(_deferred, "stream", None)
-    keep = getattr(_deferred, "keep", None)
+    call joined) and the tensors that stream reads, which the caller keeps
+    referenced until its stream has waited, so their memory is not reused."""
+    taken = getattr(_deferred, "stream", None), getattr(_deferred, "keep", None)
     _deferred.requested = False
-    _deferred.stream = None
-    _deferred.keep = None
-    return stream, keep
+    _deferred.stream = _deferred.keep = None
+    return taken
 
 
-# ---------------------------------------------------------------------------
-# Deferred candidates
-# ---------------------------------------------------------------------------
+# Deferred candidates.
 class CandidateStream:
-    """A side stream for candidate work that only the candidate consumers
-    read: `defer` runs it there once the current stream reaches that point,
-    and each consumer calls `join` before reading what it wrote.
-
-    The work waits on the current stream, so it cannot overtake earlier reads
-    of the buffers it writes. The side stream issues no collectives.
-    """
+    """A side stream for work that only the candidate consumers read. `defer`
+    runs it after the current stream's work so far, so it cannot overtake earlier
+    reads of the buffers it writes; each consumer calls `join` before reading.
+    The side stream issues no collectives."""
 
     def __init__(self) -> None:
         self.stream = torch.cuda.Stream()
         self.done = torch.cuda.Event()
         self.pending = False
-        # Tensors the work reads that the current stream allocated, kept
-        # referenced until the join so their memory is not reused before.
+        # Tensors the work reads, kept alive until the join: no early memory reuse.
         self.keep: tuple = ()
 
     def defer(self, work: Callable[[], T], keep: tuple = ()) -> T:
@@ -181,16 +156,14 @@ class CandidateStream:
             # Rejoin so that a capture reports this error, not unjoined work.
             main.wait_stream(self.stream)
             raise
-        self.pending = True
-        self.keep = keep
+        self.pending, self.keep = True, keep
         return result
 
     def join(self) -> None:
         """Make the current stream wait for the deferred work, if any."""
         if self.pending:
             torch.cuda.current_stream().wait_event(self.done)
-            self.pending = False
-            self.keep = ()
+            self.pending, self.keep = False, ()
 
 
 _candidates: CandidateStream | None = None
@@ -199,9 +172,8 @@ _expanded: Any = None
 
 
 def init_candidate_stream(allowed: bool) -> None:
-    """Create the candidate stream (at model construction) when `allowed`:
-    not with micro-batching, whose threads would share the one deferred
-    candidate state, nor with speculative decoding."""
+    """Create the candidate stream at model construction if `allowed` (not with
+    micro-batching, whose threads would share it, nor speculative decoding)."""
     global _candidates
     if (
         envs.VLLM_INDEXER_OVERLAP
@@ -214,8 +186,7 @@ def init_candidate_stream(allowed: bool) -> None:
 
 def candidate_defer_allowed(metadata: Any) -> bool:
     """Whether the candidate source may defer: a FULL CUDA graph capture of a
-    decode-only batch whose later layers read the candidates through the
-    sparse decode rows (their first reader joins)."""
+    decode-only batch whose consumers read the sparse decode rows."""
     return (
         _candidates is not None
         and decode_only(metadata)
@@ -225,9 +196,8 @@ def candidate_defer_allowed(metadata: Any) -> bool:
 
 
 def defer_candidates(work: Callable[[], None], keep: tuple) -> None:
-    """Run `work()` on the candidate stream once the caller's stream reaches
-    this point, without joining. `keep` holds the caller-allocated tensors
-    `work` reads until `join_candidates`."""
+    """Run `work()` on the candidate stream without joining; `keep` holds the
+    caller-allocated tensors it reads until `join_candidates`."""
     assert _candidates is not None
     assert not _candidates.pending, "deferred candidates were never joined"
     _candidates.defer(work, keep)
@@ -235,32 +205,27 @@ def defer_candidates(work: Callable[[], None], keep: tuple) -> None:
 
 
 def join_candidates() -> None:
-    """Called by the first reader of the candidates: wait for the deferred
-    work, if any."""
+    """Called by each reader of the candidates: wait for deferred work, if any."""
     if _candidates is not None:
         _candidates.join()
 
 
 def take_expanded(rows: Any) -> bool:
-    """True once, for the rows whose sparse block ids the deferred work
-    already expanded."""
+    """True once for the rows the deferred work expanded, while unscheduled."""
     global _expanded
-    if _expanded is not None and _expanded is rows:
-        _expanded = None
-        return True
-    return False
+    if rows is not _expanded or rows.kernel_metadata is not None:
+        return False
+    _expanded = None
+    return True
 
 
 def expand_sparse_decode_rows(
     metadata: Any, candidate_blocks: torch.Tensor, candidate_block_size: int
 ) -> None:
     """Expand the candidates into the sparse decode rows' block ids, as their
-    first consumer would; that consumer then builds only the schedule
-    (`take_expanded`)."""
+    first consumer would; that consumer then builds only the schedule."""
     global _expanded
-    from vllm.model_executor.layers.sparse_mqa_indexer import (
-        expand_decode_candidates,
-    )
+    from vllm.model_executor.layers.sparse_mqa_indexer import expand_decode_candidates
 
     rows = metadata.sparse_decode
     if rows.row_ke.shape[0] == 0 or rows.kernel_metadata is not None:

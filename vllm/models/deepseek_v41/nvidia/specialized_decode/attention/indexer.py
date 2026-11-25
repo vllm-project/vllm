@@ -417,8 +417,12 @@ class CandidateOverlap(CandidateStream):
     hidden states, so the candidate source forks them onto `stream` once it
     has written the candidates (`fork`) and every consumer waits for them
     (`join`) before scoring. The kernels and inputs are those of the inline
-    path, so the outputs match. The schedule allocated on `stream` is recorded
-    as used by the main stream.
+    path, so the outputs match.
+
+    The side stream issues no collectives. The fork waits on the main stream,
+    so a step's writes to the builder's `sparse_indices` / `end` cannot
+    overtake the previous step's reads, and the schedule allocated on
+    `stream` is recorded as used by the main stream.
 
     DeepGEMM's schedule kernel keeps a per-stream workspace that it creates on
     first use and refuses to create during a capture, so `warm` runs the

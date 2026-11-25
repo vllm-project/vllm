@@ -452,7 +452,7 @@ def _decode_chunk_ranges(
 
 
 def _decode_candidate_score_dtype(topk_backend: str) -> torch.dtype | None:
-    """The candidate selection's score dtype on decode rows."""
+    """The score dtype of the unchunked decode path's candidate selection."""
     return (
         torch.float32 if topk_backend in ("auto", "cooperative", "persistent") else None
     )
@@ -512,7 +512,9 @@ def _varlen_decode_rows(
                 candidate_block_size,
                 candidates,
                 1,
-                score_dtype=_decode_candidate_score_dtype(topk_backend),
+                score_dtype=(
+                    torch.float32 if topk_backend in ("auto", "persistent") else None
+                ),
             )
         else:
             _apply_candidate_mask(
@@ -1227,8 +1229,7 @@ def sparse_attn_indexer(
                 and candidate_blocks is None
                 and indexer_overlap.consume_deferred_topk_request()
             ):
-                # The stock scan and top-k below, on the stock indexer's
-                # stream, without joining (VLLM_INDEXER_OVERLAP).
+                # Defer the stock scan and top-k below (VLLM_INDEXER_OVERLAP).
                 def stock_scan_topk() -> None:
                     scores = fp8_fp4_paged_mqa_logits(
                         q,
@@ -1254,10 +1255,7 @@ def sparse_attn_indexer(
                         attn_metadata_narrowed.max_seq_len,
                     )
 
-                indexer_overlap.defer_stock_topk(
-                    stock_scan_topk,
-                    (padded_q_quant_cast, padded_q_scale, decode_weights),
-                )
+                indexer_overlap.defer_stock_topk(stock_scan_topk, (*q, decode_weights))
                 return topk_indices_buffer
             logits = fp8_fp4_paged_mqa_logits(
                 q,
@@ -1291,13 +1289,9 @@ def sparse_attn_indexer(
                 and next_n == 1
                 and indexer_overlap.candidate_defer_allowed(attn_metadata_narrowed)
             ):
-                # The candidate selection, and its expansion into the sparse
-                # block ids the first consumer would build first, on the
-                # candidate stream; this layer's top-k and the next layers do
-                # not wait for them (VLLM_INDEXER_OVERLAP).
-                def deferred_candidates(
-                    logits=logits, vis=vis, decode_candidates=decode_candidates
-                ) -> None:
+                # Defer the candidate selection and the first consumer's block-id
+                # expansion to the candidate stream (VLLM_INDEXER_OVERLAP).
+                def deferred_candidates() -> None:
                     _select_candidate_blocks(
                         logits,
                         None,

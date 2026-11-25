@@ -240,7 +240,6 @@ class KimiK3DSAIndexer(nn.Module):
         self.dcp_local_topk = init_dcp_topk_merge(vllm_config, index_topk)
         # wkv_index issued early on its own stream by prefetch_kv.
         self._kv_stream: torch.cuda.Stream | None = None
-        self._kv_events: tuple[torch.cuda.Event, torch.cuda.Event] | None = None
 
     @property
     def cp_kv_cache_interleave_size(self) -> int:
@@ -335,19 +334,13 @@ class KimiK3DSAIndexer(nn.Module):
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.cuda.Event]:
         """Issue wkv_index, which reads only the layer input, on a side stream
-        beside the query chain (fused_qkv_a_proj, q norm, wq_index); `forward`
-        given the result waits for it."""
+        beside the query chain; `forward` given the result waits for it."""
         if self._kv_stream is None:
             self._kv_stream = torch.cuda.Stream(device=hidden_states.device)
-            self._kv_events = (torch.cuda.Event(), torch.cuda.Event())
-        assert self._kv_events is not None
-        start, done = self._kv_events
-        start.record(torch.cuda.current_stream())
-        self._kv_stream.wait_event(start)
+        self._kv_stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(self._kv_stream):
             kv = self.wkv_index(hidden_states)[0]
-            done.record(self._kv_stream)
-        return kv, done
+        return kv, self._kv_stream.record_event()
 
     def forward(
         self,
@@ -704,8 +697,7 @@ class KimiK3DSAAttention(nn.Module):
             shardq_eligible=True,
         )
         # VLLM_INDEXER_OVERLAP: FULL CUDA graph decode steps of the wrapper path
-        # let the indexer's top-k land while the layer issues the work that does
-        # not read it (`_forward_deferred_topk`).
+        # defer the indexer's top-k (`_forward_deferred_topk`).
         self.defer_topk = (
             envs.VLLM_INDEXER_OVERLAP
             and self.q_lora_rank is not None
@@ -811,9 +803,9 @@ class KimiK3DSAAttention(nn.Module):
         return self.o_proj(_gate_sigmoid_mul(attn_out, gate))[0]
 
     def _defers_topk(self, num_tokens: int) -> bool:
-        """Whether this call may let the indexer's top-k land late: a FULL CUDA
-        graph capture of a pure decode batch whose sparse attention reads the
-        top-k only through its index group's conversion."""
+        """Whether this call may defer the indexer's top-k: a FULL CUDA graph
+        capture of a decode-only batch whose sparse attention reads the top-k
+        only through its index group's conversion."""
         if not self.defer_topk:
             return False
         attn = self.mla_attn.mla_attn
@@ -825,32 +817,24 @@ class KimiK3DSAAttention(nn.Module):
     def _forward_deferred_topk(
         self, positions: torch.Tensor, hidden_states: torch.Tensor
     ) -> torch.Tensor:
-        """`MultiHeadLatentAttentionWrapper.forward`'s ops for this layer,
-        reordered around a deferred indexer top-k.
-
-        The indexer runs right after the q-LoRA norm; while its top-k is
-        computed on other streams, this stream issues the work that never reads
-        the kept tokens (kv_a norm, q_b_proj, RoPE, the output gate, then in the
-        MLA attention the cache insert and the query preparation). The index
-        group's ready event is recorded on the stream that writes the kept
-        tokens; its remap waits on it, and sparse attention on the remap. The
-        indexer key projection, which reads only the layer input, runs on a side
-        stream beside the query chain.
+        """`MultiHeadLatentAttentionWrapper.forward`'s ops for this layer around a
+        deferred indexer top-k: while it runs on another stream, this one issues
+        the work that never reads the kept tokens (kv norm, q_b_proj, RoPE, the
+        output gate, the MLA cache insert and query preparation). The index group's
+        conversion waits for the top-k, and sparse attention for the conversion.
         """
         assert self.q_lora_rank is not None
-        indexer = self.dsa_indexer
         attn = cast(Any, self.mla_attn.mla_attn)
-        prefetched_kv = indexer.prefetch_kv(hidden_states)
-        q_c, kv_lora = self.fused_qkv_a_proj(hidden_states)[0].split(
-            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
+        prefetched_kv = self.dsa_indexer.prefetch_kv(hidden_states)
+        q_c, kv_c, k_pe = self.fused_qkv_a_proj(hidden_states)[0].split(
+            [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
         q_c = self.q_a_layernorm(q_c)
 
         indexer_overlap.request_deferred_topk()
-        indexer(hidden_states, q_c, positions, self.rotary_emb, prefetched_kv)
+        self.dsa_indexer(hidden_states, q_c, positions, self.rotary_emb, prefetched_kv)
         topk_stream, topk_inputs = indexer_overlap.take_deferred_topk()
 
-        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c)
         k_pe = k_pe.unsqueeze(1)
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
@@ -862,21 +846,12 @@ class KimiK3DSAAttention(nn.Module):
         if hasattr(self, "g_proj"):
             gate = self.g_proj(hidden_states)[0].sigmoid()
 
-        # The kept tokens are ready on the stream that writes them (this one if
-        # the indexer joined).
+        # Ready on the stream that writes the top-k (this one if the indexer joined).
         with torch.cuda.stream(topk_stream):
             attn.impl.record_logical_topk_ready()
-        attn_out = attn(
-            q,
-            kv_c_normed,
-            k_pe,
-            output_shape=(
-                hidden_states.shape[0],
-                self.num_local_heads * self.v_head_dim,
-            ),
-        )
-        # This stream has waited for the kept tokens: the deferred top-k's
-        # inputs may be freed.
+        out_shape = (hidden_states.shape[0], self.num_local_heads * self.v_head_dim)
+        attn_out = attn(q, kv_c_normed, k_pe, output_shape=out_shape)
+        # This stream has waited for the top-k: its inputs may be freed.
         del topk_inputs
         if gate is not None:
             attn_out = attn_out * gate
