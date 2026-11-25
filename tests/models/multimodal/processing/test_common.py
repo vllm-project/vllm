@@ -69,10 +69,8 @@ def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     return mm_data
 
 
-def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
-    """Patch the multimodal data for GLM-ASR model.
-    GLM-ASR requires text and audio to match 1:1, so we limit audio to 1.
-    """
+def single_audio_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+    """Limit audio to 1 for processors that require text and audio to match 1:1."""
     assert isinstance(mm_data, dict)
     if "audio" in mm_data:
         audio = mm_data["audio"]
@@ -92,7 +90,8 @@ _IGNORE_MM_KEYS = {
 }
 
 MM_DATA_PATCHES = {
-    "glmasr": glmasr_patch_mm_data,
+    "glmasr": single_audio_patch_mm_data,
+    "omniasr": single_audio_patch_mm_data,
 }
 
 _XPU_EXCLUDED_MODEL_IDS = {

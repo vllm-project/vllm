@@ -6,12 +6,13 @@ from contextlib import nullcontext
 from functools import cached_property
 
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.models.hy_v4.nvidia.mm_preprocess import (
+from vllm.models.hy_v4.common.mm_preprocess import (
     HYV4VLDummyInputsBuilder,
     HYV4VLMultiModalProcessor,
     HYV4VLProcessingInfo,
 )
-from vllm.models.hy_v4.nvidia.vl_model import HYV4VLForConditionalGeneration
+from vllm.models.hy_v4.common.vl_model import HYV4VLForConditionalGeneration
+from vllm.models.hy_v4_flash import platform_module
 from vllm.models.hy_v4_flash.configs import HYV4FlashVLConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.transformers_utils.processor import get_processor_kwargs_keys
@@ -20,7 +21,8 @@ from vllm.transformers_utils.processors.hy_v4 import (
     HYV4VLProcessorKwargs,
 )
 
-from .model import HYV4FlashForCausalLM, validate_platform
+_text_model = platform_module("model")
+HYV4FlashForCausalLM = _text_model.HYV4FlashForCausalLM
 
 
 class HYV4FlashVLProcessingInfo(HYV4VLProcessingInfo):
@@ -74,7 +76,7 @@ class HYV4FlashVLForConditionalGeneration(HYV4VLForConditionalGeneration):
     )
 
     def __init__(self, *, vllm_config, prefix=""):
-        validate_platform()
+        _text_model.validate_platform()
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.token_lookback_depth = self.language_model.token_lookback_depth
         engram_hash = self.language_model.model.engram_hash

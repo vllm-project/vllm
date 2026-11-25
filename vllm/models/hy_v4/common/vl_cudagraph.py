@@ -8,7 +8,7 @@ Mixin implementing the `SupportsEncoderCudaGraph` protocol
 (`vllm/model_executor/models/interfaces.py`) on top of
 `HYV4VisionTransformer`. The captured graph packs a whole batch of images
 and videos into one varlen ViT run (per-frame attention via `cu_seqlens`,
-FLASH_ATTN only) over fixed-size buffers, and the per-item merger
+FLASH_ATTN or ROCM_AITER_FA only) over fixed-size buffers, and the per-item merger
 (`HYV4VisionPatchMerger`) runs eagerly on the graph's hidden-state output
 in `postprocess_encoder_output`.
 
@@ -21,9 +21,9 @@ real cumulative offset, leaving padded rows outside the attention sequences.
 
 Budgets are in units of *patches* (rows of the packed ViT input). Video item
 specs charge `_FRAME_CHARGE` merge cells per frame against the budget so
-the packer splits frame-heavy batches: FlashAttn varlen pays a fixed
+the packer splits frame-heavy batches: varlen flash attention pays a fixed
 per-sequence scheduling cost even for zero-length padding sequences
-(measured ~0.14us/seq/layer on GB200/FA4), so captured graphs keep their
+(measured ~0.14us/seq/layer with FA4), so captured graphs keep their
 cu_seqlens slot count minimal (`budget // _FRAME_CHARGE` for video graphs,
 `max_batch_size` for image graphs via the modality capture axis).
 
@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 
 # Merge cells (not patches) charged per video frame during packing. Bounds
 # the cu_seqlens slots a captured video graph needs (budget /
-# (_FRAME_CHARGE * merge**2)): FlashAttn varlen pays a fixed per-sequence
+# (_FRAME_CHARGE * merge**2)): varlen flash attention pays a fixed per-sequence
 # scheduling cost per layer even for zero-length padding sequences, so a
 # max_frames-sized slot array would tax every replay by tens of ms.
 _FRAME_CHARGE = 16
@@ -119,13 +119,16 @@ class HYV4VLEncoderCudaGraphMixin:
             )
         backend = self.visual.attn_backend
         # FlashInfer reads max_seqlen on the host and TORCH_SDPA calls
-        # .tolist() on CUDA cu_seqlens; only FLASH_ATTN is capture-safe here.
-        if backend != AttentionBackendEnum.FLASH_ATTN:
+        # .tolist() on CUDA cu_seqlens; neither can be captured.
+        if backend not in (
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+        ):
             raise ValueError(
                 f"cudagraph_mm_encoder is not supported with the "
                 f"{backend.name} ViT attention backend for HYV4 VL. Set "
-                "--mm-encoder-attn-backend FLASH_ATTN or disable "
-                "cudagraph_mm_encoder."
+                "--mm-encoder-attn-backend FLASH_ATTN or ROCM_AITER_FA "
+                "(ROCm), or disable cudagraph_mm_encoder."
             )
 
         buffer_keys = ["patches", "pos_embeds"]
@@ -133,9 +136,9 @@ class HYV4VLEncoderCudaGraphMixin:
             buffer_keys += ["rope_cos", "rope_sin"]
         buffer_keys += ["cu_seqlens", "max_seqlen"]
 
-        # FlashAttn varlen pays a fixed per-sequence scheduling cost even for
-        # zero-length padding sequences (~0.14us/seq/layer measured on
-        # GB200/FA4), so the frame-slot count baked into a captured graph
+        # Varlen flash attention pays a fixed per-sequence scheduling cost even
+        # for zero-length padding sequences (~0.14us/seq/layer measured with
+        # FA4), so the frame-slot count baked into a captured graph
         # taxes every replay. Capture separate image and video graphs: image
         # graphs need only one slot per item, video graphs cover multi-frame
         # batches (bounded by the frame charge in the item specs).

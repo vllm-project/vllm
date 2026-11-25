@@ -21,12 +21,26 @@ use crate::transport::ConnectedEngine;
 pub type UtilitySender = oneshot::Sender<Result<UtilityOutput>>;
 pub type UtilityReceiver = oneshot::Receiver<Result<UtilityOutput>>;
 
+/// Request-scoped state that follows one request through the client.
+///
+/// The output dispatcher shows it each output as it arrives from the engine,
+/// before the output reaches the request's stream, so it does not depend on
+/// how fast the stream is read. It runs under the request registry's lock and
+/// must not block. It is dropped when the request leaves the client: on
+/// finish, on abort (including a dropped stream), when sending the request
+/// fails, or when the client closes.
+pub trait RequestObserver: Send + std::fmt::Debug {
+    /// Observe one output of the request.
+    fn observe_output(&mut self, output: &EngineCoreOutput);
+}
+
 #[derive(Debug)]
 struct TrackedRequest {
     sender: OutputSender,
     engine_id: EngineId,
     lora: Option<LoraRequestState>,
     admission_stats_generation: Option<u64>,
+    observer: Option<Box<dyn RequestObserver>>,
 }
 
 /// Frontend-side view of one LoRA request's scheduling phase.
@@ -192,10 +206,18 @@ impl RequestRegistry {
                 engine_id: engine_id.clone(),
                 lora,
                 admission_stats_generation,
+                observer: None,
             },
         );
 
         Ok((engine_id, rx))
+    }
+
+    /// Attach an observer to a request just registered. It sees the request's
+    /// outputs and is dropped when the request leaves the registry.
+    pub fn observe(&mut self, request_id: &str, observer: Box<dyn RequestObserver>) {
+        let tracked = (self.requests.get_mut(request_id)).expect("the request was just registered");
+        tracked.observer = Some(observer);
     }
 
     fn choose_engine_for_request(&mut self, data_parallel_rank: Option<u32>) -> Result<EngineId> {
@@ -249,6 +271,11 @@ impl RequestRegistry {
         output: EngineCoreStreamOutput,
     ) -> Option<EngineCoreStreamOutput> {
         self.apply_lora_events(&output.output);
+        if let Some(observer) = (self.requests.get_mut(output.request_id.as_str()))
+            .and_then(|tracked| tracked.observer.as_mut())
+        {
+            observer.observe_output(&output.output);
+        }
         if output.finished() {
             match self.remove(output.request_id.as_str()) {
                 Some((mut sender, _)) => sender.send(output),
@@ -506,7 +533,8 @@ mod tests {
 
     use crate::EngineId;
     use crate::client::state::{
-        EngineLoadSnapshot, EngineRoutingState, OutputReceiver, RequestRegistry, UtilityRegistry,
+        EngineLoadSnapshot, EngineRoutingState, OutputReceiver, RequestObserver, RequestRegistry,
+        UtilityRegistry,
     };
     use crate::client::stream::EngineCoreStreamOutput;
     use crate::mock_engine::default_ready_response;
@@ -581,6 +609,54 @@ mod tests {
 
         assert!(unrouted.is_none());
         assert!(!registry.contains("req-1"));
+    }
+
+    /// Records the outputs it observes and when it is dropped.
+    #[derive(Debug)]
+    struct RecordingObserver(std::sync::Arc<parking_lot::Mutex<Vec<String>>>);
+
+    impl RequestObserver for RecordingObserver {
+        fn observe_output(&mut self, output: &EngineCoreOutput) {
+            self.0.lock().push(format!("output {:?}", output.finish_reason));
+        }
+    }
+
+    impl Drop for RecordingObserver {
+        fn drop(&mut self) {
+            self.0.lock().push("dropped".to_string());
+        }
+    }
+
+    /// An observer sees each routed output and is dropped once its request
+    /// leaves the registry, whether it finishes, is aborted or the registry
+    /// closes.
+    #[test]
+    fn observer_follows_outputs_until_the_request_leaves() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        let events = std::sync::Arc::default();
+        for request_id in ["finished", "aborted", "open"] {
+            registry.register(request_id.to_string(), None, None, NonZeroU32::MIN).unwrap();
+            let observer = RecordingObserver(std::sync::Arc::clone(&events));
+            registry.observe(request_id, Box::new(observer));
+        }
+        let take = || std::mem::take(&mut *events.lock()).join(", ");
+
+        registry.send_output(stream_output(EngineCoreOutput {
+            request_id: "finished".to_string(),
+            ..Default::default()
+        }));
+        registry.send_output(stream_output(EngineCoreOutput {
+            request_id: "finished".to_string(),
+            finish_reason: Some(EngineCoreFinishReason::Length),
+            ..Default::default()
+        }));
+        assert_eq!(take(), "output None, output Some(Length), dropped");
+
+        registry.abort_many([&"aborted".to_string()], 0.0);
+        assert_eq!(take(), "dropped");
+
+        drop(registry.close());
+        assert_eq!(take(), "dropped");
     }
 
     /// Drain the outputs that are ready on `receiver` without waiting,
