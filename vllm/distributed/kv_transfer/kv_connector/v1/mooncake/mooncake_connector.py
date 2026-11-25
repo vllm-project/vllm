@@ -27,12 +27,14 @@ from numpy.typing import NDArray
 from vllm import envs
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.config.kv_transfer import KVCacheAccess
+from vllm.config.utils import hash_factors
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
     check_compressed_kernel_split,
     get_current_attn_backends,
     get_current_attn_backends_and_specs,
+    get_speculative_kv_compatibility_factors,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -653,6 +655,25 @@ def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
     return None
 
 
+class DraftContextKVCompatibility(msgspec.Struct, frozen=True):
+    method: str
+    config_hash: str
+
+
+def _get_draft_context_kv_compatibility(
+    vllm_config: VllmConfig,
+) -> DraftContextKVCompatibility | None:
+    spec = vllm_config.speculative_config
+    if spec is None or not spec.speculator_config.projects_context_kv:
+        return None
+
+    method = spec.custom_method or spec.method
+    assert method is not None
+    factors = get_speculative_kv_compatibility_factors(vllm_config)
+    factors["method"] = method
+    return DraftContextKVCompatibility(method, hash_factors(factors))
+
+
 class MooncakeXferMetadata(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -680,7 +701,7 @@ class MooncakeXferMetadata(
     layout_id: int = 0
     # Sent with the full layout when decode needs context KV from a drafter
     # that projects it from target hidden states.
-    required_draft_context_method: str | None = None
+    required_draft_context: DraftContextKVCompatibility | None = None
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -1814,23 +1835,19 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
-        required_method = meta.required_draft_context_method
-        if required_method is not None:
-            spec = self.vllm_config.speculative_config
-            prefill_method = (
-                (spec.custom_method or spec.method) if spec is not None else None
+        required_draft = meta.required_draft_context
+        if required_draft is not None and required_draft != (
+            _get_draft_context_kv_compatibility(self.vllm_config)
+        ):
+            response = MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.ERROR,
+                err_msg=(
+                    f"Mooncake decode requires compatible {required_draft.method} "
+                    "draft context KV. Configure the same drafter on prefill."
+                ),
             )
-            if prefill_method != required_method:
-                response = MooncakeXferResponse(
-                    status=MooncakeXferResponseStatus.ERROR,
-                    err_msg=(
-                        f"Mooncake decode requires {required_method} draft context "
-                        "KV. Configure the same drafter on prefill "
-                        f"(currently {prefill_method or 'no drafter'})."
-                    ),
-                )
-                await sock.send_multipart((identity, self._encoder.encode(response)))
-                return
+            await sock.send_multipart((identity, self._encoder.encode(response)))
+            return
         if _pp_mismatch_hides_packed_layers(
             self.pp_size,
             meta.remote_pp_size,
@@ -3351,10 +3368,6 @@ class MooncakeConnectorWorker:
                 block_lens=[],
                 kv_block_lens=[],
             )
-        spec = self.vllm_config.speculative_config
-        required_draft_context_method = None
-        if spec is not None and spec.speculator_config.projects_context_kv:
-            required_draft_context_method = spec.custom_method or spec.method
         return MooncakeXferMetadata(
             remote_hostname=self.hostname,
             remote_port=self.rpc_port,
@@ -3373,7 +3386,9 @@ class MooncakeConnectorWorker:
                 list(groups) for groups in self.region_shared_groups
             ],
             registered_row_offsets=self.region_row_offsets,
-            required_draft_context_method=required_draft_context_method,
+            required_draft_context=_get_draft_context_kv_compatibility(
+                self.vllm_config
+            ),
         )
 
     def _validate_head_resharding_layout(
