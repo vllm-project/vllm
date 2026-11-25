@@ -3,9 +3,11 @@
 """Qwen3.5 model — hardware-isolated entry point.
 
 The NVIDIA and ROCm variants use the eager + breakable CUDA-graph modelling
-code with explicit fused kernels. All other platforms keep the previous
-torch.compile implementation in `vllm/model_executor/models/` so their behavior
-is unchanged.
+code with explicit fused kernels.
+XPU uses a separate eager + breakable XPU-graph implementation with explicit
+routed/shared expert fusion for eligible MoE calls.
+All other platforms keep the previous torch.compile implementation in
+`vllm/model_executor/models/` so their behavior is unchanged.
 """
 
 from typing import TYPE_CHECKING
@@ -22,6 +24,16 @@ if TYPE_CHECKING or current_platform.is_cuda():
         Qwen3_5MoeForConditionalGeneration,
     )
     from .nvidia.mtp import Qwen3_5MoeMTP, Qwen3_5MTP
+elif current_platform.is_xpu():
+    from .xpu.model import (  # type: ignore[assignment]
+        Qwen3_5ForCausalLM,
+        Qwen3_5ForCausalLMBase,
+        Qwen3_5ForConditionalGeneration,
+        Qwen3_5Model,
+        Qwen3_5MoeForCausalLM,
+        Qwen3_5MoeForConditionalGeneration,
+    )
+    from .xpu.mtp import Qwen3_5MoeMTP, Qwen3_5MTP  # type: ignore[assignment]
 elif current_platform.is_rocm():
     from .amd.model import (  # type: ignore[assignment]
         Qwen3_5ForCausalLM,

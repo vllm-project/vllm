@@ -152,7 +152,10 @@ class Glm5NextMultiTokenPredictor(nn.Module):
         self.prefill_rows: torch.Tensor | None = None
 
     def _specialized_draft(self) -> "SpecializedDraft | None":
-        if self.specialized_decode_config is None:
+        if (
+            self.specialized_decode_config is None
+            or self.specialized_decode_config.boundary_only
+        ):
             return None
         if (
             self.specialized_decode is None
