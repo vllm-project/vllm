@@ -476,6 +476,7 @@ def test_startup_plan_fingerprint_covers_sizing_settings_and_the_environment(
         ("HOSTNAME", "worker-x7k2p"),
         ("VLLM_HOST_IP", "10.0.0.2"),
         ("MASTER_PORT", "29511"),
+        ("CUDA_VISIBLE_DEVICES", "3"),
         ("KUBERNETES_SERVICE_HOST", "10.43.0.1"),
         ("FRONTEND_SERVICE_HOST", "10.43.7.7"),
         ("HF_TOKEN", "hf_x"),

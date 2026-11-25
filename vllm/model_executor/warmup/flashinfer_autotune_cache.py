@@ -61,6 +61,16 @@ def get_flashinfer_mm_encoder_autotune_config(
     return mm_config
 
 
+def _flashinfer_identity() -> str:
+    """FlashInfer's version and the GPU arch, as its JIT workspace names them."""
+    try:
+        from flashinfer.jit import env as flashinfer_jit_env
+    except ImportError:
+        return ""
+    workspace = flashinfer_jit_env.FLASHINFER_WORKSPACE_DIR
+    return f"{workspace.parent.name}/{workspace.name}"
+
+
 def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
@@ -90,6 +100,16 @@ def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
         )
     ):
         factors = {**factors, "moe_routed": True}
+    # The tables hold FlashInfer's choice of kernel for each shape: another
+    # FlashInfer version or GPU arch, or an environment variable a kernel
+    # reads, can change what wins or what a choice means.
+    from vllm.v1.worker.startup_plan import environment_factors
+
+    factors = {
+        **factors,
+        "flashinfer": _flashinfer_identity(),
+        "env": environment_factors(),
+    }
     return hash_factors(factors)
 
 

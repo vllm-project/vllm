@@ -40,10 +40,12 @@ logger = init_logger(__name__)
 PLAN_SCHEMA_VERSION = 2
 
 # Environment variables that differ between the processes, hosts or pods of one
-# deployment (ranks and rendezvous, pod identity, Kubernetes service links) or
-# that carry credentials: they never change the memory a worker measures.
-_ENV_NOT_MEMORY_FACTORS = re.compile(
+# deployment (ranks, device lists and rendezvous, pod identity, Kubernetes
+# service links) or that carry credentials: they never change what a worker
+# measures or tunes.
+_ENV_NOT_FACTORS = re.compile(
     r"^(RANK|LOCAL_RANK|GROUP_RANK|ROLE_RANK|WORLD_SIZE|LOCAL_WORLD_SIZE"
+    r"|.*_VISIBLE_DEVICES"
     r"|GROUP_WORLD_SIZE|ROLE_WORLD_SIZE|MASTER_ADDR|MASTER_PORT|TORCHELASTIC_.*"
     r"|HOSTNAME|PWD|OLDPWD|SHLVL|_|TERM|POD_.*|NODE_NAME|.*HOST_IP"
     r"|KUBERNETES_.*|.*_SERVICE_(HOST|PORT)(_.*)?|.*_PORT_[0-9]+_(TCP|UDP|SCTP)(_.*)?"
@@ -51,21 +53,21 @@ _ENV_NOT_MEMORY_FACTORS = re.compile(
 )
 
 
-def memory_env_factors() -> dict:
-    """The environment the measured memory depends on.
+def environment_factors() -> dict:
+    """The environment a measured or tuned result depends on.
 
     vLLM's own variables count as in `envs.compile_factors()`. Every other
-    variable counts too, except those matched by `_ENV_NOT_MEMORY_FACTORS`:
-    kernels and allocators read variables directly, outside `envs.py` (e.g.
+    variable counts too, except those matched by `_ENV_NOT_FACTORS`: kernels
+    and allocators read variables directly, outside `envs.py` (e.g.
     `PYTORCH_CUDA_ALLOC_CONF` sets the allocator's behavior), so any of them
-    can change what is measured.
+    can change what is measured or which kernel wins.
     """
     return {
         "vllm": sorted((k, repr(v)) for k, v in envs.compile_factors().items()),
         "other": sorted(
             (k, v)
             for k, v in os.environ.items()
-            if not k.startswith("VLLM_") and not _ENV_NOT_MEMORY_FACTORS.match(k)
+            if not k.startswith("VLLM_") and not _ENV_NOT_FACTORS.match(k)
         ),
     }
 
@@ -132,7 +134,7 @@ def compute_plan_fingerprint(
         # Sizing settings the compile factors leave out (they do not change
         # compiled graphs), and the environment.
         "sizing": memory_sizing_factors(vllm_config),
-        "env": memory_env_factors(),
+        "env": environment_factors(),
     }
     digest = hashlib.sha256(json.dumps(factors, sort_keys=True).encode()).hexdigest()
     return digest[:16]

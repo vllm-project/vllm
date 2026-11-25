@@ -845,3 +845,32 @@ def test_autotune_cache_key_separates_moe_routed_tuning_under_dp(monkeypatch):
     assert key(2, "1", routed=False) == key(2, "0", routed=False)
     sim = "uniform_random"
     assert key(2, "1", routed=True, sim=sim) == key(2, "0", routed=True, sim=sim)
+
+
+def test_flashinfer_autotune_cache_hash_covers_flashinfer_and_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A table tuned by another FlashInfer version or GPU arch, or under another
+    value of a variable a kernel reads, is not reused; per-pod variables do not
+    change the key."""
+    from vllm.config import VllmConfig
+    from vllm.model_executor.warmup import flashinfer_autotune_cache as cache
+
+    model = SimpleNamespace(modules=lambda: iter([]))
+    runner = SimpleNamespace(vllm_config=VllmConfig(), get_model=lambda: model)
+    monkeypatch.setattr(cache, "_flashinfer_identity", lambda: "0.6.1/100a")
+    base = cache.flashinfer_autotune_cache_hash(runner)
+
+    monkeypatch.setattr(cache, "_flashinfer_identity", lambda: "0.6.2/100a")
+    assert cache.flashinfer_autotune_cache_hash(runner) != base
+    monkeypatch.setattr(cache, "_flashinfer_identity", lambda: "0.6.1/103a")
+    assert cache.flashinfer_autotune_cache_hash(runner) != base
+    monkeypatch.setattr(cache, "_flashinfer_identity", lambda: "0.6.1/100a")
+
+    monkeypatch.setenv("AUTOTUNE_TEST_KERNEL_VARIANT", "b")
+    assert cache.flashinfer_autotune_cache_hash(runner) != base
+    monkeypatch.delenv("AUTOTUNE_TEST_KERNEL_VARIANT")
+
+    monkeypatch.setenv("POD_NAME", "worker-x7k2p")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+    assert cache.flashinfer_autotune_cache_hash(runner) == base
