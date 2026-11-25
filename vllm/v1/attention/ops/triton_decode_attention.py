@@ -42,7 +42,12 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_kernel_dispatcher_with_warmup,
 )
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import (
+    tensor_descriptor_compatible,
+    tl,
+    triton,
+    use_tensor_descriptor,
+)
 
 is_hip_ = current_platform.is_rocm()
 
@@ -325,6 +330,7 @@ def _fwd_grouped_kernel_stage1(
     Lk: tl.constexpr,
     Lv: tl.constexpr,
     IS_MLA: tl.constexpr = False,
+    USE_TD: tl.constexpr = False,
     SLIDING_WINDOW: tl.constexpr = 0,
 ):
     cur_head_id = tl.program_id(0)
@@ -344,26 +350,49 @@ def _fwd_grouped_kernel_stage1(
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
     cur_batch_req_idx = cur_batch
 
-    offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
-    q = tl.load(
-        Q + offs_q,
-        mask=(mask_h[:, None]) & (mask_d[None, :]),
-        other=0.0,
-        cache_modifier=".ca",
-    )
+    if USE_TD:
+        # One KV head: the descriptor bounds are exactly mask_h and mask_d.
+        q_desc = tl.make_tensor_descriptor(
+            Q + cur_batch * stride_qbs,
+            shape=[q_head_num, Lk],
+            strides=[stride_qh, 1],
+            block_shape=[BLOCK_H, BLOCK_DMODEL],
+        )
+        q = q_desc.load([cur_head_id * VALID_BLOCK_H, 0])
+    else:
+        offs_q = (
+            cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
+        )
+        q = tl.load(
+            Q + offs_q,
+            mask=(mask_h[:, None]) & (mask_d[None, :]),
+            other=0.0,
+            cache_modifier=".ca",
+        )
 
     if BLOCK_DPE > 0:
         offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
         mask_dpe = offs_dpe < Lk
-        off_qpe = (
-            cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_dpe[None, :]
-        )
-        qpe = tl.load(
-            Q + off_qpe,
-            mask=(mask_h[:, None]) & (mask_dpe[None, :]),
-            other=0.0,
-            cache_modifier=".ca",
-        )
+        if USE_TD:
+            qpe_desc = tl.make_tensor_descriptor(
+                Q + cur_batch * stride_qbs,
+                shape=[q_head_num, Lk],
+                strides=[stride_qh, 1],
+                block_shape=[BLOCK_H, BLOCK_DPE],
+            )
+            qpe = qpe_desc.load([cur_head_id * VALID_BLOCK_H, BLOCK_DMODEL])
+        else:
+            off_qpe = (
+                cur_batch * stride_qbs
+                + cur_head[:, None] * stride_qh
+                + offs_dpe[None, :]
+            )
+            qpe = tl.load(
+                Q + off_qpe,
+                mask=(mask_h[:, None]) & (mask_dpe[None, :]),
+                other=0.0,
+                cache_modifier=".ca",
+            )
 
     # A window of SLIDING_WINDOW keys ends at the sequence end.
     window_start = 0
@@ -528,6 +557,21 @@ def _decode_grouped_att_m_fwd_warmup_inputs(
     )
 
 
+def _use_q_tensor_descriptor(q, k_buffer, is_mla: bool) -> bool:
+    """Whether the grouped stage-1 kernel loads its Q tile with 2D block reads:
+    on XPU, for the 576-wide MLA tile (one KV head), when a descriptor can
+    cover `q`.  The 288-wide tile measured slower with TD, so it keeps
+    pointers."""
+    return (
+        current_platform.is_xpu()
+        and is_mla
+        and k_buffer.shape[-1] == 576
+        and k_buffer.shape[-2] == 1
+        and use_tensor_descriptor()
+        and tensor_descriptor_compatible(q)
+    )
+
+
 @triton_kernel_dispatcher_with_warmup(
     kernel=_fwd_grouped_kernel_stage1,
     warmup_inputs=_decode_grouped_att_m_fwd_warmup_inputs,
@@ -597,6 +641,8 @@ def _decode_grouped_att_m_fwd(
         # exceeds 101376 bytes limit
         num_stages = 1
 
+    use_td = _use_q_tensor_descriptor(q, k_buffer, is_mla)
+
     return grid, dict(
         Q=q,
         K_Buffer=k_buffer,
@@ -635,6 +681,7 @@ def _decode_grouped_att_m_fwd(
         Lk=Lk,
         Lv=Lv,
         IS_MLA=is_mla,
+        USE_TD=use_td,
         SLIDING_WINDOW=sliding_window,
         **extra_kargs,
     )

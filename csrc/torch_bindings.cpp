@@ -835,6 +835,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? cu_chunk_seqlen,"
       "Tensor? last_chunk_indices) -> ()");
 
+#ifndef USE_ROCM
+  // GDN prefill: fused causal conv1d + post-conv prep
+  ops.def(
+      "gdn_prefill_conv(Tensor x, Tensor weight,"
+      "Tensor! conv_states, Tensor query_start_loc,"
+      "Tensor cache_indices, Tensor has_initial_state,"
+      "Tensor a, Tensor b, Tensor A_log, Tensor dt_bias,"
+      "Tensor! q, Tensor! k, Tensor! v, Tensor! g, Tensor! beta,"
+      "int num_k_heads, int head_dim, bool output_g_exp,"
+      "float beta_scale, int null_block_id) -> ()");
+#endif  // USE_ROCM
+
   // LongCat n-gram embedding index kernel. All tensor args are marked mutable
   // to match the (non-const) stable-Tensor& C++ signature; only ne_token_table
   // and n_gram_ids are actually written in place.
@@ -1038,6 +1050,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 
   // Mamba kernels
   ops.impl("selective_scan_fwd", TORCH_BOX(&selective_scan_fwd));
+#ifndef USE_ROCM
+  ops.impl("gdn_prefill_conv", TORCH_BOX(&gdn_prefill_conv));
+#endif  // USE_ROCM
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CPU, ops) {

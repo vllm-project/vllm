@@ -87,19 +87,6 @@ async fn not_supported(method: Method, path: MatchedPath) -> (StatusCode, Json<E
     )
 }
 
-fn runtime_lora_updating_enabled() -> bool {
-    std::env::var("VLLM_ALLOW_RUNTIME_LORA_UPDATING")
-        .ok()
-        .is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
-}
-
-fn cohere_api_enabled() -> bool {
-    std::env::var("VLLM_ENABLE_COHERE_API")
-        .ok()
-        .and_then(|value| value.parse::<i64>().ok())
-        .is_some_and(|value| value != 0)
-}
-
 /// Optional route families, each enabled by a CLI flag or an environment
 /// variable as in the Python frontend.
 #[derive(Debug, Clone, Copy, Default)]
@@ -110,17 +97,14 @@ struct RouteGates {
     runtime_lora_updating: bool,
     /// `--enable-scale-out`: scale-out routes, which answer 403 when disabled.
     scale_out: bool,
-    /// `VLLM_ENABLE_COHERE_API`: Cohere v2 chat routes.
-    cohere_api: bool,
 }
 
 impl RouteGates {
     fn resolve(state: &AppState) -> Self {
         Self {
             dev_mode: state.api_server_options.server_dev_mode,
-            runtime_lora_updating: runtime_lora_updating_enabled(),
+            runtime_lora_updating: state.api_server_options.allow_runtime_lora_updating,
             scale_out: state.api_server_options.enable_scale_out,
-            cohere_api: cohere_api_enabled(),
         }
     }
 }
@@ -202,19 +186,6 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         for path in UNIMPLEMENTED_SCALE_OUT_ROUTES {
             router = router.route(path, post(disabled_scale_out));
         }
-    }
-
-    if gates.cohere_api {
-        // TODO: implement the Cohere v2 chat API.
-        router = router.route("/cohere/v2/chat", post(not_supported));
-        if gates.scale_out {
-            router = router.route("/cohere/v2/chat/render", post(not_supported));
-        }
-    }
-
-    if state.api_server_options.enable_tokenizer_info_endpoint {
-        // TODO: implement `/tokenizer_info`.
-        router = router.route("/tokenizer_info", get(not_supported));
     }
 
     // Process checkpoint lifecycle, which requires sleep mode.
