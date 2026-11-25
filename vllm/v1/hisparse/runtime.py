@@ -304,10 +304,23 @@ def use_shared_hisparse_host_pool(vllm_config: VllmConfig) -> bool:
     )
 
 
-def get_hisparse_host_leader_rank(vllm_config: VllmConfig) -> int:
-    """TP rank that creates and writes this node's shared host pool."""
+def get_hisparse_host_leader_rank(
+    vllm_config: VllmConfig, tp_rank: int | None = None
+) -> int:
+    """TP rank that creates and writes this node's shared host pool.
+
+    Args:
+        vllm_config: Engine config; its `local_world_size` sets the node size.
+        tp_rank: TP rank to resolve; defaults to this process's TP rank.
+
+    Returns:
+        The first TP rank on `tp_rank`'s node.
+
+    """
+    if tp_rank is None:
+        tp_rank = get_tensor_model_parallel_rank()
     local_world_size = vllm_config.parallel_config.local_world_size
-    return get_tensor_model_parallel_rank() // local_world_size * local_world_size
+    return tp_rank // local_world_size * local_world_size
 
 
 def get_hisparse_host_block_stride(
