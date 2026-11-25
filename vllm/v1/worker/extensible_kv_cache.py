@@ -410,7 +410,10 @@ def kv_cache_export_handle_types(vllm_config: "VllmConfig") -> int:
         return 0
     access = kv_transfer_config.kv_cache_access()
     handle_types = 0
-    if KVCacheAccess.EXPORTS_FD in access:
+    if KVCacheAccess.EXPORTS_FD in access or (
+        KVCacheAccess.OPTIONAL_EXPORTS_FD in access
+        and vllm_config.cache_config.enable_extensible_kv_cache
+    ):
         handle_types |= MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
     if KVCacheAccess.EXPORTS_FABRIC in access:
         handle_types |= MEM_HANDLE_TYPE_FABRIC

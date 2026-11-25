@@ -391,6 +391,15 @@ class ExportsKVCacheTestConnector(ExampleConnector):
         return KVCacheAccess.EXPORTS_FD
 
 
+class ExportsKVCacheWithFallbackTestConnector(ExportsKVCacheTestConnector):
+    """External connector that exports the device KV cache to another process,
+    with legacy IPC fallback when extensible KV cache is unavailable."""
+
+    @classmethod
+    def kv_cache_access(cls, kv_transfer_config: KVTransferConfig) -> KVCacheAccess:
+        return KVCacheAccess.OPTIONAL_EXPORTS_FD | KVCacheAccess.LEGACY_IPC
+
+
 class TestExampleConnector(ExampleConnector):
     __test__ = False
 

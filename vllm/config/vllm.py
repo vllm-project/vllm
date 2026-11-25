@@ -3448,8 +3448,21 @@ class VllmConfig:
                 "which connectors that register the KV cache (e.g. NIXL, Mooncake, "
                 "MoRIIO, UMBP) require"
             )
-        exports_fd = KVCacheAccess.EXPORTS_FD in kv_cache_access
-        if exports_fd and (requested is False or unsupported is not None):
+        exports_fd_required = KVCacheAccess.EXPORTS_FD in kv_cache_access
+        exports_fd_optional = (
+            KVCacheAccess.OPTIONAL_EXPORTS_FD in kv_cache_access
+        )
+        exports_fd = exports_fd_required or exports_fd_optional
+
+        if exports_fd and not current_platform.is_cuda_alike():
+            raise ValueError(
+                "enable_extensible_kv_cache: a KV connector (e.g. "
+                "LMCacheMPConnector with lmcache.mp.use_vmm_api) imports the KV "
+                "cache through POSIX file descriptors, which needs it, but "
+                f"{unsupported}."
+            )
+
+        if exports_fd_required and (requested is False or unsupported is not None):
             raise ValueError(
                 "enable_extensible_kv_cache: a KV connector (e.g. "
                 "LMCacheMPConnector with lmcache.mp.use_vmm_api) imports the KV "
@@ -3470,6 +3483,17 @@ class VllmConfig:
                     "within a host (e.g. NIXL) would lose NVLink and fall back to "
                     "RDMA or TCP. If transfers only cross hosts, pass "
                     "--enable-extensible-kv-cache."
+                )
+            elif (
+                unsupported is not None
+                and exports_fd_optional
+                and not exports_fd_required
+            ):
+                logger.warning(
+                    "enable_extensible_kv_cache disabled because %s. "
+                    "Falling back to legacy IPC for %s.",
+                    unsupported,
+                    self.kv_transfer_config.kv_connector,
                 )
         elif requested and unsupported is not None:
             raise ValueError(f"enable_extensible_kv_cache: {unsupported}.")
