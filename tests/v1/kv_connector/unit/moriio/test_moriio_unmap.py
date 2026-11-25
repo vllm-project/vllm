@@ -218,7 +218,7 @@ def test_write_consumer_rejection_without_receive_releases_prefill(monkeypatch):
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("already_in_flight", [False, True])
 def test_write_allocation_without_remote_prefill_preserves_receive_tracking(
-    already_in_flight,
+    already_in_flight, monkeypatch
 ):
     scheduler = create_scheduler(create_moriio_config(role="kv_consumer"))
     connector = _moriio_scheduler(scheduler)
@@ -228,10 +228,11 @@ def test_write_allocation_without_remote_prefill_preserves_receive_tracking(
     request.kv_transfer_params["do_remote_prefill"] = False
     pending = {request.request_id: False} if already_in_flight else {}
     connector._write_recvs_in_flight.update(pending)
-    connector.send_notify_block = MagicMock()
+    send_notify_block = MagicMock()
+    monkeypatch.setattr(connector, "send_notify_block", send_notify_block)
 
     connector.update_state_after_alloc(request, MagicMock(), num_external_tokens=16)
 
     assert connector._write_recvs_in_flight == pending
     assert connector.transfer_id_to_request_id == {"xfer-local": request.request_id}
-    connector.send_notify_block.assert_not_called()
+    send_notify_block.assert_not_called()

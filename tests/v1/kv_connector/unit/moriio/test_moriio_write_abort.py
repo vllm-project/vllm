@@ -43,8 +43,8 @@ def _setup(*, mamba=False, empty=False):
     wrapper.local_memory_registered = True
     wrapper.moriio_engine = SimpleNamespace(allocate_transfer_uid=lambda: 1)
     vars(wrapper).update(
-        send_notify=lambda tid, host, port, message_type, **kw: (
-            notifications.append((tid, message_type))
+        send_notify=lambda tid, host, port, message_type, **kw: notifications.append(
+            (tid, message_type)
         )
     )
 
