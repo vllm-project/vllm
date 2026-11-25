@@ -17,6 +17,7 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    FullAttentionManager,
     MambaManager,
     get_kv_cache_kind,
 )
@@ -140,7 +141,6 @@ class KVCacheManager:
         collect_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
         enable_mamba_shared_prefix_checkpoint: bool = False,
@@ -169,7 +169,6 @@ class KVCacheManager:
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.metrics_collector,
@@ -195,6 +194,14 @@ class KVCacheManager:
             if manager.retains_longer_hit
         )
         self.kv_cache_config = kv_cache_config
+        # Full-attention groups hashed per block: their cached prefix of a
+        # request grows one hash block at a time.
+        self.prefix_probe_group_ids = [
+            manager.kv_cache_group_id
+            for manager in self.coordinator.single_type_managers
+            if isinstance(manager, FullAttentionManager)
+            and manager.block_size == hash_block_size
+        ]
 
         # Watermark: minimum number of KV cache blocks to keep free when
         # admitting waiting/preempted requests, to avoid frequent preemptions.
@@ -265,6 +272,24 @@ class KVCacheManager:
             request.block_hashes, request.num_tokens - 1
         )
         return num_computed_tokens
+
+    def extend_cached_prefix(self, request: Request, num_tokens: int) -> int:
+        """Extends `num_tokens`, a cached prefix length of the request, by the
+        full-attention blocks cached after it (if any such groups)."""
+        if not self.prefix_probe_group_ids or not self.prefix_cache_lookup_enabled(
+            request
+        ):
+            return num_tokens
+        block_size = self.block_pool.hash_block_size
+        block_hashes = request.block_hashes
+        # The last token is always recomputed.
+        max_blocks = min(len(block_hashes), (request.num_tokens - 1) // block_size)
+        num_blocks = num_tokens // block_size
+        while num_blocks < max_blocks and self.block_pool.get_cached_block(
+            block_hashes[num_blocks], self.prefix_probe_group_ids
+        ):
+            num_blocks += 1
+        return num_blocks * block_size
 
     def record_prefix_cache_stats(self, request: Request, num_hits: int) -> None:
         # Don't count a request that skipped the cache lookup.

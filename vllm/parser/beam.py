@@ -24,7 +24,7 @@ from vllm.parser.chat_parsing import ResponseParser
 from vllm.parser.chat_parsing.response_templates import ResponseTemplate
 from vllm.parser.response_template import (
     CONTENT_FIELD,
-    THINKING_FIELD,
+    REASONING_FIELD,
     TOOL_FIELD,
     ResponseTemplateParser,
     ResponseTemplateReasoningParser,
@@ -83,7 +83,7 @@ class BeamReasoningParser(ResponseTemplateReasoningParser):
     def reasoning_start_str(self) -> str | None:
         if literal := super().reasoning_start_str:
             return literal
-        thinking = self.response_template.fields.get(THINKING_FIELD)
+        thinking = self.response_template.fields.get(REASONING_FIELD)
         if thinking is None:
             return None
         openers = _openers(thinking, message_start_anchors(self.response_template))
@@ -211,7 +211,7 @@ class BeamParser(ResponseTemplateParser):
         if open_field == CONTENT_FIELD:
             if always_constrain and output is None:
                 tag = answer_rest_structural_tag(fields[CONTENT_FIELD])
-        elif open_field != THINKING_FIELD or reasoning_gated:
+        elif open_field != REASONING_FIELD or reasoning_gated:
             functions = []
             if tools_enabled:
                 tools = _as_tool_dicts(constrained_tools or request.tools)
@@ -229,7 +229,7 @@ class BeamParser(ResponseTemplateParser):
                     parallel_tool_calls=(
                         not named and request.parallel_tool_calls is not False
                     ),
-                    thinking=fields.get(THINKING_FIELD),
+                    thinking=fields.get(REASONING_FIELD),
                     answer=None if forced else answer,
                     answer_format=(
                         None if answer_format is None else answer_format.model_dump()
