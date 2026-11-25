@@ -71,7 +71,7 @@ steps:
       --deselect tests/v1/engine/test_engine_core.py::test_failed_inprocess_startup_releases_model
       --deselect tests/v1/engine/test_async_llm.py::test_multi_abort
       --deselect tests/v1/engine/test_engine_core.py::test_engine_core_tp
-    - pytest -v -s test_config.py
+    - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then PYTEST_ADDOPTS= pytest -v -s test_config.py; fi
   parallelism: 4
 
 - label: ":intel: (BMG) E2E Core"
