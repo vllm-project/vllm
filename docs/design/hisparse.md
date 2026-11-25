@@ -25,11 +25,56 @@ request ────► HiSparseCoordinator ── source blocks + residency pol
                     └──► HiSparseConnector ── host bytes + copies + GPU LRU
 ```
 
-This is a local KV connector. When P/D or another offload connector is also
-configured, `MultiConnector` composes it with `HiSparseConnector`.
+## Enabling HiSparse
 
-`host_pool_gib` is configured on `HiSparseConnector` and is the usable
-host-cache capacity per data-parallel replica, not a node-wide memory budget.
+Set the host memory budget on `hisparse_config`:
+
+```bash
+vllm serve DSA_MODEL --attention-config.hisparse_config.host_pool_gib 64
+```
+
+vLLM then configures the KV connectors: `HiSparseConnector`, and with prefix
+caching an `OffloadingConnector` for the indexer cache, splitting the budget
+between them (see [Indexer KV offloading](#indexer-kv-offloading)). The split
+depends on the model's page sizes and is reported at startup. For example, a
+GLM-5.3 deployment logs 60.22 GiB for the HiSparse host pool and 3.77 GiB for
+the indexer tier, so the flag above is roughly equivalent to:
+
+```bash
+vllm serve DSA_MODEL --kv-transfer-config '{
+  "kv_connector": "MultiConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {"connectors": [
+    {"kv_connector": "HiSparseConnector", "kv_role": "kv_both",
+     "kv_connector_extra_config": {"host_pool_gib": 60.22}},
+    {"kv_connector": "OffloadingConnector", "kv_role": "kv_both",
+     "kv_connector_extra_config": {"cpu_bytes_to_use": 4048000000}}
+  ]}
+}'
+```
+
+The flag sizes the indexer tier by token count rather than bytes, so the two
+pools always cover the same tokens. It also counts the tier's copies: one when
+the TP ranks share it (single-node MLA on CUDA or XPU), otherwise one per rank,
+which an explicit `cpu_bytes_to_use` must include.
+
+For P/D, keep the NIXL `--kv-transfer-config` and add the same flag; vLLM
+composes its connectors with yours through `MultiConnector`:
+
+```bash
+vllm serve DSA_MODEL \
+    --attention-config.hisparse_config.host_pool_gib 64 \
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+```
+
+A `--kv-transfer-config` that already contains `HiSparseConnector` or a KV
+offloading connector is used as written, without
+`hisparse_config.host_pool_gib`: set `host_pool_gib` on `HiSparseConnector`,
+and add an `OffloadingConnector` with its own `cpu_bytes_to_use` to keep prefix
+caching effective.
+
+`host_pool_gib` is the usable host-cache capacity per data-parallel replica,
+not a node-wide memory budget.
 MLA tensor-parallel ranks hold replicated views of that logical cache, using
 private per-rank backing or one shared physical allocation. QSA stores full K/V
 heads in private per-rank pools, with each rank writing its own shard. Its
@@ -50,12 +95,10 @@ footprint. Host-pool metrics are listed in
 
 ## QSA models
 
-For Qwen4Exp QSA models, configure `HiSparseConnector` to offload the main K/V
-cache.
+For Qwen4Exp QSA models, HiSparse offloads the main K/V cache.
 
 ```bash
-vllm serve QSA_MODEL \
-  --kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":8}}'
+vllm serve QSA_MODEL --attention-config.hisparse_config.host_pool_gib 8
 ```
 
 The device layout resolves to `BLNHC`, so one copy row holds a token's K and V
@@ -185,9 +228,21 @@ its GPU cache group.
 ## Indexer KV offloading
 
 HiSparse does not keep a private CPU copy of indexer KV. The indexer remains a
-normal prefix-cacheable GPU cache group. If `OffloadingConnector` is configured
-with HiSparse, it stores and restores that group through the generic KV
-offloading path; HiSparse continues to own only the main sparse-attention host tier.
+normal prefix-cacheable GPU cache group. `OffloadingConnector` stores and
+restores that group through the generic KV offloading path; HiSparse continues
+to own only the main sparse-attention host tier.
+
+Every prefix hit needs both its host pages and its indexer KV. Without an
+offload tier, a prefix is lost as soon as its indexer blocks are evicted from
+the GPU pool, long before the host pool fills. With
+`hisparse_config.host_pool_gib`, vLLM adds an `OffloadingConnector` under prefix
+caching and splits the budget between the HiSparse host pool and the indexer
+tier so that both hold the same tokens.
+
+An explicit `--kv-transfer-config` is used as written, and `host_pool_gib` on
+`HiSparseConnector` then sizes only the HiSparse host pool. vLLM warns when it
+runs with prefix caching but without an `OffloadingConnector` or
+`MooncakeStoreConnector`.
 
 The two prefix sources can have different hit lengths. When the HiSparse host
 prefix extends beyond the GPU-resident indexer prefix, the scheduler asks

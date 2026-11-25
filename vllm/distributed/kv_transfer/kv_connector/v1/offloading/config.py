@@ -72,6 +72,27 @@ def get_sliding_window_size_in_chunks(
     return None
 
 
+def use_replicated_offload_layout(
+    vllm_config: "VllmConfig", kv_tp_replicas: int
+) -> bool:
+    """Whether the TP ranks can share one CPU copy of KV that is identical
+    across `kv_tp_replicas` consecutive ranks."""
+    parallel_config = vllm_config.parallel_config
+    return (
+        vllm_config.model_config.use_mla
+        and parallel_config.tensor_parallel_size > 1
+        and kv_tp_replicas == parallel_config.tensor_parallel_size
+        # Safe MVP boundary: TP-only, no other parallel axes.
+        and parallel_config.pipeline_parallel_size == 1
+        and parallel_config.prefill_context_parallel_size == 1
+        and parallel_config.decode_context_parallel_size == 1
+        and parallel_config.world_size == parallel_config.tensor_parallel_size
+        # Shared /dev/shm mmap layout is single-node mp only.
+        and parallel_config.distributed_executor_backend == "mp"
+        and parallel_config.nnodes_within_dp == 1
+    )
+
+
 def build_offloading_config(
     vllm_config: "VllmConfig",
     kv_cache_config: "KVCacheConfig",
@@ -178,19 +199,8 @@ def build_offloading_config(
             parallel_config.tensor_parallel_size,
             parallel_config.decode_context_parallel_size,
         )
-    replicated_layout = (
-        vllm_config.model_config.use_mla
-        and parallel_config.tensor_parallel_size > 1
-        and kv_tp_replicas == parallel_config.tensor_parallel_size
-        and worker_kv_bytes_per_block > 0
-        # Safe MVP boundary: TP-only, no other parallel axes.
-        and parallel_config.pipeline_parallel_size == 1
-        and parallel_config.prefill_context_parallel_size == 1
-        and parallel_config.decode_context_parallel_size == 1
-        and parallel_config.world_size == parallel_config.tensor_parallel_size
-        # Shared /dev/shm mmap layout is single-node mp only.
-        and parallel_config.distributed_executor_backend == "mp"
-        and parallel_config.nnodes_within_dp == 1
+    replicated_layout = worker_kv_bytes_per_block > 0 and use_replicated_offload_layout(
+        vllm_config, kv_tp_replicas
     )
 
     canonical_layout = bool(extra_config.get("canonical_layout", False))
@@ -264,6 +274,22 @@ def build_offloading_config(
         else vllm_config.cache_config.cache_dtype
     )
 
+    default_num_blocks = None
+    hisparse_config = vllm_config.attention_config.hisparse_config
+    if (
+        kv_cache_config.hisparse_host_num_blocks is not None
+        and hisparse_config is not None
+        and hisparse_config.host_pool_gib is not None
+    ):
+        # Hold as many tokens as the HiSparse host pool, whose budget it shares.
+        (source_group,) = (
+            g for g in kv_cache_config.kv_cache_groups if g.host_resident
+        )
+        default_num_blocks = cdiv(
+            kv_cache_config.hisparse_host_num_blocks * source_group.block_size,
+            max(group_tokens_per_block),
+        )
+
     return OffloadingConfig(
         groups=groups,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
@@ -297,4 +323,5 @@ def build_offloading_config(
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
         kv_cache_layout=vllm_config.cache_config.kv_cache_layout,
+        default_num_blocks=default_num_blocks,
     )

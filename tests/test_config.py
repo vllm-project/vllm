@@ -962,7 +962,7 @@ def test_hisparse_requires_hisparse_connector(
         "get_hisparse_backend_cls",
         lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
-    with pytest.raises(ValueError, match="requires a KV transfer config"):
+    with pytest.raises(ValueError, match="requires hisparse_config.host_pool_gib"):
         VllmConfig(
             attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
             cache_config=CacheConfig(kv_offloading_size=kv_offloading_size),
@@ -1030,6 +1030,135 @@ def test_hisparse_connector_implies_attention_config(monkeypatch, kv_transfer_co
         ),
     )
     assert isinstance(config.attention_config.hisparse_config, HiSparseConfig)
+
+
+def _hisparse_vllm_config(monkeypatch, **kwargs) -> VllmConfig:
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
+    return VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            is_encoder_decoder=False,
+            disable_hybrid_kv_cache_manager=False,
+        ),
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    "enable_prefix_caching,connectors",
+    [
+        (True, ["HiSparseConnector", "OffloadingConnector"]),
+        (False, ["HiSparseConnector"]),
+    ],
+)
+def test_hisparse_host_pool_gib_builds_connectors(
+    monkeypatch, enable_prefix_caching, connectors
+):
+    config = _hisparse_vllm_config(
+        monkeypatch,
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig(host_pool_gib=64)
+        ),
+        cache_config=CacheConfig(enable_prefix_caching=enable_prefix_caching),
+    )
+
+    built = config.kv_transfer_config.kv_connector_extra_config["connectors"]
+    assert [c["kv_connector"] for c in built] == connectors
+    assert built[0]["kv_connector_extra_config"] == {"host_pool_gib": 64}
+
+
+@pytest.mark.parametrize(
+    "kv_transfer_config",
+    [
+        KVTransferConfig(
+            kv_connector="NixlConnector",
+            kv_role="kv_consumer",
+            kv_connector_extra_config={"backends": ["UCX"]},
+        ),
+        KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_consumer",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "NixlConnector",
+                        "kv_role": "kv_consumer",
+                        "kv_connector_extra_config": {"backends": ["UCX"]},
+                    }
+                ]
+            },
+        ),
+    ],
+    ids=["single", "multi-connector"],
+)
+def test_hisparse_host_pool_gib_composes_with_pd_connector(
+    monkeypatch, kv_transfer_config
+):
+    config = _hisparse_vllm_config(
+        monkeypatch,
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig(host_pool_gib=64)
+        ),
+        kv_transfer_config=kv_transfer_config,
+    )
+
+    kv_transfer_config = config.kv_transfer_config
+    built = kv_transfer_config.kv_connector_extra_config["connectors"]
+    assert kv_transfer_config.kv_connector == "MultiConnector"
+    assert kv_transfer_config.kv_connector_module_path is None
+    assert kv_transfer_config.kv_role == "kv_consumer"
+    assert [c["kv_connector"] for c in built] == [
+        "NixlConnector",
+        "HiSparseConnector",
+        "OffloadingConnector",
+    ]
+    assert built[0]["kv_role"] == "kv_consumer"
+    assert built[0]["kv_connector_extra_config"] == {"backends": ["UCX"]}
+
+
+@pytest.mark.parametrize(
+    "kv_connector,extra_config",
+    [
+        ("HiSparseConnector", {"host_pool_gib": 128}),
+        ("OffloadingConnector", {"cpu_bytes_to_use": 1 << 30}),
+    ],
+)
+def test_hisparse_host_pool_gib_rejects_configured_hisparse_or_offload(
+    monkeypatch, kv_connector, extra_config
+):
+    with pytest.raises(ValueError, match="adds HiSparse's connectors itself"):
+        _hisparse_vllm_config(
+            monkeypatch,
+            attention_config=AttentionConfig(
+                hisparse_config=HiSparseConfig(host_pool_gib=64)
+            ),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector=kv_connector,
+                kv_role="kv_both",
+                kv_connector_extra_config=extra_config,
+            ),
+        )
+
+
+def test_hisparse_explicit_config_without_indexer_offload_warns(
+    monkeypatch, caplog_vllm
+):
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="HiSparseConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"host_pool_gib": 128},
+    )
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        config = _hisparse_vllm_config(
+            monkeypatch, kv_transfer_config=kv_transfer_config
+        )
+
+    assert config.kv_transfer_config.kv_connector == "HiSparseConnector"
+    assert "nothing offloads its indexer cache" in caplog_vllm.text
 
 
 def test_hisparse_connector_preserves_explicit_attention_config(monkeypatch):

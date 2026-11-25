@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import hisparse_host_pool_gib
 from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
@@ -36,6 +36,8 @@ from vllm.v1.kv_cache_interface import (
     compute_layout_strides,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.spec import cpu_offload_uses_shared_region
 
 logger = init_logger(__name__)
 
@@ -360,12 +362,64 @@ def create_hisparse_layout(
             spec.num_states * total_num_kv_heads * spec.state_content_size_bytes
             for spec in gqa_source_specs
         )
+    gpu_block_size = source_group.block_size
+    # A vLLM-managed indexer offload tier holds the same tokens as the host
+    # pool, so the budget is split in proportion to their per-token sizes,
+    # counting each copy the tier keeps per copy of the host pool.
+    indexer_chunk_bytes = indexer_block_size = 0
+    indexer_copies = host_pool_copies = 1
+    hisparse_config = vllm_config.attention_config.hisparse_config
+    assert hisparse_config is not None
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if (
+        hisparse_config.host_pool_gib is not None
+        and kv_transfer_config is not None
+        and kv_transfer_config.has_connector("OffloadingConnector")
+    ):
+        (indexer_group,) = [
+            group for group in groups if group.role is KVCacheGroupRole.HISPARSE_INDEXER
+        ]
+        indexer_block_size = indexer_group.block_size
+        indexer_chunk_bytes = round_up(
+            indexer_group.page_size_bytes, SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+            use_replicated_offload_layout,
+        )
+        from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
+
+        parallel_config = vllm_config.parallel_config
+        tp_size = parallel_config.tensor_parallel_size
+        dcp_size = parallel_config.decode_context_parallel_size
+        indexer_replicas = kv_cache_groups_tp_replicas(
+            [indexer_group], tp_size, dcp_size
+        )
+        if not (
+            cpu_offload_uses_shared_region()
+            and use_replicated_offload_layout(vllm_config, indexer_replicas)
+        ):
+            indexer_copies = indexer_replicas
+        if not shared_host_pool and not gqa_source_specs:
+            host_pool_copies = kv_cache_groups_tp_replicas(
+                [source_group], tp_size, dcp_size
+            )
+        logical_block_bytes += cdiv(
+            indexer_chunk_bytes * gpu_block_size * indexer_copies,
+            indexer_block_size * host_pool_copies,
+        )
     host_num_blocks = host_budget // logical_block_bytes
+    indexer_offload_bytes = (
+        cdiv(host_num_blocks * gpu_block_size, indexer_block_size)
+        * indexer_chunk_bytes
+        * indexer_copies
+        // host_pool_copies
+        if indexer_block_size
+        else 0
+    )
     if host_num_blocks <= 0:
         raise ValueError("HiSparse has no allocatable host blocks.")
     # Every computed page needs a host block, so one request at max_model_len
     # must fit alongside the pool's null block and a copy-on-write tail.
-    gpu_block_size = source_group.block_size
     min_host_blocks = cdiv(vllm_config.model_config.max_model_len, gpu_block_size) + 2
     if host_num_blocks < min_host_blocks:
         raise ValueError(
@@ -376,11 +430,14 @@ def create_hisparse_layout(
         )
     logger.info_once(
         "HiSparse host pool: %.2f GiB per replica holds %d tokens; pinning "
-        "%.2f GiB %s.",
+        "%.2f GiB %s%s.",
         host_budget / GiB_bytes,
         host_num_blocks * gpu_block_size,
         host_num_blocks * host_block_stride / GiB_bytes,
         "per replica, shared by its TP ranks" if shared_host_pool else "per rank",
+        f" and {indexer_offload_bytes / GiB_bytes:.2f} GiB for the indexer offload tier"
+        if indexer_offload_bytes
+        else "",
     )
 
     return HiSparseLayout(

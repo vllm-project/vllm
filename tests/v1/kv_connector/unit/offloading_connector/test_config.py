@@ -558,6 +558,31 @@ def test_hisparse_offloads_only_indexer_group():
     assert [group.group_idx for group in scheduler_config.kv_group_configs] == [1]
 
 
+@pytest.mark.parametrize("host_pool_gib,expected", [(64, 10), (None, None)])
+def test_hisparse_indexer_tier_defaults_to_host_pool_tokens(host_pool_gib, expected):
+    source = make_kv_cache_group(["source"], _mla_spec(), host_resident=True)
+    indexer = make_kv_cache_group(
+        ["indexer"],
+        _mla_spec(block_size=64, head_size=128),
+        role=KVCacheGroupRole.HISPARSE_INDEXER,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[source, indexer],
+        hisparse_host_num_blocks=37,
+    )
+
+    config = _make_vllm_config()
+    config.attention_config.hisparse_config.host_pool_gib = host_pool_gib
+
+    offloading_config = build_offloading_config(config, kv_cache_config)
+
+    # 37 host blocks of 16 tokens fit in 10 indexer blocks of 64 tokens; an
+    # explicit KV transfer config must size the tier itself.
+    assert offloading_config.default_num_blocks == expected
+
+
 def test_hisparse_indexer_tier_is_single_copy_under_tp():
     """The resident groups' raw pages carry no TP metadata; they must not
     force a copy of the replicated indexer per rank."""

@@ -834,6 +834,28 @@ def test_cpu_spec_missing_cpu_bytes_to_use_raises():
         _create_spec(cpu_bytes_to_use=None)
 
 
+@pytest.mark.parametrize("blocks_per_chunk", [1, 4])
+def test_cpu_spec_default_num_blocks_sizes_without_cpu_bytes(blocks_per_chunk):
+    spec = _create_spec(
+        cpu_bytes_to_use=None,
+        default_num_blocks=37,
+        blocks_per_chunk=blocks_per_chunk,
+        world_size=4,
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks == -(-37 // blocks_per_chunk)
+
+
+def test_cpu_spec_cpu_bytes_to_use_overrides_default_num_blocks():
+    spec = _create_spec(cpu_bytes_to_use=65536, default_num_blocks=1)
+    baseline = _create_spec(cpu_bytes_to_use=65536)
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert isinstance(baseline, CPUOffloadingSpec)
+    assert spec.num_chunks == baseline.num_chunks
+
+
 def test_duplicate_registration_raises():
     with pytest.raises(ValueError, match="is already registered"):
         OffloadingSpecFactory.register_spec(
