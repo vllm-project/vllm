@@ -1,5 +1,11 @@
 #pragma once
 
+#include <cassert>
+#include <cstdio>
+#include <limits>
+#include <optional>
+#include <stdexcept>
+#include <string>
 #include <vector>
 #include <hip/hip_runtime.h>
 #include "quick_reduce_impl.cuh"
