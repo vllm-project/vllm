@@ -217,7 +217,11 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
-            dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+            # A layer that also reads `weight` directly (DSpine's injection)
+            # still wants the packed GEMM, so only the free is skipped.
+            dispatch_cpu_unquantized_gemm(
+                layer, remove_weight=not getattr(layer, "_cpu_keep_weight", False)
+            )
         elif current_platform.is_rocm():
             layer.weight.data = maybe_pad_weight_avoid_cache_aliasing(layer.weight.data)
         elif self._gemm_impl is cuda_unquantized_gemm:
