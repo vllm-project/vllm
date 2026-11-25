@@ -45,7 +45,7 @@ def flash_attn_maxseqlen_wrapper(
 
         if not current_platform.is_rocm() and fa_version is not None:
             kwargs["fa_version"] = fa_version
-        if current_platform.is_cuda() and fa_version == 3 and envs.VLLM_BATCH_INVARIANT:
+        if fa_version == 3 and envs.VLLM_BATCH_INVARIANT:
             kwargs["num_splits"] = 1
 
     q_len = q.size(1)
