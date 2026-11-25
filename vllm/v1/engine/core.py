@@ -700,6 +700,51 @@ class EngineCore:
         for eco in outputs.values():
             eco.weight_version = self._weight_version
 
+    def _scheduler_has_pending_remote_kv(self) -> bool:
+        """Whether any request is currently blocked on a remote KV transfer."""
+        kv_holding = getattr(self.scheduler, "kv_holding_waiting", None)
+        if not kv_holding:
+            return False
+        return any(r.status == RequestStatus.WAITING_FOR_REMOTE_KVS for r in kv_holding)
+
+    def _scheduler_has_structured_output(self) -> bool:
+        """Whether any tracked request uses structured output."""
+        requests = getattr(self.scheduler, "requests", None)
+        if not requests:
+            return False
+        return any(
+            getattr(request, "use_structured_output", False)
+            for request in requests.values()
+        )
+
+    def _pop_and_update_batch_queue(self) -> dict[int, EngineCoreOutputs]:
+        """Pop the oldest queued batch, wait for it and update the scheduler.
+
+        Shared by step_with_batch_queue()'s normal tail and the KV-ready early
+        drain so both paths do identical abort/output/stats handling.
+        """
+        batch_queue = self.batch_queue
+        assert batch_queue is not None
+        future, scheduler_output, exec_model_fut = batch_queue.pop()
+        with self.log_error_detail(scheduler_output):
+            model_output = self._wait_for_output(future)
+            if model_output is None:
+                # None from sample_tokens() implies that the original execute_model()
+                # call failed - raise that exception.
+                exec_model_fut.result()
+                raise RuntimeError("unexpected error")
+        iteration_details = self._untimed_iteration_details(scheduler_output)
+
+        # Before processing the model output, process any aborts that happened
+        # during the model execution.
+        self._process_aborts_queue()
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, model_output
+        )
+        self._attach_iteration_details(engine_core_outputs, iteration_details)
+        self._attach_weight_version(engine_core_outputs)
+        return engine_core_outputs
+
     def _should_throttle_prefills(self) -> bool:
         """Whether to defer prefills this step, to run them every Nth step.
         Overridden by the DP engine core to align across ranks."""
@@ -793,6 +838,28 @@ class EngineCore:
         assert len(batch_queue) < self.batch_queue_size
 
         model_executed = False
+        # KV-ready early drain: while at least one request is parked in
+        # WAITING_FOR_REMOTE_KVS, settle the oldest in-flight batch *before*
+        # scheduling the next one. The scheduler only learns that a KV transfer
+        # finished (finished_recving) from update_from_output(), which in the
+        # async batch-queue path runs *after* schedule() has already been
+        # issued. A transfer that completes while a batch is in flight would
+        # therefore be missed by this step's schedule() and the request would
+        # wait one extra iteration. Restricted to the non-pipelined async path;
+        # structured output keeps the regular ordering (see deferred_step).
+        early_outputs = None
+        if (
+            self.async_scheduling
+            and self.vllm_config.parallel_config.pipeline_parallel_size == 1
+            and self.deferred_step is None
+            and batch_queue
+            and self.scheduler.should_schedule()
+            and os.environ.get("VLLM_KV_READY_EARLY_DRAIN", "1") != "0"
+            and self._scheduler_has_pending_remote_kv()
+            and not self._scheduler_has_structured_output()
+        ):
+            early_outputs = self._pop_and_update_batch_queue()
+
         # Workers need a deferred step's sample_tokens() before the next step.
         if self.deferred_step is None and self.scheduler.should_schedule():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
@@ -837,37 +904,20 @@ class EngineCore:
                 ):
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
-                    return None, model_executed
+                    return early_outputs, model_executed
 
         elif not batch_queue:
             # Queue is empty. We should not reach here since this method should
             # only be called when the scheduler contains requests or the queue
             # is non-empty.
-            return None, False
+            return early_outputs, False
 
         if self._wait_for_new_request(batch_queue):
             # Schedule the newly arrived request into the free slot.
-            return None, model_executed
+            return early_outputs, model_executed
 
         # Block until the next result is available.
-        future, scheduler_output, exec_model_fut = batch_queue.pop()
-        with self.log_error_detail(scheduler_output):
-            model_output = self._wait_for_output(future)
-            if model_output is None:
-                # None from sample_tokens() implies that the original execute_model()
-                # call failed - raise that exception.
-                exec_model_fut.result()
-                raise RuntimeError("unexpected error")
-        iteration_details = self._untimed_iteration_details(scheduler_output)
-
-        # Before processing the model output, process any aborts that happened
-        # during the model execution.
-        self._process_aborts_queue()
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output
-        )
-        self._attach_iteration_details(engine_core_outputs, iteration_details)
-        self._attach_weight_version(engine_core_outputs)
+        engine_core_outputs = self._pop_and_update_batch_queue()
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
