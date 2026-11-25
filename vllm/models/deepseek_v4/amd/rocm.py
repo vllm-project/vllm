@@ -28,15 +28,13 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     triton_kernel_dispatcher_with_warmup,
 )
+from vllm.models.deepseek_v4.amd.ops.fused_indexer_k import rocm_fused_indexer_k
 from vllm.models.deepseek_v4.attention import (
     DeepseekV4Attention,
     DeepseekV4Indexer,
     DeepseekV4IndexerCache,
 )
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
-from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
-    _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL,
-)
 from vllm.models.deepseek_v4.compressor import CompressorMetadata, DeepseekCompressor
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
@@ -70,7 +68,6 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 )
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
     rocm_mxfp4_indexer_q_quant,
-    rocm_paged_mxfp4_cache_layout,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -1967,6 +1964,18 @@ class DeepseekV4RocmMxfp4Compressor(DeepseekCompressor):
         super().__init__(vllm_config, **kwargs)
         assert self.head_dim == 128 and self.use_fp4_cache
         self.num_index_heads = vllm_config.model_config.hf_config.index_n_heads
+        if vllm_config.kernel_config.enable_jit_warmup:
+            rocm_fused_indexer_k.register_warmup(
+                vllm_config=vllm_config,
+                k_cache_prefix=self.k_cache_prefix,
+                dtype=self.norm.weight.dtype,
+                head_dim=self.head_dim,
+                rope_head_dim=self.rope_head_dim,
+                state_width=self.coff * self.head_dim,
+                compress_ratio=self.compress_ratio,
+                overlap=self.overlap,
+                num_index_heads=self.num_index_heads,
+            )
 
     def _compress_norm_rope_store(
         self,
@@ -1982,12 +1991,8 @@ class DeepseekV4RocmMxfp4Compressor(DeepseekCompressor):
         if num_tokens == 0:
             return
         kv_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
-        layout = rocm_paged_mxfp4_cache_layout(
-            self.num_index_heads, self.head_dim, kv_cache.shape[1]
-        )
-        _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL(
+        rocm_fused_indexer_k(
             state_cache=state_cache,
-            num_actual=num_tokens,
             token_to_req_indices=state_metadata.token_to_req_indices,
             positions=positions,
             slot_mapping=state_metadata.slot_mapping,
@@ -1996,21 +2001,14 @@ class DeepseekV4RocmMxfp4Compressor(DeepseekCompressor):
             state_width=state_width,
             cos_sin_cache=rotary_emb.cos_sin_cache,
             kv_cache=kv_cache,
-            k_cache_metadata=attn_metadata[self.k_cache_prefix],
-            pdl_kwargs=pdl_kwargs,
+            kv_slot_mapping=attn_metadata[self.k_cache_prefix].slot_mapping,
             head_dim=self.head_dim,
             rope_head_dim=self.rope_head_dim,
             compress_ratio=self.compress_ratio,
             overlap=self.overlap,
-            use_fp4_cache=True,
             rms_norm_weight=self.norm.weight,
             rms_norm_eps=self.rms_norm_eps,
-            quant_block=self._quant_block,
-            token_stride=self._token_stride,
-            scale_dim=self._scale_dim,
-            n_per_tile=layout.n_per_tile,
-            d_per_tile=layout.d_per_tile,
-            scale_lanes=layout.scale_lanes,
+            num_index_heads=self.num_index_heads,
         )
 
 

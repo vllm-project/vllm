@@ -9,6 +9,7 @@ The dense scoring path it feeds is covered by test_rocm_paged_mxfp4_indexer.py.
 
 import itertools
 import types
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -24,17 +25,17 @@ from vllm.platforms.rocm import get_cdna_version
 if get_cdna_version() != 4:
     pytest.skip("CDNA4-only", allow_module_level=True)
 
+from vllm.models.deepseek_v4.amd.ops.fused_indexer_k import rocm_fused_indexer_k
 from vllm.models.deepseek_v4.amd.rocm import (
     DeepseekV4RocmMxfp4Compressor,
+    DeepseekV4RocmMxfp4IndexerCache,
+    compress_pool,
 )
-from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
-    _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL,
-)
+from vllm.models.deepseek_v4.compressor import DeepseekCompressor
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
     rocm_mxfp4_indexer_k_store,
-    rocm_paged_mxfp4_cache_layout,
 )
 
 # DeepSeek-V4-Pro's indexer: 64 heads of 128, ratio 4 with overlap, 256-token
@@ -105,13 +106,14 @@ class _Case:
             out[t] = (torch.stack(kv) * torch.stack(score).softmax(0)).sum(0)
         return out
 
-    def run_compressor(self):
+    def run_compressor(self, kv_cache=None):
         """The ROCm compressor's store step on this case; returns its K cache."""
         comp = DeepseekV4RocmMxfp4Compressor.__new__(DeepseekV4RocmMxfp4Compressor)
         nn.Module.__init__(comp)
-        kv_cache = torch.zeros(
-            self.num_pages, PAGE, WIDTH, dtype=torch.uint8, device=DEVICE
-        )
+        if kv_cache is None:
+            kv_cache = torch.zeros(
+                self.num_pages, PAGE, WIDTH, dtype=torch.uint8, device=DEVICE
+            )
         comp.head_dim, comp.compress_ratio, comp.overlap = HEAD_DIM, RATIO, True
         comp.rope_head_dim = 64
         comp.use_fp4_cache, comp.num_index_heads = True, HEADS
@@ -168,22 +170,98 @@ def test_k_pages_match_aiter_fed_by_torch(seq_lens):
     assert (kv_cache != ref).float().mean().item() < 5e-3
 
 
-def test_warmup_compiles_the_aiter_layout_variant(monkeypatch):
-    """Startup warmup compiles the one variant the compressor launches."""
-    from vllm.v1.attention.backends.mla import indexer
-
-    monkeypatch.setattr(indexer, "dsa_indexer_uses_fp4", lambda _: True)
-    hf_config = types.SimpleNamespace(
-        index_head_dim=HEAD_DIM, qk_rope_head_dim=64, index_n_heads=HEADS
+def test_k_pages_match_two_stage_writer_exactly():
+    set_random_seed(42)
+    case = _Case([7, 257])
+    case.norm = case.norm.bfloat16()
+    case.kv_slot[3::37] = -1
+    pitch = PAGE * WIDTH + 128
+    actual = torch.full((case.num_pages, pitch), 173, dtype=torch.uint8, device=DEVICE)
+    expected = actual.clone()
+    shape = (case.num_pages, PAGE, WIDTH)
+    strides = (pitch, WIDTH, 1)
+    pooled = torch.empty(
+        len(case.positions), HEAD_DIM, dtype=torch.bfloat16, device=DEVICE
     )
-    vllm_config = types.SimpleNamespace(
-        model_config=types.SimpleNamespace(hf_config=hf_config, dtype=torch.bfloat16),
-        cache_config=types.SimpleNamespace(
-            block_size=PAGE * RATIO, cache_dtype="fp8_ds_mla"
+    compress_pool(
+        case.state_cache,
+        case.req,
+        case.positions,
+        case.kv_slot,
+        case.block_table,
+        STATE_BLOCK,
+        pooled,
+        case.state_width,
+        RATIO,
+        True,
+    )
+    rocm_mxfp4_indexer_k_store(
+        pooled,
+        case.positions,
+        case.cos_sin,
+        case.norm,
+        1e-6,
+        expected.as_strided(shape, strides),
+        case.kv_slot,
+        RATIO,
+        True,
+        num_heads=HEADS,
+    )
+    case.run_compressor(actual.as_strided(shape, strides))
+    assert (expected[:, : PAGE * WIDTH] != 173).any()
+    assert (expected[:, PAGE * WIDTH :] == 173).all()
+    assert torch.equal(actual, expected)
+
+
+def test_warmup_compiles_the_bound_cache_layout(monkeypatch):
+    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+
+    prefix = "indexer.k_cache"
+    cache = DeepseekV4RocmMxfp4IndexerCache.__new__(DeepseekV4RocmMxfp4IndexerCache)
+    nn.Module.__init__(cache)
+    config = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(
+            hf_config=types.SimpleNamespace(index_n_heads=HEADS)
+        ),
+        kernel_config=types.SimpleNamespace(enable_jit_warmup=True),
+        compilation_config=types.SimpleNamespace(
+            static_forward_context={prefix: cache}
         ),
     )
-    kernel = _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL
-    (key,) = kernel.get_warmup_keys(vllm_config)
-    layout = rocm_paged_mxfp4_cache_layout(HEADS, HEAD_DIM, PAGE)
-    assert (key.n_per_tile, key.d_per_tile, key.scale_lanes) == tuple(layout)
-    kernel.compile(key)
+
+    def init_base(compressor, vllm_config):
+        nn.Module.__init__(compressor)
+        compressor.k_cache_prefix = prefix
+        compressor.use_fp4_cache, compressor.overlap = True, True
+        compressor.coff, compressor.compress_ratio = 2, RATIO
+        compressor.head_dim, compressor.rope_head_dim = HEAD_DIM, 64
+        compressor.norm = types.SimpleNamespace(
+            weight=torch.empty(0, dtype=torch.bfloat16)
+        )
+
+    monkeypatch.setattr(DeepseekCompressor, "__init__", init_base)
+    registry = JitWarmupRegistry(config)
+    with registry.activate():
+        DeepseekV4RocmMxfp4Compressor(config)
+    assert len(registry) == 1
+    pitch = PAGE * WIDTH + 128
+    cache.bind_kv_cache(
+        torch.empty_strided(
+            (2, 1, PAGE, WIDTH),
+            (pitch, PAGE * WIDTH, WIDTH, 1),
+            dtype=torch.uint8,
+            device=DEVICE,
+        )
+    )
+    with patch.object(
+        rocm_fused_indexer_k, "compile_many", wraps=rocm_fused_indexer_k.compile_many
+    ) as compile_many:
+        registry.warmup()
+    (keys,) = compile_many.call_args.args
+    ranges = set()
+    for key in keys:
+        inputs = dict(key.inputs)
+        pages = inputs["kv_cache"]
+        assert pages.shape == (1, PAGE, WIDTH) and pages.strides == (pitch, WIDTH, 1)
+        ranges.add((inputs["state_cache"].ptr_range_bytes, pages.ptr_range_bytes))
+    assert ranges == set(itertools.product((0, 1 << 32), repeat=2))
