@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the TRITON_MLA_SPARSE backend and SM80+ Triton MQA logits fallback."""
 
+import ast
+import inspect
+import textwrap
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +21,7 @@ from vllm.config.parallel import ParallelConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers import sparse_attn_indexer as sai_mod
+from vllm.models.deepseek_v32.common import kernels as dsv32_kernels
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
@@ -28,6 +32,7 @@ from vllm.v1.attention.backends.mla.triton_mla_sparse import (
     TritonMLASparseMetadataBuilder,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.ops import triton_mla_sparse as mla_sparse_ops
 from vllm.v1.attention.ops.common import e4m3_uint8_to_f32, f32_to_e4m3_uint8
 from vllm.v1.attention.ops.mqa_logits_triton import (
     fp8_mqa_logits_triton,
@@ -257,6 +262,23 @@ def test_triton_mla_sparse_rejects_dcp_and_missing_index_topk(monkeypatch):
     assert _validate(valid_cfg) == []
 
 
+def _make_dsa_vllm_config() -> VllmConfig:
+    dsa_hf = SimpleNamespace(
+        index_topk=2048,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        qk_nope_head_dim=128,
+    )
+    vllm_cfg = VllmConfig(
+        parallel_config=ParallelConfig(decode_context_parallel_size=1),
+        device_config=DeviceConfig(device="cpu"),
+    )
+    vllm_cfg.model_config = SimpleNamespace(  # type: ignore[assignment]
+        hf_text_config=dsa_hf
+    )
+    return vllm_cfg
+
+
 def test_cuda_selector_selects_triton_mla_sparse_on_sm80(monkeypatch):
     """On SM80, DSA sparse MLA must resolve to TRITON_MLA_SPARSE (issue #66960)."""
     try:
@@ -264,12 +286,6 @@ def test_cuda_selector_selects_triton_mla_sparse_on_sm80(monkeypatch):
     except ImportError as e:
         pytest.skip(f"CUDA platform unavailable on this host: {e}")
 
-    dsa_hf = SimpleNamespace(index_topk=2048, kv_lora_rank=512, qk_rope_head_dim=64)
-    vllm_cfg = SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=dsa_hf),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-    )
-    monkeypatch.setattr("vllm.config.get_current_vllm_config_or_none", lambda: vllm_cfg)
     monkeypatch.setattr(
         CudaPlatform,
         "get_device_capability",
@@ -286,11 +302,14 @@ def test_cuda_selector_selects_triton_mla_sparse_on_sm80(monkeypatch):
         use_sparse=True,
         attn_type=AttentionType.DECODER,
     )
-    backend_path = CudaPlatform.get_attn_backend_cls(
-        selected_backend=None,
-        attn_selector_config=selector_cfg,
-        num_heads=64,
-    )
+    # Candidate backends probed during selection (e.g. FLASHINFER_MLA) read
+    # get_current_vllm_config(), so a VllmConfig context must be active.
+    with set_current_vllm_config(_make_dsa_vllm_config()):
+        backend_path = CudaPlatform.get_attn_backend_cls(
+            selected_backend=None,
+            attn_selector_config=selector_cfg,
+            num_heads=64,
+        )
     assert backend_path.endswith(".TritonMLASparseBackend")
 
     # Hopper/Blackwell high-priority sparse backends remain ahead of TRITON_MLA_SPARSE.
@@ -303,6 +322,133 @@ def test_cuda_selector_selects_triton_mla_sparse_on_sm80(monkeypatch):
             head_size=576,
         )
         assert order[-1] is AttentionBackendEnum.TRITON_MLA_SPARSE
+
+
+def test_sm80_candidate_validation_uses_vllm_config_context(monkeypatch):
+    """Regression test: MLA candidate validation that calls
+    `get_current_vllm_config()` requires `set_current_vllm_config(...)`, and
+    under that context only `TRITON_MLA_SPARSE` validates on SM80.
+    """
+    from vllm.v1.attention.backends.mla import (
+        flashinfer_mla_sparse_sm90 as fi_sm90_mod,
+    )
+    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
+    from vllm.v1.attention.backends.mla.triton_mla import TritonMLABackend
+
+    # Force FlashInferMLASparseSM90Backend.supports_combination past the
+    # FlashInfer version check so it exercises get_current_vllm_config().
+    monkeypatch.setattr(fi_sm90_mod, "has_flashinfer_sm90_nope_mla", lambda: True)
+
+    selector_cfg = AttentionSelectorConfig(
+        head_size=576,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=None,
+        use_mla=True,
+        has_sink=False,
+        use_sparse=True,
+        attn_type=AttentionType.DECODER,
+    )
+
+    with pytest.raises(AssertionError, match="Current vLLM config is not set"):
+        fi_sm90_mod.FlashInferMLASparseSM90Backend.validate_configuration(
+            device_capability=SM80,
+            **selector_cfg._asdict(),
+        )
+
+    with set_current_vllm_config(_make_dsa_vllm_config()):
+        for rejected_cls in (
+            TritonMLABackend,
+            FlashMLASparseBackend,
+            fi_sm90_mod.FlashInferMLASparseSM90Backend,
+        ):
+            reasons = rejected_cls.validate_configuration(
+                device_capability=SM80,
+                **selector_cfg._asdict(),
+            )
+            assert reasons, f"{rejected_cls.__name__} should be rejected on SM80"
+
+        assert (
+            TritonMLASparseBackend.validate_configuration(
+                device_capability=SM80,
+                **selector_cfg._asdict(),
+            )
+            == []
+        )
+
+
+def test_fused_q_kernel_guards_fp8_dtypes_under_quantize_mqa():
+    """Regression test: Triton compiles code after a constexpr early `return`,
+    so every `tl.float8e4nv`/`tl.float8e4b8` reference in `_fused_q_kernel`
+    must be lexically nested inside the positive branch of `if QUANTIZE_MQA:`
+    to avoid SM80 compilation failures when `QUANTIZE_MQA=False`.
+    """
+    kernel_fn = getattr(
+        dsv32_kernels._fused_q_kernel, "fn", dsv32_kernels._fused_q_kernel
+    )
+    tree = ast.parse(textwrap.dedent(inspect.getsource(kernel_fn)))
+    fp8_sites: list[tuple[int, str, bool]] = []
+
+    def _walk(node: ast.AST, inside_quantize_mqa: bool) -> None:
+        if isinstance(node, ast.If):
+            is_q_mqa = isinstance(node.test, ast.Name) and node.test.id == (
+                "QUANTIZE_MQA"
+            )
+            for stmt in node.body:
+                _walk(stmt, inside_quantize_mqa or is_q_mqa)
+            for stmt in node.orelse:
+                _walk(stmt, inside_quantize_mqa)
+            return
+        if isinstance(node, ast.Attribute) and node.attr in (
+            "float8e4nv",
+            "float8e4b8",
+        ):
+            fp8_sites.append((node.lineno, node.attr, inside_quantize_mqa))
+        for child in ast.iter_child_nodes(node):
+            _walk(child, inside_quantize_mqa)
+
+    _walk(tree, False)
+    assert fp8_sites, "Expected FP8 dtype references in _fused_q_kernel"
+    unguarded = [(ln, attr) for ln, attr, guarded in fp8_sites if not guarded]
+    assert not unguarded, (
+        f"Found FP8 dtype references not nested under `if QUANTIZE_MQA:`: {unguarded}"
+    )
+
+
+def test_triton_mla_sparse_kernels_pass_loge2_as_constexpr():
+    """Regression test: `@triton.jit` kernels must receive `LOGE2` as a
+    `tl.constexpr` parameter rather than reading a Python module global.
+    """
+    for kernel in (
+        mla_sparse_ops._triton_mla_sparse_fwd_kernel,
+        mla_sparse_ops._triton_mla_sparse_reduce_kernel,
+    ):
+        fn = getattr(kernel, "fn", kernel)
+        sig = inspect.signature(fn)
+        assert "LOGE2" in sig.parameters
+        assert sig.parameters["LOGE2"].annotation is tl.constexpr
+
+    for kernel in (
+        mla_sparse_ops._triton_mla_sparse_fwd_kernel,
+        mla_sparse_ops._triton_mla_sparse_splitk_kernel,
+        mla_sparse_ops._triton_mla_sparse_reduce_kernel,
+    ):
+        fn = getattr(kernel, "fn", kernel)
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        func_node = next(n for n in tree.body if isinstance(n, ast.FunctionDef))
+        params = {a.arg for a in func_node.args.args + func_node.args.kwonlyargs}
+        assigned = set(params)
+        body_loaded: set[str] = set()
+        for stmt in func_node.body:
+            for sub in ast.walk(stmt):
+                if isinstance(sub, ast.Name):
+                    if isinstance(sub.ctx, ast.Store):
+                        assigned.add(sub.id)
+                    elif isinstance(sub.ctx, ast.Load):
+                        body_loaded.add(sub.id)
+        allowed = {"range", "float", "int", "min", "max", "abs", "True", "False", "tl"}
+        unbound = sorted(body_loaded - assigned - allowed)
+        assert not unbound, f"{fn.__name__} references unbound globals: {unbound}"
 
 
 # ---------------------------------------------------------------------------
@@ -980,3 +1126,137 @@ def test_triton_mla_sparse_cuda_graph_capture_and_replay(monkeypatch):
     torch.testing.assert_close(attn_out, ref_attn, rtol=2e-2, atol=2e-2)
     assert lse_out is not None
     torch.testing.assert_close(lse_out, ref_lse, rtol=1e-2, atol=1e-2)
+
+
+def _ref_rope_2d(
+    x: torch.Tensor,
+    pos: torch.Tensor,
+    cos_sin: torch.Tensor,
+    interleave: bool,
+) -> torch.Tensor:
+    rot = cos_sin.shape[-1]
+    half = rot // 2
+    cs = cos_sin[pos.long()].unsqueeze(1)
+    cos, sin = cs[..., :half], cs[..., half:]
+    out = x.float().clone()
+    r = out[..., :rot]
+    if interleave:
+        x1, x2 = r[..., 0::2].clone(), r[..., 1::2].clone()
+        r[..., 0::2] = x1 * cos - x2 * sin
+        r[..., 1::2] = x2 * cos + x1 * sin
+    else:
+        x1, x2 = r[..., :half].clone(), r[..., half:].clone()
+        r[..., :half] = x1 * cos - x2 * sin
+        r[..., half:] = x2 * cos + x1 * sin
+    return out
+
+
+def _fp8_max_ulp_diff(a: torch.Tensor, b: torch.Tensor) -> int:
+    def _ordered_key(t: torch.Tensor) -> torch.Tensor:
+        u = t.contiguous().view(torch.uint8).to(torch.int64)
+        return torch.where(u >= 0x80, 0xFF - u, u + 0x80)
+
+    return int((_ordered_key(a) - _ordered_key(b)).abs().max().item())
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    "has_indexer,index_rope_interleave",
+    [(True, False), (True, True), (False, False)],
+)
+def test_fused_q_sm80_emulate_fp8_bf16_query_path(
+    monkeypatch, has_indexer: bool, index_rope_interleave: bool
+):
+    """Regression test for SM80 engine init failure in `_fused_q_kernel`:
+    with `quantize_mqa=False` and SM < 8.9 (`EMULATE_FP8=True`), Triton must
+    compile without `fp8e4nv` casts and produce accurate RoPE + indexer FP8
+    outputs.
+    """
+    monkeypatch.setattr(
+        current_platform,
+        "has_device_capability",
+        lambda cap, device_id=0: cap <= 80,
+    )
+    torch.manual_seed(11)
+    device = torch.device("cuda")
+    num_tokens, num_q_heads, rope_dim, kv_lora_rank = 7, 16, 64, 512
+    num_idx_heads, idx_head_dim = 32, 128
+    max_pos = 128
+
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    q_pe = torch.randn(
+        num_tokens, num_q_heads, rope_dim, dtype=torch.bfloat16, device=device
+    )
+    ql_nope = torch.randn(
+        num_tokens, num_q_heads, kv_lora_rank, dtype=torch.bfloat16, device=device
+    )
+    q_scale = torch.tensor([1.0], dtype=torch.float32, device=device)
+
+    half = rope_dim // 2
+    inv_freq = 1.0 / (
+        10000.0 ** (torch.arange(0, half, dtype=torch.float32, device=device) / half)
+    )
+    t = torch.arange(max_pos, dtype=torch.float32, device=device)
+    freqs = torch.einsum("i,j->ij", t, inv_freq)
+    cos_sin = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
+
+    index_q = (
+        torch.randn(
+            num_tokens,
+            num_idx_heads,
+            idx_head_dim,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        if has_indexer
+        else None
+    )
+    index_weights = (
+        torch.randn(num_tokens, num_idx_heads, dtype=torch.float32, device=device)
+        if has_indexer
+        else None
+    )
+    softmax_scale = idx_head_dim**-0.5
+    head_scale = num_idx_heads**-0.5
+
+    iq_fp8, iw_out, mqa_q = dsv32_kernels.fused_q(
+        positions,
+        q_pe,
+        cos_sin,
+        index_q,
+        cos_sin if has_indexer else None,
+        ql_nope,
+        q_scale,
+        index_weights,
+        softmax_scale,
+        head_scale,
+        has_indexer=has_indexer,
+        index_rope_interleave=index_rope_interleave,
+        quantize_mqa=False,
+    )
+
+    assert mqa_q.shape == q_pe.shape
+    assert mqa_q.dtype == torch.bfloat16
+    assert not torch.isnan(mqa_q).any()
+    ref_q_pe = _ref_rope_2d(q_pe, positions, cos_sin, interleave=True)
+    torch.testing.assert_close(mqa_q.float(), ref_q_pe, rtol=1e-2, atol=1e-2)
+
+    if has_indexer:
+        assert index_q is not None and index_weights is not None
+        assert iq_fp8.shape == index_q.shape
+        assert iq_fp8.dtype == current_platform.fp8_dtype()
+        assert not torch.isnan(iq_fp8.float()).any()
+        ref_iq = _ref_rope_2d(
+            index_q, positions, cos_sin, interleave=index_rope_interleave
+        )
+        amax = ref_iq.abs().amax(dim=-1, keepdim=True)
+        fp8_max = (
+            224.0 if current_platform.fp8_dtype() == torch.float8_e4m3fnuz else 448.0
+        )
+        scale = torch.exp2(
+            torch.ceil(torch.log2(torch.clamp(amax, min=1e-4) / fp8_max))
+        )
+        ref_iq_fp8 = (ref_iq / scale).to(current_platform.fp8_dtype())
+        assert _fp8_max_ulp_diff(iq_fp8, ref_iq_fp8) <= 1
+        ref_iw = index_weights * scale.squeeze(-1) * softmax_scale * head_scale
+        torch.testing.assert_close(iw_out, ref_iw, rtol=1e-3, atol=1e-3)

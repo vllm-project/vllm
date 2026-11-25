@@ -830,34 +830,35 @@ def _fused_q_kernel(
     if pid == 2:
         # ql_nope quantize + pack into the front of mqa_q_fp8. On the bf16
         # query path ql_nope is consumed as-is (no pack), so skip entirely.
-        if not QUANTIZE_MQA:
-            return
-        fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
-        if 2 * head_idx >= NUM_Q_HEADS:
-            return
+        # Nest under `if QUANTIZE_MQA:` rather than an early `return` so Triton
+        # prunes the `fp8e4nv` cast at compile time on SM < 8.9.
+        if QUANTIZE_MQA:
+            fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
+            if 2 * head_idx >= NUM_Q_HEADS:
+                return
 
-        scale = tl.load(q_scale_ptr)
-        for local_head in range(2):
-            q_head_idx = head_idx * 2 + local_head
-            if q_head_idx < NUM_Q_HEADS:
-                ql_nope_off = tl.arange(0, QL_NOPE_BLOCK)
-                ql_nope_mask = ql_nope_off < QL_NOPE_DIM
-                ql_nope = tl.load(
-                    ql_nope_ptr
-                    + tok_idx * ql_nope_stride0
-                    + q_head_idx * ql_nope_stride1
-                    + ql_nope_off,
-                    mask=ql_nope_mask,
-                ).to(tl.float32)
-                ql_nope_fp8 = (ql_nope / scale).to(fp8_dtype)
-                tl.store(
-                    mqa_q_fp8_ptr
-                    + tok_idx * mqa_q_fp8_stride0
-                    + q_head_idx * mqa_q_fp8_stride1
-                    + ql_nope_off,
-                    ql_nope_fp8,
-                    mask=ql_nope_mask,
-                )
+            scale = tl.load(q_scale_ptr)
+            for local_head in range(2):
+                q_head_idx = head_idx * 2 + local_head
+                if q_head_idx < NUM_Q_HEADS:
+                    ql_nope_off = tl.arange(0, QL_NOPE_BLOCK)
+                    ql_nope_mask = ql_nope_off < QL_NOPE_DIM
+                    ql_nope = tl.load(
+                        ql_nope_ptr
+                        + tok_idx * ql_nope_stride0
+                        + q_head_idx * ql_nope_stride1
+                        + ql_nope_off,
+                        mask=ql_nope_mask,
+                    ).to(tl.float32)
+                    ql_nope_fp8 = (ql_nope / scale).to(fp8_dtype)
+                    tl.store(
+                        mqa_q_fp8_ptr
+                        + tok_idx * mqa_q_fp8_stride0
+                        + q_head_idx * mqa_q_fp8_stride1
+                        + ql_nope_off,
+                        ql_nope_fp8,
+                        mask=ql_nope_mask,
+                    )
         return
     elif pid == 0:
         # q_pe RoPE + quantize + pack into the tail of mqa_q_fp8.
