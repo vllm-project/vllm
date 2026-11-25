@@ -12,7 +12,7 @@ from .encoder import fit_encoder, workload_rates
 
 
 def pd_rate_bounds(workload, model):
-    """Estimate PD rate bounds from the lifetime KV token-step demand."""
+    """Estimate PD rate bounds from KV occupancy and the scheduling budget."""
     requests = list(zip(workload["input_lens"], workload["output_lens"], strict=True))
     if (
         workload["failed"]
@@ -26,15 +26,20 @@ def pd_rate_bounds(workload, model):
         model["chunk_tokens"],
         model["step_seconds"],
     )
+    scheduled_tokens = model.get("max_num_scheduled_tokens", chunk_tokens)
     if (
         type(kv_tokens) is not int
         or kv_tokens <= 0
         or type(chunk_tokens) is not int
         or chunk_tokens <= 0
+        or type(scheduled_tokens) is not int
+        or scheduled_tokens <= 0
         or not isfinite(step_seconds)
         or step_seconds <= 0
     ):
-        raise ValueError("PD calibration needs positive KV, chunk, and step values")
+        raise ValueError(
+            "PD KV, chunk, scheduling budget and step time must be positive"
+        )
     largest = max(prompt + output for prompt, output in requests)
     if largest >= kv_tokens:
         raise ValueError("A request reaches the calibrated PD KV capacity")
@@ -48,7 +53,13 @@ def pd_rate_bounds(workload, model):
             + output * (output + 1) // 2
         )
     token_seconds = step_seconds * fmean(demands)
-    return (kv_tokens - largest) / token_seconds, kv_tokens / token_seconds
+    # Prefill produces the first output token.
+    mean_scheduled = fmean(prompt + output - 1 for prompt, output in requests)
+    scheduler_rps = scheduled_tokens / (step_seconds * mean_scheduled)
+    return (
+        min((kv_tokens - largest) / token_seconds, scheduler_rps),
+        min(kv_tokens / token_seconds, scheduler_rps),
+    )
 
 
 def predict_rates(calibration, workload):

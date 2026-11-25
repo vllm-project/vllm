@@ -3,6 +3,7 @@
 # Adapted from InferRSI examples/epd_provisioning/calibration.py.
 """Fit encoder occupancy curves from caller-supplied measurement summaries."""
 
+import warnings
 from math import isfinite
 from statistics import fmean
 
@@ -31,6 +32,12 @@ def fit_encoder(data):
     if len(set(tokens)) < 3 or len(set(tokens)) != len(tokens):
         raise ValueError(
             "supply one row per anchor, with at least three distinct token counts"
+        )
+    if len(tokens) == 3:
+        warnings.warn(
+            "Three anchors give no leave-one-anchor-out validation for quadratic "
+            "components. Supply additional distinct token counts.",
+            stacklevel=2,
         )
     saturated_degrees = dict(SATURATED_DEGREES)
     if "media_decode" in data["parallelism"]:
@@ -96,6 +103,17 @@ def fit_encoder(data):
         for lane, degree in degrees.items():
             observed = [row[key][lane] for row in anchors]
             model = fit_component(anchors, lane, degree)
+            # A polynomial's minimum is at an endpoint or a stationary point.
+            points = [lo, hi]
+            points.extend(point for point in model.deriv().roots() if lo < point < hi)
+            for point in points:
+                duration = model(point)
+                if not isfinite(duration) or duration < 0:
+                    raise ValueError(
+                        f"{key}.{lane} must be finite and nonnegative across "
+                        f"[{lo}, {hi}] visual tokens. Got {duration:.6g} ms at "
+                        f"{point:.6g} visual tokens."
+                    )
             coefficients[lane] = model.coef.tolist()
             residual = sum(
                 (value - model(token)) ** 2

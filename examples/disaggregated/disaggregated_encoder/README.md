@@ -31,6 +31,15 @@ metrics URLs for the active topology. Use the same model, workload distribution,
 batching, connector, and cache policy in both passes. For a cold-cache replay,
 disable prefix caching and use fresh image inputs and encoder caches.
 
+Start the proxy with `--decode-retries 0` for both passes. The measurement tool
+uses one image per user request. The default `random-mm` replay supports mixed
+image sizes through `--random-mm-bucket-config`. To replay real requests, pass
+`--dataset-name custom_image --dataset-path workload.jsonl` after `--`. The
+tool checks each JSONL record for exactly one image before sending requests.
+Before accepting a probe, it also checks that the completion count from each
+pool equals the benchmark's completed user requests. Run any warmup separately
+before measuring.
+
 From `examples/disaggregated/disaggregated_encoder/`, run the E pass. Adjust
 the port numbers to match your deployment and pass representative work to
 `vllm bench serve` after `--`. This example uses synthetic images.
@@ -40,9 +49,7 @@ python -m epd_capacity.measure --stage encoder --output encoder-rates.json \
     --target-metrics http://localhost:8101/metrics \
     --peer-metrics http://localhost:8102/metrics \
     --peer-metrics http://localhost:8103/metrics -- \
-    --model Qwen/Qwen2.5-VL-3B-Instruct --backend openai-chat \
-    --port 8000 --endpoint /v1/chat/completions --dataset-name random-mm \
-    --num-prompts 1000
+    --model Qwen/Qwen2.5-VL-3B-Instruct --port 8000 --num-prompts 1000
 ```
 
 Run the PD pass with `--stage pd`, its single PD worker as `--target-metrics`,
@@ -61,10 +68,11 @@ python size_epd.py --num-gpus 4 --measured-rates encoder-rates.json pd-rates.jso
 ### Predict rates for a new request distribution
 
 Provide a frozen calibration for the target deployment and a representative
-sample of completed requests. The workload JSON contains an `encoder` list of
-objects with `visual_tokens` and a `pd` object with `input_lens`, `output_lens`,
-and `failed`. Keep PD input/output lengths paired per request. For a replay using
-one fixed image shape, pass the detailed `vllm bench serve` result with
+sample of completed requests with one image each. The workload JSON contains
+an `encoder` list of objects with `visual_tokens` and a `pd` object with
+`input_lens`, `output_lens`, and `failed`. Keep PD input/output lengths paired
+per request. For a replay using one fixed image shape, pass the detailed
+`vllm bench serve` result with
 `--benchmark-result PATH MERGED_TOKENS` in place of `--workload`.
 
 ```bash
@@ -74,15 +82,27 @@ python size_epd.py --num-gpus 4 --frozen-model frozen.json --workload workload.j
 The predictor evaluates each encoder resource curve at the sampled merged-token
 counts and uses the largest mean normalized occupancy to estimate the encoder
 rate upper bound. The PD model uses paired lengths, the KV capacity, prefill chunk
-size, and a calibrated step time. Its lower packing estimate drives the sizing
-calculation. The encoder fit and PD parameters are reused across request mixes
-within the calibrated encoder range on the same deployment. The estimates refer
-to saturation and depend on replica balance and shared resource contention.
+size, and a calibrated step time. It caps the KV estimates by the scheduler rate
+for an uncached prompt and ordinary decoding. The scheduled token demand is the
+prompt length plus the output length minus one, since prefill produces the first
+output token. The lower capped estimate drives the sizing calculation.
+
+Set `pd.max_num_scheduled_tokens` to the deployment's effective token budget per
+step. When this field is absent, the predictor uses `pd.chunk_tokens` as the
+budget, as in the archived calibration. The encoder fit and PD parameters are
+reused across request mixes within the calibrated encoder range on the same
+deployment. The estimates refer to saturation and depend on replica balance and
+shared resource contention.
 
 To fit the encoder from collected timing summaries, run
 `python -m epd_capacity.model --profiles profiles.json --output frozen.json`.
 The input includes `measurements` with per-component serial and saturated timing
 anchors and their effective parallelism, as well as calibrated `pd` settings.
+Use at least three distinct token-count anchors. With exactly three, the tool
+warns that leave-one-anchor-out validation of the quadratic components is
+unavailable.
+Before writing the model, the command checks that each fitted duration is finite
+and nonnegative throughout the calibrated visual-token range.
 For a worked model and held-out workload, use `frozen_predictor/frozen.json`
 from the [reproducer archive][epd-reproducer] and
 `results-783695/shift-workload.json` from the [results archive][epd-results].
