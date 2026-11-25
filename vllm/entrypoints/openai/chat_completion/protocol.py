@@ -1245,6 +1245,23 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
                 "prompt cannot serve several conversations.",
                 parameter="kv_transfer_params.prompt_token_ids",
             )
+        remote_kv_source = (
+            kv_transfer_params.get("remote_kv_source")
+            if isinstance(kv_transfer_params, dict)
+            else None
+        )
+        messages = data.get("messages")
+        if (
+            isinstance(messages, list)
+            and len(messages) > 1
+            and isinstance(remote_kv_source, dict)
+        ):
+            raise VLLMValidationError(
+                "`kv_transfer_params['remote_kv_source']` cannot be shared "
+                "across multiple conversations. Send each conversation "
+                "separately with a distinct `kv_request_id`.",
+                parameter="kv_transfer_params.remote_kv_source",
+            )
         response_format = data.get("response_format")
         if response_format is not None:
             rf_type = (

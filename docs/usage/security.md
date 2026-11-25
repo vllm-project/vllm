@@ -386,9 +386,10 @@ vLLM enforces several configurable limits to prevent this:
 
 Connections that fail (ZMQ socket errors, handshake failures) are handled gracefully — the request falls back to local prefill instead of crashing the engine.
 
-A `kv_request_id` identifies one live request per peer. If a frontend fans the
-same ID out to multiple engine requests, only the first uses remote KV and the
-others fall back to local prefill.
+A `remote_kv_source` transfer ID identifies one live engine request per peer.
+Multi-prompt `/v1/completions` and `/v1/chat/completions/batch` requests that
+would share it across engine requests are rejected with HTTP 400. Submit each
+prompt separately with a distinct `kv_request_id`.
 
 **Recommendations:**
 

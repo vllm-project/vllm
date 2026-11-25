@@ -155,7 +155,6 @@ class P2PSourceInfo:
     do_probe: bool  # False for remote_prefiller (PD), True for remote_kv_source
     # Mutable per-request state; retained across decoder preemptions.
     pd_fetch_submitted: bool = False
-    remote_load_enabled: bool = True
 
 
 @dataclass(slots=True)
@@ -396,10 +395,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._control: ControlTransport = ZmqTransport(self._local_id, host, port)
 
         self._sessions: dict[str, P2PSession] = {}
-        # A peer's transfer ID addresses one mutable client-role state. If a
-        # frontend fans that ID out to multiple engine requests, only the
-        # first request may use the remote state; the others prefill locally.
-        self._source_owners: dict[tuple[str, str], ReqContext] = {}
         # peer_id → (backoff, retry_at); see _schedule_reconnect_backoff.
         self._reconnect_backoff: dict[str, tuple[float, float]] = {}
         # peer_id → data-plane faults over this process's lifetime. Unlike
@@ -448,7 +443,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         source = req_context.get_state(P2PSourceInfo)
-        if source is None or not source.remote_load_enabled:
+        if source is None:
             return LookupResult.MISS
         if source.kv_request_id in self._failed_req_ids:
             return LookupResult.MISS
@@ -500,18 +495,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         _annotate_req_context(req_context)
         source = req_context.get_state(P2PSourceInfo)
         if source is not None:
-            owner_key = (source.peer_id, source.kv_request_id)
-            owner = self._source_owners.setdefault(owner_key, req_context)
-            if owner is not req_context:
-                source.remote_load_enabled = False
-                logger.warning_once(
-                    "P2P %s: duplicate source transfer ID; using local prefill",
-                    self._local_id,
-                )
-            else:
-                session = self._get_or_create_session(source.peer_id)
-                if session is None:
-                    self._failed_req_ids.add(source.kv_request_id)
+            session = self._get_or_create_session(source.peer_id)
+            if session is None:
+                self._failed_req_ids.add(source.kv_request_id)
         dest = req_context.get_state(P2PDestInfo)
         if dest is not None and dest.kv_request_id:
             return SecondaryTierRequestContext(policy=OffloadPolicy.REQUEST_LEVEL)
@@ -542,14 +528,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         """
         source = req_context.get_state(P2PSourceInfo)
         dest = req_context.get_state(P2PDestInfo)
-        owns_source = False
-        if source is not None and source.remote_load_enabled:
-            owner_key = (source.peer_id, source.kv_request_id)
-            owner = self._source_owners.get(owner_key)
-            owns_source = owner is None or owner is req_context
-            if owner is req_context:
-                self._source_owners.pop(owner_key)
-        source_id = source.kv_request_id if source is not None and owns_source else None
+        source_id = source.kv_request_id if source is not None else None
         dest_id = dest.kv_request_id if dest is not None else None
         if source_id is None and dest_id is None:
             return
@@ -559,8 +538,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             self._failed_req_ids.discard(dest_id)
 
         source_session = None
-        if owns_source:
-            assert source is not None
+        if source is not None:
             source_session = self._sessions.get(source.peer_id)
             if source_session is not None:
                 source_session.finish_request(source.kv_request_id)
@@ -667,9 +645,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             source.kv_request_id if source is not None else None,
             source.peer_id if source is not None else None,
         )
-        if source is None or not source.remote_load_enabled:
+        if source is None:
             logger.debug(
-                "P2P %s: submit_load job_id=%d FAILED unavailable consumer route",
+                "P2P %s: submit_load job_id=%d FAILED missing consumer params",
                 self._local_id,
                 job_id,
             )
@@ -1286,7 +1264,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             # to flush them and no TieringManager left to release.
             session.close()
         self._sessions.clear()
-        self._source_owners.clear()
         self._kv_to_session.clear()
         # Surface buffered store jobs as failed so the engine doesn't
         # leak them; the manager is going away after this call.

@@ -671,6 +671,37 @@ class CompletionRequest(OpenAIBaseModel):
 
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def validate_remote_kv_source_prompt_count(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        prompt = data.get("prompt")
+        prompt_embeds = data.get("prompt_embeds")
+        has_multiple_prompts = (
+            isinstance(prompt, list)
+            and bool(prompt)
+            and not is_list_of(prompt, int)
+            and len(prompt) > 1
+        ) or (isinstance(prompt_embeds, list) and len(prompt_embeds) > 1)
+
+        kv_transfer_params = data.get("kv_transfer_params")
+        remote_kv_source = (
+            kv_transfer_params.get("remote_kv_source")
+            if isinstance(kv_transfer_params, dict)
+            else None
+        )
+        if has_multiple_prompts and isinstance(remote_kv_source, dict):
+            raise VLLMValidationError(
+                "`kv_transfer_params['remote_kv_source']` cannot be shared "
+                "across multiple prompts. Send each prompt separately with "
+                "a distinct `kv_request_id`.",
+                parameter="kv_transfer_params.remote_kv_source",
+            )
+
+        return data
+
 
 class CompletionLogProbs(OpenAIBaseModel):
     text_offset: list[int] = Field(default_factory=list)
