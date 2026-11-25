@@ -327,17 +327,14 @@ class SimpleCPUOffloadWorker:
     def _store_reused_blocks(self, metadata: SimpleCPUOffloadMetadata) -> None:
         """Lazy mode: save the old content of blocks this step reuses.
 
-        The copies follow earlier steps' writes. Later writes on the compute
-        stream (zeroing, copy-on-write copies, the forward) wait for the
-        blocks they may overwrite; later loads wait for all of them.
+        The copy follows earlier steps' writes, and every later write on the
+        compute stream (zeroing, copy-on-write copies, the forward) and every
+        later load waits for it.
         """
         backend = self._backend
         assert isinstance(backend, DmaCopyBackend)
-        n = metadata.num_forward_store_blocks
-        gpu_blocks, cpu_blocks = metadata.store_gpu_blocks, metadata.store_cpu_blocks
-        forward_ready = backend.store_now(gpu_blocks[:n], cpu_blocks[:n])
-        torch.cuda.current_stream().wait_event(forward_ready)
-        done = backend.store_now(gpu_blocks[n:], cpu_blocks[n:])
+        done = backend.store_now(metadata.store_gpu_blocks, metadata.store_cpu_blocks)
+        torch.cuda.current_stream().wait_event(done)
         self._store_events.append((metadata.store_event, done))
         self._store_done = done
 

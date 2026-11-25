@@ -531,11 +531,8 @@ class SimpleCPUOffloadScheduler:
         # --- Stores ---
         store_event = -1
         reused_blocks: list[ReusedBlock] | None = None
-        num_forward_store = 0
         if self._lazy_mode:
-            store_gpu, store_cpu, reused_blocks, num_forward_store = (
-                self._prepare_lazy_store_specs()
-            )
+            store_gpu, store_cpu, reused_blocks = self._prepare_lazy_store_specs()
             store_req_ids: list[str] = []
             store_meta = None
         else:
@@ -593,20 +590,17 @@ class SimpleCPUOffloadScheduler:
             store_event=store_event,
             store_gpu_blocks=store_gpu,
             store_cpu_blocks=store_cpu,
-            num_forward_store_blocks=num_forward_store,
             need_flush=bool(scheduler_output.preempted_req_ids),
         )
         return result
 
     def _prepare_lazy_store_specs(
         self,
-    ) -> tuple[list[int], list[int], list[ReusedBlock], int]:
+    ) -> tuple[list[int], list[int], list[ReusedBlock]]:
         """Offload the reused GPU blocks of offloaded groups with no CPU copy.
 
         The worker copies them out before this step writes any KV cache block.
-        Blocks beyond free CPU capacity are not offloaded. Blocks only this
-        step's loads overwrite go last, so the forward does not wait for them;
-        the returned count covers the others.
+        Blocks beyond free CPU capacity are not offloaded.
         """
         assert self._gpu_block_pool is not None
         cpu_cache = self.cpu_block_pool.cached_block_hash_to_block
@@ -623,21 +617,12 @@ class SimpleCPUOffloadScheduler:
                 break
             reused_blocks.append(reused)
         if not reused_blocks:
-            return [], [], [], 0
-        load_dsts = {
-            block_id
-            for state in self._reqs_to_load.values()
-            if state.load_event is None
-            for block_id in state.transfer_meta.gpu_block_ids
-        }
-        reused_blocks.sort(key=lambda reused: reused[0] in load_dsts)
-        num_forward = sum(block_id not in load_dsts for block_id, _, _ in reused_blocks)
+            return [], [], []
         cpu_blocks = self.cpu_block_pool.get_new_blocks(len(reused_blocks))
         return (
             [block_id for block_id, _, _ in reused_blocks],
             [block.block_id for block in cpu_blocks],
             reused_blocks,
-            num_forward,
         )
 
     def _prepare_eager_store_specs(
