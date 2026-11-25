@@ -234,6 +234,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         vllm_config=builder_config,
         device=DEVICE,
     )
+    assert not builder.use_replayssm
     builder_config.cache_config.hash_block_size = BLOCK_SIZE
     builder_config.cache_config.cache_hit_alignment_tokens = BLOCK_SIZE
 

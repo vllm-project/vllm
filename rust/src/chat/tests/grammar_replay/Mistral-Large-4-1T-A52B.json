@@ -1,0 +1,40 @@
+{
+  "model_id": "mistralai/Mistral-Large-4-1T-A52B",
+  "vocab_size": 204800,
+  "all_stop_token_ids": [2],
+  "grammars": [
+    {
+      "grammar": {
+        "format": {
+          "type": "json_schema",
+          "json_schema": {
+            "type": "object",
+            "properties": {
+              "answer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "answer"
+            ]
+          },
+          "style": "json",
+          "any_order": false,
+          "max_whitespace_cnt": null,
+          "excludes": []
+        },
+        "coverage": "final_output_only"
+      },
+      "generations": {
+        "none_schema": {
+          "completion": "[THINK]Need call the weather and add tools.[/THINK]{\"answer\":\"sunny\"}",
+          "generation_token_ids": [34, 60332, 4811, 1327, 29317, 1413, 2867, 12017, 1046, 35, 3745, 29916, 1951, 44915, 7167, 23665, 2]
+        },
+        "auto_schema_content": {
+          "completion": "[THINK]Need call the weather and add tools.[/THINK]{\"answer\":\"sunny\"}",
+          "generation_token_ids": [34, 60332, 4811, 1327, 29317, 1413, 2867, 12017, 1046, 35, 3745, 29916, 1951, 44915, 7167, 23665, 2]
+        }
+      }
+    }
+  ]
+}

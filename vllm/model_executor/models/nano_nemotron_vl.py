@@ -410,12 +410,8 @@ class NanoNemotronVLMultiModalProcessor(
         )
 
     def _get_video_fields_config(self, hf_inputs: BatchFeature):
-        video_num_patches = hf_inputs.get("video_num_patches", torch.empty(0))
-
         return dict(
-            pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
-                "video", video_num_patches
-            ),
+            pixel_values_flat_video=MultiModalFieldConfig.batched("video"),
             pixel_values_raw_video=MultiModalFieldConfig.batched(
                 "video", keep_on_cpu=True
             ),
@@ -1528,13 +1524,16 @@ class NemotronH_Nano_VL_V2(
                 and pixel_values_flat_video.ndim == 5
             ):
                 # batched._reduce_data stacked same-shape videos into
-                # [num_videos, nf, 3, H, W]; unstack back to a list so the
-                # same-H,W cat path below handles it uniformly.
-                pixel_values_flat_video = list(pixel_values_flat_video)
+                # [num_videos, nf, 3, H, W]: join them without a copy.
+                pixel_values_flat_video = pixel_values_flat_video.flatten(0, 1)
 
             if not isinstance(pixel_values_flat_video, torch.Tensor):
                 assert isinstance(pixel_values_flat_video, (list, tuple))
-                pixel_values_flat_video = torch.cat(pixel_values_flat_video, dim=0)
+                pixel_values_flat_video = (
+                    pixel_values_flat_video[0]
+                    if len(pixel_values_flat_video) == 1
+                    else torch.cat(pixel_values_flat_video, dim=0)
+                )
 
             assert isinstance(video_num_patches, torch.Tensor)
             expected_h = pixel_values_flat_video.shape[-2]
@@ -1598,8 +1597,8 @@ class NemotronH_Nano_VL_V2(
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         sizes = kwargs.get("video_frame_sizes")
         if isinstance(sizes, torch.Tensor) and len(sizes.unique(dim=0)) > 1:
-            # device_resize videos of different frame sizes cannot share one
-            # frame tensor: embed them one at a time (all fields are per video).
+            # Videos of different frame sizes cannot share one frame tensor:
+            # embed them one at a time (all fields are per video).
             return [
                 embedding
                 for i in range(len(sizes))
