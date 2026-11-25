@@ -602,10 +602,8 @@ def test_attention_prologue_stores_low_precision_kv_without_touching_padding(
 
 
 @pytest.mark.skipif(not current_platform.is_device_capability(90), reason="needs SM90")
-@pytest.mark.parametrize(
-    ("q_cols", "kv_cols", "padded_cols"), [(6552, 1024, 8600), (3276, 512, 4304)]
-)
-def test_sm90_mini_grouped_qkv(q_cols, kv_cols, padded_cols, monkeypatch):
+@pytest.mark.parametrize("tp", [1, 2, 4, 8])
+def test_sm90_mini_grouped_qkv(tp, monkeypatch):
     from vllm import envs
     from vllm.models.inkling2.nvidia.ops.ll_gemm_sm120 import qkv_bmm, use_qkv_bmm
 
@@ -613,6 +611,8 @@ def test_sm90_mini_grouped_qkv(q_cols, kv_cols, padded_cols, monkeypatch):
         torch.full((17, 2304), value, device=DEVICE, dtype=torch.bfloat16)
         for value in (1, 2, 3)
     )
+    q_cols, kv_cols = 6552 // tp, 1024 // tp
+    padded_cols = (q_cols + 2 * kv_cols + 7) // 8 * 8
     weight = xq.new_zeros((padded_cols, 2304))
     weight[:, 0] = 1
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
@@ -621,7 +621,7 @@ def test_sm90_mini_grouped_qkv(q_cols, kv_cols, padded_cols, monkeypatch):
     assert use_qkv_bmm(*xs, weight)
     assert not use_qkv_bmm(*xs, weight[:-1])
     out = qkv_bmm(*xs, weight, q_cols, q_cols + kv_cols)
-    # Check both column boundaries, including the unaligned TP2 split.
+    # Check both column boundaries, including splits inside a kernel tile.
     q, k, v = out[:, : q_cols + 2 * kv_cols].split((q_cols, kv_cols, kv_cols), dim=1)
     for projection, x in zip((q, k, v), xs):
         torch.testing.assert_close(

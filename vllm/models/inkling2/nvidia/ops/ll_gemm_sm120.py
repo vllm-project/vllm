@@ -261,7 +261,8 @@ def use_qkv_bmm(
                 120, device_id=x_q.get_device()
             )
             or (
-                w.shape in ((8600, 2304), (4304, 2304))
+                # Padded rank-local Mini projections for TP1, TP2, TP4 and TP8.
+                w.shape in ((8600, 2304), (4304, 2304), (2152, 2304), (1080, 2304))
                 and x_q.shape[1] == w.shape[1]
                 and x_q.device == x_k.device == x_v.device == w.device
                 and not envs.VLLM_BATCH_INVARIANT
