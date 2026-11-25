@@ -37,7 +37,9 @@ def checkpoint():
     if not deep_gemm_supports_sm90_nvfp4():
         pytest.skip("DeepGEMM has no SM90 NVFP4 MegaMoE")
     try:
-        path = hf_api().snapshot_download(MODEL, local_files_only=True)
+        path = hf_api().snapshot_download(
+            MODEL, local_files_only=True, allow_patterns=["*.json", "*.safetensors"]
+        )
     except LocalEntryNotFoundError:
         pytest.skip(f"{MODEL} is not in the local HF cache")
     with open(os.path.join(path, "config.json")) as f:
