@@ -129,6 +129,14 @@ mod tests {
     use super::{ChatMessage, StringOrArray, validate_stop};
 
     #[test]
+    fn image_url_detail_rejects_null() {
+        serde_json::from_str::<ChatMessage>(
+            r#"{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "u", "detail": null}}]}"#,
+        )
+        .expect_err("null detail should be rejected");
+    }
+
+    #[test]
     fn validate_stop_accepts_four_stop_strings() {
         let stop = StringOrArray::Array(
             ["one", "two", "three", "four"].into_iter().map(str::to_string).collect(),
@@ -269,7 +277,29 @@ impl ContentPart {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ImageUrl {
     pub url: String,
+    #[serde(default, deserialize_with = "deserialize_image_detail")]
     pub detail: Option<ImageDetail>,
+}
+
+/// Reads OpenAI's `original` image detail as `high`; image preprocessing ignores the detail.
+pub fn deserialize_image_detail<'de, D>(deserializer: D) -> Result<Option<ImageDetail>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum WireImageDetail {
+        Auto,
+        Low,
+        #[serde(alias = "original")]
+        High,
+    }
+
+    Ok(Some(match WireImageDetail::deserialize(deserializer)? {
+        WireImageDetail::Auto => ImageDetail::Auto,
+        WireImageDetail::Low => ImageDetail::Low,
+        WireImageDetail::High => ImageDetail::High,
+    }))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

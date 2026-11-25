@@ -6088,7 +6088,8 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
                                 {
                                     "type": "image_url",
                                     "image_url": {
-                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                                        "detail": "original"
                                     },
                                     "uuid": "image-1"
                                 }

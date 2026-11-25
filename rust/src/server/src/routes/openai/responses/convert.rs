@@ -1136,4 +1136,27 @@ mod tests {
             }])
         );
     }
+
+    #[test]
+    fn input_image_detail_reads_original_as_high() {
+        let content = serde_json::from_value(json!([
+            {"type": "input_image", "image_url": "u"},
+            {"type": "input_image", "image_url": "u", "detail": "original"}
+        ]))
+        .expect("deserialize Responses image content");
+
+        let converted = convert_content_parts(content).expect("convert Responses image content");
+        let image = |detail| ChatContentPart::ImageUrl {
+            image_url: "u".to_string(),
+            detail,
+            uuid: None,
+        };
+        assert_eq!(
+            converted,
+            ChatContent::Parts(vec![
+                image(None),
+                image(Some(llm_multimodal::ImageDetail::High))
+            ])
+        );
+    }
 }

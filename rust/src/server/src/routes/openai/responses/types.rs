@@ -14,7 +14,7 @@ use std::fmt;
 use crate::routes::openai::utils::metrics::PerRequestMetrics;
 use crate::routes::openai::utils::types::{
     Function, FunctionChoice, InputAudio, ReasoningEffort, StringOrArray, ToolChoiceValue,
-    ToolReference, default_true, deserialize_request_top_k,
+    ToolReference, default_true, deserialize_image_detail, deserialize_request_top_k,
 };
 use llm_multimodal::ImageDetail;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
@@ -502,7 +502,7 @@ pub enum ResponseInputContentPart {
     InputImage {
         #[serde(default)]
         image_url: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_image_detail")]
         detail: Option<ImageDetail>,
         #[serde(default)]
         file_id: Option<String>,
