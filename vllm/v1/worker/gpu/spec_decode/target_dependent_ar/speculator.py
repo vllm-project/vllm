@@ -45,8 +45,9 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         # Shared layers read their owner's allocation. Cache ownership is fixed
         # for the lifetime of the loaded model.
         return any(
-            not self.draft_attn_layer_names.isdisjoint(tensor.layers)
+            layer_name in self.draft_attn_layer_names
             for tensor in self.kv_cache_config.kv_cache_tensors
+            for layer_name in tensor.layers
         )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
