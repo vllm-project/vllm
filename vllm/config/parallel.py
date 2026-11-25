@@ -542,6 +542,9 @@ class ParallelConfig:
     Set to be private as it's not intended to be configured by users.
     """
 
+    _snapshot_data_parallel_port_list: list[int] | None = None
+    """Ports reserved for rebuilding communication groups after restore."""
+
     _coord_store_port: int = 0
     """Port of the coordination TCPStore. Can be set by the API server; workers
     connect as clients to exchange self-picked group ports at runtime."""
@@ -877,13 +880,62 @@ class ParallelConfig:
         pop a new port from the prepared port list each time we need to
         initialize a new process group related to data parallelism.
         """
+        from vllm.snapshot.utils import is_restore
+
+        if is_restore() and self._snapshot_data_parallel_port_list is not None:
+            if not self._snapshot_data_parallel_port_list:
+                raise RuntimeError("No port reserved for snapshot restore")
+            port = self._snapshot_data_parallel_port_list.pop()
+            logger.info(
+                "[snapshot][port] selected restore DP init port: port=%d "
+                "remaining_ports=%s",
+                port,
+                self._snapshot_data_parallel_port_list,
+            )
+            return port
+
         if self._data_parallel_master_port_list:
             answer = self._data_parallel_master_port_list.pop()
+            source = "prepared DP port list"
         else:
             answer = self.data_parallel_master_port
             self.data_parallel_master_port += 1
+            source = "data_parallel_master_port"
+
+        logger.info(
+            "[parallel][port] selected DP init port: port=%d source=%s "
+            "remaining_ports=%s",
+            answer,
+            source,
+            self._data_parallel_master_port_list,
+        )
 
         return answer
+
+    def reserve_snapshot_ports(self) -> None:
+        if self._snapshot_data_parallel_port_list is not None:
+            return
+
+        excluded_ports = set(self._data_parallel_master_port_list)
+        excluded_ports.update(
+            (
+                self.data_parallel_master_port,
+                self.data_parallel_rpc_port,
+                self.master_port,
+            )
+        )
+        if self._coord_store_port:
+            excluded_ports.add(self._coord_store_port)
+        self._snapshot_data_parallel_port_list = get_open_ports_list(
+            2, exclude_ports=excluded_ports
+        )
+        logger.info(
+            "[snapshot][port] reserved restore ports: worker_port=%d "
+            "engine_core_port=%d excluded_ports=%s",
+            self._snapshot_data_parallel_port_list[0],
+            self._snapshot_data_parallel_port_list[1],
+            sorted(excluded_ports),
+        )
 
     def _pick_stateless_dp_port(self) -> tuple[int, socket.socket | None]:
         """Return `(port, listen_socket)` for DP group init.
@@ -908,9 +960,24 @@ class ParallelConfig:
             s.listen()
             port = s.getsockname()[1]
             store.set(key, str(port).encode())
+            logger.info(
+                "[parallel][port] published stateless DP group port: "
+                "master=%s:%d rank=%d role=server",
+                self.data_parallel_master_ip,
+                port,
+                self.data_parallel_rank,
+            )
             return port, s
         else:
-            return int(store.get(key).decode()), None
+            port = int(store.get(key).decode())
+            logger.info(
+                "[parallel][port] received stateless DP group port: "
+                "master=%s:%d rank=%d role=client",
+                self.data_parallel_master_ip,
+                port,
+                self.data_parallel_rank,
+            )
+            return port, None
 
     @overload
     def stateless_init_dp_group(
@@ -942,9 +1009,21 @@ class ParallelConfig:
 
         max_retries = 5
         last_exc: Exception | None = None
-        for _ in range(max_retries):
+        for attempt in range(1, max_retries + 1):
+            port = None
             try:
                 port, listen_socket = self._pick_stateless_dp_port()
+                logger.info(
+                    "[parallel][port] initializing stateless DP group: "
+                    "master=%s:%d rank=%d world_size=%d role=%s attempt=%d/%d",
+                    self.data_parallel_master_ip,
+                    port,
+                    self.data_parallel_rank,
+                    self.data_parallel_size,
+                    "server" if self.data_parallel_rank == 0 else "client",
+                    attempt,
+                    max_retries,
+                )
                 # use gloo since the engine process might not have cuda device
                 return stateless_init_torch_distributed_process_group(
                     self.data_parallel_master_ip,
@@ -959,7 +1038,14 @@ class ParallelConfig:
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
                 if "EADDRINUSE" in str(e):
-                    logger.warning("Address already in use. Retrying with a new port.")
+                    logger.warning(
+                        "[parallel][port] stateless DP group port is already in use: "
+                        "port=%s rank=%d attempt=%d/%d; retrying",
+                        port,
+                        self.data_parallel_rank,
+                        attempt,
+                        max_retries,
+                    )
                     last_exc = e
                     continue  # try again with a new port
                 raise e
@@ -1144,6 +1230,7 @@ class ParallelConfig:
             "data_parallel_master_port",
             "_data_parallel_master_port_list",
             "_coord_store_port",
+            "_snapshot_data_parallel_port_list",
             "data_parallel_rpc_port",
             "rank",
             "master_addr",
@@ -1230,6 +1317,10 @@ class ParallelConfig:
             if not self.enable_elastic_ep:
                 if not self._data_parallel_master_port_list:
                     self._data_parallel_master_port_list = get_open_ports_list(5)
+                    logger.info(
+                        "[parallel][port] generated DP init ports: ports=%s",
+                        self._data_parallel_master_port_list,
+                    )
                 self.data_parallel_master_port = (
                     self._data_parallel_master_port_list.pop()
                 )

@@ -95,6 +95,49 @@ def test_logging_config_cli_args(serve_parser):
     assert config.formatter == "json"
     assert config.pylogging_config_file == "/tmp/json.json"
 
+def test_snapshot_config_arg_parsing(serve_parser):
+    args = serve_parser.parse_args(
+        [
+            "--snapshot-config",
+            json.dumps(
+                {
+                    "snapshot_metadata": "/snapshot/snapshot_metadata.json",
+                    "enable_auto_checkpoint": True,
+                }
+            ),
+        ]
+    )
+
+    assert args.snapshot_config.snapshot_metadata == "/snapshot/snapshot_metadata.json"
+    assert args.snapshot_config.enable_auto_checkpoint
+
+
+def test_snapshot_config_disabled_by_default(serve_parser):
+    args = serve_parser.parse_args([])
+
+    assert args.snapshot_config is None
+
+
+def test_auto_checkpoint_requires_snapshot_metadata(serve_parser):
+    with pytest.raises(SystemExit):
+        serve_parser.parse_args(
+            [
+                "--snapshot-config",
+                json.dumps({"enable_auto_checkpoint": True}),
+            ]
+        )
+
+
+def test_snapshot_metadata_does_not_enable_auto_checkpoint(serve_parser):
+    args = serve_parser.parse_args(
+        [
+            "--snapshot-config",
+            json.dumps({"snapshot_metadata": "/snapshot/metadata.json"}),
+        ]
+    )
+
+    assert not args.snapshot_config.enable_auto_checkpoint
+
 
 ### Tests for LoRA module parsing
 def test_valid_key_value_format(serve_parser):

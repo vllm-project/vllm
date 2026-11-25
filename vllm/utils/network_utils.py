@@ -49,18 +49,19 @@ def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
             sock.close(linger=0)
 
 
-def get_ip() -> str:
-    host_ip = envs.VLLM_HOST_IP
-    if "HOST_IP" in os.environ and "VLLM_HOST_IP" not in os.environ:
-        logger.warning(
-            "The environment variable HOST_IP is deprecated and ignored, as"
-            " it is often used by Docker and other software to"
-            " interact with the container's network stack. Please "
-            "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
-            " to communicate with each other."
-        )
-    if host_ip:
-        return host_ip
+def get_ip(*, force: bool = False) -> str:
+    if not force:
+        host_ip = envs.VLLM_HOST_IP
+        if "HOST_IP" in os.environ and "VLLM_HOST_IP" not in os.environ:
+            logger.warning(
+                "The environment variable HOST_IP is deprecated and ignored, as"
+                " it is often used by Docker and other software to"
+                " interact with the container's network stack. Please "
+                "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
+                " to communicate with each other."
+            )
+        if host_ip:
+            return host_ip
 
     # IP is not set, try to get it from the network interface
 
@@ -204,28 +205,35 @@ def get_open_port() -> int:
     return port
 
 
-def get_open_ports_list(count: int = 5) -> list[int]:
+def get_open_ports_list(
+    count: int = 5, exclude_ports: set[int] | None = None
+) -> list[int]:
     """Get a list of unique open ports.
 
     When VLLM_PORT is set, scans upward from that port, advancing
-    the start position after each find so every port is unique.
+    the start position after each find so every port is unique. Ports
+    in ``exclude_ports`` are skipped.
     """
+    exclude_ports = exclude_ports or set()
     ports_set = set[int]()
     if envs.VLLM_PORT is not None:
         reserved_port_range = _get_reserved_port_range()
         next_port = envs.VLLM_PORT
-        for _ in range(count):
+        while len(ports_set) < count:
             port = _get_open_port(start_port=next_port, max_attempts=1000)
             if port in reserved_port_range:
                 port = _get_open_port(
                     start_port=reserved_port_range.stop, max_attempts=1000
                 )
-            ports_set.add(port)
             next_port = port + 1
+            if port not in exclude_ports:
+                ports_set.add(port)
         return list(ports_set)
     else:
         while len(ports_set) < count:
-            ports_set.add(get_open_port())
+            port = get_open_port()
+            if port not in exclude_ports:
+                ports_set.add(port)
 
     return list(ports_set)
 
@@ -322,6 +330,14 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
     if is_valid_ipv6_address(host):
         return f"{scheme}://[{host}]:{port}"
     return f"{scheme}://{host}:{port}"
+
+
+def replace_zmq_tcp_host(path: str, host: str) -> str:
+    """Replace the host of a TCP ZMQ endpoint, preserving its port."""
+    scheme, _, port = split_zmq_path(path)
+    if scheme != "tcp":
+        return path
+    return make_zmq_path(scheme, host, int(port))
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783

@@ -186,6 +186,17 @@ async def run_server_worker(
     if client_config and "api_server_loads" in client_config:
         loads = client_config.pop("api_server_loads")
         peer_loads = (loads, client_config["client_index"])
+    if args.snapshot_config is not None:
+        client_config = dict(client_config) if client_config else {}
+        from vllm.snapshot.monitor import SnapshotMonitor
+
+        snapshot_monitor = client_config.get("snapshot_monitor")
+        if snapshot_monitor is None:
+            snapshot_monitor = SnapshotMonitor()
+            client_config["snapshot_monitor"] = snapshot_monitor
+        args._snapshot_monitor = snapshot_monitor
+        args._snapshot_sentinel_leader = client_config.get("client_index", 0) == 0
+
 
     async with build_async_engine_client(
         args,

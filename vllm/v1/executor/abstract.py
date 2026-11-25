@@ -213,6 +213,23 @@ class Executor(ABC):
             "set_kv_cache_layout", args=(layout_name, cp_kv_cache_interleave_size)
         )
 
+    def suspend(self, model_save_path: str | None = None) -> None:
+        self.collective_rpc("suspend", args=(model_save_path,))
+
+    def device_unlock(self) -> None:
+        self.collective_rpc("device_unlock")
+
+    def resume(
+        self,
+        data_parallel_master_ip: str,
+        model_path: str | None = None,
+        new_engine_id: str | None = None,
+    ) -> None:
+        self.collective_rpc(
+            "resume",
+            args=(data_parallel_master_ip, model_path, new_engine_id),
+        )
+
     @overload
     def collective_rpc(
         self,

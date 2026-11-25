@@ -1552,6 +1552,10 @@ def wait_for_engine_startup(
                         "data_parallel_size",
                     )
                 }
+                if parallel_config._snapshot_data_parallel_port_list is not None:
+                    parallel_config_payload["_snapshot_data_parallel_port_list"] = (
+                        parallel_config._snapshot_data_parallel_port_list
+                    )
                 if (
                     parallel_config.enable_elastic_ep
                     and not parallel_config._coord_store_port
