@@ -839,9 +839,9 @@ class SparseDcpDecodePx(SparseDcpDecode):
             for r in cutlass.range_constexpr(2):
                 row = 16 * t + group + 8 * r
                 for e in cutlass.range_constexpr(2):
-                    words = tuple(float_bits(acc[t, j, 2 * r + e]) for j in range(4))
+                    p_words = tuple(float_bits(acc[t, j, 2 * r + e]) for j in range(4))
                     column = 32 * pblock + 8 * quarter + 4 * e
-                    store_words(at(inbox, psplit, row, column), words, shared=True)
+                    store_words(at(inbox, psplit, row, column), p_words, shared=True)
         cute.arch.sync_threads()
         for t in cutlass.range_constexpr(T):
             self.merge(args, inbox, stats, tile, split, b, tid, t)
