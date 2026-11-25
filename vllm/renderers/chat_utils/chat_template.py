@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from vllm.exceptions import VLLMValidationError
 
@@ -16,6 +17,15 @@ class ChatTemplateConfig:
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
     trust_request_chat_template: bool = False
     trust_request_mm_kwargs: bool = False
+
+
+def has_request_chat_template(
+    chat_template: str | None, chat_template_kwargs: dict[str, Any] | None
+) -> bool:
+    return chat_template is not None or (
+        chat_template_kwargs is not None
+        and chat_template_kwargs.get("chat_template") is not None
+    )
 
 
 def validate_chat_template(chat_template: Path | str | None):

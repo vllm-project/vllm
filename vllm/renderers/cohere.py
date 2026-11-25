@@ -59,14 +59,10 @@ callers; not part of the Cohere Chat v2 surface):
   overrides derivation from `citation_options.mode`),
   `platform_instruction`.
 
-**Rejected inputs**: `template_jinja` and `template` are Cohere's
-own inlets for raw Jinja template source. They are valid at Cohere's
-API surface but not at vLLM's -- raw template source must flow through
-the standard `chat_template` request field (guarded by
-`--trust-request-chat-template`), which this renderer forwards to
-melody as `template_jinja`. Setting these keys explicitly in
-`chat_template_kwargs` raises `ValueError` so client
-misconfiguration surfaces loudly.
+**Rejected inputs**: This renderer accepts server-configured chat templates.
+Online requests may select a built-in template or supply template variables.
+They cannot supply template source through `chat_template` or the
+`template_jinja` and `template` Cohere-specific kwargs.
 
 **Everything else** in `chat_template_kwargs` is forwarded verbatim
 to melody as `additional_template_fields` and becomes accessible as
@@ -94,6 +90,7 @@ from enum import StrEnum
 from typing import Any
 
 from vllm.config import VllmConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -605,11 +602,8 @@ def _build_render_config(
 ) -> tuple[str, dict[str, Any]]:
     """Build the `render_cmd3` / `render_cmd4` config dict.
 
-    `chat_template` is the standard vLLM per-request template override
-    (from `ChatCompletionRequest.chat_template` / the server-side
-    `--chat-template` flag). When non-`None` it is forwarded to melody
-    as `template_jinja` so a single vLLM-native path drives template
-    source through the trust guard.
+    `chat_template` is the server-configured template or an offline template.
+    When non-`None` it is forwarded to melody as `template_jinja`.
 
     Returns `(format, config_dict)` where `format` is either `"cmd3"`
     or `"cmd4"`.
@@ -620,17 +614,11 @@ def _build_render_config(
             f"Invalid cohere_format={fmt!r}; expected one of {_VALID_FORMATS}"
         )
 
-    # Reject Cohere-only inlets for raw Jinja source. These keys are
-    # valid at Cohere's own API surface but not at vLLM's: callers must
-    # use the standard vLLM ``chat_template`` request field so the
-    # ``--trust-request-chat-template`` guard applies uniformly.
     for cohere_only_key in ("template_jinja", "template"):
         if chat_template_kwargs.get(cohere_only_key) is not None:
             raise ValueError(
                 f"chat_template_kwargs.{cohere_only_key!r} is not accepted "
-                "in vLLM (it is a Cohere-only field); pass the template "
-                "body via the standard 'chat_template' request field "
-                "instead (requires --trust-request-chat-template)."
+                "in vLLM. Use --chat-template to configure a server template."
             )
 
     config: dict[str, Any] = {
@@ -645,9 +633,6 @@ def _build_render_config(
     # variants (not raw source), so it is safe to accept from the client.
     if template_id := chat_template_kwargs.get("template_id"):
         config["template_id"] = template_id
-    # Raw template source flows exclusively through the standard vLLM
-    # ``chat_template`` field so it is subject to the
-    # ``--trust-request-chat-template`` guard in OnlineRenderer.
     if chat_template:
         config["template_jinja"] = chat_template
     # Only support Jinja with vllm
@@ -752,6 +737,13 @@ class CohereRenderer(BaseHfRenderer[HfTokenizer]):
     chat-template step is replaced with `cohere_melody.render_cmd3` /
     `render_cmd4`. Enabled via `--tokenizer-mode cohere`.
     """
+
+    def validate_request_chat_template(self) -> None:
+        raise VLLMValidationError(
+            "Cohere tokenizer mode does not support request-supplied chat "
+            "templates. Use --chat-template to configure a server template.",
+            parameter="chat_template",
+        )
 
     def __init__(
         self,

@@ -65,6 +65,7 @@ from vllm.renderers.chat_utils import (
     ConversationMessage,
     has_non_text_content,
 )
+from vllm.renderers.chat_utils.chat_template import has_request_chat_template
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
     parse_model_prompt,
@@ -728,19 +729,18 @@ class OnlineRenderer:
         chat_template_kwargs: dict[str, Any] | None,
         trust_request_chat_template: bool,
     ) -> ErrorResponse | None:
-        """Copied from GenerateBaseServing._validate_chat_template."""
-        if not trust_request_chat_template and (
-            request_chat_template is not None
-            or (
-                chat_template_kwargs
-                and chat_template_kwargs.get("chat_template") is not None
-            )
-        ):
+        if not has_request_chat_template(request_chat_template, chat_template_kwargs):
+            return None
+        if not trust_request_chat_template:
             return self.create_error_response(
                 "Chat template is passed with request, but "
                 "--trust-request-chat-template is not set. "
                 "Refused request with untrusted chat template."
             )
+        try:
+            self.renderer.validate_request_chat_template()
+        except VLLMValidationError as error:
+            return self.create_error_response(error)
         return None
 
     async def preprocess_completion(
