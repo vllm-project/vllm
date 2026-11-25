@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use vllm_chat::ChatTool;
+use vllm_chat::{AllowedToolsMode, ChatTool};
 use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_llm::{PromptCacheUsage, TokenUsage};
 
@@ -437,17 +437,15 @@ pub enum ToolChoiceValue {
 #[serde(untagged)]
 pub enum ToolChoice {
     Value(ToolChoiceValue),
-    Function {
-        #[serde(rename = "type")]
-        tool_type: String,
-        function: FunctionChoice,
-    },
-    AllowedTools {
-        #[serde(rename = "type")]
-        tool_type: String,
-        mode: String,
-        tools: Vec<ToolReference>,
-    },
+    Object(ToolChoiceObject),
+}
+
+/// Object form of [`ToolChoice`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolChoiceObject {
+    Function { function: FunctionChoice },
+    AllowedTools { allowed_tools: AllowedTools },
 }
 
 impl Default for ToolChoice {
@@ -456,13 +454,29 @@ impl Default for ToolChoice {
     }
 }
 
-/// Function choice specification for `ToolChoice::Function`.
+/// Function choice specification for `ToolChoiceObject::Function`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct FunctionChoice {
     pub name: String,
 }
 
-/// Tool reference for `ToolChoice::AllowedTools`.
+/// The allowed set of `ToolChoiceObject::AllowedTools`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AllowedTools {
+    pub mode: AllowedToolsMode,
+    pub tools: Vec<AllowedTool>,
+}
+
+/// One tool of [`AllowedTools`], named like a function tool choice:
+/// `{"type": "function", "function": {"name": ...}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AllowedTool {
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    pub function: FunctionChoice,
+}
+
+/// Tool reference of the Responses API `allowed_tools` tool choice.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -849,7 +863,7 @@ mod usage_tests {
 }
 
 /// OpenAI completions-style logprobs.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct LogProbs {
     pub tokens: Vec<String>,
     pub token_logprobs: Vec<Option<f32>>,
