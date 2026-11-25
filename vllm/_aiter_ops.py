@@ -716,6 +716,20 @@ def _rocm_aiter_gather_kv_b_proj_fake(
     pass
 
 
+@functools.cache
+def _aiter_sparse_mla_archs(name: str) -> tuple[str, ...]:
+    """The archs the installed aiter's sparse_mla lists under name, or ().
+
+    gfx942 joins SUPPORTED_ARCHS in ROCm/aiter#5721 and FP8_SCALAR_ARCHS, the
+    archs that read a per-tensor fp8 cache, in ROCm/aiter#6199.
+    """
+    try:
+        from aiter.ops.triton.attention import sparse_mla
+    except ImportError:
+        return ()
+    return tuple(getattr(sparse_mla, name, ()))
+
+
 def _rocm_aiter_mla_decode_fwd_impl(
     q: torch.Tensor,
     kv_buffer: torch.Tensor,
@@ -2331,7 +2345,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: Controls Triton unified attention.
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
-        VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
+        VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950,
+            and rope-free sparse MLA on gfx942).
         VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA: Routes the fp8_ds_mla sparse MLA
             calls the FlyDSL kernel supports to it (gfx950).
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
@@ -2814,15 +2829,28 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def is_triton_sparse_mla_enabled(cls) -> bool:
+    def is_triton_sparse_mla_enabled(cls, gfx942_ok: bool = False) -> bool:
+        """gfx942_ok: the caller passes only flat bf16 or per-tensor fp8 caches,
+        which aiter's kernel also runs on gfx942. DeepSeek V4's packed caches
+        are gfx950-only."""
         if not cls._TRITON_SPARSE_MLA:
             return False
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import on_gfx942, on_gfx950
 
         if not cls._AITER_ENABLED:
             reason = "VLLM_ROCM_USE_AITER is off"
-        elif not on_gfx950():
-            reason = "the kernel is gfx950-only"
+        elif on_gfx950():
+            return True
+        elif not (gfx942_ok and on_gfx942()):
+            reason = (
+                "the kernel is gfx942/gfx950-only"
+                if gfx942_ok
+                else "the kernel is gfx950-only"
+            )
+        elif "gfx942" not in _aiter_sparse_mla_archs("SUPPORTED_ARCHS"):
+            reason = (
+                "the installed aiter has no gfx942 sparse MLA kernel (ROCm/aiter#5721)"
+            )
         else:
             return True
         logger.warning_once(
@@ -4194,6 +4222,11 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_fused_topk(x, router_logits, top_k, gate_up)
 
     @staticmethod
+    def triton_sparse_mla_reads_fp8_on_gfx942() -> bool:
+        """Whether aiter's sparse MLA kernel reads an fp8 cache on gfx942."""
+        return "gfx942" in _aiter_sparse_mla_archs("FP8_SCALAR_ARCHS")
+
+    @staticmethod
     @functools.cache
     def _flydsl_sparse_mla_ops() -> tuple[Callable, Callable] | None:
         """Return the FlyDSL sparse MLA (supported, fwd), or None if absent.
@@ -4329,7 +4362,8 @@ class rocm_aiter_ops:
         compressed tokens here. inv_rope_positions and inv_rope_cos_sin_cache
         make the store apply the inverse RoPE; out_mxfp8 = (data, scale)
         replaces o with MXFP8 rows. dot_precision overrides the default
-        selected from q's dtype.
+        selected from q's dtype: gfx942's kernel takes no fp8 q, so with an
+        fp8 cache it gets a bf16 q and "fp8", and quantizes q itself.
 
         With VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA, the calls the FlyDSL
         kernel supports (bf16 q, fp8_ds_mla, no scales/sink/extra) run there.
