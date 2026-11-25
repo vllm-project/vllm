@@ -54,6 +54,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype,
 )
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
@@ -61,7 +62,11 @@ from vllm.model_executor.model_loader.reload.layerwise import (
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.utils import get_model_architecture
-from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    maybe_fuse_shared_experts,
+)
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -150,12 +155,6 @@ class _StubAttention(torch.nn.Module):
         self.o_proj = SimpleNamespace(reduce_results=True)
 
 
-@pytest.fixture
-@override_parallel_groups(SingleRankGroup())
-def single_rank_parallel_state():
-    yield
-
-
 @pytest.fixture(autouse=True)
 def reset_aiter_shared_expert_topk_metadata(monkeypatch: pytest.MonkeyPatch):
     """Isolate AITER's process-global shared-expert routing buffer."""
@@ -170,6 +169,7 @@ def _write_minimal_moe_config(
     model_path: Path,
     architecture: str,
     quantization_config: dict[str, Any] | None = None,
+    num_layers: int = 1,
 ) -> None:
     """Write a compact MoE config with one shared expert.
 
@@ -183,7 +183,7 @@ def _write_minimal_moe_config(
         "num_attention_heads": 4,
         "num_key_value_heads": 4,
         "head_dim": 64,
-        "num_hidden_layers": 1,
+        "num_hidden_layers": num_layers,
         "vocab_size": 256,
         "max_position_embeddings": 64,
         "q_lora_rank": 64,
@@ -203,7 +203,7 @@ def _write_minimal_moe_config(
         "hidden_act": "silu",
         "tie_word_embeddings": False,
         "rope_theta": 10000,
-        "quantization_config": _QUARK_MXFP4_CONFIG,
+        "quantization_config": quantization_config or _QUARK_MXFP4_CONFIG,
     }
     if architecture == "AXK1ForCausalLM":
         config["model_type"] = "axk1"
@@ -220,7 +220,7 @@ def _write_minimal_moe_config(
             "scoring_func": "sigmoid",
             "routed_scaling_factor": 2.0,
             "num_local_experts": 4,
-            "moe_layer_freq": [1],
+            "moe_layer_freq": [1] * num_layers,
             "sparse_attention_config": None,
             "quantization_config": quantization_config
             or {
@@ -251,7 +251,8 @@ def _write_minimal_moe_config(
                 "linear_attention"
                 if architecture == "Qwen3NextForCausalLM"
                 else "full_attention"
-            ],
+            ]
+            * num_layers,
             head_dim=64,
             linear_key_head_dim=64,
             linear_value_head_dim=64,
@@ -262,7 +263,7 @@ def _write_minimal_moe_config(
     elif architecture == "Qwen4ExpForCausalLM":
         config.update(
             model_type="qwen4_exp_text",
-            layer_types=["full_attention"],
+            layer_types=["full_attention"] * num_layers,
             head_dim=64,
             linear_key_head_dim=64,
             linear_value_head_dim=64,
@@ -277,9 +278,10 @@ def _write_minimal_moe_config(
     elif architecture == "Glm5NextForCausalLM":
         config.update(
             model_type="glm5_next",
-            layer_types=["linear_attention"],
-            mlp_layer_types=["sparse"],
+            layer_types=["linear_attention"] * num_layers,
+            mlp_layer_types=["sparse"] * num_layers,
             qk_rope_head_dim=0,
+            mla_use_nope=True,
             index_topk=1,
             index_kpool=1,
             pad_token_id=None,
@@ -290,7 +292,7 @@ def _write_minimal_moe_config(
     else:
         config["model_type"] = (
             "deepseek_v3"
-            if "V3" in architecture
+            if "V3" in architecture or architecture == "MistralLarge3ForCausalLM"
             else "deepseek_v32"
             if architecture == "DeepseekV32ForCausalLM"
             else "deepseek_v2"
@@ -316,9 +318,9 @@ def _unpadded_block(padded: torch.Tensor, expected: torch.Tensor) -> torch.Tenso
 @pytest.mark.parametrize(
     "load_path", ["load_weights", "fused_gate_up", "weight_loader"]
 )
+@override_parallel_groups(SingleRankGroup())
 def test_online_shared_expert_loads_bf16_weights_into_mxfp4_slot(
     default_vllm_config,
-    single_rank_parallel_state,
     load_path: str,
 ) -> None:
     """A BF16 shared expert is quantized while routed MXFP4 weights are loaded.
@@ -408,9 +410,9 @@ def test_online_shared_expert_loads_bf16_weights_into_mxfp4_slot(
         assert torch.equal(_unpadded_block(actual, expected), expected)
 
 
+@override_parallel_groups(SingleRankGroup())
 def test_online_shared_expert_reload_compatibility(
     default_vllm_config,
-    single_rank_parallel_state,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reload a BF16 shared weight into its MXFP4 slot via meta staging."""
@@ -481,6 +483,144 @@ def test_online_shared_expert_reload_compatibility(
         )
 
 
+# Constant expert weights: a constant tensor quantizes to a single packed byte
+# and a single scale, which AITER's weight shuffling and padding preserve, so
+# what landed in each expert slot can be checked in any backend layout.
+_ROUTED_VALUE = 1.0
+# 0x22: two E2M1 nibbles of 1.0.
+_NVFP4_ONES_BYTE = 0x22
+_MOE_DIM = 256  # hidden, routed and shared intermediate sizes of the test config
+
+
+def _shared_value(layer: int) -> float:
+    """A shared expert value per layer, with a distinct MXFP4 scale."""
+    return 4.0 * 2**layer
+
+
+def _moe_checkpoint(
+    architecture: str, routed_requantized: bool, num_layers: int
+) -> list[tuple[str, torch.Tensor]]:
+    """Routed and shared expert tensors under the checkpoint's names.
+
+    `routed_requantized`: NVFP4 routed and MXFP8 shared experts (MiniMax-M3.1
+    style). Otherwise Quark MXFP4 routed and BF16 shared experts.
+    """
+    minimax = architecture.startswith("MiniMaxM3")
+    # Mistral's own checkpoint names, which its weights mapper renames.
+    mistral = architecture == "MistralLarge3ForCausalLM"
+    moe_attr = "block_sparse_moe" if minimax else "mlp"
+    shared_name = (
+        "shared_expert" if architecture.startswith("Qwen") else ("shared_experts")
+    )
+    expert_names = (
+        {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}
+        if minimax or mistral
+        else {name: name for name in ("gate_proj", "up_proj", "down_proj")}
+    )
+    shape = (_MOE_DIM, _MOE_DIM)
+    weights: list[tuple[str, torch.Tensor]] = []
+    for layer in range(num_layers):
+        prefix = f"layers.{layer}" if mistral else f"model.layers.{layer}.{moe_attr}"
+        for expert in range(4):
+            for ckpt_name in expert_names.values():
+                name = f"{prefix}.experts.{expert}.{ckpt_name}"
+                if routed_requantized:
+                    weights += [
+                        (
+                            f"{name}.weight_packed",
+                            torch.full(
+                                (shape[0], shape[1] // 2),
+                                _NVFP4_ONES_BYTE,
+                                dtype=torch.uint8,
+                            ),
+                        ),
+                        (
+                            f"{name}.weight_scale",
+                            torch.ones(shape[0], shape[1] // 16).to(
+                                torch.float8_e4m3fn
+                            ),
+                        ),
+                        (f"{name}.weight_global_scale", torch.ones(1)),
+                        (f"{name}.input_global_scale", torch.ones(1)),
+                    ]
+                else:
+                    weight, scale = mxfp4_quantize(
+                        torch.full(
+                            shape,
+                            _ROUTED_VALUE,
+                            dtype=torch.bfloat16,
+                            device=current_platform.device_type,
+                        )
+                    )
+                    weights += [
+                        (f"{name}.weight", weight.view(torch.uint8).cpu()),
+                        (f"{name}.weight_scale", scale.view(torch.uint8).cpu()),
+                    ]
+        shared = torch.full(shape, _shared_value(layer), dtype=torch.bfloat16)
+        for projection in expert_names:
+            shared_projection = expert_names[projection] if mistral else projection
+            name = f"{prefix}.{shared_name}.{shared_projection}"
+            if routed_requantized:
+                weight, scale = mxfp8_e4m3_quantize(
+                    shared.to(current_platform.device_type),
+                    is_sf_swizzled_layout=False,
+                )
+                weight, scale = weight.cpu(), scale.cpu()
+                scale_name = "weight_scale_inv" if minimax else "weight_scale"
+                weights += [
+                    (f"{name}.weight", weight),
+                    (f"{name}.{scale_name}", scale),
+                ]
+            else:
+                weights.append((f"{name}.weight", shared.clone()))
+    return weights
+
+
+def _moe_checkpoint_loader(
+    weights: list[tuple[str, torch.Tensor]], loaded: set[str]
+) -> type[DefaultModelLoader]:
+    """A loader that loads only `weights`, through `model.load_weights`.
+
+    The rest of the model stays uninitialized, which is fine since it is not run;
+    quantized models have no check that every parameter was loaded.
+    """
+
+    class _MoECheckpointLoader(DefaultModelLoader):
+        def download_model(self, model_config) -> None:
+            pass
+
+        def load_weights(self, model, model_config) -> None:
+            # As `DefaultModelLoader.load_weights`, keeping the loaded names.
+            loaded.update(model.load_weights(iter(weights)) or ())
+
+    return _MoECheckpointLoader
+
+
+def _assert_mxfp4_constant(
+    weight: torch.Tensor, scale: torch.Tensor, value: float, what: str
+) -> None:
+    """`weight`/`scale` hold `value` quantized to MXFP4, up to padding."""
+    expected = mxfp4_quantize(
+        torch.full((32, 64), value, dtype=torch.bfloat16, device=weight.device)
+    )
+    for tensor, reference, kind in (
+        (weight, expected[0], "weight"),
+        (scale, expected[1], "scale"),
+    ):
+        values = tensor.contiguous().view(torch.uint8).flatten()
+        expected_byte = reference.contiguous().view(torch.uint8).flatten()[0].item()
+        assert torch.mode(values).values.item() == expected_byte, (
+            f"{what} {kind}: expected {value} (byte {expected_byte}), "
+            f"found bytes {torch.unique(values).tolist()}"
+        )
+        # Anything else is padding.
+        assert set(torch.unique(values).tolist()) <= {expected_byte, 0, 127}, (
+            what,
+            kind,
+            torch.unique(values).tolist(),
+        )
+
+
 # TODO: Add DeepseekV4ForConditionalGeneration once it uses
 # resolve_layer_fused_shared_expert.
 @pytest.mark.parametrize(
@@ -496,20 +636,55 @@ def test_online_shared_expert_reload_compatibility(
         "Glm5NextForCausalLM",
         "GlmMoeDsaForCausalLM",
         "MiniMaxM3SparseForCausalLM",
+        "MistralLarge3ForCausalLM",
         "Qwen3NextForCausalLM",
         "Qwen3_5MoeForCausalLM",
         "Qwen4ExpForCausalLM",
     ],
 )
+@pytest.mark.parametrize("precision", ["all", "mixed-precision"])
+@pytest.mark.parametrize(
+    "routed_requantized", [False, True], ids=["routed_mxfp4", "routed_nvfp4"]
+)
+@pytest.mark.skip_global_cleanup
+@override_parallel_groups(SingleRankGroup())
 def test_online_quantization(
     architecture: str,
+    precision: str,
+    routed_requantized: bool,
     tmp_path: Path,
     monkeypatch,
     caplog_vllm,
-    single_rank_parallel_state,
     workspace_init,
 ) -> None:
-    """Online MXFP4 fuses each architecture's shared expert into its MoE."""
+    """Online MXFP4 fuses each architecture's shared expert into its MoE.
+
+    Checkpoint (`routed_requantized`):
+    - False: Quark MXFP4 routed experts, BF16 shared experts.
+    - True: NVFP4 routed experts, MXFP8 shared experts and linears (MiniMax-M3.1
+      style); the routed experts are requantized online.
+
+    `all`: one MoE layer whose routed (if requantized) and shared experts are
+    quantized to MXFP4, and fused.
+
+    `mixed-precision`: two MoE layers with different online precisions, of which
+    only the layer whose routed and shared experts both run MXFP4 fuses, here
+    layer 1:
+    - Requantized: routed experts of the fused layer to MXFP4, of the other to
+      MXFP8, shared experts to MXFP4, as served in production for MiniMax.
+    - Otherwise: the shared expert of the fused layer to MXFP4, of the other
+      to MXFP8.
+
+    The routed and shared expert weights are loaded with `model.load_weights`,
+    and every fused layer's expert slots are checked to hold them.
+    """
+    # TODO: generalize to other tests. This saves ~0.75s per test: each full
+    # `gc.collect()` in `load_model` takes ~0.4s, as the test process holds many
+    # Python objects.
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.base_loader.gc",
+        SimpleNamespace(collect=lambda *args: 0),
+    )
     _enable_aiter(monkeypatch, fse=True)
     if architecture == "Glm5NextForCausalLM":
         from vllm.models.glm5next.common import model as glm5_next_model
@@ -538,22 +713,70 @@ def test_online_quantization(
         from vllm.models.qwen4_exp.amd import model as qwen4_exp_model
 
         monkeypatch.setattr(qwen4_exp_model, "Qwen3NextAttention", _StubAttention)
-    _write_minimal_moe_config(tmp_path, architecture)
     expected_shared_expert_name = (
         "shared_expert" if architecture.startswith("Qwen") else "shared_experts"
     )
     target_pattern = f"*{expected_shared_expert_name}*"
+    mixed = precision == "mixed-precision"
+    num_layers = 2 if mixed else 1
+    fused, unfused = 1, 0
+    requantize_routed = routed_requantized
+    moe_attr = "block_sparse_moe" if architecture.startswith("MiniMaxM3") else "mlp"
+    routed_target = f"*{moe_attr}.experts*"
+    if requantize_routed:
+        routed_pattern = f"*layers.{{}}.{moe_attr}.experts*"
+        targets = (
+            {
+                routed_pattern.format(unfused): "mxfp8",
+                routed_pattern.format(fused): "mxfp4",
+                target_pattern: "mxfp4",
+            }
+            if mixed
+            else {routed_target: "mxfp4", target_pattern: "mxfp4"}
+        )
+        expected_fused = {fused} if mixed else {0}
+        _write_minimal_moe_config(
+            tmp_path,
+            architecture,
+            _MINIMAX_NVFP4_ROUTED_MXFP8_SHARED_QUANT_CONFIG,
+            num_layers=num_layers,
+        )
+        _use_checkpoint_quantization(monkeypatch)
+        load_kwargs: dict[str, Any] = {
+            "model_config_kwargs": {
+                "quantization_config": QuantizationConfigArgs(targets=targets)
+            }
+        }
+    else:
+        shared_pattern = f"*layers.{{}}.*{expected_shared_expert_name}*"
+        targets = (
+            {
+                shared_pattern.format(fused): "mxfp4",
+                shared_pattern.format(unfused): "mxfp8",
+            }
+            if mixed
+            else {target_pattern: "mxfp4"}
+        )
+        expected_fused = {fused} if mixed else {0}
+        _write_minimal_moe_config(tmp_path, architecture, num_layers=num_layers)
+        load_kwargs = {
+            "quantization": "quark",
+            "model_config_kwargs": {
+                "quantization_config": resolve_quantization_config(
+                    "quark", {"targets": targets}
+                )
+            },
+        }
 
+    loaded_names: set[str] = set()
     model, vllm_config = load_model_without_vllm_runner(
         str(tmp_path),
         dtype="bfloat16",
-        quantization="quark",
-        model_config_kwargs={
-            "quantization_config": resolve_quantization_config(
-                "quark", {"targets": {target_pattern: "mxfp4"}}
-            )
-        },
-        model_loader_cls=DummyModelLoader,
+        model_loader_cls=_moe_checkpoint_loader(
+            _moe_checkpoint(architecture, requantize_routed, num_layers),
+            loaded_names,
+        ),
+        **load_kwargs,
     )
     expected_model_cls, resolved_architecture = get_model_architecture(
         vllm_config.model_config
@@ -561,27 +784,49 @@ def test_online_quantization(
     assert resolved_architecture == architecture
     assert isinstance(model, expected_model_cls)
 
-    fused_moes = [
+    moes = [
         module
         for module in model.modules()
-        if getattr(module, "is_fused_shared_expert_enabled", False)
+        if hasattr(module, "is_fused_shared_expert_enabled")
         and hasattr(module, "experts")
     ]
-    assert len(fused_moes) == 1, f"{architecture} did not enable FSE"
-    moe = fused_moes[0]
+    assert len(moes) == num_layers, architecture
+    assert {
+        index
+        for index, module in enumerate(moes)
+        if module.is_fused_shared_expert_enabled
+    } == expected_fused, f"{architecture}: unexpected fused layers"
     shared_expert_name = (
-        "shared_expert" if hasattr(moe, "shared_expert") else "shared_experts"
+        "shared_expert" if hasattr(moes[0], "shared_expert") else "shared_experts"
     )
     assert shared_expert_name == expected_shared_expert_name
-    assert getattr(moe, shared_expert_name) is None
+    for index, layer_moe in enumerate(moes):
+        shared = getattr(layer_moe, shared_expert_name)
+        assert (shared is None) == (index in expected_fused), index
+        if shared is not None:
+            # The unfused shared expert keeps its own online precision.
+            assert layer_moe.experts.expert_map_manager.num_fused_shared_experts == 0
+    moe = moes[min(expected_fused)]
 
     routed_experts = moe.experts.routed_experts
-    assert isinstance(routed_experts.quant_method, QuarkOCP_MX_MoEMethod)
+    assert isinstance(
+        routed_experts.quant_method,
+        Mxfp4OnlineMoEMethod if requantize_routed else QuarkOCP_MX_MoEMethod,
+    )
+    if mixed and requantize_routed:
+        unfused_routed = moes[unfused].experts.routed_experts
+        assert isinstance(unfused_routed.quant_method, Mxfp8OnlineMoEMethod)
     shared_expert_prefix = routed_experts.moe_config.shared_expert_prefix
     assert shared_expert_prefix is not None
     assert shared_expert_prefix.endswith(shared_expert_name)
-    assert routed_experts.shared_expert_online_loader is not None
-    assert routed_experts.shared_expert_online_loader.quantizer is not None
+    shared_loader = routed_experts.shared_expert_online_loader
+    assert shared_loader is not None
+    if requantize_routed:
+        # Staged, then quantized with the requantized routed experts.
+        assert shared_loader.routed_requantized
+        assert shared_loader.stages_shared_experts
+    else:
+        assert shared_loader.quantizer is not None
     expert_map_manager = routed_experts.expert_map_manager
     assert expert_map_manager.num_fused_shared_experts == 1
     assert expert_map_manager.map_global_to_local(
@@ -596,16 +841,67 @@ def test_online_quantization(
     assert routed_experts.w13_weight_scale.dtype == torch.uint8
     assert routed_experts.w2_weight.dtype == expected_weight_dtype
     assert routed_experts.w2_weight_scale.dtype == torch.uint8
+
+    assert loaded_names, f"{architecture} loaded no weights"
+    for index in set(range(num_layers)) - expected_fused:
+        # The unfused shared expert is loaded into its own MLP.
+        assert any(
+            f"layers.{index}.{moe_attr}.{shared_expert_name}." in name
+            for name in loaded_names
+        ), (index, sorted(loaded_names))
+
+    # The loaded weights landed in each fused layer's expert slots.
+    for index in sorted(expected_fused):
+        fused_routed = moes[index].experts.routed_experts
+        shared_slot = fused_routed.moe_config.num_logical_experts
+        for slot, value in (
+            (0, _ROUTED_VALUE),
+            (shared_slot, _shared_value(index)),
+        ):
+            what = f"layer {index} slot {slot}"
+            _assert_mxfp4_constant(
+                fused_routed.w13_weight[slot],
+                fused_routed.w13_weight_scale[slot],
+                value,
+                f"{what} w13",
+            )
+            _assert_mxfp4_constant(
+                fused_routed.w2_weight[slot],
+                fused_routed.w2_weight_scale[slot],
+                value,
+                f"{what} w2",
+            )
+
     assert vllm_config.quant_config is not None
     assert vllm_config.quant_config.online_quantization_config is not None
-    assert not any(
-        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-        "cannot be enabled" in warning
+    fse_refusals = [
+        warning
         for warning in _fse_warnings(caplog_vllm)
-    )
-    parent_name = (
-        "block_sparse_moe" if architecture == "MiniMaxM3SparseForCausalLM" else "mlp"
-    )
+        if "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
+        "cannot be enabled" in warning
+    ]
+    # The mixed layer that does not fuse reports why.
+    assert bool(fse_refusals) == mixed, fse_refusals
+    if mixed:
+        # Per-layer targets: every target is reported, in whichever grouping.
+        (log,) = _online_quantization_logs(caplog_vllm)
+        for pattern, scheme in targets.items():
+            assert f"(from targets: {pattern}, {scheme})" in log, log
+        return
+    if requantize_routed:
+        assert _online_quantization_logs(caplog_vllm) == [
+            (
+                "Quantizing 3 layers of types: "
+                f"{moe_attr}.experts: 1 "
+                f"(from targets: {routed_target}, mxfp4); "
+                f"{moe_attr}.{shared_expert_name}.down_proj: 1 "
+                f"(from targets: {target_pattern}, mxfp4); "
+                f"{moe_attr}.{shared_expert_name}.gate_up_proj: 1 "
+                f"(from targets: {target_pattern}, mxfp4)"
+            )
+        ]
+        return
+    parent_name = "block_sparse_moe" if architecture.startswith("MiniMaxM3") else "mlp"
     assert _online_quantization_logs(caplog_vllm) == [
         (
             "Quantizing 2 layers of types: "
@@ -838,6 +1134,7 @@ _ROUTED_TARGET_CASES = [
         ),
     ],
 )
+@override_parallel_groups(SingleRankGroup())
 def test_fse_online_quantization_routed_shared(
     checkpoint_quant_config: dict[str, Any],
     source_cls: type,
@@ -847,7 +1144,6 @@ def test_fse_online_quantization_routed_shared(
     tmp_path: Path,
     monkeypatch,
     caplog_vllm,
-    single_rank_parallel_state,
     workspace_init,
 ) -> None:
     """Routed and/or shared experts are (re)quantized online. The shared experts
@@ -984,10 +1280,10 @@ def test_fse_online_quantization_routed_shared(
             )
 
 
+@override_parallel_groups(SingleRankGroup())
 def test_fse_online_quantization_bf16_routed_quantized_shared_raises(
     tmp_path: Path,
     monkeypatch,
-    single_rank_parallel_state,
     workspace_init,
 ) -> None:
     """Routed experts quantized online from BF16 can not take a staged shared
@@ -1011,9 +1307,9 @@ def test_fse_online_quantization_bf16_routed_quantized_shared_raises(
         )
 
 
+@override_parallel_groups(SingleRankGroup())
 def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
     default_vllm_config,
-    single_rank_parallel_state,
 ) -> None:
     """Routed NVFP4 and shared MXFP8 weights land in their MXFP4 expert slots.
 
@@ -1021,10 +1317,7 @@ def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
     checkpoint names (`w1/w2/w3`, `shared_experts.*`, `weight_scale_inv`), as the
     model loader does.
     """
-    from vllm.models.minimax_m3.amd.model import (
-        MiniMaxM3SparseForCausalLM,
-        _redirect_fused_shared_experts,
-    )
+    from vllm.models.minimax_m3.amd.model import MiniMaxM3SparseForCausalLM
 
     default_vllm_config.model_config = ModelConfig()
     hidden_size = intermediate_size = 64
@@ -1122,7 +1415,16 @@ def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
         decoder_layer.block_sparse_moe = torch.nn.Module()
         decoder_layer.block_sparse_moe.experts = runner
         model.layers = torch.nn.ModuleList([decoder_layer])
-        redirect = partial(_redirect_fused_shared_experts, model=model)
+        # As `MiniMaxM3SparseForCausalLM`'s weights mapper with fused shared experts.
+        redirect = partial(
+            maybe_fuse_shared_experts,
+            n_routed_experts=num_routed_experts,
+            n_shared_experts=1,
+            fused_shared_expert_layers=model.fused_shared_expert_layers,
+            ckpt_prefix="block_sparse_moe.shared_experts",
+            experts_prefix="block_sparse_moe.experts",
+            ckpt_proj_names={"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"},
+        )
         mapper = MiniMaxM3SparseForCausalLM.hf_to_vllm_mapper
         mapper = mapper | WeightsMapper(weights_transforms=[redirect])
         AutoWeightsLoader(model).load_weights(weights, mapper=mapper)
@@ -1151,11 +1453,11 @@ def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
     )
 
 
+@override_parallel_groups(SingleRankGroup())
 def test_online_gate_up_proj_target_disables_fse(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog_vllm,
-    single_rank_parallel_state,
     workspace_init,
 ) -> None:
     """A partial shared-expert target quantizes while disabling FSE."""
@@ -1273,11 +1575,11 @@ else:
 
 
 @pytest.mark.parametrize("requantize", [False, True], ids=["no_requant", "requant"])
+@override_parallel_groups(SingleRankGroup())
 def test_nvfp4_moe_requantization_on_rocm(
     requantize: bool,
     tmp_path: Path,
     default_vllm_config,
-    single_rank_parallel_state,
     workspace_init,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1352,9 +1654,9 @@ def test_nvfp4_moe_requantization_on_rocm(
     assert nvfp4_oracle_logger.mock_calls == []
 
 
+@override_parallel_groups(SingleRankGroup())
 def test_nvfp4_oracle_only_skipped_for_requantized_layers(
     default_vllm_config,
-    single_rank_parallel_state,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only the targeted layer's NVFP4 checkpoint method skips backend selection."""

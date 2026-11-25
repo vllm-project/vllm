@@ -569,6 +569,60 @@ def get_fused_shared_expert_layers(
     return frozenset(fused_layers)
 
 
+# TODO: Remove once all models move to AutoWeightsLoader.
+def load_layer_expert_weights(
+    model: nn.Module,
+    weights: Iterable[tuple],
+    loaded_params: set[str],
+    experts_prefix: str = "mlp.experts",
+) -> Iterable[tuple]:
+    """Load expert tensors through the experts loader of their own layer, and
+    yield the other tensors.
+
+    For hand-written `load_weights` loops, which `AutoWeightsLoader` does not
+    descend into. The layer's `RoutedExperts.load_weights` resolves that layer's
+    parameters, e.g. the online quantization staging parameters of fused shared
+    experts, which differ per layer under per-layer quantization: a model-wide
+    expert mapping cannot. As in `AutoWeightsLoader`, each run of consecutive
+    tensors of a layer's experts is loaded in one call.
+
+    Args:
+        model: Module the weight names are relative to.
+        weights: Checkpoint `(name, tensor, ...)` tuples.
+        loaded_params: Updated with the names of the loaded expert parameters.
+        experts_prefix: Module name of the routed experts in a layer.
+
+    Yields:
+        The tensors that are not routed expert tensors of a layer of `model`,
+        e.g. those of speculative decoding layers, in their original order.
+
+    """
+    marker = f"{experts_prefix}."
+
+    def layer_prefix(item: tuple) -> str | None:
+        return item[0].split(marker, 1)[0] if marker in item[0] else None
+
+    for prefix, group in itertools.groupby(weights, key=layer_prefix):
+        if prefix is None:
+            yield from group
+            continue
+        experts_name = f"{prefix}{experts_prefix}"
+        if is_pp_missing_parameter(experts_name, model):
+            continue
+        try:
+            experts = model.get_submodule(experts_name)
+        except AttributeError:
+            # Not a layer of this model; left to the caller.
+            yield from group
+            continue
+        loaded_params.update(
+            f"{experts_name}.{loaded}"
+            for loaded in experts.load_weights(
+                (name.split(marker, 1)[1], weight) for name, weight, *_ in group
+            )
+        )
+
+
 def maybe_fuse_shared_experts(
     weights: Iterable[tuple[str, torch.Tensor]],
     *,
@@ -576,21 +630,29 @@ def maybe_fuse_shared_experts(
     n_shared_experts: int,
     fused_shared_expert_layers: frozenset[int],
     ckpt_prefix: str = "mlp.shared_experts",
+    experts_prefix: str = "mlp.experts",
+    ckpt_proj_names: dict[str, str] | None = None,
 ) -> Iterable[tuple[str, torch.Tensor]]:
     """Route AITER fused-shared-expert checkpoint weights into fused slots.
 
     When AITER fused-shared-experts is active, shared experts are packed into
     the routed expert tensor. The checkpoint stores them under `ckpt_prefix`
     as a single (possibly widened) tensor; this splits it into
-    `n_shared_experts` chunks named `mlp.experts.{n_routed_experts + j}` so
-    the `RoutedExperts` loader treats them as extra experts. Yields the input
-    unchanged when the fusion is inactive, so callers can wrap unconditionally.
+    `n_shared_experts` chunks named `{experts_prefix}.{n_routed_experts + j}`
+    so the `RoutedExperts` loader of their layer treats them as extra experts.
+    That loader resolves the parameters per layer, e.g. the online quantization
+    staging parameters, which a model-wide expert mapping cannot. Yields the
+    input unchanged when the fusion is inactive, so callers can wrap
+    unconditionally.
 
     Args:
         weights: Iterable of `(name, tensor)` checkpoint pairs.
         n_routed_experts: Number of routed experts; offsets the fused slots.
         n_shared_experts: Number of shared experts packed into the tensor.
         ckpt_prefix: Checkpoint module name of the shared experts.
+        experts_prefix: Module name of the routed experts.
+        ckpt_proj_names: Renames the shared experts' projections to the routed
+            experts' checkpoint names, e.g. `{"gate_proj": "w1"}`.
         fused_shared_expert_layers: Layer indices whose shared expert was fused
             at construction time, as returned by
             `get_fused_shared_expert_layers`. Only weights belonging to these
@@ -614,6 +676,18 @@ def maybe_fuse_shared_experts(
         if extract_layer_index(name) not in fused_shared_expert_layers:
             yield name, loaded_weight
             continue
+        suffix = name.split(prefix, 1)[1]
+        if ckpt_proj_names:
+            projection, dot, tail = suffix.partition(".")
+            suffix = ckpt_proj_names.get(projection, projection) + dot + tail
+        if n_shared_experts == 1:
+            # Nothing to split: also keeps 0-D tensors (e.g. per-tensor scales).
+            yield (
+                name.split(prefix, 1)[0]
+                + f"{experts_prefix}.{n_routed_experts}.{suffix}",
+                loaded_weight,
+            )
+            continue
         # gate/up split on the output dim; down_proj on the input dim.
         split_dim = 1 if ("down_proj.weight" in name and loaded_weight.ndim > 1) else 0
         total = loaded_weight.shape[split_dim]
@@ -632,7 +706,8 @@ def maybe_fuse_shared_experts(
             else:
                 chunk_weight = loaded_weight[:, sl]
             yield (
-                name.replace(prefix, f"mlp.experts.{n_routed_experts + j}."),
+                name.split(prefix, 1)[0]
+                + f"{experts_prefix}.{n_routed_experts + j}.{suffix}",
                 chunk_weight,
             )
 

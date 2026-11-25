@@ -170,8 +170,21 @@ def test_eagle_mistral_large3_loads_weights(tmp_path: Path):
         model=str(tmp_path), skip_tokenizer_init=True, max_model_len=32
     )
     vllm_config = VllmConfig(model_config=model_config)
+    # The draft model is the target model itself here.
+    vllm_config.speculative_config = SimpleNamespace(draft_model_config=model_config)
     with set_current_vllm_config(vllm_config):
-        model = eagle_mod.EagleMistralLarge3Model(vllm_config=vllm_config)
+        causal_lm = eagle_mod.EagleMistralLarge3ForCausalLM(vllm_config=vllm_config)
+        model = causal_lm.model
         weight = torch.arange(config.hidden_size, dtype=model.norm.weight.dtype)
         assert model.load_weights([("norm.weight", weight)]) == {"norm.weight"}
         torch.testing.assert_close(model.norm.weight, weight, rtol=0, atol=0)
+
+        # Through the draft's own loader, whose mapper renames the Mistral
+        # checkpoint names (`eagle_linear.*` -> `model.fc.*`).
+        fc_weight = torch.ones_like(model.fc.weight)
+        loaded = causal_lm.load_weights(
+            [("eagle_linear.weight", fc_weight), ("norm.weight", weight + 1)]
+        )
+        assert {"model.fc.weight", "model.norm.weight"} <= loaded
+        torch.testing.assert_close(model.fc.weight, fc_weight, rtol=0, atol=0)
+        torch.testing.assert_close(model.norm.weight, weight + 1, rtol=0, atol=0)
