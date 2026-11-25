@@ -40,6 +40,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
 
 # Request message-type tags. Frame 0 of every request.
 LOOKUP_MSG: bytes = b"lookup"
+# LOOKUP_MSG payload plus frame 4: confirmed local prefix tokens (u32).
+LOOKUP_FROM_MSG: bytes = b"lookup_from_v1"
 RESET_MSG: bytes = b"reset"
 
 # Single-byte response status codes for admin commands.
