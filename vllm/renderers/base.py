@@ -79,6 +79,10 @@ logger = init_logger(__name__)
 
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 
+SERVER_OWNED_CHAT_TEMPLATE_KWARGS = frozenset(
+    {"tokenize", "padding", "max_length", "tokenizer_kwargs"}
+)
+
 
 class _SwappableExecutor(Executor):
     """Executor whose inner pool can be replaced without changing identity.
