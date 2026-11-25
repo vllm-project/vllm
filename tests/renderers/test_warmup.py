@@ -362,7 +362,7 @@ class TestEngineStartWarmupHook:
                 MagicMock(),
                 MagicMock(),
                 # Passing this rejected kwarg is the point of the test.
-                renderer=self._mock_renderer(),  # type: ignore[call-arg]
+                renderer=self._mock_renderer(),  # type: ignore[call-arg, ty:unknown-argument]
             )
 
     def test_inproc_client_forwards_fail_callback_but_not_renderer(self):

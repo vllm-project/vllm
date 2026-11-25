@@ -60,7 +60,7 @@ def as_expert_substitution_model(model_cls: type[_T], model_config: Any) -> type
         return model_cls
     value_names = spec.value_names
 
-    class ExpertSubstitutionModel(model_cls):  # type: ignore[valid-type, misc]
+    class ExpertSubstitutionModel(model_cls):  # type: ignore[valid-type, misc, ty:shadowed-type-variable]
         @wraps(model_cls.__init__)  # type: ignore[misc]
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)

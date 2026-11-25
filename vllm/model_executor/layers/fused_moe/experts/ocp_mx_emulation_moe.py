@@ -167,11 +167,11 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         """Dequantize weights based on the OCP MX scheme."""
-        if self.ocp_mx_scheme.startswith("w_mxfp4"):  # type: ignore[union-attr]
+        if self.ocp_mx_scheme.startswith("w_mxfp4"):  # type: ignore[union-attr, ty:missing-union-attribute]
             return dequant_mxfp4(w, w_scale, dtype)
-        elif self.ocp_mx_scheme.startswith("w_mxfp6_e3m2"):  # type: ignore[union-attr]
+        elif self.ocp_mx_scheme.startswith("w_mxfp6_e3m2"):  # type: ignore[union-attr, ty:missing-union-attribute]
             return dequant_mxfp6(w, w_scale, quant_dtype="fp6_e3m2", float_dtype=dtype)
-        elif self.ocp_mx_scheme.startswith("w_mxfp6_e2m3"):  # type: ignore[union-attr]
+        elif self.ocp_mx_scheme.startswith("w_mxfp6_e2m3"):  # type: ignore[union-attr, ty:missing-union-attribute]
             return dequant_mxfp6(w, w_scale, quant_dtype="fp6_e2m3", float_dtype=dtype)
         else:
             raise NotImplementedError(f"Unsupported ocp_mx_scheme={self.ocp_mx_scheme}")
@@ -197,7 +197,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         if (
             current_platform.is_rocm()
             and dtype == torch.bfloat16
-            and self.ocp_mx_scheme.startswith("w_mxfp4")  # type: ignore[union-attr]
+            and self.ocp_mx_scheme.startswith("w_mxfp4")  # type: ignore[union-attr, ty:missing-union-attribute]
             # Rows of -1 ids stay unwritten. MX activation scales are per block,
             # but a dynamic fp8 a2 scale would be reduced over those rows too.
             and not (

@@ -217,7 +217,7 @@ class IpcPeerTransport(PeerTransport):
         h = None
         try:
             p = lib.cudaMalloc(max(self.capacity, 1))
-            self._base = int(p.value)  # type: ignore[arg-type]
+            self._base = int(p.value)  # type: ignore[arg-type, ty:invalid-argument-type]
             lib.cudaMemset(p, 0, max(self.capacity, 1))
             h = bytes(lib.cudaIpcGetMemHandle(p))
         except Exception:
@@ -234,8 +234,8 @@ class IpcPeerTransport(PeerTransport):
                     bases.append(self._base)
                     continue
                 q = lib.cudaIpcOpenMemHandle(cudaIpcMemHandle_t.from_buffer_copy(hb))
-                self._opened.append(int(q.value))  # type: ignore[arg-type]
-                bases.append(int(q.value))  # type: ignore[arg-type]
+                self._opened.append(int(q.value))  # type: ignore[arg-type, ty:invalid-argument-type]
+                bases.append(int(q.value))  # type: ignore[arg-type, ty:invalid-argument-type]
             opened = True
         except Exception:
             logger.exception(
@@ -334,7 +334,7 @@ class SymmMemPeerTransport(PeerTransport):
         # peer_ptrs / multicast_ptr are the allocation's bases: the arena must start
         # there (a pooled sub-allocation would not).
         ok = (
-            int(handle.buffer_ptrs[self.rank]) == int(buf.data_ptr())  # type: ignore[union-attr]
+            int(handle.buffer_ptrs[self.rank]) == int(buf.data_ptr())  # type: ignore[union-attr, ty:missing-union-attribute]
             and handle.world_size == self.world
             and handle.rank == self.rank
         )
@@ -344,7 +344,7 @@ class SymmMemPeerTransport(PeerTransport):
                 "rank %d/%d, expected %d/%d",
                 self.rank,
                 int(handle.buffer_ptrs[self.rank]),
-                int(buf.data_ptr()),  # type: ignore[union-attr]
+                int(buf.data_ptr()),  # type: ignore[union-attr, ty:missing-union-attribute]
                 handle.rank,
                 handle.world_size,
                 self.rank,

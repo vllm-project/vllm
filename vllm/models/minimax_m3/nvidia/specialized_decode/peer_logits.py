@@ -193,10 +193,10 @@ class PeerPushedLogits:
             raise RuntimeError(f"{self._name}: peer logits used before warm_up")
         torch.mm(hidden_states, self._lm_head.weight.t(), out=self._shards.local[:rows])
         self._push(rows)
-        return self._full[:rows]  # type: ignore[index]
+        return self._full[:rows]  # type: ignore[index, ty:not-subscriptable]
 
     def _push(self, rows: int) -> None:
-        shards: PeerShards = self._shards  # type: ignore[assignment]
+        shards: PeerShards = self._shards  # type: ignore[assignment, ty:invalid-assignment]
         weight = self._lm_head.weight
         local = shards.local[:rows]
         _push_shard_kernel[(rows, triton.cdiv(shards.shard, self.BLOCK))](

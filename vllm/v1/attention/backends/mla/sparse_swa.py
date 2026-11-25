@@ -796,7 +796,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             tile_sched_c128a=tile_sched[_LAYER_TYPE_C128A],
             tile_sched_c1a=tile_sched[_LAYER_TYPE_C1A],
             tile_sched_c2a=tile_sched[_LAYER_TYPE_C2A],
-            **deepseek_v4_fields,  # type: ignore[arg-type]
+            **deepseek_v4_fields,  # type: ignore[arg-type, ty:invalid-argument-type]
         )
 
     def _build_image_visibility(

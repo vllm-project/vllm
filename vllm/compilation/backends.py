@@ -89,7 +89,7 @@ def make_copy_and_call(
             if input_buffers[i] is None:
                 input_buffers[i] = runtime_tensor.clone()
 
-            static_tensor = input_buffers[i][:runtime_shape]  # type: ignore[index]
+            static_tensor = input_buffers[i][:runtime_shape]  # type: ignore[index, ty:not-subscriptable]
             static_tensor.copy_(runtime_tensor)
             list_args[index] = static_tensor
         return callable_fn(*list_args)

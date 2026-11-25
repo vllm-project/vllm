@@ -717,7 +717,7 @@ def test_get_gen_prompt(
     # Call the function and get the result. The plain role/content request
     # messages are already in conversation shape, which mypy cannot see
     # through ``ChatCompletionMessageParam``.
-    result = safe_apply_chat_template(  # type: ignore[call-overload]
+    result = safe_apply_chat_template(  # type: ignore[call-overload, ty:no-matching-overload]
         model_config,
         tokenizer,
         mock_request.messages,

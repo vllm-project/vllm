@@ -188,7 +188,7 @@ class ServingTokenization(BaseServing):
             TokensPrompt(prompt_token_ids=request.tokens),
             tok_params,
         )
-        prompt_text = tok_prompt["prompt"]  # type: ignore[typeddict-item]
+        prompt_text = tok_prompt["prompt"]  # type: ignore[typeddict-item, ty:invalid-typed-dict-key]
 
         return DetokenizeResponse(prompt=prompt_text)
 

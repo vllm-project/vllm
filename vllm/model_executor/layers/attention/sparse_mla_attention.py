@@ -1448,7 +1448,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         assert output is not None and output_lse is not None
         return output, output_lse
 
-    def forward_mha(  # type: ignore[override]
+    def forward_mha(  # type: ignore[override, ty:incompatible-method-override]
         self,
         q: torch.Tensor,
         kv_c_normed: torch.Tensor,

@@ -417,7 +417,7 @@ def build_ultraquant_decode_hd256_module(
         trip_or_zero = in_range.select(trip_clamped, 0)
         loop_init = [running_max, running_sum, *acc_pv]
         results = loop_init
-        for tg_idx, state in range(0, trip_or_zero, 1, init=loop_init):  # type: ignore[call-overload]
+        for tg_idx, state in range(0, trip_or_zero, 1, init=loop_init):  # type: ignore[call-overload, ty:no-matching-overload, ty:not-iterable]
             tg_i32 = fx.Int32(tg_idx)
             partition_start = (part + tg_i32 * NUM_PARTS_C) * KV_COMPUTE_BLOCK
             bt_seq_base = seq * _stride_bt_seq + (partition_start // _BS)

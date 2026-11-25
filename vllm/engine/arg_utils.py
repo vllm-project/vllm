@@ -2012,7 +2012,7 @@ class EngineArgs:
             hf_config_path=self.hf_config_path,
             runner=self.runner,
             convert=self.convert,
-            tokenizer=self.tokenizer,  # type: ignore[arg-type]
+            tokenizer=self.tokenizer,  # type: ignore[arg-type, ty:invalid-argument-type]
             tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
@@ -2318,10 +2318,10 @@ class EngineArgs:
         )
 
         cache_config = CacheConfig(
-            block_size=self.block_size,  # type: ignore[arg-type]
+            block_size=self.block_size,  # type: ignore[arg-type, ty:invalid-argument-type]
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
-            enable_extensible_kv_cache=self.enable_extensible_kv_cache,  # type: ignore[arg-type]
+            enable_extensible_kv_cache=self.enable_extensible_kv_cache,  # type: ignore[arg-type, ty:invalid-argument-type]
             cache_dtype=resolved_cache_dtype,  # type: ignore[arg-type]
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,

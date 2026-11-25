@@ -328,7 +328,7 @@ class PrithviMultimodalDataProcessor(IOProcessor[ImagePrompt, ImageRequestOutput
                 }
             )
 
-        return prompts  # type: ignore[return-value]
+        return prompts  # type: ignore[return-value, ty:invalid-explicit-return]
 
     def post_process(
         self,

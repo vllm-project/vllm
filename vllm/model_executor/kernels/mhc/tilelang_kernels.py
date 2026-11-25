@@ -715,14 +715,14 @@ def mhc_fused_tilelang(
     h_per_split = h // split_k
     n_tiles = n_out // tile_n
 
-    comb_mix: T.Tensor((m, hc, hc), T.float32)  # type: ignore[no-redef, valid-type]
-    residual_in: T.Tensor((m, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
-    post_mix: T.Tensor((m, hc), T.float32)  # type: ignore[no-redef, valid-type]
-    x_in: T.Tensor((m, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
-    weight_t: T.Tensor((n_out, hc, h), T.float32)  # type: ignore[no-redef, valid-type]
-    yp_out: T.Tensor((split_k, m, n_out), T.float32)  # type: ignore[no-redef, valid-type]
-    rp_out: T.Tensor((split_k, m), T.float32)  # type: ignore[no-redef, valid-type]
-    residual_out: T.Tensor((m, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
+    comb_mix: T.Tensor((m, hc, hc), T.float32)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    residual_in: T.Tensor((m, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    post_mix: T.Tensor((m, hc), T.float32)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    x_in: T.Tensor((m, h), T.bfloat16)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    weight_t: T.Tensor((n_out, hc, h), T.float32)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    yp_out: T.Tensor((split_k, m, n_out), T.float32)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    rp_out: T.Tensor((split_k, m), T.float32)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    residual_out: T.Tensor((m, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
 
     h_iters = h_per_split // n_thr
     num_warps = n_thr // 32
@@ -827,11 +827,11 @@ def mhc_post_tilelang(
     h = hidden
 
     h_blk = math.gcd(hidden, h_blk)
-    a: T.Tensor((n, hc, hc), T.float32)  # type: ignore[no-redef, valid-type]
-    b: T.Tensor((n, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
-    c: T.Tensor((n, hc), T.float32)  # type: ignore[no-redef, valid-type]
-    d: T.Tensor((n, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
-    x: T.Tensor((n, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
+    a: T.Tensor((n, hc, hc), T.float32)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    b: T.Tensor((n, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    c: T.Tensor((n, hc), T.float32)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    d: T.Tensor((n, h), T.bfloat16)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    x: T.Tensor((n, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
     with T.Kernel(n, threads=n_thr) as i_n:
         b_shared = T.alloc_shared((hc, h_blk), T.bfloat16)
         d_shared = T.alloc_shared(h_blk, T.bfloat16)
@@ -882,10 +882,10 @@ def hc_prenorm_gemm_tilelang(
     k_iters = k_per_split // n_thr
     n_tiles = T.ceildiv(n_out, tile_n)
 
-    x: T.Tensor((num_tokens, hc_hidden_size), T.bfloat16)  # type: ignore[no-redef, valid-type]
-    fn: T.Tensor((n_out, hc_hidden_size), T.float32)  # type: ignore[no-redef, valid-type]
-    out: T.Tensor((n_splits, num_tokens, n_out), T.float32)  # type: ignore[no-redef, valid-type]
-    sqrsum: T.Tensor((n_splits, num_tokens), T.float32)  # type: ignore[no-redef, valid-type]
+    x: T.Tensor((num_tokens, hc_hidden_size), T.bfloat16)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    fn: T.Tensor((n_out, hc_hidden_size), T.float32)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    out: T.Tensor((n_splits, num_tokens, n_out), T.float32)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    sqrsum: T.Tensor((n_splits, num_tokens), T.float32)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
 
     with T.Kernel(num_tokens, n_tiles, n_splits, threads=n_thr) as (
         i_n,
@@ -966,10 +966,10 @@ def hc_prenorm_gemm_block_m_tilelang(
     n_tiles = T.ceildiv(n_out, tile_n)
     m_tiles = T.ceildiv(num_tokens, block_m)
 
-    x: T.Tensor((num_tokens, hc_hidden_size), T.bfloat16)  # type: ignore[no-redef, valid-type]
-    fn: T.Tensor((n_out, hc_hidden_size), T.float32)  # type: ignore[no-redef, valid-type]
-    out: T.Tensor((1, num_tokens, n_out), T.float32)  # type: ignore[no-redef, valid-type]
-    sqrsum: T.Tensor((1, num_tokens), T.float32)  # type: ignore[no-redef, valid-type]
+    x: T.Tensor((num_tokens, hc_hidden_size), T.bfloat16)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    fn: T.Tensor((n_out, hc_hidden_size), T.float32)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    out: T.Tensor((1, num_tokens, n_out), T.float32)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
+    sqrsum: T.Tensor((1, num_tokens), T.float32)  # type: ignore[no-redef, valid-type, ty:invalid-type-form]
 
     with T.Kernel(m_tiles, n_tiles, threads=n_thr) as (i_mt, i_t):
         tid = T.get_thread_binding()

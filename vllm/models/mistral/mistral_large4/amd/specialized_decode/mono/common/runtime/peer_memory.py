@@ -182,9 +182,9 @@ class SymmetricPeerBuffer:
             readiness = [None] * npes
             dist.all_gather_object(readiness, (local_error, mine), group=group)
             failed = [
-                (peer, status[0])  # type: ignore[index]
+                (peer, status[0])  # type: ignore[index, ty:not-subscriptable]
                 for peer, status in enumerate(readiness)
-                if status[0] is not None  # type: ignore[index]
+                if status[0] is not None  # type: ignore[index, ty:not-subscriptable]
             ]
             if failed:
                 detail = "; ".join(f"rank {peer}: {error}" for peer, error in failed)
@@ -199,7 +199,7 @@ class SymmetricPeerBuffer:
 
             addresses = []
             open_error = None
-            for peer_rank, (_, peer) in enumerate(readiness):  # type: ignore[misc]
+            for peer_rank, (_, peer) in enumerate(readiness):  # type: ignore[misc, ty:not-iterable]
                 handle, offset = peer  # type: ignore[has-type]
                 if peer_rank == rank:
                     addresses.append(self.local_address)

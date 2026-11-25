@@ -2131,7 +2131,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index]
+                conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index, ty:not-subscriptable]
                     : attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
                 ],
                 validate_data=True,
@@ -2217,7 +2217,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     v=value_spec,
                     initial_state=ssm_state,
                     inplace_final_state=True,
-                    cu_seqlens=spec_query_start_loc[  # type: ignore[index]
+                    cu_seqlens=spec_query_start_loc[  # type: ignore[index, ty:not-subscriptable]
                         : attn_metadata.num_spec_decodes
                         + 1  # type: ignore[attr-defined]
                     ],
@@ -2238,21 +2238,21 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     1,
                     self.num_v_heads // self.tp_size,
                     self.head_v_dim,
-                    dtype=mixed_qkv_non_spec.dtype,  # type: ignore[union-attr]
-                    device=mixed_qkv_non_spec.device,  # type: ignore[union-attr]
+                    dtype=mixed_qkv_non_spec.dtype,  # type: ignore[union-attr, ty:missing-union-attribute]
+                    device=mixed_qkv_non_spec.device,  # type: ignore[union-attr, ty:missing-union-attribute]
                 )
                 self._replayssm_decode(
-                    mixed_qkv_non_spec[:num_decode_tokens].contiguous(),  # type: ignore[index]
+                    mixed_qkv_non_spec[:num_decode_tokens].contiguous(),  # type: ignore[index, ty:not-subscriptable]
                     a[:num_decode_tokens],
                     b[:num_decode_tokens],
-                    non_spec_state_indices_tensor[: attn_metadata.num_decodes],  # type: ignore[index]
+                    non_spec_state_indices_tensor[: attn_metadata.num_decodes],  # type: ignore[index, ty:not-subscriptable]
                     out_decode,
                     attn_metadata,
                 )
                 core_attn_out_decode = out_decode.transpose(0, 1)
             else:
                 query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
-                    mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
+                    mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index, ty:not-subscriptable]
                 )
                 core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -2264,7 +2264,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     v=value_decode,
                     initial_state=ssm_state,
                     inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
+                    cu_seqlens=non_spec_query_start_loc[  # type: ignore[index, ty:not-subscriptable]
                         : attn_metadata.num_decodes + 1
                     ],
                     ssm_state_indices=non_spec_state_indices_tensor,
@@ -2370,7 +2370,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     v=value_non_spec,
                     initial_state=ssm_state,
                     inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
+                    cu_seqlens=non_spec_query_start_loc[  # type: ignore[index, ty:not-subscriptable]
                         : attn_metadata.num_decodes
                         + 1  # type: ignore[attr-defined]
                     ],
@@ -2573,7 +2573,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index]
+                conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index, ty:not-subscriptable]
                     : attn_metadata.num_actual_tokens
                 ],
                 validate_data=True,
@@ -2594,7 +2594,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             head_v_dim=self.head_v_dim,
             initial_state=ssm_state,
             inplace_final_state=True,
-            cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],  # type: ignore[index]
+            cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],  # type: ignore[index, ty:not-subscriptable]
             ssm_state_indices=non_spec_state_indices_tensor,
             use_qk_l2norm_in_kernel=True,
             core_attn_out=core_attn_out.reshape(-1),
@@ -2627,7 +2627,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             ba[:num_tokens],
             conv_state,
             self.kv_cache[1],
-            attn_metadata.non_spec_state_indices_tensor[:num_tokens],  # type: ignore[index]
+            attn_metadata.non_spec_state_indices_tensor[:num_tokens],  # type: ignore[index, ty:not-subscriptable]
             conv_weights,
             conv_bias,
             self.A_log,
@@ -2638,7 +2638,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             quant_dtype=None,
             qkvz_layout=self.qkvz_layout,
             # Empty query segments mark padded CUDA-graph rows; the kernel skips them.
-            query_start_loc=attn_metadata.non_spec_query_start_loc[  # type: ignore[index]
+            query_start_loc=attn_metadata.non_spec_query_start_loc[  # type: ignore[index, ty:not-subscriptable]
                 : num_tokens + 1
             ],
             out=normed_out[:num_tokens],

@@ -40,7 +40,7 @@ class ForwardPipelineExecutor(ExecutorWithExternalLauncher):
 
     supports_pp = True
 
-    def collective_rpc(  # type: ignore[override]
+    def collective_rpc(  # type: ignore[override, ty:incompatible-method-override]
         self,
         method: str | Callable,
         timeout: float | None = None,

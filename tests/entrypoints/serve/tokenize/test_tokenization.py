@@ -105,7 +105,7 @@ async def test_tokenize_chat(
                 if continue_final:
                     conversation.append({"role": "assistant", "content": "Sure,"})
 
-                prompt = tokenizer.apply_chat_template(  # type: ignore[call-arg]
+                prompt = tokenizer.apply_chat_template(  # type: ignore[call-arg, ty:missing-argument]
                     add_generation_prompt=add_generation,
                     continue_final_message=continue_final,
                     conversation=conversation,
@@ -173,7 +173,7 @@ async def test_tokenize_chat_with_tools(
                 if continue_final:
                     conversation.append({"role": "assistant", "content": "Sure,"})
 
-                prompt = tokenizer.apply_chat_template(  # type: ignore[call-arg]
+                prompt = tokenizer.apply_chat_template(  # type: ignore[call-arg, ty:missing-argument]
                     add_generation_prompt=add_generation,
                     continue_final_message=continue_final,
                     conversation=conversation,

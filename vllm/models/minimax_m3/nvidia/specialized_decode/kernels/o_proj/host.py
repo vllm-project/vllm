@@ -413,7 +413,7 @@ def _views(
         _arg(weight.view(torch.uint8)),
         _arg(weight_scale.view(torch.uint8).reshape(-1)),
         _arg(x_bytes),
-        _arg(xsf.view(torch.uint8).reshape(-1)),  # type: ignore[union-attr]
+        _arg(xsf.view(torch.uint8).reshape(-1)),  # type: ignore[union-attr, ty:missing-union-attribute]
         _arg(
             y.view(-1)
             if y.numel()

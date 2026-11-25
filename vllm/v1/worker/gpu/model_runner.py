@@ -1328,7 +1328,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 prompt_len=prompt_len,
                 all_token_ids=new_req_data.prefill_token_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
-                max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
+                max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type, ty:invalid-argument-type]
             )
             req_index = self.req_states.req_id_to_index[req_id]
             if self.adaptive_verification is not None:
@@ -2362,7 +2362,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_runner_output = ModelRunnerOutput(
             req_ids=input_batch.req_ids,
             sampled_token_ids=None,  # type: ignore
-            prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
+            prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type, ty:invalid-argument-type]
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
             cudagraph_stats=cudagraph_stats,
         )

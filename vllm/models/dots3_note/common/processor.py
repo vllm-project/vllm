@@ -613,7 +613,7 @@ class Dots3NoteDummyInputsBuilder(BaseDummyInputsBuilder[Dots3NoteProcessingInfo
         num_videos = mm_counts.get("video", 0)
         if num_videos:
             width, height = self.info.get_max_image_size()
-            factor = self.info.image_processor.factor  # type: ignore[union-attr]
+            factor = self.info.image_processor.factor  # type: ignore[union-attr, ty:missing-union-attribute]
             frame_tokens = max(1, width * height // (factor * factor))
             video_tokens = max(1, seq_len - seq_len // 4)
             num_frames = max(4, math.ceil(video_tokens / frame_tokens))
@@ -725,7 +725,7 @@ class Dots3NoteMultiModalProcessor(BaseMultiModalProcessor[Dots3NoteProcessingIn
             image_start_id = vocab[IMAGE_START]
             image_pad_id = vocab[IMAGE_PAD]
             image_end_id = vocab[IMAGE_END]
-            merge_size = self.info.image_processor.merge_size  # type: ignore[union-attr]
+            merge_size = self.info.image_processor.merge_size  # type: ignore[union-attr, ty:missing-union-attribute]
 
             def image_replacement(item_idx: int) -> PromptUpdateDetails:
                 grid = out_mm_kwargs["image"][item_idx]["image_grid_thw"].data

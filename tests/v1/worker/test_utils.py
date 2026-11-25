@@ -142,7 +142,7 @@ def _as_cache_handles(*handles: SimpleNamespace) -> list[HiSparseCacheHandle]:
     Each stand-in carries only the HiSparseCacheHandle fields its test's code
     path reads, so reading any other field still raises AttributeError.
     """
-    return [*handles]  # type: ignore[list-item]  # SimpleNamespace stand-ins
+    return [*handles]  # type: ignore[list-item, ty:invalid-explicit-return]  # SimpleNamespace stand-ins
 
 
 def test_hisparse_worker_get_kv_connector_stats_reads_completed_snapshot(monkeypatch):

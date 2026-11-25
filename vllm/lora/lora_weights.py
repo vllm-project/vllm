@@ -223,8 +223,8 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         # Use each projection's own scaling (e.g. alpha/sqrt(r) for rsLoRA, or
         # per-module values from rank_pattern / alpha_pattern) instead of
         # alpha/rank.
-        w1_scaling = loras[0].scaling  # type: ignore[union-attr]
-        w2_scaling = loras[1].scaling  # type: ignore[union-attr]
+        w1_scaling = loras[0].scaling  # type: ignore[union-attr, ty:missing-union-attribute]
+        w2_scaling = loras[1].scaling  # type: ignore[union-attr, ty:missing-union-attribute]
         last_scaling = loras[2].scaling if loras[2] is not None else w1_scaling
 
         if is_non_gated_moe:

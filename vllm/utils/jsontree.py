@@ -139,7 +139,7 @@ def json_reduce_leaves(
 def json_reduce_leaves(
     func: Callable[[_T, _T], _T] | Callable[[_U, _T], _U],
     value: _JSONTree[_T],
-    initial: _U = ...,  # type: ignore[assignment]
+    initial: _U = ...,  # type: ignore[assignment, ty:invalid-parameter-default]
     /,
 ) -> _T | _U:
     """Apply a function of two arguments cumulatively to each leaf in a

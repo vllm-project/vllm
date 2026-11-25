@@ -2260,7 +2260,7 @@ def _shared_cta(
                 _wait(b_dn_rdy, 0)
                 prims.tcgen05_fence(prims.Tcgen05Fence.AFTER_THREAD_SYNC)
             _wait(sh_full.subview(st), (g // cutlass.Int32(SH_NST)) & cutlass.Int32(1))
-            raw = cutlass.Int32(_SB_RAW // 4) + st * cutlass.Int32(512)  # type: ignore[operator]
+            raw = cutlass.Int32(_SB_RAW // 4) + st * cutlass.Int32(512)  # type: ignore[operator, ty:unsupported-operator]
             if (g < cutlass.Int32(SH_GT)) & cutlass.Boolean(not SH_PRETILE):
                 # MMA row 32 Q + i = quadrant Q's row i: word 4 i + Q <- raw atom Q's word 4 i + sid % 4
                 w4 = [

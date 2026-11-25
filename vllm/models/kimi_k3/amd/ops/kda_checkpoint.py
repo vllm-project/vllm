@@ -21,7 +21,7 @@ class KimiK3ROCmKDAPrefillCheckpointExporter(FlashKDAPrefillCheckpointExporter):
     `state_len` is `conv_kernel_size - 1`, not the spec-widened conv row.
     """
 
-    def export(  # type: ignore[override]
+    def export(  # type: ignore[override, ty:incompatible-method-override]
         self,
         checkpoint: MambaPrefillCheckpointMetadata,
         *,

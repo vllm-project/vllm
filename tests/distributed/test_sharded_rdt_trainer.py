@@ -169,7 +169,7 @@ class TestShardedRDTTrainerInitInfo:
         assert ShardedRDTTrainerInitInfo(num_consumers=4, rank=1).is_sender is False
         with pytest.raises(TypeError):
             # rank is keyword-only.
-            ShardedRDTTrainerInitInfo(4, 0)  # type: ignore[misc]
+            ShardedRDTTrainerInitInfo(4, 0)  # type: ignore[misc, ty:missing-argument]
 
     def test_registered_in_trainer_factory(self):
         cls = WeightTransferTrainerFactory._registry["sharded_rdt"]()

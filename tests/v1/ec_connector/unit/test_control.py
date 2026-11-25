@@ -45,7 +45,7 @@ class _ConcreteConn(ControlConnection):
 
 def test_control_connection_abc_cannot_be_instantiated_directly():
     with pytest.raises(TypeError):
-        ControlConnection()  # type: ignore[abstract]
+        ControlConnection()  # type: ignore[abstract, ty:abstract-class-instantiation]
 
 
 def test_concrete_connection_send_recv():

@@ -1066,7 +1066,7 @@ class MockMLAAttentionLayer(MLAAttention):
         raise NotImplementedError
 
     # test replica takes only the arguments the test passes
-    def forward_impl(  # type: ignore[override]
+    def forward_impl(  # type: ignore[override, ty:incompatible-method-override]
         self,
         q: torch.Tensor,
         kv_c: torch.Tensor,

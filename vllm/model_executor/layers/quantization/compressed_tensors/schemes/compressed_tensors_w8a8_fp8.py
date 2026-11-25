@@ -84,7 +84,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             self.weight_quant_key = weight_quant_key_mapping[self.strategy]
 
     @property
-    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override, ty:incompatible-property-override]
         kernel = getattr(self, "fp8_linear", None)
         return isinstance(kernel, CutlassFP8ScaledMMLinearKernel) or (
             self.weight_block_size == [128, 128]

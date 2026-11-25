@@ -312,7 +312,7 @@ class PublishingLowLatencyBlockscaledGemmKernel(LowLatencyBlockscaledGemmKernel)
             tDpredC[i] = cute.elem_less(tDcC[i], mC_mnl.shape)
 
         if cutlass.const_expr(self.use_scale):
-            scale_value = mScale[0].to(self.acc_dtype)  # type: ignore[index]
+            scale_value = mScale[0].to(self.acc_dtype)  # type: ignore[index, ty:not-subscriptable]
 
         if cutlass.const_expr(self.use_bias):
             gBias_mnl = cute.local_tile(

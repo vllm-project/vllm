@@ -409,7 +409,7 @@ class SharedWeightParameter(BasevLLMParameter):
         return super().__new__(cls, data=None, **kwargs)
 
     def __init__(self, input_dim: int = 1, output_dim: int = 0, **kwargs):
-        weight_loader: Callable = kwargs.get("weight_loader")  # type: ignore[assignment]
+        weight_loader: Callable = kwargs.get("weight_loader")  # type: ignore[assignment, ty:invalid-assignment]
         super().__init__(data=None, weight_loader=weight_loader)
 
         self.local_tensors = set()

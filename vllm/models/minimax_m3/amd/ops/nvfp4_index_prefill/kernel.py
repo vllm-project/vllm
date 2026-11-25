@@ -552,12 +552,12 @@ def compile_score_prefill(heads: int = 1):
                 def one(st):
                     return fx.Int32(st[0] if isinstance(st, (list, tuple)) else st)
 
-                for g, st in range(  # type: ignore[call-overload]
+                for g, st in range(  # type: ignore[call-overload, ty:no-matching-overload, ty:not-iterable]
                     fx.Index(0), fx.Index(n_full), fx.Index(1), init=[_ir(pg_next)]
                 ):
                     pgn = group(blk0 + fx.Int32(g) * GROUP, one(st), False)
                     res = yield [_ir(pgn)]
-                for g, st in range(  # type: ignore[call-overload]
+                for g, st in range(  # type: ignore[call-overload, ty:no-matching-overload, ty:not-iterable]
                     fx.Index(n_full),
                     fx.Index(n_groups),
                     fx.Index(1),

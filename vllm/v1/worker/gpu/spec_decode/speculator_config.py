@@ -250,7 +250,7 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
             revision=spec.revision,
             code_revision=spec.code_revision,
             tokenizer_revision=target.tokenizer_revision,
-            max_model_len=spec.max_model_len,  # type: ignore[arg-type]
+            max_model_len=spec.max_model_len,  # type: ignore[arg-type, ty:invalid-argument-type]
             spec_target_max_model_len=target.max_model_len,
             quantization=spec.quantization,
             enforce_eager=target.enforce_eager,

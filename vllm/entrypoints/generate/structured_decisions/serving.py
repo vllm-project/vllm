@@ -71,7 +71,7 @@ class ServingStructuredDecisions(BaseServingDecisions):
         request: StructuredDecisionRequest,
         raw_request: Request | None = None,
     ) -> StructuredDecisionResponse | ErrorResponse:
-        if (error := await self._check_model(request)) is not None:  # type: ignore[arg-type]
+        if (error := await self._check_model(request)) is not None:  # type: ignore[arg-type, ty:invalid-argument-type]
             return error
         renderer = self.strategy.context.online_renderer
         if (
@@ -91,7 +91,7 @@ class ServingStructuredDecisions(BaseServingDecisions):
         try:
             questions = parse_questions(request, self.limits)
             media = self._media(request)
-            lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
+            lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type, ty:invalid-argument-type]
             joint = self._admit(questions, request.joint)
             trace_headers = (
                 None

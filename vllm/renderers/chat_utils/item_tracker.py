@@ -411,7 +411,7 @@ def _resolve_vision_chunk_items(
                     VisionChunkImage(type="image", image=image_data, uuid=uuid)
                 )
             else:
-                processed_chunks.append(data)  # type: ignore[arg-type]
+                processed_chunks.append(data)  # type: ignore[arg-type, ty:invalid-argument-type]
         elif inner_modality == "video":
             # For video, we may need to split into chunks
             # if processor supports it
@@ -438,9 +438,9 @@ def _resolve_vision_chunk_items(
                     video_idx += 1
                 except Exception as e:
                     logger.warning("Failed to split video chunks: %s", e)
-                    processed_chunks.append(data)  # type: ignore[arg-type]
+                    processed_chunks.append(data)  # type: ignore[arg-type, ty:invalid-argument-type]
             else:
-                processed_chunks.append(data)  # type: ignore[arg-type]
+                processed_chunks.append(data)  # type: ignore[arg-type, ty:invalid-argument-type]
     return processed_chunks, vision_chunks_uuids
 
 

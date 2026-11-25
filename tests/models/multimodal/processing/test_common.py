@@ -192,7 +192,7 @@ def get_token_prompt(
             mm_counts,
             mm_options=MultiModalDummyOptions(),
             # Assume all Mistral models define this extra argument
-            mm_data=mm_data,  # type: ignore[call-arg]
+            mm_data=mm_data,  # type: ignore[call-arg, ty:unknown-argument]
         )
     else:
         inputs = processor.get_dummy_inputs(

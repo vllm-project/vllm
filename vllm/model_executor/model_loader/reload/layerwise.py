@@ -280,7 +280,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
             # reloading: place kernel tensors back as a fallback. Always place, even
             # when nothing is loadable (load_numel_total == 0), so parameter-alias
             # buffers on such layers are restored rather than left deleted.
-            if info.load_numel_total > 0:  # type: ignore[operator]
+            if info.load_numel_total > 0:  # type: ignore[operator, ty:unsupported-operator]
                 logger.warning("%s: Failed to load weights", layer.__class__.__name__)
             _place_kernel_tensors(layer, info)
 
@@ -288,7 +288,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         # if the created weight has extra padding elements which are not loaded
         # Having too many of these delayed layers can lead to excess memory usage
         # see Limitations(4)
-        elif info.defer_processing or info.load_numel < info.load_numel_total:  # type: ignore[operator]
+        elif info.defer_processing or info.load_numel < info.load_numel_total:  # type: ignore[operator, ty:unsupported-operator]
             _check_requantization_source_fully_loaded(layer, info)
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
             _layerwise_process(layer, info)

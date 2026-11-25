@@ -428,7 +428,7 @@ class MultiprocExecutor(Executor):
         else:
             self.failure_callback = callback
 
-    def execute_model(  # type: ignore[override]
+    def execute_model(  # type: ignore[override, ty:incompatible-method-override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         return self.collective_rpc(
@@ -441,7 +441,7 @@ class MultiprocExecutor(Executor):
             ec_output_aggregator=self.ec_output_aggregator,
         )
 
-    def sample_tokens(  # type: ignore[override]
+    def sample_tokens(  # type: ignore[override, ty:incompatible-method-override]
         self, grammar_output: GrammarOutput | None, non_block: bool = False
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         return self.collective_rpc(

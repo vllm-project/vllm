@@ -206,7 +206,7 @@ class XPUPlatform(Platform):
             )
 
             invalid_reasons = XPUFlashAttnMLABackend.validate_configuration(
-                device_capability=cls.get_device_capability(),  # type: ignore[arg-type]
+                device_capability=cls.get_device_capability(),  # type: ignore[arg-type, ty:invalid-argument-type]
                 **attn_selector_config._asdict(),
             )
             if invalid_reasons:

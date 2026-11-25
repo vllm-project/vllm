@@ -380,7 +380,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             ),
         )
 
-    def build(  # type: ignore[override]
+    def build(  # type: ignore[override, ty:incompatible-method-override]
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
@@ -741,7 +741,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.spec_query_start_loc[: num_spec_decodes + 1].copy_(
                 spec_query_start_loc, non_blocking=True
             )
-            spec_num_query_tokens = spec_query_start_loc[-1]  # type: ignore[index]
+            spec_num_query_tokens = spec_query_start_loc[-1]  # type: ignore[index, ty:not-subscriptable]
             spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
             spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
 
@@ -763,7 +763,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.non_spec_query_start_loc[: num_decodes + 1].copy_(
                 non_spec_query_start_loc, non_blocking=True
             )
-            non_spec_num_query_tokens = non_spec_query_start_loc[-1]  # type: ignore[index]
+            non_spec_num_query_tokens = non_spec_query_start_loc[-1]  # type: ignore[index, ty:not-subscriptable]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 

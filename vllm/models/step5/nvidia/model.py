@@ -655,7 +655,7 @@ class Step5FusedQKVIndexerLinear(QKVParallelLinear):
     def reset_load_state(self) -> None:
         self.loaded_shard_ids.clear()
 
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override, ty:lost-keyword-for-regular-parameter]
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:

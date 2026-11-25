@@ -151,7 +151,7 @@ class DequantGatherKCacheKernel(
             seq_len = seq_lens[req_id]
             gather_len = seq_len
             if cutlass.const_expr(gather_lens is not None):
-                gather_len = gather_lens[req_id]  # type: ignore[index]
+                gather_len = gather_lens[req_id]  # type: ignore[index, ty:not-subscriptable]
             start_pos = seq_len - gather_len
 
             # Start prefetch.

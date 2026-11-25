@@ -635,7 +635,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             indexer=indexer,
             **extra_impl_args,
         )
-        self.impl = impl  # type: ignore[assignment]
+        self.impl = impl  # type: ignore[assignment, ty:invalid-assignment]
         # ShardQ (see vllm.v1.attention.ops.shardq), if the impl supports it.
         self.use_shardq = shardq_eligible and getattr(impl, "use_shardq", False)
         # Indexer cache bytes per token, for DCP ShardQ (0: no indexer).
@@ -1000,11 +1000,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             attn_metadata_raw = forward_context.attn_metadata
             attn_metadata: MLACommonMetadata
             if isinstance(attn_metadata_raw, dict):
-                attn_metadata = attn_metadata_raw[self.layer_name]  # type: ignore[assignment]
+                attn_metadata = attn_metadata_raw[self.layer_name]  # type: ignore[assignment, ty:invalid-assignment]
             elif isinstance(attn_metadata_raw, list):
                 # list[dict[str, AttentionMetadata]]: used in speculative decoding
                 # where [0] is the base-model (non-speculative) metadata dict.
-                attn_metadata = attn_metadata_raw[0][self.layer_name]  # type: ignore[assignment]
+                attn_metadata = attn_metadata_raw[0][self.layer_name]  # type: ignore[assignment, ty:invalid-assignment]
             else:
                 attn_metadata = attn_metadata_raw
             self_kv_cache = self.kv_cache
@@ -1969,9 +1969,9 @@ class _DecodeConcatQuantFP8(QuantFP8):
 
         return forward
 
-    forward_native = _make_forward(QuantFP8.forward_native)  # type: ignore[arg-type]
-    forward_cuda = _make_forward(QuantFP8.forward_cuda)  # type: ignore[arg-type]
-    forward_hip = _make_forward(QuantFP8.forward_hip)  # type: ignore[arg-type]
+    forward_native = _make_forward(QuantFP8.forward_native)  # type: ignore[arg-type, ty:invalid-argument-type]
+    forward_cuda = _make_forward(QuantFP8.forward_cuda)  # type: ignore[arg-type, ty:invalid-argument-type]
+    forward_hip = _make_forward(QuantFP8.forward_hip)  # type: ignore[arg-type, ty:invalid-argument-type]
 
 
 class MLACommonBackend(AttentionBackend):
@@ -2998,7 +2998,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             decode=decode_metadata,
         )
 
-        return attn_metadata  # type: ignore[return-value]
+        return attn_metadata  # type: ignore[return-value, ty:invalid-explicit-return]
 
 
 def reorg_kvcache(
@@ -3517,7 +3517,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
         return output, output_lse
 
-    def forward_mha(  # type: ignore[override]
+    def forward_mha(  # type: ignore[override, ty:incompatible-method-override]
         self,
         q: torch.Tensor,
         kv_c_normed: torch.Tensor,

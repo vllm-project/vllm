@@ -12,7 +12,7 @@ from typing import Any
 import regex as re
 
 try:
-    from re import _parser  # type: ignore[attr-defined]
+    from re import _parser  # type: ignore[attr-defined, ty:missing-module-member]
 except ImportError:  # Python 3.10
     import sre_parse as _parser
 

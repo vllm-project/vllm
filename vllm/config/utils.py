@@ -74,7 +74,7 @@ def config(
         merged_config.update(config)
 
     def decorator(cls: type[ConfigT]) -> type[ConfigT]:
-        return dataclass(cls, config=merged_config, **kwargs)  # type: ignore[return-value]
+        return dataclass(cls, config=merged_config, **kwargs)  # type: ignore[return-value, ty:invalid-explicit-return]
 
     # Called with arguments: @config(config=...)
     if cls is None:

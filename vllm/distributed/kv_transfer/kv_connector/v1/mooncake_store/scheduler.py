@@ -353,7 +353,7 @@ class MooncakeStoreScheduler:
             )
             assert request.req_id in self._unfinished_requests
             request_tuple = self._unfinished_requests.get(request.req_id)
-            request_real = request_tuple[0]  # type: ignore[index]
+            request_real = request_tuple[0]  # type: ignore[index, ty:not-subscriptable]
 
             unfolded_block_ids = tuple(
                 request.block_ids[group_id].copy() for group_id in self._store_group_ids

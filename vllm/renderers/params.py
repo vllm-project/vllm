@@ -602,7 +602,7 @@ class TokenizeParams:
                 prompt["prompt_token_ids"],
             )
         if "prompt_embeds" in prompt:
-            prompt["prompt_embeds"] = self._validate_tokens(  # type: ignore[typeddict-unknown-key]
+            prompt["prompt_embeds"] = self._validate_tokens(  # type: ignore[typeddict-unknown-key, ty:invalid-typed-dict-key]
                 tokenizer,
                 prompt["prompt_embeds"],  # type: ignore[typeddict-item]
             )

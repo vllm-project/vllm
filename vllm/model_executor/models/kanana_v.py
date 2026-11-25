@@ -288,7 +288,7 @@ class CustomQwen2VLVE(Qwen2VisionTransformer):
         """Drop-in replacement for the HF `_from_config` constructor."""
         return cls(config)
 
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override, ty:incompatible-method-override]
         self,
         pixel_values: torch.Tensor,
         grid_thw: torch.Tensor,

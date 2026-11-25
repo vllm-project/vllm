@@ -638,9 +638,9 @@ class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
 
 @triton.jit
 def _lookup_ple_embedding_from_pinned_kernel(
-    weight_ptr: tl.pointer_type(tl.uint8),  # type: ignore[valid-type]
+    weight_ptr: tl.pointer_type(tl.uint8),  # type: ignore[valid-type, ty:invalid-type-form]
     ids_ptr,
-    output_ptr: tl.pointer_type(tl.uint8),  # type: ignore[valid-type]
+    output_ptr: tl.pointer_type(tl.uint8),  # type: ignore[valid-type, ty:invalid-type-form]
     row_bytes,
     tp_vocab_start,
     tp_vocab_end,

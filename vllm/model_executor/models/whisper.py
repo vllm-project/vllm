@@ -326,7 +326,7 @@ class WhisperCrossAttention(WhisperAttention):
             prefix=f"{prefix}.kv_proj",
         )
 
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override, ty:incompatible-method-override]
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,

@@ -449,7 +449,7 @@ class VllmConfig:
 
     # TODO: use default_factory once default constructing ModelConfig doesn't
     # try to download a model
-    model_config: ModelConfig = None  # type: ignore[assignment]
+    model_config: ModelConfig = None  # type: ignore[assignment, ty:invalid-assignment]
     """Model configuration."""
     cache_config: CacheConfig = Field(default_factory=CacheConfig)
     """Cache configuration."""

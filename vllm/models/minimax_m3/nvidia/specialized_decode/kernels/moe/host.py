@@ -74,10 +74,10 @@ def _kernel_module(config: dict, path: str):
             + "_".join(f"{k}{v}" for k, v in key[1:])
         )
         spec = importlib.util.spec_from_file_location(name, path)
-        mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type, ty:invalid-argument-type]
         mod.M3_CONFIG = dict(config)  # type: ignore[attr-defined]
         sys.modules[name] = mod
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        spec.loader.exec_module(mod)  # type: ignore[union-attr, ty:missing-union-attribute]
         _modules[key] = mod
     return mod
 

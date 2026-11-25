@@ -277,7 +277,7 @@ def _reduced_vocabulary(tokenizer: TokenizerLike) -> dict[bytes, list[int]]:
 
                 # safe to ignore since token_str is of type (bytearray, bytes)
                 # by this point.
-                token_bytes = bytes(token_str)  # type: ignore[arg-type]
+                token_bytes = bytes(token_str)  # type: ignore[arg-type, ty:invalid-argument-type]
 
             elif (token_str == "\ufffd" and token != "\ufffd") or (
                 "\ufffd" in token_str and not re_replacement_seq.match(token_str)
@@ -296,7 +296,7 @@ def _reduced_vocabulary(tokenizer: TokenizerLike) -> dict[bytes, list[int]]:
                         )
                     # safe to ignore, since if None in byte_vals,
                     # an error is thrown.
-                    token_bytes = bytes(byte_vals)  # type: ignore[arg-type]
+                    token_bytes = bytes(byte_vals)  # type: ignore[arg-type, ty:invalid-argument-type]
             else:
                 token_bytes = token_str.encode("utf-8")
 

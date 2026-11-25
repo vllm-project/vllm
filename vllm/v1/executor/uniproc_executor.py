@@ -116,7 +116,7 @@ class UniProcExecutor(Executor):
             future.set_exception(e)
         return future
 
-    def execute_model(  # type: ignore[override]
+    def execute_model(  # type: ignore[override, ty:incompatible-method-override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         output = self.collective_rpc(
@@ -131,7 +131,7 @@ class UniProcExecutor(Executor):
             output.result()
         return output
 
-    def sample_tokens(  # type: ignore[override]
+    def sample_tokens(  # type: ignore[override, ty:incompatible-method-override]
         self, grammar_output: GrammarOutput | None, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         return self.collective_rpc(

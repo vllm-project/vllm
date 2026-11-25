@@ -80,7 +80,7 @@ class TransformersMoERunner(MoERunner):
         self._moe_state = moe_state
         self._moe_state.is_sequence_parallel = self.moe_config.is_sequence_parallel
 
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override, ty:incompatible-method-override]
         self,
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,

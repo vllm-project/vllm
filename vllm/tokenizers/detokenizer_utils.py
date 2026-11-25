@@ -136,7 +136,7 @@ def convert_prompt_ids_to_tokens(
     read_offset = len(new_tokens)
     prefix_offset = max(read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
     # This is required to guard against out-of-vocab prompt token ids
-    _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
+    _replace_none_with_empty(new_tokens)  # type: ignore[arg-type, ty:invalid-argument-type]
     return new_tokens, prefix_offset, read_offset
 
 
@@ -227,7 +227,7 @@ def detokenize_incrementally(
         else:
             # This is required to guard against out-of-vocab prompt token ids
             # (for example when using dummy weights)
-            _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
+            _replace_none_with_empty(new_tokens)  # type: ignore[arg-type, ty:invalid-argument-type]
     else:
         new_tokens = [""]
     output_token_count = len(prev_tokens) + len(new_tokens)

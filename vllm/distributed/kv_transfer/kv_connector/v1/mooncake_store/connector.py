@@ -199,7 +199,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         super().__init__(
             vllm_config=vllm_config,
             role=role,
-            kv_cache_config=kv_cache_config,  # type: ignore[arg-type]
+            kv_cache_config=kv_cache_config,  # type: ignore[arg-type, ty:invalid-argument-type]
         )
         assert vllm_config.kv_transfer_config is not None
         assert kv_cache_config is not None, "kv_cache_config is required"

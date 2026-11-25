@@ -183,7 +183,7 @@ class EPLBConfig:
     committed all layers.
     """
 
-    num_redundant_experts: int = Field(default=None, ge=0)  # type: ignore[assignment]
+    num_redundant_experts: int = Field(default=None, ge=0)  # type: ignore[assignment, ty:invalid-assignment]
     """Number of redundant experts to use for expert parallelism.
     If None (default), the minimum valid value will be computed automatically
     based on the number of logical experts and the expert parallel size.
@@ -385,7 +385,7 @@ class ParallelConfig:
 
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
-    elastic_ep_max_dp_size: int = Field(default=None, ge=1)  # type: ignore[assignment]
+    elastic_ep_max_dp_size: int = Field(default=None, ge=1)  # type: ignore[assignment, ty:invalid-assignment]
     """Maximum data parallel size supported by elastic expert parallelism."""
 
     enable_dbo: bool = False

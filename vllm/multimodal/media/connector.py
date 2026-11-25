@@ -294,7 +294,7 @@ class MediaConnector:
 
     def _maybe_evict(self, exclude: Path | None = None) -> None:
         """Evict expired entries first, then LRU until under size limit."""
-        cache_dir = Path(self._media_cache_dir)  # type: ignore[arg-type]
+        cache_dir = Path(self._media_cache_dir)  # type: ignore[arg-type, ty:invalid-argument-type]
         entries = []
         expired = []
         total_size = 0
@@ -329,7 +329,7 @@ class MediaConnector:
     def _media_cache_path(self, url: str) -> Path:
         url_hash = hashlib.sha256(url.encode()).hexdigest()[:20]
         ext = Path(url.split("?", 1)[0]).suffix or ""
-        return Path(self._media_cache_dir) / f"{url_hash}{ext}"  # type: ignore[arg-type]
+        return Path(self._media_cache_dir) / f"{url_hash}{ext}"  # type: ignore[arg-type, ty:invalid-argument-type]
 
     def _load_data_url(
         self,

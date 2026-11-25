@@ -303,7 +303,7 @@ class DeepseekV32Attention(MLAAttention):
         if self.indexer is not None:
             self.indexer.process_weights_after_loading()
 
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override, ty:incompatible-method-override]
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,

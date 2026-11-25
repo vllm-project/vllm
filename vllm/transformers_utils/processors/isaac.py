@@ -428,7 +428,7 @@ class IsaacProcessor(ProcessorMixin):
         text: str | list[str] | None = None,
         images: Image.Image | list[Image.Image] | None = None,
         return_tensors: str | TensorType | None = None,
-        **kwargs: Unpack[IsaacProcessorKwargs],  # type: ignore[misc]
+        **kwargs: Unpack[IsaacProcessorKwargs],  # type: ignore[misc, ty:invalid-type-form]
     ) -> BatchFeature:
         output_kwargs = self._merge_kwargs(
             IsaacProcessorKwargs,

@@ -492,7 +492,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         set_default_quant_scales(self, register_buffer=True)
 
         self.attn_backend = Qwen4ExpQSABackend
-        self.impl: Qwen4ExpQSAImpl = Qwen4ExpQSAImpl(  # type: ignore[assignment]
+        self.impl: Qwen4ExpQSAImpl = Qwen4ExpQSAImpl(  # type: ignore[assignment, ty:incompatible-attribute-override]
             self.num_heads,
             self.head_dim,
             self.scaling,

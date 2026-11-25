@@ -181,7 +181,7 @@ class MuseSparkOmniMixin:
         text_vllm_config = copy(vllm_config)
         text_vllm_config.model_config = copy(vllm_config.model_config)
         text_vllm_config.model_config.hf_config = hf_config.text_config
-        super().__init__(vllm_config=text_vllm_config, prefix=prefix)  # type: ignore[call-arg]
+        super().__init__(vllm_config=text_vllm_config, prefix=prefix)  # type: ignore[call-arg, ty:unknown-argument]
 
         vision_config = hf_config.vision_config
         audio_config = hf_config.audio_config

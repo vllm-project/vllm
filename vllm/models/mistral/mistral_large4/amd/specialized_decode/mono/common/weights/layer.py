@@ -133,7 +133,7 @@ def linear_ptpc_fp8(
         and scale.numel() == weight.shape[0],
         f"{name} per-output-channel scale",
     )
-    return weight.data, scale.data.view(-1)  # type: ignore[union-attr]
+    return weight.data, scale.data.view(-1)  # type: ignore[union-attr, ty:missing-union-attribute]
 
 
 def linear_bf16(
@@ -219,12 +219,12 @@ def linear_bf16(
         scale = getattr(linear, "weight_scale", None)
         _need(scale is not None, f"{name} per_Token weight_scale is missing")
         _need(
-            scale.shape == (storage_rows, 1),  # type: ignore[union-attr]
-            f"{name} weight_scale shape {tuple(scale.shape)}, expected {(storage_rows, 1)}",  # type: ignore[union-attr]
+            scale.shape == (storage_rows, 1),  # type: ignore[union-attr, ty:missing-union-attribute]
+            f"{name} weight_scale shape {tuple(scale.shape)}, expected {(storage_rows, 1)}",  # type: ignore[union-attr, ty:missing-union-attribute]
         )
         _need(
-            scale.dtype == torch.float32,  # type: ignore[union-attr]
-            f"{name} weight_scale must be FP32, got {scale.dtype}",  # type: ignore[union-attr]
+            scale.dtype == torch.float32,  # type: ignore[union-attr, ty:missing-union-attribute]
+            f"{name} weight_scale must be FP32, got {scale.dtype}",  # type: ignore[union-attr, ty:missing-union-attribute]
         )
         if shuffled:
             _need(
@@ -233,7 +233,7 @@ def linear_bf16(
             )
             weight = _unshuffle_linear_weight(weight)
         weight = weight.narrow(0, row_start, row_count)
-        scale = scale.narrow(0, row_start, row_count)  # type: ignore[union-attr]
+        scale = scale.narrow(0, row_start, row_count)  # type: ignore[union-attr, ty:missing-union-attribute]
         return (weight.float() * scale.float()).to(torch.bfloat16).contiguous()
 
     fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
@@ -265,12 +265,12 @@ def linear_bf16(
     expected_scale_shape = (padded_rows, padded_groups)
     _need(scale is not None, f"{name} per_1x32 weight_scale is missing")
     _need(
-        scale.element_size() == 1,  # type: ignore[union-attr]
+        scale.element_size() == 1,  # type: ignore[union-attr, ty:missing-union-attribute]
         f"{name} weight_scale must use one-byte E8M0 values",
     )
     _need(
-        scale.shape == expected_scale_shape,  # type: ignore[union-attr]
-        f"{name} weight_scale shape {tuple(scale.shape)}, expected {expected_scale_shape}",  # type: ignore[union-attr]
+        scale.shape == expected_scale_shape,  # type: ignore[union-attr, ty:missing-union-attribute]
+        f"{name} weight_scale shape {tuple(scale.shape)}, expected {expected_scale_shape}",  # type: ignore[union-attr, ty:missing-union-attribute]
     )
     packed = _unshuffle_linear_weight(weight).narrow(0, row_start, row_count)
     native_scale = _unshuffle_linear_scale(

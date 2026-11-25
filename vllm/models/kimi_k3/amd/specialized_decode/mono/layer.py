@@ -509,7 +509,7 @@ def build(key: K2Build):
     @fx.union
     class MainLds:
         k2: K2Lds
-        m1c: M1cLds  # type: ignore[valid-type]
+        m1c: M1cLds  # type: ignore[valid-type, ty:invalid-type-form]
 
     @fx.struct
     class Smem:

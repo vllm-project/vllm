@@ -24,7 +24,7 @@ class DiffusionConfig:
     tokens) with overloaded semantics for block-based generation.
     """
 
-    canvas_length: int = Field(default=None, gt=0)  # type: ignore[assignment]
+    canvas_length: int = Field(default=None, gt=0)  # type: ignore[assignment, ty:invalid-assignment]
     """Length of the denoising canvas (block).  Also determines the number of
     speculative tokens scheduled per step."""
 

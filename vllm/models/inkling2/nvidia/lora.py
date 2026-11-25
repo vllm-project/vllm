@@ -295,6 +295,6 @@ def register() -> None:
     lora_utils.get_supported_lora_modules = get_supported_lora_modules
     lora_utils.is_supported_lora_module = is_supported_lora_module
     # model_manager binds both names at import.
-    model_manager.get_supported_lora_modules = get_supported_lora_modules  # type: ignore[attr-defined]
-    model_manager.is_supported_lora_module = is_supported_lora_module  # type: ignore[attr-defined]
+    model_manager.get_supported_lora_modules = get_supported_lora_modules  # type: ignore[attr-defined, ty:invalid-assignment]
+    model_manager.is_supported_lora_module = is_supported_lora_module  # type: ignore[attr-defined, ty:invalid-assignment]
     _registered = True

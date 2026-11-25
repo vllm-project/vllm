@@ -418,16 +418,16 @@ def register_backend(
 
     def decorator(cls: type) -> type:
         if is_mamba:
-            _MAMBA_ATTN_OVERRIDES[backend] = f"{cls.__module__}.{cls.__qualname__}"  # type: ignore[index]
+            _MAMBA_ATTN_OVERRIDES[backend] = f"{cls.__module__}.{cls.__qualname__}"  # type: ignore[index, ty:invalid-assignment]
         else:
-            _ATTN_OVERRIDES[backend] = f"{cls.__module__}.{cls.__qualname__}"  # type: ignore[index]
+            _ATTN_OVERRIDES[backend] = f"{cls.__module__}.{cls.__qualname__}"  # type: ignore[index, ty:invalid-assignment]
         return cls
 
     if class_path is not None:
         if is_mamba:
-            _MAMBA_ATTN_OVERRIDES[backend] = class_path  # type: ignore[index]
+            _MAMBA_ATTN_OVERRIDES[backend] = class_path  # type: ignore[index, ty:invalid-assignment]
         else:
-            _ATTN_OVERRIDES[backend] = class_path  # type: ignore[index]
+            _ATTN_OVERRIDES[backend] = class_path  # type: ignore[index, ty:invalid-assignment]
         return lambda x: x
 
     return decorator

@@ -60,7 +60,7 @@ def enter_stage(name: str) -> None:
 
 
 def _stage() -> str:
-    return _record.stages[-1] if _record.stages else "<before any stage>"  # type: ignore[union-attr]
+    return _record.stages[-1] if _record.stages else "<before any stage>"  # type: ignore[union-attr, ty:missing-union-attribute]
 
 
 def note(region: str, space: Space, kind: str) -> None:

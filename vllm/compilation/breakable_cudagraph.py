@@ -123,7 +123,7 @@ def eager_break_during_capture(fn: F) -> F:
         weak_kwargs = {k: _weak_ref_capture_arg(v) for k, v in kwargs.items()}
         return capture.add_eager(lambda: fn(*weak_args, **weak_kwargs))
 
-    return wrapper  # type: ignore[return-value]
+    return wrapper  # type: ignore[return-value, ty:invalid-explicit-return]
 
 
 # ---------------------------------------------------------------------------

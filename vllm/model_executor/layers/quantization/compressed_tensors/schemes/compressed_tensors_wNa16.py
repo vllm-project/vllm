@@ -111,7 +111,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         )
 
     @property
-    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override, ty:incompatible-property-override]
         return isinstance(
             self.kernel, MarlinLinearKernel
         ) and self.kernel.config.act_type in (torch.float16, torch.bfloat16)

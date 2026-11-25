@@ -111,7 +111,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         if isinstance(prompts, dict) and "data" in prompts:
             ctx = OfflinePluginInputsContext(
                 pooling_task=pooling_task,
-                prompts=prompts,  # type: ignore[arg-type]
+                prompts=prompts,  # type: ignore[arg-type, ty:invalid-argument-type]
                 tokenization_kwargs=tokenization_kwargs,
                 pooling_params=pooling_params,
                 lora_request=lora_request,

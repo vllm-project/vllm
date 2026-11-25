@@ -294,7 +294,7 @@ class KernelConfig:
     v0.34.0. Kernels will be selected by the platform, as for other custom ops.
     """
 
-    enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
+    enable_flashinfer_autotune: bool = None  # type: ignore[assignment, ty:invalid-assignment]
     """Benchmark FlashInfer kernel implementations during warmup and use the
     fastest. Enabled by default except at `-O0`; disable for faster startup."""
 

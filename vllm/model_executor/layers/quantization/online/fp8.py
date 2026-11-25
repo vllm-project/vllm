@@ -218,7 +218,7 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         self.weight_quant_key = kFp8StaticTensorSym
 
     @property
-    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override, ty:incompatible-property-override]
         return self.requantization_source is None and isinstance(
             getattr(self, "fp8_linear", None), CutlassFP8ScaledMMLinearKernel
         )
@@ -333,7 +333,7 @@ class Fp8PerBlockOnlineLinearMethod(OnlineLinearBase):
         )
 
     @property
-    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override, ty:incompatible-property-override]
         return self.requantization_source is None and isinstance(
             getattr(self, "fp8_linear", None), CutlassFp8BlockScaledMMKernel
         )
@@ -454,7 +454,7 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
         return key
 
     @property
-    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override, ty:incompatible-property-override]
         return self.requantization_source is None and isinstance(
             getattr(self, "fp8_linear", None), CutlassFP8ScaledMMLinearKernel
         )

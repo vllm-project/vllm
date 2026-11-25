@@ -48,7 +48,7 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
     activation_quant_key: QuantKey | None = None
 
     @property
-    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override, ty:incompatible-property-override]
         kernel = getattr(self, "kernel", None)
         return (
             self.requantization_source is None

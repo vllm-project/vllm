@@ -255,7 +255,7 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
 
         return inputs_embeds
 
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override, ty:incompatible-method-override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,

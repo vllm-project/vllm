@@ -355,7 +355,7 @@ def _get_chat_content(
             for item in prompt
         )
     ):
-        prompt_dicts: list[dict[str, Any]] = prompt  # type: ignore[assignment]
+        prompt_dicts: list[dict[str, Any]] = prompt  # type: ignore[assignment, ty:invalid-assignment]
         if mm_position == "first":
             return mm_contents + prompt_dicts
 
@@ -388,7 +388,7 @@ def _get_chat_messages(
 ) -> list[dict[str, Any]]:
     prompt = request_func_input.prompt
     if _is_chat_messages(prompt):
-        return prompt  # type: ignore[return-value]
+        return prompt  # type: ignore[return-value, ty:invalid-explicit-return]
 
     return [
         {

@@ -56,7 +56,7 @@ class OpenAIServingDecisions(BaseServingDecisions):
     async def create_decisions(
         self, request: DecisionRequest, raw_request: Request | None = None
     ) -> DecisionResponse | ErrorResponse:
-        if (error := await self._check_model(request)) is not None:  # type: ignore[arg-type]
+        if (error := await self._check_model(request)) is not None:  # type: ignore[arg-type, ty:invalid-argument-type]
             return error
         engine = self.strategy.context.engine_client
         if engine.errored:
@@ -73,7 +73,7 @@ class OpenAIServingDecisions(BaseServingDecisions):
                 )
                 for i, question in enumerate(request.questions)
             ]
-            lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
+            lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type, ty:invalid-argument-type]
             joint = self._admit(questions, request.joint)
             trace_headers = (
                 None

@@ -985,7 +985,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             num_kv_heads=self.num_kv_heads,
             use_flashinfer_msa=use_flashinfer_msa,
         )
-        self.impl: MiniMaxM3SparseImpl = impl_cls(  # type: ignore[assignment]
+        self.impl: MiniMaxM3SparseImpl = impl_cls(  # type: ignore[assignment, ty:incompatible-attribute-override]
             self.num_heads,
             self.head_dim,
             self.scaling,

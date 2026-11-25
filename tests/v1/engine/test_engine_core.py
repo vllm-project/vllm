@@ -329,7 +329,7 @@ def test_engine_core_concurrent_batches():
             # Use the thread pool instead of creating a new thread
             return self.thread_pool.submit(_execute)
 
-        def sample_tokens(  # type: ignore[override]
+        def sample_tokens(  # type: ignore[override, ty:incompatible-method-override]
             self,
             grammar_output: GrammarOutput | None,
             non_block: bool = False,

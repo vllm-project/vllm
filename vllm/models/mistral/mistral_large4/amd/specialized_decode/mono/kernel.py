@@ -4900,7 +4900,7 @@ def build_ml4_monokernel(
                                 pair_word = fx.Int32(
                                     bo.buffer_load(rs, word, vec_width=1, dtype=T.i32)
                                 )
-                            ug_scale = pair_word.shrui(  # type: ignore[union-attr]
+                            ug_scale = pair_word.shrui(  # type: ignore[union-attr, ty:missing-union-attribute]
                                 (pair_byte + (cc % 2) * 2) * 8
                             ) & fx.Int32(0xFF)
                         if const_expr(expert_mxfp4):

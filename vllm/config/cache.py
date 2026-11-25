@@ -185,7 +185,7 @@ class CacheConfig:
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 64
     DEFAULT_GPU_MEMORY_UTILIZATION: ClassVar[float] = 0.92
 
-    block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
+    block_size: int = Field(default=None, gt=0)  # type: ignore[assignment, ty:invalid-assignment]
     """Size of a contiguous cache block in number of tokens.
     Accepts None (meaning "use default"). After construction, always int."""
     user_specified_block_size: bool = field(default=False, init=False)
@@ -388,7 +388,7 @@ class CacheConfig:
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
 
-    enable_extensible_kv_cache: bool = Field(default=None)  # type: ignore[assignment]
+    enable_extensible_kv_cache: bool = Field(default=None)  # type: ignore[assignment, ty:invalid-assignment]
     """Reserve the KV cache address range with device virtual memory and commit
     physical pages after warmup, so the cache is sized from the memory actually
     free after CUDA graph capture rather than from a profiling estimate. If

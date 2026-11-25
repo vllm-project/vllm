@@ -2476,12 +2476,12 @@ def test_store_trigger_and_success_are_keyword_only():
     manager = CPUOffloadingManager(num_chunks=4)
     keys = to_keys([1])
     with pytest.raises(TypeError):
-        manager.prepare_store(  # type: ignore[misc]
+        manager.prepare_store(  # type: ignore[misc, ty:missing-argument]
             keys, _EMPTY_REQ_CTX, StoreTrigger.ON_COMPUTE
         )
     assert manager.prepare_store(keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)
     with pytest.raises(TypeError):
-        manager.complete_store(  # type: ignore[misc]
+        manager.complete_store(  # type: ignore[misc, ty:missing-argument]
             keys, _EMPTY_REQ_CTX, StoreTrigger.ON_COMPUTE
         )
     manager.complete_store(keys, _EMPTY_REQ_CTX, trigger=StoreTrigger.ON_COMPUTE)

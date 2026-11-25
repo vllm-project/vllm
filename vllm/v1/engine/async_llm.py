@@ -641,7 +641,7 @@ class AsyncLLM(EngineClient):
             request_id=request_id,
             prompt=TokensPrompt(prompt_token_ids=[0]),
             params=sampling_params,
-            **inputs,  # type: ignore[arg-type]
+            **inputs,  # type: ignore[arg-type, ty:invalid-argument-type]
         )
         self.input_processor.assign_request_id(final_req)
         internal_req_id = final_req.request_id
@@ -674,7 +674,7 @@ class AsyncLLM(EngineClient):
                         prompt=input_chunk.prompt,
                         params=sp,
                         resumable=True,
-                        **inputs,  # type: ignore[arg-type]
+                        **inputs,  # type: ignore[arg-type, ty:invalid-argument-type]
                     )
                     req.external_req_id = request_id
                     if req.prompt_embeds is not None:

@@ -38,7 +38,7 @@ def _fake_lm_head(
     weight: torch.Tensor, quantized: bool = False, shard_indices: object | None = None
 ) -> VocabParallelEmbedding:
     # The dtype tests only need the projection fields, not distributed setup.
-    return _FakeLmHead(weight, quantized, shard_indices)  # type: ignore[return-value]
+    return _FakeLmHead(weight, quantized, shard_indices)  # type: ignore[return-value, ty:invalid-explicit-return]
 
 
 def _build_processor(vocab_size: int) -> LogitsProcessor:

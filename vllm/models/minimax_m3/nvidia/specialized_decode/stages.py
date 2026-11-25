@@ -410,7 +410,7 @@ class Stages(NamedTuple):
     def for_cache_dtypes(self, dtypes: CacheDtypes) -> "Stages":
         """The implementations that run over caches of `dtypes`."""
         return Stages(
-            *([stage for stage in impls if stage.runs_with(dtypes)] for impls in self)  # type: ignore[arg-type]
+            *([stage for stage in impls if stage.runs_with(dtypes)] for impls in self)  # type: ignore[arg-type, ty:invalid-argument-type]
         )
 
     def select(self, rows: int) -> "StepStages":
@@ -435,7 +435,7 @@ class Stages(NamedTuple):
         index = [0] * len(candidates)
         while True:
             step = StepStages(
-                *(found[i] for found, i in zip(candidates, index))  # type: ignore[arg-type]
+                *(found[i] for found, i in zip(candidates, index))  # type: ignore[arg-type, ty:invalid-argument-type]
             )
             demoted = False
             for slot, stage in enumerate(step):

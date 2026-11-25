@@ -285,7 +285,7 @@ def _validate_enc_input(enc_input: SingletonInput) -> EncoderInput:
             "for encoder-decoder models."
         )
 
-    return enc_input  # type: ignore[return-value]
+    return enc_input  # type: ignore[return-value, ty:invalid-explicit-return]
 
 
 def _validate_dec_input(dec_input: SingletonInput) -> DecoderEngineInput:

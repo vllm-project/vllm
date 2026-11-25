@@ -125,7 +125,7 @@ def paged_row_contract(
         "active": active,
         "context": end - start,
         "index_base": start if active else 0,
-        "safe_row": rows[0] if active else 0,  # type: ignore[misc]
+        "safe_row": rows[0] if active else 0,  # type: ignore[misc, ty:index-out-of-bounds]
         "write_cache": active if slot_mapping is None else slot_owned,
     }
 

@@ -96,7 +96,7 @@ def test_multiproc_executor_worker_termination_timeout(
 
 
 class CustomMultiprocExecutor(MultiprocExecutor):
-    def collective_rpc(  # type: ignore[override]
+    def collective_rpc(  # type: ignore[override, ty:incompatible-method-override]
         self,
         method: str | Callable,
         timeout: float | None = None,

@@ -49,9 +49,9 @@ def prompt_to_seq(
     if isinstance(prompt_or_prompts, (dict, str, bytes)) or (
         len(prompt_or_prompts) > 0 and is_list_of(prompt_or_prompts, int)
     ):
-        return [prompt_or_prompts]  # type: ignore[list-item]
+        return [prompt_or_prompts]  # type: ignore[list-item, ty:invalid-explicit-return]
 
-    return prompt_or_prompts  # type: ignore[return-value]
+    return prompt_or_prompts  # type: ignore[return-value, ty:invalid-explicit-return]
 
 
 def conversation_to_seq(
@@ -61,9 +61,9 @@ def conversation_to_seq(
     if len(conversation_or_conversations) > 0 and is_list_of(
         conversation_or_conversations, dict
     ):
-        return [conversation_or_conversations]  # type: ignore[list-item]
+        return [conversation_or_conversations]  # type: ignore[list-item, ty:invalid-explicit-return]
 
-    return conversation_or_conversations  # type: ignore[return-value]
+    return conversation_or_conversations  # type: ignore[return-value, ty:invalid-explicit-return]
 
 
 DecoderOnlyDictPrompt: TypeAlias = TextPrompt | TokensPrompt | EmbedsPrompt
@@ -148,7 +148,7 @@ def parse_dec_only_prompt(prompt: PromptType | object) -> DecoderOnlyDictPrompt:
             or "prompt_token_ids" in prompt
             or "prompt_embeds" in prompt
         ):
-            return prompt  # type: ignore[return-value]
+            return prompt  # type: ignore[return-value, ty:invalid-explicit-return]
 
         raise TypeError("Prompt dictionary must contain text, tokens, or embeddings")
 
@@ -172,7 +172,7 @@ def _parse_enc_prompt(prompt: PromptType | object) -> EncoderDictPrompt:
             raise TypeError("Cannot pass embeddings prompt to encoder-decoder models")
 
         if "prompt" in prompt or "prompt_token_ids" in prompt:
-            return prompt  # type: ignore[return-value]
+            return prompt  # type: ignore[return-value, ty:invalid-explicit-return]
 
         raise TypeError("Prompt dictionary must contain text or tokens")
 
@@ -203,7 +203,7 @@ def _parse_dec_prompt(prompt: PromptType | object) -> DecoderDictPrompt:
             raise TypeError("Cannot pass multi-modal inputs to decoder prompt")
 
         if "prompt" in prompt or "prompt_token_ids" in prompt:
-            return prompt  # type: ignore[return-value]
+            return prompt  # type: ignore[return-value, ty:invalid-explicit-return]
 
         raise TypeError("Prompt dictionary must contain text or tokens")
 

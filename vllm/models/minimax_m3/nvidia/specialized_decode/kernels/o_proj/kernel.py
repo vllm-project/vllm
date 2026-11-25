@@ -2036,7 +2036,7 @@ def m3_mx_gemv_kernel(
                         din_ss / cutlass.Float32(din_half_k) + din_eps, fastmath=True
                     )
                     din_keep = din_valid | (din_hidden_half == cutlass.Int32(1))
-                    din_rs.store(  # type: ignore[union-attr]
+                    din_rs.store(  # type: ignore[union-attr, ty:missing-union-attribute]
                         cutlass.select_(din_keep, din_r, cutlass.Float32(0.0)),
                         idx=din_tok,
                     )
@@ -2143,7 +2143,7 @@ def m3_mx_gemv_kernel(
                         qz_vals = []
                         qz_amax = cutlass.Float32(0.0)
                         if cutlass.const_expr(din):
-                            qz_rs = din_rs.load(  # type: ignore[union-attr]
+                            qz_rs = din_rs.load(  # type: ignore[union-attr, ty:missing-union-attribute]
                                 idx=cutlass.select_(
                                     qz_t < num_tokens, qz_t, cutlass.Int32(0)
                                 )

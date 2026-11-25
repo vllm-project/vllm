@@ -133,7 +133,7 @@ class MuseSparkDSparkDecoderLayer(MuseSparkDecoderLayer):
                 "Muse Spark DSpark layers must share their positional mode"
             )
 
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override, ty:incompatible-method-override]
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,

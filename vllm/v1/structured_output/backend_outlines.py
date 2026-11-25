@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from re import _constants, _parser  # type: ignore[attr-defined]
+from re import _constants, _parser  # type: ignore[attr-defined, ty:missing-module-member]
 from typing import TYPE_CHECKING
 
 import torch

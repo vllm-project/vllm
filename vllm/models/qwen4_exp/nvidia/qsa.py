@@ -627,7 +627,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.attn_backend = (
             Qwen4ExpQSAHiSparseBackend if index_group else Qwen4ExpQSABackend
         )
-        self.impl: Qwen4ExpQSAImpl = Qwen4ExpQSAImpl(  # type: ignore[assignment]
+        self.impl: Qwen4ExpQSAImpl = Qwen4ExpQSAImpl(  # type: ignore[assignment, ty:incompatible-attribute-override]
             self.num_heads,
             self.head_dim,
             self.scaling,

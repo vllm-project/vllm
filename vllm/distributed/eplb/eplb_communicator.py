@@ -415,7 +415,7 @@ class NixlEplbCommunicator(EplbCommunicator):
     @staticmethod
     def _init_step(name: str, fn: object, *args: object, **kwargs: object) -> None:
         try:
-            fn(*args, **kwargs)  # type: ignore[operator]
+            fn(*args, **kwargs)  # type: ignore[operator, ty:not-callable]
         except Exception as exc:
             raise RuntimeError(f"NIXL EPLB init failed: {name}") from exc
 

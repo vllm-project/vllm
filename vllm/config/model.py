@@ -178,7 +178,7 @@ class ModelConfig:
     """Convert the model using adapters defined in
     [vllm.model_executor.models.adapters][]. The most common use case is to
     adapt a text generation model to be used for pooling tasks."""
-    tokenizer: str = None  # type: ignore[assignment]
+    tokenizer: str = None  # type: ignore[assignment, ty:invalid-assignment]
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode | str = "auto"
@@ -268,7 +268,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: int = Field(default=None, ge=-1)  # type: ignore[assignment]
+    max_model_len: int = Field(default=None, ge=-1)  # type: ignore[assignment, ty:invalid-assignment]
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 
@@ -953,7 +953,7 @@ class ModelConfig:
                 k: v for k, v in mm_config_kwargs.items() if v is not None
             }
 
-            self.multimodal_config = MultiModalConfig(**mm_config_kwargs)  # type: ignore[arg-type]
+            self.multimodal_config = MultiModalConfig(**mm_config_kwargs)  # type: ignore[arg-type, ty:invalid-argument-type]
 
             pruning_spec = self.multimodal_config.get_video_pruning_spec()
             supported_pruning = self._model_info.supported_video_pruning_methods

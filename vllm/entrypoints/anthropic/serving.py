@@ -1365,7 +1365,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         _, engine_inputs = result
 
         input_tokens = sum(  # type: ignore
-            len(engine_input["prompt_token_ids"])  # type: ignore[typeddict-item, misc]
+            len(engine_input["prompt_token_ids"])  # type: ignore[typeddict-item, misc, ty:invalid-argument-type]
             for engine_input in engine_inputs
             if "prompt_token_ids" in engine_input
         )

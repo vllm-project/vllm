@@ -267,29 +267,29 @@ class PassConfig:
     """
 
     # New flags
-    fuse_norm_quant: bool = None  # type: ignore[assignment]
+    fuse_norm_quant: bool = None  # type: ignore[assignment, ty:invalid-assignment]
     """Fuse the custom RMSNorm + quant ops."""
-    fuse_act_quant: bool = None  # type: ignore[assignment]
+    fuse_act_quant: bool = None  # type: ignore[assignment, ty:invalid-assignment]
     """Fuse the custom SiluMul + quant ops."""
-    fuse_attn_quant: bool = None  # type: ignore[assignment]
+    fuse_attn_quant: bool = None  # type: ignore[assignment, ty:invalid-assignment]
     """Fuse the custom Attention and MLAAttention + quant ops."""
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
-    fuse_allreduce_rms: bool = None  # type: ignore[assignment]
+    fuse_allreduce_rms: bool = None  # type: ignore[assignment, ty:invalid-assignment]
     """Enable flashinfer allreduce fusion."""
-    enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
+    enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment, ty:invalid-assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
-    fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
+    fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment, ty:invalid-assignment]
     """Enable fused MLA KV cache update with RoPE."""
 
     # ROCm/AITER specific fusions
-    fuse_act_padding: bool = None  # type: ignore[assignment]
+    fuse_act_padding: bool = None  # type: ignore[assignment, ty:invalid-assignment]
     """Fuse the custom RMSNorm + padding ops."""
-    fuse_mla_dual_rms_norm: bool = None  # type: ignore[assignment]
+    fuse_mla_dual_rms_norm: bool = None  # type: ignore[assignment, ty:invalid-assignment]
     """Fuse paired q/kv RMS norms in MLA attention."""
-    fuse_rope_kvcache: bool = None  # type: ignore[assignment]
+    fuse_rope_kvcache: bool = None  # type: ignore[assignment, ty:invalid-assignment]
     """Fuse the QK rope + KV cache ops."""
-    fuse_qk_norm_rope_kvcache: bool = Field(default=None)  # type: ignore[assignment]
+    fuse_qk_norm_rope_kvcache: bool = Field(default=None)  # type: ignore[assignment, ty:invalid-assignment]
     """Fuse QK RMSNorm + RoPE/MRoPE + KV cache update into an AITER HIP
     kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
     for layers that support it. Auto-enabled at O2+ on ROCm for models
@@ -562,7 +562,7 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    mode: CompilationMode = None  # type: ignore[assignment]
+    mode: CompilationMode = None  # type: ignore[assignment, ty:invalid-assignment]
     """The compilation approach used for torch.compile-based compilation of the
     model.
 
@@ -624,7 +624,7 @@ class CompilationConfig:
     backend="inductor".
     Inductor generates (fused) Triton kernels for disabled custom ops."""
 
-    ir_enable_torch_wrap: bool = None  # type: ignore[assignment]
+    ir_enable_torch_wrap: bool = None  # type: ignore[assignment, ty:invalid-assignment]
     """If True, enable vllm_ir torch custom op wrapping during the forward pass.
     When False, torch custom op wrapping is disabled, allowing Dynamo to trace the
     selected implementation directly or avoiding torch custom op overhead in eager mode.
@@ -749,7 +749,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: CUDAGraphMode = None  # type: ignore[assignment]
+    cudagraph_mode: CUDAGraphMode = None  # type: ignore[assignment, ty:invalid-assignment]
     """
     The mode of the cudagraph:
 
@@ -801,7 +801,7 @@ class CompilationConfig:
     It means the first several runs will be treated as warmup runs.
     Only after that, the execution will be recorded, and the recorded
     cudagraph will be used for subsequent runs."""
-    cudagraph_capture_sizes: list[int] = None  # type: ignore[assignment]
+    cudagraph_capture_sizes: list[int] = None  # type: ignore[assignment, ty:invalid-assignment]
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given.
@@ -874,7 +874,7 @@ class CompilationConfig:
     When `enable_lora` is False, this option has no effect.
     """
 
-    use_inductor_graph_partition: bool = None  # type: ignore[assignment]
+    use_inductor_graph_partition: bool = None  # type: ignore[assignment, ty:invalid-assignment]
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
     are finished. It generates a single `call` function which wraps
@@ -897,7 +897,7 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
-    max_cudagraph_capture_size: int = None  # type: ignore[assignment]
+    max_cudagraph_capture_size: int = None  # type: ignore[assignment, ty:invalid-assignment]
     """The maximum cudagraph capture size.
 
     If cudagraph_capture_sizes is specified, this will be set to the largest

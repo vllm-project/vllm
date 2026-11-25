@@ -644,7 +644,7 @@ class DelegatingParser(Parser):
         try:
             result = self._tool_parser.extract_tool_calls(
                 model_output,
-                request=request,  # type: ignore[arg-type]
+                request=request,  # type: ignore[arg-type, ty:invalid-argument-type]
             )
             is_tool_called = bool(result.tools_called)
         except Exception as e:
@@ -680,7 +680,7 @@ class DelegatingParser(Parser):
                 previous_token_ids,
                 current_token_ids,
                 delta_token_ids,
-                request,  # type: ignore[arg-type]
+                request,  # type: ignore[arg-type, ty:invalid-argument-type]
             )
             is_tool_called = bool(result and result.tool_calls)
         except Exception as e:

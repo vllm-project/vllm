@@ -52,8 +52,8 @@ def test_non_gated_moe_keeps_w3_unscaled():
     # PackedLoRALayerWeights stores one scaling per packed projection but
     # inherits the base class's float annotation.
     scaling = packed.scaling
-    assert scaling[:2] == pytest.approx([RSLORA_SCALING] * 2)  # type: ignore[index]
-    assert scaling[2] == 1.0  # type: ignore[index]
+    assert scaling[:2] == pytest.approx([RSLORA_SCALING] * 2)  # type: ignore[index, ty:not-subscriptable]
+    assert scaling[2] == 1.0  # type: ignore[index, ty:not-subscriptable]
 
 
 @pytest.mark.parametrize(

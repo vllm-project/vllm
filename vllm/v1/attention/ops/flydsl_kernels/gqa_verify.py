@@ -553,14 +553,14 @@ def _launcher(
             ids0.extend(_raw(x) for x in page_ids(clamp(begin + NS + j)))
         init = o0 + n0 + t0 + l0 + slots0 + ids0
         if fx.const_expr(window):
-            for gi, st in range(0, head_groups, 1, init=init):  # type: ignore[call-overload]
+            for gi, st in range(0, head_groups, 1, init=init):  # type: ignore[call-overload, ty:no-matching-overload, ty:not-iterable]
                 c0 = begin + fx.Int32(arith.index_cast(T.i32, _raw(gi))) * NS
                 fin0 = yield group_step(c0, st, True)
             init = list(fin0)
-        for gi, st in range(0, ngroups, 1, init=init):  # type: ignore[call-overload]
+        for gi, st in range(0, ngroups, 1, init=init):  # type: ignore[call-overload, ty:no-matching-overload, ty:not-iterable]
             c0 = start + fx.Int32(arith.index_cast(T.i32, _raw(gi))) * NS
             fin = yield group_step(c0, st, False)
-        for gi, st in range(0, tail_groups, 1, init=list(fin)):  # type: ignore[call-overload]
+        for gi, st in range(0, tail_groups, 1, init=list(fin)):  # type: ignore[call-overload, ty:no-matching-overload, ty:not-iterable]
             c0 = mid + fx.Int32(arith.index_cast(T.i32, _raw(gi))) * NS
             fin2 = yield group_step(c0, st, True)
         o_acc, n_run, l_run = (

@@ -94,7 +94,7 @@ def test_bf16_mxfp8_linear_method_takes_emulation(monkeypatch):
     assert issubclass(method_cls, modelopt.ModelOptLinearMethod)
     method = method_cls.__new__(method_cls)
     method.fmt = modelopt.FormatScheme()
-    method.create_weights(SimpleNamespace())  # type: ignore[call-arg]
+    method.create_weights(SimpleNamespace())  # type: ignore[call-arg, ty:missing-argument]
     assert isinstance(method.kernel, EmulationMxfp8LinearKernel)
 
 
@@ -189,7 +189,7 @@ def _linear_kernel(monkeypatch, layer: torch.nn.Module, bmm_batch_size=None):
     method = method_cls.__new__(method_cls)
     method.fmt = modelopt.FormatScheme()
     layer.bmm_batch_size = bmm_batch_size
-    method.create_weights(layer)  # type: ignore[call-arg]
+    method.create_weights(layer)  # type: ignore[call-arg, ty:missing-argument]
     return method.kernel
 
 

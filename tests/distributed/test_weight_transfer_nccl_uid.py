@@ -45,7 +45,7 @@ class TestNCCLRendezvousValidation:
         # kw_only so a stale positional call fails loudly rather than silently
         # swapping fields once the rendezvous fields became optional.
         with pytest.raises(TypeError):
-            NCCLWeightTransferInitInfo(1, 3, "127.0.0.1", 12345)  # type: ignore[call-arg]
+            NCCLWeightTransferInitInfo(1, 3, "127.0.0.1", 12345)  # type: ignore[call-arg, ty:missing-argument, ty:too-many-positional-arguments]
 
     def test_trainer_init_info_accepts_positional_fields(self):
         # NCCLTrainerInitInfo keeps positional subclass fields; only `rank`

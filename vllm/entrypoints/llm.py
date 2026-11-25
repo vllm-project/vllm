@@ -271,7 +271,7 @@ class LLM(
             if value is None:
                 return cls()
             if isinstance(value, dict):
-                return cls(**{k: v for k, v in value.items() if is_init_field(cls, k)})  # type: ignore[arg-type]
+                return cls(**{k: v for k, v in value.items() if is_init_field(cls, k)})  # type: ignore[arg-type, ty:invalid-argument-type]
             return value
 
         if isinstance(compilation_config, int):

@@ -343,7 +343,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         )
 
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
-        self.impl = impl_cls(  # type: ignore[assignment]
+        self.impl = impl_cls(  # type: ignore[assignment, ty:invalid-assignment]
             num_heads=self.num_local_heads,
             head_size=self.head_size,
             scale=self.scale,

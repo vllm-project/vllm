@@ -65,7 +65,7 @@ class _FakeTokenizer(TokenizerLike):
     def num_special_tokens_to_add(self) -> int:
         return self._num_special_tokens
 
-    def __call__(self, text, text_pair=None, **kw):  # type: ignore[override]
+    def __call__(self, text, text_pair=None, **kw):  # type: ignore[override, ty:incompatible-method-override]
         raise NotImplementedError
 
     def get_vocab(self) -> dict[str, int]:
@@ -74,10 +74,10 @@ class _FakeTokenizer(TokenizerLike):
     def get_added_vocab(self) -> dict[str, int]:
         return {}
 
-    def encode(self, text, **kw) -> list[int]:  # type: ignore[override]
+    def encode(self, text, **kw) -> list[int]:  # type: ignore[override, ty:incompatible-method-override]
         raise NotImplementedError
 
-    def apply_chat_template(self, messages, **kw):  # type: ignore[override]
+    def apply_chat_template(self, messages, **kw):  # type: ignore[override, ty:incompatible-method-override]
         raise NotImplementedError
 
     def convert_tokens_to_ids(self, tokens):

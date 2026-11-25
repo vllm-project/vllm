@@ -1459,7 +1459,7 @@ class TestValuePostprocessorRemoved:
         with pytest.raises(TypeError):
             ParserEngineConfig(
                 name="test",
-                value_postprocessor=lambda x: x,  # type: ignore[call-arg]
+                value_postprocessor=lambda x: x,  # type: ignore[call-arg, ty:unknown-argument]
             )
 
 

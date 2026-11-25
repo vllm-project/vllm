@@ -460,7 +460,7 @@ def download_weights_from_hf(
                 if weight_map:
                     # Extra [] so that weight_map files are treated as a
                     # single allow_pattern in the loop below
-                    allow_patterns = [list(set(weight_map.values()))]  # type: ignore[list-item]
+                    allow_patterns = [list(set(weight_map.values()))]  # type: ignore[list-item, ty:invalid-assignment]
                 else:
                     allow_patterns = ["*.safetensors"]
             else:

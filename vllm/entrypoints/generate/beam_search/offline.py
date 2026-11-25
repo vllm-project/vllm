@@ -278,7 +278,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
             active_beams = [all_beams[i] for i in active_indices]
             active_params: Sequence[SamplingParams | PoolingParams] = [
-                beam_entries[i][0]  # type: ignore[index]
+                beam_entries[i][0]  # type: ignore[index, ty:not-subscriptable]
                 for i in active_indices
             ]
         else:

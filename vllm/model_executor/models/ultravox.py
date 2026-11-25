@@ -571,7 +571,7 @@ class UltravoxWhisperEncoder(WhisperEncoder):
         return (input_lengths - 1) // 2 + 1
 
     # Ultravox requires chunk lengths in addition to Whisper's input features.
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override, ty:incompatible-method-override]
         self,
         input_features: torch.Tensor,
         audio_lens: torch.Tensor,

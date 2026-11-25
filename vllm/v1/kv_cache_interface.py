@@ -462,7 +462,7 @@ class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
-    head_size_v: int = None  # type: ignore[assignment]
+    head_size_v: int = None  # type: ignore[assignment, ty:invalid-assignment]
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
     num_head_slots: int | None = None

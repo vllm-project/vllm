@@ -156,7 +156,7 @@ class InklingMultiTokenPredictor(nn.Module):
         # The target's raw token embedding (pre embed_norm), attached by
         # load_eagle_model. Never materialized here: building our own
         # replicated copy would transiently double the 2.3 GiB table.
-        self.embed_tokens: InklingReplicatedEmbedding = None  # type: ignore[assignment]
+        self.embed_tokens: InklingReplicatedEmbedding = None  # type: ignore[assignment, ty:invalid-assignment]
         # The depth layers consume the *backbone-normed* embedding
         # (embed_norm(embed(ids))), not the raw one: mtp embed_norm weights
         # are near-identity (trained on already-normalized inputs), and
@@ -186,7 +186,7 @@ class InklingMultiTokenPredictor(nn.Module):
             norm.weight if norm is not None else None,
             norm.variance_epsilon if norm is not None else 0.0,
         )
-        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:  # type: ignore[arg-type]
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:  # type: ignore[arg-type, ty:invalid-argument-type]
             return embeds
         from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 
@@ -273,7 +273,7 @@ class InklingMTP(nn.Module, SupportsMultiModalEmbeddings):
         )
         # The target's (vocab-sharded) LM head, attached by load_eagle_model;
         # never materialized here (same reasoning as model.embed_tokens).
-        self.lm_head: ParallelLMHead = None  # type: ignore[assignment]
+        self.lm_head: ParallelLMHead = None  # type: ignore[assignment, ty:invalid-assignment]
         self.logits_processor = LogitsProcessor(
             config.vocab_size,
             org_vocab_size=config.unpadded_vocab_size or config.vocab_size,
@@ -386,7 +386,7 @@ def _load_inkling_mtp_weights(
             else:
                 loader(param, weight)
         else:
-            loader(param, weight, shard_id)  # type: ignore[call-arg]
+            loader(param, weight, shard_id)  # type: ignore[call-arg, ty:too-many-positional-arguments]
         loaded.add(name)
         return True
 

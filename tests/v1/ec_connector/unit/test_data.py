@@ -51,7 +51,7 @@ def _make_transport(nixl_mock=None):
 
 def test_data_transport_abc_cannot_be_instantiated():
     with pytest.raises(TypeError):
-        DataTransport()  # type: ignore[abstract]
+        DataTransport()  # type: ignore[abstract, ty:abstract-class-instantiation]
 
 
 # ── NixlDataTransport construction ───────────────────────────────────────────

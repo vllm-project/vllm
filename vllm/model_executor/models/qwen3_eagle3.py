@@ -101,7 +101,7 @@ class Qwen3Eagle3DecoderLayer(Qwen3DecoderLayer):
         hidden_states = self.hidden_norm(hidden_states)
         return hidden_states, residual
 
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override, ty:incompatible-method-override]
         self,
         positions: torch.Tensor,
         embeds: torch.Tensor,
@@ -331,7 +331,7 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
     ) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override, ty:incompatible-method-override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,

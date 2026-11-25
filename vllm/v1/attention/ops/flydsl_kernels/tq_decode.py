@@ -293,7 +293,7 @@ def build_tq_decode_module(
         # Loop-carried FA-2 state: running_max, running_sum, acc_pv[...].
         loop_init = [running_max, running_sum, *acc_pv]
         results = loop_init
-        for tg_idx, state in range(0, trip_or_zero, 1, init=loop_init):  # type: ignore[call-overload]
+        for tg_idx, state in range(0, trip_or_zero, 1, init=loop_init):  # type: ignore[call-overload, ty:no-matching-overload, ty:not-iterable]
             tg_i32 = fx.Int32(tg_idx)
             partition_start = partition_base + tg_i32 * KV_COMPUTE_BLOCK
             bt_seq_base = seq * _stride_bt_seq + (partition_start // _BS)

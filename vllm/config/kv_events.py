@@ -15,7 +15,7 @@ class PublisherConfig:
     `enable_events`, which resolves `publisher` to "null" when they are off.
     """
 
-    publisher: Literal["null", "zmq"] = None  # type: ignore[assignment]
+    publisher: Literal["null", "zmq"] = None  # type: ignore[assignment, ty:invalid-assignment]
     """The publisher to use for publishing cache events. Can be "null", "zmq".
     """
 

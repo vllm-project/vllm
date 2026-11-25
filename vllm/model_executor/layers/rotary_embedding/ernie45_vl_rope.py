@@ -10,7 +10,7 @@ from .mrope import MRotaryEmbedding
 class Ernie4_5_VLRotaryEmbedding(MRotaryEmbedding):
     """3D rotary positional embedding. 3D is t:time h:height w:width."""
 
-    def forward_native(  # type: ignore[override]
+    def forward_native(  # type: ignore[override, ty:incompatible-method-override]
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
@@ -73,7 +73,7 @@ class Ernie4_5_VLRotaryEmbedding(MRotaryEmbedding):
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
-    def forward_cuda(  # type: ignore[override]
+    def forward_cuda(  # type: ignore[override, ty:incompatible-method-override]
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
@@ -81,7 +81,7 @@ class Ernie4_5_VLRotaryEmbedding(MRotaryEmbedding):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.forward_native(positions, query, key)
 
-    def forward_xpu(  # type: ignore[override]
+    def forward_xpu(  # type: ignore[override, ty:incompatible-method-override]
         self,
         positions: torch.Tensor,
         query: torch.Tensor,

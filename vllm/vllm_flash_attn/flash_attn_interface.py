@@ -11,7 +11,7 @@ import torch
 # Use relative import to support build-from-source installation in vLLM
 
 try:
-    from . import _vllm_fa2_C  # type: ignore[attr-defined]  # noqa: F401
+    from . import _vllm_fa2_C  # type: ignore[attr-defined, ty:missing-module-member]  # noqa: F401
 
     FA2_UNAVAILABLE_REASON = None
     FA2_AVAILABLE = True
@@ -20,7 +20,7 @@ except ImportError as e:
     FA2_AVAILABLE = False
 
 try:
-    from . import _vllm_fa3_C  # type: ignore[attr-defined]  # noqa: F401
+    from . import _vllm_fa3_C  # type: ignore[attr-defined, ty:missing-module-member]  # noqa: F401
 
     FA3_UNAVAILABLE_REASON = None
     FA3_AVAILABLE = True

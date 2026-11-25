@@ -628,7 +628,7 @@ def _convert_developer_to_system(
             new_msg = dict(msg)
             new_msg["role"] = "system"
             new_msg.pop("tools", None)
-            converted.append(new_msg)  # type: ignore[arg-type]
+            converted.append(new_msg)  # type: ignore[arg-type, ty:invalid-argument-type]
         else:
             converted.append(msg)
     return converted

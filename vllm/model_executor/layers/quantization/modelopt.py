@@ -3265,7 +3265,7 @@ class ModelOptLinearMethod(LinearMethodBase):
         self.kernel: Any = None
 
     @property
-    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override, ty:incompatible-property-override]
         w = self.spec.weight
         return isinstance(w, QuantKey) and (
             w.dtype == FP4_DTYPE

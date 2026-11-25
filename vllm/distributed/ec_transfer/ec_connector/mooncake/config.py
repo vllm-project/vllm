@@ -40,7 +40,7 @@ def _positive_float(name: str, value: object) -> float:
     if isinstance(value, bool):
         raise ValueError(message)
     try:
-        result = float(value)  # type: ignore[arg-type]
+        result = float(value)  # type: ignore[arg-type, ty:invalid-argument-type]
     except (TypeError, ValueError) as error:
         raise ValueError(message) from error
     if not math.isfinite(result) or result <= 0:

@@ -980,7 +980,7 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
                 if item is None:
                     raise RuntimeError(f"Found empty mm_items[{modality}][{i}]")
 
-        return self  # type: ignore[return-value]
+        return self  # type: ignore[return-value, ty:invalid-explicit-return]
 
     def get_data(
         self,

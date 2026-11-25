@@ -424,7 +424,7 @@ class InputProcessor:
             if arrival_time is None:
                 arrival_time = prompt.get("arrival_time", time.time())  # type: ignore[assignment]
 
-            engine_input: EngineInput = prompt  # type: ignore[assignment]
+            engine_input: EngineInput = prompt  # type: ignore[assignment, ty:invalid-assignment]
         else:
             logger.warning_once(
                 "Passing raw prompts to InputProcessor is deprecated "

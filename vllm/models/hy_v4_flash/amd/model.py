@@ -126,8 +126,8 @@ class HYV4FlashModel(HYV4FlashModelMixin, HYV4Model):
 
 class HYV4FlashForCausalLM(HYV4FlashForCausalLMMixin, HYV4ForCausalLM):
     model_cls = HYV4FlashModel
-    supports_lora = False  # type: ignore[assignment]
-    supports_pp = False  # type: ignore[assignment]
+    supports_lora = False  # type: ignore[assignment, ty:invalid-assignment]
+    supports_pp = False  # type: ignore[assignment, ty:invalid-assignment]
     requires_raw_input_tokens = True
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     hf_to_vllm_mapper = HYV4_MLP_MAPPER | WeightsMapper(

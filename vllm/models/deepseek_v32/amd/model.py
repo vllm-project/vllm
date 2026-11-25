@@ -370,7 +370,7 @@ class DeepseekV32Model(torch.nn.Module):
                             continue
                         if name.endswith(".bias") and name not in params_dict:
                             continue
-                        name = maybe_remap_kv_scale_name(name, params_dict)  # type: ignore[assignment]
+                        name = maybe_remap_kv_scale_name(name, params_dict)  # type: ignore[assignment, ty:invalid-argument-type]
                         if name is None:
                             continue
                         if is_pp_missing_parameter(name, self):

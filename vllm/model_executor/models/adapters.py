@@ -156,7 +156,7 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
 
     from .utils import AutoWeightsLoader, StageMissingLayer, no_init_weights
 
-    class ModelForPooling(orig_cls, VllmModelForPooling):  # type: ignore[valid-type,misc]
+    class ModelForPooling(orig_cls, VllmModelForPooling):  # type: ignore[valid-type, misc, ty:shadowed-type-variable]
         is_pooling_model = True
 
         def __init__(
@@ -294,7 +294,7 @@ def as_embedding_model(cls: type[_T]) -> type[_T]:
     # Lazy import
     from vllm.model_executor.layers.pooler import DispatchPooler
 
-    class ModelForEmbedding(_create_pooling_model_cls(cls)):  # type: ignore[misc]
+    class ModelForEmbedding(_create_pooling_model_cls(cls)):  # type: ignore[misc, ty:shadowed-type-variable]
         def _init_pooler(
             self,
             vllm_config: "VllmConfig",

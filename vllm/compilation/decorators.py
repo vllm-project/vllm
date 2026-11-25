@@ -601,7 +601,7 @@ def _support_torch_compile(
                 not (self._allow_aot_compile and envs.VLLM_USE_AOT_COMPILE)
                 or self.vllm_config.compilation_config.backend == "eager"
             )
-            return TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)  # type: ignore[arg-type]
+            return TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)  # type: ignore[arg-type, ty:invalid-argument-type]
 
         # This is the path for the first compilation.
         # the first compilation needs to have dynamic shapes marked
@@ -704,7 +704,7 @@ def _support_torch_compile(
                     tag=self._compile_tag,
                 ):
                     output = TorchCompileWithNoGuardsWrapper.__call__(
-                        self,  # type: ignore[arg-type]
+                        self,  # type: ignore[arg-type, ty:invalid-argument-type]
                         *args,
                         **kwargs,
                     )

@@ -160,7 +160,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         }
         shape = shape_map[weight_name]
         assert isinstance(shape, tuple) and all(isinstance(d, int) for d in shape)
-        return shape  # type: ignore[return-value]
+        return shape  # type: ignore[return-value, ty:invalid-explicit-return]
 
     def create_weights(
         self,

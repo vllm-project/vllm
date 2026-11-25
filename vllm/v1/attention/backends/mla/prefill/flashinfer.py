@@ -139,7 +139,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
             get_per_layer_parameters(
                 self.vllm_config,
                 layer_names,
-                MLACommonImpl,  # type: ignore[type-abstract]
+                MLACommonImpl,  # type: ignore[type-abstract, ty:invalid-argument-type]
             )
         )
         return self._global_hyperparameters

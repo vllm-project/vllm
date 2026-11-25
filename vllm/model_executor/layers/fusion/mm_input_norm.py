@@ -196,7 +196,7 @@ def _validate_layout(layout: str) -> InputLayout:
     """
     if layout not in _INPUT_LAYOUTS:
         raise ValueError(f"invalid layout {layout!r}; expected one of {_INPUT_LAYOUTS}")
-    return layout  # type: ignore[return-value]
+    return layout  # type: ignore[return-value, ty:invalid-explicit-return]
 
 
 class IdentityInputNorm(nn.Module):

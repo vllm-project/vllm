@@ -290,7 +290,7 @@ class TestPromptBuilding:
         )
 
         for i, exp in enumerate(expected):
-            assert engine_inputs[i]["prompt_token_ids"] == exp  # type: ignore[typeddict-item]
+            assert engine_inputs[i]["prompt_token_ids"] == exp  # type: ignore[typeddict-item, ty:invalid-typed-dict-key]
 
 
 class TestGeneration:

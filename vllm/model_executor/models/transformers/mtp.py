@@ -114,7 +114,7 @@ class MTPMixin(CausalMixin):
             self.has_own_embed_tokens = any(n.startswith(embed_prefix) for n in loaded)
         return loaded
 
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override, ty:incompatible-method-override]
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,

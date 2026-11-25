@@ -121,7 +121,7 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
     _, moe_config, initialized_with = build_runner(monkeypatch)
 
     # The stand-in deliberately borrows the real config's property.
-    assert moe_config.use_deferred_moe_finalize  # type: ignore[misc]
+    assert moe_config.use_deferred_moe_finalize  # type: ignore[misc, ty:invalid-attribute-access]
     assert moe_config.defer_moe_finalize_max_num_tokens == 128
     assert initialized_with["experts_per_token"] == 16
 
@@ -142,7 +142,7 @@ def test_tail_fusion_requires_supported_topology(
 
     assert runner.enable_k3_latent_moe_tail_fusion is tail_enabled
     # The stand-in deliberately borrows the real config's property.
-    assert moe_config.use_deferred_moe_finalize == tail_enabled  # type: ignore[misc]
+    assert moe_config.use_deferred_moe_finalize == tail_enabled  # type: ignore[misc, ty:invalid-attribute-access]
     assert bool(initialized_with) is tail_enabled
 
 

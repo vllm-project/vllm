@@ -460,7 +460,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 extra_impl_args.setdefault("block_n", block_n)
 
         impl_cls = self.attn_backend.get_impl_cls()
-        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
+        self.impl = impl_cls(  # type: ignore[assignment, ty:invalid-assignment]  # impl_cls always returns an AttentionImpl subclass
             num_heads,
             head_size,
             scale,

@@ -35,7 +35,7 @@ def test_hash_algorithm(algorithm: MMHasherAlgorithm):
 
 def test_hash_algorithm_required():
     with pytest.raises(TypeError, match="algorithm"):
-        MultiModalHasher.hash_kwargs(value="test")  # type: ignore[call-arg]
+        MultiModalHasher.hash_kwargs(value="test")  # type: ignore[call-arg, ty:missing-argument]
 
 
 def test_hash_single_item_different_shape():

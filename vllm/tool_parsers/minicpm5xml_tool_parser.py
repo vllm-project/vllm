@@ -306,7 +306,7 @@ def _parse_function_block(
     try:
         if _HAS_LXML:
             try:
-                parser = ET.XMLParser(**{"strip_cdata": False})  # type: ignore[call-arg]
+                parser = ET.XMLParser(**{"strip_cdata": False})  # type: ignore[call-arg, ty:unknown-argument]
             except TypeError:
                 parser = ET.XMLParser()
             root = ET.fromstring(block, parser=parser)

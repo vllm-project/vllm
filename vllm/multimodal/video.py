@@ -562,7 +562,7 @@ class EmbeddingGemma2VideoBackend(VideoBackend):
         frames, metadata = super().load_bytes(
             data,
             num_frames=-1,
-            fps=fps,  # type: ignore[arg-type]
+            fps=fps,  # type: ignore[arg-type, ty:invalid-argument-type]
             max_duration=max_duration,
             frame_recovery=frame_recovery,
             backend=backend,

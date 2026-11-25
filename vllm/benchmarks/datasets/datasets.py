@@ -668,7 +668,7 @@ class RandomDataset(BenchmarkDataset):
                 batch = requests[i : i + batchsize]
                 batch_requests.append(
                     SampleRequest(
-                        prompt=[req.prompt for req in batch],  # type: ignore[arg-type]
+                        prompt=[req.prompt for req in batch],  # type: ignore[arg-type, ty:invalid-argument-type]
                         prompt_len=sum(req.prompt_len for req in batch),
                         request_id=request_id_prefix + str(i // batchsize),
                     )
@@ -4205,7 +4205,7 @@ class MLPerfDataset(HuggingFaceDataset):
                 {"role": "user", "content": question},
             ]
             prompt_formatted = tokenizer.apply_chat_template(
-                messages,  # type: ignore[arg-type]
+                messages,  # type: ignore[arg-type, ty:invalid-argument-type]
                 add_generation_prompt=True,
                 tokenize=False,
             )

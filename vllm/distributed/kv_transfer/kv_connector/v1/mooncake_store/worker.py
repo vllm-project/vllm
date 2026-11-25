@@ -1321,10 +1321,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             self.request_queue.task_done()
 
     def _load_request(self, req_meta: ReqMeta):
-        token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
+        token_len = req_meta.load_spec.token_len  # type: ignore[union-attr, ty:missing-union-attribute]
         req_id = req_meta.req_id
         mask_num = (
-            req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
+            req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr, ty:missing-union-attribute]
             // self.block_size
             * self.block_size
         )
@@ -1335,7 +1335,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         tail_key_boundaries = {
             boundary.group_id: boundary.num_tokens
             for boundary in (
-                req_meta.load_spec.tail_key_boundaries  # type: ignore[union-attr]
+                req_meta.load_spec.tail_key_boundaries  # type: ignore[union-attr, ty:missing-union-attribute]
             )
         }
 

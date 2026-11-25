@@ -281,7 +281,7 @@ class KpoolTailBackend(DeepseekV32IndexerBackend):
         return [MultipleOf(1)]
 
     @staticmethod
-    def get_builder_cls() -> type["KpoolTailMetadataBuilder"]:  # type: ignore[override]
+    def get_builder_cls() -> type["KpoolTailMetadataBuilder"]:  # type: ignore[override, ty:incompatible-method-override]
         return KpoolTailMetadataBuilder
 
 

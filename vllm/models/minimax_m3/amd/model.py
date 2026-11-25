@@ -892,7 +892,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             emits_sparse_block_table=self.indexer_emits_table,
         )
         # impl is AttentionImplBase (broader than AttentionLayerBase's annotation).
-        self.impl: MiniMaxM3SparseImpl = main_impl_cls(  # type: ignore[assignment]
+        self.impl: MiniMaxM3SparseImpl = main_impl_cls(  # type: ignore[assignment, ty:incompatible-attribute-override]
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -1582,7 +1582,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                     self.indexer(index_query)
         if out_q is not None:
             assert out_scale is not None
-            self.impl.forward_decode_mxfp8(  # type: ignore[attr-defined]
+            self.impl.forward_decode_mxfp8(  # type: ignore[attr-defined, ty:missing-union-attribute]
                 self, query, self.kv_cache, out_q, out_scale
             )
             return None

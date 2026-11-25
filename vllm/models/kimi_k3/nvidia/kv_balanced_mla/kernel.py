@@ -4006,7 +4006,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             tTR_gO = tmem_load_thr_copy.partition_D(gO)
             tTR_cO = tmem_load_thr_copy.partition_D(cO)
         tTR_rAcc = cute.make_fragment_like(tTR_gO, self.acc_dtype)
-        return tmem_load_tiled_copy, tAcc, tTR_tAcc, tTR_gO, tTR_cO, tTR_rAcc  # type: ignore[return-value]
+        return tmem_load_tiled_copy, tAcc, tTR_tAcc, tTR_gO, tTR_cO, tTR_rAcc  # type: ignore[return-value, ty:invalid-explicit-return]
 
     def get_correction_factor(
         self,

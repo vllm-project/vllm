@@ -310,7 +310,7 @@ class FlexibleArgumentParser(ArgumentParser):
         # determine help from format above
         return formatter.format_help()
 
-    def parse_args(  # type: ignore[override]
+    def parse_args(  # type: ignore[override, ty:incompatible-method-override]
         self,
         args: list[str] | None = None,
         namespace: Namespace | None = None,

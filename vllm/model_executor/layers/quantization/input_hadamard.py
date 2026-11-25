@@ -80,7 +80,7 @@ class InputHadamardLinearMethod(LinearMethodBase):
         self.rotate_weight = rotate_weight
 
     @property
-    def uses_meta_device(self) -> bool:  # type: ignore[override]
+    def uses_meta_device(self) -> bool:  # type: ignore[override, ty:incompatible-property-override]
         return self.quant_method.uses_meta_device
 
     def create_weights(

@@ -1885,7 +1885,7 @@ class MuseSparkModel(LlamaModel):
         hidden_states = self.embed_tokens(input_ids)
         return self.tok_embeddings_norm(hidden_states, out_dtype=self.residual_dtype)
 
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override, ty:incompatible-method-override]
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,

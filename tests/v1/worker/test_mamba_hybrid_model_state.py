@@ -44,7 +44,7 @@ def _recoverssm_attn_groups(layer_name: str) -> list[list[AttentionGroup]]:
     """RecoverSSMState.record_step reads only each group's `layer_names` and
     `metadata_builders`."""
     group = SimpleNamespace(layer_names=[layer_name], metadata_builders=[object()])
-    return [[group]]  # type: ignore[list-item]  # stand-in group
+    return [[group]]  # type: ignore[list-item, ty:invalid-explicit-return]  # stand-in group
 
 
 GPU_DEVICE = current_platform.device_type

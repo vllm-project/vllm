@@ -82,7 +82,7 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         layer.requires_unquantized_input = bool(self.input_tfms)
 
         # get weight loader for transforms
-        weight_loader: Callable = extra_weight_attrs.get("weight_loader")  # type: ignore[assignment]
+        weight_loader: Callable = extra_weight_attrs.get("weight_loader")  # type: ignore[assignment, ty:invalid-assignment]
 
         # HACK: UnquantizedLinearMethod does not support weight loader v2, but
         # transforms (specifically SharedWeightParameter) requires

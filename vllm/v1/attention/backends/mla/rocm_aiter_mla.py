@@ -1152,7 +1152,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 max_decode_query_len(vllm_config),
             )
             self._varlen_decode_qlen = self._mtp_decode_qlen
-            self.query_len_support = QueryLenSupport.VARLEN  # type: ignore[misc]
+            self.query_len_support = QueryLenSupport.VARLEN  # type: ignore[misc, ty:invalid-attribute-access]
             max_rows = vllm_config.scheduler_config.max_num_seqs * (
                 self._varlen_decode_qlen
             )

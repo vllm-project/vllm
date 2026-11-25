@@ -307,7 +307,7 @@ class MooncakeStoreCoordinator:
             manager_config, block_size, group_ids = self.attention_groups[0]
             manager_cls = manager_config.manager_cls
             hit_blocks, hit_length = manager_cls.find_longest_cache_hit(
-                block_hashes=block_hashes,  # type: ignore[arg-type]
+                block_hashes=block_hashes,  # type: ignore[arg-type, ty:invalid-argument-type]
                 max_length=max_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=cast(BlockPool, cached_block_pool),
@@ -340,7 +340,7 @@ class MooncakeStoreCoordinator:
                     continue
 
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
-                    block_hashes=block_hashes,  # type: ignore[arg-type]
+                    block_hashes=block_hashes,  # type: ignore[arg-type, ty:invalid-argument-type]
                     max_length=curr_hit_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=cast(BlockPool, cached_block_pool),

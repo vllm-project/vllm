@@ -297,7 +297,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override, ty:incompatible-method-override]
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
@@ -442,7 +442,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                             continue
                         if name.endswith(".bias") and name not in params_dict:
                             continue
-                        name = maybe_remap_kv_scale_name(name, params_dict)  # type: ignore[assignment]
+                        name = maybe_remap_kv_scale_name(name, params_dict)  # type: ignore[assignment, ty:invalid-argument-type]
                         if name is None:
                             continue
                         if (

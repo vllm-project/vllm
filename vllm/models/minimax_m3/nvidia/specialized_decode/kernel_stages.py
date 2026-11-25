@@ -737,7 +737,7 @@ class KernelContext:
             local_blocks=local_blocks,
             max_rows=self.max_rows_of("page_topk"),
         ).build()
-        dev = self.row_ids.device  # type: ignore[union-attr]
+        dev = self.row_ids.device  # type: ignore[union-attr, ty:missing-union-attribute]
         self.identity_rows = (
             torch.arange(MAX_COLS, dtype=torch.int32, device=dev)
             .unsqueeze(0)
@@ -766,7 +766,7 @@ class KernelContext:
             moe = lk.block_sparse_moe
             for rows in self.rows_ok["allreduce_norm"]:
                 post = PostRouteStage(
-                    transport=self.transport,  # type: ignore[arg-type]
+                    transport=self.transport,  # type: ignore[arg-type, ty:invalid-argument-type]
                     rx=lk.rx[rows],
                     post_norm_weight=_bf16(lk.layer.post_attention_layernorm.weight),
                     router_bias=moe.e_score_correction_bias.detach(),
@@ -782,8 +782,8 @@ class KernelContext:
 
         # One fold per layer: the 128x4 index of the MXFP8 o_proj input scales (for a
         # stock attention output, quantized here).
-        n = torch.arange(128, device=self.row_ids.device).unsqueeze(1)  # type: ignore[union-attr]
-        kb = torch.arange(hw.KO // 32, device=self.row_ids.device).unsqueeze(0)  # type: ignore[union-attr]
+        n = torch.arange(128, device=self.row_ids.device).unsqueeze(1)  # type: ignore[union-attr, ty:missing-union-attribute]
+        kb = torch.arange(hw.KO // 32, device=self.row_ids.device).unsqueeze(0)  # type: ignore[union-attr, ty:missing-union-attribute]
         self.sf_index = hw.sf128x4_index(n, kb, hw.KO // 32)
         for lk in self.layers.values():
             attn, moe = lk.attn, lk.block_sparse_moe
@@ -799,14 +799,14 @@ class KernelContext:
             blobs = (blob_a.to(o_w.device), blob_r.to(o_w.device))
             for rows in self.rows_ok["o_proj"]:
                 stage = OProjRouterStage(
-                    transport=self.transport,  # type: ignore[arg-type]
+                    transport=self.transport,  # type: ignore[arg-type, ty:invalid-argument-type]
                     rx=lk.rx[rows],
                     o_weight=o_w,
                     o_weight_scale=o_s,
                     router_weight=router,
                     post_norm_weight=post_norm,
-                    residual_mid=lk.r_mid[:rows],  # type: ignore[index]
-                    xq=lk.xq[:rows],  # type: ignore[index]
+                    residual_mid=lk.r_mid[:rows],  # type: ignore[index, ty:not-subscriptable]
+                    xq=lk.xq[:rows],  # type: ignore[index, ty:not-subscriptable]
                     xsf=lk.xsf,
                     rows=rows,
                     blobs=blobs,
@@ -860,7 +860,7 @@ class KernelContext:
         from .kernels import wide
 
         rows = self.rows_ok["front_wide"]
-        dev = self.row_ids.device  # type: ignore[union-attr]
+        dev = self.row_ids.device  # type: ignore[union-attr, ty:missing-union-attribute]
         lks = list(self.layers.values())
         n = None
         for i, lk in enumerate(lks):
@@ -896,7 +896,7 @@ class KernelContext:
         from .kernels.o_proj import weights as hw
 
         rows = self.rows_ok["o_proj_wide"]
-        dev = self.row_ids.device  # type: ignore[union-attr]
+        dev = self.row_ids.device  # type: ignore[union-attr, ty:missing-union-attribute]
         if self.sf_index is None:
             # The 128x4 index of the MXFP8 input scales (``quantize_attn_out`` of a
             # stock attention output).
@@ -1285,9 +1285,9 @@ class KernelSparseDecode(_KernelStage, SparseDecodeStage):
             tables,
             self.ctx.lens,
             lk.out[:rows],
-            lk.xq[:rows],  # type: ignore[index]
+            lk.xq[:rows],  # type: ignore[index, ty:not-subscriptable]
             lk.xsf,
-            lk.sfp[:rows],  # type: ignore[index]
+            lk.sfp[:rows],  # type: ignore[index, ty:not-subscriptable]
             q_prewait=q_prewait,
         )
         return lk.out[:rows]
@@ -1404,10 +1404,10 @@ class KernelMoE(_KernelStage, MoEStage):
         if hidden.data_ptr() != engine.handoff.normed.data_ptr():
             # Its routes and NVFP4 input come from the paired post only.
             raise RuntimeError(
-                f"kernel MoE of layer {lk.layer_id}: its input is not the kernel "  # type: ignore[union-attr]
+                f"kernel MoE of layer {lk.layer_id}: its input is not the kernel "  # type: ignore[union-attr, ty:missing-union-attribute]
                 "post's hand-off (a stock allreduce_norm ran before it)"
             )
-        out = lk.ffn_out[rows]  # type: ignore[union-attr]
+        out = lk.ffn_out[rows]  # type: ignore[union-attr, ty:missing-union-attribute]
         engine(out=out, push=push)
         return PushedFFN(out) if push else out
 

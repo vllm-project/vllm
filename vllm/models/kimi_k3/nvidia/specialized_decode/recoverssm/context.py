@@ -107,7 +107,7 @@ class KDADeferredCommitContext(KDARecoverSSMCommitContext):
                     sdec_commit.compile_commit_f32(
                         state_ref, spec_query_len, layers[0].A_log.dtype, align, indexed
                     )
-            context.backend = FP32_DEFERRED  # type: ignore[assignment]
+            context.backend = FP32_DEFERRED  # type: ignore[assignment, ty:invalid-assignment]
         return context
 
     def commit(
