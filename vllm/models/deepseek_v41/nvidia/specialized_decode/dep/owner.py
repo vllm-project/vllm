@@ -41,6 +41,8 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.dep.shared_boundary impo
     _FusedMHCDeviceKernel,
 )
 
+from . import MAX_ROWS_BY_WIDTH
+
 
 @dsl_user_op
 def _abort_wait(*, loc=None, ip=None):
@@ -50,7 +52,7 @@ def _abort_wait(*, loc=None, ip=None):
 def uniform_owner_layout(sizes, rows, width):
     return (
         width in (2, 4, 8)
-        and 0 < rows <= 128
+        and 0 < rows <= MAX_ROWS_BY_WIDTH[width]
         and sizes is not None
         and len(sizes) == width
         and all(size == rows for size in sizes)
@@ -66,8 +68,8 @@ class OwnerOutput:
 
 
 def owner_slice(global_row, rows, width):
-    if width not in (2, 4, 8) or not 1 <= rows <= 128:
-        raise ValueError("uniform EP2/4/8 and 1..128 local rows required")
+    if not 1 <= rows <= MAX_ROWS_BY_WIDTH.get(width, 0):
+        raise ValueError("uniform EP2/4 up to 128 rows or EP8 up to 384 rows required")
     if not 0 <= global_row < rows * width:
         raise ValueError("global row out of range")
     return divmod(global_row, rows)

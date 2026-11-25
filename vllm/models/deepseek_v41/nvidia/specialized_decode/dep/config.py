@@ -17,11 +17,13 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode import DecodeConfig
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from . import MAX_ROWS_BY_WIDTH
+
 
 @dataclass(frozen=True, slots=True)
 class DEPConfig(DecodeConfig):
     dep: bool = True
-    # Larger captures keep the stock layer loop; the full-model sweep regressed.
+    # DEP8 also admits larger captures; DEP2/4 retain their validated limit.
     max_rows: int = 128
     wide_c8_attention: bool = False
 
@@ -55,6 +57,7 @@ def requirements(config: VllmConfig, dp_size: int):
     graph = c.cudagraph_mode
     return {
         "SM103": current_platform.is_device_capability(103),
+        "DP/EP width 2, 4 or 8": dp_size in MAX_ROWS_BY_WIDTH,
         f"TP1/DP{dp_size}/EP{dp_size}, CP1/PP1, no microbatch/EPLB": supports_layout(
             p, dp_size
         ),
@@ -93,6 +96,7 @@ def dep_config(config: VllmConfig) -> DEPConfig:
     dp_size = config.parallel_config.data_parallel_size
     dp_group = get_dp_group()
     missing = [key for key, ok in requirements(config, dp_size).items() if not ok]
+    extra = config.additional_config
     if dp_group.world_size != dp_size:
         missing.append(f"a DP group of {dp_size} ranks (got {dp_group.world_size})")
     if not all(in_the_same_node_as(dp_group.cpu_group, source_rank=0)):
@@ -106,7 +110,6 @@ def dep_config(config: VllmConfig) -> DEPConfig:
             + ("; ".join(missing) or "support on all DP ranks")
         )
     k = config.kernel_config
-    extra = config.additional_config
     wide_c8 = (
         extra.get("dep_wide_c8_attention", False) if isinstance(extra, dict) else False
     )
@@ -115,5 +118,6 @@ def dep_config(config: VllmConfig) -> DEPConfig:
     return DEPConfig(
         k.enable_flashinfer_autotune is not False,
         bool(k.enable_jit_warmup),
+        max_rows=MAX_ROWS_BY_WIDTH[dp_size],
         wide_c8_attention=wide_c8,
     )

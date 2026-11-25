@@ -25,6 +25,13 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm i
 from ..moe.routed_expert_front_cute import (
     RoutedExpertFront,
 )
+from . import MAX_ROWS
+
+
+def _build_rows(rows: int) -> int:
+    if not 1 <= rows <= MAX_ROWS:
+        raise ValueError(f"DEP front requires 1..{MAX_ROWS} rows")
+    return width(rows) if rows <= 192 else MAX_ROWS
 
 
 class FrontOutput(NamedTuple):
@@ -35,10 +42,12 @@ class FrontOutput(NamedTuple):
 
 
 @cache
-def compile_front(device_index: int, image: bool, built: int):
+def compile_front(device_index: int, image: bool, built: int, quantize: bool = True):
     with torch.accelerator.device_index(device_index):
         return cute.compile(
-            RoutedExpertFront(image, built, build_routing_record=False),
+            RoutedExpertFront(
+                image, built, build_routing_record=False, quantize=quantize
+            ),
             _fake(cutlass.Float32, 16),
             _fake(cutlass.Float32, 16),
             _fake(cutlass.Float32, 16),
@@ -72,8 +81,9 @@ def _tensor(t, shape, dtype, device):
 
 
 class DEPFront:
-    def __init__(self, config: FrontConfig, workspace=None):
+    def __init__(self, config: FrontConfig, workspace=None, *, quantize=True):
         self.config = config
+        self.quantize = quantize
         self.workspace = workspace
         self.device = config.bias.device
         self.device_index = self.device.index
@@ -93,16 +103,16 @@ class DEPFront:
     def warmup(self, rows: int):
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("compile the front before capture")
-        built = width(rows)
+        built = _build_rows(rows)
         self._compiled[built] = compile_front(
-            self.device_index, self.config.bias_vl is not None, built
+            self.device_index, self.config.bias_vl is not None, built, self.quantize
         )
 
     def accepts(self, x, logits, input_ids=None, is_padding=None):
         if not isinstance(x, torch.Tensor) or x.ndim != 2:
             return False
         rows = x.size(0)
-        if not 1 <= rows <= 192:
+        if not 1 <= rows <= MAX_ROWS:
             return False
         if not _tensor(x, (rows, HIDDEN), torch.bfloat16, self.device):
             return False
@@ -118,7 +128,7 @@ class DEPFront:
             is_padding, (rows,), torch.bool, self.device
         ):
             return False
-        return width(rows) in self._compiled
+        return _build_rows(rows) in self._compiled
 
     def __call__(self, x, logits, input_ids=None, is_padding=None, *, output=None):
         if not self.accepts(x, logits, input_ids, is_padding):
@@ -134,6 +144,8 @@ class DEPFront:
             ("front_weights", (rows, TOP_K), torch.float32),
         )
         if output is None:
+            if not self.quantize:
+                raise ValueError("routing-only front requires prequantized output")
             output = FrontOutput(
                 *(
                     torch.empty(shape, dtype=dtype, device=self.device)
@@ -147,7 +159,7 @@ class DEPFront:
             for tensor, (_, shape, dtype) in zip(output, specs)
         ):
             raise ValueError("front output must match the contiguous local row layout")
-        self._compiled[width(rows)](
+        self._compiled[_build_rows(rows)](
             _pointer(cutlass.Float32, logits, 16),
             _pointer(cutlass.Float32, config.bias, 16),
             _pointer(cutlass.Float32, config.bias_vl if image else config.bias, 16),

@@ -120,6 +120,28 @@ def test_dep_kv_transfer_preserves_factory_validation():
         supports_kv_transfer(config)
 
 
+@pytest.mark.parametrize("width,limit", [(2, 128), (4, 128), (8, 384)])
+def test_dep_row_limit(width, limit):
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.dep import (
+        MAX_ROWS_BY_WIDTH,
+    )
+    from vllm.models.deepseek_v41.nvidia.specialized_decode.dep.owner import (
+        owner_slice,
+        uniform_owner_layout,
+    )
+
+    assert MAX_ROWS_BY_WIDTH[width] == limit
+    for rows in (1, 128, 129, 192, 384, 385):
+        assert uniform_owner_layout([rows] * width, rows, width) is (rows <= limit)
+        if rows <= limit:
+            assert owner_slice(rows * width - 1, rows, width) == (width - 1, rows - 1)
+        else:
+            with pytest.raises(ValueError, match="uniform EP"):
+                owner_slice(0, rows, width)
+    assert not uniform_owner_layout([0] * width, 0, width)
+    assert not uniform_owner_layout([limit] * (width - 1) + [0], limit, width)
+
+
 @pytest.mark.skipif(
     not current_platform.is_device_capability(103), reason="needs SM103"
 )
@@ -151,7 +173,7 @@ def test_local_mhc_cluster_entry():
         assert torch.all(output[2] == 0.5)
 
 
-def _worker(rank, width, port):
+def _worker(rank, width, port, capacity):
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
     from vllm.model_executor.layers.layernorm import RMSNorm
@@ -179,14 +201,17 @@ def _worker(rank, width, port):
     device = torch.device("cuda", rank)
     try:
         with torch.inference_mode(), set_current_vllm_config(VllmConfig()):
-            owner = EPReduceScatterMHC(dist.group.WORLD, device)
-            storage = PeerFrontDispatch(device, dist.group.WORLD, 128)
+            owner = EPReduceScatterMHC(dist.group.WORLD, device, capacity)
+            storage = PeerFrontDispatch(device, dist.group.WORLD, capacity)
             norm = RMSNorm(5120, eps=1e-6).to(device=device, dtype=torch.bfloat16)
             reference = shared_boundary.FusedPostPre()
             errors = torch.zeros((), dtype=torch.int64, device=device)
             counter = torch.zeros((), dtype=torch.int32, device=device)
             graphs = []
-            for rows in (1, 6, 12, 48, 128):
+            row_counts = (1, 6, 12, 48, 128)
+            if capacity > 128:
+                row_counts = (1, 126, 129, 192, 288, 384)
+            for rows in row_counts:
                 assert uniform_owner_layout([rows] * width, rows, width)
                 assert not uniform_owner_layout([0] + [rows] * (width - 1), rows, width)
                 assert not uniform_owner_layout(
@@ -383,4 +408,19 @@ def _worker(rank, width, port):
 def test_owner_transport_graph_reuse(width):
     if torch.accelerator.device_count() < width:
         pytest.skip(f"needs {width} isolated GPUs")
-    torch.multiprocessing.spawn(_worker, args=(width, get_open_port()), nprocs=width)
+    torch.multiprocessing.spawn(
+        _worker, args=(width, get_open_port(), 128), nprocs=width
+    )
+
+
+@pytest.mark.distributed
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(103), reason="needs SM103"
+)
+def test_owner_transport_large_graph_reuse():
+    width = 8
+    if torch.accelerator.device_count() < width:
+        pytest.skip(f"needs {width} isolated GPUs")
+    torch.multiprocessing.spawn(
+        _worker, args=(width, get_open_port(), 384), nprocs=width
+    )

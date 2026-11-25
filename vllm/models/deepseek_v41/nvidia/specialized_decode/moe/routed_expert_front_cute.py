@@ -510,19 +510,33 @@ def quantize_row(
 class RoutedExpertFront:
     """The fused front (module docstring); `image`: whether the router
     routes image sentinel tokens with `bias_vl`; `max_rows`: 8, 16, 32,
-    64, 128 or 192, the most rows of a call."""
+    64, 128 or 192, the most rows of a call. The pre-dispatch variant without
+    routing records also supports 384 rows with up to eight rows per CTA."""
 
     def __init__(
-        self, image: bool, max_rows: int = 8, *, build_routing_record: bool = True
+        self,
+        image: bool,
+        max_rows: int = 8,
+        *,
+        build_routing_record: bool = True,
+        quantize: bool = True,
     ) -> None:
-        assert max_rows in (8, 16, 32, 64, 128, 192)
+        assert max_rows in (8, 16, 32, 64, 128, 192) or (
+            not build_routing_record and max_rows == 384
+        )
         self.image = image
+        assert quantize or not build_routing_record
+        self.quantize = quantize
         # EP ownership and row order are only known after dispatch. Reuse the
         # top-k/quantization without building a discarded TP record.
         self.build_routing_record = build_routing_record
         self.max_rows = max_rows
-        self.selecting = SELECT_CTAS  # CTAs, one cluster
-        self.select_rows = max_rows // self.selecting  # 1-8, 16 at 128 rows, 24 at 192
+        # DEP has no cross-CTA routing record and need not fit one cluster.
+        # Keep four warps per row instead of serializing more experts per lane.
+        self.selecting = (
+            SELECT_CTAS if build_routing_record else max(SELECT_CTAS, max_rows // 8)
+        )
+        self.select_rows = max_rows // self.selecting
         # Warps per row: four, or as many as fit above 8 rows a CTA.
         self.parts = min(FRONT_THREADS // 32 // self.select_rows, MAX_PARTS)
         self.per_lane = EXPERTS // 32 // self.parts  # experts per lane
@@ -562,9 +576,12 @@ class RoutedExpertFront:
         `permuted` [rows, 6] and the routing record. rows in [1, max_rows]."""
         slots = cute.make_layout(rows * TOP_K)
         selecting = self.selecting
-        quantizing = (rows + QUANT_ROWS - 1) // QUANT_ROWS
-        # Whole clusters: the last one's spare CTAs exit at once.
-        quantizing = (quantizing + selecting - 1) // selecting * selecting
+        quantizing = Int32(0)
+        if cutlass.const_expr(self.quantize):
+            quantizing = (rows + QUANT_ROWS - 1) // QUANT_ROWS
+        # Only the TP record builder needs whole multi-CTA clusters.
+        if cutlass.const_expr(self.build_routing_record):
+            quantizing = (quantizing + selecting - 1) // selecting * selecting
         self.kernel(
             cute.make_tensor(logits_ptr, cute.make_layout(rows * EXPERTS)),
             cute.make_tensor(bias_ptr, cute.make_layout(EXPERTS)),
@@ -620,10 +637,11 @@ class RoutedExpertFront:
         thread, _, _ = cute.arch.thread_idx()
         cta, _, _ = cute.arch.block_idx()
         if cta >= self.selecting:
-            row = (cta - self.selecting) * QUANT_ROWS + thread // ROW_THREADS
-            if thread < QUANT_ROWS * ROW_THREADS and row < rows:
-                cute.arch.griddepcontrol_wait()
-                quantize_row(x, row, thread % ROW_THREADS, x_quant, x_scale)
+            if cutlass.const_expr(self.quantize):
+                row = (cta - self.selecting) * QUANT_ROWS + thread // ROW_THREADS
+                if thread < QUANT_ROWS * ROW_THREADS and row < rows:
+                    cute.arch.griddepcontrol_wait()
+                    quantize_row(x, row, thread % ROW_THREADS, x_quant, x_scale)
         else:
             self.select_and_route(
                 logits,

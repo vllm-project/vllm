@@ -26,11 +26,11 @@ For a different group size, change `--data-parallel-size`. The same
 `--tensor-parallel-size 1` and `--enable-expert-parallel`; these are not the
 TP4/TP8 executors.
 
-| GPUs | `--data-parallel-size` | Routed experts per rank (384 total) |
-| ---: | ---: | ---: |
-| 2 | 2 | 192 |
-| 4 | 4 | 96 |
-| 8 | 8 | 48 |
+| GPUs | `--data-parallel-size` | Routed experts per rank (384 total) | Maximum decode rows per rank |
+| ---: | ---: | ---: | ---: |
+| 2 | 2 | 192 | 128 |
+| 4 | 4 | 96 | 128 |
+| 8 | 8 | 48 | 384 |
 
 Unsupported layouts fail at startup. Global expert IDs are preserved through
 dispatch.
@@ -48,9 +48,11 @@ dispatch.
 - No LoRA, sleep, weight updates or batch-invariant mode.
 
 Unsupported configurations fail at initialization. Pure decode graphs up to
-128 token rows per rank use the executor; prefill, eager execution and larger
-graphs retain the original layer loop. Request counts and token rows differ:
-DSpark5 can produce six target rows and five draft rows per request.
+128 token rows per rank for DEP2/4, or 384 for DEP8, use the executor. Prefill,
+eager execution and larger graphs retain the original layer loop. Request
+counts and token rows differ: DSpark5 can produce six target rows and five
+draft rows per request. The limit applies to the padded graph size, not just
+the number of live tokens.
 
 The executor reuses the specialized attention/indexer and Engram prefetch
 paths, adds local mHC boundaries without TP collectives, and fuses top-k with
@@ -114,13 +116,61 @@ DEP-specific transport code. End-to-end PD validation here covers NIXL pull;
 the configuration tests cover the generic admission check, not transfers for
 every connector.
 
-## Experimental C8 attention
+## DEP8 Larger Decode Batches
+
+DEP8 automatically uses a 384-row capacity with the same
+`latency_specialized_dep` backend. No extra capacity flag is needed. With
+DSpark5, 32 and 64 requests per rank produce 192 and 384 target rows before
+graph padding. Capture the corresponding target and draft graph sizes to use
+this path. DEP2/4 remain limited to 128 rows. Dispatch copies every activation
+row; there is no route-aware activation filtering. Expert GEMMs, quantization
+and sampling remain unchanged.
+
+### Paired Measurements
+
+Eight B300 GPUs, TP1 and DP=EP=8; the same 84-648 Ki-token input distribution,
+3,000 output tokens per request, DSpark5, AV off, and synthetic acceptance
+length 3.51 on both backends. Values are medians of three rounds. Each count
+starts with a prefix-cache reset, serial prefill and a 256-token warmup;
+timed input-token cache hits were about 99.98%, with no preemption. Baseline
+and candidate ran sequentially, not interleaved.
+
+| Requests per rank (total) | Target rows per rank | Main step (ms) | DEP step (ms) | Time saved | Main output (tokens/s) | DEP output (tokens/s) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8 (64) | 48 | 14.620 | 12.472 | 14.69% | 15,371 | 18,012 |
+| 21 (168) | 126 | 20.951 | 19.087 | 8.89% | 28,105 | 30,851 |
+| 32 (256) | 192 | 23.452 | 21.589 | 7.95% | 38,339 | 41,653 |
+| 64 (512) | 384 | 32.047 | 30.155 | 5.90% | 56,173 | 59,684 |
+
+Step time uses the original benchmark's host-inclusive common streaming
+window at full concurrency, divided by the mean number of output chunks per
+request. It includes target and draft work, but is not a CUDA-event kernel
+timer or prefill-inclusive E2E time. Output throughput is the aggregate across
+all eight GPUs in that window. FULL graph replay and the specialized path
+were recorded on every rank, including the 192- and 384-row captures.
+
+### GSM8K
+
+Separate accuracy runs used all 1,319 five-shot GSM8K questions, real block
+rejection, seed 42, temperature 1.0, top-p 0.95, thinking enabled and no
+request-level output cap. Invalid final-answer formats count as incorrect.
+
+| Requests per rank | Main correct | DEP correct |
+| ---: | ---: | ---: |
+| 32 | 1,238 / 1,319 (93.86%) | 1,238 / 1,319 (93.86%) |
+| 64 | 1,246 / 1,319 (94.47%) | 1,257 / 1,319 (95.30%) |
+
+All four runs completed without request errors or length truncation. These
+single-seed scores are regression evidence, not a claim of improved accuracy
+or bitwise equivalence.
+
+## Experimental C8 Attention
 
 `dep_wide_c8_attention: true` in `additional_config` enables an experimental
 64-head sparse attention kernel for the target's 48-row, 640-column decode
 case. It is off by default and allocates about 30 MiB of fixed scratch per
 rank. Other shapes, the draft, and unsupported layouts retain their existing
 dispatch. Component correctness has been exercised through 384 rows, but the
-larger shapes regressed and are not selected. This does not increase the
-executor's 128-row limit. Full-model validation is still required before
-deployment.
+larger shapes regressed and are not selected. The DEP8 capacity extension
+does not select this attention kernel for those larger shapes. Full-model
+validation of the optional attention kernel is still required before deployment.

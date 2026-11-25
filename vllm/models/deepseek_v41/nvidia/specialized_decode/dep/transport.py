@@ -14,12 +14,19 @@ from vllm.models.deepseek_v41.nvidia.ops.cute_dsl.all_reduce_mhc import (
 )
 from vllm.triton_utils import tl, triton
 
+from . import MAX_ROWS_BY_WIDTH
 from .front import FrontOutput
 
 
 @triton.jit
 def _peer_gather_planes(
-    peers, quant, scale, indices, weights, ROWS: tl.constexpr, BLOCK: tl.constexpr
+    peers,
+    quant,
+    scale,
+    indices,
+    weights,
+    ROWS: tl.constexpr,
+    BLOCK: tl.constexpr,
 ):
     source = tl.program_id(1)
     offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -65,9 +72,9 @@ class PeerFrontDispatch:
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("prepare dispatch before capture")
         self.width, self.rank = dist.get_world_size(group), dist.get_rank(group)
-        if self.width not in (2, 4, 8) or not 2 <= rows <= 128 or rows % 2:
+        if not 2 <= rows <= MAX_ROWS_BY_WIDTH.get(self.width, 0) or rows % 2:
             raise ValueError(
-                "uniform even DEP rows in 2..128 across 2/4/8 ranks required"
+                "uniform even rows: DEP2/4 up to 128, DEP8 up to 384 required"
             )
         self.rows = rows
         self.global_output = FrontOutput(

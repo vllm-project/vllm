@@ -32,14 +32,16 @@ from vllm.models.deepseek_v41.nvidia.ops.cute_dsl.all_reduce_mhc import (
     _LamportMHCDeviceKernel,
 )
 
+from . import MAX_ROWS
+
 
 class _LocalMHCDeviceKernel(_LamportMHCDeviceKernel):
-    def __init__(self, hidden, hc, quantize, capture_aux):
+    def __init__(self, hidden, hc, quantize, capture_aux, linear_scales=False):
         super().__init__(
             hidden=hidden,
             hc=hc,
             tp=1,
-            capacity_m=128,
+            capacity_m=MAX_ROWS,
             cluster_size=5,
             rank_lanes=1,
             threads=128,
@@ -48,6 +50,7 @@ class _LocalMHCDeviceKernel(_LamportMHCDeviceKernel):
             reduced_input=True,
         )
         self.capture_aux = capture_aux
+        self.linear_scales = linear_scales
 
     @cute.jit
     def __call__(
@@ -268,14 +271,21 @@ class _LocalMHCDeviceKernel(_LamportMHCDeviceKernel):
                         ),
                     )
                     if fragment % FRAGMENTS_PER_MXFP8_BLOCK == 0:
-                        quant_scales[
-                            self.mxfp8_ops.compute_sf_index_swizzled_128x4_gpu(
-                                token,
-                                fragment // FRAGMENTS_PER_MXFP8_BLOCK,
-                                Int32(self.scale_cols),
+                        if cutlass.const_expr(self.linear_scales):
+                            scale_index = (
+                                Int64(token) * self.scale_cols
+                                + fragment // FRAGMENTS_PER_MXFP8_BLOCK
                             )
-                        ] = scale.to(Uint8)
-        if cutlass.const_expr(self.quantize):
+                            quant_scales[scale_index] = scale.to(Uint8)
+                        else:
+                            quant_scales[
+                                self.mxfp8_ops.compute_sf_index_swizzled_128x4_gpu(
+                                    token,
+                                    fragment // FRAGMENTS_PER_MXFP8_BLOCK,
+                                    Int32(self.scale_cols),
+                                )
+                            ] = scale.to(Uint8)
+        if cutlass.const_expr(self.quantize and not self.linear_scales):
             m, _, _ = cute.arch.grid_dim()
             words_per_row = self.scale_cols // SCALE_TILE_COLS
             padded_m = (m + SCALE_TILE_ROWS - 1) // SCALE_TILE_ROWS * SCALE_TILE_ROWS
@@ -295,11 +305,21 @@ class LocalPostPre:
         self.compiled = {}
 
     def __call__(
-        self, x, residual, post, comb, pre, norm, mxfp8_out, capture_aux=False
+        self,
+        x,
+        residual,
+        post,
+        comb,
+        pre,
+        norm,
+        mxfp8_out,
+        capture_aux=False,
+        *,
+        linear_scales=False,
     ):
         rows, hc, hidden = residual.shape
         if not (
-            0 < rows <= 128
+            0 < rows <= MAX_ROWS
             and hidden == 5120
             and hc == 4
             and x.dtype == residual.dtype == torch.bfloat16
@@ -308,7 +328,28 @@ class LocalPostPre:
             )
         ):
             return None
-        key = (rows, hidden, hc, mxfp8_out is not None, capture_aux, x.device)
+        if linear_scales and (
+            mxfp8_out is None
+            or len(mxfp8_out) != 2
+            or any(
+                t.shape != shape
+                or t.dtype != torch.uint8
+                or t.device != x.device
+                or not t.is_contiguous()
+                or t.data_ptr() % 16
+                for t, shape in zip(mxfp8_out, ((rows, hidden), (rows, hidden // 32)))
+            )
+        ):
+            raise ValueError("linear MXFP8 requires contiguous byte data/scales")
+        key = (
+            rows,
+            hidden,
+            hc,
+            mxfp8_out is not None,
+            capture_aux,
+            linear_scales,
+            x.device,
+        )
         if key not in self.compiled and torch.cuda.is_current_stream_capturing():
             return None
         out = torch.empty_like(residual)
@@ -337,7 +378,9 @@ class LocalPostPre:
         args += (Float32(norm.variance_epsilon), Int32(rows), current_cu_stream())
         if key not in self.compiled:
             self.compiled[key] = cute.compile(
-                _LocalMHCDeviceKernel(hidden, hc, mxfp8_out is not None, capture_aux),
+                _LocalMHCDeviceKernel(
+                    hidden, hc, mxfp8_out is not None, capture_aux, linear_scales
+                ),
                 *args,
             )
         self.compiled[key](*args)

@@ -34,6 +34,8 @@ from vllm.models.deepseek_v41.nvidia.ops.cute_dsl.all_reduce_mhc import (
     _LamportMHCDeviceKernel,
 )
 
+from . import MAX_ROWS
+
 
 @dataclass(frozen=True)
 class LocalMoEOutput:
@@ -47,7 +49,7 @@ class _FusedMHCDeviceKernel(_LamportMHCDeviceKernel):
             hidden=hidden,
             hc=hc,
             tp=1,
-            capacity_m=128,
+            capacity_m=MAX_ROWS,
             cluster_size=5,
             rank_lanes=1,
             threads=128,
@@ -373,7 +375,7 @@ class FusedPostPre:
             assert shared.shape == (rows, hidden) and shared.dtype == x.dtype
             assert shared.is_contiguous()
         if not (
-            0 < rows <= 128
+            0 < rows <= MAX_ROWS
             and hidden == 5120
             and hc == 4
             and x.dtype == residual.dtype == torch.bfloat16

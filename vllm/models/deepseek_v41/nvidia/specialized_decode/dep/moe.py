@@ -207,8 +207,9 @@ class DEPMoEStep:
         front = _front_config(runner)
         if isinstance(front, FrontConfig):
             self.front = DEPFront(front, workspace)
-            for rows in (8, 16, 32, 64, max_rows):
-                self.front.warmup(rows)
+            for rows in (8, 16, 32, 64, 128, 192, 384):
+                if rows <= max_rows:
+                    self.front.warmup(rows)
         self.front_config = front if isinstance(front, FrontConfig) else None
         self.max_rows = max_rows
         self.owner = None

@@ -61,7 +61,7 @@ class DEPDecode:
             wide_c8=config.wide_c8_attention and not self.is_draft,
         )
         self.workspace = (
-            ExpertWorkspace(attns[0].fused_wqa_wkv.weight.device)
+            ExpertWorkspace(attns[0].fused_wqa_wkv.weight.device, config.max_rows)
             if target is None
             else target.workspace
         )
