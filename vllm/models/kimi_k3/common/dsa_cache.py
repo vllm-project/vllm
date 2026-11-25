@@ -74,6 +74,10 @@ class KimiK3IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
     compressed indexers are written: in a packed block row the block table
     addresses 64-token kernel pages, which manager slots do not."""
 
+    # K3.1 stores one key per token, so the ROCm DCP row-sharded prefill is
+    # exact here.
+    _dcp_prefill_rowshard_supported = True
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         if self.use_pcp:
