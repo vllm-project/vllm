@@ -269,6 +269,10 @@ pub enum LlmSource {
     /// for a remote one. The server treats it as opaque, even when it is an
     /// [`EngineCoreLlm`]: routes and gRPC services that drive the engine-core
     /// client directly are not served.
+    ///
+    /// The server shuts it down after serving. If startup fails or is
+    /// cancelled, it is dropped without [`Llm::shutdown`], so its `Drop` must
+    /// release what it holds.
     Provided(Box<dyn Llm>),
 }
 
