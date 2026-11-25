@@ -8,7 +8,8 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
-@triton.jit
+# The token bound and head-major group strides can vary between batches.
+@triton.jit(do_not_specialize=["num_tokens"])
 def _lora_grouped_matmul_kernel(
     input_ptr,
     lora_ptr,
@@ -17,18 +18,18 @@ def _lora_grouped_matmul_kernel(
     num_tokens_per_lora,
     lora_token_start_loc,
     lora_ids,
-    NUM_TOKENS: tl.constexpr,
+    num_tokens,
     N: tl.constexpr,
     K: tl.constexpr,
     input_token_stride: tl.constexpr,
-    input_group_stride: tl.constexpr,
+    input_group_stride,
     input_feature_stride: tl.constexpr,
     lora_slot_stride: tl.constexpr,
     lora_group_stride: tl.constexpr,
     lora_n_stride: tl.constexpr,
     lora_k_stride: tl.constexpr,
     output_token_stride: tl.constexpr,
-    output_group_stride: tl.constexpr,
+    output_group_stride,
     output_feature_stride: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -54,15 +55,15 @@ def _lora_grouped_matmul_kernel(
     # Stable sorting keeps token indices ascending within each adapter.
     # This lets a kernel processing a batch prefix skip out-of-range tiles.
     first_token = tl.load(sorted_tile_ptr)
-    if first_token >= NUM_TOKENS:
+    if first_token >= num_tokens:
         return
     rows = tl.arange(0, BLOCK_M)
     token_indices = tl.load(
         sorted_tile_ptr + rows,
         mask=row_start + rows < lora_num_tokens,
-        other=NUM_TOKENS,
+        other=num_tokens,
     ).to(tl.int64)
-    valid_tokens = token_indices < NUM_TOKENS
+    valid_tokens = token_indices < num_tokens
 
     # The helper loads a full tile and writes only its leading valid rows.
     do_expand_kernel(
