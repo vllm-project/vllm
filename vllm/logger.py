@@ -419,3 +419,4 @@ def enable_trace_function_call(log_file_path: str, root_dir: str | None = None):
         # by default, this is the vllm root directory
         root_dir = os.path.dirname(os.path.dirname(__file__))
     sys.settrace(partial(_trace_calls, log_file_path, root_dir))
+# Measurement-only change for Dockerfile split part 5/6; do not merge.
