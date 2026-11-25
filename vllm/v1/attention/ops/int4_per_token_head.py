@@ -125,6 +125,9 @@ def _reshape_cache_int4_kernel(
         tl.max(tl.where(even_k_mask, k_even, float("-inf"))),
         tl.max(tl.where(odd_k_mask, k_odd, float("-inf"))),
     )
+    # The 4-bit zero-point only fits ranges that contain zero.
+    k_min = tl.minimum(k_min, 0.0)
+    k_max = tl.maximum(k_max, 0.0)
     k_scale = tl.maximum((k_max - k_min) / 15.0, 1e-6)
     k_zp_f = tl.clamp(
         tl.where(
@@ -199,6 +202,9 @@ def _reshape_cache_int4_kernel(
         tl.max(tl.where(even_v_mask, v_even, float("-inf"))),
         tl.max(tl.where(odd_v_mask, v_odd, float("-inf"))),
     )
+    # The 4-bit zero-point only fits ranges that contain zero.
+    v_min = tl.minimum(v_min, 0.0)
+    v_max = tl.maximum(v_max, 0.0)
     v_scale = tl.maximum((v_max - v_min) / 15.0, 1e-6)
     v_zp_f = tl.clamp(
         tl.where(

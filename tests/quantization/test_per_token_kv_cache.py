@@ -389,6 +389,57 @@ def test_per_token_head_round_trip_accuracy(
                 )
 
 
+@pytest.mark.parametrize("dominant_dim", [0, 1])
+@torch.inference_mode()
+def test_int4_round_trip_one_dominant_coordinate(dominant_dim: int):
+    """INT4 must reconstruct a row whose energy sits in one coordinate.
+
+    Coordinate 0 rotates to a row of equal-sign values, so its range excludes
+    zero.  Some BOS value rows of Llama-3.2-1B look like this.
+    """
+    from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+        triton_reshape_and_cache_flash_per_token_head_quant,
+    )
+
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    num_heads, head_size, block_size = 4, 64, 16
+    data = torch.randn(1, num_heads, head_size) * 0.02
+    data[..., dominant_dim] = 1.0
+    data = data.to(torch.bfloat16)
+
+    key_cache = torch.zeros(1, block_size, num_heads, head_size // 2, dtype=torch.uint8)
+    value_cache = torch.zeros_like(key_cache)
+    k_scale_cache = torch.ones(1, block_size, num_heads, dtype=torch.float32)
+    v_scale_cache = torch.ones_like(k_scale_cache)
+
+    triton_reshape_and_cache_flash_per_token_head_quant(
+        data,
+        data,
+        key_cache,
+        value_cache,
+        k_scale_cache,
+        v_scale_cache,
+        torch.tensor([0], dtype=torch.long),
+        kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+    )
+
+    ref = data[0].float()
+    for cache, sc in [(key_cache, k_scale_cache), (value_cache, v_scale_cache)]:
+        scale_bits = sc[0, 0].view(torch.int32)
+        zp = (scale_bits & 0xF).to(torch.float32)
+        clean_scale = (scale_bits & -16).view(torch.float32)
+        packed = cache[0, 0]
+        full = torch.zeros(num_heads, head_size, dtype=torch.float32)
+        full[:, 0::2] = (packed & 0xF).to(torch.float32)
+        full[:, 1::2] = ((packed >> 4) & 0xF).to(torch.float32)
+        deq_rht = (full - zp[:, None]) * clean_scale[:, None]
+        deq = single_rht(deq_rht, inverse=True) / head_size
+        rel_err = (deq - ref).norm(dim=-1) / ref.norm(dim=-1)
+        assert rel_err.max().item() < 0.1
+
+
 @torch.inference_mode()
 def test_int8_per_token_head_raw_cache_matches_round_reference():
     """INT8 cache writes should match round-to-nearest quantization exactly."""
