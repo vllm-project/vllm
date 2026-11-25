@@ -1268,7 +1268,7 @@ class MiMoV2OmniForCausalLM(
 ):
     supports_encoder_tp_data = True
 
-    packed_modules_mapping = MiMoV2FlashForCausalLM.packed_modules_mapping.copy()
+    packed_modules_mapping = MiMoV2FlashForCausalLM.packed_modules_mapping
 
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
