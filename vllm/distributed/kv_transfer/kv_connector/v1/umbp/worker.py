@@ -174,7 +174,6 @@ class UMBPStoreConnectorWorker:
                 result.error,
             )
         if is_load:
-            self._worker_meta.failed_load_block_ids.update(result.failed_block_ids)
             if not self._report_failed_requests:
                 self._load_error_block_ids.update(result.failed_block_ids)
             elif not succeeded:

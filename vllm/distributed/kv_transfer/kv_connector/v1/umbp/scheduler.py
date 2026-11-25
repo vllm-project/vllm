@@ -335,8 +335,6 @@ class UMBPStoreConnectorScheduler:
                 manager.block_pool = self._lookup_pool
                 manager._null_block = self._lookup_pool.null_block
         self._pending_loads: dict[str, list[BlockTransferPlan] | BlockLoadBatch] = {}
-        # Blocks left out of zeroing for a synchronous load that then failed.
-        self._unzeroed_block_ids: set[int] = set()
         self._load_specs: dict[str, LoadSpec] = {}
         self._lookup_units = {
             group_id: (
@@ -839,13 +837,13 @@ class UMBPStoreConnectorScheduler:
             if load_plans:
                 meta.load_requests[request_id] = load_plans
 
-        if not self.load_async and (
-            scheduler_output.new_block_ids_to_zero or self._unzeroed_block_ids
-        ):
+        if not self.load_async and scheduler_output.new_block_ids_to_zero:
             # Zeroing is queued on the forward stream, which a transfer is not
             # ordered behind, so it could wipe a synchronous load. The load
             # overwrites its blocks whole, as core relies on for async loads.
-            # Blocks an earlier load failed to fill are zeroed now instead.
+            # Blocks a load fails to fill need no zeroing either: core zeroes
+            # them when it reallocates them, and with one cache group (the only
+            # layout loaded synchronously) their bytes never change precision.
             loaded = {
                 block_id
                 for plans in meta.load_requests.values()
@@ -857,13 +855,9 @@ class UMBPStoreConnectorScheduler:
             }
             scheduler_output.new_block_ids_to_zero = [
                 block_id
-                for block_id in (
-                    *(scheduler_output.new_block_ids_to_zero or ()),
-                    *sorted(self._unzeroed_block_ids),
-                )
+                for block_id in scheduler_output.new_block_ids_to_zero
                 if block_id not in loaded
             ]
-            self._unzeroed_block_ids.clear()
 
         for request_id in scheduler_output.preempted_req_ids or set():
             meta.preempted_request_ids.add(request_id)
@@ -1764,8 +1758,6 @@ class UMBPStoreConnectorScheduler:
         metadata = output.kv_connector_worker_meta
         if not isinstance(metadata, UMBPConnectorWorkerMetadata):
             return
-        if not self.load_async and self.kv_cache_config.needs_kv_cache_zeroing:
-            self._unzeroed_block_ids |= metadata.failed_load_block_ids
         pool = self._gpu_block_pool
         for event_id, result in metadata.store_events.items():
             event = self._store_events.get(event_id)

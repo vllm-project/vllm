@@ -970,7 +970,6 @@ class UMBPConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     """Worker completion metadata aggregated across ranks."""
 
     store_events: dict[int, StoreEventResult] = field(default_factory=dict)
-    failed_load_block_ids: set[int] = field(default_factory=set)
 
     def aggregate(
         self, other: KVConnectorWorkerMetadata
@@ -979,5 +978,4 @@ class UMBPConnectorWorkerMetadata(KVConnectorWorkerMetadata):
             raise TypeError("cannot aggregate incompatible UMBP worker metadata")
         for event, result in other.store_events.items():
             self.store_events.setdefault(event, StoreEventResult()).merge(result)
-        self.failed_load_block_ids |= other.failed_load_block_ids
         return self

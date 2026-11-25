@@ -872,11 +872,11 @@ def test_object_evicted_after_lookup_follows_failure_policy(
     worker.shutdown()
 
 
-@pytest.mark.parametrize("failure_policy", [None, "fail", "recompute"])
-def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, failure_policy):
+@pytest.mark.parametrize("load_fails", [False, True])
+def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, load_fails):
     """New blocks are zeroed on the forward stream, which a transfer is not
     ordered behind. Blocks a synchronous load fills must skip that zeroing, and
-    be zeroed in the next step when the load failed."""
+    blocks a failed load left unfilled must be zeroed when they are reused."""
     runtime = install_memory_runtime(monkeypatch)
     kv_cache_config = _kv_cache_config()
     (group,) = kv_cache_config.kv_cache_groups
@@ -896,7 +896,7 @@ def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, failure_p
             "lookup_dir": socket_dir,
             "load_async": False,
         },
-        kv_load_failure_policy=failure_policy or "fail",
+        kv_load_failure_policy="fail",
     )
     scheduler = create_scheduler(
         vllm_config,
@@ -923,7 +923,7 @@ def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, failure_p
     output = _engine_step(
         scheduler,
         worker,
-        before_load=runtime.evict_all if failure_policy else lambda: None,
+        before_load=runtime.evict_all if load_fails else lambda: None,
     )
     (block_ids,) = output.scheduled_new_reqs[0].block_ids
     loaded = output.kv_connector_metadata.load_requests[request.request_id].block_ids
@@ -931,9 +931,10 @@ def test_synchronous_load_blocks_skip_zeroing(monkeypatch, socket_dir, failure_p
     # The block the request computes itself is still zeroed.
     assert output.new_block_ids_to_zero == block_ids[3:]
 
-    next_output = _engine_step(scheduler, worker)
-    assert (next_output.new_block_ids_to_zero or []) == (
-        loaded if failure_policy else []
-    )
+    if load_fails:
+        assert request.status == RequestStatus.FINISHED_ERROR
+        scheduler.add_request(create_request(num_tokens=num_tokens, max_tokens=1))
+        reused = _engine_step(scheduler, worker)
+        assert set(loaded) <= set(reused.new_block_ids_to_zero)
     _run_to_completion(scheduler, worker)
     worker.shutdown()

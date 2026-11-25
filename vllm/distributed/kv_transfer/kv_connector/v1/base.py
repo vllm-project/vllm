@@ -654,9 +654,7 @@ class KVConnectorBase_V1(ABC):
         FIXME: one exception:
         synchronous READ connectors may remove attention blocks they fully
         overwrite this step from new_block_ids_to_zero. They must complete
-        those loads before the blocks are used. If a load fails, they must fail
-        the step, or add the removed blocks to new_block_ids_to_zero in the next
-        step, before the scheduler recomputes into them or reuses them.
+        those loads before the blocks are used and fail the step if a load fails.
         Calling this function will reset the state of the connector.
 
         Args:
