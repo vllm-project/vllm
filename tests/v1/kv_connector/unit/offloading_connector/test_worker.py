@@ -104,6 +104,7 @@ def _make_worker(
     replicated_layout: bool = False,
     rank: int = 0,
     canonical_layout: bool = False,
+    config_replicated_layout: bool = True,
 ):
     """Create an OffloadingConnectorWorker with mocked dependencies."""
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
@@ -112,9 +113,12 @@ def _make_worker(
 
     spec = MagicMock(spec=OffloadingSpec)
     spec.replicated_layout = replicated_layout
+    spec.async_init = False
     spec.config = MagicMock()
+    spec.config.replicated_layout = replicated_layout and config_replicated_layout
     spec.config.canonical_layout = canonical_layout
     spec.config.parallel.rank = rank
+    spec.config.parallel.local_world_size = 4
     spec.get_worker.return_value = MagicMock()
 
     worker = OffloadingConnectorWorker(
@@ -179,6 +183,7 @@ def _offloading_config(rank: int = 0) -> OffloadingConfig:
         parallel=OffloadingParallelConfig(
             rank=rank,
             world_size=2,
+            local_world_size=2,
             tp_size=2,
             pp_size=1,
             pcp_size=1,
@@ -204,11 +209,15 @@ class BareExternalOffloadingSpec(OffloadingSpec):
 # ---------------------------------------------------------------------------
 
 
-def test_prepare_store_kv_non_writer_marks_completed_without_submit():
+@pytest.mark.parametrize(("rank", "config_replicated"), [(1, True), (4, False)])
+def test_prepare_store_kv_non_writer_marks_completed_without_submit(
+    rank, config_replicated
+):
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
         replicated_layout=True,
-        rank=1,
+        config_replicated_layout=config_replicated,
+        rank=rank,
     )
 
     worker.prepare_store_kv(_store_metadata(7))
@@ -222,7 +231,9 @@ def test_prepare_store_kv_non_writer_marks_completed_without_submit():
     assert meta.completed_jobs == {7: 1}
 
 
-@pytest.mark.parametrize("rank,canonical_layout", [(0, False), (0, True), (1, True)])
+@pytest.mark.parametrize(
+    "rank,canonical_layout", [(0, False), (4, False), (0, True), (1, True)]
+)
 def test_prepare_store_kv_writer_submits_store(rank, canonical_layout):
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
@@ -664,6 +675,48 @@ def test_register_packed_kv_caches_skips_scratch_group():
     assert len(canonical.tensors) == 1
     assert canonical.tensors[0].tensor.shape == (NUM_BLOCKS, 2 * page)
     assert canonical.group_data_refs == [[CanonicalKVCacheRef(0, 2 * page)]]
+
+
+def test_register_split_padded_pages_raises():
+    """Offloading reads each page's payload from its start, which a padded page
+    split into kernel blocks does not keep: its padding sits after every
+    kernel block."""
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    unpadded = AttentionSpec(
+        block_size=4 * BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    ).page_size_bytes
+    spec = AttentionSpec(
+        block_size=4 * BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+        page_size_padded=unpadded + 4 * 64,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=spec.page_size_bytes * NUM_BLOCKS,
+                layers=["layer0"],
+                layer_stride=spec.page_size_bytes * NUM_BLOCKS,
+                block_stride=spec.page_size_bytes,
+            )
+        ],
+        kv_cache_groups=[make_kv_cache_group(["layer0"], spec)],
+    )
+    kv_caches = allocate_kv_cache(
+        kv_cache_config,
+        torch.device(f"{DEVICE_TYPE}:0"),
+        KVCacheLayout.LBNHC,
+        [BLOCK_SIZE],
+    )
+    worker, _ = _make_worker(kv_cache_config)
+    with pytest.raises(NotImplementedError, match="split into kernel blocks"):
+        worker.register_kv_caches(kv_caches)
 
 
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)

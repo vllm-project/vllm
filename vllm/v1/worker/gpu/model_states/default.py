@@ -7,6 +7,9 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    get_transferred_mrope_position_delta,
+)
 from vllm.v1.attention.backends.utils import compute_mm_prefix_ranges
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -18,7 +21,10 @@ from vllm.v1.worker.gpu.model_states.interface import (
     ModelSpecificAttnMetadata,
     ModelState,
 )
-from vllm.v1.worker.gpu.model_states.mm_pruning import maybe_create_mm_pruner
+from vllm.v1.worker.gpu.model_states.mm_pruning import (
+    maybe_create_mm_pruner,
+    uses_multimodal_pruning,
+)
 from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
@@ -61,6 +67,11 @@ class DefaultModelState(ModelState):
         self.mm_pruner = maybe_create_mm_pruner(
             self.model_config, model, self.rope_state, encoder_cache
         )
+        # EVS recomputes M-RoPE positions from the pruned encoder outputs.
+        self.positions_depend_on_encoder = (
+            self.rope_state is not None
+            and uses_multimodal_pruning(self.model_config, model)
+        )
 
         # Per-request bidirectional MM ranges. Not kept in the encoder cache:
         # only the first PP rank has one, but every rank builds attn metadata.
@@ -89,14 +100,25 @@ class DefaultModelState(ModelState):
             mm_features = [
                 f for f in new_req_data.mm_features if f.modality != "prompt_embeds"
             ]
+            position_delta = None
+            if not mm_features:
+                position_delta = get_transferred_mrope_position_delta(
+                    self.vllm_config, new_req_data.sampling_params
+                )
             self.rope_state.init_prefill_positions(
                 req_index,
                 self.model,
                 new_req_data.prefill_token_ids,
                 mm_features=mm_features,
+                position_delta=position_delta,
             )
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.add_request(req_index, new_req_data)
+
+    def get_mrope_position_delta(self, req_index: int) -> int | None:
+        if self.rope_state is None:
+            return None
+        return self.rope_state.get_prefill_delta(req_index)
 
     def remove_request(self, req_id: str) -> None:
         if self.mm_prefix_ranges is not None:
@@ -188,12 +210,9 @@ class DefaultModelState(ModelState):
         return {"positions": positions}
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
-        model_inputs = {}
-        if self.supports_mm_inputs or self.prompt_embeds_state is not None:
-            model_inputs["inputs_embeds"] = self.dummy_inputs_embeds(num_tokens)
-        if self.rope_state is not None:
-            model_inputs["positions"] = self.rope_state.get_positions(num_tokens)
-        return model_inputs
+        if self.rope_state is None:
+            return {}
+        return {"positions": self.rope_state.get_positions(num_tokens)}
 
     def prepare_attn(
         self,

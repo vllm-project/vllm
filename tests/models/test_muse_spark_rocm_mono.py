@@ -356,7 +356,7 @@ requires_gfx950 = pytest.mark.skipif(
 )
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class TinyModel:
     lm: Any
     vllm_config: VllmConfig
@@ -447,6 +447,19 @@ def test_layer_guards_follow_the_weight_finalize(tiny_model) -> None:
     ):
         assert reason in before
     assert layer_refusals(tiny_model.model, tiny_model.dims) == []
+
+
+@requires_gfx950
+def test_pooler_uses_the_default_gemm_dispatch_on_the_tiny_model(tiny_model) -> None:
+    """The model as built on this GPU (CDNA4) keeps no PyTorch-linear pin."""
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+    from vllm.models.muse_spark.amd.model import MuseSparkTorchLinearMethod
+
+    moe = tiny_model.layers[1].feed_forward
+    # MuseSparkTorchLinearMethod subclasses UnquantizedLinearMethod, so rule it out.
+    for projection in (moe.pooler, moe.unpooler):
+        assert isinstance(projection.quant_method, UnquantizedLinearMethod)
+        assert not isinstance(projection.quant_method, MuseSparkTorchLinearMethod)
 
 
 @requires_gfx950
@@ -624,7 +637,7 @@ class StockLaunches:
                 _device_view(b[name], t.shape, t.dtype).copy_(t)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class _Key:
     S: int
     W: int

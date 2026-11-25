@@ -46,7 +46,7 @@ class AttentionType(StrEnum):
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MultipleOf:
     base: int
 
@@ -75,6 +75,16 @@ class AttentionBackend(ABC):
         kv_cache_spec: "KVCacheSpec | None" = None,
     ) -> list[int | MultipleOf]:
         return [MultipleOf(1)]
+
+    @classmethod
+    def get_supported_kernel_block_sizes_for_layers(
+        cls,
+        kv_cache_spec: "KVCacheSpec | None",
+        layer_names: list[str],
+    ) -> list[int | MultipleOf]:
+        """Kernel block sizes for the named layers. Override when the sizes depend
+        on layer geometry that the cache spec does not hold, such as query heads."""
+        return cls.get_supported_kernel_block_sizes(kv_cache_spec)
 
     @staticmethod
     @abstractmethod
@@ -396,7 +406,7 @@ class AttentionMetadata:
 T = TypeVar("T", bound=AttentionMetadata)
 
 
-@dataclass
+@dataclass(slots=True)
 class CommonAttentionMetadata:
     """Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.
@@ -969,11 +979,14 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        q_out_fp8: torch.Tensor | None = None,
+        q_scale: torch.Tensor | None = None,
     ):
         """If `fused_qk_norm_rope_kvcache_supported` returns True, this method
         will be called by the fused custom op. Applies QK-norm + RoPE and
         writes K/V to the KV cache. Results are written to the pre-allocated
-        q_out and k_out tensors; V is split from QKV at the graph level.
+        q_out and k_out tensors, and to q_out_fp8 (Q statically quantized by
+        q_scale) when set; V is split from QKV at the graph level.
         """
         raise NotImplementedError
 
@@ -1008,10 +1021,14 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        query_out: torch.Tensor | None = None,
+        key_out: torch.Tensor | None = None,
     ):
         """If `fused_rope_kvcache_supported` returns True, this method will be called
         by torch.ops.vllm.fused_rope_and_unified_kv_cache_update
-        to perform the inplace RoPE and KV cache update.
+        to perform the RoPE and KV cache update. The rotated q/k go to
+        `query_out`/`key_out` when given, else RoPE is applied in place. Overrides
+        without these arguments still work: the caller passes them copies.
         """
         raise NotImplementedError
 
@@ -1129,10 +1146,8 @@ def subclass_attention_backend(
     builder_cls: type[AttentionMetadataBuilder[M]],
 ) -> type[AttentionBackend]:
     """Return a new subclass where `get_builder_cls` returns `builder_cls`."""
-    name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
-
-    return type(
-        name, (attention_backend_cls,), {"get_builder_cls": lambda: builder_cls}
+    return subclass_attention_backend_with_overrides(
+        name_prefix, attention_backend_cls, {"get_builder_cls": lambda: builder_cls}
     )
 
 
@@ -1142,4 +1157,11 @@ def subclass_attention_backend_with_overrides(
     overrides: dict[str, Any],
 ) -> type[AttentionBackend]:
     name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
-    return type(name, (attention_backend_cls,), overrides)
+    # Keep the identity of the underlying class: attention groups are keyed by
+    # `full_cls_name()`, so two backends of the same name from different
+    # modules must not share one group.
+    identity = {
+        "__module__": attention_backend_cls.__module__,
+        "__qualname__": name_prefix + attention_backend_cls.__qualname__,
+    }
+    return type(name, (attention_backend_cls,), {**identity, **overrides})
