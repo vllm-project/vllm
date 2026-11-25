@@ -7,6 +7,8 @@ import ctypes
 import errno
 import mmap
 import os
+import resource
+import signal
 import tempfile
 import threading
 import time
@@ -872,6 +874,54 @@ def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
         for region in regions:
             region.cleanup()
     assert not any(os.path.exists(path) for path, _, _ in segments)
+
+
+def _mp_create_over_file_size_limit(engine_id: str, result_queue) -> None:
+    # A file-size limit below the first extra segment makes its ftruncate fail
+    # with EFBIG, as a full /dev/shm or a low ulimit -f would.
+    signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (PAGE_SIZE, PAGE_SIZE))
+    region_module._MIN_SEGMENT_BYTES = PAGE_SIZE
+    path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+    try:
+        SharedOffloadRegion(
+            engine_id=engine_id,
+            num_chunks=5,
+            rank=0,
+            kv_bytes_per_chunk=2 * PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            num_segments=3,
+        )
+        error = None
+    except OSError as e:
+        error = e.errno
+    leaked = []
+    for fd in os.listdir("/proc/self/fd"):
+        with contextlib.suppress(OSError):
+            target = os.readlink(f"/proc/self/fd/{fd}")
+            if target.startswith(path):
+                leaked.append(target)
+    result_queue.put((error, leaked))
+
+
+def test_failed_segment_creation_closes_its_descriptor(iid):
+    """A creator whose extra segment cannot be sized raises without leaving
+    a descriptor open on the unlinked segment file."""
+    ctx = get_mp_context()
+    result_queue = ctx.Queue()
+    child = ctx.Process(
+        target=_mp_create_over_file_size_limit, args=(iid, result_queue)
+    )
+    child.start()
+    error, leaked = result_queue.get(timeout=60)
+    child.join(timeout=10)
+    assert child.exitcode == 0
+    assert error == errno.EFBIG
+    assert leaked == []
+    assert not any(
+        os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap{suffix}")
+        for suffix in ("", ".1", ".2")
+    )
 
 
 @pytest.mark.parametrize("num_segments", [1, 3])
