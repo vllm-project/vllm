@@ -221,6 +221,35 @@ impl SamplingParams {
             ..Self::default()
         }
     }
+
+    /// Validate explicit sampling-parameter invariants that do not depend on
+    /// model defaults, vocabulary size, or prompt length.
+    ///
+    /// Lowering still runs the full check after applying model defaults and
+    /// engine limits; upper layers such as `vllm-chat` may call this early to
+    /// short-circuit before expensive work like template rendering or outbound
+    /// media fetches.
+    pub fn validate(&self) -> Result<()> {
+        crate::lower::sampling::validate_explicit_sampling_params(self)?;
+        if let (Some(min_tokens), Some(max_tokens)) = (self.min_tokens, self.max_tokens)
+            && min_tokens > max_tokens
+        {
+            return Err(Error::MinTokensExceedsMaxTokens {
+                min_tokens,
+                max_tokens,
+            });
+        }
+        crate::lower::normalize_thinking_token_budget(self.thinking_token_budget)?;
+        crate::lower::validate_repetition_detection(self.repetition_detection.as_ref())?;
+        crate::lower::logprobs::validate_explicit_logprobs(
+            self.logprobs,
+            self.prompt_logprobs,
+            self.logprob_token_ids.as_deref(),
+            self.prompt_logprob_token_ids.as_deref(),
+            self.prompt_logprob_start,
+        )?;
+        Ok(())
+    }
 }
 
 /// One raw text-generation request ready to be tokenized or sent directly to
@@ -319,34 +348,10 @@ impl TextRequest {
                 request_id: self.request_id.clone(),
             });
         }
-        if self
-            .decode_options
-            .stop_strings
-            .as_ref()
-            .is_some_and(|stops| stops.iter().any(String::is_empty))
-        {
-            return Err(Error::EmptyStopString {
-                request_id: self.request_id.clone(),
-            });
-        }
-        if let Some(stops) = self.decode_options.stop_strings.as_ref() {
-            let max = max_stop_strings();
-            if stops.len() > max {
-                return Err(Error::TooManyStopStrings {
-                    count: stops.len(),
-                    max,
-                });
-            }
-        }
-        if !self.decode_options.detokenize
-            && self.decode_options.stop_strings.as_ref().is_some_and(|stops| !stops.is_empty())
-        {
-            return Err(Error::StopStringsRequireDetokenize {
-                request_id: self.request_id.clone(),
-            });
-        }
-        if self.cache_salt.as_deref().is_some_and(|salt| !is_valid_cache_salt(salt)) {
-            return Err(Error::InvalidCacheSalt);
+        self.sampling_params.validate()?;
+        self.decode_options.validate(&self.request_id)?;
+        if let Some(salt) = self.cache_salt.as_deref() {
+            validate_cache_salt(salt)?;
         }
         if self.mm_features.is_some() && self.prompt_truncation.is_some() {
             return Err(Error::TruncateUnsupportedWithMultimodal);
@@ -355,24 +360,18 @@ impl TextRequest {
     }
 }
 
-/// Whether a cache salt is safe to hand to downstream cache backends, which
-/// may use these characters as key separators or terminators. Mirrors Python's
-/// `validate_cache_salt`, which counts length in code points.
-fn is_valid_cache_salt(salt: &str) -> bool {
+/// Validate a prefix-cache salt before handing it to downstream cache
+/// backends, which may use `@`, `/`, `\`, or `\0` as key separators or
+/// terminators. Mirrors Python's `validate_cache_salt`, which counts length in
+/// code points.
+pub fn validate_cache_salt(salt: &str) -> Result<()> {
     const MAX_LEN: usize = 128;
     const FORBIDDEN: [char; 4] = ['@', '/', '\\', '\0'];
 
-    !salt.is_empty() && salt.chars().count() <= MAX_LEN && !salt.contains(FORBIDDEN)
-}
-
-const MAX_STOP_STRINGS_ENV: &str = "VLLM_MAX_STOP_STRINGS";
-const DEFAULT_MAX_STOP_STRINGS: usize = 4;
-
-fn max_stop_strings() -> usize {
-    std::env::var(MAX_STOP_STRINGS_ENV)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_MAX_STOP_STRINGS)
+    if salt.is_empty() || salt.chars().count() > MAX_LEN || salt.contains(FORBIDDEN) {
+        return Err(Error::InvalidCacheSalt);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

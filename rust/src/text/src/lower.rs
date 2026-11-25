@@ -294,7 +294,7 @@ pub fn lower_sampling_params(
 /// `None` and the `-1` "unlimited" sentinel both map to `None`; any other
 /// negative value is rejected; non-negative values pass through unchanged. Like
 /// Python's `int`, no upper bound is imposed.
-fn normalize_thinking_token_budget(value: Option<i64>) -> Result<Option<u64>> {
+pub(crate) fn normalize_thinking_token_budget(value: Option<i64>) -> Result<Option<u64>> {
     match value {
         None | Some(-1) => Ok(None),
         Some(budget) if budget >= 0 => Ok(Some(budget as u64)),
@@ -302,7 +302,9 @@ fn normalize_thinking_token_budget(value: Option<i64>) -> Result<Option<u64>> {
     }
 }
 
-fn validate_repetition_detection(params: Option<&RepetitionDetectionParams>) -> Result<()> {
+pub(crate) fn validate_repetition_detection(
+    params: Option<&RepetitionDetectionParams>,
+) -> Result<()> {
     let Some(params) = params else {
         return Ok(());
     };

@@ -43,7 +43,7 @@ The remaining crates are tooling and infrastructure (`vllm-metrics`, `vllm-traci
 
 ## Request validation
 
-Check each request invariant once, at the lowest layer that owns its semantics:
+Define each request invariant once, in the lowest layer that owns its semantics (SSOT); upper stages may call that owner's check early to short-circuit before expensive work such as chat template rendering or outbound media fetches:
 
 - **Wire parsing (`serde`)**: JSON shape, field types, and closed wire enums. HTTP handlers take `Result<Json<T>, JsonRejection>` directly (which extracts `body.<path>` on data errors); do not add `validator` derive macros or duplicate bounds onto DTO structs.
 - **Route boundary (`vllm-server` `validate.rs` / `convert.rs`)**: protocol-only invariants that lower crates do not see (such as `stream_options` requiring `stream`, `top_logprobs` requiring `logprobs`, or route-specific `metadata` limits), lowering-time format conversions, and server-state or per-route policy checks (`model_names.check`, `VLLM_MAX_N_SEQUENCES`). Keep temporary rejections of unimplemented fields isolated in `reject_unsupported_fields`.

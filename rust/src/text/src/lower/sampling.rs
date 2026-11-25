@@ -4,6 +4,8 @@
 use thiserror::Error;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
+use crate::request::SamplingParams;
+
 #[derive(Debug, Error, PartialEq)]
 pub enum SamplingParamsError {
     #[error("{parameter} must be a finite number, got {value}")]
@@ -72,6 +74,33 @@ fn validate_repetition_penalty(value: f32) -> Result<(), SamplingParamsError> {
         value,
         expected: "(0, inf)",
     })
+}
+
+pub(crate) fn validate_explicit_sampling_params(
+    params: &SamplingParams,
+) -> Result<(), SamplingParamsError> {
+    if let Some(temperature) = params.temperature {
+        validate_temperature(temperature)?;
+    }
+    if let Some(top_p) = params.top_p {
+        validate_top_p(top_p)?;
+    }
+    if let Some(min_p) = params.min_p {
+        validate_min_p(min_p)?;
+    }
+    if let Some(frequency_penalty) = params.frequency_penalty {
+        validate_frequency_penalty(frequency_penalty)?;
+    }
+    if let Some(presence_penalty) = params.presence_penalty {
+        validate_presence_penalty(presence_penalty)?;
+    }
+    if let Some(repetition_penalty) = params.repetition_penalty {
+        validate_repetition_penalty(repetition_penalty)?;
+    }
+    if params.max_tokens == Some(0) {
+        return Err(SamplingParamsError::InvalidMaxTokens);
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_resolved_sampling_params(

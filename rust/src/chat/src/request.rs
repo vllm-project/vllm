@@ -759,7 +759,8 @@ impl ChatRequest {
         }
     }
 
-    /// Validate basic request invariants before rendering.
+    /// Validate prompt-independent request invariants before rendering or
+    /// fetching remote media.
     pub fn validate(&self) -> Result<()> {
         if self.messages.is_empty() {
             return Err(Error::EmptyMessages);
@@ -774,6 +775,11 @@ impl ChatRequest {
             }
             (GenerationPromptMode::NoGenerationPrompt, _)
             | (GenerationPromptMode::StartNewAssistant, _) => {}
+        }
+        self.sampling_params.validate()?;
+        self.decode_options.validate(&self.request_id)?;
+        if let Some(salt) = self.cache_salt.as_deref() {
+            vllm_text::validate_cache_salt(salt)?;
         }
         if self.has_multimodal() && self.prompt_truncation.is_some() {
             return Err(Error::Text(
