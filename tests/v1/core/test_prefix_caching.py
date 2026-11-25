@@ -7358,3 +7358,52 @@ def test_mamba_deprioritize_preempted_request_keeps_old_state():
     )
     pool.get_new_blocks(num_uncached + 1)
     assert pool.get_cached_block(turn1.block_hashes[1], [1]) is not None
+
+
+def test_mamba_deprioritize_preserves_shared_fork_fallback():
+    """A cached fork state (A -> B and A -> C) stays in normal LRU while any
+    sibling branch still depends on it as its one-turn fallback, and is
+    deprioritized once all branches advance past it."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 80, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        retention_interval=0,
+        deprioritize_superseded_mamba_states=True,
+    )
+    older = make_request("o", [9] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, older, [32, 40]) == 0
+    root_a = make_request("a", [1] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, root_a, [32, 40]) == 0
+
+    # Two independent continuations fork from already-cached root_a
+    # (so shared_prefix_boundary == 0 for both).
+    branch_b = make_request("b", [1] * 40 + [2] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, branch_b, [64, 80]) == 32
+    branch_c = make_request("c", [1] * 40 + [3] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, branch_c, [64, 80]) == 32
+
+    # Advancing branch_b -> d must NOT deprioritize root_a while branch_c
+    # still relies on root_a as its immediate fallback.
+    branch_d = make_request("d", [1] * 40 + [2] * 40 + [4] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, branch_d, [112, 120]) == 80
+
+    pool = manager.block_pool
+    free_blocks = pool.free_block_queue.get_all_free_blocks()
+    a_block = pool.get_cached_block(root_a.block_hashes[1], [1])
+    older_block = pool.get_cached_block(older.block_hashes[1], [1])
+    assert a_block is not None and older_block is not None
+    assert free_blocks.index(a_block[0]) > free_blocks.index(older_block[0])
+
+    # Once branch_c -> e also advances, no branch relies on root_a, so root_a
+    # is deprioritized ahead of older's blocks.
+    branch_e = make_request("e", [1] * 40 + [3] * 40 + [5] * 40, block_size, sha256)
+    assert _run_mamba_finished_request(manager, branch_e, [112, 120]) == 80
+    num_uncached = sum(
+        b.block_hash is None for b in pool.free_block_queue.get_all_free_blocks()
+    )
+    pool.get_new_blocks(num_uncached + 1)
+    assert pool.get_cached_block(root_a.block_hashes[1], [1]) is None
+    assert pool.get_cached_block(older.block_hashes[1], [1]) is not None

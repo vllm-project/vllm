@@ -1933,9 +1933,12 @@ class MambaManager(SingleTypeKVCacheManager):
         # Deepest cached state hash left by finished requests and its immediate
         # predecessor on the same prefix chain. Keeping one predecessor in
         # normal LRU shields against small tail rollbacks (e.g. tool retries)
-        # while deprioritizing states two or more turns behind.
+        # while deprioritizing states two or more turns behind. `_prev_tip_refcnt`
+        # tracks how many retained tips point to each predecessor so shared fork
+        # points stay in normal LRU until no branch relies on them.
         self._tip_hashes: set[BlockHashWithGroupId] = set()
         self._prev_tip: dict[BlockHashWithGroupId, BlockHashWithGroupId] = {}
+        self._prev_tip_refcnt: dict[BlockHashWithGroupId, int] = {}
         if self.prefix_caching:
             # Mapping from request ID to the index of the block
             # allocated in the previous step
@@ -2462,6 +2465,35 @@ class MambaManager(SingleTypeKVCacheManager):
             ]
         return super().pop_blocks_for_free(request_id)
 
+    def reset_superseded_state_tracking(self) -> None:
+        self._tip_hashes.clear()
+        self._prev_tip.clear()
+        self._prev_tip_refcnt.clear()
+
+    def _set_prev_tip(
+        self, tip: BlockHashWithGroupId, prev: BlockHashWithGroupId
+    ) -> None:
+        old_prev = self._prev_tip.get(tip)
+        if old_prev == prev:
+            return
+        if old_prev is not None:
+            self._dec_prev_tip_refcnt(old_prev)
+        self._prev_tip[tip] = prev
+        self._prev_tip_refcnt[prev] = self._prev_tip_refcnt.get(prev, 0) + 1
+
+    def _pop_prev_tip(self, tip: BlockHashWithGroupId) -> BlockHashWithGroupId | None:
+        prev = self._prev_tip.pop(tip, None)
+        if prev is not None:
+            self._dec_prev_tip_refcnt(prev)
+        return prev
+
+    def _dec_prev_tip_refcnt(self, prev: BlockHashWithGroupId) -> None:
+        cnt = self._prev_tip_refcnt.get(prev, 0) - 1
+        if cnt > 0:
+            self._prev_tip_refcnt[prev] = cnt
+        else:
+            self._prev_tip_refcnt.pop(prev, None)
+
     def deprioritize_superseded_states(self, request: Request, hit_tokens: int) -> None:
         """Deprioritize earlier Mamba tip states superseded by a finished
         request.
@@ -2469,10 +2501,10 @@ class MambaManager(SingleTypeKVCacheManager):
         A tip is the deepest cached Mamba state a finished request left on its
         prompt. When a request extends past a previous tip, the immediate
         predecessor is retained in normal LRU as a one-turn rollback fallback,
-        and any older tips along the chain are deprioritized (evicted after
-        uncached blocks but before normal LRU-cached blocks, keeping their
-        hashes until reused). Shared-prefix junction states keep normal LRU
-        order.
+        and any older tips along the chain (not still needed as a fallback by
+        another cached branch) are deprioritized (evicted after uncached blocks
+        but before normal LRU-cached blocks, keeping their hashes until reused).
+        Shared-prefix junction states keep normal LRU order.
         """
         block_pool = self.block_pool
         get_cached_block = block_pool.cached_block_hash_to_block.get_one_block
@@ -2505,17 +2537,21 @@ class MambaManager(SingleTypeKVCacheManager):
             return
         if old_tips:
             immediate = old_tips[0]
-            self._prev_tip[tip] = immediate
-            stale_keys = list(old_tips[1:])
-            cur = self._prev_tip.pop(immediate, None)
+            self._set_prev_tip(tip, immediate)
+            stale_keys = [
+                key for key in old_tips[1:] if key not in self._prev_tip_refcnt
+            ]
+            cur = self._pop_prev_tip(immediate)
             while cur is not None:
+                if cur in self._prev_tip_refcnt:
+                    break
                 if cur in self._tip_hashes:
                     stale_keys.append(cur)
-                cur = self._prev_tip.pop(cur, None)
+                cur = self._pop_prev_tip(cur)
             to_deprioritize: list[KVCacheBlock] = []
             for key in stale_keys:
                 self._tip_hashes.discard(key)
-                self._prev_tip.pop(key, None)
+                self._pop_prev_tip(key)
                 block = get_cached_block(key)
                 if block is not None:
                     to_deprioritize.append(block)
@@ -2526,7 +2562,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 block_hashes[junction_idx], self.kv_cache_group_id
             )
             self._tip_hashes.discard(junction_key)
-            self._prev_tip.pop(junction_key, None)
+            self._pop_prev_tip(junction_key)
         if tip_idx != junction_idx:
             self._tip_hashes.add(tip)
         if len(self._tip_hashes) > block_pool.num_gpu_blocks:
@@ -2538,6 +2574,9 @@ class MambaManager(SingleTypeKVCacheManager):
                 for key, prev in self._prev_tip.items()
                 if key in self._tip_hashes and prev in self._tip_hashes
             }
+            self._prev_tip_refcnt = {}
+            for prev in self._prev_tip.values():
+                self._prev_tip_refcnt[prev] = self._prev_tip_refcnt.get(prev, 0) + 1
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """Get the number of tokens whose mamba state are not needed anymore. Mamba only
