@@ -512,6 +512,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
         for group in kv_cache_config.kv_cache_groups
         for layer_name, spec in group.kv_cache_specs.items()
     }
+    worker._ring_buffer_layers = set()
     worker._layer_group_indices = {
         layer_name: group_index
         for group_index, group in enumerate(kv_cache_config.kv_cache_groups)
@@ -1807,7 +1808,7 @@ async def _plan_and_apply_sd_reshard(
         )
         assert err_reqs == [] and err_msg is None
         for src, dst, length in zip(src_ptrs, dst_ptrs, lengths):
-            ctypes.memmove(dst, src, length)
+            ctypes.memmove(int(dst), int(src), int(length))
 
 
 @pytest.mark.cpu_test
