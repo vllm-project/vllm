@@ -128,6 +128,77 @@ def test_dflash_reference_acceptance_lengths(vllm_runner):
 
 
 @single_gpu_only
+def test_dflash2_mixed_kv_pages_do_not_inflate_after_allocation(
+    monkeypatch: pytest.MonkeyPatch, vllm_runner
+):
+    """BF16 draft KV must fit the hybrid page planned for FP8 target KV."""
+    # The geometry callback stays local; no callable serialization is needed.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    def allocated_geometry(worker):
+        from vllm.config.vllm import get_layers_from_vllm_config
+        from vllm.model_executor.layers.attention import Attention
+        from vllm.v1.kv_cache_interface import AttentionSpec
+
+        config = worker.vllm_config
+        cache = worker.model_runner.kv_cache_config
+        layers = get_layers_from_vllm_config(config, Attention)
+        dtypes: dict[str, set[str]] = {"target": set(), "draft": set()}
+        pages = set()
+        for group in cache.kv_cache_groups:
+            for name, spec in group.kv_cache_specs.items():
+                pages.add(spec.page_size_bytes)
+                if isinstance(spec, AttentionSpec):
+                    layer = layers[name]
+                    role = "draft" if layer.is_draft_layer else "target"
+                    dtypes[role].add(layer.kv_cache_dtype)
+        views = worker.model_runner.kv_caches_by_layer
+        for tensor in cache.kv_cache_tensors:
+            view = views[tensor.layers[0]]
+            assert view.is_cuda
+            assert view.untyped_storage().nbytes() == tensor.size
+        return (
+            config.cache_config.mamba_page_size_padded,
+            pages,
+            dtypes,
+        )
+
+    config = QWEN3_5_4B_DFLASH2
+    with vllm_runner(
+        config.model,
+        dtype="bfloat16",
+        block_size=None,
+        distributed_executor_backend="uni",
+        kv_cache_dtype="fp8_e4m3",
+        mamba_cache_dtype="bfloat16",
+        mamba_ssm_cache_dtype="float32",
+        kv_cache_memory_bytes=8 * 1024**3,
+        max_model_len=4096,
+        max_num_seqs=1,
+        max_num_batched_tokens=512,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        enforce_eager=True,
+        language_model_only=True,
+        speculative_config={
+            "method": "dflash",
+            "model": config.draft_model,
+            "num_speculative_tokens": config.num_speculative_tokens,
+            "kv_cache_dtype": "bfloat16",
+        },
+    ) as runner:
+        llm = runner.llm
+        padded_page, pages, dtypes = llm.collective_rpc(allocated_geometry)[0]
+        print(
+            f"Mixed KV geometry: planned_page={padded_page}, allocated_pages={pages}, "
+            f"dtypes={dtypes}"
+        )
+        assert dtypes == {"target": {"fp8_e4m3"}, "draft": {"bfloat16"}}
+        assert pages == {2621440}, "Draft KV inflated the shared physical page"
+        assert padded_page == 2621440
+
+
+@single_gpu_only
 @pytest.mark.parametrize(
     "config",
     [
