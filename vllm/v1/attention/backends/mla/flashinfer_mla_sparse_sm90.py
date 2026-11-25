@@ -658,7 +658,7 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
         assert self.topk_indices_buffer is not None
         self.supports_quant_query_input = False
         self.use_fp8_kv_cache = self.kv_cache_dtype in _FP8_KV_DTYPES
-        self.use_shardq &= self.qk_rope_head_dim == 0 and not self.use_fp8_kv_cache
+        self.use_shardq &= self.qk_rope_head_dim == 0
 
     def forward_mqa(
         self,

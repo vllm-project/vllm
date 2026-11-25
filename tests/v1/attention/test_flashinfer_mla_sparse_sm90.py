@@ -428,11 +428,11 @@ def _sm90_flashinfer_available():
 SM90_HEADS, SM90_TOPK, SM90_KPOOL, SM90_WIDTH = 16, 2048, 4, 2176
 
 
-def _real_state(rows):
+def _real_state(rows, kv_dtype=torch.bfloat16):
     return sm90_mod._SM90State(
         torch.device("cuda"),
         SM90_HEADS,
-        torch.bfloat16,
+        kv_dtype,
         rows,
         SM90_WIDTH,
         HEAD,
@@ -574,8 +574,8 @@ def test_supports_combination_gates(monkeypatch, default_vllm_config):
     [
         ("auto", 0, True, True),
         ("bfloat16", 0, True, True),
-        ("fp8", 0, True, False),
-        ("fp8_e4m3", 0, True, False),
+        ("fp8", 0, True, True),
+        ("fp8_e4m3", 0, True, True),
         ("auto", 64, True, False),
         ("auto", 0, False, False),
     ],
@@ -684,7 +684,10 @@ def test_shardq_plans_rank_local_rows_and_preserves_decode(monkeypatch, num_deco
 @pytest.mark.skipif(
     not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
 )
-def test_shardq_clamps_with_original_noncontiguous_query_rows():
+@pytest.mark.parametrize(
+    "kv_dtype,kv_scale", [(torch.bfloat16, 1.0), (torch.float8_e4m3fn, 0.5)]
+)
+def test_shardq_clamps_with_original_noncontiguous_query_rows(kv_dtype, kv_scale):
     """A strided subset across requests must match an exact FA3 plan."""
     torch.manual_seed(124)
     ctx, valid, cam, req_id, slots = _clamp_batch(
@@ -692,7 +695,7 @@ def test_shardq_clamps_with_original_noncontiguous_query_rows():
     )
     picked = torch.tensor([3, 7, 8, 16, 39, 62, 79, 92])
     rows = len(picked)
-    actual = _real_state(rows)
+    actual = _real_state(rows, kv_dtype)
     exact = _real_state(rows)
     bounds = torch.clamp(ctx[picked] + 10, max=actual.max_valid)
     device_rows = picked.cuda()
@@ -700,9 +703,16 @@ def test_shardq_clamps_with_original_noncontiguous_query_rows():
     exact.plan(rows, valid[picked], None, None)
     q = torch.randn(rows, SM90_HEADS, HEAD, dtype=torch.bfloat16, device="cuda")
     kv = torch.randn(1 << 16, 1, HEAD, dtype=torch.bfloat16, device="cuda")
+    kv = kv.to(kv_dtype)
     local_slots = slots[device_rows]
-    outputs = []
-    for state in (actual, exact):
-        state.pack_indices(local_slots)
-        outputs.append(state.wrapper.run(q, q[..., :0], kv, kv[..., :0]))
-    torch.testing.assert_close(outputs[0], outputs[1], atol=1e-2, rtol=1e-2)
+    actual.pack_indices(local_slots)
+    exact.pack_indices(local_slots)
+    scale_args = (
+        {"ckv_scale": kv_scale, "kpe_scale": 1.0}
+        if kv_dtype == torch.float8_e4m3fn
+        else {}
+    )
+    out = actual.wrapper.run(q, q[..., :0], kv, kv[..., :0], **scale_args)
+    reference_kv = kv.to(torch.bfloat16) * kv_scale
+    ref = exact.wrapper.run(q, q[..., :0], reference_kv, reference_kv[..., :0])
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
