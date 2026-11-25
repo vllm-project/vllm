@@ -345,8 +345,13 @@ A union can still report errors from several branches. This applies to OpenAI ch
 completions, and Responses, including scale-out routes, as well as tokenization,
 pooling, embeddings, classification, scoring, and Anthropic and Cohere
 compatibility endpoints. The same behavior applies when `/invocations` uses a
-covered schema. SDK models that provide their own validators apply their own
-error collection rules.
+covered schema.
+
+The Python frontend checks request objects before passing them to OpenAI,
+Harmony, or Cohere SDK model validators. Each object is limited to 4,096 list
+items and object entries in total, including nested collections. The same
+limit applies to Harmony history objects and to Responses items normalized
+into SDK models.
 
 Generation requests also enforce `VLLM_MAX_STOP_STRINGS` (4),
 `VLLM_MAX_STOP_TOKEN_IDS` (128), and `VLLM_MAX_NUM_BAD_WORDS` (128).

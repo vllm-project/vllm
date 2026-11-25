@@ -13,6 +13,7 @@ request models whose before-validators were missing the same guard.
 from typing import Any
 
 import pytest
+from openai_harmony import Message, Role
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from typing_extensions import TypedDict
 
@@ -238,3 +239,28 @@ def test_fail_fast_validation_keeps_shared_schema_references_independent(
         (1, "items", "numbers", 0),
         (plain_index, "items", "numbers", 1),
     }
+
+
+def test_harmony_request_sdk_validation_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = Message.from_role_and_content(Role.USER, "Hello")
+    raw = message.model_dump()
+    (parsed,) = ChatCompletionRequest.model_validate({"messages": [raw]}).messages
+    assert isinstance(parsed, Message)
+    assert parsed.author == message.author
+
+    monkeypatch.setattr(
+        "vllm.entrypoints.serve.utils.request_validation._MAX_SDK_VALIDATION_ENTRIES",
+        1,
+    )
+    assert (
+        ChatCompletionRequest.model_validate({"messages": [message]}).messages[0]
+        is message
+    )
+    with pytest.raises(ValidationError) as exc_info:
+        ChatCompletionRequest.model_validate({"messages": [raw]})
+
+    assert any(
+        error["type"] == "sdk_validation_budget" for error in exc_info.value.errors()
+    )

@@ -260,8 +260,8 @@ def test_function_call_validation_failure_logs_debug(caplog):
 
         # Verify debug was called with expected message
         mock_logger.debug.assert_called_once()
-        call_args = mock_logger.debug.call_args[0][0]
-        assert "Failed to parse function_call" in call_args
+        message, *args = mock_logger.debug.call_args.args
+        assert "Failed to parse function_call" in message % tuple(args)
 
 
 def test_validator_handles_iterator_input():
