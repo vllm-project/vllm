@@ -684,12 +684,12 @@ def test_draft_temperature_matches_rescaled_proposals(
     """
     torch.manual_seed(42)
     K, num_trials = 3, 128
-    target = torch.randn(NARROW_VOCAB_SIZE, device="cuda")
+    target = torch.randn(NARROW_VOCAB_SIZE, device=DEVICE)
     draft = -target
     inputs = _build_rejection_sample_inputs(
         target, draft, K, temperature=1.0, num_trials=num_trials
     )
-    temperatures = torch.tensor([0.0, 0.5, 1.0, 2.0], device="cuda").repeat(
+    temperatures = torch.tensor([0.0, 0.5, 1.0, 2.0], device=DEVICE).repeat(
         num_trials // 4
     )
     inputs["temperature"] = temperatures
@@ -710,7 +710,7 @@ def test_draft_temperature_matches_rescaled_proposals(
         **inputs, num_speculative_steps=K, use_block_verification=use_block_verification
     )
     torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
-    emitted = torch.arange(K + 1, device="cuda")[None, :] < num_sampled[:, None]
+    emitted = torch.arange(K + 1, device=DEVICE)[None, :] < num_sampled[:, None]
     torch.testing.assert_close(sampled[emitted], expected[emitted], rtol=0, atol=0)
 
 
@@ -721,11 +721,11 @@ def test_mixed_draft_temperatures_match_individual_proposal_distributions(
     """Cached zero-temperature rows must use the uncached one-hot distribution."""
     torch.manual_seed(42)
     k, num_reqs = 3, 4
-    target = torch.randn(NARROW_VOCAB_SIZE, device="cuda")
+    target = torch.randn(NARROW_VOCAB_SIZE, device=DEVICE)
     draft = -target
     inputs = _build_rejection_sample_inputs(target, draft, k, 1.0, num_reqs)
-    temperatures = torch.tensor([0.0, 0.5, 1.0, 2.0], device="cuda")
-    draft_temperatures = torch.tensor([99.0, 0.0, 0.0, 0.5, 1.0], device="cuda")[1:]
+    temperatures = torch.tensor([0.0, 0.5, 1.0, 2.0], device=DEVICE)
+    draft_temperatures = torch.tensor([99.0, 0.0, 0.0, 0.5, 1.0], device=DEVICE)[1:]
     inputs["temperature"] = temperatures
     inputs["draft_temperature"] = draft_temperatures
     scales = torch.where(temperatures > 0, temperatures, 1.0)
@@ -763,7 +763,7 @@ def test_mixed_draft_temperatures_match_individual_proposal_distributions(
         torch.testing.assert_close(
             lengths[row : row + 1], expected_length, rtol=0, atol=0
         )
-        emitted = torch.arange(k + 1, device="cuda") < expected_length[0]
+        emitted = torch.arange(k + 1, device=DEVICE) < expected_length[0]
         torch.testing.assert_close(
             sampled[row, emitted], expected[0, emitted], rtol=0, atol=0
         )
