@@ -65,8 +65,7 @@ class FlashInferDCPWorkspace:
     ) -> None:
         if not has_flashinfer_dcp_a2a_lse_reduce():
             raise RuntimeError(
-                "dcp_comm_backend='flashinfer_a2a_fused' requires FlashInfer with "
-                "decode_cp_a2a_lse_reduce from flashinfer-ai/flashinfer#6483."
+                "dcp_comm_backend='flashinfer_a2a_fused' requires FlashInfer >= 0.7.6."
             )
         from flashinfer.comm import dcp_lse_reduce
 
@@ -179,6 +178,7 @@ class FlashInferDCPWorkspace:
             self.world_size,
             "basee" if is_lse_base_on_e else "base2",
             mask=mask,
+            layout="dst_major",
         )
 
 

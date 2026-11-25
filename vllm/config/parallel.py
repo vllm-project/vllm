@@ -565,10 +565,10 @@ class ParallelConfig:
       combine with Triton kernel. Reduces NCCL calls from 3 to 2
       per layer for MLA models.
     - "flashinfer_a2a_fused": FlashInfer's fused A2A exchange + LSE reduce in one
-      kernel. Requires FlashInfer with flashinfer-ai/flashinfer#6483, an MLA
-      model, DCP ranks in one NVLink domain, and no PCP. Switches the worker's
-      PyTorch symmetric-memory backend to NCCL. Batches larger than the DCP
-      workspace use the "a2a" combine.
+      kernel. Requires FlashInfer >= 0.7.6, an MLA model, DCP ranks in one
+      NVLink domain, and no PCP. Switches the worker's PyTorch symmetric-memory
+      backend to NCCL. Batches larger than the DCP workspace use the "a2a"
+      combine.
 
     `None` selects the model default, which is "ag_rs" unless the model
     overrides it via [`set_dcp_defaults`][vllm.config.ParallelConfig.set_dcp_defaults].
@@ -780,8 +780,7 @@ class ParallelConfig:
             if not (current_platform.is_cuda() and has_flashinfer_dcp_a2a_lse_reduce()):
                 raise ValueError(
                     "dcp_comm_backend='flashinfer_a2a_fused' requires CUDA and "
-                    "FlashInfer with decode_cp_a2a_lse_reduce from "
-                    "flashinfer-ai/flashinfer#6483."
+                    "FlashInfer >= 0.7.6."
                 )
 
         return self

@@ -214,7 +214,7 @@ def _test_cp_gsm8k(
         dcp_comm_backend == "flashinfer_a2a_fused"
         and not has_flashinfer_dcp_a2a_lse_reduce()
     ):
-        pytest.skip("Needs FlashInfer with flashinfer-ai/flashinfer#6483.")
+        pytest.skip("Needs FlashInfer >= 0.7.6.")
 
     server_args = [
         # use half precision for speed and memory savings in CI environment

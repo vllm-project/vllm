@@ -397,10 +397,11 @@ def has_flashinfer_comm() -> bool:
 @functools.cache
 def has_flashinfer_dcp_a2a_lse_reduce() -> bool:
     """Return whether FlashInfer has the fused DCP A2A + LSE reduce with the
-    destination-major layout and token mask (flashinfer-ai/flashinfer#6483).
+    token mask and the `layout` argument (FlashInfer >= 0.7.6).
 
     FlashInfer 0.7.1-0.7.5 export `decode_cp_a2a_lse_reduce` with a head-major
-    layout and no mask, which would silently mix heads with vLLM's layout.
+    layout and no mask. Probe the signature rather than the version so dev
+    builds carry the gate.
     """
     if not has_flashinfer_comm():
         return False
@@ -409,7 +410,7 @@ def has_flashinfer_dcp_a2a_lse_reduce() -> bool:
     return (
         callable(reduce)
         and callable(getattr(mod, "decode_cp_a2a_lse_reduce_create_workspace", None))
-        and "mask" in inspect.signature(reduce).parameters
+        and {"mask", "layout"} <= inspect.signature(reduce).parameters.keys()
     )
 
 

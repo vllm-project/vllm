@@ -54,7 +54,9 @@ def _worker(env: dict[str, str]) -> None:
         )
 
         group = dist.group.WORLD
-        heads, head_dim, max_tokens = 2, 512, 16
+        # At 4 GPUs heads == world_size, where FlashInfer needs layout= to
+        # tell destination-major from head-major.
+        heads, head_dim, max_tokens = 4, 512, 16
         dtype = torch.bfloat16
         # vLLM's direct A2A workspace on the NCCL backend, allocated first as
         # in a real worker, then FlashInfer's.
@@ -148,7 +150,7 @@ def _worker(env: dict[str, str]) -> None:
 )
 @pytest.mark.skipif(
     not has_flashinfer_dcp_a2a_lse_reduce(),
-    reason="Needs FlashInfer with flashinfer-ai/flashinfer#6483.",
+    reason="Needs FlashInfer >= 0.7.6.",
 )
 @pytest.mark.parametrize("world_size", [4, 8])
 def test_flashinfer_combine_on_nccl_symm_mem(world_size: int):
