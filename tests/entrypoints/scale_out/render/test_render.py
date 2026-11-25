@@ -1286,7 +1286,7 @@ def test_chat_render_metadata_payload_omits_tensors_only(qwen2_vl_server, conten
 
 
 def test_chat_render_tensors_after_metadata_keep_pixel_values(qwen2_vl_server):
-    """A metadata render skips the pixel transform without caching its result."""
+    """A tensors render after a metadata render of the same image keeps pixel_values."""
     image = Image.new("RGB", (448, 336), color=(7, 99, 201))
     content = [{"type": "image_url", "image_url": {"url": encode_image_url(image)}}]
     responses = {

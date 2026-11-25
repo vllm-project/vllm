@@ -1333,8 +1333,10 @@ class BaseRenderer(ABC, Generic[_T]):
         engine_input: EngineInput
         if "encoder_prompt" in prompt:
             engine_input = self._process_enc_dec(
-                prompt, skip_mm_cache=skip_mm_cache, mm_metadata_only=mm_metadata_only
-            )  # type: ignore[arg-type]
+                prompt,  # type: ignore[arg-type]
+                skip_mm_cache=skip_mm_cache,
+                mm_metadata_only=mm_metadata_only,
+            )
         else:
             engine_input = self._process_singleton(
                 prompt,
