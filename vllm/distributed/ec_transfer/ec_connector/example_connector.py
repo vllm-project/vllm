@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import hashlib
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import regex as re
 import safetensors
 
 from vllm.config import VllmConfig
@@ -24,6 +26,12 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+def _uses_legacy_cache_path(identifier: str) -> bool:
+    return re.fullmatch(
+        r"[a-z0-9_-]{1,128}", identifier
+    ) is not None and not identifier.startswith("id-")
 
 
 @dataclass(slots=True)
@@ -99,7 +107,9 @@ class ECExampleConnector(ECConnectorBase):
         for mm_data in metadata.mm_datas:
             if mm_data.mm_hash in encoder_cache:
                 continue
-            filename = self._generate_filename_debug(mm_data.mm_hash)
+            filename = self._generate_filename_debug(
+                mm_data.mm_hash, create_folder=False
+            )
             with gpu_sync_allowed():
                 ec_cache = safetensors.torch.load_file(filename, device=device)[
                     "ec_cache"
@@ -225,9 +235,14 @@ class ECExampleConnector(ECConnectorBase):
         recursively the first time it is needed.
         """
         storage_root = os.path.realpath(self._storage_path)
-        foldername = os.path.realpath(os.path.join(storage_root, mm_hash))
+        if _uses_legacy_cache_path(mm_hash):
+            cache_key = mm_hash
+        else:
+            digest = hashlib.sha256(mm_hash.encode("utf-8", "surrogatepass"))
+            cache_key = "id-" + digest.hexdigest()
+        foldername = os.path.realpath(os.path.join(storage_root, cache_key))
         if os.path.commonpath((storage_root, foldername)) != storage_root:
-            raise ValueError(f"mm_hash escapes shared_storage_path: {mm_hash!r}")
+            raise ValueError("Generated encoder-cache path escapes shared_storage_path")
         if create_folder:
             os.makedirs(foldername, exist_ok=True)
         return foldername
@@ -241,4 +256,11 @@ class ECExampleConnector(ECConnectorBase):
         If `create_folder` is True (default) the parent directory is created.
         """
         foldername = self._generate_foldername_debug(mm_hash, create_folder)
-        return os.path.join(foldername, "encoder_cache.safetensors")
+        # Old servers could create encoder_cache.safetensors in any directory.
+        # Use a separate filename for the mapped namespace during upgrades.
+        filename = (
+            "encoder_cache.safetensors"
+            if _uses_legacy_cache_path(mm_hash)
+            else "encoder_cache.v2.safetensors"
+        )
+        return os.path.join(foldername, filename)

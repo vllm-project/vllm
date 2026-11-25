@@ -3,6 +3,7 @@
 
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 import torch
@@ -218,6 +219,10 @@ def test_extract_hidden_states_with_predictable_dummy_model(
     assert out0.prompt_token_ids is not None
     path0 = out0.kv_transfer_params["hidden_states_path"]
     assert path0 != custom_path
+    default_path = Path(path0)
+    assert default_path.parent == tmp_path.resolve()
+    assert len(bytes.fromhex(default_path.stem)) == 32
+    assert default_path.with_suffix(".safetensors.lock").is_file()
     obj0 = example_hidden_states_connector.load_hidden_states(path0)
     assert torch.equal(obj0["token_ids"], torch.tensor(out0.prompt_token_ids))
     assert obj0["hidden_states"].shape == (
