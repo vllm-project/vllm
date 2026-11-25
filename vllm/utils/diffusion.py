@@ -5,10 +5,53 @@
 from typing import TYPE_CHECKING
 
 from vllm.exceptions import VLLMValidationError
-from vllm.sampling_params import _SAMPLING_EPS
+from vllm.sampling_params import _SAMPLING_EPS, MAX_LOGPROB_TOKEN_IDS
 
 if TYPE_CHECKING:
     from vllm.sampling_params import SamplingParams
+
+
+def validate_constrained_diffusion(
+    params: "SamplingParams",
+    *,
+    vocab_size: int,
+    tensor_parallel_size: int = 1,
+) -> None:
+    extra = params.extra_args
+    constrained = extra.get("diffusion_constrained") if extra else None
+    if constrained is None:
+        return
+    if not isinstance(constrained, (bool, int)) or constrained not in (0, 1):
+        raise VLLMValidationError(
+            "diffusion_constrained must be a boolean (or 0/1).",
+            parameter="diffusion_constrained",
+        )
+    if not constrained:
+        return
+    if tensor_parallel_size > 1:
+        raise VLLMValidationError(
+            "Constrained DiffusionGemma reads require tensor parallel size 1.",
+            parameter="diffusion_constrained",
+        )
+    token_ids = params.logprob_token_ids
+    if not token_ids:
+        raise VLLMValidationError(
+            "diffusion_constrained needs logprob_token_ids: they are the allowed set.",
+            parameter="logprob_token_ids",
+        )
+    if len(token_ids) > MAX_LOGPROB_TOKEN_IDS or any(
+        not isinstance(token_id, int) or not 0 <= token_id < vocab_size
+        for token_id in token_ids
+    ):
+        raise VLLMValidationError(
+            "Constrained reads require valid token IDs within the list limit.",
+            parameter="logprob_token_ids",
+        )
+    if params.logprobs is not None and params.logprobs != len(token_ids):
+        raise VLLMValidationError(
+            "logprobs must equal the number of constrained token IDs.",
+            parameter="logprobs",
+        )
 
 
 def validate_diffusion_sampling_params(
@@ -16,6 +59,7 @@ def validate_diffusion_sampling_params(
     *,
     canvas_length: int | None,
     vocab_size: int,
+    tensor_parallel_size: int = 1,
 ) -> None:
     """Validate request options and normalize one-canvas reads at admission.
 
@@ -113,14 +157,6 @@ def validate_diffusion_sampling_params(
             params.max_tokens = min(params.max_tokens or expected_len, expected_len)
         params.ignore_eos = True
 
-    constrained = extra.get("diffusion_constrained")
-    if constrained is not None:
-        check(
-            isinstance(constrained, (bool, int)) and constrained in (0, 1),
-            "diffusion_constrained must be a boolean (or 0/1).",
-        )
-    if constrained:
-        check(
-            bool(params.logprob_token_ids),
-            "diffusion_constrained needs logprob_token_ids: they are the allowed set.",
-        )
+    validate_constrained_diffusion(
+        params, vocab_size=vocab_size, tensor_parallel_size=tensor_parallel_size
+    )

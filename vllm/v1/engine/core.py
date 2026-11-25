@@ -47,6 +47,7 @@ from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils import numa_utils
+from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.utils.gc_utils import (
     freeze_gc_heap,
     maybe_attach_gc_debug_callback,
@@ -1290,6 +1291,24 @@ class EngineCore:
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward
         """
+        params = request.sampling_params
+        model_config = self.vllm_config.model_config
+        if (
+            params is not None
+            and model_config.architecture == "DiffusionGemmaForBlockDiffusion"
+        ):
+            diffusion_config = self.vllm_config.diffusion_config
+            validate_diffusion_sampling_params(
+                params,
+                canvas_length=(
+                    diffusion_config.canvas_length
+                    if diffusion_config is not None
+                    else None
+                ),
+                vocab_size=model_config.get_vocab_size(),
+                tensor_parallel_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            )
+
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
         # and will only be accessed in the input processing thread afterwards.
@@ -1299,7 +1318,6 @@ class EngineCore:
             )
 
         watermark_config = self.vllm_config.watermark_config
-        params = request.sampling_params
         # Greedy decoding and trace replay cannot be watermarked; leave their
         # flag as the frontend resolved it.
         if (
