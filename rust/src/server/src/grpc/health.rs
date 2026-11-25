@@ -43,6 +43,8 @@ impl EngineHealth {
 pub(crate) struct HealthMonitor {
     reporter: HealthReporter,
     engine: EngineHealth,
+    /// Whether `vllm.Control` is served, so its health is published.
+    serves_control: bool,
     /// Readiness as last published to `readiness` and `vllm.Inference`.
     ready: bool,
 }
@@ -51,15 +53,22 @@ impl HealthMonitor {
     /// Register every named health service with the engines' current
     /// readiness. Call before the listener accepts connections so clients
     /// never see an unregistered service.
-    pub async fn register(reporter: HealthReporter, mut engine: EngineHealth) -> Self {
+    pub async fn register(
+        reporter: HealthReporter,
+        mut engine: EngineHealth,
+        serves_control: bool,
+    ) -> Self {
         let ready = *engine.readiness.borrow_and_update();
-        reporter.set_serving::<ControlGrpcService>().await;
+        if serves_control {
+            reporter.set_serving::<ControlGrpcService>().await;
+        }
         reporter.set_serving::<RenderGrpcService<AppState>>().await;
         reporter.set_service_status(LIVENESS_SERVICE, ServingStatus::Serving).await;
         set_readiness(&reporter, ready).await;
         Self {
             reporter,
             engine,
+            serves_control,
             ready,
         }
     }
@@ -151,7 +160,9 @@ impl HealthMonitor {
 
         let reporter = &mut self.reporter;
         set_readiness(reporter, false).await;
-        reporter.set_not_serving::<ControlGrpcService>().await;
+        if self.serves_control {
+            reporter.set_not_serving::<ControlGrpcService>().await;
+        }
         reporter.set_not_serving::<RenderGrpcService<AppState>>().await;
         // The gRPC services are served alongside the same engine client, so overall
         // server health mirrors its engine health.
@@ -194,6 +205,7 @@ mod tests {
 
     use futures::{FutureExt as _, StreamExt as _};
     use tonic::Request;
+    use tonic::server::NamedService;
     use tonic_health::pb::HealthCheckRequest;
     use tonic_health::pb::health_server::Health as _;
     use tonic_health::server::HealthService;
@@ -204,6 +216,13 @@ mod tests {
     /// engine signals, which must outlive the test: a closed channel reads as
     /// an engine failure.
     async fn monitor() -> (HealthMonitor, HealthService, [watch::Sender<bool>; 2]) {
+        monitor_serving_control(true).await
+    }
+
+    /// Like [`monitor`], with `vllm.Control` served only when `serves_control`.
+    async fn monitor_serving_control(
+        serves_control: bool,
+    ) -> (HealthMonitor, HealthService, [watch::Sender<bool>; 2]) {
         let (reporter, _) = tonic_health::server::health_reporter();
         let health = HealthService::from_health_reporter(reporter.clone());
         let (liveness_tx, liveness) = watch::channel(true);
@@ -212,7 +231,7 @@ mod tests {
             liveness,
             readiness,
         };
-        let monitor = HealthMonitor::register(reporter, engine).await;
+        let monitor = HealthMonitor::register(reporter, engine, serves_control).await;
         (monitor, health, [liveness_tx, readiness_tx])
     }
 
@@ -224,6 +243,22 @@ mod tests {
         });
         let response = health.check(request).now_or_never().expect("uncontended read");
         response.is_ok_and(|response| response.get_ref().status == ServingStatus::Serving as i32)
+    }
+
+    #[tokio::test]
+    async fn control_health_is_published_only_when_served() {
+        for serves_control in [true, false] {
+            let (_monitor, health, _engine) = monitor_serving_control(serves_control).await;
+            let request = Request::new(HealthCheckRequest {
+                service: <ControlGrpcService as NamedService>::NAME.to_string(),
+            });
+            let status = health.check(request).await.map(|response| response.get_ref().status);
+            if serves_control {
+                assert_eq!(status.unwrap(), ServingStatus::Serving as i32);
+            } else {
+                assert_eq!(status.unwrap_err().code(), tonic::Code::NotFound);
+            }
+        }
     }
 
     #[tokio::test]
