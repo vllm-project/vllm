@@ -593,19 +593,17 @@ class StreamingParserEngine:
         Streams argument characters incrementally while holding back
         closing braces/brackets that might change as more input arrives.
         """
-        events: list[SemanticEvent] = []
         for ch in text:
-            result = self._feed_args_char(ch)
-            events.extend(result)
-        return events
+            self._advance_args_char(ch)
+        return self._flush_safe_args()
 
-    def _feed_args_char(self, ch: str) -> list[SemanticEvent]:
+    def _advance_args_char(self, ch: str) -> None:
         self._args_buffer += ch
 
         if self._args_escape_next:
             self._args_escape_next = False
             self._args_safe_end = len(self._args_buffer)
-            return self._flush_safe_args()
+            return
 
         if self._args_in_string:
             if ch == "\\":
@@ -613,28 +611,27 @@ class StreamingParserEngine:
             elif ch == '"':
                 self._args_in_string = False
             self._args_safe_end = len(self._args_buffer)
-            return self._flush_safe_args()
+            return
 
         if ch == '"':
             self._args_in_string = True
             self._args_safe_end = len(self._args_buffer)
-            return self._flush_safe_args()
+            return
 
         if ch in ("{", "["):
             self._args_brace_depth += 1
             self._args_safe_end = len(self._args_buffer)
-            return self._flush_safe_args()
+            return
 
         if ch in ("}", "]"):
             if self._args_brace_depth > 0:
                 self._args_brace_depth -= 1
             if self._args_brace_depth == 0:
-                return []
+                return
             self._args_safe_end = len(self._args_buffer)
-            return self._flush_safe_args()
+            return
 
         self._args_safe_end = len(self._args_buffer)
-        return self._flush_safe_args()
 
     def _flush_safe_args(self) -> list[SemanticEvent]:
         """Emit buffered argument characters up to the safe-end watermark.
@@ -666,11 +663,13 @@ class StreamingParserEngine:
                 events.extend(self._emit_for_state(text[i:]))
                 break
             events.extend(self._feed_json_collection_char(ch))
+        if self._json_collection_in_element:
+            events.extend(self._flush_safe_args())
         return events
 
     def _feed_json_collection_char(self, ch: str) -> list[SemanticEvent]:
         if self._json_collection_in_element:
-            events = self._feed_args_char(ch)
+            self._advance_args_char(ch)
             # Element object closed: top-level '}' with all braces balanced.
             if (
                 ch == "}"
@@ -678,8 +677,8 @@ class StreamingParserEngine:
                 and not self._args_escape_next
                 and self._args_brace_depth == 0
             ):
-                events.extend(self._end_json_element())
-            return events
+                return self._end_json_element()
+            return []
 
         # Delimiters are interpreted only between complete JSON objects, never
         # inside strings or nested values.
@@ -733,9 +732,8 @@ class StreamingParserEngine:
         self.tool_index += 1
         self._reset_args_state()
         self._json_collection_in_element = True
-        events = [SemanticEvent(EventType.TOOL_CALL_START, tool_index=self.tool_index)]
-        events.extend(self._feed_args_char(ch))
-        return events
+        self._advance_args_char(ch)
+        return [SemanticEvent(EventType.TOOL_CALL_START, tool_index=self.tool_index)]
 
     def _end_json_element(self) -> list[SemanticEvent]:
         self._json_collection_in_element = False

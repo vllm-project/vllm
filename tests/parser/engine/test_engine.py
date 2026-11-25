@@ -17,6 +17,7 @@ from vllm.parser.engine.incremental_lexer import (
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
     ParserState,
+    ToolCallBodyCollection,
     Transition,
 )
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
@@ -1013,3 +1014,132 @@ class TestTerminalAliases:
             EventType.ARG_VALUE_CHUNK,
             EventType.TOOL_CALL_END,
         ]
+
+
+class TestCoalescedArgStreaming:
+    """_feed_args_text and _feed_json_collection_text flush once per chunk."""
+
+    def test_feed_args_text_emits_one_event_per_chunk(self):
+        engine = StreamingParserEngine(_hermes_config(), tokenizer=None)
+        engine.feed("<tool_call>", [])
+
+        chunk1 = '{"name": "bash", "args": {"command": "echo hello world'
+        events1 = engine.feed(chunk1, [])
+        arg_events1 = [e for e in events1 if e.type == EventType.ARG_VALUE_CHUNK]
+        assert len(arg_events1) == 1
+        assert arg_events1[0].value == chunk1
+
+        # Top-level closing '}' is held back until confirmed by end or more text.
+        chunk2 = ' \\"quoted\\" \\\\"}}'
+        events2 = engine.feed(chunk2, [])
+        arg_events2 = [e for e in events2 if e.type == EventType.ARG_VALUE_CHUNK]
+        assert len(arg_events2) == 1
+        assert arg_events2[0].value == ' \\"quoted\\" \\\\"}'
+
+        # End tag flushes the held closing '}'.
+        events3 = engine.feed("</tool_call>", [])
+        arg_events3 = [e for e in events3 if e.type == EventType.ARG_VALUE_CHUNK]
+        assert len(arg_events3) == 1
+        assert arg_events3[0].value == "}"
+        assert any(e.type == EventType.TOOL_CALL_END for e in events3)
+
+    def test_split_escapes_match_char_by_char(self):
+        payload = (
+            '<tool_call>{"command": "a\\"b\\\\c\\\\\\"d", "nested": {"x": 1}}'
+            "</tool_call>"
+        )
+        char_engine = StreamingParserEngine(_hermes_config(), tokenizer=None)
+        char_args = "".join(
+            e.value
+            for ch in payload
+            for e in char_engine.feed(ch, [])
+            if e.type == EventType.ARG_VALUE_CHUNK
+        )
+        char_args += "".join(
+            e.value for e in char_engine.finish() if e.type == EventType.ARG_VALUE_CHUNK
+        )
+
+        for step in (2, 3, 7, 17, len(payload)):
+            engine = StreamingParserEngine(_hermes_config(), tokenizer=None)
+            chunks = [payload[i : i + step] for i in range(0, len(payload), step)]
+            args = "".join(
+                e.value
+                for c in chunks
+                for e in engine.feed(c, [])
+                if e.type == EventType.ARG_VALUE_CHUNK
+            )
+            args += "".join(
+                e.value for e in engine.finish() if e.type == EventType.ARG_VALUE_CHUNK
+            )
+            assert args == char_args
+
+    @pytest.mark.parametrize(
+        ("mode", "body"),
+        [
+            (
+                ToolCallBodyCollection.JSON_ARRAY,
+                (
+                    '[{"name":"a","args":{"x":"hello world"}},'
+                    '{"name":"b","args":{"y":"foo bar"}}]'
+                ),
+            ),
+            (
+                ToolCallBodyCollection.SEMICOLON_SEQUENCE,
+                (
+                    '{"name":"a","args":{"x":"hello world"}};'
+                    '{"name":"b","args":{"y":"foo bar"}}'
+                ),
+            ),
+        ],
+    )
+    def test_json_collection_coalesces_events_per_chunk_and_element(
+        self, mode: ToolCallBodyCollection, body: str
+    ):
+        cfg = ParserEngineConfig(
+            name="collection_coalesce_test",
+            terminals={"TOOL_START": "<tc>", "TOOL_END": "</tc>"},
+            transitions={
+                (ParserState.CONTENT, "TOOL_START"): Transition(
+                    ParserState.TOOL_ARGS, ()
+                ),
+                (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
+                    ParserState.CONTENT, ()
+                ),
+            },
+            content_events={
+                ParserState.CONTENT: EventType.TEXT_CHUNK,
+                ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+            },
+            tool_args_json=True,
+            tool_call_body_collection=mode,
+        )
+
+        # Single-shot chunk containing two elements -> 1 ARG_VALUE_CHUNK per element.
+        engine_full = StreamingParserEngine(cfg, tokenizer=None)
+        full_events = engine_full.feed(f"<tc>{body}</tc>", []) + engine_full.finish()
+        full_chunks = [e for e in full_events if e.type == EventType.ARG_VALUE_CHUNK]
+        assert len(full_chunks) == 2
+        assert full_chunks[0].tool_index == 0
+        assert full_chunks[1].tool_index == 1
+        assert full_chunks[0].value == '{"name":"a","args":{"x":"hello world"}}'
+        assert full_chunks[1].value == '{"name":"b","args":{"y":"foo bar"}}'
+
+        # Multi-character streaming emits at most 1 ARG_VALUE_CHUNK
+        # per element per chunk.
+        engine_stream = StreamingParserEngine(cfg, tokenizer=None)
+        engine_stream.feed("<tc>", [])
+        by_tool: dict[int, list[str]] = {}
+        for i in range(0, len(body), 11):
+            ev = engine_stream.feed(body[i : i + 11], [])
+            arg_ev = [e for e in ev if e.type == EventType.ARG_VALUE_CHUNK]
+            # At most one event per tool_index in a single chunk.
+            indices = [e.tool_index for e in arg_ev]
+            assert len(indices) == len(set(indices))
+            for e in arg_ev:
+                by_tool.setdefault(e.tool_index, []).append(e.value)
+        for e in engine_stream.feed("</tc>", []) + engine_stream.finish():
+            if e.type == EventType.ARG_VALUE_CHUNK:
+                by_tool.setdefault(e.tool_index, []).append(e.value)
+
+        assert "".join(by_tool[0]) == '{"name":"a","args":{"x":"hello world"}}'
+        assert "".join(by_tool[1]) == '{"name":"b","args":{"y":"foo bar"}}'
