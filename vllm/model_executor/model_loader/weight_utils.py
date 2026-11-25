@@ -3,6 +3,7 @@
 """Utilities for downloading and initializing model weights."""
 
 import asyncio
+import bisect
 import collections
 import concurrent.futures
 import fnmatch
@@ -1047,15 +1048,15 @@ def _node_local_rank() -> tuple[int, int]:
 
 def _node_prefetch_ranges(
     files: list[str], local_expert_ids: set[int]
-) -> tuple[list[list[list[int]]], list[int], list[int]]:
+) -> tuple[list[list[list[int]]], int]:
     """Plan this rank's prefetch under EP up front, so the threads only read: the
     shared tensors of its share of the files plus its experts from every file.
 
-    Returns, per file, the merged [offset, length] ranges, the node's bytes (the
-    shared tensors plus local_world_size times this rank's experts) and the
-    bytes this rank loads (the shared tensors plus its experts)."""
+    Returns the merged [offset, length] ranges per file and the node's bytes: the
+    shared tensors plus local_world_size times this rank's experts."""
     local_rank, local_world_size = _node_local_rank()
-    ranges, node_bytes, rank_bytes = [], [], []
+    shared_bytes = mine_bytes = 0
+    ranges = []
     for i, path in enumerate(files):
         shared, mine = [], []
         with open(path, "rb") as f:
@@ -1064,10 +1065,8 @@ def _node_prefetch_ranges(
                     shared.append(t["data_offsets"])
                 elif not should_skip_weight(name, local_expert_ids):
                     mine.append(t["data_offsets"])
-        shared_bytes = sum(end - start for start, end in shared)
-        mine_bytes = sum(end - start for start, end in mine)
-        node_bytes.append(shared_bytes + local_world_size * mine_bytes)
-        rank_bytes.append(shared_bytes + mine_bytes)
+        shared_bytes += sum(end - start for start, end in shared)
+        mine_bytes += sum(end - start for start, end in mine)
         merged: list[list[int]] = []
         for start, end in sorted(
             shared + mine if i % local_world_size == local_rank else mine
@@ -1077,173 +1076,32 @@ def _node_prefetch_ranges(
             else:
                 merged.append([start, end - start])
         ranges.append(merged)
-    return ranges, node_bytes, rank_bytes
+    return ranges, shared_bytes + local_world_size * mine_bytes
 
 
-# Lustre clients cancel unused extent locks once they reach the namespace's
-# lru_max_age, together with a batch of younger ones, and drop the cached pages
-# under them; reading cached pages does not refresh a lock. With locks left by
-# earlier work on the node, pages have dropped after 40-60% of lru_max_age, so
-# the prefetch runs at most a quarter of it ahead of the loaders.
-_LUSTRE_PREFETCH_LEAD_FRACTION = 0.25
-# Assumed when lru_max_age can't be read: short enough for any setting seen so
-# far (the Lustre default is 3900 s).
-_LUSTRE_DEFAULT_LOCK_MAX_AGE_S = 600.0
+class _PrefetchWindow:
+    """Lets the prefetch read only a window of files ahead of this rank's loader.
 
+    Lustre clients cancel extent locks older than lru_max_age and drop the pages
+    cached under them, so pages prefetched far ahead are gone by the time the
+    loader reaches them. The prefetch reads several times faster than the loader,
+    so a fixed window keeps the loader fed and the pages young."""
 
-def _lustre_lock_max_age_s() -> float | None:
-    """Return the smallest lru_max_age of this Lustre client's data (OSC) lock
-    namespaces in seconds, or None if it can't be read."""
-    ages = []
-    for root in ("/sys/fs/lustre", "/proc/fs/lustre"):
-        for path in glob.glob(f"{root}/ldlm/namespaces/*-osc-*/lru_max_age"):
-            with suppress(OSError):
-                # Milliseconds since Lustre 2.11, optionally with a unit.
-                m = re.fullmatch(r"\s*(\d+)\s*(ms|s)?\s*", Path(path).read_text())
-                if m:
-                    ages.append(int(m[1]) / (1 if m[2] == "s" else 1000))
-        if ages:
-            return min(ages)
-    return None
+    def __init__(self, sizes: list[int], window_bytes: int):
+        self.ends = list(itertools.accumulate(sizes))
+        self.window_bytes = window_bytes
+        self.loading = 0  # set by the loader; len(sizes) once it stops
 
-
-def _prefetch_lead_s(fs_type: str) -> float:
-    """How many seconds of loading the prefetch may run ahead of the loaders; 0
-    leaves it unpaced. Filesystems other than Lustre keep cached pages until
-    memory runs short, which the RAM check before prefetching covers."""
-    if envs.VLLM_SAFETENSORS_PREFETCH_LEAD_S is not None:
-        return max(envs.VLLM_SAFETENSORS_PREFETCH_LEAD_S, 0.0)
-    if fs_type != "lustre":
-        return 0.0
-    max_age = _lustre_lock_max_age_s()
-    lead = _LUSTRE_PREFETCH_LEAD_FRACTION * (max_age or _LUSTRE_DEFAULT_LOCK_MAX_AGE_S)
-    logger.info_once(
-        "Lustre lock max age %s; pacing the checkpoint prefetch %.0f s ahead of "
-        "the loaders (VLLM_SAFETENSORS_PREFETCH_LEAD_S overrides, 0 disables).",
-        "unreadable" if max_age is None else f"{max_age:.0f} s",
-        lead,
-    )
-    return lead
-
-
-_pacer_ids = itertools.count()
-
-
-class _PrefetchPacer:
-    """Keeps the checkpoint prefetch at most lead_s of loading ahead of the
-    node's fastest loader, so pages are read shortly before they are used.
-
-    Positions are files plus the fraction of the current file loaded, and the
-    bytes between them are the bytes the node prefetches from each file. A file
-    may be prefetched once its start is within the loader's average rate times
-    lead_s, or min_lead_bytes, of the fastest loader on the node. Until that
-    rate is known, the prefetch is not paced for the first lead_s / 5: it reads
-    the start of the checkpoint, which the loaders need first, so that stays
-    within lead_s while they load at least a fifth as fast as it reads. A file is
-    skipped once every loader on the node has passed it. The ranks of a node
-    share their positions through the torch.distributed store, so one lagging
-    rank does not hold back the files the others need; without it, each rank
-    paces on its own loader.
-    """
-
-    def __init__(
-        self,
-        node_bytes: list[int],
-        rank_bytes: list[int],
-        lead_s: float,
-        min_lead_bytes: int = 0,
-    ):
-        self.cum = list(itertools.accumulate(node_bytes, initial=0))
-        self.rank_bytes = rank_bytes
-        self.lead_s = lead_s
-        self.min_lead_bytes = min_lead_bytes
-        self.start = time.monotonic()
-        self.unpaced_s = lead_s / 5
-        self.loaded = (0, 0)  # (file, bytes of it loaded), set by the loader
-        self.slowest = self.fastest = 0.0
-        self.done = False
-        self.store = None
-        self.published = 0
-        self.keys: list[str] = []
-        if torch.distributed.is_initialized():
-            with suppress(Exception):
-                self.store = torch.distributed.distributed_c10d._get_default_store()
-            local_rank, local_world_size = _node_local_rank()
-            first = get_world_group().rank - local_rank
-            prefix = f"vllm_prefetch_pacer/{next(_pacer_ids)}/"
-            self.keys = [
-                prefix + str(r) for r in range(first, first + local_world_size)
-            ]
-            self.key = self.keys[local_rank]
-
-    # Called by the loader: no locks or I/O.
-    def start_file(self, i: int) -> None:
-        self.loaded = (i, 0)
-
-    def add(self, nbytes: int) -> None:
-        i, n = self.loaded
-        self.loaded = (i, n + nbytes)
-
-    def finish(self) -> None:
-        self.loaded = (len(self.rank_bytes), 0)
-        self.done = True
-
-    def position(self) -> float:
-        i, n = self.loaded
-        if i >= len(self.rank_bytes):
-            return float(i)
-        return i + min(n / max(self.rank_bytes[i], 1), 1.0)
-
-    def sync(self) -> None:
-        """Publish this loader's position and read the node's."""
-        own = self.position()
-        positions = [own]
-        if self.store is not None:
-            try:
-                value = round(own * 1e6)
-                self.store.add(self.key, value - self.published)
-                self.published = value
-                positions += [self.store.add(k, 0) / 1e6 for k in self.keys]
-            except Exception as e:
-                logger.warning("Prefetch pacing falls back to this rank: %s", e)
-                self.store = None
-        self.slowest, self.fastest = min(positions), max(positions)
-
-    def _bytes_at(self, position: float) -> float:
-        i = min(int(position), len(self.cum) - 1)
-        if i == len(self.cum) - 1:
-            return self.cum[-1]
-        return self.cum[i] + (position - i) * (self.cum[i + 1] - self.cum[i])
-
-    def allowed(self, i: int) -> bool:
-        elapsed = time.monotonic() - self.start
-        if elapsed < self.unpaced_s:
-            return True
-        loaded = self._bytes_at(max(self.fastest, self.position()))
-        ahead = self.cum[i] - loaded
-        rate = loaded / elapsed
-        return ahead <= max(rate * self.lead_s, self.min_lead_bytes)
-
-    def passed(self, i: int) -> bool:
-        return self.slowest >= i + 1
-
-    async def wait(self, i: int) -> None:
-        """Wait until file i may be prefetched."""
-        while True:
-            self.sync()
-            if self.done or self.allowed(i):
-                return
-            for _ in range(5):
-                await asyncio.sleep(0.2)
-                if self.done or self.allowed(i):
-                    return
-
-    def publish_until_done(self) -> None:
-        """Keep publishing this loader's position for the node until it is done."""
-        while self.store is not None and not self.done:
-            self.sync()
-            time.sleep(1)
-        self.sync()
+    def allowed(self, i: int, mine: list[int], num_threads: int) -> bool:
+        """Whether file i may be read: the files from the loader's current one
+        through i fit in the window, or i is among the next num_threads files this
+        rank prefetches (*mine*, sorted), so every thread has one."""
+        start = self.ends[self.loading - 1] if self.loading else 0
+        first = bisect.bisect_left(mine, self.loading)
+        return (
+            self.ends[i] - start <= self.window_bytes
+            or bisect.bisect_left(mine, i) < first + num_threads
+        )
 
 
 def _prefetch_checkpoint(
@@ -1282,32 +1140,31 @@ def _prefetch_all_checkpoints(
     num_prefetch_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
     ranges: list[list[list[int]]] | None = None,
-    pacer: _PrefetchPacer | None = None,
+    window: _PrefetchWindow | None = None,
 ) -> None:
     """Start prefetching checkpoint files into page cache in a background thread.
 
     The ranks of each node split the files, or, given *ranges* from
     _node_prefetch_ranges, each rank reads those byte ranges of every file.
-    Given a *pacer*, files are read in order as it allows them.
+    Given a *window*, each file is read only once the window allows it.
     """
     if num_prefetch_threads < 1:
         raise ValueError("safetensors prefetch num threads must be >= 1")
     if block_size < 1:
         raise ValueError("safetensors prefetch block size must be >= 1")
 
-    work: list[tuple[int, str, list[list[int]] | None]]
+    work: list[tuple[str, list[list[int]] | None]]
     if ranges is None:
         local_rank, local_world_size = _node_local_rank()
-        work = [
-            (i, sorted_files[i], None)
-            for i in range(local_rank, len(sorted_files), local_world_size)
-        ]
+        work = [(p, None) for p in sorted_files[local_rank::local_world_size]]
     else:
-        work = [(i, p, r) for i, (p, r) in enumerate(zip(sorted_files, ranges)) if r]
+        work = [(p, r) for p, r in zip(sorted_files, ranges) if r]
     total_for_rank = len(work)
+    index = {p: i for i, p in enumerate(sorted_files)}
+    mine = [index[p] for p, _ in work]
 
-    def prefetch(i: int, path: str, ranges: list[list[int]] | None) -> None:
-        if pacer is None or not pacer.passed(i):
+    def prefetch(path: str, ranges: list[list[int]] | None) -> None:
+        if window is None or index[path] >= window.loading:
             _prefetch_checkpoint(path, block_size, ranges)
 
     async def _prefetch_all() -> None:
@@ -1316,14 +1173,13 @@ def _prefetch_all_checkpoints(
         next_log_pct = 10
 
         async def prefetch_one(
-            i: int,
             path: str,
             ranges: list[list[int]] | None,
             executor: concurrent.futures.ThreadPoolExecutor,
         ) -> None:
             nonlocal completed, next_log_pct
             try:
-                await loop.run_in_executor(executor, prefetch, i, path, ranges)
+                await loop.run_in_executor(executor, prefetch, path, ranges)
                 completed += 1
                 if total_for_rank > 0 and next_log_pct <= 100:
                     pct = 100 * completed / total_for_rank
@@ -1344,18 +1200,12 @@ def _prefetch_all_checkpoints(
             max_workers=num_prefetch_threads
         ) as executor:
             tasks = []
-            # The pacer gates submission, at most one file per thread ahead of
-            # the reads, so the threads never wait on it and each file is read
-            # soon after the pacer allows it.
-            free = asyncio.Semaphore(num_prefetch_threads)
-            for i, p, r in work:
-                if pacer is not None:
-                    await free.acquire()
-                    await pacer.wait(i)
-                task = asyncio.ensure_future(prefetch_one(i, p, r, executor))
-                if pacer is not None:
-                    task.add_done_callback(lambda _: free.release())
-                tasks.append(task)
+            for p, r in work:
+                # The window gates submission; the threads never wait on it.
+                i = index[p]
+                while window and not window.allowed(i, mine, num_prefetch_threads):
+                    await asyncio.sleep(0.1)
+                tasks.append(asyncio.ensure_future(prefetch_one(p, r, executor)))
             await asyncio.gather(*tasks)
 
     def _run_prefetch() -> None:
@@ -1366,18 +1216,13 @@ def _prefetch_all_checkpoints(
             "Prefetching checkpoint files into page cache finished in %.2fs",
             elapsed,
         )
-        if pacer is not None:
-            pacer.publish_until_done()
 
     logger.info(
         "Prefetching checkpoint files into page cache started "
-        "(in background, num_threads=%d, block_size=%d bytes, %s)",
+        "(in background, num_threads=%d, block_size=%d bytes, read-ahead %s)",
         num_prefetch_threads,
         block_size,
-        "unpaced"
-        if pacer is None
-        else f"paced {pacer.lead_s:.0f} s / min {pacer.min_lead_bytes / 2**30:.0f}"
-        f" GiB ahead, {'node' if pacer.store else 'rank'} position",
+        "unlimited" if window is None else f"{window.window_bytes / 2**30:g} GiB",
     )
     threading.Thread(target=_run_prefetch, daemon=True).start()
 
@@ -1412,15 +1257,13 @@ def safetensors_weights_iterator(
     # Whole shards stream fastest; only when they do not fit, read just the
     # shared tensors and this node's experts.
     prefetch_ranges = None
-    node_bytes = rank_bytes = [os.path.getsize(f) for f in sorted_files]
     if (
         local_expert_ids is not None
         and total_bytes > ram_threshold_pct / 100.0 * avail_bytes
     ):
-        prefetch_ranges, node_bytes, rank_bytes = _node_prefetch_ranges(
+        prefetch_ranges, total_bytes = _node_prefetch_ranges(
             sorted_files, local_expert_ids
         )
-        total_bytes = sum(node_bytes)
     fits_in_ram = total_bytes <= (ram_threshold_pct / 100.0) * avail_bytes
     fs_name = fs_type.upper() if fs_type else "unknown"
 
@@ -1473,21 +1316,20 @@ def safetensors_weights_iterator(
             avail_bytes / 1024**3,
         )
 
-    pacer = None
+    window = None
     if should_prefetch:
+        # Lustre drops the cached pages of old locks; see _PrefetchWindow.
         # Shuffled files are loaded in a different order on every rank.
-        lead_s = 0.0 if shuffle_safetensors_files else _prefetch_lead_s(fs_type)
-        if lead_s > 0:
-            min_lead_gib = envs.VLLM_SAFETENSORS_PREFETCH_MIN_LEAD_GB
-            pacer = _PrefetchPacer(
-                node_bytes, rank_bytes, lead_s, int(min_lead_gib * 2**30)
-            )
+        lead_gib = envs.VLLM_SAFETENSORS_PREFETCH_LEAD_GB
+        if fs_type == "lustre" and lead_gib > 0 and not shuffle_safetensors_files:
+            sizes = [os.path.getsize(f) for f in sorted_files]
+            window = _PrefetchWindow(sizes, int(lead_gib * 2**30))
         _prefetch_all_checkpoints(
             sorted_files,
             num_prefetch_threads=safetensors_prefetch_num_threads,
             block_size=safetensors_prefetch_block_size,
             ranges=prefetch_ranges,
-            pacer=pacer,
+            window=window,
         )
 
     if shuffle_safetensors_files:
@@ -1502,12 +1344,12 @@ def safetensors_weights_iterator(
             local_expert_ids,
             should_prefetch,
             safetensors_prefetch_num_threads,
-            pacer,
+            window,
         )
     finally:
-        # Also when the loader stops early, so the prefetch stops too.
-        if pacer is not None:
-            pacer.finish()
+        # Also when the loader stops early or fails: release the prefetch.
+        if window is not None:
+            window.loading = len(sorted_files)
 
 
 def _safetensors_files_iterator(
@@ -1518,7 +1360,7 @@ def _safetensors_files_iterator(
     local_expert_ids: set[int] | None,
     should_prefetch: bool,
     safetensors_prefetch_num_threads: int,
-    pacer: _PrefetchPacer | None,
+    window: _PrefetchWindow | None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     leftover_state_dict: dict[str, torch.Tensor] = {}
     for i, st_file in enumerate(
@@ -1529,8 +1371,8 @@ def _safetensors_files_iterator(
             bar_format=_BAR_FORMAT,
         )
     ):
-        if pacer is not None:
-            pacer.start_file(i)
+        if window is not None:
+            window.loading = i
         if safetensors_load_strategy == "eager":
             with open(st_file, "rb") as f:
                 state_dict = load(f.read())
@@ -1570,20 +1412,15 @@ def _safetensors_files_iterator(
         elif not should_prefetch or _rank_reads_whole_tensors():
             # Without prefetch, faulting cold pages of the mapping is slower
             # than reading whole tensors even when the rank keeps only slices.
-            for name, param in _read_safetensors_file(
+            yield from _read_safetensors_file(
                 st_file, local_expert_ids, safetensors_prefetch_num_threads
-            ):
-                if pacer is not None:
-                    pacer.add(param.nbytes)
-                yield name, param
+            )
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
                     if should_skip_weight(name, local_expert_ids):
                         continue
                     param = f.get_tensor(name)
-                    if pacer is not None:
-                        pacer.add(param.nbytes)
                     yield name, param
 
 
