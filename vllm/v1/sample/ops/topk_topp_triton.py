@@ -11,14 +11,16 @@
       picks the best bins that hold enough items, at most the tier's: they hold the
       best items of the next level. Only the tier's logits are sorted.
    b. Only if a row missed its tier (k > 256, a larger nucleus, crowded ties): rounds
-      over each row's span of logits (at first all of them, below the row max). All
-      programs histogram the spans (CUDA: 8192 bins of 1/512 nat at first), with the
+      over each row's span of finite logits (at first all of them, below the row max;
+      a row with fewer than k keeps them all). All programs histogram the spans
+      (CUDA: 8192 bins of 1/512 nat at first, the last one open below), with the
       exact count and mass above them, then a plan per row finds the bins that can
       hold the k and p cuts (from counts and mass bounds). If they hold at most 4096
       logits, one pass masks the bins below and gathers the cut bins, and an exact cut
       on the sorted window masks the row. Else the row narrows its span to those bins
-      for the next round (to the k cut first if the cuts lie apart). A row left after
-      the last round is cut by one program, by an exact radix select.
+      for the next round (to the k cut first if the cuts lie apart, and to the range
+      of the open bin's logits). A row left after the last round is cut by one
+      program, by an exact radix select.
    c. Fill (rows x splits): -inf, then the kept logits of the rows cut by a tier.
 Exactly k logits are kept, ties broken by the lowest index, then the smallest prefix
 whose mass reaches p. Runtime ints are not specialized, so one compiled variant serves
@@ -47,9 +49,17 @@ FILL_SPLITS = 8  # at least this many splits per row for the fill (balances cut 
 # (more hide the latency of its block syncs). ROCm lowers tl.histogram through wave
 # ballots, whose cost grows with the bins, so it refines coarse bins, and its waves of
 # 64 have twice the threads.
-BINS, ROUNDS, WARPS = (128, 3, 8) if current_platform.is_rocm() else (8192, 2, 16)
+BINS, ROUNDS, WARPS = (128, 5, 8) if current_platform.is_rocm() else (8192, 4, 16)
 assert 3 + 2 * ROUNDS <= 16  # sync slots: barrier, exit, queue, 2 row counts per round
 BIN_SCALE = BINS / 16.0  # bins per nat below the row max
+# A cut in the open last bin narrows to the bin's range if its bins stay at most 1/32
+# nat wide (CUDA: 256 nats), else to the 16 nats below its best logit.
+TAIL_RANGE = tl.constexpr(BINS / 32.0)
+# The floor of an open span: below every finite logit (finfo.min too), above -inf.
+LOWEST = tl.constexpr(-3.4028234663852886e38)
+MASS_SLACK = tl.constexpr(1e-5)  # relative slack of mass bounds over FP32 rounding
+# Rows per launch pair: caps the workspace (117 KB per row at vocab 248k: 480 MB).
+MAX_ROWS = 4096
 WINDOW = 4096  # logits gathered to resolve a histogram cut
 KEPT = 256  # kept logits stored per row by the tiers, also the largest tier
 # Keys hold the index in 32 bits.
@@ -104,12 +114,19 @@ def apply_top_k_top_p_triton(
     if logits.stride(1) != 1:
         logits = logits.contiguous()
     rows, vocab = logits.shape
+    if rows > MAX_ROWS:
+        for start in range(0, rows, MAX_ROWS):
+            part = slice(start, start + MAX_ROWS)
+            k_part = None if k is None else k[part]
+            p_part = None if p is None else p[part]
+            apply_top_k_top_p_triton(logits[part], k_part, p_part)
+        return logits
     has_k, has_p = k is not None, p is not None
     # An absent k or p: an empty tensor (a null pointer the kernels never read), so the
     # pointer dtypes, and thus the compiled variant, do not change.
     empty = functools.partial(torch.empty, 0, device=logits.device)
-    k = empty(dtype=torch.int32) if k is None else k.to(torch.int32)
-    p = empty(dtype=torch.float32) if p is None else p.to(torch.float32)
+    k = empty(dtype=torch.int32) if k is None else k.to(torch.int32).contiguous()
+    p = empty(dtype=torch.float32) if p is None else p.to(torch.float32).contiguous()
     device = logits.device
     b = buffers(device, rows, vocab)
     levels_args, filter_args = kernel_args(
@@ -125,7 +142,7 @@ def apply_top_k_top_p_triton(
 def reserve_workspace(device: torch.device, rows: int, vocab: int) -> None:
     """Allocate the workspace for rows rows now, e.g. while memory profiling counts
     it, so that serving does not grow it."""
-    buffers(device, rows, vocab)
+    buffers(device, min(rows, MAX_ROWS), vocab)
 
 
 def register_warmups() -> None:
@@ -170,6 +187,7 @@ WORKSPACE = [
     "more",
     "span",
     "above",
+    "tail",
     "queue",
     "sync",
 ]
@@ -275,7 +293,8 @@ def allocate(device: torch.device, rows: int, vocab: int) -> dict[str, torch.Ten
     """Level 1 and 2 maxima, (max, sum of exp) per split and per row, row states, kept
     keys, histograms, per-row gather scratch, windows, gather counts and masses, spans
     (top, floor, scale, flag) with the count and mass above (and mass below) them, the
-    rows queued for the histogram path, and the grid barrier (barrier count, exit
+    best logit in their open last bin and the lowest finite logit, the rows queued for
+    the histogram path, and the grid barrier (barrier count, exit
     count, histogram rows per round from 2, rows to cut per round from 8), which is
     zeroed once and reset by each call."""
     empty = functools.partial(torch.empty, device=device)
@@ -295,6 +314,7 @@ def allocate(device: torch.device, rows: int, vocab: int) -> dict[str, torch.Ten
         more=empty(rows * 2, dtype=torch.float64),
         span=empty(rows * 4, dtype=torch.float32),
         above=empty(rows * 4, dtype=torch.float64),
+        tail=empty(rows * 2, dtype=torch.float32),
         queue=empty(rows, dtype=torch.int32),
         sync=_SYNC[device],
     )
@@ -385,6 +405,7 @@ def _filter_kernel(
     more_ptr,
     span_ptr,
     above_ptr,
+    tail_ptr,
     queue_ptr,
     sync_ptr,
     rows,
@@ -423,6 +444,7 @@ def _filter_kernel(
             scratch_ptr,
             span_ptr,
             above_ptr,
+            tail_ptr,
             queue_ptr,
             sync_ptr,
             row,
@@ -458,12 +480,15 @@ def _filter_kernel(
         for item in range(pid, queued * hsplits, programs):
             row = tl.load(queue_ptr + item // hsplits, volatile=True)
             if tl.load(state_ptr + row, volatile=True) == HIST_C:
+                k, _ = _row_params(k_ptr, p_ptr, row, vocab, has_k, has_p)
                 _histogram(
                     logits_ptr + row.to(tl.int64) * stride,
                     hist_ptr + row.to(tl.int64) * BINS,
                     span_ptr + 4 * row,
                     above_ptr + 4 * row,
+                    tail_ptr + 2 * row,
                     tl.load(row_stats_ptr + 2 * row, volatile=True).to(tl.float32),
+                    k < vocab,
                     r == 0,
                     item % hsplits * hchunk,
                     vocab,
@@ -488,6 +513,7 @@ def _filter_kernel(
                     more_ptr + 2 * row,
                     span_ptr + 4 * row,
                     above_ptr + 4 * row,
+                    tail_ptr + 2 * row,
                     next_rows,
                     sync_ptr + 3 + ROUNDS + r,
                     k,
@@ -540,6 +566,7 @@ def _filter_kernel(
                     state_ptr + row,
                     span_ptr + 4 * row,
                     above_ptr + 4 * row,
+                    tail_ptr + 2 * row,
                     row_stats_ptr + 2 * row,
                     k,
                     p,
@@ -587,6 +614,7 @@ def _select_row(
     scratch_ptr,
     span_ptr,
     above_ptr,
+    tail_ptr,
     queue_ptr,
     sync_ptr,
     row,
@@ -643,8 +671,9 @@ def _select_row(
                 hist_ptr + row.to(tl.int64) * BINS,
                 span_ptr + 4 * row,
                 above_ptr + 4 * row,
+                tail_ptr + 2 * row,
                 row_max,
-                -float("inf"),
+                LOWEST,
                 BIN_SCALE,
                 0.0,
                 BINS,
@@ -656,7 +685,15 @@ def _select_row(
 
 @triton.jit
 def _start_span(
-    hist_row, span_row, above_row, top, floor, scale, flag, BINS: tl.constexpr
+    hist_row,
+    span_row,
+    above_row,
+    tail_row,
+    top,
+    floor,
+    scale,
+    flag,
+    BINS: tl.constexpr,
 ):
     """Queue the row for a histogram round over its logits from top down to floor."""
     tl.store(span_row, top)
@@ -664,6 +701,8 @@ def _start_span(
     tl.store(span_row + 2, scale)
     tl.store(span_row + 3, flag)
     tl.store(above_row + tl.arange(0, 4), tl.zeros([4], tl.float64))
+    tl.store(tail_row, -float("inf"))
+    tl.store(tail_row + 1, float("inf"))
     tl.debug_barrier()  # this program may just have read the old histogram
     tl.store(hist_row + tl.arange(0, BINS), tl.zeros([BINS], tl.int32))
 
@@ -787,7 +826,9 @@ def _histogram(
     hist_row,
     span_row,
     above_row,
+    tail_row,
     row_max,
+    use_k,
     first,
     lo,
     vocab,
@@ -796,21 +837,25 @@ def _histogram(
     BIN_SCALE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    """Add the chunk's logits in the row's span to its histogram. A narrowed span
-    also adds the exact count and mass of the logits above it, and the mass below it."""
+    """Add the chunk's finite logits in the row's span to its histogram. A narrowed span
+    also adds the exact count and mass of the logits above it, and the mass below it.
+    The first span of a top-k row also tracks its last bin's range."""
     top, floor, scale, _ = _span(span_row, row_max, first, BIN_SCALE)
     offs = tl.arange(0, BLOCK)
     hi = tl.minimum(lo + chunk, vocab)
     counts = tl.zeros([BINS], tl.int32)
     x_next = tl.load(row_ptr + lo + offs, mask=lo + offs < hi, other=-float("inf"))
-    if first:  # the first span: every logit is in it
+    if first:  # the first span: every finite logit is in it
         for start in range(lo, hi, BLOCK):
             idx = start + offs
             x = x_next
             x_next = tl.load(
                 row_ptr + idx + BLOCK, mask=idx + BLOCK < hi, other=-float("inf")
             )
-            counts += tl.histogram(_bin(x, top, scale, BINS), BINS, mask=idx < hi)
+            # Finite as the gather bins them (NaN in the last bin).
+            counts += tl.histogram(_bin(x, top, scale, BINS), BINS, mask=~(x < LOWEST))
+        if use_k:
+            _track_tail(row_ptr, tail_row, top, scale, lo, hi, BINS, BLOCK)
     else:
         n_above = tl.zeros([BLOCK], tl.int32)
         m_above = tl.zeros([BLOCK], tl.float32)
@@ -843,11 +888,32 @@ def _histogram(
 
 
 @triton.jit
+def _track_tail(
+    row_ptr, tail_row, top, scale, lo, hi, BINS: tl.constexpr, BLOCK: tl.constexpr
+):
+    """Update the best logit in the first span's open last bin and the lowest finite
+    logit with the chunk's. A pass of its own, so that the histogram's stays lean."""
+    offs = tl.arange(0, BLOCK)
+    tail = tl.full([BLOCK], -float("inf"), tl.float32)
+    low = tl.full([BLOCK], float("inf"), tl.float32)
+    for start in range(lo, hi, BLOCK):
+        idx = start + offs
+        x = tl.load(row_ptr + idx, mask=idx < hi, other=-float("inf"))
+        finite = x > -float("inf")
+        tail = tl.maximum(
+            tail, tl.where(finite & (_bin(x, top, scale, BINS) == BINS - 1), x, tail)
+        )
+        low = tl.minimum(low, tl.where(finite, x, low))
+    tl.atomic_max(tail_row, tl.max(tail), sem="relaxed", scope="gpu")
+    tl.atomic_min(tail_row + 1, tl.min(low), sem="relaxed", scope="gpu")
+
+
+@triton.jit
 def _span(span_row, row_max, first, BIN_SCALE: tl.constexpr):
     """The row's span (top, floor, scale, flag): every logit below the row max in the
     first round."""
     top = row_max
-    floor = row_max * 0.0 - float("inf")
+    floor = row_max * 0.0 + LOWEST
     scale = row_max * 0.0 + BIN_SCALE
     flag = row_max * 0.0
     if not first:
@@ -874,6 +940,7 @@ def _plan_row(
     more_row,
     span_row,
     above_row,
+    tail_row,
     next_rows,
     cut_rows,
     k,
@@ -917,6 +984,8 @@ def _plan_row(
     per_block = tl.sum(counts, 1)
     before = tl.cumsum(per_block, 0) - per_block  # logits in the blocks above
     total = tl.sum(per_block)
+    if use_k & (k > total):  # fewer finite logits than k: they all stay
+        k = total
     kb = BINS  # no k cut
     if use_k:
         block = tl.min(tl.where(before + per_block >= k, c, NC - 1))
@@ -956,7 +1025,7 @@ def _plan_row(
         lo = _reach(
             hist_row,
             upper,
-            p * total_lo * (1 - 1e-6) - mass_up,
+            p * total_lo * (1 - MASS_SLACK) - mass_up,
             1,
             F,
             NC,
@@ -968,7 +1037,7 @@ def _plan_row(
             _reach(
                 hist_row,
                 lower,
-                p * total_hi * (1 + 1e-6) - mass_up,
+                p * total_hi * (1 + MASS_SLACK) - mass_up,
                 2,
                 F,
                 NC,
@@ -990,12 +1059,14 @@ def _plan_row(
         # A top-p row's exact mass in the span also bounds the mass below each bin.
         inside = total_lo - mass_up - mass_down
         up_all = tl.sum(upper)
-        slack = 1e-6 * up_all
-        target = p * total_hi * (1 + 1e-6) - mass_up - inside + up_all + slack
+        slack = MASS_SLACK * up_all
+        target = p * total_hi * (1 + MASS_SLACK) - mass_up - inside + up_all + slack
         hi = tl.minimum(
             hi, _reach(hist_row, upper, target, 1, F, NC, BINS, scale, floor_w)
         )
-        target = p * total_lo * (1 - 1e-6) - mass_up - inside + tl.sum(lower) - slack
+        target = (
+            p * total_lo * (1 - MASS_SLACK) - mass_up - inside + tl.sum(lower) - slack
+        )
         lo = tl.maximum(
             lo, _reach(hist_row, lower, target, 2, F, NC, BINS, scale, floor_w)
         )
@@ -1006,7 +1077,9 @@ def _plan_row(
     # The bins to narrow to: bin kb alone if it lies apart (its top-k is cut first).
     first_bin = tl.where(apart, kb, lo)
     last_bin = tl.where(apart, kb, hi)
-    if n <= WINDOW:
+    if first & use_k & (k == total) & (use_p == 0):  # every finite logit stays
+        tl.store(state_row, SELF_C)
+    elif n <= WINDOW:
         # Position of the k-th logit among the gathered ones, in key order.
         k_at = k - 1 - above_lo - between
         _gather_window(
@@ -1030,16 +1103,27 @@ def _plan_row(
         new_top = top - (first_bin - 0.5) / scale  # half a bin wider on each side
         new_floor = top - (last_bin + 1.5) / scale
         new_scale = BINS / (new_top - new_floor)
-        if (last_bin == BINS - 1) & (floor == -float("inf")):
-            # The cuts may lie in the open last bin, so the span stays open below:
-            # the same bins, from the first bin down (the mass above becomes exact).
+        if (last_bin == BINS - 1) & (floor == LOWEST):
+            # The cuts may lie in the open last bin, so the span stays open below: the
+            # same bins, from the first bin down (the mass above becomes exact). A top-k
+            # cut there starts at the bin's best logit, and spans down to the lowest
+            # finite logit if near enough.
             new_floor = floor
             new_scale = scale
+            tail = tl.load(tail_row, volatile=True)
+            low = tl.load(tail_row + 1, volatile=True)
+            if tail >= low:  # tracked (a top-k cut)
+                if first_bin == BINS - 1:
+                    new_top = tl.minimum(new_top, tail)
+                if new_top - low <= TAIL_RANGE:
+                    new_floor = low
+                    new_scale = BINS / tl.maximum(new_top - low, 1e-30)
         tl.atomic_add(next_rows, 1, sem="relaxed", scope="gpu")
         _start_span(
             hist_row,
             span_row,
             above_row,
+            tail_row,
             new_top,
             new_floor,
             new_scale,
@@ -1241,6 +1325,7 @@ def _resolve_row(
     state_row,
     span_row,
     above_row,
+    tail_row,
     stats_row,
     k,
     p,
@@ -1295,8 +1380,9 @@ def _resolve_row(
                     hist_row,
                     span_row,
                     above_row,
+                    tail_row,
                     row_max,
-                    -float("inf"),
+                    LOWEST,
                     BIN_SCALE,
                     P_AFTER_K * 1.0,
                     BINS,

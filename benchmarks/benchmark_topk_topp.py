@@ -12,12 +12,14 @@ Scenarios:
 - top_k only (whole batch, partial batch)
 - top_p only (whole batch, partial batch)
 - mix of top_k and top_p
+- top_k of 1000 with fewer finite logits than k (a grammar mask) or a forced logit
 - optional sparse inputs via --num-finite-logits
 """
 
 import argparse
 import gc
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +45,7 @@ class BenchmarkConfig:
     p_values: torch.Tensor | None  # [batch_size] or None
     description: str
     ops_pct: float = 0.0  # Percentage of ops relative to batch size
+    modify: Callable[[torch.Tensor], torch.Tensor] | None = None  # on the logits
 
 
 def calculate_ops_pct(
@@ -256,7 +259,40 @@ def create_benchmark_configs(
                 )
             )
 
+            # 7. Top-k of 1000 (above the kernel's tiers) with 500 finite logits per
+            # row (a grammar mask), and with one forced logit (a thinking budget).
+            k_large = torch.full((batch_size,), 1000, dtype=torch.int32, device=device)
+            for name, modify in (
+                ("topk_grammar", mask_all_but_500),
+                ("topk_forced", force),
+            ):
+                configs.append(
+                    BenchmarkConfig(
+                        name=f"{name}_b{batch_size}_v{vocab_size // 1000}k",
+                        batch_size=batch_size,
+                        vocab_size=vocab_size,
+                        k_values=k_large,
+                        p_values=None,
+                        description=f"{name} (k=1000), batch={batch_size}, "
+                        f"vocab={vocab_size}",
+                        ops_pct=calculate_ops_pct(
+                            k_large, None, vocab_size, batch_size
+                        ),
+                        modify=modify,
+                    )
+                )
+
     return configs
+
+
+def mask_all_but_500(logits: torch.Tensor) -> torch.Tensor:
+    rank = torch.rand_like(logits).argsort(dim=-1).argsort(dim=-1)
+    return logits.masked_fill(rank >= 500, -float("inf"))
+
+
+def force(logits: torch.Tensor) -> torch.Tensor:
+    logits[:, 0] = 1e9
+    return logits
 
 
 def format_memory(bytes_val: int) -> str:
@@ -289,6 +325,8 @@ def run_benchmark(
             config.vocab_size,
             num_finite_logits=num_finite_logits,
         )
+        if config.modify is not None:
+            logits = config.modify(logits)
         checks = {}
         if check:
             checks = check_implementations(logits, config, implementations)
@@ -451,6 +489,8 @@ def main():
             "topp_partial",
             "topk_topp_whole",
             "mixed_partial",
+            "topk_grammar",
+            "topk_forced",
         ],
         help="Run only the selected scenarios (default: all)",
     )

@@ -864,6 +864,12 @@ class TestTritonTopkTopp:
             ("normal", 8, 248320, None, 0.99),
             ("huge", 4, 131072, 1000, None),
             ("huge", 4, 131072, None, 0.5),
+            ("huge", 4, 131072, 1000, 0.95),
+            ("bias", 8, 131072, 1000, None),
+            ("bias", 8, 131072, 1000, 0.95),
+            ("grammar", 8, 151936, 300, None),
+            ("grammar", 8, 151936, 500, 0.95),
+            ("normal", 4, 131072, "max", None),
             ("bf16", 4, 131072, 300, None),
             ("bf16", 4, 131072, None, 0.99),
             ("bf16", 64, 65536, "mixed", "mixed"),
@@ -999,17 +1005,7 @@ class TestTritonTopkTopp:
 
         def median_ms(p: float) -> float:
             p_rows = torch.full((batch,), p)
-            times = []
-            for _ in range(5):
-                logits = source.clone()
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
-                start.record()
-                apply_top_k_top_p_triton(logits, None, p_rows)
-                end.record()
-                end.synchronize()
-                times.append(start.elapsed_time(end))
-            return sorted(times)[2]
+            return _median_ms(apply_top_k_top_p_triton, source, None, p_rows)
 
         assert median_ms(0.9995) < 10 * median_ms(0.9)
 
@@ -1034,6 +1030,56 @@ class TestTritonTopkTopp:
         reserved = torch.accelerator.memory_allocated()
         tt.apply_top_k_top_p_triton(logits, k, None)
         assert torch.accelerator.memory_allocated() == reserved
+
+    def test_rows_above_the_cap_share_the_workspace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """More rows than MAX_ROWS are filtered MAX_ROWS at a time, in the workspace
+        reserved for MAX_ROWS rows (it took 117 KB per row at vocab 248k)."""
+        import vllm.v1.sample.ops.topk_topp_triton as tt
+
+        monkeypatch.setattr(tt, "MAX_ROWS", 4)
+        tt.reset_buffer_cache()
+        batch, vocab = 10, 65536
+        source = torch.randn(batch, vocab, generator=self.generator)
+        k = torch.randint(1, 3000, (batch,), generator=self.generator)
+        p = torch.rand(batch, generator=self.generator)
+        actual = source.clone()
+        tt.reserve_workspace(source.device, batch, vocab)
+        reserved = torch.accelerator.memory_allocated()
+        tt.apply_top_k_top_p_triton(actual, k, p)
+        assert torch.accelerator.memory_allocated() == reserved
+        _assert_exact_filter(source, actual, k, p)
+
+    def test_strided_k_and_p(self):
+        """Strided k and p views (`.to()` keeps the strides of an int32 k)."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        batch, vocab = 8, 32000
+        source = torch.randn(batch, vocab, generator=self.generator)
+        rows = (2 * batch,)
+        k = torch.randint(1, 300, rows, generator=self.generator, dtype=torch.int32)
+        k = k[::2]
+        p = torch.rand(rows, generator=self.generator)[::2]
+        actual = apply_top_k_top_p_triton(source.clone(), k, p)
+        _assert_exact_filter(source, actual, k, p)
+
+    @pytest.mark.parametrize("kind", ["grammar", "bias", "huge"])
+    def test_large_k_is_cut_by_all_programs(self, kind: str):
+        """Top-k above 256 with fewer finite logits than k (grammar masks) or the k-th
+        logit far below the max (a biased or forced token) is cut by the histogram
+        rounds of all programs. It used to fall back to one program's radix select
+        per row, 10x to 50x slower."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        batch, vocab = 64, 151936
+        k = torch.full((batch,), 1000, dtype=torch.int32)
+        plain = torch.randn(batch, vocab, generator=self.generator)
+        hard = _make_logits(kind, batch, vocab, self.generator)
+        times = {}
+        for name, source in (("plain", plain), ("hard", hard)):
+            times[name] = _median_ms(apply_top_k_top_p_triton, source, k, None)
+        assert times["hard"] < 3 * times["plain"]
 
     def test_misaligned_logits_after_an_aligned_call(self):
         """Triton specializes pointers on 16-byte alignment, so logits 4 bytes off
@@ -1094,14 +1140,39 @@ def _make_logits(kind: str, batch: int, vocab: int, gen: Generator) -> torch.Ten
         logits[:, :4] = 18.0
     if kind == "huge":  # thinking-budget forcing, at a sampled position
         logits[:, 0] = 1e9
+    if kind == "bias":  # logit_bias of +100: the k-th logit far below the max
+        logits[:, 0] += 100
+    if kind == "grammar":  # structured output: 50 to 257 allowed tokens per row
+        allowed = torch.randint(50, 258, (batch, 1), generator=gen)
+        rank = torch.rand(batch, vocab, generator=gen).argsort(-1).argsort(-1)
+        logits = logits.masked_fill(rank >= allowed, -float("inf"))
     if kind == "neginf":
         logits[:, 100:] = -float("inf")
     return logits.bfloat16().float() if kind == "bf16" else logits
 
 
+def _median_ms(func, source: torch.Tensor, k, p) -> float:
+    """Median of 5 timed calls, each on a fresh copy of source."""
+    times = []
+    for _ in range(5):
+        logits = source.clone()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        func(logits, k, p)
+        end.record()
+        end.synchronize()
+        times.append(start.elapsed_time(end))
+    return sorted(times)[2]
+
+
 def _make_param(kind, batch: int, vocab: int, gen: Generator, dtype: torch.dtype):
     if kind is None:
         return None
+    if kind == "max":  # one row's k is vocab - 1, the others' 20
+        value = torch.full((batch,), 20, dtype=dtype)
+        value[0] = vocab - 1
+        return value
     if kind != "mixed":
         return torch.full((batch,), kind, dtype=dtype)
     if dtype == torch.int32:
