@@ -52,7 +52,13 @@ from vllm.inputs import (
 )
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
-from vllm.renderers import BaseRenderer, ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers import (
+    BaseRenderer,
+    ChatParams,
+    TokenizeParams,
+    map_reasoning_effort,
+    merge_kwargs,
+)
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -64,6 +70,7 @@ from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
 )
+from vllm.renderers.metrics import observe_request_render_duration
 from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
@@ -78,7 +85,7 @@ ResponsesPreviousMessages: TypeAlias = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResponsesRenderResult:
     messages: ResponsesPreviousMessages
     engine_input: EngineInput
@@ -109,11 +116,12 @@ def _reused_prompt_token_ids(
     """Pop prompt token ids forwarded for decode-side reuse, if any.
 
     Disaggregated serving carries the prefill stage's ids in
-    ``kv_transfer_params`` so the decode stage can skip re-tokenizing. Removing
+    `kv_transfer_params` so the decode stage can skip re-tokenizing. Removing
     the key keeps the id list out of the engine's sampling metadata.
 
-    Returns None without checking the ids when ``echo`` is set or ``messages``
-    has non-text content, since both need ``messages`` to be rendered.
+    Returns None when token ids alone are not enough. For example, the
+    user may want the rendered prompt back, or may have sent media for
+    the model to see. In those cases, conversation is re-rendered instead.
     Otherwise raises VLLMValidationError if the ids are malformed or out of
     vocabulary.
     """
@@ -127,6 +135,12 @@ def _reused_prompt_token_ids(
         logger.debug(
             "Ignoring kv_transfer_params['prompt_token_ids']: "
             "echo is set, so messages are rendered instead."
+        )
+        return None
+    if getattr(request, "return_prompt_text", False):
+        logger.debug(
+            "Ignoring kv_transfer_params['prompt_token_ids']: "
+            "return_prompt_text is set, so messages are rendered instead."
         )
         return None
     if has_non_text_content(messages):
@@ -168,6 +182,7 @@ class OnlineRenderer:
         reasoning_parser: str | None = None,
         tool_strict_level: str | None = None,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        reasoning_effort_map: dict[str, str] | None = None,
         log_error_stack: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -194,6 +209,7 @@ class OnlineRenderer:
         self.default_chat_template_kwargs: dict[str, Any] = (
             default_chat_template_kwargs or {}
         )
+        self.reasoning_effort_map: dict[str, str] = reasoning_effort_map or {}
         self.trust_request_chat_template = trust_request_chat_template
         self.trust_request_mm_kwargs = trust_request_mm_kwargs
 
@@ -217,6 +233,7 @@ class OnlineRenderer:
             request.build_chat_params(
                 self.chat_template,
                 self.chat_template_content_format,
+                self.reasoning_effort_map,
             )
             .with_defaults(self.default_chat_template_kwargs)
             .chat_template_kwargs
@@ -227,18 +244,20 @@ class OnlineRenderer:
         request: ChatCompletionRequest,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Core preprocessing logic for chat requests (no model/engine check).
 
         Called directly by render_chat_request and delegated to by
         OpenAIServingChat.render_chat_request after its engine-aware checks.
 
-        Decode-side token reuse (ids forwarded in ``kv_transfer_params``) is
-        handled deeper, in ``preprocess_chat`` / ``_make_request_with_harmony``,
+        Decode-side token reuse (ids forwarded in `kv_transfer_params`) is
+        handled deeper, in `preprocess_chat` / `_make_request_with_harmony`,
         so it skips only templating and tokenization while tool-choice
-        validation and ``adjust_request`` still run and the output is
+        validation and `adjust_request` still run and the output is
         detokenized (text-out).
         """
+        render_start = time.perf_counter()
         tokenizer = self.renderer.tokenizer
 
         tool_parser = self.parser.tool_parser_cls if self.parser is not None else None
@@ -306,15 +325,23 @@ class OnlineRenderer:
                 tool_dicts=tool_dicts,
                 parser=self.parser,
                 skip_mm_cache=skip_mm_cache,
+                tok_params=tok_params,
             )
         else:
             # For GPT-OSS.
             self.adjust_harmony_request(request)
             should_include_tools = tool_dicts is not None
             conversation, engine_inputs = self._make_request_with_harmony(
-                request, should_include_tools
+                request,
+                should_include_tools,
+                tok_params=tok_params,
             )
 
+        observe_request_render_duration(
+            cast(str, self.model_config.served_model_name),
+            "chat",
+            time.perf_counter() - render_start,
+        )
         return conversation, engine_inputs
 
     async def render_responses(
@@ -420,8 +447,9 @@ class OnlineRenderer:
                 build_harmony_preamble(
                     instructions=instructions,
                     tools=request.tools if with_custom_tools else None,
-                    reasoning_effort=(
-                        request.reasoning.effort if request.reasoning else None
+                    reasoning_effort=map_reasoning_effort(
+                        request.reasoning.effort if request.reasoning else None,
+                        self.reasoning_effort_map,
                     ),
                     with_custom_tools=with_custom_tools,
                     **descriptions,
@@ -519,10 +547,10 @@ class OnlineRenderer:
     def adjust_harmony_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> None:
-        """Apply the Harmony parser's ``adjust_request`` to ``request`` in place.
+        """Apply the Harmony parser's `adjust_request` to `request` in place.
 
         Every Harmony render path must call this before sampling params are
-        built from ``request``.
+        built from `request`.
         """
         if self.parser is None:
             return
@@ -538,6 +566,7 @@ class OnlineRenderer:
         self,
         request: ChatCompletionRequest,
         should_include_tools: bool = True,
+        tok_params: TokenizeParams | None = None,
     ):
         """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
         reuse_ids = _reused_prompt_token_ids(request, self.renderer)
@@ -562,7 +591,10 @@ class OnlineRenderer:
         # if the model supports it. TODO: Support browsing.
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
-        if (reasoning_effort := request.reasoning_effort) == "none":
+        reasoning_effort = map_reasoning_effort(
+            request.reasoning_effort, self.reasoning_effort_map
+        )
+        if reasoning_effort == "none":
             raise VLLMValidationError(
                 f"Harmony does not support {reasoning_effort=}",
                 parameter="reasoning_effort",
@@ -581,8 +613,16 @@ class OnlineRenderer:
         messages.extend(parse_chat_inputs_to_harmony_messages(chat_messages))
 
         # Render prompt token ids.
-        prompt_token_ids = render_for_completion(messages)
-        engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
+
+        prompt = TokensPrompt(prompt_token_ids=render_for_completion(messages))
+        if tok_params is not None:
+            tok_params.apply_post_tokenization(
+                self.renderer.tokenizer,
+                prompt,
+            )
+        engine_input = tokens_input(
+            prompt["prompt_token_ids"], cache_salt=request.cache_salt
+        )
 
         return messages, [engine_input]
 
@@ -597,6 +637,7 @@ class OnlineRenderer:
         Called directly by render_completion_request and delegated to by
         OpenAIServingCompletion.render_completion_request after its engine-aware checks.
         """
+        render_start = time.perf_counter()
         prompt_input = request.prompt
         if request.suffix is not None:
             if request.echo:
@@ -665,6 +706,11 @@ class OnlineRenderer:
             skip_mm_cache=skip_mm_cache,
         )
 
+        observe_request_render_duration(
+            cast(str, self.model_config.served_model_name),
+            "completion",
+            time.perf_counter() - render_start,
+        )
         return engine_inputs
 
     def create_error_response(
@@ -704,6 +750,7 @@ class OnlineRenderer:
         prompt_embeds: bytes | list[bytes] | None,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> list[EngineInput]:
         """Copied from GenerateBaseServing._preprocess_completion."""
         prompts = list[SingletonPrompt | bytes]()
@@ -711,7 +758,9 @@ class OnlineRenderer:
             prompts.extend(prompt_to_seq(prompt_embeds))
         if prompt_input is not None:
             prompts.extend(prompt_to_seq(prompt_input))
-        return await self.preprocess_cmpl(request, prompts, skip_mm_cache=skip_mm_cache)
+        return await self.preprocess_cmpl(
+            request, prompts, skip_mm_cache=skip_mm_cache, tok_params=tok_params
+        )
 
     async def preprocess_cmpl(
         self,
@@ -719,6 +768,7 @@ class OnlineRenderer:
         prompts: Sequence[PromptType | bytes],
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> list[EngineInput]:
         """Copied from GenerateBaseServing._preprocess_cmpl."""
         renderer = self.renderer
@@ -737,7 +787,8 @@ class OnlineRenderer:
             )
             for prompt in prompts
         ]
-        tok_params = request.build_tok_params(model_config)
+        if tok_params is None:
+            tok_params = request.build_tok_params(self.model_config)
 
         return await renderer.render_cmpl_async(
             parsed_prompts,
@@ -761,6 +812,7 @@ class OnlineRenderer:
         parser: type[Parser] | None = None,
         *,
         skip_mm_cache: bool = False,
+        tok_params: TokenizeParams | None = None,
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from GenerateBaseServing._preprocess_chat."""
         renderer = self.renderer
@@ -782,9 +834,13 @@ class OnlineRenderer:
             ),
         )
 
-        tok_params = request.build_tok_params(self.model_config)
+        if tok_params is None:
+            tok_params = request.build_tok_params(self.model_config)
+        build_kwargs: dict[str, Any] = {}
+        if isinstance(request, (ChatCompletionRequest, ResponsesRequest)):
+            build_kwargs["reasoning_effort_map"] = self.reasoning_effort_map
         chat_params = request.build_chat_params(
-            default_template, default_template_content_format
+            default_template, default_template_content_format, **build_kwargs
         ).with_defaults(
             default_template_kwargs,
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),

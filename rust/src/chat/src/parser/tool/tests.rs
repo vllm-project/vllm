@@ -145,7 +145,7 @@ Tokyo
     assert!(output.normal_text().is_empty());
     assert_eq!(output.calls().len(), 1);
     assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
-    assert_eq!(output.calls()[0].arguments, r#"{"location":"Tokyo"}"#);
+    assert_eq!(output.calls()[0].arguments, r#"{"location": "Tokyo"}"#);
 }
 
 #[test]
@@ -261,17 +261,6 @@ fn factory_new_resolves_default_patterns() {
         factory.resolve_name_for_model("internlm/Intern-S1-Pro"),
         None
     );
-}
-
-#[test]
-fn factory_new_registers_phi4_mini_json_by_name() {
-    // phi-4-mini is registered by explicit name only (matching Python's
-    // `--tool-call-parser phi4_mini_json`); it is intentionally not mapped to
-    // any model-name pattern.
-    let factory = ToolParserFactory::new();
-
-    assert!(factory.contains(names::PHI4_MINI_JSON));
-    factory.create(names::PHI4_MINI_JSON, &[], tokenizer()).unwrap();
 }
 
 #[test]

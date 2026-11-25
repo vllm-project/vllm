@@ -61,7 +61,7 @@ class MultiModalProcessorFactory(Protocol[_I]):  # type: ignore[misc]
     ) -> BaseMultiModalProcessor[_I]: ...
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ProcessorFactories(Generic[_I]):
     info: ProcessingInfoFactory[_I]
     processor: MultiModalProcessorFactory[_I]

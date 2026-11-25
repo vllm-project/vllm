@@ -79,8 +79,10 @@ from vllm.entrypoints.openai.responses.utils import (
     custom_tool_names,
     decode_custom_tool_input,
     decode_custom_tool_input_prefix,
+    extend_custom_tool_input_prefix,
     resolve_responses_tool_call_name,
 )
+from vllm.logprobs import LogprobsOnePosition
 from vllm.outputs import CompletionOutput
 from vllm.parser.harmony import Segment
 from vllm.renderers.chat_utils import make_tool_call_id
@@ -96,7 +98,7 @@ TOOL_NAME_TO_MCP_SERVER_LABEL: Final[dict[str, str]] = {
 def _resolve_mcp_name_label(recipient: str) -> tuple[str, str]:
     """Resolve MCP tool name and server label from a recipient string.
 
-    - ``mcp.*`` recipients: strip prefix, use the bare name as both
+    - `mcp.*` recipients: strip prefix, use the bare name as both
       name and server_label.
     - Everything else: use the recipient as the name and look up the
       server_label in TOOL_NAME_TO_MCP_SERVER_LABEL.
@@ -107,7 +109,7 @@ def _resolve_mcp_name_label(recipient: str) -> tuple[str, str]:
     return recipient, TOOL_NAME_TO_MCP_SERVER_LABEL.get(recipient, recipient)
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamingState:
     """Mutable state for streaming event processing."""
 
@@ -117,6 +119,11 @@ class StreamingState:
     current_call_id: str = ""
     sent_output_item_added: bool = False
     is_first_function_call_delta: bool = False
+    # (token_id, logprobs) of output text tokens not yet sent on a delta,
+    # e.g. part of a multi-byte character whose delta is still empty.
+    pending_logprobs: list[tuple[int, LogprobsOnePosition]] = field(
+        default_factory=list
+    )
 
     def reset_for_new_item(self) -> None:
         """Reset state when expecting a new output item."""
@@ -125,6 +132,7 @@ class StreamingState:
         self.sent_output_item_added = False
         self.is_first_function_call_delta = False
         self.current_call_id = ""
+        self.pending_logprobs = []
 
 
 def is_mcp_tool_by_namespace(
@@ -133,7 +141,7 @@ def is_mcp_tool_by_namespace(
 ) -> bool:
     """Determine if a tool call is an MCP tool based on recipient prefix.
 
-    Inverse of :func:`is_function_recipient` — everything that is not
+    Inverse of `is_function_recipient` — everything that is not
     a function call is an MCP tool.
     """
     if recipient is None:
@@ -149,6 +157,7 @@ def is_mcp_tool_by_namespace(
 def emit_text_delta_events(
     delta: str,
     state: StreamingState,
+    logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for text content delta streaming."""
     events: list[StreamingResponsesResponse] = []
@@ -193,8 +202,7 @@ def emit_text_delta_events(
             output_index=state.current_output_index,
             item_id=state.current_item_id,
             delta=delta,
-            # TODO, use logprobs from ctx.last_request_output
-            logprobs=[],
+            logprobs=_to_stream_logprobs(logprobs or []),
         )
     )
     return events
@@ -384,12 +392,14 @@ def emit_code_interpreter_delta_events(
 def emit_text_output_done_events(
     text: str,
     state: StreamingState,
+    logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events when a final text output item completes."""
     text_content = ResponseOutputText(
         type="output_text",
         text=text,
         annotations=[],
+        logprobs=logprobs,
     )
     events: list[StreamingResponsesResponse] = []
     events.append(
@@ -569,6 +579,7 @@ def emit_content_delta_events(
     segment: Segment,
     state: StreamingState,
     function_tool_names: frozenset[str] | None = None,
+    logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for content delta streaming based on channel type.
 
@@ -585,7 +596,7 @@ def emit_content_delta_events(
     if channel in ("final", "commentary") and recipient is None:
         # Preambles (commentary with no recipient) and final messages
         # are both user-visible text.
-        return emit_text_delta_events(delta, state)
+        return emit_text_delta_events(delta, state, logprobs)
     elif channel == "analysis" and recipient is None:
         return emit_reasoning_delta_events(delta, state)
     elif recipient is not None:
@@ -607,6 +618,7 @@ def emit_previous_item_done_events(
     previous_item: HarmonyMessage,
     state: StreamingState,
     function_tool_names: frozenset[str] | None = None,
+    logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit done events for the previous item when expecting a new start.
 
@@ -638,7 +650,7 @@ def emit_previous_item_done_events(
     elif previous_item.channel in ("commentary", "final"):
         # Preambles (commentary with no recipient) and final messages
         # are both user-visible text.
-        return emit_text_output_done_events(text, state)
+        return emit_text_output_done_events(text, state, logprobs)
     return []
 
 
@@ -814,7 +826,7 @@ class _StateType(Enum):
     TOOL_CALL = auto()
 
 
-@dataclass
+@dataclass(slots=True)
 class SimpleStreamingState:
     output_index: int = 0
     current_item_id: str = ""
@@ -829,6 +841,9 @@ class SimpleStreamingState:
     tool_call_index: int | None = None
     tool_call_is_custom: bool = False
     tool_call_payload: str = ""
+    # End of the custom-tool arguments decoded into tool_call_payload, or -1
+    # once they need a full decode.
+    tool_call_payload_end: int = 0
     current_state: _StateType = field(default_factory=lambda: _StateType.NONE)
 
 
@@ -1062,6 +1077,7 @@ def emit_simple_tool_call_open(
     state.tool_call_index = index
     state.tool_call_is_custom = is_custom
     state.tool_call_payload = ""
+    state.tool_call_payload_end = 0
     state.accumulated_text = ""
     item: ResponseOutputItem
     if is_custom:
@@ -1114,15 +1130,27 @@ def _emit_custom_tool_input_delta(
     ]
 
 
+def _custom_tool_input_prefix(state: SimpleStreamingState) -> str:
+    if state.tool_call_payload_end >= 0:
+        result = extend_custom_tool_input_prefix(
+            state.accumulated_text,
+            state.tool_call_payload,
+            state.tool_call_payload_end,
+        )
+        if result is not None:
+            payload, state.tool_call_payload_end = result
+            return payload
+        state.tool_call_payload_end = -1
+    return decode_custom_tool_input_prefix(state.accumulated_text)
+
+
 def emit_simple_tool_call_delta(
     state: SimpleStreamingState,
     delta: str,
 ) -> list[StreamingResponsesResponse]:
     state.accumulated_text += delta
     if state.tool_call_is_custom:
-        return _emit_custom_tool_input_delta(
-            state, decode_custom_tool_input_prefix(state.accumulated_text)
-        )
+        return _emit_custom_tool_input_delta(state, _custom_tool_input_prefix(state))
     return [
         ResponseFunctionCallArgumentsDeltaEvent(
             type="response.function_call_arguments.delta",

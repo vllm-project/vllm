@@ -120,7 +120,7 @@ async def test_top_logprobs(client: openai.AsyncOpenAI):
         max_tokens=1,
         extra_body={
             "top_logprobs": -1,
-            "logprobs": "true",
+            "logprobs": True,
         },
     )
     assert completion.choices[0].logprobs is not None

@@ -19,8 +19,14 @@ pub enum TokenIdsError {
     EmptyAllowedTokenIds,
     #[error("bad_words_token_ids must not contain empty sequences")]
     EmptyBadWordSequence,
+    #[error("bad_words cannot contain an empty string.")]
+    EmptyBadWord,
+    #[error("bad_words entries must tokenize to at least one token.")]
+    EmptyBadWordTokenization,
     #[error("Too many bad words: {count}. The max number is {max}.")]
     TooManyBadWords { count: usize, max: usize },
+    #[error("Too many bad words after tokenization: {count}. The max number is {max}.")]
+    TooManyTokenizedBadWords { count: usize, max: usize },
     #[error("Too many total bad word tokens: {count}. The max is {max}.")]
     TooManyBadWordTokens { count: usize, max: usize },
     #[error(
@@ -58,11 +64,16 @@ fn env_limit(name: &str, default: usize) -> usize {
     std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default)
 }
 
+/// The per-request cap on bad-word sequences.
+pub(super) fn max_num_bad_words() -> usize {
+    env_limit(MAX_NUM_BAD_WORDS_ENV, DEFAULT_MAX_NUM_BAD_WORDS)
+}
+
 /// Mirrors Model Runner V2's per-request bad-words buffer limits:
 /// <https://github.com/vllm-project/vllm/blob/a956a8126e6bd184cb0a6b8f7318fe4717675c2f/vllm/v1/worker/gpu/sample/bad_words.py#L40-L66>
 fn validate_bad_words_limits(bad_words_token_ids: &[Vec<u32>]) -> Result<(), TokenIdsError> {
     let count = bad_words_token_ids.len();
-    let max = env_limit(MAX_NUM_BAD_WORDS_ENV, DEFAULT_MAX_NUM_BAD_WORDS);
+    let max = max_num_bad_words();
     if count > max {
         return Err(TokenIdsError::TooManyBadWords { count, max });
     }
@@ -81,15 +92,23 @@ fn validate_bad_words_limits(bad_words_token_ids: &[Vec<u32>]) -> Result<(), Tok
 
 /// Validate that pre-tokenized prompt IDs are within the engine-visible prompt
 /// vocabulary range.
+///
+/// Only multimodal placeholders may exceed the model vocabulary: the engine
+/// replaces them before the embedding lookup. A prompt without multimodal
+/// inputs is embedded in full, so tokenizer-only IDs (e.g. Kimi's reserved
+/// tokens) are rejected. Python widens the bound for every request to a
+/// multimodal model (`BaseRenderer.validate_token_ids`).
 pub(crate) fn validate_prompt_token_ids(
     prompt_token_ids: &[u32],
+    has_multimodal_inputs: bool,
     limits: &SamplingLimits,
 ) -> Result<(), TokenIdsError> {
-    validate_param(
-        "prompt",
-        prompt_token_ids.iter().copied(),
-        limits.prompt_token_vocab_size(),
-    )
+    let vocab_size = if has_multimodal_inputs {
+        limits.tokenizer_vocab_size.max(limits.model_vocab_size)
+    } else {
+        limits.model_vocab_size
+    };
+    validate_param("prompt", prompt_token_ids.iter().copied(), vocab_size)
 }
 
 /// Validate that token IDs in text sampling parameters are within their

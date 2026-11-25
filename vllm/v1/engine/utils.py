@@ -5,7 +5,7 @@ import contextlib
 import os
 import threading
 import weakref
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import connection
@@ -50,20 +50,26 @@ def get_engine_process_shutdown_timeout(
 ) -> float | None:
     """Return the EngineCore process-manager shutdown timeout.
 
-    ``VllmConfig.shutdown_timeout`` controls how long in-flight requests may
+    `VllmConfig.shutdown_timeout` controls how long in-flight requests may
     drain. A value of zero therefore tells EngineCore to abort requests as soon
     as it receives SIGTERM. The parent process manager still needs a separate
     window in which the EngineCore can release device resources before it is
-    force-killed. ROCm teardown can take longer than the generic best-effort
-    window, and force-killing during teardown can leave VRAM resident.
+    force-killed. An explicitly set `VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS`
+    sets that window on every platform. Otherwise ROCm gets a fixed window:
+    its teardown can take longer than the generic best-effort window, and
+    force-killing during teardown can leave VRAM resident.
 
-    ``process_timeout`` may be a remaining budget computed by an outer process
-    manager. Keep it unchanged unless both values are zero: a zero remaining
-    budget for a positive request timeout must not receive a fresh grace period
-    because EngineCore relies on that deadline to enforce request draining.
+    `process_timeout` may be a remaining budget computed by an outer process
+    manager. A zero remaining budget for a positive request timeout must not
+    receive a fresh grace period because EngineCore relies on that deadline to
+    enforce request draining. `None` (e.g. `AsyncLLM.shutdown()`) means no
+    budget was given, so it receives the same cleanup window as zero.
     """
-    if request_timeout == 0 and process_timeout == 0 and current_platform.is_rocm():
-        return ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S
+    if request_timeout == 0 and process_timeout in (0, None):
+        if envs.is_set("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS"):
+            return float(envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+        if current_platform.is_rocm():
+            return ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S
     return process_timeout
 
 
@@ -83,7 +89,7 @@ class CoreEngine:
         self.state = CoreEngineState.NEW
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineZmqBindAddresses:
     """Frontend endpoints before their owning sockets bind."""
 
@@ -91,7 +97,7 @@ class EngineZmqBindAddresses:
     outputs: list[str]
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineZmqAddresses:
     """Resolved frontend endpoints advertised to engine processes."""
 
@@ -109,7 +115,7 @@ class EngineZmqAddresses:
     frontend_stats_publish_address: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineZmqListeners:
     inputs: list[ZmqListener]
     outputs: list[ZmqListener]
@@ -130,7 +136,7 @@ class EngineZmqListeners:
             self.cleanup()
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineHandshakeMetadata:
     """Metadata sent to each engine process during startup handshake,
     including addresses of the front-end ZMQ queues that they should
@@ -159,12 +165,12 @@ def _get_bundle_node_ip(bundle: dict[str, float]) -> str:
 def _dp_nodes_master_first(
     available_resources: dict[str, dict], dp_master_ip: str
 ) -> list[tuple[str, dict]]:
-    """Live Ray nodes as ``(node_id, resources)`` with the DP master first.
+    """Live Ray nodes as `(node_id, resources)` with the DP master first.
 
-    The master is found through the ``node:<ip>`` resource Ray sets on every
-    node, so this works with the resource maps from ``ray._private.state``.
-    Do not replace it with ``ray.util.state.list_nodes()``: that API goes
-    through the dashboard HTTP server and only exists with ``ray[default]``
+    The master is found through the `node:<ip>` resource Ray sets on every
+    node, so this works with the resource maps from `ray._private.state`.
+    Do not replace it with `ray.util.state.list_nodes()`: that API goes
+    through the dashboard HTTP server and only exists with `ray[default]`
     (see #23822).
     """
     master_key = f"node:{dp_master_ip}"
@@ -184,9 +190,9 @@ def _dp_nodes_master_first(
 def _node_ip_from_resources(node_resources: dict) -> str | None:
     """Return the node IP encoded in a Ray per-node resource dict, or None.
 
-    Ray advertises each node's IP as a ``node:<ip>`` resource key. The head node
-    also carries ``node:__internal_head__``, and placement groups add
-    ``..._group_...`` keys; both are ignored.
+    Ray advertises each node's IP as a `node:<ip>` resource key. The head node
+    also carries `node:__internal_head__`, and placement groups add
+    `..._group_...` keys; both are ignored.
     """
     for key in node_resources:
         if (
@@ -201,7 +207,7 @@ def _node_ip_from_resources(node_resources: dict) -> str | None:
 @contextlib.contextmanager
 def _configure_uniproc_startup_threads(
     executor_class: type[Executor], local_engine_count: int
-) -> Iterator[None]:
+) -> Generator[None]:
     if (
         not issubclass(executor_class, UniProcExecutor)
         or current_platform.is_cpu()
@@ -234,6 +240,22 @@ def _configure_uniproc_startup_threads(
         yield
 
 
+def _exited_cleanly(proc: BaseProcess) -> bool:
+    """Whether `proc` exited with status 0, without reaping it.
+
+    Reading `proc.exitcode` would reap the child, racing `shutdown()`'s join;
+    `WNOWAIT` leaves `shutdown()` as the only reaper. The engine is a direct
+    child under both start methods `get_mp_context()` uses (fork and spawn).
+    """
+    if not hasattr(os, "waitid"):  # macOS before Python 3.13
+        return proc.exitcode == 0
+    try:
+        info = os.waitid(os.P_PID, cast(int, proc.pid), os.WEXITED | os.WNOWAIT)
+    except ChildProcessError:  # already reaped by shutdown()
+        return True
+    return info is not None and info.si_code == os.CLD_EXITED and info.si_status == 0
+
+
 class CoreEngineProcManager:
     """Utility class to handle creation, readiness, and shutdown
     of background processes used by the AsyncLLM and LLMEngine.
@@ -248,7 +270,7 @@ class CoreEngineProcManager:
         local_client: bool,
         handshake_address: str,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
     ):
@@ -259,7 +281,7 @@ class CoreEngineProcManager:
             "local_client": local_client,
             "handshake_address": handshake_address,
             "executor_class": executor_class,
-            "log_stats": log_stats,
+            "collect_stats": collect_stats,
             "tensor_queue": tensor_queue,
         }
 
@@ -342,7 +364,7 @@ class CoreEngineProcManager:
             )
             if process_timeout != timeout:
                 logger.info(
-                    "[shutdown] EngineCore process manager: using %ss ROCm "
+                    "[shutdown] EngineCore process manager: using %ss "
                     "cleanup grace after immediate request abort",
                     process_timeout,
                 )
@@ -358,8 +380,7 @@ class CoreEngineProcManager:
 
             for sentinel in died_sentinels:
                 proc = sentinel_to_proc.pop(cast(int, sentinel))
-                exitcode = proc.exitcode
-                if exitcode != 0 and not self.manager_stopped.is_set():
+                if not self.manager_stopped.is_set() and not _exited_cleanly(proc):
                     self.failed_proc_name = proc.name
             if died_sentinels:
                 break
@@ -503,7 +524,7 @@ class CoreEngineActorManager:
         vllm_config: VllmConfig,
         addresses: EngineZmqAddresses,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         placement_groups: list["PlacementGroup"] | None = None,
         local_dp_ranks: list[int] | None = None,
     ):
@@ -514,6 +535,7 @@ class CoreEngineActorManager:
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
         from vllm.v1.engine.core import DPMoEEngineCoreActor, EngineCoreActor
+        from vllm.v1.executor.ray_utils import init_ray
 
         dp_size = vllm_config.parallel_config.data_parallel_size
         actor_class = (
@@ -536,7 +558,7 @@ class CoreEngineActorManager:
 
         self.addresses = addresses
         self.executor_class = executor_class
-        self.log_stats = log_stats
+        self.collect_stats = collect_stats
         local_engine_count = vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
         self.manager_stopped = threading.Event()
@@ -545,7 +567,7 @@ class CoreEngineActorManager:
         if ray.is_initialized():
             logger.info("Ray is already initialized. Skipping Ray initialization.")
         else:
-            ray.init()
+            init_ray()
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_elastic_ep:
@@ -595,7 +617,7 @@ class CoreEngineActorManager:
             # Ray XPU known issue: dpctl initializes the GPU runtime early, so
             # setting device env vars in Ray actor's initialization method
             # will not affect device selection. See:
-            # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56 # noqa: E501
+            # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56
             if current_platform.is_xpu():
                 device_evar = current_platform.device_control_env_var
                 physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
@@ -617,7 +639,7 @@ class CoreEngineActorManager:
                 .remote(
                     vllm_config=dp_vllm_config,
                     executor_class=executor_class,
-                    log_stats=log_stats,
+                    collect_stats=collect_stats,
                     local_client=local_client,
                     addresses=addresses,
                     dp_rank=index,
@@ -1012,7 +1034,7 @@ class CoreEngineActorManager:
                 .remote(
                     vllm_config=dp_vllm_config,
                     executor_class=self.executor_class,
-                    log_stats=self.log_stats,
+                    collect_stats=self.collect_stats,
                     local_client=local_client,
                     addresses=self.addresses,
                     dp_rank=rank,
@@ -1118,9 +1140,9 @@ def get_engine_zmq_bind_addresses(
 ) -> EngineZmqBindAddresses:
     """Create ZMQ endpoint templates for engine-client communication.
 
-    Each TCP address is a ``tcp://host:0`` placeholder. A single-process
-    ``MPClient`` binds its own ZMQ sockets. Cross-process frontends use
-    ``bind_engine_zmq_listeners`` so the supervisor binds raw listeners before
+    Each TCP address is a `tcp://host:0` placeholder. A single-process
+    `MPClient` binds its own ZMQ sockets. Cross-process frontends use
+    `bind_engine_zmq_listeners` so the supervisor binds raw listeners before
     launching engines and transfers listener ownership to each frontend."""
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
@@ -1184,7 +1206,7 @@ def bind_engine_zmq_listeners(
 FrontendProcess = BaseProcess | _SubprocessWrapper
 
 
-@dataclass
+@dataclass(slots=True)
 class CoreEngineLaunch:
     """Resources and startup barrier for launched engine processes."""
 
@@ -1201,9 +1223,9 @@ class CoreEngineLaunch:
 def launch_core_engines(
     vllm_config: VllmConfig,
     executor_class: type[Executor],
-    log_stats: bool,
+    collect_stats: bool,
     addresses: EngineZmqAddresses,
-) -> Iterator[CoreEngineLaunch]:
+) -> Generator[CoreEngineLaunch]:
     """Launch engine and DP coordinator processes as needed."""
     parallel_config = vllm_config.parallel_config
     dp_size = parallel_config.data_parallel_size
@@ -1300,7 +1322,7 @@ def launch_core_engines(
             vllm_config=vllm_config,
             addresses=addresses,
             executor_class=executor_class,
-            log_stats=log_stats,
+            collect_stats=collect_stats,
         )
 
         yield CoreEngineLaunch(
@@ -1362,7 +1384,7 @@ def launch_core_engines(
             local_engine_manager = CoreEngineProcManager(
                 vllm_config=vllm_config,
                 executor_class=executor_class,
-                log_stats=log_stats,
+                collect_stats=collect_stats,
                 handshake_address=handshake_address,
                 client_handshake_address=client_handshake_address,
                 local_client=True,
@@ -1415,6 +1437,10 @@ def wait_for_engine_startup(
         not parallel_config.data_parallel_hybrid_lb
         and not parallel_config.data_parallel_external_lb
     )
+
+    # (engine index, parallel config hash) of the first READY engine, which
+    # the other engines' hashes are compared with.
+    reference_config_hash: tuple[int, str | None] | None = None
 
     # 1. Engine processes
     if isinstance(launch.engine_manager, CoreEngineProcManager):
@@ -1558,10 +1584,13 @@ def wait_for_engine_startup(
                 parallel_config.elastic_ep_max_dp_size = elastic_ep_max_dp_size
 
             # Validate config hash consistency across DP workers for MoE models.
+            # Compare possibly-updated engine config hashes with each other.
             if coordinated_dp:
                 worker_config_hash = msg.get("parallel_config_hash")
-                expected_hash = parallel_config.compute_hash()
-                if worker_config_hash != expected_hash:
+                if reference_config_hash is None:
+                    reference_config_hash = (eng_index, worker_config_hash)
+                elif worker_config_hash != reference_config_hash[1]:
+                    reference_index, reference_hash = reference_config_hash
                     raise RuntimeError(
                         f"Configuration mismatch detected for engine "
                         f"{eng_index}. All DP workers must have identical "
@@ -1569,7 +1598,8 @@ def wait_for_engine_startup(
                         f"communication (e.g., enable_eplb, "
                         f"eplb_config.log_balancedness). "
                         f"Worker hash: {worker_config_hash}, "
-                        f"Expected hash: {expected_hash}. "
+                        f"Expected hash: {reference_hash} (engine "
+                        f"{reference_index}). "
                         f"Please ensure all workers are started with the same "
                         f"command-line arguments."
                     )

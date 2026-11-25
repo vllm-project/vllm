@@ -238,7 +238,7 @@ def _make_stats_data(
 
     Values for unlabeled metrics may be passed flat (wrapped here under the
     empty label tuple); values for labeled metrics must already be passed as
-    a ``{labelvalues: value}`` map.
+    a `{labelvalues: value}` map.
     """
     metric_types = {}
     data = {}
@@ -802,7 +802,7 @@ def _prom_metrics(
     spec_cls = _spec_cls_with_metric_definitions(metric_definitions or {}, info_keys)
     with patch.object(OffloadingSpecFactory, "get_spec_cls", return_value=spec_cls):
         return OffloadPromMetrics(
-            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            vllm_config=_FakeVllmConfig(store_threshold=0),
             metric_types={
                 Gauge: _FakeMetric,
                 Counter: _FakeMetric,
@@ -1053,7 +1053,7 @@ def test_aggregate_keeps_the_config_info_of_the_other_payload():
 
     worker_stats.aggregate(scheduler_stats)
 
-    assert worker_stats.data[_StatsKey.INFO] == [{"cpu_num_chunks": 512}]
+    assert worker_stats.data[_StatsKey.INFO] == [{"cpu_num_chunks": "512"}]
     assert worker_stats.data[_StatsKey.DATA][LOAD_BYTES] == {(): 100}
 
 
@@ -1067,7 +1067,7 @@ def test_aggregate_keeps_the_config_info_of_a_later_payload():
 
     stats.aggregate(later_stats)
 
-    assert stats.data[_StatsKey.INFO] == [{"cpu_num_chunks": 512}]
+    assert stats.data[_StatsKey.INFO] == [{"cpu_num_chunks": "512"}]
 
 
 def test_metric_sections_leave_out_the_config_info():

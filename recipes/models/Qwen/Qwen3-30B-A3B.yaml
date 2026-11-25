@@ -2,17 +2,17 @@ meta:
   title: "Qwen3-30B-A3B"
   slug: "qwen3-30b-a3b"
   provider: "Qwen"
-  description: "Qwen3 MoE model with 30.5B total and 3.3B active parameters, validated for BF16 serving on Intel Xeon 6 and Intel Arc Pro B70 and W8A8 serving on Ascend A3."
+  description: "Qwen3 MoE model with 30.5B total and 3.3B active parameters, validated for BF16 serving on Intel Xeon 6 and Intel Arc Pro B60 / B70 and W8A8 serving on Ascend A3."
   date_added: 2026-08-14
-  date_updated: 2026-09-23
+  date_updated: 2026-11-24
   tasks:
     - text
-  performance_headline: "Validated on Intel Xeon 6 (GNR), Ascend A3 W8A8 and 4x Intel Arc Pro B70 with BF16 serving"
+  performance_headline: "Validated on Intel Xeon 6 (GNR), Ascend A3 W8A8 and 4x Intel Arc Pro B60 / B70 with BF16 serving"
   related_recipes:
     - "Qwen/Qwen3-235B-A22B-Instruct-2507"
   hardware:
     xeon6: verified
-    ascend_910c: verified
+    arc_pro_b60: verified
     arc_pro_b70: verified
 
 model:
@@ -48,59 +48,12 @@ features:
 opt_in_features:
   - long_context
 
-hardware_opt_in_features:
-  ascend_910c:
-    - tool_calling
-    - reasoning
-
 variants:
   default:
     precision: bf16
     vram_minimum_gb: 74
     description: "Full precision BF16"
-    supported_hardware: [xeon6, arc_pro_b70]
-  ascend_w8a8:
-    model_id: "Eco-Tech/Qwen3-30B-A3B-w8a8"
-    precision: int8
-    label: "W8A8 (Ascend A3)"
-    vram_minimum_gb: 37
-    description: "ModelSlim INT8 W8A8 checkpoint for Ascend 910C, verified with TP4 + expert parallelism."
-    supported_hardware: [ascend_910c]
-    tp: 4
-    min_vllm_version: "0.23.0"
-    extra_args:
-      - "--trust-remote-code"
-      - "--max-num-seqs"
-      - "100"
-      - "--max-model-len"
-      - "40960"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--enable-expert-parallel"
-      - "--quantization"
-      - "ascend"
-      - "--distributed_executor_backend"
-      - "mp"
-      - "--no-enable-prefix-caching"
-      - "--async-scheduling"
-      - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      - "--additional-config"
-      - '{"enable_flashcomm1": true, "weight_nz_mode": 2}'
-      - "--gpu-memory-utilization"
-      - "0.95"
-    extra_env:
-      VLLM_USE_MODELSCOPE: "True"
-      HCCL_OP_EXPANSION_MODE: "AIV"
-      HCCL_BUFFSIZE: "1024"
-      OMP_PROC_BIND: "false"
-      OMP_NUM_THREADS: "1"
-      TASK_QUEUE_ENABLE: "1"
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      VLLM_USE_RUST_FRONTEND: "1"
-    hardware_overrides:
-      ascend_910c:
-        docker_image: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:v0.23.0-a3"
+    supported_hardware: [xeon6, arc_pro_b60, arc_pro_b70]
 
 compatible_strategies:
   - single_node_tp
@@ -117,7 +70,6 @@ hardware_overrides:
     extra_args:
       - "--block-size"
       - "64"
-      - "--enforce-eager"
       - "--no-enable-prefix-caching"
       - "--disable-sliding-window"
       - "--max-model-len"
@@ -138,7 +90,7 @@ guide: |
 
   ## Prerequisites
 
-  - Hardware: 4x Xeon 6 CPUs, or 4x Intel Arc Pro B70 (32 GB per card).
+  - Hardware: 4x Xeon 6 CPUs, or 4x Intel Arc Pro B60 (24 GB per card) / B70 (32 GB per card).
   - vLLM >= 0.8.5
 
   ### pip (Intel Xeon 6 CPUs)
@@ -153,7 +105,7 @@ guide: |
   docker pull vllm/vllm-openai-cpu:latest-x86_64
   ```
 
-  ### Docker (Intel Arc Pro B70)
+  ### Docker (Intel Arc Pro B60 / B70)
 
   ```bash
   docker pull vllm/vllm-openai-xpu:latest
@@ -186,10 +138,11 @@ guide: |
     --reasoning-parser qwen3
   ```
 
-  ## Intel Arc Pro B70 (XPU)
+  ## Intel Arc Pro B60 / B70 (XPU)
 
-  Validated on 4x Intel Arc Pro B70 (32 GB per card) with the official vLLM XPU
-  image `vllm/vllm-openai-xpu:latest`, BF16, TP=4.
+  Validated on 4x Intel Arc Pro B60 (24 GB per card) and 4x Intel Arc Pro B70
+  (32 GB per card) with the official vLLM XPU image `vllm/vllm-openai-xpu:latest`,
+  BF16, TP=4.
 
   ```bash
   docker run --device /dev/dri \
@@ -200,7 +153,6 @@ guide: |
     Qwen/Qwen3-30B-A3B \
     --tensor-parallel-size 4 \
     --block-size 64 \
-    --enforce-eager \
     --no-enable-prefix-caching \
     --disable-sliding-window \
     --max-model-len 9472 \
