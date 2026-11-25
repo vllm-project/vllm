@@ -1190,8 +1190,8 @@ def test_events_require_global_kv_events_flag(tmp_path):
 
 
 def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
-    """A GPU->CPU->fs cascade surfaces the tier-owned FS stored event via the
-    TieringOffloadingManager's aggregated take_events()."""
+    """A GPU->CPU->fs cascade surfaces the tier-owned FS stored event in the
+    TieringOffloadingManager's aggregated StepResult."""
     from vllm.v1.kv_offload.tiering.manager import (
         CPUPrimaryTierOffloadingManager,
         TieringOffloadingManager,
@@ -1225,8 +1225,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
         ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline and not events:
-            manager.on_schedule_end(ctx)
-            events.extend(manager.take_events())
+            events.extend(manager.on_schedule_end(ctx).events)
             time.sleep(0.01)
 
         fs_events = [e for e in events if e.medium == Medium.STORAGE]

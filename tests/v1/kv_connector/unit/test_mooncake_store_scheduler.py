@@ -65,14 +65,19 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 
 
+class _TestMooncakeStoreScheduler(MooncakeStoreScheduler):
+    _gpu_block_pool: BlockPool
+    _store_coord: MooncakeStoreCoordinator
+
+
 def _make_bare_scheduler(
     *,
     hash_block_size: int = 16,
     enable_partial_hash_hits: bool = False,
     kv_role: str = "kv_both",
     save_decode_cache: bool = False,
-) -> MooncakeStoreScheduler:
-    scheduler = object.__new__(MooncakeStoreScheduler)
+) -> _TestMooncakeStoreScheduler:
+    scheduler = object.__new__(_TestMooncakeStoreScheduler)
     scheduler.kv_role = kv_role
     scheduler.save_decode_cache = save_decode_cache
     scheduler.enable_kv_events = False
@@ -386,7 +391,7 @@ def test_current_save_block_ids_use_store_group_projection():
         req_id="req-0",
         token_len_chunk=800,
         block_ids=(),
-        block_hashes=[b"h0"],
+        block_hashes=[BlockHash(b"h0")],
         can_save=True,
     )
     meta.add_request(req_meta)
@@ -416,7 +421,7 @@ def _setup_decode_request(
     kv_role: str = "kv_consumer",
     save_decode_cache: bool = False,
     token_len: int = 47,
-) -> tuple[MooncakeStoreScheduler, RequestTracker]:
+) -> tuple[_TestMooncakeStoreScheduler, RequestTracker]:
     scheduler = _make_bare_scheduler(
         kv_role=kv_role, save_decode_cache=save_decode_cache
     )
@@ -562,6 +567,7 @@ def test_consumer_saves_only_full_decode_blocks(token_len, saved_tokens):
         assert req_meta.block_ids == ([0, 1, 2],)
         assert req_meta.token_ids == list(range(32, 48))
         assert req_meta.token_ids_start == 32
+        assert tracker.token_ids is not None
         tracker.token_ids.append(999)
         assert req_meta.token_ids == list(range(32, 48))
 
@@ -850,7 +856,7 @@ def test_from_request_tracker_load_overrides_caller_skip_save():
         hash_block_size=16,
         load_spec=load_spec,
         skip_save=False,
-        block_hashes=[b"h0", b"h1", b"h2"],
+        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
     )
 
     assert req_meta is not None
@@ -876,7 +882,7 @@ def test_from_request_tracker_load_with_can_load_false_still_saves():
         hash_block_size=16,
         load_spec=load_spec,
         skip_save=False,
-        block_hashes=[b"h0", b"h1", b"h2"],
+        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
     )
 
     assert req_meta is not None
@@ -911,7 +917,7 @@ def test_from_request_tracker_no_load_saves_normally(token_len, save_partial_tai
         hash_block_size=16,
         load_spec=None,
         skip_save=False,
-        block_hashes=[b"h0", b"h1", b"h2"],
+        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
         save_partial_tail=save_partial_tail,
         num_prompt_tokens=token_len,
     )
@@ -1056,6 +1062,7 @@ def test_admission_lookup_waits_to_create_load_until_local_hit_is_known():
 
     scheduler.start_lookup_prefetch(request)
 
+    assert isinstance(scheduler.client, _StubLookupClient)
     assert scheduler.client.prefetched == [(request.request_id, 48)]
     assert scheduler.load_specs == {}
     assert scheduler._unfinished_requests == {}
@@ -1084,6 +1091,7 @@ def test_admission_lookup_skips_ineligible_requests(option):
         request.block_hashes = []
 
     scheduler.start_lookup_prefetch(request)
+    assert isinstance(scheduler.client, _StubLookupClient)
     assert scheduler.client.prefetched == []
 
 
@@ -1097,6 +1105,7 @@ def test_admission_lookup_is_discarded_on_preemption():
 
     scheduler.build_connector_meta(_make_preemption_scheduler_output())
 
+    assert isinstance(scheduler.client, _StubLookupClient)
     assert scheduler.client.discarded == [request.request_id]
 
 
@@ -1105,7 +1114,8 @@ def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
     # existing boundary, so the scheduler receives the usable aligned hit.
     scheduler = _make_bare_scheduler()
     scheduler.load_async = True
-    scheduler.client = _StubLookupClient(hit_tokens=32)
+    lookup_client = _StubLookupClient(hit_tokens=32)
+    scheduler.client = lookup_client
 
     request = SimpleNamespace(
         request_id="req-0",
@@ -1122,7 +1132,7 @@ def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
     assert need_to_allocate == 16
     assert load_async is True
     load_spec = scheduler.load_specs["req-0"]
-    assert scheduler.client.num_tokens == [48]
+    assert lookup_client.num_tokens == [48]
     assert load_spec.vllm_cached_tokens == 16
     assert load_spec.kvpool_cached_tokens == 32
     assert load_spec.kvpool_cached_tokens % 16 == 0
@@ -1135,7 +1145,8 @@ def test_full_external_hit_with_full_local_hit_skips_load():
     # into any block-aligned key.
     scheduler = _make_bare_scheduler()
     scheduler.load_async = True
-    scheduler.client = _StubLookupClient(hit_tokens=32)
+    lookup_client = _StubLookupClient(hit_tokens=32)
+    scheduler.client = lookup_client
 
     request = SimpleNamespace(
         request_id="req-0",
@@ -1157,12 +1168,22 @@ def test_partial_hash_hit_block_aligned_local_loads_partial_tail():
     # sub-block remote hit (24 = a hash boundary inside block 1). Loads [16, 24).
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
     scheduler.load_async = True
-    scheduler.client = _StubLookupClient(hit_tokens=24)
+    lookup_client = _StubLookupClient(hit_tokens=24)
+    scheduler.client = lookup_client
 
     request = SimpleNamespace(
         request_id="req-0",
         num_tokens=32,
-        block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5", b"h6", b"h7"],
+        block_hashes=[
+            b"h0",
+            b"h1",
+            b"h2",
+            b"h3",
+            b"h4",
+            b"h5",
+            b"h6",
+            b"h7",
+        ],
     )
 
     need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
@@ -1182,12 +1203,22 @@ def test_partial_hash_hit_no_remote_gain_skips_load():
     # that block-aligned local hit, nothing is loaded.
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
     scheduler.load_async = True
-    scheduler.client = _StubLookupClient(hit_tokens=16)
+    lookup_client = _StubLookupClient(hit_tokens=16)
+    scheduler.client = lookup_client
 
     request = SimpleNamespace(
         request_id="req-0",
         num_tokens=32,
-        block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5", b"h6", b"h7"],
+        block_hashes=[
+            b"h0",
+            b"h1",
+            b"h2",
+            b"h3",
+            b"h4",
+            b"h5",
+            b"h6",
+            b"h7",
+        ],
     )
 
     need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
@@ -1206,7 +1237,8 @@ def test_sub_block_prompt_looks_up_with_fine_grained():
     # block-size floor returned (0, False) for such prompts.
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
     scheduler.load_async = True
-    scheduler.client = _StubLookupClient(hit_tokens=8)
+    lookup_client = _StubLookupClient(hit_tokens=8)
+    scheduler.client = lookup_client
 
     request = SimpleNamespace(
         request_id="req-0",
@@ -1227,7 +1259,8 @@ def test_sub_block_prompt_not_looked_up_without_fine_grained():
     # Without fine-grained partial hits, sub-block prompts still skip the lookup
     # (there is no full block, and no sub-block key granularity).
     scheduler = _make_bare_scheduler()
-    scheduler.client = _StubLookupClient(hit_tokens=8)
+    lookup_client = _StubLookupClient(hit_tokens=8)
+    scheduler.client = lookup_client
 
     request = SimpleNamespace(
         request_id="req-0",
@@ -1249,16 +1282,17 @@ def test_failed_load_skips_store_lookup_until_finished():
     # make the request reload forever; it recomputes locally instead.
     scheduler = _make_bare_scheduler()
     scheduler.load_async = True
-    scheduler.client = _StubLookupClient(hit_tokens=32)
+    lookup_client = _StubLookupClient(hit_tokens=32)
+    scheduler.client = lookup_client
     request = _make_admission_request()
     assert scheduler.get_num_new_matched_tokens(request, 0) == (32, True)
     scheduler.update_connector_output(
         KVConnectorOutput(failed_recving={request.request_id})
     )
 
-    num_lookups = len(scheduler.client.num_tokens)
+    num_lookups = len(lookup_client.num_tokens)
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
-    assert len(scheduler.client.num_tokens) == num_lookups
+    assert len(lookup_client.num_tokens) == num_lookups
 
     finished_output = _make_preemption_scheduler_output()
     finished_output.preempted_req_ids = set()
@@ -1286,7 +1320,8 @@ def test_disabled_lookup_reports_no_hit_without_querying_client():
     # lookup. Used by instances that only contribute store capacity.
     scheduler = _make_bare_scheduler()
     scheduler.enable_lookup = False
-    scheduler.client = _StubLookupClient(hit_tokens=32)
+    lookup_client = _StubLookupClient(hit_tokens=32)
+    scheduler.client = lookup_client
 
     request = SimpleNamespace(
         request_id="req-0",
@@ -1300,7 +1335,7 @@ def test_disabled_lookup_reports_no_hit_without_querying_client():
 
     assert need_to_allocate == 0
     assert load_async is False
-    assert scheduler.client.num_tokens == []
+    assert lookup_client.num_tokens == []
     assert scheduler.load_specs == {}
 
 
@@ -1374,6 +1409,7 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     assert req_meta.num_prompt_tokens == 13
     assert req_meta.block_ids == ([0],)
     store_job_id = req_meta.store_job_id
+    assert store_job_id is not None
     assert scheduler._pinned_saves[store_job_id][0] == [7]
     assert scheduler._gpu_block_pool.blocks[0].ref_cnt == 0
     assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 1
@@ -1474,6 +1510,7 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
             (checkpoint + attention_block_size - 1) // attention_block_size,
         )
     ] + [(1, 50, 44)]
+    assert req_meta.store_job_id is not None
     assert set(scheduler._pinned_saves[req_meta.store_job_id][0]) == {50, *expected}
     assert all(pool.blocks[i].ref_cnt == 1 for i in expected + [50])
     assert scheduler._finished_partial_tail_metas == {}
@@ -1527,7 +1564,9 @@ def test_partial_tail_follows_lookahead_checkpoint(
         req_id="req-0",
         token_len_chunk=0,
         block_ids=(list(range(1, 11)), [50, 51, 52, 53, 54]),
-        block_hashes=[bytes([i]) for i in range(max(0, 73 - num_lookahead) // 4)],
+        block_hashes=[
+            BlockHash(bytes([i])) for i in range(max(0, 73 - num_lookahead) // 4)
+        ],
         num_prompt_tokens=73,
         completed_token_len=73,
         boundary_puts=[BoundaryPut(1, 60, mamba_tail)],
@@ -1591,7 +1630,7 @@ def test_shared_prefix_junction_handoff_adds_no_attention_tail(
         req_id="req-0",
         token_len_chunk=0,
         block_ids=(list(range(1, 20)), [50, 51, 52, 53, 54]),
-        block_hashes=[bytes([i]) for i in range(18)],
+        block_hashes=[BlockHash(bytes([i])) for i in range(18)],
         num_prompt_tokens=75,
         completed_token_len=completed,
         boundary_puts=[BoundaryPut(1, 60 + i, n) for i, n in enumerate(mamba_tails)],
@@ -1609,7 +1648,14 @@ def test_decode_boundary_state_offload_dropped_unclaimed():
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
     request = SimpleNamespace(
         all_token_ids=list(range(24)),
-        block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5"],
+        block_hashes=[
+            b"h0",
+            b"h1",
+            b"h2",
+            b"h3",
+            b"h4",
+            b"h5",
+        ],
         num_output_placeholders=0,
         num_prompt_tokens=12,
     )
@@ -1712,6 +1758,7 @@ def test_resumed_prefill_claims_boundaries_past_prompt_length():
     # Aligned states at 16 and 32 are inside the resumed prefill; 48 is past it.
     assert meta.requests[0].boundary_puts == [(1, 7, 16), (1, 9, 32)]
     store_job_id = meta.requests[0].store_job_id
+    assert store_job_id is not None
     assert scheduler._pinned_saves[store_job_id][0] == [7, 9]
 
 
@@ -1726,12 +1773,14 @@ def test_boundary_state_job_pins_exact_blocks_once():
     meta = scheduler.build_connector_meta(out)
 
     req_meta = meta.requests[0]
+
     assert req_meta.boundary_puts == [
         (1, 7, 16),
         (1, 8, 32),
         (1, 9, 48),
     ]
     store_job_id = req_meta.store_job_id
+    assert store_job_id is not None
     assert scheduler._pinned_saves[store_job_id][0] == [7, 8, 9]
     assert [scheduler._gpu_block_pool.blocks[i].ref_cnt for i in (7, 8, 9)] == [
         1,
@@ -1791,6 +1840,7 @@ def test_store_job_pins_current_non_null_non_mamba_blocks():
     req_meta = meta.requests[0]
     assert req_meta.block_ids == current_block_ids
     store_job_id = req_meta.store_job_id
+    assert store_job_id is not None
     assert scheduler._pinned_saves[store_job_id][0] == [8, 7, 2, 6]
     assert pool.blocks[0].ref_cnt == 0
     assert pool.blocks[5].ref_cnt == 0
@@ -1815,7 +1865,9 @@ def test_boundary_state_release_is_per_store_job():
     first = scheduler.build_connector_meta(_make_offload_only_output([(1, 7, 16)]))
     second = scheduler.build_connector_meta(_make_offload_only_output([(1, 8, 32)]))
     first_job_id = first.requests[0].store_job_id
+    assert first_job_id is not None
     second_job_id = second.requests[0].store_job_id
+    assert second_job_id is not None
 
     scheduler.update_connector_output(_make_worker_output({first_job_id: 1}))
 
@@ -1830,6 +1882,7 @@ def test_preemption_and_request_id_reuse_do_not_release_inflight_job():
     _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
     first = scheduler.build_connector_meta(_make_offload_only_output([(1, 7, 16)]))
     first_job_id = first.requests[0].store_job_id
+    assert first_job_id is not None
 
     _preempt(scheduler)
     assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 1
@@ -1838,6 +1891,7 @@ def test_preemption_and_request_id_reuse_do_not_release_inflight_job():
     _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
     second = scheduler.build_connector_meta(_make_offload_only_output([(1, 8, 32)]))
     second_job_id = second.requests[0].store_job_id
+    assert second_job_id is not None
     assert second.requests[0].boundary_puts == [(1, 8, 32)]
 
     scheduler.update_connector_output(_make_worker_output({first_job_id: 1}))
@@ -1872,6 +1926,7 @@ def test_decode_consumer_claims_only_decode_boundary_state():
 
     assert meta.requests[0].boundary_puts == [(1, 9, 16)]
     store_job_id = meta.requests[0].store_job_id
+    assert store_job_id is not None
     assert scheduler._pinned_saves[store_job_id][0] == [9]
 
 
@@ -1881,7 +1936,13 @@ def test_resumed_partial_tail_uses_exact_boundary():
     out = _add_pending_partial_tail_request(
         scheduler,
         num_tokens=20,
-        block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4"],
+        block_hashes=[
+            b"h0",
+            b"h1",
+            b"h2",
+            b"h3",
+            b"h4",
+        ],
         block_ids=([0, 1],),
     )
 
@@ -1952,6 +2013,7 @@ def test_partial_tail_cow_block_is_referenced_for_the_job():
     meta = scheduler.build_connector_meta(out)
 
     store_job_id = meta.requests[0].store_job_id
+    assert store_job_id is not None
     # It leads the list, as in `pop_blocks_for_free`, so that the reversed free
     # puts it last in eviction priority.
     assert scheduler._pinned_saves[store_job_id][0] == [7]
@@ -1982,6 +2044,7 @@ def test_store_job_blocks_are_released_once_every_rank_reports():
         _make_scheduler_output(scheduled_spec_tokens=None)
     )
     store_job_id = meta.requests[0].store_job_id
+    assert store_job_id is not None
     assert pool.blocks[2].ref_cnt == 1
     assert scheduler.has_pending_push_work() is True
 

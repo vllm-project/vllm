@@ -760,7 +760,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # with the `fastokens` (https://github.com/crusoecloud/fastokens) shim.
     # Applies to any tokenizer mode that loads an HF fast tokenizer
     # (`hf`, `deepseek_v32`, `deepseek_v4`, …). The `fastokens`
-    # Python package (>= 0.3.5) must be installed.
+    # Python package (>= 0.3.6) must be installed.
     "VLLM_USE_FASTOKENS": lambda: bool(int(os.getenv("VLLM_USE_FASTOKENS", "0"))),
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
@@ -2624,6 +2624,15 @@ def compile_factors() -> dict[str, object]:
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
         "VLLM_SKIP_VERSION_SUFFIX",
+        # Install-time switches, like VLLM_SKIP_VERSION_SUFFIX above.
+        "VLLM_USE_PRECOMPILED",
+        "VLLM_USE_PRECOMPILED_RUST",
+        "VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX",
+        # Frontend selection: the Python and Rust frontends drive the same
+        # engine graphs.
+        "VLLM_USE_RUST_FRONTEND",
+        "VLLM_USE_RUST_BENCH",
+        "VLLM_RUST_FRONTEND_PATH",
         "FORCE_COLOR",
         "VLLM_REQUEST_BODY_LOG_LEVEL",
         # Where Engram host tables live; the GPU views and graphs are the same.

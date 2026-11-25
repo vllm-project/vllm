@@ -861,6 +861,50 @@ def test_hisparse_import_promotes_host_pages_when_pool_has_room(has_room):
     assert not coordinator.has_pending_work()
 
 
+def test_hisparse_import_promotion_keeps_cached_prefixes():
+    """Promoting an import takes no block that holds a cached prefix.
+
+    A promoted page only spares decode a host read; the prefix-cached indexer
+    blocks it would evict are what a later host prefix hit needs.
+    """
+    manager = make_hisparse_kv_cache_manager(
+        64, 64, max_model_len=1024, enable_caching=True
+    )
+    num_tokens = 8 * HISPARSE_BLOCK_SIZE
+    prefix = make_request(
+        "prefix", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    assert _allocate_scheduled(manager, prefix, num_tokens) is not None
+    _publish_hisparse_pages(manager)
+    manager.free(prefix)
+    imported = make_request(
+        "import",
+        list(range(num_tokens, 2 * num_tokens + 1)),
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+    )
+    assert allocate_external_prefix(manager, imported, num_tokens + 1) is not None
+    coordinator = get_hisparse_coordinator(manager)
+    pool = coordinator.gpu_pool
+    num_cached = sum(
+        block.block_hash is not None
+        for block in pool.free_block_queue.get_all_free_blocks()
+    )
+    assert num_cached > coordinator.transition_watermark
+    # Other requests hold every uncached block above the transition watermark.
+    pool.get_new_blocks(
+        pool.get_num_free_blocks() - num_cached - coordinator.transition_watermark
+    )
+
+    coordinator.finish_host_import(imported.request_id, failed=False)
+    command = coordinator.build_offload_command()
+    assert command is not None and command.page_transfers
+
+    again = make_request("again", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(again)
+    assert num_computed == num_tokens - HISPARSE_BLOCK_SIZE
+
+
 def test_hisparse_aborted_promotion_keeps_pages_until_restored():
     """An abort cannot recycle GPU pages a queued promotion still writes."""
     manager = make_hisparse_kv_cache_manager(256, 16)
@@ -1813,6 +1857,11 @@ def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
     assert get_hisparse_coordinator(manager).all_context_pages_resident(
         ((resumed.request_id, num_computed, len(tokens) - num_computed),)
     )
+    # Adopting a copy took it out of the free blocks; the rest stay allocatable.
+    pool = manager.block_pool
+    taken = pool.get_new_blocks(pool.get_num_free_blocks())
+    assert len({block.block_id for block in taken}) == len(taken)
+    assert all(block.ref_cnt == 1 for block in taken)
 
 
 @pytest.mark.parametrize("free_blocks,adopted_pages", [(7, []), (10, [0, 1])])
@@ -1966,6 +2015,32 @@ def test_hisparse_finished_request_leaves_free_copies():
     pool.get_new_blocks(pool.get_num_free_blocks())
     assert not coordinator.copies
     assert not coordinator.spills_to_send
+
+
+def test_hisparse_finished_copies_do_not_evict_older_prefix():
+    """A finished request's copies are reused before cached prefixes.
+
+    A prefix hit needs the prefix-cached indexer blocks; a copy alone serves
+    nothing. When copies shared the cached LRU order, a later request's copies
+    outlived an earlier prefix's indexer blocks and the prefix was lost.
+    """
+    manager = make_hisparse_kv_cache_manager(64, 32, enable_caching=True)
+    num_tokens = 4 * HISPARSE_BLOCK_SIZE
+    num_cached = 0
+    for i, name in enumerate(("prefix", "filler")):
+        tokens = list(range(i * num_tokens, (i + 1) * num_tokens))
+        request = make_request(name, tokens, HISPARSE_BLOCK_SIZE, sha256)
+        assert _allocate_scheduled(manager, request, num_tokens) is not None
+        _publish_hisparse_pages(manager)
+        indexer = manager.get_blocks(name).blocks[1]
+        num_cached += sum(block.block_hash is not None for block in indexer)
+        manager.free(request)
+    pool = manager.block_pool
+    pool.get_new_blocks(pool.get_num_free_blocks() - num_cached)
+
+    prefix = make_request("again", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(prefix)
+    assert num_computed == 3 * HISPARSE_BLOCK_SIZE
 
 
 @pytest.mark.parametrize(
@@ -2525,6 +2600,36 @@ def test_prefill(hash_fn):
         free_block_queue.fake_free_list_tail.prev_free_block
         is free_block_queue.fake_free_list_head
     )
+
+
+def test_extend_cached_prefix():
+    """Probes only the blocks after the given prefix, and stops before the last
+    token, which is always recomputed."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 20),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    prompt = [i for i in range(4) for _ in range(block_size)] + [4]
+    req = make_request("req", prompt, block_size, sha256)
+    assert manager.extend_cached_prefix(req, 0) == 0
+
+    def cache_prefix(req_id: str, num_tokens: int) -> None:
+        writer = make_request(req_id, prompt[:num_tokens], block_size, sha256)
+        assert manager.allocate_slots(writer, num_tokens) is not None
+
+    cache_prefix("a", 33)
+    assert manager.extend_cached_prefix(req, 0) == 32
+    cache_prefix("b", 49)
+    assert manager.extend_cached_prefix(req, 32) == 48
+    assert manager.extend_cached_prefix(req, 48) == 48
+
+    cache_prefix("c", 65)
+    assert manager.extend_cached_prefix(req, 48) == 64
+    req_64 = make_request("req_64", prompt[:64], block_size, sha256)
+    assert manager.extend_cached_prefix(req_64, 0) == 48
 
 
 def test_prefill_hybrid_model():

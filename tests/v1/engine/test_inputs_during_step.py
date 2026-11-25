@@ -150,3 +150,41 @@ def test_blocks_for_output_after_spin_period():
     assert future.waits == 0
     assert future.polls == 2
     assert handled == [(ADD, "a")]
+
+
+def test_stop_on_add_returns_at_first_add():
+    """With a free batch-queue slot, the wait returns as soon as a request is added
+    (aborts don't stop it), leaving the step's output to be collected later."""
+    engine, handled = make_engine()
+
+    def on_poll(n: int) -> None:
+        if n == 2:
+            engine.input_queue.put((ABORT, ["x"]))
+        elif n == 4:
+            engine.input_queue.put((ADD, "a"))
+            engine.input_queue.put((ADD, "b"))
+
+    future = PollableFuture(ready_after=1000, on_poll=on_poll)
+    assert engine._handle_inputs_while_waiting(future, stop_on_add=True)
+    assert not future.done()
+    assert handled == [(ABORT, ["x"]), (ADD, "a")]
+    assert engine.input_queue.qsize() == 1
+
+    # A request arriving after the spin period still stops the wait.
+    engine, handled = make_engine()
+
+    def on_late_poll(n: int) -> None:
+        if n == 5:
+            engine.input_queue.put((ADD, "c"))
+
+    future = PollableFuture(ready_after=1000, on_poll=on_late_poll)
+    with mock.patch.object(engine_core, "_INPUT_SPIN_DURATION_S", 0.0):
+        assert engine._handle_inputs_while_waiting(future, stop_on_add=True)
+    assert future.waits == 0
+    assert handled == [(ADD, "c")]
+
+    # Output ready before any request arrives.
+    engine, handled = make_engine()
+    assert not engine._handle_inputs_while_waiting(
+        PollableFuture(ready_after=3), stop_on_add=True
+    )

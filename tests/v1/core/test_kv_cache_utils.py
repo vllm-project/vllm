@@ -880,6 +880,103 @@ def test_free_kv_cache_block_queue_get_all_free_blocks():
     assert queue.get_all_free_blocks() == blocks[1:2] + blocks[3:] + [block_to_remove]
 
 
+def test_free_kv_cache_block_queue_insert_before_cached():
+    """Middle-tier blocks sit after prepended blocks and before appended ones."""
+    blocks = [KVCacheBlock(block_id=i) for i in range(8)]
+    queue = FreeKVCacheBlockQueue(blocks[:2])  # [0, 1] (uncached)
+
+    # Inserting before any append places blocks at the tail without setting
+    # _cached_head, so subsequent appends still follow them.
+    queue.insert_before_cached([blocks[2]])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [0, 1, 2]
+
+    queue.append_n([blocks[3], blocks[4]])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [0, 1, 2, 3, 4]
+
+    # Repeated middle-tier inserts preserve FIFO order before _cached_head (3).
+    queue.insert_before_cached([blocks[5], blocks[6]])
+    queue.prepend_n([blocks[7]])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [
+        7,
+        0,
+        1,
+        2,
+        5,
+        6,
+        3,
+        4,
+    ]
+    assert queue.num_free_blocks == 8
+
+    # Removing _cached_head (3) advances it to 4.
+    queue.remove(blocks[3])
+    queue.insert_before_cached([blocks[3]])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [
+        7,
+        0,
+        1,
+        2,
+        5,
+        6,
+        3,
+        4,
+    ]
+
+    # Removing the last appended block (4) clears _cached_head to None.
+    queue.remove(blocks[4])
+    queue.append(blocks[4])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [
+        7,
+        0,
+        1,
+        2,
+        5,
+        6,
+        3,
+        4,
+    ]
+
+
+@pytest.mark.parametrize("pop_mode", ["popleft", "popleft_1", "popleft_n"])
+def test_free_kv_cache_block_queue_cached_head_across_pops(pop_mode):
+    """Popping past _cached_head updates it so later middle-tier inserts stay
+    ahead of remaining appended blocks (and clear it when drained)."""
+    blocks = [KVCacheBlock(block_id=i) for i in range(5)]
+    queue = FreeKVCacheBlockQueue([blocks[0]])
+    queue.append_n([blocks[1], blocks[2], blocks[3]])
+
+    if pop_mode == "popleft":
+        popped = [queue.popleft(), queue.popleft()]
+    elif pop_mode == "popleft_1":
+        popped = queue.popleft_n(1) + queue.popleft_n(1)
+    else:
+        popped = queue.popleft_n(2)
+    assert [b.block_id for b in popped] == [0, 1]
+
+    # Remaining queue is [2, 3] with _cached_head at 2.
+    queue.insert_before_cached([blocks[4]])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [4, 2, 3]
+
+    # Draining the queue clears _cached_head cleanly.
+    drained = queue.popleft_n(queue.num_free_blocks)
+    assert [b.block_id for b in drained] == [4, 2, 3]
+    queue.insert_before_cached([blocks[0]])
+    queue.append(blocks[1])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [0, 1]
+
+
+def test_free_kv_cache_block_queue_reset_cached_head():
+    blocks = [KVCacheBlock(block_id=i) for i in range(4)]
+    queue = FreeKVCacheBlockQueue([])
+    queue.append_n([blocks[0], blocks[1]])
+    queue.reset_cached_head()
+    # After reset, all existing blocks act as uncached; middle-tier inserts go
+    # after them and before new appends.
+    queue.insert_before_cached([blocks[2]])
+    queue.append(blocks[3])
+    assert [b.block_id for b in queue.get_all_free_blocks()] == [0, 1, 2, 3]
+
+
 def test_generate_block_hash_extra_keys():
     request = make_request(
         request_id="0",
@@ -1501,7 +1598,7 @@ def test_dcp_target_allocates_replicated_draft_independently(
     assert widths == [16, 64]
 
     cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        config, groups, available_memory=16 * 1024 * 1024
+        config, groups, num_blocks=128
     )
     scheduler_config = generate_scheduler_kv_cache_config([cache_config])
     assert get_max_concurrency_for_kv_cache_config(config, cache_config) > 0
@@ -1622,7 +1719,8 @@ def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
     merged = new_kv_cache_group(["draft.0", "draft.1"], draft)
     assert not merged.dcp_sharded
     assert merged.max_num_blocks_per_req(config, 1024) == 64
-    assert merged.max_memory_usage_bytes(config) == 2 * 64 * draft.page_size_bytes
+    assert merged.max_allocated_blocks_per_request(config) == 64
+    assert merged.page_size_bytes == 2 * draft.page_size_bytes
     assert kv_cache_utils.resolve_dcp_kv_block_size(merged, 4) == 16
     with pytest.raises(AssertionError):
         KVCacheGroup.from_layers(

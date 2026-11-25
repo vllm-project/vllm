@@ -841,6 +841,20 @@ class BlockPool:
                 released.append(block)
         self.free_block_queue.append_n(released)
 
+    def deprioritize_blocks(self, blocks: Iterable[KVCacheBlock]) -> None:
+        """Deprioritize free blocks so they are evicted after uncached blocks
+        but before normal LRU-cached blocks, in FIFO order.
+
+        Blocks still referenced (`ref_cnt > 0`) or not in the free queue are
+        left unchanged.
+        """
+        moved: list[KVCacheBlock] = []
+        for block in blocks:
+            if block.ref_cnt == 0 and block.prev_free_block is not None:
+                self.free_block_queue.remove(block)
+                moved.append(block)
+        self.free_block_queue.insert_before_cached(moved)
+
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
@@ -984,6 +998,7 @@ class BlockPool:
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
+        self.free_block_queue.reset_cached_head()
 
         if self.metrics_collector:
             self.metrics_collector.reset()
@@ -1003,6 +1018,16 @@ class BlockPool:
 
         """
         return self.free_block_queue.num_free_blocks
+
+    def get_num_uncached_free_blocks(self, limit: int) -> int:
+        """Count, up to `limit`, the leading uncached free blocks that
+        `get_new_blocks` hands out before any cached prefix block."""
+        count = 0
+        for block in self.free_block_queue.iter_blocks_after(None):
+            if count >= limit or block.block_hash is not None:
+                break
+            count += 1
+        return count
 
     def get_usage(self) -> float:
         """Get the KV cache usage.

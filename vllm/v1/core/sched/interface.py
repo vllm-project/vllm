@@ -207,6 +207,11 @@ class SchedulerInterface(ABC):
         not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
 
+    def should_schedule(self) -> bool:
+        """Whether the engine should schedule another step now, rather than wait
+        for an in-flight one."""
+        return self.has_requests()
+
     def run_idle_work(self) -> bool:
         """Do a slice of deferrable work while the engine waits for a step's
         output. Returns whether work remains."""
