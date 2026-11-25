@@ -13,6 +13,7 @@ import torch
 import torch.multiprocessing as mp
 
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 
 if not current_platform.is_device_capability(90):
     pytest.skip("NVFP4 MegaMoE runs on SM90", allow_module_level=True)
@@ -299,8 +300,9 @@ def test_data_parallel_matches_single_rank_humming(checkpoint_path):
     if torch.accelerator.device_count() < world:
         pytest.skip(f"needs {world} GPUs")
     queue = mp.get_context("spawn").Queue()
+    port = get_open_port()
     mp.spawn(
-        _data_parallel_worker, args=(world, 29680, checkpoint_path, queue), nprocs=world
+        _data_parallel_worker, args=(world, port, checkpoint_path, queue), nprocs=world
     )
     results = dict(queue.get() for _ in range(world))
     assert all(not f for f in results.values()), results

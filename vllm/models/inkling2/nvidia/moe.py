@@ -194,8 +194,11 @@ class Inkling2Experts(nn.Module):
             and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         ):
             self.mega_vllm_config = vllm_config
-            # Collective: every rank builds the same layers.
-            mega_rank_group()
+            self.mega_cls = Inkling2MegaMoEExperts
+            if not self.dp_ep and get_ep_group().world_size > 1:
+                self.mega_cls = Inkling2LocalMegaMoEExperts
+                # Collective: every rank builds the same layers.
+                mega_rank_group()
         self.mega: Inkling2MegaMoEExperts | None = None
         if self.sm100:
             load_kernels(
@@ -265,10 +268,7 @@ class Inkling2Experts(nn.Module):
             except ValueError as e:
                 logger.warning("%s runs on Humming: %s", self.prefix, e)
             else:
-                mega_cls = Inkling2LocalMegaMoEExperts
-                if self.dp_ep or get_ep_group().world_size == 1:
-                    mega_cls = Inkling2MegaMoEExperts
-                self.mega = mega_cls(
+                self.mega = self.mega_cls(
                     self.mega_vllm_config,
                     l1,
                     l2,
@@ -434,10 +434,12 @@ class Inkling2MoE(nn.Module):
         lora: ExpertsLoRA | None = None,
         pass_idx: int = 0,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None:
-        """bf16 [T, H] -> bf16 [T, H], reduced over the expert-parallel group;
-        without `reduce`, the unreduced `(down, src2dst)` of
-        `Inkling2Experts`, or (with `push`) pushes this rank's partial sums
-        to the token shard owners.
+        """bf16 [T, H] -> bf16 [T, H], reduced over the expert-parallel group
+        (with expert parallelism over data-parallel ranks, the output of this
+        rank's own tokens; `reduce` and `push` do not apply); without
+        `reduce`, the unreduced `(down, src2dst)` of `Inkling2Experts`, or
+        (with `push`) pushes this rank's partial sums to the token shard
+        owners.
         Padding tokens (`is_padding` of the forward context) are routed to
         no expert and come out as 0. `lora` (`Inkling2MoEWithLoRA`) adds
         per-expert LoRA deltas inside the expert GEMMs, before any reduce or
@@ -468,6 +470,7 @@ class Inkling2MoE(nn.Module):
         (all-gather) and reduce-scatters the partial sums back."""
         ep_group = get_ep_group()
         dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None, "needs the token counts of every DP rank"
         sizes = dp_metadata.num_tokens_across_dp_cpu.tolist()
         if is_padding is None:
             gathered = ep_group.all_gatherv(x, 0, sizes)
