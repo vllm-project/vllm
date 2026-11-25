@@ -52,10 +52,9 @@ if hasattr(torch.ops._xpu_C, "fp8_gemm_w8a16"):
         weight_scale: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        input_2d = input.view(-1, input.shape[-1])
-        M = input_2d.size(0)
-        N = q_weight.size(1)
-        return torch.empty((M, N), dtype=input.dtype, device=input.device)
+        N = q_weight.size(-1)
+        out_shape = (*input.shape[:-1], N)
+        return torch.empty(out_shape, dtype=input.dtype, device=input.device)
 
 
 if hasattr(torch.ops._xpu_C, "fp4_gemm"):
