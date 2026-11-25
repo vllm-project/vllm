@@ -5,7 +5,6 @@ run_all_patterns:
   - ".buildkite/ci_config_intel.yaml"
   - ".buildkite/image_build/image_build_xpu.sh"
   - ".buildkite/scripts/hardware_ci/run-intel-test.sh"
-  - ".dockerignore"
   - "docker/Dockerfile"
   - "docker/Dockerfile.xpu"
   - "docker/docker-bake-xpu.hcl"
