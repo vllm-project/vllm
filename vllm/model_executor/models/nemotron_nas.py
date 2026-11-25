@@ -51,7 +51,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import HasNoOps, SupportsLoRA, SupportsPP
 from .utils import (
@@ -129,7 +128,6 @@ class DeciLMAttention(nn.Module):
         bias_o_proj: bool = False,
         cache_config: CacheConfig | None = None,
         prefix: str = "",
-        attn_type: str = AttentionType.DECODER,
     ) -> None:
         super().__init__()
         layer_idx = extract_layer_index(prefix)
@@ -199,7 +197,6 @@ class DeciLMAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             per_layer_sliding_window=sliding_window,
-            attn_type=attn_type,
             prefix=f"{prefix}.attn",
         )
 
