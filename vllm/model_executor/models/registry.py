@@ -1395,10 +1395,7 @@ class _ModelRegistry:
 
         # `architectures` may name a class that Transformers doesn't have, so use the
         # class `AutoModel` builds for the config instead.
-        if (
-            model_config.model_impl == "transformers"
-            and not model_config.trust_remote_code
-        ):
+        if not model_config.trust_remote_code:
             if architecture in _TRANSFORMERS_SUPPORTED_MODELS:
                 return architecture
             model_type = model_config.hf_config.model_type
