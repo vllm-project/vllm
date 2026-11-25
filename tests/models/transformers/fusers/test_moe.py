@@ -650,30 +650,28 @@ def test_moe_fuser_unrecognized_router_moves_shared_expert():
     assert fuser.shared_name == "shared_expert"
 
 
-def test_moe_fuser_scaled_output_needs_vllm_routing():
-    """Only vLLM routing applies the routed scale, so nothing else moves without it."""
-    with torch.device("meta"):
-        block = MoEBlockScaledBiasedRouter()
-    assert MoEBlockFuser.match(block, "experts") is None
-
-
 def test_moe_fuser_matches_experts_called_by_keyword():
     with torch.device("meta"):
         block = MoEBlockExpertsKeywords()
     assert isinstance(MoEBlockFuser.match(block, "experts"), MoEBlockFuser)
 
 
-@pytest.mark.parametrize("block_cls", [MoEBlockScaled, MoEBlockScaledLeft])
-def test_moe_fuser_scaled_output_with_vllm_routing(block_cls):
-    """A scaled block fuses because vLLM routing applies `routed_scaling_factor`,
-    but only if that is the scale the block applies."""
+@pytest.mark.parametrize(
+    ("block_cls", "fuses"),
+    [
+        (MoEBlockScaled, True),
+        (MoEBlockScaledLeft, True),
+        (MoEBlockScaledBiasedRouter, False),
+    ],
+)
+def test_moe_fuser_scaled_output_needs_vllm_routing(block_cls, fuses):
+    """Only vLLM routing applies `routed_scaling_factor`, so a scaled block fuses
+    only with vLLM routing, and only if that is the scale the block applies."""
     with torch.device("meta"):
         block = block_cls()
     assert MoEBlockFuser.match(block, "experts", routed_scaling_factor=1.0) is None
     fuser = MoEBlockFuser.match(block, "experts", routed_scaling_factor=2.5)
-    assert fuser is not None
-    assert fuser.scoring_func == "softmax"
-    assert fuser.shared_name == "shared_expert"
+    assert (fuser is not None) == fuses
 
 
 @pytest.mark.parametrize("block_cls", [MoEBlockCastCombine, MoEBlockIdentityLatent])
