@@ -131,11 +131,7 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         num_reqs = input_batch.num_reqs
         if num_speculative_tokens is None:
             num_speculative_tokens = self.num_speculative_steps
-        if (
-            num_speculative_tokens == 0
-            and not self.advance_draft_positions
-            and (dp_sync_state is None or dp_sync_state.skip_drafts)
-        ):
+        if num_speculative_tokens == 0 and not self.advance_draft_positions:
             # Q-only drafters have no KV of their own to update for a later step.
             return self.draft_tokens[:num_reqs].fill_(-1)
         num_tokens = input_batch.num_tokens
