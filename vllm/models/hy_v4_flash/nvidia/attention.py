@@ -86,9 +86,15 @@ class HYV4FlashAttention(HYV4MLAAttention):
                 )
             if vllm_config.attention_config.hisparse_config is not None:
                 raise NotImplementedError("HY4 Flash on Ada does not support HiSparse")
-            if vllm_config.speculative_config is not None:
+            spec = vllm_config.speculative_config
+            if spec is not None and (
+                spec.method != "dfly"
+                or vllm_config.cache_config.cache_dtype not in ("auto", "bfloat16")
+                or not vllm_config.model_config.enforce_eager
+            ):
                 raise NotImplementedError(
-                    "HY4 Flash on Ada does not support speculative decoding"
+                    "HY4 Flash on Ada only supports DFly speculative decoding "
+                    "with BF16 KV and --enforce-eager"
                 )
             parallel = vllm_config.parallel_config
             if (

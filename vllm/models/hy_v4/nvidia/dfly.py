@@ -9,7 +9,7 @@ import torch
 from compressed_tensors.quantization import QuantizationArgs
 from torch import nn
 
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config, set_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -37,9 +37,11 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.hy_v4 import HYV4Config
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.attention.backend import AttentionBackend
 
 from ..common.mrope import set_token_rope
 from ..dfly_config import HYV4DFlySpeculatorConfig
+from .attention import HYV4MLAAttention
 from .model import HYV4DecoderLayer
 from .moe import HYV4FeedForward
 
@@ -179,8 +181,30 @@ class HYV4DFlyFeedForward(HYV4FeedForward):
         self.act_fn = mlp.act_fn
 
 
+class HYV4DFlyAttention(HYV4MLAAttention):
+    def _resolve_sink_backend(
+        self, kv_cache_dtype: str
+    ) -> type[AttentionBackend] | None:
+        if (
+            current_platform.is_device_capability(89)
+            and self.external_topk
+            and kv_cache_dtype in ("auto", "bfloat16")
+        ):
+            spec = get_current_vllm_config().speculative_config
+            if (
+                spec is not None
+                and spec.target_model_config.hf_text_config.model_type == "hy_v4_flash"
+            ):
+                from vllm.models.hy_v4_flash.nvidia.ada import HYV4FlashAdaBackend
+
+                # Match the target's KV layout and apply the draft's own sink.
+                return HYV4FlashAdaBackend
+        return super()._resolve_sink_backend(kv_cache_dtype)
+
+
 class HYV4DFlyDecoderLayer(HYV4DecoderLayer):
     feed_forward_cls: type[HYV4FeedForward] = HYV4DFlyFeedForward
+    attention_cls = HYV4DFlyAttention
 
 
 class HYV4DFlyModel(nn.Module):
