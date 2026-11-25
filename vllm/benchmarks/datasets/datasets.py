@@ -70,7 +70,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_NUM_PROMPTS = 1000
 
 
-@dataclass
+@dataclass(slots=True)
 class SampleRequest:
     """Represents a single inference request for benchmarking."""
 
@@ -936,6 +936,8 @@ class RandomMultiModalDataset(RandomDataset):
         (720, 1280, 16): 0.0,
     }
     DEFAULT_ENABLE_MULTIMODAL_CHAT = False
+    # Synthetic video container encode rate; see --random-mm-video-encode-fps.
+    DEFAULT_VIDEO_ENCODE_FPS = 30.0
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -957,12 +959,19 @@ class RandomMultiModalDataset(RandomDataset):
         return Image.fromarray(random_pixels)
 
     def generate_synthetic_video(
-        self, width: int, height: int, num_frames: int
+        self,
+        width: int,
+        height: int,
+        num_frames: int,
+        encode_fps: float = DEFAULT_VIDEO_ENCODE_FPS,
     ) -> dict:
         """Generate synthetic video with random values.
 
         Creates a video with random pixel values, encodes it to MP4 format,
         and returns the content as bytes.
+
+        `encode_fps` is container metadata only; the target model may
+        resample at its own native fps, so processed frame count can differ.
         """
         import cv2
 
@@ -974,7 +983,7 @@ class RandomMultiModalDataset(RandomDataset):
         )
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        fps = 30  # frames per second
+        fps = encode_fps
 
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir) / "video.mp4"
@@ -1026,6 +1035,7 @@ class RandomMultiModalDataset(RandomDataset):
     def generate_mm_item(
         self,
         mm_item_config: tuple[int, int, int],
+        video_encode_fps: float = DEFAULT_VIDEO_ENCODE_FPS,
     ) -> Mapping[str, Any]:
         """Create synthetic images and videos and
         apply process_image/process_video respectively.
@@ -1039,7 +1049,10 @@ class RandomMultiModalDataset(RandomDataset):
         elif self.map_config_to_modality(mm_item_config) == "video":
             return process_video(
                 self.generate_synthetic_video(
-                    mm_item_config[1], mm_item_config[0], mm_item_config[2]
+                    mm_item_config[1],
+                    mm_item_config[0],
+                    mm_item_config[2],
+                    video_encode_fps,
                 )
             )
         else:
@@ -1058,7 +1071,7 @@ class RandomMultiModalDataset(RandomDataset):
             raise ValueError("num_mm_items_range_ratio must be in [0, 1].")
 
         # Ensure modalities to sample are in limit_mm_per_prompt
-        for k, v in bucket_config.items():
+        for k in bucket_config:
             # get modality from bucket config
             modality = self.map_config_to_modality(k)
             if modality not in limit_mm_per_prompt:
@@ -1165,7 +1178,7 @@ class RandomMultiModalDataset(RandomDataset):
             else:
                 # If the counter is greater than the limit per prompt
                 # set all multimodal items of this modality to 0
-                for k, v in bucket_config_copy.items():
+                for k in bucket_config_copy:
                     if self.map_config_to_modality(k) == modality:
                         bucket_config_copy[k] = 0
                 # If all configs are 0, break the loop
@@ -1200,6 +1213,7 @@ class RandomMultiModalDataset(RandomDataset):
             tuple[int, int, int], float
         ] = DEFAULT_MM_ITEM_BUCKET_CONFIG,
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
+        video_encode_fps: float = DEFAULT_VIDEO_ENCODE_FPS,
         **kwargs,
     ) -> list[SampleRequest]:
         if batchsize != 1:
@@ -1276,7 +1290,9 @@ class RandomMultiModalDataset(RandomDataset):
             mm_content = cast(
                 list[dict[str, Any]],
                 [
-                    self.generate_mm_item(mm_item_config)
+                    self.generate_mm_item(
+                        mm_item_config, video_encode_fps=video_encode_fps
+                    )
                     for mm_item_config in mm_item_iterator
                 ],
             )
@@ -1582,7 +1598,12 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         action="store_true",
         help="Trust remote code from huggingface",
     )
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed for dataset sampling and shuffling.",
+    )
     parser.add_argument(
         "--num-prompts",
         type=int,
@@ -1629,7 +1650,8 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--skip-chat-template",
         action="store_true",
-        help="Skip applying chat template to prompt for datasets that support it.",
+        help="Skip applying chat template to prompt for datasets that support it. "
+        "Always skipped for chat backends, which apply the template themselves.",
     )
     parser.add_argument(
         "--enable-multimodal-chat",
@@ -2036,17 +2058,47 @@ def add_random_multimodal_dataset_args(
         ),
     )
 
+    def _parse_positive_float(v: str) -> float:
+        parsed = float(v)
+        if parsed <= 0:
+            raise argparse.ArgumentTypeError(
+                f"must be a positive float, got {parsed!r}"
+            )
+        return parsed
+
+    parser_or_group.add_argument(
+        "--random-mm-video-encode-fps",
+        type=_parse_positive_float,
+        default=RandomMultiModalDataset.DEFAULT_VIDEO_ENCODE_FPS,
+        help=(
+            "Encode rate for synthetic video containers. Container metadata "
+            "only -- set to match the target model's native sampling fps so "
+            "num_frames in --random-mm-bucket-config reflects the frame "
+            "count it actually processes."
+        ),
+    )
+
 
 def _parse_range_ratio(value: str) -> RangeRatio:
-    """Parse a ``--random-range-ratio`` CLI string.
+    """Parse a `--random-range-ratio` CLI string.
 
-    Accepts either a plain float (``"0.3"``) or a JSON dict
-    (``'{"input": 0.3, "output": 0.5}'``).
+    Accepts either a plain float (`"0.3"`) or a JSON dict
+    (`'{"input": 0.3, "output": 0.5}'`).
     """
     try:
         return float(value)
     except ValueError:
         return json.loads(value)
+
+
+# Backends whose endpoint applies the chat template to the prompt it receives.
+CHAT_TEMPLATE_BACKENDS = (
+    "openai-chat",
+    "openai-responses",
+    "vllm-chat",
+    "vllm-systemone",
+    "openai-decisions",
+)
 
 
 def get_samples(
@@ -2057,6 +2109,12 @@ def get_samples(
 ) -> list[SampleRequest]:
     if not hasattr(args, "request_id_prefix"):
         args.request_id_prefix = ""
+
+    # Chat backends render the chat template themselves (the server, or
+    # LLM.chat for throughput), so a client-side render would apply it twice.
+    skip_chat_template = getattr(args, "skip_chat_template", False) or (
+        getattr(args, "backend", None) in CHAT_TEMPLATE_BACKENDS
+    )
 
     if hasattr(args, "random_range_ratio") and isinstance(args.random_range_ratio, str):
         args.random_range_ratio = _parse_range_ratio(args.random_range_ratio)
@@ -2071,7 +2129,7 @@ def get_samples(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
-            skip_chat_template=args.skip_chat_template,
+            skip_chat_template=skip_chat_template,
             chat_template_kwargs=getattr(args, "chat_template_kwargs", None),
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
@@ -2267,7 +2325,7 @@ def get_samples(
             enable_multimodal_chat=args.enable_multimodal_chat,
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
-            skip_chat_template=args.skip_chat_template,
+            skip_chat_template=skip_chat_template,
             **hf_kwargs,
         )
 
@@ -2289,6 +2347,7 @@ def get_samples(
         )
         dataset_mapping = {
             "spec_bench": lambda: SpecBench(
+                random_seed=args.seed,
                 dataset_path=args.dataset_path,
                 category=args.spec_bench_category,
                 disable_shuffle=args.disable_shuffle,
@@ -2296,6 +2355,7 @@ def get_samples(
                 num_requests=args.num_prompts,
                 tokenizer=tokenizer,
                 output_len=args.spec_bench_output_len,
+                skip_chat_template=skip_chat_template,
                 enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
@@ -2352,6 +2412,7 @@ def get_samples(
                 limit_mm_per_prompt=args.random_mm_limit_mm_per_prompt,
                 num_mm_items_range_ratio=args.random_mm_num_mm_items_range_ratio,
                 bucket_config=args.random_mm_bucket_config,
+                video_encode_fps=args.random_mm_video_encode_fps,
                 enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
@@ -2384,6 +2445,7 @@ def get_samples(
                 no_oversample=args.no_oversample,
             ),
             "speed_bench": lambda: SpeedBench(
+                random_seed=args.seed,
                 dataset_path=args.dataset_path,
                 dataset_subset=args.speed_bench_dataset_subset,
                 category=args.speed_bench_category,
@@ -2392,7 +2454,7 @@ def get_samples(
                 num_requests=args.num_prompts,
                 tokenizer=tokenizer,
                 output_len=args.speed_bench_output_len,
-                skip_chat_template=args.skip_chat_template,
+                skip_chat_template=skip_chat_template,
                 chat_template_kwargs=getattr(args, "chat_template_kwargs", None),
                 enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
@@ -3695,7 +3757,7 @@ class BlazeditDataset(HuggingFaceDataset):
                 continue
 
             # template copied from
-            # https://github.com/ise-uiuc/blazedit/blob/7765137e656fd62de877422d2e4cf8de51228054/dataset/create_refined_dataset.py#L94-L105 # noqa: E501
+            # https://github.com/ise-uiuc/blazedit/blob/7765137e656fd62de877422d2e4cf8de51228054/dataset/create_refined_dataset.py#L94-L105
             prompt = f"""Given a code file, please apply the change requests and generate the new file.
 
 Original file:
@@ -4353,18 +4415,18 @@ class BFCLDataset(HuggingFaceDataset):
     https://huggingface.co/datasets/gorilla-llm/Berkeley-Function-Calling-Leaderboard
 
     BFCL ships one JSON-lines file per category at the repo root (e.g.
-    ``BFCL_v3_simple.json``, ``BFCL_v3_live_simple.json``) rather than a
-    single HuggingFace split. Each record has ``{id, question, function}``
-    where ``function`` uses a non-OpenAI schema dialect (``"type": "dict"``).
+    `BFCL_v3_simple.json`, `BFCL_v3_live_simple.json`) rather than a
+    single HuggingFace split. Each record has `{id, question, function}`
+    where `function` uses a non-OpenAI schema dialect (`"type": "dict"`).
 
     This dataset loader:
-      - downloads the selected per-category files via ``hf_hub_download``
+      - downloads the selected per-category files via `hf_hub_download`
         and interleaves rows round-robin so sampling is balanced
       - translates BFCL function schemas to OpenAI tool format
-      - sets :attr:`SampleRequest.chat_messages` directly and attaches
-        ``tools`` / ``tool_choice`` via :attr:`SampleRequest.request_overrides`,
+      - sets `SampleRequest.chat_messages` directly and attaches
+        `tools` / `tool_choice` via `SampleRequest.request_overrides`,
         producing production-alike tool calling traffic when used with an
-        ``openai-chat`` backend
+        `openai-chat` backend
     """
 
     DEFAULT_OUTPUT_LEN = 512
@@ -4385,7 +4447,7 @@ class BFCLDataset(HuggingFaceDataset):
     }
 
     def load_data(self) -> None:
-        """Defer loading to :meth:`sample` where categories are known."""
+        """Defer loading to `sample` where categories are known."""
         self.data = None
 
     def _resolve_categories(self, categories: list[str] | None) -> list[str]:
@@ -4567,10 +4629,10 @@ class SpeedBench(CustomDataset):
 
     Download the dataset using:
 
-    `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py | python3 -`
+    `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Gym/refs/heads/main/benchmarks/speed-bench/prepare.py | python3 - --format raw --config all`
     """  # noqa: E501
 
-    DOWNLOAD_SCRIPT_URL = "https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py"
+    DOWNLOAD_COMMAND = "curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Gym/refs/heads/main/benchmarks/speed-bench/prepare.py | python3 - --format raw --config all"  # noqa: E501
 
     def __init__(self, **kwargs) -> None:
         self.dataset_subset = kwargs.pop("dataset_subset", "qualitative")
@@ -4586,7 +4648,7 @@ class SpeedBench(CustomDataset):
             raise ValueError(
                 f"dataset_path {self.dataset_path} is not a directory. "
                 f"Please make sure to download the dataset from HuggingFace using "
-                f"`curl -LsSf {self.DOWNLOAD_SCRIPT_URL} | python3 -`"
+                f"`{self.DOWNLOAD_COMMAND}`"
             )
 
         self.data = []
@@ -4602,7 +4664,7 @@ class SpeedBench(CustomDataset):
             raise ValueError(
                 "JSONL file must contain a 'messages' column. "
                 "Please make sure to download the dataset from HuggingFace using "
-                f"`curl -LsSf {self.DOWNLOAD_SCRIPT_URL} | python3 -`"
+                f"`{self.DOWNLOAD_COMMAND}`"
             )
 
         for _, row in jsonl_data.iterrows():

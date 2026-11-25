@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as ops
 from vllm.config.model import LogprobsMode
 from vllm.platforms import current_platform
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
@@ -17,7 +17,7 @@ from vllm.v1.worker.cpu.input_batch import InputBatch
 CHUNK_SIZE = 1024
 
 
-@dataclass
+@dataclass(slots=True)
 class _TokenIdScores:
     token_ids: torch.Tensor  # [num_rows, num_ids], on device
     pad: torch.Tensor  # [num_rows, num_ids] bool, True at padded columns

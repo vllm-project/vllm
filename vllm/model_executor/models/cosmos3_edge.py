@@ -19,6 +19,7 @@ from transformers.models.cosmos3_edge.image_processing_cosmos3_edge import (
 )
 
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -62,6 +63,7 @@ from .qwen3_vl import (
 )
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     WeightsMapper,
     maybe_prefix,
 )
@@ -133,7 +135,7 @@ def patch_merging_by_param(
     grid_thw: torch.Tensor,
     merge_size: int = 2,
 ) -> torch.Tensor:
-    """Merge each spatial ``merge_size`` block into the channel dimension."""
+    """Merge each spatial `merge_size` block into the channel dimension."""
     merged_embeds: list[torch.Tensor] = []
     current_idx = 0
     hidden_size = image_embeds.shape[-1]
@@ -498,12 +500,15 @@ class Cosmos3EdgeForCausalLM(nn.Module):
                 "-": NemotronHMLPDecoderLayer,
             },
         )
-        self.lm_head = ParallelLMHead(
-            text_config.vocab_size,
-            text_config.hidden_size,
-            quant_config=self.quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                text_config.vocab_size,
+                text_config.hidden_size,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(text_config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -534,10 +539,10 @@ class Cosmos3EdgeForCausalLM(nn.Module):
 def _cosmos3_edge_diffusers_prefix_map() -> dict[str, str]:
     """Map Diffusers blocks to interleaved Nemotron-H layers.
 
-    The checkpoint stores attention and MLP in one ``layers.N`` block, while
+    The checkpoint stores attention and MLP in one `layers.N` block, while
     the Nemotron-H model represents them as separate decoder layers. Therefore,
-    checkpoint block ``N`` maps its attention to layer ``2N`` and its MLP to
-    layer ``2N + 1``.
+    checkpoint block `N` maps its attention to layer `2N` and its MLP to
+    layer `2N + 1`.
     """
     mappings = {
         "embed_tokens.": "language_model.model.embed_tokens.",
@@ -552,12 +557,12 @@ def _cosmos3_edge_diffusers_prefix_map() -> dict[str, str]:
         mappings.update(
             {
                 f"{source_prefix}.input_layernorm.": f"{attention_prefix}.norm.",
-                f"{source_prefix}.self_attn.qkv_proj.": (
-                    f"{attention_prefix}.mixer.qkv_proj."
-                ),
-                f"{source_prefix}.self_attn.o_proj.": (
-                    f"{attention_prefix}.mixer.o_proj."
-                ),
+                **{
+                    f"{source_prefix}.self_attn.{proj}_proj.": (
+                        f"{attention_prefix}.mixer.{proj}_proj."
+                    )
+                    for proj in ("q", "k", "v", "o")
+                },
                 f"{source_prefix}.post_attention_layernorm.": (f"{mlp_prefix}.norm."),
                 f"{source_prefix}.mlp.": f"{mlp_prefix}.mixer.",
             }
@@ -585,9 +590,9 @@ class Cosmos3EdgeForConditionalGeneration(
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
-            ".self_attn.q_proj": (".self_attn.qkv_proj", "q"),
-            ".self_attn.k_proj": (".self_attn.qkv_proj", "k"),
-            ".self_attn.v_proj": (".self_attn.qkv_proj", "v"),
+            ".q_proj.": (".qkv_proj.", "q"),
+            ".k_proj.": (".qkv_proj.", "k"),
+            ".v_proj.": (".qkv_proj.", "v"),
         },
         orig_to_new_prefix={
             **_cosmos3_edge_diffusers_prefix_map(),

@@ -8,6 +8,12 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
 
 
+def _row_map_kwargs(row_map: torch.Tensor | None) -> dict[str, torch.Tensor]:
+    # Only the XPU punica wrapper accepts row_map: it lets the kernels read and
+    # write rows in the experts' grouped layout instead of (token, topk) order.
+    return {} if row_map is None else {"row_map": row_map}
+
+
 class LoRAExpertsMixin:
     """Mixin for FusedMoEExpertsModular subclasses that natively handle
     MoELoRAContext inside their apply() implementation.
@@ -49,6 +55,7 @@ class LoRAExpertsMixin:
         top_k_num: int,
         add_inputs: bool = True,
         swap_w13_slices: bool = False,
+        row_map: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -99,6 +106,7 @@ class LoRAExpertsMixin:
             lora_context.use_tuned_config,
             add_inputs=add_inputs or interleave_w13,
             token_lora_mapping=lora_context.local_token_lora_mapping,
+            **_row_map_kwargs(row_map),
         )
         if interleave_w13:
             # Map gate/up slices onto even/odd output channels without a copy.
@@ -126,6 +134,7 @@ class LoRAExpertsMixin:
         w2: torch.Tensor,
         top_k_num: int,
         add_inputs: bool = True,
+        row_map: torch.Tensor | None = None,
     ) -> None:
         w2_lora_b_stacked = lora_context.w2_lora_b_stacked
         if lora_context.enable_moe_shared_loras:
@@ -156,4 +165,5 @@ class LoRAExpertsMixin:
             lora_context.tp_rank,
             lora_context.use_tuned_config,
             add_inputs=add_inputs,
+            **_row_map_kwargs(row_map),
         )

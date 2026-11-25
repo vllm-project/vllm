@@ -16,6 +16,7 @@ import torch
 
 # isort: off
 import vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 as sm90_mod
+from vllm.v1.attention.backends.mla.sparse_utils import SparseMLAPrefillRoute
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90 import (
     FlashInferMLASparseSM90Backend,
     FlashInferMLASparseSM90Builder,
@@ -88,6 +89,7 @@ class FakeState:
 def make_impl(qk_rope, kv_dtype="fp8_e4m3", num_heads=2, topk_width=TOPK):
     impl = object.__new__(FlashInferMLASparseSM90Impl)
     impl.num_heads = num_heads
+    impl.use_shardq = False
     impl.head_size = HEAD + qk_rope
     impl.scale = (HEAD + qk_rope) ** -0.5
     impl.kv_lora_rank = HEAD
@@ -107,7 +109,10 @@ def make_batch(rows, topk_rows, own_blocks):
     for t, row in enumerate(topk_rows):
         topk[t, : len(row)] = torch.tensor(row, dtype=torch.int32)
     return SimpleNamespace(
-        req_id_per_token=req_id, block_table=block_table, block_size=BLOCK_SIZE
+        req_id_per_token=req_id,
+        block_table=block_table,
+        block_size=BLOCK_SIZE,
+        topk_start=0,
     )
 
 
@@ -169,16 +174,16 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
         assert kwargs == {}
 
 
-@pytest.mark.parametrize("use_mha", [False, True])
+@pytest.mark.parametrize("route", list(SparseMLAPrefillRoute))
 @pytest.mark.parametrize("num_decodes", [0, 1])
-def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_decodes):
+def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, route, num_decodes):
     """MHA prefill rows must not make the MQA kernel read beyond its query."""
     builder = object.__new__(FlashInferMLASparseSM90Builder)
     builder._adaptive_verification = False
     state = FakeState(TOPK)
     builder.state = state
-    builder._attention_layer = SimpleNamespace(_use_sparse_mha=lambda _: use_mha)
     metadata = object.__new__(sm90_mod.FlashInferMLASparseSM90Metadata)
+    metadata.prefill = SimpleNamespace(route=route)
     metadata.state = None
     metadata.req_id_per_token = None
     metadata.num_prefills = 1
@@ -203,7 +208,7 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_dec
 
     assert result.state is builder.state
     expected_lens = [1402] if num_decodes else []
-    if not use_mha:
+    if route is SparseMLAPrefillRoute.SPARSE_MQA:
         expected_lens += [1, 2, 3, 4, 5]
     assert state.plan_calls[0][0] == len(expected_lens)
     assert state.plan_calls[0][1].tolist() == expected_lens
@@ -423,11 +428,11 @@ def _sm90_flashinfer_available():
 SM90_HEADS, SM90_TOPK, SM90_KPOOL, SM90_WIDTH = 16, 2048, 4, 2176
 
 
-def _real_state(rows):
+def _real_state(rows, kv_dtype=torch.bfloat16):
     return sm90_mod._SM90State(
         torch.device("cuda"),
         SM90_HEADS,
-        torch.bfloat16,
+        kv_dtype,
         rows,
         SM90_WIDTH,
         HEAD,
@@ -562,3 +567,152 @@ def test_supports_combination_gates(monkeypatch, default_vllm_config):
     assert call() is None
     monkeypatch.setattr(sm90_mod, "has_flashinfer_sm90_nope_mla", lambda: False)
     assert "requires FlashInfer" in (call() or "")
+
+
+@pytest.mark.parametrize(
+    ("kv_dtype", "rope_dim", "enabled", "expected"),
+    [
+        ("auto", 0, True, True),
+        ("bfloat16", 0, True, True),
+        ("fp8", 0, True, True),
+        ("fp8_e4m3", 0, True, True),
+        ("auto", 64, True, False),
+        ("auto", 0, False, False),
+    ],
+)
+def test_shardq_impl_eligibility(
+    monkeypatch, default_vllm_config, kv_dtype, rope_dim, enabled, expected
+):
+    """Only eligible NoPE layers can opt into the shared ShardQ path."""
+    config = default_vllm_config
+    config.parallel_config.tensor_parallel_size = 8
+    config.attention_config.sparse_mla_shard_q = enabled
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.attention.sparse_mla_attention."
+        "get_tensor_model_parallel_world_size",
+        lambda: 8,
+    )
+    impl = FlashInferMLASparseSM90Impl(
+        num_heads=8,
+        head_size=HEAD + rope_dim,
+        scale=256**-0.5,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype=kv_dtype,
+        logits_soft_cap=None,
+        attn_type="decoder",
+        kv_sharing_target_layer_name=None,
+        topk_indices_buffer=torch.empty((1, TOPK), dtype=torch.int32),
+        q_lora_rank=None,
+        kv_lora_rank=HEAD,
+        qk_nope_head_dim=256 - rope_dim,
+        qk_rope_head_dim=rope_dim,
+        qk_head_dim=256,
+        v_head_dim=256,
+        kv_b_proj=None,
+    )
+    assert impl.use_shardq is expected
+
+
+def test_shardq_reads_rank_local_topk_after_decodes(monkeypatch):
+    """All heads attend the rank's compact indices after the decode prefix."""
+    monkeypatch.setattr(
+        sm90_mod, "triton_convert_req_index_to_global_index", ref_convert
+    )
+    impl, _ = make_impl(0, kv_dtype="auto", num_heads=2)
+    impl.topk_indices_buffer[:, 0] = torch.tensor([1, 7, 13, 3])
+    meta = make_batch(2, [[7], [13]], [3])
+    meta.topk_start = 1
+    meta.state = FakeState(TOPK)
+    meta.state.kv_indptr[1:3] = torch.tensor([1, 2])
+    q = torch.randn(2, 8, HEAD, dtype=torch.bfloat16)
+    cache = torch.zeros(4, BLOCK_SIZE, HEAD, dtype=torch.bfloat16)
+    out, _ = impl.forward_mqa(q, cache, meta, SimpleNamespace())
+    assert out.shape == q.shape
+    assert meta.state.wrapper.run_args[1].shape == (2, 8, 0)
+    assert meta.state.kv_indices[:2].tolist() == [
+        3 * BLOCK_SIZE + 7,
+        3 * BLOCK_SIZE + 13,
+    ]
+
+
+@pytest.mark.parametrize("num_decode", [0, 1])
+def test_shardq_plans_rank_local_rows_and_preserves_decode(monkeypatch, num_decode):
+    """Rank-local host bounds and device row IDs refer to the same original queries."""
+    builder = object.__new__(FlashInferMLASparseSM90Builder)
+    decode_state = FakeState(TOPK)
+    builder.state = decode_state
+    builder._adaptive_verification = False
+    plan_calls = []
+    builder.shardq_state = SimpleNamespace(plan=lambda *args: plan_calls.append(args))
+    meta_cls = sm90_mod.FlashInferMLASparseSM90Metadata
+    meta = object.__new__(meta_cls)
+    local = object.__new__(meta_cls)
+    rows = torch.tensor([0, 2, 5], dtype=torch.int64)
+    meta.shardq = SimpleNamespace(
+        num_decode_tokens=num_decode,
+        local_token_ids=rows,
+        local_token_ids_cpu=rows.numpy(),
+        attn_metadata=local,
+    )
+    meta.prefill = None
+    meta.req_id_per_token = torch.tensor(
+        ([0] if num_decode else []) + [num_decode] * 3 + [num_decode + 1] * 3
+    )
+    monkeypatch.setattr(
+        sm90_mod.FlashInferMLASparseMetadataBuilder, "build", lambda *_: meta
+    )
+    cam = SimpleNamespace(
+        num_reqs=2 + num_decode,
+        query_start_loc_cpu=torch.tensor([0, 1, 4, 7] if num_decode else [0, 3, 6]),
+        seq_lens_cpu_upper_bound=torch.tensor(([1] if num_decode else []) + [10, 20]),
+    )
+    result = builder.build(0, cam)
+    ((n, lens, original, reqs, positions),) = plan_calls
+    assert result.shardq is not None
+    assert result.shardq.attn_metadata is local
+    assert local.state is builder.shardq_state
+    assert n == 3 and lens.tolist() == [8, 10, 20]
+    assert original is cam and reqs is meta.req_id_per_token
+    assert torch.equal(positions, rows + num_decode)
+    assert len(decode_state.plan_calls) == num_decode
+    if num_decode:
+        assert decode_state.plan_calls[0][1].tolist() == [1]
+
+
+@pytest.mark.skipif(
+    not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
+)
+@pytest.mark.parametrize(
+    "kv_dtype,kv_scale", [(torch.bfloat16, 1.0), (torch.float8_e4m3fn, 0.5)]
+)
+def test_shardq_clamps_with_original_noncontiguous_query_rows(kv_dtype, kv_scale):
+    """A strided subset across requests must match an exact FA3 plan."""
+    torch.manual_seed(124)
+    ctx, valid, cam, req_id, slots = _clamp_batch(
+        12, 8, 16, 2160, SM90_TOPK, SM90_KPOOL, SM90_WIDTH
+    )
+    picked = torch.tensor([3, 7, 8, 16, 39, 62, 79, 92])
+    rows = len(picked)
+    actual = _real_state(rows, kv_dtype)
+    exact = _real_state(rows)
+    bounds = torch.clamp(ctx[picked] + 10, max=actual.max_valid)
+    device_rows = picked.cuda()
+    actual.plan(rows, bounds, cam, req_id, device_rows)
+    exact.plan(rows, valid[picked], None, None)
+    q = torch.randn(rows, SM90_HEADS, HEAD, dtype=torch.bfloat16, device="cuda")
+    kv = torch.randn(1 << 16, 1, HEAD, dtype=torch.bfloat16, device="cuda")
+    kv = kv.to(kv_dtype)
+    local_slots = slots[device_rows]
+    actual.pack_indices(local_slots)
+    exact.pack_indices(local_slots)
+    scale_args = (
+        {"ckv_scale": kv_scale, "kpe_scale": 1.0}
+        if kv_dtype == torch.float8_e4m3fn
+        else {}
+    )
+    out = actual.wrapper.run(q, q[..., :0], kv, kv[..., :0], **scale_args)
+    reference_kv = kv.to(torch.bfloat16) * kv_scale
+    ref = exact.wrapper.run(q, q[..., :0], reference_kv, reference_kv[..., :0])
+    torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)

@@ -4,7 +4,7 @@
 
 Tensor bytes never travel through this module.  It coordinates destination
 reservations, completion/cancellation, TP-shard discovery, and readiness
-notifications while :mod:`transfer` owns the Mooncake data plane.
+notifications while `transfer` owns the Mooncake data plane.
 """
 
 from __future__ import annotations

@@ -15,6 +15,7 @@ import ray
 import torch
 from ray.experimental.tqdm_ray import tqdm
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -31,7 +32,13 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import *
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    fused_experts,
+    get_config_file_name,
+    get_default_config,
+    get_moe_configs,
+)
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -95,8 +102,8 @@ def clear_triton_cache():
 
 def ensure_divisibility(numerator, denominator, text):
     """Ensure that numerator is divisible by the denominator."""
-    assert numerator % denominator == 0, "{} {} is not divisible by tp {}.".format(
-        text, numerator, denominator
+    assert numerator % denominator == 0, (
+        f"{text} {numerator} is not divisible by tp {denominator}."
     )
 
 
@@ -702,7 +709,7 @@ class BenchmarkWorker:
 
         need_device_guard = False
         if current_platform.is_rocm():
-            visible_device = os.environ.get("ROCR_VISIBLE_DEVICES", None)
+            visible_device = os.environ.get("HIP_VISIBLE_DEVICES", None)
             if visible_device != f"{self.device_id}":
                 need_device_guard = True
 
@@ -860,11 +867,6 @@ def get_model_params(config):
         topk = config.ffn_config.moe_top_k
         intermediate_size = config.ffn_config.ffn_hidden_size
         hidden_size = config.hidden_size
-    elif architecture == "JambaForCausalLM":
-        E = config.num_experts
-        topk = config.num_experts_per_tok
-        intermediate_size = config.intermediate_size
-        hidden_size = config.hidden_size
     elif architecture in (
         "DeepseekV2ForCausalLM",
         "DeepseekV3ForCausalLM",
@@ -898,6 +900,15 @@ def get_model_params(config):
     ):
         text_config = config.get_text_config()
         E = text_config.num_experts
+        topk = text_config.num_experts_per_tok
+        intermediate_size = text_config.moe_intermediate_size
+        hidden_size = text_config.hidden_size
+    elif architecture in (
+        "Glm5NextForConditionalGeneration",
+        "Glm5NextForCausalLM",
+    ):
+        text_config = config.get_text_config()
+        E = text_config.n_routed_experts
         topk = text_config.num_experts_per_tok
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
@@ -975,7 +986,7 @@ def get_quantization_group_size(config) -> int | None:
     """Extract the quantization group size from the HF model config.
 
     This reads directly from the HuggingFace config object (as returned by
-    ``get_config()``), not from vLLM's quantization config classes.
+    `get_config()`), not from vLLM's quantization config classes.
 
     Supports AWQ/GPTQ-style configs (direct 'group_size' key) and
     compressed-tensors configs (nested inside 'config_groups').
@@ -1068,14 +1079,10 @@ def main(args: argparse.Namespace):
     use_deep_gemm = bool(args.use_deep_gemm)
 
     if current_platform.is_rocm() and "HIP_VISIBLE_DEVICES" in os.environ:
-        # Ray will set ROCR_VISIBLE_DEVICES for device visibility
-        logger.warning(
-            "Ray uses ROCR_VISIBLE_DEVICES to control device accessibility."
-            "Replacing HIP_VISIBLE_DEVICES with ROCR_VISIBLE_DEVICES."
-        )
-        val = os.environ["HIP_VISIBLE_DEVICES"]
-        os.environ["ROCR_VISIBLE_DEVICES"] = val
-        del os.environ["HIP_VISIBLE_DEVICES"]
+        # Importing vLLM copied HIP_VISIBLE_DEVICES into CUDA_VISIBLE_DEVICES.
+        # Ray narrows HIP_VISIBLE_DEVICES per worker, so an inherited copy
+        # would conflict with it. Drop it; each worker re-syncs on import.
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
     ray.init()
     num_gpus = int(ray.available_resources()["GPU"])

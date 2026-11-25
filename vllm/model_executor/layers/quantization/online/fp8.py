@@ -18,9 +18,14 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.kernels.linear import (
     fp8_scaled_mm_is_batch_invariant,
     init_fp8_linear_kernel,
+    init_wfp8_a16_linear_kernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
+    CutlassFP8ScaledMMLinearKernel,
     MarlinFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.humming import (
     HummingFP8ScaledMMLinearKernel,
@@ -65,7 +70,7 @@ from vllm.model_executor.model_loader.reload.layerwise import (
     initialize_online_processing,
 )
 from vllm.model_executor.parameter import ModelWeightParameter
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
@@ -110,7 +115,7 @@ def _fp8_quant_per_channel(weight: torch.Tensor, scale: torch.Tensor) -> torch.T
 
 
 def _is_tp_sharded(layer: Module, *, reduces_output_dim: bool = True) -> bool:
-    """Whether the weight is sharded along a dim its ``amax`` reduces over.
+    """Whether the weight is sharded along a dim its `amax` reduces over.
 
     Row parallel shards the input dim, column parallel the output dim.
     Per-output-channel scales only reduce the input dim, so they are already
@@ -134,6 +139,12 @@ class OnlineLinearBase(OnlineRequantizationMixin, LinearMethodBase):
         super().__init__()
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
+
+    def tie_weights(self, layer: torch.nn.Module, embed_tokens: torch.nn.Module):
+        raise ValueError(
+            "Online quantization of a tied lm_head is not supported; remove "
+            "the lm_head from quantization_config.targets."
+        )
 
     def get_weight_for_quantization(self, layer: torch.nn.Module) -> torch.Tensor:
         if self.requantization_source is None:
@@ -204,8 +215,13 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         self.block_quant = False
         self.use_deep_gemm = False
         self.use_marlin = False
-        self.marlin_input_dtype = None
         self.weight_quant_key = kFp8StaticTensorSym
+
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        return self.requantization_source is None and isinstance(
+            getattr(self, "fp8_linear", None), CutlassFP8ScaledMMLinearKernel
+        )
 
     def create_weights(
         self,
@@ -240,6 +256,15 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Online FP8 backend cannot use pre-processed weights"
+                )
+            layer.input_scale = None
+            layer._already_called_process_weights_after_loading = True
+            return
+
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
@@ -256,8 +281,6 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         layer.processed_weight_dims = (0, 1)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
-        if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
-            self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
         self.fp8_linear.process_weights_after_loading(layer)
         self.release_requantization_source_weights(layer)
 
@@ -309,6 +332,12 @@ class Fp8PerBlockOnlineLinearMethod(OnlineLinearBase):
             static=True, group_shape=GroupShape(*self.weight_block_size)
         )
 
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        return self.requantization_source is None and isinstance(
+            getattr(self, "fp8_linear", None), CutlassFp8BlockScaledMMKernel
+        )
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -342,6 +371,15 @@ class Fp8PerBlockOnlineLinearMethod(OnlineLinearBase):
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Online FP8 backend cannot use pre-processed weights"
+                )
+            layer.input_scale = None
+            layer._already_called_process_weights_after_loading = True
+            return
+
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
@@ -387,10 +425,39 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
     Per-output-channel weight scale + dynamic per-token activation scale. The
     layout matches the llmcompressor's FP8_DYNAMIC recipe, so accuracy
     is comparable but no pre-quantized checkpoint is required.
+
+    `activation: null` requests weight-only (W8A16) instead: the weights are
+    the same and the activations keep the model dtype.
     """
 
     weight_quant_key = kFp8StaticChannelSym
-    activation_quant_key = kFp8DynamicTokenSym
+    activation_quant_key: QuantKey | None = kFp8DynamicTokenSym
+    accepts_activation_override = True
+    supports_lm_head = True
+
+    def __init__(self, activation_quant_key: QuantKey | None = kFp8DynamicTokenSym):
+        super().__init__()
+        self.activation_quant_key = self.resolve_activation_quant_key(
+            activation_quant_key, explicit=True
+        )
+
+    @classmethod
+    def resolve_activation_quant_key(
+        cls, activation_quant_key: QuantKey | None, explicit: bool
+    ) -> QuantKey | None:
+        key = super().resolve_activation_quant_key(activation_quant_key, explicit)
+        if key not in (None, kFp8DynamicTokenSym):
+            raise NotImplementedError(
+                f"activation override for online {cls.__name__} supports only "
+                f"{kFp8DynamicTokenSym} or null, got {key}"
+            )
+        return key
+
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        return self.requantization_source is None and isinstance(
+            getattr(self, "fp8_linear", None), CutlassFP8ScaledMMLinearKernel
+        )
 
     def create_weights(
         self,
@@ -412,29 +479,51 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
             **extra_weight_attrs,
         )
 
-        self.fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=self.activation_quant_key,
-            weight_quant_key=self.weight_quant_key,
-            weight_shape=layer.weight.shape,
-            input_dtype=self.input_dtype,
-            out_dtype=self.out_dtype,
-            module_name=self.__class__.__name__,
-        )
-        # PTPC requires per-token activation FP8; Marlin and Humming FP8 are
-        # W8A16 and would silently produce a weight-only fp8 model.
-        if isinstance(
-            self.fp8_linear,
-            (MarlinFP8ScaledMMLinearKernel, HummingFP8ScaledMMLinearKernel),
-        ):
-            raise ValueError(
-                "FP8 PTPC online quant requires a kernel that honors "
-                "per-token activation quantization; "
-                f"{type(self.fp8_linear).__name__} is W8A16 weight-only. "
-                "Requires SM89+ for Cutlass FP8 or ROCm MI3xx "
-                "for rowwise scaled_mm."
+        if self.activation_quant_key is not None:
+            self.fp8_linear = init_fp8_linear_kernel(
+                activation_quant_key=self.activation_quant_key,
+                weight_quant_key=self.weight_quant_key,
+                weight_shape=layer.weight.shape,
+                input_dtype=self.input_dtype,
+                out_dtype=self.out_dtype,
+                module_name=self.__class__.__name__,
+            )
+            # PTPC requires per-token activation FP8; Marlin and Humming FP8
+            # are W8A16 and would silently produce a weight-only fp8 model.
+            if isinstance(
+                self.fp8_linear,
+                (MarlinFP8ScaledMMLinearKernel, HummingFP8ScaledMMLinearKernel),
+            ):
+                raise ValueError(
+                    "FP8 PTPC online quant requires a kernel that honors "
+                    "per-token activation quantization; "
+                    f"{type(self.fp8_linear).__name__} is W8A16 weight-only. "
+                    "Requires SM89+ for Cutlass FP8 or ROCm MI3xx "
+                    "for rowwise scaled_mm."
+                )
+        else:
+            # Weight-only (`activation: null`): the kernel table only holds
+            # W8A16 kernels, so the activation key is a placeholder.
+            self.fp8_linear = init_wfp8_a16_linear_kernel(
+                weight_quant_key=self.weight_quant_key,
+                activation_quant_key=kFp8DynamicTensorSym,
+                weight_shape=layer.weight.shape,
+                input_dtype=self.input_dtype,
+                out_dtype=self.out_dtype,
+                module_name=self.__class__.__name__,
             )
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Online FP8 backend cannot use pre-processed weights"
+                )
+            layer.input_scale = None
+            expose_input_quant_key(layer, self.fp8_linear)
+            layer._already_called_process_weights_after_loading = True
+            return
+
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
@@ -571,6 +660,8 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+            self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

@@ -34,7 +34,6 @@ vllm serve Qwen/Qwen3-4B-Thinking-2507 \
     --seed 42 \
     -tp 1 \
     --max-model-len 2048 \
-    --gpu-memory-utilization 0.8 \
     --speculative-config '{"model": "Qwen/Qwen3-0.6B", "num_speculative_tokens": 5, "method": "draft_model"}'
 ```
 
@@ -75,34 +74,6 @@ The code used to request completions as a client remains unchanged:
     else:
         print(completion)
     ```
-
-## Draft Model Method with heterogeneous vocabs
-
-  By default, vLLM requires the draft and target models to share the same vocabulary. Setting `use_heterogeneous_vocab: true` enables the **Token-Level Intersection (TLI)** algorithm, which allows draft models from a different model family with a different tokenizer.
-  
-  Currently, `use_heterogeneous_vocab` requires `draft_sample_method='greedy'` (the default). Probabilistic draft sampling is not yet supported and will be added in a
-  future release.
-
-  ```python
-  from vllm import LLM, SamplingParams
-
-  llm = LLM(
-      model="Qwen/Qwen3-8B",
-      speculative_config={                               
-          "method": "draft_model",
-          "model": "HuggingFaceTB/SmolLM2-135M-Instruct",
-          "num_speculative_tokens": 3,
-          "use_heterogeneous_vocab": True,
-      },
-      gpu_memory_utilization=0.5,
-  )
-outputs = llm.generate(prompts, sampling_params)
-
-for output in outputs:
-      prompt = output.prompt
-      generated_text = output.outputs[0].text
-      print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-```
 
 !!! warning
     Note: Please use `--speculative-config` to set all configurations related

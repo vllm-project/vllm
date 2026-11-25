@@ -8,7 +8,6 @@ import functools
 import json
 import os
 import sys
-import warnings
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
 from types import UnionType
@@ -42,6 +41,7 @@ from vllm.config import (
     ConfigType,
     DeviceConfig,
     DiffusionConfig,
+    ECEventsConfig,
     ECTransferConfig,
     EncoderCacheManagerConfig,
     EngramConfig,
@@ -75,7 +75,6 @@ from vllm.config import (
 from vllm.config.cache import (
     CacheDType,
     KVOffloadingBackend,
-    MambaCacheMode,
     MambaDType,
     PrefixCachingHashAlgo,
 )
@@ -110,12 +109,13 @@ from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import (
     All2AllBackend,
     DataParallelBackend,
+    DBOSchedule,
     DCPCommBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
 )
 from vllm.config.scheduler import SchedulerPolicy
-from vllm.config.utils import get_field
+from vllm.config.utils import get_field, replace
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.config.watermarking import WatermarkConfig
 from vllm.logger import configure_logging_if_needed, init_logger, suppress_logging
@@ -134,7 +134,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
 from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsProcessor
 from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
@@ -300,13 +300,13 @@ def _maybe_add_docs_url(cls: Any) -> str:
 def _expand_json_human_readable_numbers(val: str) -> str:
     """Expand human-readable number suffixes in a JSON string.
 
-    Based on :func:`human_readable_int` so that the ``k/m/g/t`` (decimal) and
-    ``K/M/G/T`` (binary) conventions work out the box.
+    Based on `human_readable_int` so that the `k/m/g/t` (decimal) and
+    `K/M/G/T` (binary) conventions work out the box.
     Also works inside JSON config arguments such
-    as ``--kv-transfer-config '{"cpu_bytes_to_use": 80m}'``.
+    as `--kv-transfer-config '{"cpu_bytes_to_use": 80m}'`.
 
     Only bare (unquoted) tokens are replaced so that JSON string values
-    like ``"model_name"`` are never modified.
+    like `"model_name"` are never modified.
     """
     # Split on quoted strings so we only touch non-string regions.
     parts = re.split(r'("(?:[^"\\]|\\.)*")', val)
@@ -452,36 +452,10 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
-_LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
-    "--log-config-file is deprecated and will be removed in v0.33.0. "
-    "Use --logging-config.pylogging_config_file instead."
-)
-
-
-_MAMBA_CACHE_MODE_DEPRECATION_MESSAGE = (
-    "--mamba-cache-mode is deprecated and will be removed in v0.34.0. "
-    "It has no effect: Mamba prefix caching follows --enable-prefix-caching."
-)
-
-
 _IR_OP_PRIORITY_DEPRECATION_MESSAGE = (
     "ir_op_priority (--ir-op-priority) is deprecated because vLLM IR is being "
     "removed. It will be removed in v0.34.0."
 )
-
-
-_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE = (
-    "--disable-cascade-attn is deprecated and has no effect since cascade "
-    "attention has been removed. It will be removed in v0.33.0."
-)
-
-
-class DeprecatedLogConfigFileAction(argparse.Action):
-    """Warn when the legacy ``--log-config-file`` option is used."""
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        warnings.warn(_LOG_CONFIG_FILE_DEPRECATION_MESSAGE, stacklevel=1)
-        setattr(namespace, self.dest, values)
 
 
 @dataclass
@@ -580,6 +554,7 @@ class EngineArgs:
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dp_sync_interval: int = ParallelConfig.dp_sync_interval
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
+    dbo_schedule: DBOSchedule | None = ParallelConfig.dbo_schedule
     disable_nccl_for_dp_synchronization: bool | None = (
         ParallelConfig.disable_nccl_for_dp_synchronization
     )
@@ -602,7 +577,6 @@ class EngineArgs:
         CacheConfig, "prefix_cache_retention_interval"
     )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
-    disable_cascade_attn: bool | None = None
     offload_backend: str = OffloadConfig.offload_backend
     cpu_offload_gb: float = UVAOffloadConfig.cpu_offload_gb
     cpu_offload_params: set[str] = get_field(UVAOffloadConfig, "cpu_offload_params")
@@ -619,8 +593,13 @@ class EngineArgs:
     long_prefill_token_threshold_adaptive: bool = (
         SchedulerConfig.long_prefill_token_threshold_adaptive
     )
+    pp_microbatch_min_tokens: int = SchedulerConfig.pp_microbatch_min_tokens
     max_num_seqs: int | None = None
     max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
+    max_num_inflight_kv_loads: int | None = SchedulerConfig.max_num_inflight_kv_loads
+    max_async_kv_loads_per_step: int | None = (
+        SchedulerConfig.max_async_kv_loads_per_step
+    )
     max_num_queued_reqs: int | None = None
     max_num_queued_tokens: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
@@ -641,7 +620,7 @@ class EngineArgs:
     quantization_config: "dict[str, Any] | QuantizationConfigArgs | None" = None
     """User-facing quantization configuration. Carries per-layer-kind
     QuantSpecs (linear, moe) and ignore patterns; see
-    :class:`QuantizationConfigArgs`. Auto-populated from the matching online
+    `QuantizationConfigArgs`. Auto-populated from the matching online
     shorthand when `quantization` is one of the values in
     `ONLINE_QUANT_SHORTHAND_NAMES`."""
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
@@ -649,7 +628,7 @@ class EngineArgs:
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     enable_shm_tensor_arena: bool = ParallelConfig.enable_shm_tensor_arena
     language_model_only: bool = MultiModalConfig.language_model_only
-    limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
+    limit_mm_per_prompt: dict[str, int | dict[str, int | bool]] = get_field(
         MultiModalConfig, "limit_per_prompt"
     )
     enable_mm_embeds: bool = MultiModalConfig.enable_mm_embeds
@@ -668,6 +647,9 @@ class EngineArgs:
     mm_shm_cache_max_object_size_mb: int = (
         MultiModalConfig.mm_shm_cache_max_object_size_mb
     )
+    mm_shm_cache_buffer_name: str = get_field(
+        MultiModalConfig, "mm_shm_cache_buffer_name"
+    )
     mm_encoder_only: bool = MultiModalConfig.mm_encoder_only
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     mm_encoder_attn_backend: AttentionBackendEnum | str | None = (
@@ -682,7 +664,7 @@ class EngineArgs:
         MultiModalConfig.mm_encoder_fp8_scale_save_margin
     )
     io_processor_plugin: str | None = None
-    renderer_num_workers: int = 1
+    renderer_num_workers: int | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     video_pruning_method: str = MultiModalConfig.video_pruning_method
@@ -712,9 +694,14 @@ class EngineArgs:
 
     enable_chunked_prefill: bool | None = None
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
+    encoder_cache_size: int | None = None
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
+    cache_aware_admission_window: int = SchedulerConfig.cache_aware_admission_window
+    cache_aware_admission_threshold: float = (
+        SchedulerConfig.cache_aware_admission_threshold
+    )
 
     watermark: float = SchedulerConfig.watermark
 
@@ -785,11 +772,11 @@ class EngineArgs:
 
     logging_config: LoggingConfig | None = None
     log_level: LogLevel | None = None
-    log_config_file: str | None = None
 
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
 
+    ec_events_config: ECEventsConfig | None = None
     ec_transfer_config: ECTransferConfig | None = None
     ec_manager_config: EncoderCacheManagerConfig = get_field(
         VllmConfig, "ec_manager_config"
@@ -803,6 +790,7 @@ class EngineArgs:
     sleep_preserve_parameter_names: list[str] = get_field(
         ModelConfig, "sleep_preserve_parameter_names"
     )
+    masked_token_ids: list[int] | None = ModelConfig.masked_token_ids
     enable_cumem_allocator: bool = ModelConfig.enable_cumem_allocator
     enable_nccl_comm_suspend: bool = ModelConfig.enable_nccl_comm_suspend
     checkpoint_prepare_on_startup: bool = ModelConfig.checkpoint_prepare_on_startup
@@ -819,7 +807,6 @@ class EngineArgs:
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
-    mamba_cache_mode: MambaCacheMode | None = None
     enable_mamba_shared_prefix_checkpoint: bool = (
         CacheConfig.enable_mamba_shared_prefix_checkpoint
     )
@@ -828,6 +815,7 @@ class EngineArgs:
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
+    mamba_prefill_backend: MambaBackendEnum = MambaConfig.prefill_backend
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
     )
@@ -837,6 +825,7 @@ class EngineArgs:
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str | dict[str, str] = LoadConfig.pt_load_map_location
+    shuffle_safetensors_files: bool = LoadConfig.shuffle_safetensors_files
 
     logits_processors: list[str | type[LogitsProcessor]] | None = (
         ModelConfig.logits_processors
@@ -844,6 +833,7 @@ class EngineArgs:
     """Custom logitproc types"""
 
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
+    async_scheduling_depth: int = SchedulerConfig.async_scheduling_depth
 
     stream_interval: int = SchedulerConfig.stream_interval
 
@@ -872,7 +862,7 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: (
-        Literal["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl"] | None
+        Literal["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl", "hip"] | None
     ) = None
     kda_prefill_backend: (
         Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
@@ -1018,12 +1008,6 @@ class EngineArgs:
             "--disable-sliding-window", **model_kwargs["disable_sliding_window"]
         )
         model_group.add_argument(
-            "--disable-cascade-attn",
-            action=argparse.BooleanOptionalAction,
-            default=None,
-            help=_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE,
-        )
-        model_group.add_argument(
             "--skip-tokenizer-init", **model_kwargs["skip_tokenizer_init"]
         )
         model_group.add_argument(
@@ -1058,6 +1042,9 @@ class EngineArgs:
         model_group.add_argument(
             "--sleep-preserve-parameter-names",
             **model_kwargs["sleep_preserve_parameter_names"],
+        )
+        model_group.add_argument(
+            "--masked-token-ids", **model_kwargs["masked_token_ids"]
         )
         model_group.add_argument(
             "--enable-cumem-allocator", **model_kwargs["enable_cumem_allocator"]
@@ -1109,6 +1096,10 @@ class EngineArgs:
         load_group.add_argument(
             "--pt-load-map-location", **load_kwargs["pt_load_map_location"]
         )
+        load_group.add_argument(
+            "--shuffle-safetensors-files",
+            **load_kwargs["shuffle_safetensors_files"],
+        )
 
         # Attention arguments
         attention_kwargs = get_kwargs(AttentionConfig)
@@ -1129,6 +1120,9 @@ class EngineArgs:
         mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
         mamba_group.add_argument(
             "--mamba-ssu-algorithm", **mamba_kwargs["ssu_algorithm"]
+        )
+        mamba_group.add_argument(
+            "--mamba-prefill-backend", **mamba_kwargs["prefill_backend"]
         )
         mamba_group.add_argument(
             "--enable-mamba-cache-stochastic-rounding",
@@ -1351,6 +1345,7 @@ class EngineArgs:
             "--dbo-prefill-token-threshold",
             **parallel_kwargs["dbo_prefill_token_threshold"],
         )
+        parallel_group.add_argument("--dbo-schedule", **parallel_kwargs["dbo_schedule"])
         parallel_group.add_argument(
             "--disable-nccl-for-dp-synchronization",
             **parallel_kwargs["disable_nccl_for_dp_synchronization"],
@@ -1444,14 +1439,6 @@ class EngineArgs:
             "--prefix-match-unit", **cache_kwargs["prefix_match_unit"]
         )
         cache_group.add_argument(
-            "--mamba-cache-mode",
-            **{
-                **cache_kwargs["mamba_cache_mode"],
-                "default": None,
-                "help": _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE,
-            },
-        )
-        cache_group.add_argument(
             "--enable-mamba-shared-prefix-checkpoint",
             **cache_kwargs["enable_mamba_shared_prefix_checkpoint"],
         )
@@ -1530,6 +1517,10 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--mm-shm-cache-max-object-size-mb",
             **multimodal_kwargs["mm_shm_cache_max_object_size_mb"],
+        )
+        multimodal_group.add_argument(
+            "--mm-shm-cache-buffer-name",
+            **multimodal_kwargs["mm_shm_cache_buffer_name"],
         )
         multimodal_group.add_argument(
             "--mm-encoder-only", **multimodal_kwargs["mm_encoder_only"]
@@ -1672,16 +1663,6 @@ class EngineArgs:
                 "Overrides that field if both are specified."
             ),
         )
-        logging_group.add_argument(
-            "--log-config-file",
-            dest="log_config_file",
-            default=argparse.SUPPRESS,
-            metavar="PYLOGGING_CONFIG_FILE",
-            action=DeprecatedLogConfigFileAction,
-            help=_LOG_CONFIG_FILE_DEPRECATION_MESSAGE,
-        )
-        # Retain the warning in v0.31.0 and v0.32.0. Remove this option and its
-        # compatibility mapping in create_logging_config() in v0.33.0.
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -1772,6 +1753,14 @@ class EngineArgs:
             **scheduler_kwargs["max_num_active_seqs"],
         )
         scheduler_group.add_argument(
+            "--max-num-inflight-kv-loads",
+            **scheduler_kwargs["max_num_inflight_kv_loads"],
+        )
+        scheduler_group.add_argument(
+            "--max-async-kv-loads-per-step",
+            **scheduler_kwargs["max_async_kv_loads_per_step"],
+        )
+        scheduler_group.add_argument(
             "--max-num-queued-reqs", **scheduler_kwargs["max_num_queued_reqs"]
         )
         scheduler_group.add_argument(
@@ -1785,6 +1774,10 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--long-prefill-token-threshold-adaptive",
             **scheduler_kwargs["long_prefill_token_threshold_adaptive"],
+        )
+        scheduler_group.add_argument(
+            "--pp-microbatch-min-tokens",
+            **scheduler_kwargs["pp_microbatch_min_tokens"],
         )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
@@ -1802,6 +1795,9 @@ class EngineArgs:
             "--disable-chunked-mm-input", **scheduler_kwargs["disable_chunked_mm_input"]
         )
         scheduler_group.add_argument(
+            "--encoder-cache-size", **scheduler_kwargs["encoder_cache_size"]
+        )
+        scheduler_group.add_argument(
             "--scheduler-cls", **scheduler_kwargs["scheduler_cls"]
         )
         scheduler_group.add_argument(
@@ -1814,11 +1810,22 @@ class EngineArgs:
             **scheduler_kwargs["prefill_schedule_interval"],
         )
         scheduler_group.add_argument(
+            "--cache-aware-admission-window",
+            **scheduler_kwargs["cache_aware_admission_window"],
+        )
+        scheduler_group.add_argument(
+            "--cache-aware-admission-threshold",
+            **scheduler_kwargs["cache_aware_admission_threshold"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
         scheduler_group.add_argument(
             "--async-scheduling", **scheduler_kwargs["async_scheduling"]
+        )
+        scheduler_group.add_argument(
+            "--async-scheduling-depth", **scheduler_kwargs["async_scheduling_depth"]
         )
         scheduler_group.add_argument(
             "--stream-interval", **scheduler_kwargs["stream_interval"]
@@ -1895,6 +1902,7 @@ class EngineArgs:
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
+        vllm_group.add_argument("--ec-events-config", **vllm_kwargs["ec_events_config"])
         vllm_group.add_argument(
             "--ec-transfer-config", **vllm_kwargs["ec_transfer_config"]
         )
@@ -1961,7 +1969,7 @@ class EngineArgs:
         parser.add_argument(
             "--gdn-prefill-backend",
             dest="gdn_prefill_backend",
-            choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl"],
+            choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl", "hip"],
             default=None,
             help="Select GDN prefill backend.",
         )
@@ -2002,8 +2010,6 @@ class EngineArgs:
                 "launched vLLM.",
                 self.seed,
             )
-        if self.disable_cascade_attn is not None:
-            warnings.warn(_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE, stacklevel=1)
 
         return ModelConfig(
             model=self.model,
@@ -2049,6 +2055,7 @@ class EngineArgs:
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
+            mm_shm_cache_buffer_name=self.mm_shm_cache_buffer_name,
             mm_hasher_algorithm=self.mm_hasher_algorithm,
             mm_encoder_only=self.mm_encoder_only,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
@@ -2064,6 +2071,7 @@ class EngineArgs:
             sleep_mode_backend=self.sleep_mode_backend,
             sleep_mode_offload_cudagraph=self.sleep_mode_offload_cudagraph,
             sleep_preserve_parameter_names=self.sleep_preserve_parameter_names,
+            masked_token_ids=self.masked_token_ids,
             enable_cumem_allocator=self.enable_cumem_allocator,
             enable_nccl_comm_suspend=self.enable_nccl_comm_suspend,
             checkpoint_prepare_on_startup=self.checkpoint_prepare_on_startup,
@@ -2110,6 +2118,7 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
             pt_load_map_location=self.pt_load_map_location,
+            shuffle_safetensors_files=self.shuffle_safetensors_files,
         )
 
     def create_speculative_config(
@@ -2251,10 +2260,6 @@ class EngineArgs:
         config = self.logging_config or LoggingConfig()
         if self.log_level is not None:
             config = dataclasses.replace(config, log_level=self.log_level)
-        if self.log_config_file is not None:
-            config = dataclasses.replace(
-                config, pylogging_config_file=self.log_config_file
-            )
         return config
 
     def create_engine_config(
@@ -2316,8 +2321,6 @@ class EngineArgs:
         assert self.enable_prefix_caching is not None, (
             "enable_prefix_caching must be set by this point"
         )
-        if self.mamba_cache_mode is not None:
-            logger.warning_once(_MAMBA_CACHE_MODE_DEPRECATION_MESSAGE)
 
         cache_config = CacheConfig(
             block_size=self.block_size,  # type: ignore[arg-type]
@@ -2614,6 +2617,7 @@ class EngineArgs:
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dp_sync_interval=self.dp_sync_interval,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
+            dbo_schedule=self.dbo_schedule,
             disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
@@ -2647,6 +2651,14 @@ class EngineArgs:
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,
         )
+        if (
+            envs.VLLM_PP_LAYER_PARTITION is not None
+            and parallel_config.pipeline_parallel_size == 1
+        ):
+            logger.warning(
+                "VLLM_PP_LAYER_PARTITION is ignored because pipeline "
+                "parallelism is disabled."
+            )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
@@ -2677,11 +2689,14 @@ class EngineArgs:
             max_num_scheduled_tokens=self.max_num_scheduled_tokens,
             max_num_seqs=self.max_num_seqs,
             max_num_active_seqs=self.max_num_active_seqs,
+            max_num_inflight_kv_loads=self.max_num_inflight_kv_loads,
+            max_async_kv_loads_per_step=self.max_async_kv_loads_per_step,
             max_num_queued_reqs=self.max_num_queued_reqs,
             max_num_queued_tokens=self.max_num_queued_tokens,
             max_model_len=model_config.max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
+            encoder_cache_size=self.encoder_cache_size,
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,
             policy=self.scheduling_policy,
@@ -2690,11 +2705,15 @@ class EngineArgs:
             long_prefill_token_threshold_adaptive=(
                 self.long_prefill_token_threshold_adaptive
             ),
+            pp_microbatch_min_tokens=self.pp_microbatch_min_tokens,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
+            cache_aware_admission_window=self.cache_aware_admission_window,
+            cache_aware_admission_threshold=self.cache_aware_admission_threshold,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            async_scheduling_depth=self.async_scheduling_depth,
             stream_interval=self.stream_interval,
         )
 
@@ -2747,9 +2766,9 @@ class EngineArgs:
                     "attention_backend and attention_config.backend "
                     "are mutually exclusive"
                 )
-            # Reuse the validator to handle "auto" and string-to-enum conversion
-            attention_config.backend = AttentionConfig.validate_backend_before(
-                self.attention_backend
+            attention_config = replace(
+                attention_config,
+                backend=self.attention_backend,
             )
 
         # Batch-invariant mode requires deterministic attention behavior.
@@ -2791,6 +2810,12 @@ class EngineArgs:
             mamba_config.backend = self.mamba_backend
         if self.mamba_ssu_algorithm is not None:
             mamba_config.ssu_algorithm = self.mamba_ssu_algorithm
+        if isinstance(self.mamba_prefill_backend, str):
+            mamba_config.prefill_backend = MambaBackendEnum[
+                self.mamba_prefill_backend.upper()
+            ]
+        else:
+            mamba_config.prefill_backend = self.mamba_prefill_backend
         if self.enable_mamba_cache_stochastic_rounding:
             mamba_config.enable_stochastic_rounding = (
                 self.enable_mamba_cache_stochastic_rounding
@@ -2799,7 +2824,7 @@ class EngineArgs:
             mamba_config.stochastic_rounding_philox_rounds = (
                 self.mamba_cache_philox_rounds
             )
-        mamba_config.validate_ssu_algorithm()
+        mamba_config.__post_init__()
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
@@ -2927,6 +2952,7 @@ class EngineArgs:
             compilation_config=compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            ec_events_config=self.ec_events_config,
             ec_transfer_config=self.ec_transfer_config,
             ec_manager_config=self.ec_manager_config,
             reasoning_config=self.reasoning_config,

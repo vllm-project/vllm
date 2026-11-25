@@ -35,7 +35,7 @@ def run_test(model_name, more_args=None):
     model_args = f"pretrained={model_name},max_model_len=4096"
 
     if more_args is not None:
-        model_args = "{},{}".format(model_args, more_args)
+        model_args = f"{model_args},{more_args}"
 
     results = lm_eval.simple_evaluate(
         model="vllm",
@@ -70,7 +70,7 @@ def test_lm_eval_accuracy_v1_engine(model):
 
         # Add TP test (if provided)
         if TPU_TP_TEST_STR:
-            more_args += ",{}".format(TPU_TP_TEST_STR)
+            more_args += f",{TPU_TP_TEST_STR}"
 
     run_test(model, more_args)
 
@@ -85,6 +85,6 @@ def test_lm_eval_accuracy_v1_engine_fp8_kv_cache(model):
 
         # Add TP test (if provided)
         if TPU_TP_TEST_STR:
-            more_args += ",{}".format(TPU_TP_TEST_STR)
+            more_args += f",{TPU_TP_TEST_STR}"
 
     run_test(model, more_args)

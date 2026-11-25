@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import math
 
 import pytest
@@ -12,6 +13,10 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.model_executor.models.kimi_k25_vit import (
+    Learnable2DInterpPosEmbDivided_fixed,
+    tpool_patch_merger,
+)
 from vllm.model_executor.models.vision import (
     get_load_balance_assignment,
     resolve_visual_encoder_outputs,
@@ -21,7 +26,7 @@ from vllm.model_executor.models.vision import (
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
 
 pytestmark = pytest.mark.cpu_test
 
@@ -249,6 +254,78 @@ class SimpleMRopeVisionModel(torch.nn.Module):
                 device=pixel_values.device,
                 dtype=pixel_values.dtype,
             )
+
+
+class SimpleTemporalPoolVisionModel(torch.nn.Module):
+    """A rope_2d vision model that pools frames like Kimi-K2.5's MoonViT."""
+
+    def __init__(self, hidden_size: int = 16):
+        super().__init__()
+        self.merge_kernel_size = (2, 2)
+        self.linear = torch.nn.Linear(768, hidden_size)
+
+    def forward(self, pixel_values: torch.Tensor, grid_thws: torch.Tensor):
+        return tpool_patch_merger(
+            self.linear(pixel_values),
+            grid_thws.tolist(),
+            merge_kernel_size=self.merge_kernel_size,
+        )
+
+
+def _check_rope_2d_temporal_pooling():
+    """rope_2d towers pool a video chunk's frames, so each item yields
+    h * w // 4 embeddings."""
+    set_random_seed(0)
+    # An image followed by three video chunks (t > 1).
+    grid_thw_list = [[1, 4, 4], [4, 4, 6], [2, 6, 4], [3, 4, 4]]
+    pixel_values = torch.randn(sum(math.prod(g) for g in grid_thw_list), 768)
+    vision_model = SimpleTemporalPoolVisionModel()
+
+    with torch.inference_mode():
+        direct_output = vision_model(pixel_values, torch.tensor(grid_thw_list))
+        sharded_output = run_dp_sharded_mrope_vision_model(
+            vision_model, pixel_values, grid_thw_list, rope_type="rope_2d"
+        )
+
+    assert [out.shape[0] for out in sharded_output] == [4, 6, 6, 4]
+    for sharded, direct in zip(sharded_output, direct_output):
+        torch.testing.assert_close(sharded, direct)
+
+
+def test_run_dp_sharded_mrope_vision_model_rope_2d_temporal_pooling(dist_init):
+    _check_rope_2d_temporal_pooling()
+
+
+@multi_gpu_test(num_gpus=2)
+def test_run_dp_sharded_mrope_vision_model_rope_2d_temporal_pooling_tp2():
+    world_size = 2
+    mp.spawn(
+        run_rope_2d_temporal_pooling_worker,
+        args=(world_size, get_open_port()),
+        nprocs=world_size,
+    )
+
+
+def run_rope_2d_temporal_pooling_worker(
+    local_rank: int, world_size: int, master_port: int
+):
+    device = f"{current_platform.device_type}:{local_rank}"
+    torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(master_port),
+        }
+    )
+    init_distributed_environment()
+    with ensure_current_vllm_config():
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+    _check_rope_2d_temporal_pooling()
 
 
 @multi_gpu_test(num_gpus=2)
@@ -487,3 +564,23 @@ def test_simple_mrope_vision_model_spatial_merge(spatial_merge_size: int):
 
     assert output.shape[0] == expected_output_patches
     assert output.shape[1] == vision_model.out_hidden_size
+
+
+@pytest.mark.parametrize("t", [1, 2, 4])
+def test_pos_emb_keeps_dtype_for_video_chunks(t: int):
+    """Video chunks (t > 1) add the float32 `time_weight` buffer; the output
+    must keep the tower's dtype even when the tower is not cast after
+    construction (e.g. ModelOpt-quantized checkpoints)."""
+    height, width, dim = 4, 4, 8
+    with set_default_torch_dtype(torch.bfloat16):
+        pos_emb = Learnable2DInterpPosEmbDivided_fixed(
+            height=height, width=width, num_frames=4, dim=dim
+        )
+    assert pos_emb.weight.dtype == torch.bfloat16
+    assert pos_emb.time_weight.dtype == torch.float32
+
+    cast_pos_emb = copy.deepcopy(pos_emb).to(torch.bfloat16)
+
+    x = torch.zeros(t * height * width, dim, dtype=torch.bfloat16)
+    grid = [[t, height, width]]
+    torch.testing.assert_close(pos_emb(x, grid), cast_pos_emb(x, grid), rtol=0, atol=0)

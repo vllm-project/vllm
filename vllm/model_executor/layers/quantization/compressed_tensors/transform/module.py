@@ -73,7 +73,7 @@ class HadamardTransform(torch.nn.Module):
         self._validate_input_transforms()
 
     def process_weights_after_loading(self):
-        for part_id, partition in self.weight.partitions.items():
+        for partition in self.weight.partitions.values():
             # required by torch.compile
             self.weight.process_weights_after_loading()
 
