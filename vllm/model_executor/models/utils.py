@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
@@ -19,9 +20,6 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.model_loader.reload import (
-    support_quantized_model_reload_from_hp_weights,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
@@ -51,41 +49,42 @@ WeightsTransformFn: TypeAlias = Callable[
 unrecognized tensors through unchanged."""
 
 
-@dataclass
+@dataclass(slots=True)
 class WeightsMapper:
     """Maps the name of each weight if they match the following patterns.
 
     If a key maps to a value of `None`, the corresponding weight is ignored.
 
-    `weights_transforms` rewrite the raw weight stream in list order before
-    any name mapping."""
+    Fields are applied in declaration order. `weights_transforms` rewrite the raw
+    weight stream in list order before any name mapping, and stacked rules run
+    last so that they see the final vLLM names."""
 
+    weights_transforms: list[WeightsTransformFn] = field(default_factory=list)
     orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
     orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_stacked: Mapping[str, tuple[str, ShardIds]] = field(
         default_factory=dict
     )
-    orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
-    orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
-    weights_transforms: list[WeightsTransformFn] = field(default_factory=list)
 
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
         return WeightsMapper(
+            weights_transforms=[*self.weights_transforms, *other.weights_transforms],
             orig_to_new_renaming=[
                 *self.orig_to_new_renaming,
                 *other.orig_to_new_renaming,
             ],
             orig_to_new_regex={**self.orig_to_new_regex, **other.orig_to_new_regex},
             orig_to_new_substr={**self.orig_to_new_substr, **other.orig_to_new_substr},
+            orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
+            orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
             orig_to_new_stacked={
                 **self.orig_to_new_stacked,
                 **other.orig_to_new_stacked,
             },
-            orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
-            orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
-            weights_transforms=[*self.weights_transforms, *other.weights_transforms],
         )
 
     def map_name(self, key: str) -> str | None:
@@ -133,12 +132,6 @@ class WeightsMapper:
 
                 key = key.replace(substr, new_key, 1)
 
-        shard_id: ShardIds | None = None
-        for substr, (new_key, new_shard_id) in self.orig_to_new_stacked.items():
-            if substr in key:
-                key = key.replace(substr, new_key, 1)
-                shard_id = new_shard_id
-
         for prefix, new_key in self.orig_to_new_prefix.items():
             if key.startswith(prefix):
                 if new_key is None:
@@ -152,6 +145,12 @@ class WeightsMapper:
                     return None
 
                 key = new_key.join(key.rsplit(suffix, 1))
+
+        shard_id: ShardIds | None = None
+        for substr, (new_key, new_shard_id) in self.orig_to_new_stacked.items():
+            if substr in key:
+                key = key.replace(substr, new_key, 1)
+                shard_id = new_shard_id
 
         return key, shard_id
 
@@ -204,12 +203,12 @@ class WeightsMapper:
         remove_none = lambda d: {k: v for k, v in d.items() if v is not None}
         return replace(
             self,
+            weights_transforms=[],
             orig_to_new_regex=remove_none(self.orig_to_new_regex),
             orig_to_new_substr=remove_none(self.orig_to_new_substr),
-            orig_to_new_stacked={},
             orig_to_new_prefix=remove_none(self.orig_to_new_prefix),
             orig_to_new_suffix=remove_none(self.orig_to_new_suffix),
-            weights_transforms=[],
+            orig_to_new_stacked={},
         )
 
 
@@ -259,29 +258,12 @@ class AutoWeightsLoader:
         *,
         ignore_unexpected_prefixes: list[str] | None = None,
         ignore_unexpected_suffixes: list[str] | None = None,
-        ignore_unexpected_patterns: Iterable[str] | None = None,
     ) -> None:
-        """Args:
-        module: The module to load weights into.
-        ignore_unexpected_prefixes: Skip unexpected weights whose qualname
-            starts with any of these.
-        ignore_unexpected_suffixes: Skip unexpected weights whose qualname
-            ends with any of these.
-        ignore_unexpected_patterns: Skip unexpected weights whose name, as
-            passed to `load_weights` (before its `mapper`), matches any of
-            these regexes. Expected weights still load.
-
-        """
         super().__init__()
 
         self.module = module
         self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
         self.ignore_unexpected_suffixes = ignore_unexpected_suffixes or []
-        self.ignore_unexpected_patterns = [
-            re.compile(p) for p in ignore_unexpected_patterns or []
-        ]
-        self.ignore_unexpected_names: set[str] = set()
-        """Qualnames of weights matching `ignore_unexpected_patterns`."""
 
         # Weight tying makes two qualnames point at the same `nn.Parameter`
         # (e.g. `lm_head.weight` and `model.embed_tokens.weight`). Loading both
@@ -323,18 +305,7 @@ class AutoWeightsLoader:
     def _can_ignore_unexpected(self, qualname: str) -> bool:
         iup = (qualname.startswith(p) for p in self.ignore_unexpected_prefixes)
         ius = (qualname.endswith(s) for s in self.ignore_unexpected_suffixes)
-        return any(iup) or any(ius) or qualname in self.ignore_unexpected_names
-
-    def _find_ignore_unexpected_names(
-        self, weights: Iterable[tuple[str, torch.Tensor]], mapper: WeightsMapper
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        """Record the qualnames of weights matching `ignore_unexpected_patterns`."""
-        patterns = self.ignore_unexpected_patterns
-        for name, weight in weights:
-            matches = any(p.search(name) for p in patterns)
-            if matches and (qualname := mapper.map_name(name)) is not None:
-                self.ignore_unexpected_names.add(qualname)
-            yield name, weight
+        return any(iup) or any(ius)
 
     def _load_param(
         self,
@@ -474,13 +445,6 @@ class AutoWeightsLoader:
 
                     continue
 
-                # Patterns can name weights below the missing module
-                qualnames = [maybe_prefix(prefix, name) for name, _ in child_weights]
-                if all(q in self.ignore_unexpected_names for q in qualnames):
-                    logger.debug("Ignoring missing %s", prefix)
-
-                    continue
-
                 named_parameters = module.named_parameters(recurse=True)
                 desc_param_keys = {
                     maybe_prefix(base_prefix, k) for k, _ in named_parameters
@@ -493,7 +457,6 @@ class AutoWeightsLoader:
                 )
                 raise ValueError(msg)
 
-    @support_quantized_model_reload_from_hp_weights
     def load_weights(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
@@ -516,8 +479,6 @@ class AutoWeightsLoader:
             self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
         mapper |= self.REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER
 
-        if self.ignore_unexpected_patterns:
-            weights = self._find_ignore_unexpected_names(weights, mapper)
         weights = mapper.apply(weights)
         weights = self._filter_skipped(weights)
 
@@ -735,16 +696,41 @@ def init_vllm_registered_model(
     """Helper function to initialize an inner model registered to vLLM,
     based on the arguments passed to the outer vLLM model.
     """
-    from vllm.model_executor.model_loader.utils import initialize_model
+    from vllm.model_executor.model_loader.utils import (
+        convert_model_cls,
+        initialize_model,
+    )
 
     if hf_config is None and architectures is not None:
         # So that the architectures field is overridden
         hf_config = vllm_config.model_config.hf_config
 
+    model_class = None
     if hf_config is not None:
-        vllm_config = vllm_config.with_hf_config(hf_config, architectures=architectures)
+        # Top-level Qwen2 and Llama use the Transformers backend, but inner Qwen2 and
+        # Llama models stay native so that composite models can keep using their
+        # submodules. `with_hf_config` infers missing architectures from `model_type`
+        if (archs := architectures or hf_config.architectures) is not None:
+            is_qwen2 = "Qwen2ForCausalLM" in archs
+            is_llama = "LlamaForCausalLM" in archs
+        else:
+            is_qwen2 = hf_config.model_type == "qwen2"
+            is_llama = hf_config.model_type == "llama"
+        if is_qwen2:
+            from vllm.model_executor.models.qwen3 import use_qwen2_attention
 
-    return initialize_model(vllm_config=vllm_config, prefix=prefix)
+            hf_config = copy.deepcopy(hf_config)
+            use_qwen2_attention(hf_config.get_text_config())
+            architectures = ["Qwen3ForCausalLM"]
+        vllm_config = vllm_config.with_hf_config(hf_config, architectures=architectures)
+        if is_llama:
+            from vllm.model_executor.models.llama import LlamaForCausalLM
+
+            model_class = convert_model_cls(LlamaForCausalLM, vllm_config.model_config)
+
+    return initialize_model(
+        vllm_config=vllm_config, prefix=prefix, model_class=model_class
+    )
 
 
 @overload

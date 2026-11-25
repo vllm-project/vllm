@@ -5,6 +5,8 @@ import pytest
 import regex as re
 import torch
 
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -156,45 +158,6 @@ def test_module_load_shared_params_that_are_not_tied_embeddings():
 
     assert loaded == {"gate.weight"}
     assert torch.all(mod.gate.weight == torch.Tensor([[1, 2], [3, 4]]))
-
-
-@pytest.mark.cpu_test
-def test_ignore_unexpected_patterns_skip_only_unexpected_weights():
-    """Like Transformers' `_keys_to_ignore_on_load_unexpected`, a pattern must not
-    skip weights that a parameter loads (e.g. A.X-K1's `post_mlp_layernorm` is
-    unused only on its dense layers)."""
-    mod = torch.nn.Module()
-    mod.moe = torch.nn.Module()
-    mod.moe.norm = torch.nn.Linear(2, 2, bias=False)
-    mod.dense = torch.nn.Module()
-
-    ones = torch.ones(2, 2)
-    weights = [
-        ("model.moe.norm.weight", ones),
-        ("model.dense.norm.weight", ones),
-        # Below the missing module, e.g. MiMo-V2-Flash's `^model\.mtp\.`
-        ("model.missing.head.weight", ones),
-    ]
-    # Patterns match checkpoint names, before the mapper strips `model.`
-    patterns = [r"\.norm\.", r"^model\.missing\."]
-    mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
-    loader = AutoWeightsLoader(mod, ignore_unexpected_patterns=patterns)
-    loaded = loader.load_weights(iter(weights), mapper=mapper)
-
-    assert loaded == {"moe.norm.weight"}
-    assert torch.all(mod.moe.norm.weight == 1)
-
-
-@pytest.mark.cpu_test
-def test_unexpected_weight_below_missing_module_raises():
-    """Only patterns, not the `.bias` suffix every load ignores, may skip weights
-    below a missing module."""
-    mod = torch.nn.Module()
-    mod.lin = torch.nn.Linear(2, 2, bias=False)
-
-    weights = [("lin.weight", torch.ones(2, 2)), ("typo_proj.bias", torch.ones(2))]
-    with pytest.raises(ValueError, match="typo_proj"):
-        AutoWeightsLoader(mod).load_weights(iter(weights))
 
 
 class raise_if_cuda_sync:
@@ -387,3 +350,32 @@ def test_weights_mapper_transforms_see_earlier_emitted_names():
 
     # The halves merge into "e.w", which the suffix mapping then doubles.
     assert torch.equal(mapped[1], torch.tensor([2.0, 0.0]))
+
+
+@pytest.mark.parametrize("quant_config", [Fp8Config, QuarkConfig])
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("h.0.self_attn.k_proj.output_scale", "h.0.self_attn.attn.k_scale"),
+        ("h.0.self_attn.to_k.output_scale", "h.0.self_attn.attn.k_scale"),
+        ("h.0.self_attn.prob_output_scale", "h.0.self_attn.attn.prob_scale"),
+        ("h.0.self_attn.k_proj.k_scale", "h.0.self_attn.attn.k_scale"),
+    ],
+)
+def test_cache_scale_rules_run_before_stacked_rules(quant_config, name, expected):
+    """A stacked rule would otherwise rewrite the `.k_proj.` the scale rule needs."""
+    model_mapper = WeightsMapper(
+        orig_to_new_substr={".to_k.": ".k_proj."},
+        orig_to_new_stacked={".k_proj.": (".qkv_proj.", "k")},
+    )
+    mapper = model_mapper | quant_config.get_cache_scale_mapper()
+    scale = torch.tensor(0.5)
+
+    ((mapped_name, mapped_scale),) = mapper.apply([(name, scale)])
+
+    assert mapped_name == expected
+    assert mapped_scale is scale
+    assert getattr(mapped_scale, "shard_id", None) is None
+    assert mapper.map_name("h.0.self_attn.k_proj.weight") == (
+        "h.0.self_attn.qkv_proj.weight"
+    )

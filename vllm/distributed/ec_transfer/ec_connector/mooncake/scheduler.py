@@ -408,7 +408,8 @@ class ECMooncakeScheduler:
             if record is not None:
                 self._scheduler_pending_work = True
                 all_ready = False
-            else:
+            elif getattr(request, "ec_transfer_params", None):
+                # Only requests with EC params expect a push.
                 waiting_id = transfer_id or f"{request.request_id}:{index}"
                 self._note_awaiting_push(mm_hash, waiting_id, request.request_id, now)
                 all_ready = False
@@ -468,7 +469,7 @@ class ECMooncakeScheduler:
                 )
 
     def update_state_after_free(self, request: Any, index: int) -> None:
-        if not self._is_consumer:
+        if not self._is_consumer or not getattr(request, "ec_transfer_params", None):
             return
         transfer_id = self._request_transfer_id(request, index)
         if transfer_id is None:
@@ -525,7 +526,7 @@ class ECMooncakeScheduler:
         return self._scheduler_pending_work
 
     def request_finished(self, request: Any) -> tuple[bool, dict[str, Any] | None]:
-        if self._is_consumer:
+        if self._is_consumer and getattr(request, "ec_transfer_params", None):
             for index in range(len(request.mm_features)):
                 transfer_id = self._request_transfer_id(request, index)
                 if transfer_id is None:
@@ -554,6 +555,27 @@ class ECMooncakeScheduler:
         if not items:
             return False, None
         return False, items
+
+    def reset(self) -> None:
+        """Invalidate local encoder-cache bookkeeping after a cache reset.
+
+        `reset_encoder_cache` already clears EncoderCacheManager and the
+        worker encoder cache. `_local_cache` is only a mirror of that
+        cache; leaving it in place lets `ensure_cache_available` skip
+        Load and hit an encoder cache miss. Consumed READY/RESIDENT
+        records are expired so a later request cannot treat a consumed
+        `transfer_id` as a cache hit. Unconsumed AVAILABLE
+        reservations remain Load-able. This does not make in-flight
+        reset concurrency-safe.
+        """
+        self._local_cache.clear()
+        self._transfers.invalidate_local(time.monotonic())
+        self._scheduler_pending_work = False
+        self._pushes_to_prepare.clear()
+        self._prepared_push_transfer_ids.clear()
+        self._store_candidates.clear()
+        self._failed_saves.clear()
+        self._event_ready_shards.clear()
 
     def close(self) -> None:
         self._control_executor.shutdown(wait=True, cancel_futures=True)
