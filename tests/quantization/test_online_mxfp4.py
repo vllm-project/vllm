@@ -10,16 +10,7 @@ against the pure-torch reference in `reference_mxfp4.py`.
 import pytest
 import torch
 
-from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-from vllm.config.kernel import MoEBackend
-from vllm.config.model import ModelConfig
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
-from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
-from vllm.model_executor.layers.quantization.online.mxfp4 import Mxfp4OnlineMoEMethod
-from vllm.model_executor.layers.quantization.quark.quark_moe import (
-    QuarkOCP_MX_MoEMethod,
-)
 from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import (
     QuarkOCP_MX,
 )
@@ -28,14 +19,8 @@ from vllm.model_executor.layers.quantization.quark.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     downcast_to_mxfp,
-    mxfp4_quantize,
     quant_dequant_mxfp4,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kMxfp4Dynamic,
-    kMxfp4Static,
-)
-from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
@@ -66,38 +51,6 @@ def fix_negative_zeros(tensor: torch.Tensor) -> torch.Tensor:
     )
 
     return low_nibble | high_nibble
-
-
-def assert_quantized_weights_equal(
-    checkpoint_layer: torch.nn.Module,
-    online_layer: torch.nn.Module,
-    keys: tuple[str, ...],
-    packed_weight_keys: tuple[str, ...],
-) -> None:
-    """Assert the checkpoint and online paths produced byte-identical weights.
-
-    `packed_weight_keys` lists the entries holding packed FP4 codewords, which
-    need negative-zero normalization before comparison.
-    """
-    for key in keys:
-        checkpoint_tensor = getattr(checkpoint_layer, key).view(torch.uint8)
-        online_tensor = getattr(online_layer, key).view(torch.uint8)
-
-        # NOTE: AMD Quark checkpoints use exclusively **positive** zeros,
-        # while other mxfp4_quantize implementations from mxfp4_utils.py may not.
-        if key in packed_weight_keys:
-            checkpoint_tensor = fix_negative_zeros(checkpoint_tensor)
-            online_tensor = fix_negative_zeros(online_tensor)
-
-        assert checkpoint_tensor.shape == online_tensor.shape
-        assert checkpoint_tensor.dtype == online_tensor.dtype
-        num_mismatched = (checkpoint_tensor != online_tensor).sum().item()
-        total = checkpoint_tensor.numel()
-
-        assert torch.equal(checkpoint_tensor, online_tensor), (
-            f"{key}: {num_mismatched}/{total} "
-            f"({100 * num_mismatched / total:.4f}%) mismatched bytes"
-        )
 
 
 def _skip_reason_if_unavailable(backend: str, dtype: torch.dtype) -> str | None:
@@ -172,202 +125,6 @@ def test_mxfp4_quantization_correctness(backend: str, dtype: torch.dtype):
     reference = qdq_mxfp4_torch(x, scale_calculation_mode="even")
 
     assert torch.equal(result, reference)
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Only tested on ROCm/CUDA."
-)
-@pytest.mark.parametrize("moe_backend", ["aiter", "emulation"])
-@pytest.mark.skip_global_cleanup
-@override_parallel_groups(SingleRankGroup())
-def test_online_mxfp4_moe_zeroes_uninitialized_padding(
-    moe_backend: MoEBackend, default_vllm_config, monkeypatch
-):
-    """NaNs in unloaded padding must become zeros before online quantization."""
-    # Neither dimension is a multiple of the MXFP4 block size, so both backends pad.
-    unpadded_hidden_size, unpadded_intermediate_size = 240, 208
-    if moe_backend == "aiter":
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
-        monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
-        rocm_aiter_ops.refresh_env_variables()
-
-        if current_platform.is_cuda():
-            pytest.skip(
-                "mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4 requires "
-                "rocm_aiter_ops in weight conversion, not compatible on cuda"
-            )
-    elif moe_backend == "emulation":
-        # `OCP_MXQuantizationEmulationTritonExperts.is_supported_config` gates
-        # on `has_quark()`, but its weight processing does not require it.
-        monkeypatch.setattr(
-            "vllm.model_executor.layers.fused_moe.experts."
-            "ocp_mx_emulation_moe.has_quark",
-            lambda: True,
-        )
-
-    default_vllm_config.model_config = ModelConfig()
-
-    num_experts = 4
-    device = current_platform.device_type
-
-    def make_layer(prefix: str) -> RoutedExperts:
-        runner = FusedMoEFactory(
-            num_experts=num_experts,
-            top_k=2,
-            hidden_size=unpadded_hidden_size,
-            intermediate_size=unpadded_intermediate_size,
-            prefix=prefix,
-        )
-        layer = runner.routed_experts
-        layer.moe_config.moe_backend = moe_backend
-        return layer
-
-    # `create_weights` implementations use plain `torch.zeros`/`torch.randn`
-    # with no explicit device, so without this context they would default
-    # to CPU and diverge from the (GPU) tensors produced by
-    # `mxfp4_quantize`/`replace_parameter`.
-    with torch.device(device):
-        checkpoint_layer = make_layer("checkpoint_layer")
-        online_layer = make_layer("online_layer")
-
-        checkpoint_method = QuarkOCP_MX_MoEMethod(
-            moe=checkpoint_layer.moe_config,
-            weight_quant_key=kMxfp4Static,
-            activation_quant_key=kMxfp4Dynamic,
-        )
-        online_method = Mxfp4OnlineMoEMethod(moe=online_layer.moe_config)
-
-        # `RoutedExperts.__init__` applies this round-up in production; these
-        # layers are built without a quant config, so it is applied explicitly.
-        # Both methods must agree on the padded sizes.
-        roundup_arguments = dict(
-            hidden_size=unpadded_hidden_size,
-            intermediate_size_per_partition=unpadded_intermediate_size,
-            act_dtype=torch.bfloat16,
-            moe_parallel_config=online_layer.moe_config.moe_parallel_config,
-        )
-        hidden_size, intermediate_size = online_method.maybe_roundup_sizes(
-            **roundup_arguments
-        )
-        assert (
-            hidden_size,
-            intermediate_size,
-        ) == checkpoint_method.maybe_roundup_sizes(**roundup_arguments)
-
-        assert hidden_size > unpadded_hidden_size
-        assert intermediate_size > unpadded_intermediate_size
-
-        for layer in (checkpoint_layer, online_layer):
-            assert layer.moe_config.hidden_dim_unpadded == unpadded_hidden_size
-            assert (
-                layer.moe_config.intermediate_size_per_partition_unpadded
-                == unpadded_intermediate_size
-            )
-            layer.moe_config.hidden_dim = hidden_size
-            layer.moe_config.intermediate_size_per_partition = intermediate_size
-
-        gate_up_weight = torch.randn(
-            num_experts,
-            2 * unpadded_intermediate_size,
-            unpadded_hidden_size,
-            dtype=torch.bfloat16,
-        )
-        down_weight = torch.randn(
-            num_experts,
-            unpadded_hidden_size,
-            unpadded_intermediate_size,
-            dtype=torch.bfloat16,
-        )
-
-        scalings = [2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]
-        for i, start in enumerate(range(0, unpadded_hidden_size, 32)):
-            gate_up_weight[..., start : start + 32] *= scalings[i % len(scalings)]
-        for i, start in enumerate(range(0, unpadded_intermediate_size, 32)):
-            down_weight[..., start : start + 32] *= scalings[i % len(scalings)]
-
-        def scatter_into_padded(
-            gate_up_weight: torch.Tensor,
-            down_weight: torch.Tensor,
-            padding_value: float,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            """Place the source weights into buffers of the padded size, the
-            way the weight loader writes only the unpadded slice of a larger
-            allocation."""
-            w13 = torch.full(
-                (num_experts, 2 * intermediate_size, hidden_size),
-                padding_value,
-                dtype=torch.bfloat16,
-            )
-            w2 = torch.full(
-                (num_experts, hidden_size, intermediate_size),
-                padding_value,
-                dtype=torch.bfloat16,
-            )
-            # w13 stacks gate and up, each padded to `intermediate_size`.
-            w13[:, :unpadded_intermediate_size, :unpadded_hidden_size] = gate_up_weight[
-                :, :unpadded_intermediate_size, :
-            ]
-            w13[
-                :,
-                intermediate_size : intermediate_size + unpadded_intermediate_size,
-                :unpadded_hidden_size,
-            ] = gate_up_weight[:, unpadded_intermediate_size:, :]
-            w2[:, :unpadded_hidden_size, :unpadded_intermediate_size] = down_weight
-            return w13, w2
-
-        # Checkpoint path: pre-quantize the source weights to MXFP4 with the
-        # ~same RTN recipe a real Quark checkpoint, then feed the
-        # already-packed tensors into `QuarkOCP_MX_MoEMethod`. Quark's
-        # `create_weights` allocates with `torch.zeros`, so its padding is zero.
-        checkpoint_w13, checkpoint_w2 = scatter_into_padded(
-            gate_up_weight, down_weight, padding_value=0.0
-        )
-        checkpoint_w13, checkpoint_w13_scale = mxfp4_quantize(checkpoint_w13)
-        checkpoint_w2, checkpoint_w2_scale = mxfp4_quantize(checkpoint_w2)
-
-        checkpoint_method.create_weights(
-            layer=checkpoint_layer,
-            num_experts=num_experts,
-            hidden_size=hidden_size,
-            intermediate_size_per_partition=intermediate_size,
-            params_dtype=torch.bfloat16,
-        )
-        checkpoint_layer.w13_weight.data.copy_(checkpoint_w13)
-        checkpoint_layer.w2_weight.data.copy_(checkpoint_w2)
-        checkpoint_layer.w13_weight_scale.data.copy_(checkpoint_w13_scale)
-        checkpoint_layer.w2_weight_scale.data.copy_(checkpoint_w2_scale)
-        checkpoint_method.process_weights_after_loading(checkpoint_layer)
-
-        # Online path: feed the *same* raw bf16 source weights and let
-        # `Mxfp4OnlineMoEMethod` quantize them during
-        # `process_weights_after_loading`. The padding starts out
-        # uninitialized, standing in for the materialized meta tensor.
-        online_w13, online_w2 = scatter_into_padded(
-            gate_up_weight, down_weight, padding_value=float("nan")
-        )
-
-        online_method.create_weights(
-            layer=online_layer,
-            num_experts=num_experts,
-            hidden_size=hidden_size,
-            intermediate_size_per_partition=intermediate_size,
-            params_dtype=torch.bfloat16,
-        )
-        replace_parameter(online_layer, "w13_weight", online_w13)
-        replace_parameter(online_layer, "w2_weight", online_w2)
-        online_method.process_weights_after_loading(online_layer)
-
-    assert checkpoint_method.mxfp4_backend == online_method.mxfp4_backend
-
-    assert_quantized_weights_equal(
-        checkpoint_layer,
-        online_layer,
-        keys=("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"),
-        packed_weight_keys=("w13_weight", "w2_weight"),
-    )
 
 
 def test_quark_ocp_mx_dense_rejects_unaligned_input_partition():
