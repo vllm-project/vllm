@@ -339,14 +339,20 @@ class KVCacheCoordinator(ABC):
             )
 
     def emit_cached_block_events(
-        self, request: Request, computed_blocks: tuple[list[KVCacheBlock], ...]
+        self,
+        request: Request,
+        computed_blocks: tuple[list[KVCacheBlock], ...],
+        num_computed_tokens: int,
     ) -> None:
         for group_idx, group_blocks in enumerate(computed_blocks):
-            if group_blocks:
-                manager = self.single_type_managers[group_idx]
+            manager = self.single_type_managers[group_idx]
+            num_full_blocks = min(
+                len(group_blocks), num_computed_tokens // manager.block_size
+            )
+            if num_full_blocks:
                 manager.block_pool.emit_cached_block_events(
                     request,
-                    len(group_blocks),
+                    num_full_blocks,
                     manager.block_size,
                     group_idx,
                 )
