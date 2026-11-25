@@ -546,6 +546,13 @@ class Worker(WorkerBase):
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
 
+            # Under heterogeneous PP, each worker adopts its own stage's TP size
+            # so downstream model/runner code sees the stage-local TP width.
+            if self.parallel_config.is_heterogeneous_pp:
+                self.parallel_config.tensor_parallel_size = (
+                    self.parallel_config.get_pp_stage_tp_size_for_rank(self.rank)
+                )
+
             # Initialize the distributed environment BEFORE taking
             # memory snapshot
             # This ensures NCCL buffers are allocated before we measure

@@ -162,11 +162,12 @@ class MultiprocExecutor(Executor):
         self.failure_callback: FailureCallback | None = None
 
         tp_size, pp_size, pcp_size = self._get_parallel_sizes()
-        assert self.world_size == tp_size * pp_size * pcp_size, (
-            f"world_size ({self.world_size}) must be equal to the "
-            f"tensor_parallel_size ({tp_size}) x pipeline"
-            f"_parallel_size ({pp_size}) x prefill_context"
-            f"_parallel_size ({pcp_size}). "
+        expected_world_size = sum(self.parallel_config.pp_stage_tp_sizes) * pcp_size
+        assert self.world_size == expected_world_size, (
+            f"world_size ({self.world_size}) must be equal to "
+            f"sum(pp_stage_tp_sizes) ({sum(self.parallel_config.pp_stage_tp_sizes)}) "
+            f"x prefill_context_parallel_size ({pcp_size}) "
+            f"(tensor_parallel_size={tp_size}, pipeline_parallel_size={pp_size})."
         )
 
         num_local_procs = self.local_world_size * max(
@@ -342,6 +343,9 @@ class MultiprocExecutor(Executor):
         pass
 
     def _is_driver_worker(self, rank: int) -> bool:
+        if self.parallel_config.is_heterogeneous_pp:
+            _, tp_rank = self.parallel_config.get_pp_stage_and_tp_rank(rank)
+            return tp_rank == 0
         return rank % self.parallel_config.tensor_parallel_size == 0
 
     def _can_start_workers_concurrently(self, inherited_fds: list[int] | None) -> bool:
@@ -684,6 +688,8 @@ class MultiprocExecutor(Executor):
     def _get_output_rank(self) -> int:
         # Only returns ModelRunnerOutput from TP rank=0 and PP rank=-1
         # (the first TP worker of the last PP stage).
+        if self.parallel_config.is_heterogeneous_pp:
+            return self.parallel_config.pp_stage_offsets[-1]
         # Example:
         # Assuming TP=8, PP=4, then the world_size=32
         # 0-7, PP rank 0

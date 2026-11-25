@@ -59,8 +59,30 @@ if TYPE_CHECKING:
 # local staging for the flag this rank writes to its previous stage's empty when
 # that stage is on another node; the copy engines' own words from
 # _ENGINE_OFFSET, data from _DATA_OFFSET.
+# For heterogeneous PP fan-out (num_dsts > 1), each receiver gets its own
+# 8-byte empty flag and _ENGINE_STRIDE-byte engine staging slot.
 _ENGINE_OFFSET = 64
+_ENGINE_STRIDE = 192
 _DATA_OFFSET = 256
+
+
+def _header_layout(num_dsts: int) -> tuple[list[int], list[int], int]:
+    """Return `(empty_offsets, engine_offsets, data_offset)` for a rank feeding
+    `num_dsts` downstream PP peers.
+
+    For `num_dsts <= 1` (uniform PP, 1-to-1, or fan-in), this matches the
+    legacy fixed layout (`empty=8`, `engine=64`, `data=256`).
+    """
+    if num_dsts <= 1:
+        return [8], [_ENGINE_OFFSET], _DATA_OFFSET
+    empty_offsets = [32 + 8 * i for i in range(num_dsts)]
+    engine_base = ((32 + 8 * num_dsts + 63) // 64) * 64
+    engine_offsets = [engine_base + _ENGINE_STRIDE * i for i in range(num_dsts)]
+    data_offset = max(
+        _DATA_OFFSET,
+        ((engine_base + _ENGINE_STRIDE * num_dsts + 255) // 256) * 256,
+    )
+    return empty_offsets, engine_offsets, data_offset
 
 
 def _check(result) -> Any:
@@ -323,9 +345,12 @@ class CopyEngineTransport(PPTransport):
         on every rank alike, with nothing left allocated, if copy engines are
         not usable on some rank."""
         from vllm.distributed.parallel_state import (
+            HeterogeneousPPGroupCoordinator,
             get_pcp_group,
             get_tp_group,
             in_the_same_node_as,
+            pp_boundary_dst_tp_ranks,
+            pp_boundary_src_tp_rank,
         )
 
         # The same on every rank, so this raises before any collective.
@@ -340,15 +365,56 @@ class CopyEngineTransport(PPTransport):
             raise CopyEngineUnavailable("PP copy engines need CUDA or ROCm")
         self.engines = engines
 
+        stage_rank = pp_group.rank_in_group
+        if isinstance(pp_group, HeterogeneousPPGroupCoordinator):
+            # Heterogeneous PP's cpu_group already spans every rank in the
+            # replica, so one all_gather_object shares handles and errors across
+            # all stages and TP widths simultaneously.
+            comm_world = pp_group.cpu_group.size()
+            my_idx = pp_group.rank
+            other_chains: list[GroupCoordinator] = []
+
+            prev_idx: int | None = None
+            prev_slot_idx = 0
+            if not pp_group.is_first_rank:
+                prev_stage = stage_rank - 1
+                prev_tp_size = pp_group.stage_tp_sizes[prev_stage]
+                cur_tp_size = pp_group.stage_tp_sizes[stage_rank]
+                src_tp = pp_boundary_src_tp_rank(
+                    pp_group.stage_tp_rank, prev_tp_size, cur_tp_size
+                )
+                prev_idx = pp_group.stage_offsets[prev_stage] + src_tp
+                src_dsts = pp_boundary_dst_tp_ranks(src_tp, prev_tp_size, cur_tp_size)
+                prev_slot_idx = src_dsts.index(pp_group.stage_tp_rank)
+
+            next_indices: list[int] = []
+            if not pp_group.is_last_rank:
+                next_stage = stage_rank + 1
+                cur_tp_size = pp_group.stage_tp_sizes[stage_rank]
+                next_tp_size = pp_group.stage_tp_sizes[next_stage]
+                dst_tps = pp_boundary_dst_tp_ranks(
+                    pp_group.stage_tp_rank, cur_tp_size, next_tp_size
+                )
+                next_indices = [pp_group.stage_offsets[next_stage] + r for r in dst_tps]
+        else:
+            comm_world = pp_group.world_size
+            my_idx = stage_rank
+            other_chains = [
+                g for g in (get_tp_group(), get_pcp_group()) if g.world_size > 1
+            ]
+            prev_idx = None if pp_group.is_first_rank else stage_rank - 1
+            prev_slot_idx = 0
+            next_indices = [] if pp_group.is_last_rank else [stage_rank + 1]
+
+        empty_offsets, engine_offsets, my_data_offset = _header_layout(
+            len(next_indices)
+        )
+
         # Anything that can differ between ranks runs inside `step`, and the
         # ranks share its outcome before going on, so they all agree. That
         # includes the other chains over TP (a stage's TP ranks must all use
         # copy engines or none, since NCCL's receive all-gathers over TP) and
         # PCP, so every rank makes the same choice.
-        rank, world = pp_group.rank_in_group, pp_group.world_size
-        other_chains = [
-            g for g in (get_tp_group(), get_pcp_group()) if g.world_size > 1
-        ]
         one_node = all(in_the_same_node_as(pp_group.cpu_group, source_rank=0))
         share, open_peer = _ipc_share, _ipc_open
         if not one_node:
@@ -362,7 +428,7 @@ class CopyEngineTransport(PPTransport):
                 out = fn()
             except Exception as e:
                 error = repr(e)
-            gathered: list[Any] = [None] * world
+            gathered: list[Any] = [None] * comm_world
             torch.distributed.all_gather_object(
                 gathered, (out, error), group=pp_group.cpu_group
             )
@@ -391,19 +457,20 @@ class CopyEngineTransport(PPTransport):
             device = torch.accelerator.current_device_index()
             engines.check_device(device)
             # Zeroed before the handle is shared.
-            ptr, handle, release = share(_DATA_OFFSET + _nbytes(layout))
+            ptr, handle, release = share(my_data_offset + _nbytes(layout))
             releases.append(release)
             phys = current_platform.visible_device_id_to_physical_device_id(device)
             props = torch.cuda.get_device_properties(device)
             pci = (props.pci_domain_id, props.pci_bus_id, props.pci_device_id)
-            return ptr, handle, layout, phys, pci
+            return ptr, handle, layout, phys, pci, my_data_offset, empty_offsets
 
         ranks = step(allocate_recv)
-        ptr, _, layout, _, _ = ranks[rank]
+        ptr, _, layout, _, _, data_offset, _ = ranks[my_idx]
 
         def open_rank(r: int) -> int:
+            peer_data_offset = ranks[r][5]
             peer_ptr, release = open_peer(
-                ranks[r][1], _DATA_OFFSET + _nbytes(ranks[r][2])
+                ranks[r][1], peer_data_offset + _nbytes(ranks[r][2])
             )
             releases.append(release)
             return peer_ptr
@@ -415,52 +482,65 @@ class CopyEngineTransport(PPTransport):
                 [r[3] for r in ranks]
             ):
                 raise RuntimeError("PP GPUs are not all directly connected")
-            prev_ptr = next_ptr = send_ptr = None
-            copier: _CudaCopyEngines | SdmaCopyEngines | None = None
-            if not pp_group.is_first_rank:
-                prev_ptr = open_rank(rank - 1)
-            if not pp_group.is_last_rank:
-                next_ptr = open_rank(rank + 1)
+            prev_ptr = send_ptr = None
+            copiers: list[_CudaCopyEngines | SdmaCopyEngines] = []
+            if prev_idx is not None:
+                prev_ptr = open_rank(prev_idx)
+            if next_indices:
+                first_layout = ranks[next_indices[0]][2]
+                if any(ranks[d][2] != first_layout for d in next_indices[1:]):
+                    raise RuntimeError(
+                        "Heterogeneous PP fan-out receivers have mismatched "
+                        "intermediate tensor layouts"
+                    )
                 # Outside the torch allocator, so memory profiling counts it.
-                send_ptr, _, release = _ipc_share(_nbytes(ranks[rank + 1][2]))
+                send_ptr, _, release = _ipc_share(_nbytes(first_layout))
                 releases.append(release)
-                copier = engines(
-                    send_ptr,
-                    next_ptr + _DATA_OFFSET,
-                    next_ptr,
-                    ptr + _ENGINE_OFFSET,
-                    ranks[rank + 1][4],
-                    not one_node,
-                )
-            return prev_ptr, send_ptr, copier
+                for i, d in enumerate(next_indices):
+                    next_ptr = open_rank(d)
+                    peer_data_offset = ranks[d][5]
+                    copiers.append(
+                        engines(
+                            send_ptr,
+                            next_ptr + peer_data_offset,
+                            next_ptr,
+                            ptr + engine_offsets[i],
+                            ranks[d][4],
+                            not one_node,
+                        )
+                    )
+            return prev_ptr, send_ptr, copiers
 
-        prev_ptr, send_ptr, self.copier = step(connect)[rank]
+        prev_ptr, send_ptr, self.copiers = step(connect)[my_idx]
 
         # Local staging for the empty flag written to another node.
         self.stage_empty = None if one_node else ptr + 16
-        if not pp_group.is_first_rank:
+        if prev_idx is not None:
             assert persistent is not None and prev_ptr is not None
-            self.src = rank - 1
+            self.src = stage_rank - 1
             self.persistent = persistent
             self.recv_layout = layout
-            self.recv_buf = _device_bytes(ptr + _DATA_OFFSET, _nbytes(layout))
+            self.recv_buf = _device_bytes(ptr + data_offset, _nbytes(layout))
             self.full = ptr
-            self.peer_empty = prev_ptr + 8
-        if not pp_group.is_last_rank:
-            assert send_ptr is not None and self.copier is not None
-            self.dst = rank + 1
-            self.send_layout = ranks[rank + 1][2]
+            peer_empty_offsets = ranks[prev_idx][6]
+            self.peer_empty = prev_ptr + peer_empty_offsets[prev_slot_idx]
+        if next_indices:
+            assert send_ptr is not None and self.copiers
+            self.dst = stage_rank + 1
+            self.send_layout = ranks[next_indices[0]][2]
             self.send_specs = {
                 k: (r.dtype, r.row_shape) for k, r in self.send_layout.items()
             }
             self.send_buf = _device_bytes(send_ptr, _nbytes(self.send_layout))
-            self.empty = ptr + 8
-            self.stream = torch.cuda.Stream()
+            self.empty_addrs = [ptr + off for off in empty_offsets]
+            # One side stream per downstream peer so fan-out copies overlap
+            # across NVLink links without head-of-line blocking.
+            self.streams = [torch.cuda.Stream() for _ in self.copiers]
             self.seq = 0
-            # The send buffer's last peer copy.
-            self.peer_done: torch.cuda.Event | None = None
-            # Metadata sends with their step's peer_done.
-            self.pending: deque[tuple[Any, torch.cuda.Event]] = deque()
+            # The send buffer's last peer copies (one event per downstream peer).
+            self.peer_done: list[torch.cuda.Event] = []
+            # Metadata sends with their step's peer_done events.
+            self.pending: deque[tuple[Any, list[torch.cuda.Event]]] = deque()
 
     def recv(self, pp_group: "GroupCoordinator") -> IntermediateTensors:
         """This step's tensors, as views of the persistent tensors. The wait
@@ -488,29 +568,38 @@ class CopyEngineTransport(PPTransport):
         return AsyncIntermediateTensors(out, comm_postprocess=[copy_in])
 
     def send(self, tensors: dict, pp_group: "GroupCoordinator") -> None:
+        if not self.copiers:
+            # Fan-in boundary (src_tp > dst_tp): redundant replicated sender.
+            return
         check_intermediate_tensors(tensors, self.send_specs)
         rows = {k: t.shape[0] for k, t in tensors.items()}
         self.seq += 1
         meta_work = pp_group.isend_object(dict(seq=self.seq, rows=rows), dst=self.dst)
 
-        # Main stream: pack once the previous peer copy is done.
+        # Main stream: pack once the previous step's peer copies are all done.
         main = torch.cuda.current_stream()
-        if self.peer_done is not None:
-            main.wait_event(self.peer_done)
+        for ev in self.peer_done:
+            main.wait_event(ev)
         for key, dst in _views(self.send_buf, self.send_layout, rows).items():
             dst.copy_(tensors[key])
         packed = torch.cuda.Event()
         packed.record(main)
 
-        # Side stream: peer copy once the receive region is empty, then publish.
-        self.stream.wait_event(packed)
-        self.engines.wait_flag(self.stream, self.empty, self.seq - 1)
-        self.copier.copy(self.stream, self.send_layout, rows, self.seq)
-        self.peer_done = torch.cuda.Event()
-        self.peer_done.record(self.stream)
+        # Side streams: peer copy once each receiver's region is empty, then publish.
+        done_events: list[torch.cuda.Event] = []
+        for stream, empty_addr, copier in zip(
+            self.streams, self.empty_addrs, self.copiers
+        ):
+            stream.wait_event(packed)
+            self.engines.wait_flag(stream, empty_addr, self.seq - 1)
+            copier.copy(stream, self.send_layout, rows, self.seq)
+            ev = torch.cuda.Event()
+            ev.record(stream)
+            done_events.append(ev)
+        self.peer_done = done_events
 
         # gloo sends complete only in wait(), which blocks until the peer
         # receives. Step k+1's copy waited for empty >= k, so k was received.
-        self.pending.append((meta_work, self.peer_done))
-        while len(self.pending) > 1 and self.pending[1][1].query():
+        self.pending.append((meta_work, done_events))
+        while len(self.pending) > 1 and all(ev.query() for ev in self.pending[1][1]):
             self.pending.popleft()[0].wait()

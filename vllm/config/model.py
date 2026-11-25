@@ -1684,12 +1684,13 @@ class ModelConfig:
 
         total_num_attention_heads = self.model_arch_config.total_num_attention_heads
         tensor_parallel_size = parallel_config.tensor_parallel_size
-        if total_num_attention_heads % tensor_parallel_size != 0:
-            raise ValueError(
-                f"Total number of attention heads ({total_num_attention_heads})"
-                " must be divisible by tensor parallel size "
-                f"({tensor_parallel_size})."
-            )
+        for stage_tp_size in dict.fromkeys(parallel_config.pp_stage_tp_sizes):
+            if total_num_attention_heads % stage_tp_size != 0:
+                raise ValueError(
+                    f"Total number of attention heads ({total_num_attention_heads})"
+                    " must be divisible by tensor parallel size "
+                    f"({stage_tp_size})."
+                )
 
         if parallel_config.enable_expert_parallel:
             self._verify_with_expert_parallelism()

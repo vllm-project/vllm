@@ -1460,16 +1460,23 @@ def get_pipeline_stages(
 ) -> tuple[KVCacheStage, ...]:
     """The KV cache of every pipeline stage, described by the first worker of
     each stage (workers are ordered by PP rank, then by PCP and TP rank)."""
-    pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
-    workers_per_stage = len(kv_cache_configs) // pipeline_parallel_size
+    parallel_config = vllm_config.parallel_config
     builder = get_kv_cache_config_builder(vllm_config)
+    if parallel_config.is_heterogeneous_pp:
+        stage_configs = [
+            kv_cache_configs[offset] for offset in parallel_config.pp_stage_offsets
+        ]
+    else:
+        pipeline_parallel_size = parallel_config.pipeline_parallel_size
+        workers_per_stage = len(kv_cache_configs) // pipeline_parallel_size
+        stage_configs = kv_cache_configs[::workers_per_stage]
     return tuple(
         KVCacheStage(
             bytes_per_block=_pool_bytes_per_block_from_builder(
                 builder, vllm_config, config.kv_cache_groups
             )
         )
-        for config in kv_cache_configs[::workers_per_stage]
+        for config in stage_configs
     )
 
 
@@ -1609,11 +1616,17 @@ def get_kv_cache_configs(
             min_num_blocks,
         )
 
-    for kv_cache_config in kv_cache_configs:
+    parallel_config = vllm_config.parallel_config
+    for rank, kv_cache_config in enumerate(kv_cache_configs):
+        stage_tp_size = (
+            parallel_config.get_pp_stage_tp_size_for_rank(rank)
+            if parallel_config.is_heterogeneous_pp
+            else parallel_config.tensor_parallel_size
+        )
         kv_cache_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
             kv_cache_config.kv_cache_groups,
-            vllm_config.parallel_config.tensor_parallel_size,
-            vllm_config.parallel_config.decode_context_parallel_size,
+            stage_tp_size,
+            parallel_config.decode_context_parallel_size,
         )
 
     # Every worker receives the scheduler's new_block_ids_to_zero.
@@ -1654,6 +1667,109 @@ def resolve_mamba_block_size(
     )
 
 
+def _get_heterogeneous_pp_kv_cache_groups(
+    vllm_config: VllmConfig,
+    stage_layer_configs: list[dict[str, KVCacheLayerConfig]],
+    merged_layer_configs: dict[str, KVCacheLayerConfig],
+) -> list[KVCacheGroup]:
+    """Group layers across heterogeneous-TP pipeline stages.
+
+    Different PP stages allocate separate GPU KV cache pools, so their physical
+    `page_size_bytes` only need to be uniform *within each stage*, while their
+    logical `block_size` per `(manager_config, dcp_sharded)` policy must match
+    across stages so the centralized scheduler shares one block table per group.
+    """
+    if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+        unify_hybrid_kv_cache_specs(merged_layer_configs)
+        for stage_dict in stage_layer_configs:
+            for name in list(stage_dict):
+                stage_dict[name] = merged_layer_configs[name]
+
+    if is_kv_cache_type_attention_free(merged_layer_configs):
+        return []
+
+    if can_share_block_table(merged_layer_configs):
+        return [KVCacheGroup.from_layers(merged_layer_configs)]
+
+    if any(
+        isinstance(lc.spec, HiddenStateCacheSpec)
+        for lc in merged_layer_configs.values()
+    ):
+        raise NotImplementedError(
+            "HiddenStateCacheSpec is not yet supported with heterogeneous "
+            "pipeline_parallel_tp_sizes."
+        )
+
+    # 1. Unify physical page sizes within each stage independently.
+    unified_stages: list[dict[str, KVCacheLayerConfig]] = [
+        unify_kv_cache_spec_page_size(stage_dict) if stage_dict else {}
+        for stage_dict in stage_layer_configs
+    ]
+
+    # 2. Align logical block sizes across stages for each manager policy so
+    # stages share the same KV cache groups instead of splitting by TP width.
+    target_block_sizes: dict[tuple[Any, bool], int] = {}
+    for stage_dict in unified_stages:
+        for lc in stage_dict.values():
+            key = (lc.manager_config, lc.spec.dcp_sharded)
+            bs = lc.spec.block_size
+            target_block_sizes[key] = (
+                math.lcm(target_block_sizes[key], bs)
+                if key in target_block_sizes
+                else bs
+            )
+
+    aligned_merged: dict[str, KVCacheLayerConfig] = {}
+    for stage_dict in unified_stages:
+        if not stage_dict:
+            continue
+        needs_align = any(
+            lc.spec.block_size
+            != target_block_sizes[(lc.manager_config, lc.spec.dcp_sharded)]
+            for lc in stage_dict.values()
+        )
+        if not needs_align:
+            aligned_merged.update(stage_dict)
+            continue
+
+        # Raise block sizes to the cross-stage LCM, then pad any smaller pages
+        # on this stage up to the stage's new maximum page size without changing
+        # their logical block sizes.
+        resized: dict[str, KVCacheLayerConfig] = {}
+        for name, lc in stage_dict.items():
+            key = (lc.manager_config, lc.spec.dcp_sharded)
+            target_bs = target_block_sizes[key]
+            spec = lc.spec
+            if spec.block_size != target_bs:
+                kw: dict[str, Any] = {"block_size": target_bs}
+                if (
+                    isinstance(spec, (AttentionSpec, MambaSpec))
+                    and spec.page_size_padded is not None
+                ):
+                    kw["page_size_padded"] = None
+                spec = replace(spec, **kw)
+            resized[name] = replace(lc, spec=spec)
+
+        stage_max_page = max(lc.spec.page_size_bytes for lc in resized.values())
+        for name, lc in resized.items():
+            spec = lc.spec
+            if spec.page_size_bytes < stage_max_page:
+                if isinstance(spec, (AttentionSpec, MambaSpec)) and not isinstance(
+                    spec, MLAAttentionSpec
+                ):
+                    spec = replace(spec, page_size_padded=stage_max_page)
+                    assert spec.page_size_bytes == stage_max_page
+                    lc = replace(lc, spec=spec)
+                else:
+                    raise NotImplementedError(
+                        f"Layer {name}: cannot align heterogeneous PP stage "
+                        f"page size {spec.page_size_bytes} to {stage_max_page}."
+                    )
+            aligned_merged[name] = lc
+
+    return _get_kv_cache_groups_uniform_page_size(aligned_merged)
+
+
 def get_global_kv_cache_groups(
     vllm_config: VllmConfig,
     layer_configs: list[dict[str, KVCacheLayerConfig]],
@@ -1687,6 +1803,20 @@ def get_global_kv_cache_groups(
                     extra_retained_tokens=extra_retained_tokens
                 ),
             )
+
+    if vllm_config.parallel_config.is_heterogeneous_pp and not (
+        vllm_config.model_config.supports_kv_cache_grouping
+        or vllm_config.attention_config.hisparse_config is not None
+    ):
+        stage_layer_configs = [
+            {name: merged_layer_configs[name] for name in layer_configs[offset]}
+            for offset in vllm_config.parallel_config.pp_stage_offsets
+        ]
+        groups = _get_heterogeneous_pp_kv_cache_groups(
+            vllm_config, stage_layer_configs, merged_layer_configs
+        )
+        _check_exact_partition(groups, merged_layer_configs)
+        return groups
 
     # Get global KV cache groups. This also handles spec unification for
     # hybrid models when disable_hybrid_kv_cache_manager is enabled.
