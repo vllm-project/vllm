@@ -57,9 +57,9 @@ Once the KV cache is sized, vLLM limits how much memory PyTorch's caching alloca
 may reserve, so that it releases cached blocks rather than taking the memory kept for
 other allocations. On ROCm, PyTorch also allocates from
 [expandable segments](https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
-from then on, which let it release every free page at that limit instead of failing
-with fragmented memory. Set `PYTORCH_ALLOC_CONF=expandable_segments:False` to keep its
-default segments.
+from then on, so that at that limit it can release free memory even from a block that
+is partly in use, instead of failing with fragmented memory. Set
+`PYTORCH_ALLOC_CONF=expandable_segments:False` to keep its default segments.
 
 On other platforms (TPU, XPU, CPU and others), and where vLLM falls back to
 estimate-based sizing, `gpu_memory_utilization` still sets the fraction of device memory
