@@ -2,7 +2,7 @@
 set -e
 
 if [[ $# -lt 3 ]]; then
-  echo "Usage: $0 <registry> <repo> <commit>"
+  echo "Usage: $0 <registry> <repo> <commit> [x86|arm64]"
   exit 1
 fi
 
@@ -10,26 +10,30 @@ REGISTRY=$1
 REPO=$2
 BUILDKITE_COMMIT=$3
 
-# image_build_cpu_arm64.sh sets CPU_ARCH=arm64: a native build, without
-# the torch nightly lane.
-CPU_ARCH=${CPU_ARCH:-x86}
-TAG_SUFFIX="cpu"
-CACHE_SUFFIX="x86_cpu"
-BUILD_ARGS=(--build-arg VLLM_CPU_X86=true --build-arg USE_SCCACHE=1)
-if [[ "$CPU_ARCH" == "arm64" ]]; then
-  TAG_SUFFIX="arm64-cpu"
-  CACHE_SUFFIX="arm64_cpu"
-  BUILD_ARGS=(--build-arg USE_SCCACHE=1)
-# When TORCH_NIGHTLY=1, build the CPU image against torch nightly and tag it
-# with the -torch-nightly-cpu suffix the test steps pull on the nightly lane.
-# Its cache gets its own ref: it resolves a different torch, so sharing one
-# with the regular lane would have the two evict each other on every run.
-elif [[ "${TORCH_NIGHTLY:-0}" == "1" ]]; then
-  TAG_SUFFIX="torch-nightly-cpu"
-  CACHE_SUFFIX="x86_cpu-nightly"
-  BUILD_ARGS+=(--build-arg PYTORCH_NIGHTLY=1)
-fi
-IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-$TAG_SUFFIX"
+# SUFFIX names the image tag and the cache refs.
+case "${4:-x86}" in
+  x86)
+    SUFFIX="cpu"
+    BUILD_ARGS=(--build-arg VLLM_CPU_X86=true --build-arg USE_SCCACHE=1)
+    # When TORCH_NIGHTLY=1, build the CPU image against torch nightly and tag it
+    # with the -torch-nightly-cpu suffix the test steps pull on the nightly lane.
+    # Its cache gets its own ref too: it resolves a different torch, so sharing
+    # one with the regular lane would have the two evict each other on every run.
+    if [[ "${TORCH_NIGHTLY:-0}" == "1" ]]; then
+      SUFFIX="torch-nightly-cpu"
+      BUILD_ARGS+=(--build-arg PYTORCH_NIGHTLY=1)
+    fi
+    ;;
+  arm64)  # a native build, without the torch nightly lane
+    SUFFIX="arm64-cpu"
+    BUILD_ARGS=(--build-arg USE_SCCACHE=1)
+    ;;
+  *)
+    echo "Unknown arch: $4 (expected x86 or arm64)" >&2
+    exit 1
+    ;;
+esac
+IMAGE="$REGISTRY/$REPO:$BUILDKITE_COMMIT-$SUFFIX"
 
 # replace invalid characters in Docker image tags and truncate to 128 chars
 clean_docker_tag() {
@@ -38,34 +42,34 @@ clean_docker_tag() {
 }
 
 # resolve and set: CACHE_TO, CACHE_FROM, CACHE_FROM_BASE_BRANCH, CACHE_FROM_MAIN
-# Reuses the same ECR cache repos as the CUDA image build, with CACHE_SUFFIX
-# on every tag so CPU and CUDA cache blobs stay isolated.
+# Reuses the same ECR cache repos as the CUDA image build, with SUFFIX on
+# every tag so CPU and CUDA cache blobs stay isolated.
 prepare_cache_tags() {
     TEST_CACHE_ECR="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-test-cache"
     MAIN_CACHE_ECR="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache"
 
     if [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]]; then
         if [[ "${BUILDKITE_BRANCH:-}" == "main" ]]; then
-            cache="${MAIN_CACHE_ECR}:latest-${CACHE_SUFFIX}"
+            cache="${MAIN_CACHE_ECR}:latest-${SUFFIX}"
         else
             clean_branch=$(clean_docker_tag "${BUILDKITE_BRANCH:-unknown}")
-            cache="${TEST_CACHE_ECR}:${clean_branch}-${CACHE_SUFFIX}"
+            cache="${TEST_CACHE_ECR}:${clean_branch}-${SUFFIX}"
         fi
         CACHE_TO="$cache"
         CACHE_FROM="$cache"
         CACHE_FROM_BASE_BRANCH="$cache"
     else
-        CACHE_TO="${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}-${CACHE_SUFFIX}"
-        CACHE_FROM="${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}-${CACHE_SUFFIX}"
+        CACHE_TO="${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}-${SUFFIX}"
+        CACHE_FROM="${TEST_CACHE_ECR}:pr-${BUILDKITE_PULL_REQUEST}-${SUFFIX}"
         if [[ "${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-main}" == "main" ]]; then
-            CACHE_FROM_BASE_BRANCH="${MAIN_CACHE_ECR}:latest-${CACHE_SUFFIX}"
+            CACHE_FROM_BASE_BRANCH="${MAIN_CACHE_ECR}:latest-${SUFFIX}"
         else
             clean_base=$(clean_docker_tag "${BUILDKITE_PULL_REQUEST_BASE_BRANCH}")
-            CACHE_FROM_BASE_BRANCH="${TEST_CACHE_ECR}:${clean_base}-${CACHE_SUFFIX}"
+            CACHE_FROM_BASE_BRANCH="${TEST_CACHE_ECR}:${clean_base}-${SUFFIX}"
         fi
     fi
 
-    CACHE_FROM_MAIN="${MAIN_CACHE_ECR}:latest-${CACHE_SUFFIX}"
+    CACHE_FROM_MAIN="${MAIN_CACHE_ECR}:latest-${SUFFIX}"
 }
 
 # authenticate with AWS ECR (public, for the image; private, for the cache repos)
