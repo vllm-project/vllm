@@ -9752,7 +9752,7 @@ def test_cpu_encoder_input_updates_resume_and_abort(async_scheduling):
 
 @pytest.mark.parametrize("prefix_hit", [False, True])
 def test_cpu_encoder_input_updates_restore_after_kv_load_failure(prefix_hit):
-    """A connector failure rewinds a running request and requires its pixels again."""
+    """A connector failure restarts a running request and requires its pixels again."""
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
         enable_prefix_caching=prefix_hit,
@@ -9805,11 +9805,10 @@ def test_cpu_encoder_input_updates_restore_after_kv_load_failure(prefix_hit):
     )
     assert request.num_computed_tokens == 0
     replay = scheduler.schedule()
-    assert replay.scheduled_new_reqs == []
+    (resumed,) = replay.scheduled_new_reqs
+    assert resumed.mm_features[0].data is request.mm_features[0].data is not None
     assert replay.scheduled_encoder_inputs == {request.request_id: [0]}
-    assert replay.encoder_input_updates == {
-        request.request_id: {0: request.mm_features[0].data},
-    }
+    assert replay.encoder_input_updates == {}
     scheduler.update_from_output(replay, model_output)
     assert scheduler.schedule().encoder_input_updates == {request.request_id: {0: None}}
 
