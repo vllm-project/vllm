@@ -1315,11 +1315,14 @@ vllm serve mistralai/Voxtral-Mini-3B-2507 \
     decoded waveform matches the soundfile reference length.
 
 !!! note
-    `torchcodec` ships as a requirement on CUDA, CPU and XPU builds. On other
-    platforms (e.g. ROCm, TPU) `auto` falls back to the soundfile → PyAV
-    chain unless you install it manually. torchcodec also links against a
-    system FFmpeg installation; if FFmpeg is missing, `auto` falls back the
-    same way.
+    The TorchCodec audio backend requires TorchCodec 0.17 or newer and a
+    system FFmpeg installation. CUDA, CPU and XPU builds include TorchCodec.
+    On other platforms (e.g. ROCm, TPU), install it separately to use this
+    backend. If the required dependencies are unavailable, `auto` falls
+    back to soundfile and then PyAV.
+
+    Audio inputs must be self-contained. The FFmpeg-backed audio decoders
+    reject secondary network and file opens through FFmpeg's I/O layer.
 
 ### Embedding Inputs
 
