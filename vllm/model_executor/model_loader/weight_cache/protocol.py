@@ -354,6 +354,13 @@ class WeightCacheKey:
     dp_rank: int = 0
     enable_expert_parallel: bool = False
     expert_placement_strategy: str = "linear"
+    enable_hc_sp_replicated_moe: bool = False
+    """Whole experts on every TP rank instead of TP shards, so weights loaded
+    with one setting have the other's shapes."""
+    hc_sp_replicated_moe_decode_layout: str | None = None
+    """With "copy" the TP shards stay beside the whole experts for the
+    specialized decode. "shares" and unset hold the same tensors but are keyed
+    apart, like a configured MoE backend."""
     moe_backend: str = "auto"
     """Kernel backends pick the processed weight layout (e.g. shuffled or
     repacked), so weights processed for one backend are wrong for another."""
@@ -380,6 +387,8 @@ class WeightCacheKey:
         dp_rank: int = 0,
         enable_expert_parallel: bool = False,
         expert_placement_strategy: str = "linear",
+        enable_hc_sp_replicated_moe: bool = False,
+        hc_sp_replicated_moe_decode_layout: str | None = None,
         kernel_config: KernelConfig | None = None,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
@@ -428,6 +437,8 @@ class WeightCacheKey:
             dp_rank=dp_rank,
             enable_expert_parallel=enable_expert_parallel,
             expert_placement_strategy=expert_placement_strategy,
+            enable_hc_sp_replicated_moe=enable_hc_sp_replicated_moe,
+            hc_sp_replicated_moe_decode_layout=hc_sp_replicated_moe_decode_layout,
             moe_backend=kernel_config.moe_backend,
             linear_backend=kernel_config.linear_backend,
             linear_backend_per_quant=linear_backend_per_quant,

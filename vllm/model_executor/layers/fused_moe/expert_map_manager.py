@@ -263,12 +263,16 @@ class ExpertMapManager:
     def _init_aiter_shared_experts_topK_buffer(self):
         if self.num_fused_shared_experts > 0:
             dp_size = self.moe_parallel_config.dp_size
+            # The buffer is built once and shared by every MoE layer. Without EP
+            # its contents do not depend on the rank or the TP size, so the
+            # cache key leaves them out: layers of different TP sizes (whole
+            # experts beside TP-sharded ones) then reuse the one buffer.
             init_aiter_topK_meta_data(
                 n_routed_experts=self.global_num_experts,
                 n_shared_experts=self.num_fused_shared_experts,
                 top_k=self.top_k,
-                tp_rank=self.ep_rank if self.use_ep else self.tp_rank,
-                tp_size=self.ep_size if self.use_ep else self.tp_size,
+                tp_rank=self.ep_rank if self.use_ep else 0,
+                tp_size=self.ep_size if self.use_ep else 1,
                 shared_experts_score=1.0,
                 max_num_tokens=self.max_num_batched_tokens * dp_size,
                 is_EP=self.use_ep,
@@ -285,14 +289,6 @@ class ExpertMapManager:
     @property
     def ep_rank(self) -> int:
         return self.moe_parallel_config.ep_rank
-
-    @property
-    def tp_size(self) -> int:
-        return self.moe_parallel_config.tp_size
-
-    @property
-    def tp_rank(self) -> int:
-        return self.moe_parallel_config.tp_rank
 
     @property
     def local_num_experts(self) -> int:

@@ -1300,6 +1300,8 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
                 enable_eplb=False,
                 enable_expert_parallel=False,
                 expert_placement_strategy="linear",
+                enable_hc_sp_replicated_moe=False,
+                hc_sp_replicated_moe_decode_layout=None,
                 rank=0,
             ),
             model_config=SimpleNamespace(is_moe=False),
@@ -1851,6 +1853,88 @@ def test_ipc_cache_key_tracks_skipped_mm_components(
 
     daemon_key = key(**daemon_mm_kwargs)
     assert daemon_key.mismatched_fields(key(**engine_mm_kwargs)) == mismatched_fields
+
+
+_REPLICATED_MOE = {"enable_hc_sp_replicated_moe": True}
+# The key does not read --monokernel; the config sets the layout only with it.
+_COPY = {**_REPLICATED_MOE, "hc_sp_replicated_moe_decode_layout": "copy"}
+
+
+@pytest.mark.parametrize(
+    "daemon_parallel,engine_parallel,mismatched_fields",
+    [
+        (_REPLICATED_MOE, _REPLICATED_MOE, []),
+        ({}, _REPLICATED_MOE, ["enable_hc_sp_replicated_moe"]),
+        (_COPY, _COPY, []),
+        (_REPLICATED_MOE, _COPY, ["hc_sp_replicated_moe_decode_layout"]),
+    ],
+)
+def test_ipc_cache_key_tracks_replicated_moe(
+    tmp_path, monkeypatch, daemon_parallel, engine_parallel, mismatched_fields
+):
+    """--enable-hc-sp-replicated-moe keeps whole experts on every TP rank
+    instead of TP shards, and the "copy" decode layout keeps the TP shards
+    beside them, so an engine and a daemon that differ in either must not
+    share weights."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.config import CacheConfig, KernelConfig, LoadConfig, ParallelConfig
+    from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        WeightCacheKey,
+        WeightCacheState,
+    )
+
+    def parallel_config(overrides):
+        # Set after construction: validation needs ROCm and TP=2 for the flag.
+        config = ParallelConfig()
+        for name, value in overrides.items():
+            setattr(config, name, value)
+        return config
+
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        dtype=torch.bfloat16,
+        quantization=None,
+        quantization_config=None,
+        revision=None,
+        hf_config=SimpleNamespace(architectures=["Qwen4ExpForCausalLM"]),
+        hf_text_config=SimpleNamespace(),
+        multimodal_config=None,
+        is_moe=True,
+    )
+    config = SimpleNamespace(
+        model_config=model_config,
+        parallel_config=parallel_config(daemon_parallel),
+        speculative_config=None,
+        cache_config=CacheConfig(),
+        kernel_config=KernelConfig(),
+    )
+    server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
+    config.parallel_config = parallel_config(engine_parallel)
+    monkeypatch.setattr(
+        ipc_loader, "check_weight_cache_loader_support", lambda *a, **k: None
+    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    requested_keys: list[WeightCacheKey] = []
+
+    def request_state(key):
+        requested_keys.append(key)
+        return WeightCacheState(
+            storages=[],
+            manifest={"storages": [], "tensors": {}},
+            aliases={},
+            attrs={},
+        )
+
+    loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    monkeypatch.setattr(loader, "_request_state", request_state)
+    monkeypatch.setattr(loader, "_build_model", lambda *args: torch.nn.Module())
+    loader.load_model(config, model_config)
+    assert len(requested_keys) == 1
+    assert server.cache_key.mismatched_fields(requested_keys[0]) == mismatched_fields
 
 
 def _warmup_cache_request(config_hash: str = "a" * 64, **overrides) -> dict:

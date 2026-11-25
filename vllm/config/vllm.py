@@ -1658,6 +1658,9 @@ class VllmConfig:
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()
+        self.parallel_config.resolve_hc_sp_replicated_moe_decode_layout(
+            self.kernel_config.monokernel
+        )
 
         if self.model_config is not None:
             # Normalize EPLB num_redundant_experts before verification.

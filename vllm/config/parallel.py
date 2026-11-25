@@ -47,6 +47,7 @@ DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
 DBOSchedule = Literal["dispatch-combine-overlap", "all-reduce-overlap"]
+ReplicatedMoEDecodeLayout = Literal["copy", "shares"]
 EPLBCommunicatorBackend = Literal[
     "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl", "symm_mem"
 ]
@@ -297,6 +298,31 @@ class ParallelConfig:
     """Enable sequence parallelism for HyperConnection (HC) computation.
     Currently supported by Qwen4Exp on CUDA/ROCm with TP>1 and PP=1 (ignored when TP=1).
     Does not change MoE parallelism. MoE SP may enable HC SP independently of this flag.
+    """
+    enable_hc_sp_replicated_moe: bool = False
+    """Keep every routed expert and the fused shared expert of the Qwen4Exp
+    decoder layers whole on each TP rank and run the MoE on the rank's own HC SP
+    rows, so the MoE input all-gather and output reduce-scatter go away; the
+    attention ones stay (ROCm, TP=2). Each rank holds all expert weights instead
+    of a 1/TP slice. Without `--monokernel` every step, decode included, uses
+    this layout. With it, `--hc-sp-replicated-moe-decode-layout` sets what the
+    specialized decode reads. It needs `--enable-hc-sp` and the AITER fused
+    shared expert (`VLLM_ROCM_USE_AITER=1`,
+    `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`). Not supported with expert
+    parallelism (so neither with EPLB), DP>1, PP>1, PCP>1, DBO, speculative
+    decoding or routed-experts capture.
+    """
+    hc_sp_replicated_moe_decode_layout: ReplicatedMoEDecodeLayout | None = None
+    """What the specialized decode (`--monokernel`) reads with
+    `--enable-hc-sp-replicated-moe`:
+
+    - "copy": a TP-sharded copy of the experts, which the layers keep besides
+      the whole ones (each rank holds its TP shard of every expert as well, so
+      less memory is left for the KV cache); every other step runs the whole
+      experts.
+    - "shares": the rank's share of the whole experts, read in place.
+
+    `None` selects "copy" with `--monokernel`. Set only with both flags.
     """
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
@@ -819,6 +845,20 @@ class ParallelConfig:
         if self.dcp_q_replicate is None:
             self.dcp_q_replicate = q_replicate
 
+    def resolve_hc_sp_replicated_moe_decode_layout(self, monokernel: bool) -> None:
+        """Settle `hc_sp_replicated_moe_decode_layout`, which only the
+        specialized decode (`--monokernel`) reads: "copy" when unset there,
+        refused elsewhere, so that the compile factors name the layers' layout.
+        """
+        if not (self.enable_hc_sp_replicated_moe and monokernel):
+            if self.hc_sp_replicated_moe_decode_layout is not None:
+                raise ValueError(
+                    "--hc-sp-replicated-moe-decode-layout requires "
+                    "--enable-hc-sp-replicated-moe and --monokernel"
+                )
+        elif self.hc_sp_replicated_moe_decode_layout is None:
+            self.hc_sp_replicated_moe_decode_layout = "copy"
+
     @property
     def world_size_across_dp(self) -> int:
         """Process world size across TP, PCP, PP, and DP."""
@@ -1176,6 +1216,10 @@ class ParallelConfig:
             "numa_bind_cpus",
             "assigned_physical_gpu_ids",
         }
+        # Unset unless the replicated MoE runs with `--monokernel`
+        # (`resolve_hc_sp_replicated_moe_decode_layout`).
+        if self.hc_sp_replicated_moe_decode_layout is None:
+            ignored_factors.add("hc_sp_replicated_moe_decode_layout")
 
         return get_compile_factors(self, ignored_factors)
 
@@ -1388,6 +1432,26 @@ class ParallelConfig:
                 "dbo_decode_token_threshold and dbo_prefill_token_threshold must "
                 f"be at least the number of microbatches ({self.num_ubatches})."
             )
+
+        if self.enable_hc_sp_replicated_moe:
+            flag = "--enable-hc-sp-replicated-moe"
+            if not current_platform.is_rocm():
+                raise ValueError(f"{flag} requires ROCm")
+            if not self.enable_hc_sp:
+                raise ValueError(f"{flag} requires --enable-hc-sp")
+            if self.tensor_parallel_size != 2:
+                raise ValueError(f"{flag} supports TP=2 only")
+            # EPLB requires expert parallelism. The MoE layer folds PCP ranks
+            # into its TP group, which would shard the experts again.
+            for unsupported, enabled in (
+                ("expert parallelism", self.enable_expert_parallel),
+                ("DP>1", self.data_parallel_size > 1),
+                ("PP>1", self.pipeline_parallel_size > 1),
+                ("PCP>1", self.prefill_context_parallel_size > 1),
+                ("DBO", self.use_ubatching),
+            ):
+                if enabled:
+                    raise ValueError(f"{flag} does not support {unsupported}")
 
         pure_tp = (
             self.tensor_parallel_size > 1

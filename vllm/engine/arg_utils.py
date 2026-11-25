@@ -113,6 +113,7 @@ from vllm.config.parallel import (
     DCPCommBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
+    ReplicatedMoEDecodeLayout,
 )
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field, replace
@@ -536,6 +537,10 @@ class EngineArgs:
     data_parallel_multi_port_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_hc_sp: bool = ParallelConfig.enable_hc_sp
+    enable_hc_sp_replicated_moe: bool = ParallelConfig.enable_hc_sp_replicated_moe
+    hc_sp_replicated_moe_decode_layout: ReplicatedMoEDecodeLayout | None = (
+        ParallelConfig.hc_sp_replicated_moe_decode_layout
+    )
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_batch_sharded_sampling: bool | None = (
         ParallelConfig.enable_batch_sharded_sampling
@@ -1300,6 +1305,14 @@ class EngineArgs:
             "a supervisor port.",
         )
         parallel_group.add_argument("--enable-hc-sp", **parallel_kwargs["enable_hc_sp"])
+        parallel_group.add_argument(
+            "--enable-hc-sp-replicated-moe",
+            **parallel_kwargs["enable_hc_sp_replicated_moe"],
+        )
+        parallel_group.add_argument(
+            "--hc-sp-replicated-moe-decode-layout",
+            **parallel_kwargs["hc_sp_replicated_moe_decode_layout"],
+        )
         parallel_group.add_argument(
             "--enable-expert-parallel",
             "-ep",
@@ -2600,6 +2613,8 @@ class EngineArgs:
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             is_moe_model=model_config.is_moe,
             enable_hc_sp=self.enable_hc_sp,
+            enable_hc_sp_replicated_moe=self.enable_hc_sp_replicated_moe,
+            hc_sp_replicated_moe_decode_layout=self.hc_sp_replicated_moe_decode_layout,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
