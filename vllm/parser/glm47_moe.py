@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -52,18 +53,47 @@ GLM_TURN_BOUNDARIES = frozenset(
     ("<|system|>", "<|user|>", "<|assistant|>", "<|observation|>")
 )
 
-# Key cannot cross `<arg_key>` or `</arg_key>`, so stray tags never leak into
-# `key`. Possessive quantifiers prevent backtracking on unterminated buffers.
-_ARG_KEY = r"<arg_key>(?P<key>[^<]*+(?:<(?!/?arg_key>)[^<]*+)*+)(?:</arg_key>\s*+)++"
+_KEY_CLOSE_TAIL_RE = re.compile(r"\s*+(?:" + re.escape(ARG_KEY_END) + r"\s*+)*+")
 
-_ARG_RE = re.compile(
-    _ARG_KEY + r"<arg_value>(?P<value>.*?)</arg_value>",
-    re.DOTALL,
-)
-_PARTIAL_ARG_RE = re.compile(
-    _ARG_KEY + r"<arg_value>(?P<value>.*)$",
-    re.DOTALL,
-)
+
+def _find_arg(text: str, pos: int) -> tuple[int, int, int] | None:
+    """Locate the first argument whose key starts at or after `pos`.
+
+    Returns `(key_start, key_end, value_start)`. The key cannot cross
+    `<arg_key>` or `</arg_key>`, and repeated `</arg_key>` tags (with
+    optional whitespace) before `<arg_value>` are skipped so stray tags
+    never leak into the key. Scans the text in linear time.
+    """
+    while (start := text.find(ARG_KEY_START, pos)) >= 0:
+        key_start = start + len(ARG_KEY_START)
+        key_end = text.find(ARG_KEY_END, key_start)
+        if key_end < 0:
+            return None
+        last_open = text.rfind(ARG_KEY_START, key_start, key_end)
+        if last_open >= 0:
+            key_start = last_open + len(ARG_KEY_START)
+        tail = _KEY_CLOSE_TAIL_RE.match(text, key_end + len(ARG_KEY_END))
+        after = tail.end() if tail is not None else key_end + len(ARG_KEY_END)
+        if text.startswith(ARG_VALUE_START, after):
+            return key_start, key_end, after + len(ARG_VALUE_START)
+        pos = after
+    return None
+
+
+def _closed_args(text: str, pos: int) -> Iterator[tuple[int, str, str, int]]:
+    """Yield `(start, key, value, end)` for each closed argument from `pos`."""
+    while (arg := _find_arg(text, pos)) is not None:
+        key_start, key_end, value_start = arg
+        value_end = text.find(ARG_VALUE_END, value_start)
+        if value_end < 0:
+            return
+        pos = value_end + len(ARG_VALUE_END)
+        yield (
+            key_start - len(ARG_KEY_START),
+            text[key_start:key_end],
+            text[value_start:value_end],
+            pos,
+        )
 
 
 class _ClosedArgs:
@@ -94,10 +124,10 @@ def _glm47_parse_args(
         pos = len(closed.text)
     start = pos
 
-    for match in _ARG_RE.finditer(raw_args, pos):
-        outside.append(raw_args[pos : match.start()])
-        params[match.group("key").strip()] = match.group("value")
-        pos = match.end()
+    for arg_start, key, value, end in _closed_args(raw_args, pos):
+        outside.append(raw_args[pos:arg_start])
+        params[key.strip()] = value
+        pos = end
 
     if closed is not None and pos > start:
         closed.text = raw_args[:pos]
@@ -107,11 +137,12 @@ def _glm47_parse_args(
     open_key = None
     if partial:
         remaining = "".join(outside) + raw_args[pos:]
-        match = _PARTIAL_ARG_RE.search(remaining)
-        if match:
-            key = match.group("key").strip()
+        arg = _find_arg(remaining, 0)
+        if arg is not None:
+            key_start, key_end, value_start = arg
+            key = remaining[key_start:key_end].strip()
             if key:
-                params[key] = match.group("value")
+                params[key] = remaining[value_start:]
                 open_key = key
 
     return params, open_key

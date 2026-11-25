@@ -376,7 +376,7 @@ def test_arg_converter_ignores_stray_arg_tags(key_prefix: str):
 
 @pytest.mark.parametrize("key_prefix", _STRAY_KEY_CASES)
 def test_partial_arg_converter_ignores_stray_arg_tags(key_prefix: str):
-    """Without `</arg_value>` the input reaches `_PARTIAL_ARG_RE`, not `_ARG_RE`."""
+    """Without `</arg_value>`, parsing uses the partial path, not `_closed_args`."""
     raw_args = f"{key_prefix}<arg_value>/tmp/x"
     assert json.loads(_glm47_arg_converter(raw_args, True)) == {"path": "/tmp/x"}
 
