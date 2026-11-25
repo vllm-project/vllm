@@ -235,6 +235,13 @@ def _small_hyv4_dfly_config(config):
     return config
 
 
+def _small_hyv4_long_config(config):
+    _small_hyv4_dfly_config(config)
+    # ShardQ needs fewer than 16 heads per rank; 16 heads give 8 at TP2.
+    config.update({"num_attention_heads": 16})
+    return config
+
+
 def _small_hyv4_flash_dfly_config(config):
     # Four layers keep a sparse DFly target layer, SWA layers and Engram layer 2.
     config = dummy_hf_overrides(
@@ -351,6 +358,25 @@ _E2E_CASES["hy4-flash-fp8-ds-mla"] = replace(
         "kv_cache_dtype": "fp8_ds_mla",
     },
 )
+# TP2 only: the long prompt's second chunk has at least IHC_SP_MIN_TOKENS and
+# sparse_mla_shard_q_min_tokens tokens and runs past index_topk, so it engages
+# iHC SP and ShardQ.
+_ALL_CASES = {
+    **_E2E_CASES,
+    "hy4-long": replace(
+        _E2E_CASES["hy4"],
+        hf_overrides=_small_hyv4_long_config,
+        prompts=(
+            *_E2E_CASES["hy4"].prompts,
+            tuple((i * 53) % 241 + 3 for i in range(3100)),
+        ),
+        engine_kwargs={
+            **_E2E_CASES["hy4"].engine_kwargs,
+            "max_model_len": 4096,
+            "max_num_batched_tokens": 2048,
+        },
+    ),
+}
 
 _MAX_TOKENS = 12
 
@@ -455,7 +481,7 @@ def _eager_target(
     vllm_runner, cache: dict[tuple[str, int], list], case_id: str, tp: int = 1
 ) -> list:
     if (case_id, tp) not in cache:
-        case = _E2E_CASES[case_id]
+        case = _ALL_CASES[case_id]
         with vllm_runner(
             case.model, **case.runner_kwargs(graphs=False, dfly=False, tp=tp)
         ) as model:
@@ -470,7 +496,9 @@ _DFLY_PARAMS = [
     pytest.param(case_id, graphs, 1, id=f"{graphs_id}-{case_id}")
     for case_id in _E2E_CASES
     for graphs, graphs_id in ((False, "eager"), (True, "full-decode-graphs"))
-] + [pytest.param("hy4", True, 2, id="tp2-full-decode-graphs-hy4", marks=_TP2)]
+] + [
+    pytest.param("hy4-long", True, 2, id="tp2-full-decode-graphs-hy4-long", marks=_TP2)
+]
 
 
 @requires_gfx950
@@ -489,7 +517,7 @@ def test_hyv4_dfly_greedy_matches_target(
     a near tie points at the DFly draft/verify path, or with graphs at stale
     FULL_DECODE_ONLY replay metadata on padded decode batches.
     """
-    case = _E2E_CASES[case_id]
+    case = _ALL_CASES[case_id]
     expected = _eager_target(vllm_runner, eager_target_outputs, case_id, tp)
     with vllm_runner(case.model, **case.runner_kwargs(graphs, True, tp)) as model:
         if graphs:
@@ -508,13 +536,13 @@ def test_hyv4_dfly_greedy_matches_target(
 @pytest.mark.parametrize(
     "case_id,tp",
     [pytest.param(case_id, 1, id=case_id) for case_id in _E2E_CASES]
-    + [pytest.param("hy4", 2, id="tp2-hy4", marks=_TP2)],
+    + [pytest.param("hy4-long", 2, id="tp2-hy4-long", marks=_TP2)],
 )
 def test_hyv4_full_decode_graphs_match_eager(
     vllm_runner, hyv4_recipe_env, eager_target_outputs, case_id: str, tp: int
 ) -> None:
     """FULL_DECODE_ONLY graph replay must decode like eager for the target."""
-    case = _E2E_CASES[case_id]
+    case = _ALL_CASES[case_id]
     expected = _eager_target(vllm_runner, eager_target_outputs, case_id, tp)
     with vllm_runner(
         case.model, **case.runner_kwargs(graphs=True, dfly=False, tp=tp)
