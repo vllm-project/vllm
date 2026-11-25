@@ -21,6 +21,19 @@ class XPUModelRunner(GPUModelRunner):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
+    def initialize_kv_cache(self, *args, **kwargs) -> None:
+        spec = self.speculative_config
+        if spec is not None and spec.method == "dspark" and self.speculator is not None:
+            configure = getattr(self.model_state, "configure_dspark_draft", None)
+            if configure is not None:
+                # The draft layers are loaded. Attach their XPU forward before
+                # the shared setup builds metadata and binds the cache views.
+                configure(self.speculator.model)
+        super().initialize_kv_cache(*args, **kwargs)
+        configure_graphs = getattr(self.model_state, "configure_xpu_graphs", None)
+        if configure_graphs is not None:
+            configure_graphs(self.cudagraph_manager, self.speculator)
+
 
 class XPUMMEncoderModelRunner(MMEncoderModelRunner):
     """An encoder-only model runner for XPU devices."""

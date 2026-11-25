@@ -429,6 +429,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "random": "vllm-project/mamba2-codestral-v0.1-tiny-random",
         },
     ),
+    "MiniCPM5MoEForCausalLM": _HfExamplesInfo("", is_available_online=False),
     "MiniCPMForCausalLM": _HfExamplesInfo(
         "openbmb/MiniCPM-2B-sft-bf16", trust_remote_code=True
     ),

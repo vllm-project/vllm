@@ -4,6 +4,7 @@
 
 import copy
 import functools
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -1173,6 +1174,7 @@ class FlashAttentionImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
+        self.dense_attention_kernel: Callable[..., Any] = _FA4_DENSE_ATTENTION_KERNEL
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
@@ -1493,7 +1495,7 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 causal = not has_window
 
-            _FA4_DENSE_ATTENTION_KERNEL(
+            self.dense_attention_kernel(
                 q=query[:num_actual_tokens],
                 k=key_cache,
                 v=value_cache,

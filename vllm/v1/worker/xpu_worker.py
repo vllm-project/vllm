@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from collections.abc import Iterable
 
 import torch
 
@@ -226,6 +227,22 @@ class XPUWorker(Worker):
         if self.vllm_config.is_mm_encoder_only:
             return XPUMMEncoderModelRunner(self.vllm_config, self.device)
         return XPUModelRunner(self.vllm_config, self.device)
+
+    def reload_weights(
+        self,
+        weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
+        weights_path: str | None = None,
+        is_checkpoint_format: bool = True,
+    ) -> None:
+        if "MiniCPM5MoEForCausalLM" in self.model_config.architectures:
+            target = getattr(self.model_runner.get_model(), "model", None)
+            if getattr(target, "specialized_decode", None) is not None:
+                # Captured mono can retain derived weights. Refuse before the
+                # parent enters the KV cache loan or mutates model parameters.
+                raise NotImplementedError(
+                    "Reloading weights with MiniCPM5 XPU mono is unsupported"
+                )
+        super().reload_weights(weights_iterator, weights_path, is_checkpoint_format)
 
     def shutdown(self) -> None:
         logger.info(
