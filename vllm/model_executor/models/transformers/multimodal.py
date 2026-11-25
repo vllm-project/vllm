@@ -180,6 +180,18 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
     def _fuses_audio_into_video(self) -> bool:
         return bool(get_load_audio_from_video(self.ctx.get_merged_mm_kwargs({})))
 
+    @cached_property
+    def _prompt_prefix_ids(self) -> list[int]:
+        """Tokens the HF processor puts before a prompt on top of what its tokenizer
+        adds, such as the BOS that Emu3 prepends itself."""
+        try:
+            outputs = self.ctx.call_hf_processor(self.get_hf_processor(), dict(text=""))
+        except ValueError:
+            # Some processors (e.g. PaliGemma) reject a prompt without multi-modal data
+            return []
+        ids = outputs["input_ids"][0].tolist()
+        return ids[: len(ids) - len(cached_encode(self.get_tokenizer(), ""))]
+
     def _get_placeholder_ids(self, modality: str) -> list[int]:
         token = getattr(self.get_hf_processor(), f"{modality}_token")
         if isinstance(token, str):
@@ -733,6 +745,12 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             f"`{key}` for {len(sizes)} video(s) with {total} patch(es), so the rows "
             "cannot be attributed to a video."
         )
+
+    def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
+        prefix = self.info._prompt_prefix_ids
+        if prompt[: len(prefix)] == prefix:
+            return prompt
+        return prefix + prompt
 
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         if self.info._fuses_audio_into_video and mm_counts.get("video"):

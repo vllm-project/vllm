@@ -251,16 +251,7 @@ def test_repeated_image_hits_the_processor_cache():
         ("llava-hf/llava-onevision-qwen2-0.5b-ov-hf", "<image>\nWhat is this?"),
         ("google/gemma-3-4b-it", "<start_of_image> What is this?"),
         ("HuggingFaceTB/SmolVLM-256M-Instruct", "<image>What is this?"),
-        pytest.param(
-            "BAAI/Emu3-Chat-hf",
-            "<image> and more text",
-            marks=pytest.mark.xfail(
-                reason="Emu3Processor prepends the BOS token itself because the "
-                "tokenizer doesn't, so the unexpanded prompt vLLM tokenizes "
-                "never gets one.",
-                strict=False,
-            ),
-        ),
+        ("BAAI/Emu3-Chat-hf", "<image> and more text"),
     ],
 )
 def test_spliced_prompt_matches_hf_expansion(model_id, prompt):
