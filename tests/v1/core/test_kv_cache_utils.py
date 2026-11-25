@@ -1598,7 +1598,7 @@ def test_dcp_target_allocates_replicated_draft_independently(
     assert widths == [16, 64]
 
     cache_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        config, groups, available_memory=16 * 1024 * 1024
+        config, groups, num_blocks=128
     )
     scheduler_config = generate_scheduler_kv_cache_config([cache_config])
     assert get_max_concurrency_for_kv_cache_config(config, cache_config) > 0
@@ -1719,7 +1719,8 @@ def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
     merged = new_kv_cache_group(["draft.0", "draft.1"], draft)
     assert not merged.dcp_sharded
     assert merged.max_num_blocks_per_req(config, 1024) == 64
-    assert merged.max_memory_usage_bytes(config) == 2 * 64 * draft.page_size_bytes
+    assert merged.max_allocated_blocks_per_request(config) == 64
+    assert merged.page_size_bytes == 2 * draft.page_size_bytes
     assert kv_cache_utils.resolve_dcp_kv_block_size(merged, 4) == 16
     with pytest.raises(AssertionError):
         KVCacheGroup.from_layers(
