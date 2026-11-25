@@ -30,7 +30,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
 from vllm.v1.hisparse.layout import (
-    get_hisparse_device_blocks_per_request,
     get_hisparse_host_pool_bytes,
     get_hisparse_kv_cache_config,
     get_hisparse_kv_cache_groups,
@@ -48,6 +47,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     compute_layout_strides,
+    max_device_blocks_per_request,
 )
 
 if TYPE_CHECKING:
@@ -1088,15 +1088,7 @@ def _max_memory_usage_bytes_from_groups(
     bytes_per_block = _pool_bytes_per_block_from_builder(
         builder, vllm_config, kv_cache_groups
     )
-    if vllm_config.attention_config.hisparse_config is not None:
-        total_blocks = get_hisparse_device_blocks_per_request(
-            vllm_config, kv_cache_groups
-        )
-    else:
-        total_blocks = sum(
-            group.max_allocated_blocks_per_request(vllm_config)
-            for group in kv_cache_groups
-        )
+    total_blocks = max_device_blocks_per_request(kv_cache_groups, vllm_config)
 
     return bytes_per_block * total_blocks
 

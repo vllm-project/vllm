@@ -28,6 +28,7 @@ from vllm.utils.hashing import xxhash, xxhash_cbor
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroup,
+    max_device_blocks_per_request,
 )
 from vllm.v1.request import Request
 from vllm.v1.token_buffer import token_slice
@@ -1154,20 +1155,14 @@ def get_max_concurrency_for_kv_cache_config(
 
     Host groups use a separate pool; the smaller concurrency limit applies.
     """
-    num_blocks_per_request = 0
-    host_blocks_per_request = 0
-    for group in kv_cache_config.kv_cache_groups:
-        required = group.max_allocated_blocks_per_request(vllm_config)
-        if group.host_resident:
-            host_blocks_per_request += required
-        else:
-            num_blocks_per_request += required
-    if vllm_config.attention_config.hisparse_config is not None:
-        from vllm.v1.hisparse.layout import get_hisparse_device_blocks_per_request
-
-        num_blocks_per_request = get_hisparse_device_blocks_per_request(
-            vllm_config, kv_cache_config.kv_cache_groups
-        )
+    num_blocks_per_request = max_device_blocks_per_request(
+        kv_cache_config.kv_cache_groups, vllm_config
+    )
+    host_blocks_per_request = sum(
+        group.max_allocated_blocks_per_request(vllm_config)
+        for group in kv_cache_config.kv_cache_groups
+        if group.host_resident
+    )
     limits = [kv_cache_config.num_blocks / num_blocks_per_request]
     if host_blocks_per_request:
         assert kv_cache_config.hisparse_host_num_blocks is not None

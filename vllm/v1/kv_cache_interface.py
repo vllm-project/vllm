@@ -794,6 +794,22 @@ class KVCacheGroup:
         )
 
 
+def max_device_blocks_per_request(
+    groups: Sequence[KVCacheGroup], vllm_config: VllmConfig
+) -> int:
+    """Device blocks one request at `max_model_len` holds at most across
+    `groups`. Groups whose managers share a `peak_owner` are combined by that
+    owner's `peak_blocks_per_request`."""
+    by_owner: dict[type[SingleTypeKVCacheManager], list[KVCacheGroup]] = {}
+    for group in groups:
+        if not group.host_resident:
+            by_owner.setdefault(group.manager_cls.peak_owner(), []).append(group)
+    return sum(
+        owner.peak_blocks_per_request(owner_groups, vllm_config)
+        for owner, owner_groups in by_owner.items()
+    )
+
+
 class PrefixLookupGroup(NamedTuple):
     """KV cache groups looked up jointly for cache hits: they share a manager
     policy, block size and DCP sharding."""

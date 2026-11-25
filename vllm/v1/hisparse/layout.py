@@ -36,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SparseCacheRole,
     compute_layout_strides,
+    max_device_blocks_per_request,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
@@ -198,30 +199,9 @@ def _device_bytes_per_request(
 ) -> int:
     from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block
 
-    return _pool_bytes_per_block(
-        vllm_config, groups
-    ) * get_hisparse_device_blocks_per_request(vllm_config, groups)
-
-
-def get_hisparse_device_blocks_per_request(
-    vllm_config: VllmConfig, groups: list[KVCacheGroup]
-) -> int:
-    """Device blocks a request holds at most. A request releases its clean
-    resident blocks when it takes its hot region, so it holds either its
-    resident window or its hot region and active tail, never both."""
-    resident_blocks = hot_blocks = tail_blocks = other_blocks = 0
-    for group in groups:
-        if group.host_resident:
-            continue
-        blocks = group.max_allocated_blocks_per_request(vllm_config)
-        if issubclass(group.manager_cls, HiSparseResidentManager):
-            resident_blocks += blocks
-            tail_blocks += min(blocks, ACTIVE_TAIL_BLOCKS)
-        elif issubclass(group.manager_cls, HiSparseHotManager):
-            hot_blocks += blocks
-        else:
-            other_blocks += blocks
-    return other_blocks + max(resident_blocks, hot_blocks + tail_blocks)
+    return _pool_bytes_per_block(vllm_config, groups) * max_device_blocks_per_request(
+        groups, vllm_config
+    )
 
 
 def get_hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int:
@@ -636,8 +616,8 @@ def get_hisparse_steady_state_concurrency(
     group, but admitting one still takes its full in-flight window, so the
     bound is all-but-one requests at steady state plus one being admitted.
     """
-    admission_blocks = get_hisparse_device_blocks_per_request(
-        vllm_config, kv_cache_config.kv_cache_groups
+    admission_blocks = max_device_blocks_per_request(
+        kv_cache_config.kv_cache_groups, vllm_config
     )
     steady_blocks = 0
     host_blocks = 0

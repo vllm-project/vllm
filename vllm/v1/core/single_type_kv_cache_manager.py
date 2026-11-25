@@ -21,6 +21,7 @@ from vllm.v1.core.kv_cache_utils import (
     trim_null_head,
 )
 from vllm.v1.hisparse.block_pool import SharedEventQueueBlockPool
+from vllm.v1.hisparse.types import ACTIVE_TAIL_BLOCKS
 from vllm.v1.kv_cache_interface import (
     KVCacheGroup,
     KVCacheLayerConfig,
@@ -134,6 +135,23 @@ class SingleTypeKVCacheManager(ABC):
         if dcp_sharded and dcp_world_size > 1:
             max_model_len = cdiv(max_model_len, dcp_world_size)
         return cdiv(max_model_len, block_size)
+
+    @classmethod
+    def peak_owner(cls) -> type["SingleTypeKVCacheManager"]:
+        """The manager whose `peak_blocks_per_request` accounts for this
+        manager's groups. Managers whose groups never hold their maximum
+        allocations at the same time share an owner."""
+        return cls
+
+    @classmethod
+    def peak_blocks_per_request(
+        cls, groups: Sequence[KVCacheGroup], vllm_config: "VllmConfig"
+    ) -> int:
+        """Device blocks one request holds at most across `groups`, the groups
+        whose `peak_owner` is this manager."""
+        return sum(
+            group.max_allocated_blocks_per_request(vllm_config) for group in groups
+        )
 
     @classmethod
     def max_num_blocks_per_req(
@@ -2972,6 +2990,27 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
 
     coordinator: "HiSparseCoordinator | None" = None
     zeroes_new_blocks: ClassVar[bool] = False
+
+    @classmethod
+    def peak_owner(cls) -> type[SingleTypeKVCacheManager]:
+        return _HiSparseAuxiliaryManager
+
+    @classmethod
+    def peak_blocks_per_request(
+        cls, groups: Sequence[KVCacheGroup], vllm_config: "VllmConfig"
+    ) -> int:
+        """A request takes its hot region only after releasing its clean
+        resident blocks, keeping its active tail, so it holds either its
+        resident window or its hot region and tail."""
+        resident_blocks = hot_blocks = tail_blocks = 0
+        for group in groups:
+            blocks = group.max_allocated_blocks_per_request(vllm_config)
+            if issubclass(group.manager_cls, HiSparseResidentManager):
+                resident_blocks += blocks
+                tail_blocks += min(blocks, ACTIVE_TAIL_BLOCKS)
+            else:
+                hot_blocks += blocks
+        return max(resident_blocks, hot_blocks + tail_blocks)
 
     @classmethod
     def prefix_cacheable(cls, config: ManagerConfig) -> bool:
