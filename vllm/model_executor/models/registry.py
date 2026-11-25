@@ -77,7 +77,6 @@ _TEXT_GENERATION_MODELS = {
     "AfmoeForCausalLM": ("afmoe", "AfmoeForCausalLM"),
     "AliceAIForCausalLM": ("alice_ai", "AliceAIForCausalLM"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
-    "AXK1ForCausalLM": ("AXK1", "AXK1ForCausalLM"),
     "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
     "BailingMoeV2ForCausalLM": ("bailing_moe", "BailingMoeV2ForCausalLM"),
     "BailingMoeV2_5ForCausalLM": ("bailing_moe_linear", "BailingMoeV25ForCausalLM"),
@@ -209,7 +208,6 @@ _TEXT_GENERATION_MODELS = {
     "Step3p5ForCausalLM": ("step3p5", "Step3p5ForCausalLM"),
     "Step5ForCausalLM": ("vllm.models.step5", "Step5ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
-    "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "UnlimitedOCR2TextForCausalLM": ("unlimited_ocr", "UnlimitedOCR2TextForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
     "ZayaForCausalLM": ("zaya", "ZayaForCausalLM"),
@@ -790,6 +788,7 @@ _SPECULATIVE_DECODING_MODELS = {
 
 _TRANSFORMERS_SUPPORTED_MODELS = {
     # Text generation models
+    "AXK1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
     "ArceeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "CwmForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Ernie4_5ForCausalLM": ("transformers", "TransformersForCausalLM"),
@@ -981,6 +980,7 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "JambaForCausalLM": "0.34.0",
     "JambaForSequenceClassification": "0.34.0",
     "MambaForCausalLM": "0.34.0",
+    "TeleFLMForCausalLM": "0.34.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
