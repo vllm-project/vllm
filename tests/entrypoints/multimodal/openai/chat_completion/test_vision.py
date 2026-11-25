@@ -7,7 +7,7 @@ import httpx
 import openai
 import pytest
 import pytest_asyncio
-from PIL import Image
+from PIL import Image, features
 from transformers import AutoProcessor
 
 from tests.entrypoints.multimodal.conftest import TEST_IMAGE_ASSETS
@@ -536,7 +536,21 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize(("image_format", "mode"), [("ICNS", "RGB"), ("BLP", "P")])
+@pytest.mark.parametrize(
+    ("image_format", "mode"),
+    [
+        ("ICNS", "RGB"),
+        ("BLP", "P"),
+        ("ICO", "RGB"),
+        pytest.param(
+            "AVIF",
+            "RGB",
+            marks=pytest.mark.skipif(
+                not features.check("avif"), reason="Pillow built without AVIF"
+            ),
+        ),
+    ],
+)
 async def test_chat_rejects_unsupported_image_format(
     client: openai.AsyncOpenAI, model_name: str, image_format: str, mode: str
 ):

@@ -10,8 +10,9 @@ import numpy as np
 import pybase64 as base64
 import pytest
 import torch
-from PIL import Image, features
+from PIL import Image, TiffImagePlugin, features
 
+import vllm.envs as envs
 from vllm.multimodal import image as image_utils
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.image import ALLOWED_IMAGE_FORMATS, open_image
@@ -326,24 +327,6 @@ def test_image_broken_png_rejected():
     assert isinstance(exc_info.value.__cause__, SyntaxError)
 
 
-@pytest.mark.skipif(not features.check("avif"), reason="Pillow built without AVIF")
-def test_image_decoder_error_rejected():
-    """The AVIF decoder's RuntimeError surfaces as a client-side ValueError."""
-    # An AVIF image without a primary item.
-    data = base64.b64decode(
-        "AAAAIGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZk1BMUIAAADrbWV0YQAAAAAAAAAh"
-        "aGRscgAAAAAAAAAAcGljdAAAAAAAAAAAAAAAAAAAAAAOAGl0bQAAAAAAAQAAAB5p"
-        "bG9jAAAAAEQAAAEAAQAAAAEAAAETAAAAIwAAAChpaW5mAAAAAAABAAAAGmluZmUC"
-        "AAAAAAEAAGF2MDFDb2xvcgAAAABqaXBycAAAAEtpcGNvAAAAFGlzcGUAAAAAAAAA"
-        "AQAAAAEAAAAQcGl4aQAAAAADCAgIAAAADGF2MUOBAAwAAAAAE2NvbHJuY2x4AAEA"
-        "DQAGgAAAABdpcG1hAAAAAAAAAAEAAQQBAoME"
-    )
-    image_io = ImageMediaIO()
-    with pytest.raises(ValueError, match="Failed to load image") as exc_info:
-        image_io.load_bytes(data)
-    assert isinstance(exc_info.value.__cause__, RuntimeError)
-
-
 def test_image_pixel_limit_disabled(monkeypatch):
     """Setting VLLM_MAX_IMAGE_PIXELS=0 disables the pixel limit."""
     import vllm.envs as envs
@@ -438,7 +421,21 @@ showpage
         image_io.load_base64("image/png", payload)
 
 
-@pytest.mark.parametrize(("image_format", "mode"), [("ICNS", "RGB"), ("BLP", "P")])
+@pytest.mark.parametrize(
+    ("image_format", "mode"),
+    [
+        ("ICNS", "RGB"),
+        ("BLP", "P"),
+        ("ICO", "RGB"),
+        pytest.param(
+            "AVIF",
+            "RGB",
+            marks=pytest.mark.skipif(
+                not features.check("avif"), reason="Pillow built without AVIF"
+            ),
+        ),
+    ],
+)
 def test_image_media_io_rejects_unsupported_format(tmp_path, image_format, mode):
     path = tmp_path / f"image.{image_format.lower()}"
     Image.new(mode, (128, 128)).save(path, format=image_format)
@@ -515,6 +512,76 @@ def _encode(image: Image.Image, fmt: str, **save_kwargs) -> bytes:
     return buffer.getvalue()
 
 
+@pytest.mark.parametrize(
+    ("mode", "save_kwargs"),
+    [("RGB", {}), ("RGB", {"lossless": True}), ("RGBA", {})],
+    ids=["lossy", "lossless", "extended"],
+)
+def test_webp_charges_canvas_before_open(monkeypatch, mode, save_kwargs):
+    data = _encode(Image.new(mode, (32, 32)), "WEBP", **save_kwargs)
+    size_bytes = 32 * 32 * 4
+    monkeypatch.setattr(envs, "VLLM_MAX_IMAGE_PIXELS", 32 * 32 - 1)
+    with pytest.raises(ValueError, match="VLLM_MAX_IMAGE_PIXELS"):
+        ImageMediaIO().load_bytes(data[:30])
+    monkeypatch.setattr(envs, "VLLM_MAX_IMAGE_PIXELS", 32 * 32)
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", size_bytes - 1)
+    # The header alone supplies the canvas size. The body is needed to decode.
+    image_io = ImageMediaIO(decoded_budget=MediaDecodedBudget())
+    with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+        image_io.load_bytes(data[:30])
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", size_bytes)
+    budget = MediaDecodedBudget()
+    image_io = ImageMediaIO(decoded_budget=budget)
+    assert image_io.load_bytes(data).media.size == (32, 32)
+    assert budget.used == size_bytes
+
+
+def test_tiff_charges_full_tile_before_decoding(monkeypatch):
+    # One standard 16x16 tile for an 8x8 image, including edge padding.
+    tiff = TiffImagePlugin
+    tile = zlib.compress(bytes(16 * 16))
+    tags = tiff.ImageFileDirectory_v2()
+    tags[tiff.IMAGEWIDTH] = tags[tiff.IMAGELENGTH] = 8
+    tags[tiff.BITSPERSAMPLE] = (8,)
+    tags[tiff.COMPRESSION] = 8  # Deflate
+    tags[tiff.PHOTOMETRIC_INTERPRETATION] = 1  # Grayscale
+    tags[tiff.TILEWIDTH] = tags[tiff.TILELENGTH] = 16
+    tags[tiff.TILEOFFSETS] = (0,)
+    tags[tiff.TILEBYTECOUNTS] = (len(tile),)
+    with BytesIO() as buffer:
+        tags[tiff.TILEOFFSETS] = (tags.save(buffer),)
+        buffer.seek(0)
+        tags.save(buffer)
+        buffer.write(tile)
+        data = buffer.getvalue()
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 1023)
+    with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+        ImageMediaIO(decoded_budget=MediaDecodedBudget()).load_bytes(data)
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 1024)
+    budget = MediaDecodedBudget()
+    assert ImageMediaIO(decoded_budget=budget).load_bytes(data).media.size == (8, 8)
+    assert budget.used == 1024
+
+
+def test_tiff_rejects_duplicate_directory_entries():
+    data = bytearray(_encode(Image.new("L", (8, 8)), "TIFF"))
+    (directory_offset,) = struct.unpack_from("<I", data, 4)
+    (count,) = struct.unpack_from("<H", data, directory_offset)
+    for offset in range(directory_offset + 2, directory_offset + 2 + count * 12, 12):
+        (tag,) = struct.unpack_from("<H", data, offset)
+        if tag == TiffImagePlugin.PHOTOMETRIC_INTERPRETATION:
+            # Give the directory two identical entries for the compression tag.
+            struct.pack_into("<H", data, offset, TiffImagePlugin.COMPRESSION)
+            break
+
+    with pytest.raises(ValueError, match="Duplicate TIFF directory tags"):
+        ImageMediaIO().load_bytes(bytes(data))
+
+
 def _rgb_png_16_bit() -> bytes:
     """Pillow can't write 16-bit RGB PNGs, so build one by hand."""
     rng = np.random.default_rng(0)
@@ -556,7 +623,7 @@ def _to_hwc(media: Image.Image | torch.Tensor) -> np.ndarray:
 
 
 @requires_torchcodec_images
-@pytest.mark.parametrize("fmt", ["JPEG", "PNG", "WEBP", "AVIF"])
+@pytest.mark.parametrize("fmt", ["JPEG", "PNG", "WEBP"])
 @pytest.mark.parametrize("mode", ["RGB", "L"])
 @pytest.mark.parametrize("orientation", [None, *range(1, 9)])
 def test_torchcodec_backend_matches_pil(fmt, mode, orientation):
