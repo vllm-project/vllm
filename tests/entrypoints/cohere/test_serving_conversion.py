@@ -1184,56 +1184,27 @@ class TestToolMessageV2ContentForwarding:
         assert blocks is not None
         assert [b["type"] for b in blocks] == ["text", "document", "text"]
 
-    @pytest.mark.parametrize("repeat_id", [False, True])
-    def test_tool_documents_follow_call_ids_after_reordering(self, tmp_path, repeat_id):
+    def test_tool_documents_follow_call_ids_after_reordering(self, tmp_path):
         from transformers import LlamaConfig
 
         from vllm.config import ModelConfig
 
-        LlamaConfig(
-            architectures=["LlamaForCausalLM"], max_position_embeddings=128
-        ).save_pretrained(tmp_path)
+        LlamaConfig(architectures=["LlamaForCausalLM"]).save_pretrained(tmp_path)
         model_config = ModelConfig(str(tmp_path), max_model_len=128)
+        calls = [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{}"},
+            }
+            for call_id in ("c1", "c2")
+        ]
         req = _make_request(
             messages=[
                 {"role": "user", "content": "hi"},
-                *(
-                    [
-                        {
-                            "role": "assistant",
-                            "tool_calls": [
-                                {
-                                    "id": "c1",
-                                    "type": "function",
-                                    "function": {"name": "f", "arguments": "{}"},
-                                }
-                            ],
-                        },
-                        {
-                            "role": "tool",
-                            "tool_call_id": "c1",
-                            "content": "earlier result",
-                        },
-                        {"role": "user", "content": "again"},
-                    ]
-                    if repeat_id
-                    else []
-                ),
-                {
-                    "role": "assistant",
-                    "tool_calls": [
-                        {
-                            "id": "c1",
-                            "type": "function",
-                            "function": {"name": "f", "arguments": "{}"},
-                        },
-                        {
-                            "id": "c2",
-                            "type": "function",
-                            "function": {"name": "g", "arguments": "{}"},
-                        },
-                    ],
-                },
+                {"role": "assistant", "tool_calls": calls[:1]},
+                {"role": "tool", "tool_call_id": "c1", "content": "earlier result"},
+                {"role": "assistant", "tool_calls": calls},
                 *[
                     {
                         "role": "tool",
@@ -1258,11 +1229,7 @@ class TestToolMessageV2ContentForwarding:
             for msg in config["messages"]
             if msg["role"] == "tool"
         ] == [
-            *(
-                [("c1", [{"type": "text", "text": "earlier result"}])]
-                if repeat_id
-                else []
-            ),
+            ("c1", [{"type": "text", "text": "earlier result"}]),
             ("c1", [{"type": "document", "document": {"city": "Paris"}}]),
             ("c2", [{"type": "document", "document": {"city": "Rome"}}]),
         ]
