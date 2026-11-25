@@ -298,7 +298,6 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         logger.info("Registered new attention backend: %s -> %s", name, value)
         return member
 
-    MAMBA1 = "vllm.v1.attention.backends.mamba1_attn.Mamba1AttentionBackend"
     MAMBA2 = "vllm.v1.attention.backends.mamba2_attn.Mamba2AttentionBackend"
     SHORT_CONV = "vllm.v1.attention.backends.short_conv_attn.ShortConvAttentionBackend"
     LINEAR = "vllm.v1.attention.backends.linear_attn.LinearAttentionBackend"
