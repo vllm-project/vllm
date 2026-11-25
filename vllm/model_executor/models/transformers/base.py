@@ -87,6 +87,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     ShardId,
+    StageMissingLayer,
     WeightsMapper,
     WeightsTransformFn,
     make_empty_intermediate_tensors_factory,
@@ -122,6 +123,12 @@ class SplitWeights:
         self.config = model.config
         tensors = chain(model.named_parameters(), model.named_buffers())
         self.shapes = {name: t.shape for name, t in tensors}
+        # The loader drops the weights of modules the model skips (e.g. towers)
+        self.missing_prefixes = tuple(
+            f"{name}."
+            for name, m in model.named_modules()
+            if isinstance(m, StageMissingLayer)
+        )
 
     def get_parameter(self, name: str) -> torch.Tensor:
         """Stand in for the model whose parameters `Split` reads the sizes of."""
@@ -139,6 +146,11 @@ class SplitWeights:
                 yield name, tensor
                 continue
             full_layer_name = self.mapper.map_name(first)
+            if full_layer_name is None or full_layer_name.startswith(
+                self.missing_prefixes
+            ):
+                yield name, tensor
+                continue
             if full_layer_name not in self.shapes:
                 raise ValueError(
                     f"Cannot split {name!r} into {targets}: {full_layer_name!r} is "

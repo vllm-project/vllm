@@ -20,6 +20,7 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForMultimodalLM,
+    AutoProcessor,
     PreTrainedConfig,
     core_model_loading,
 )
@@ -1132,3 +1133,30 @@ def test_split_weights_splits_fused_gqa_qkv():
     scale = ("attention.query_key_value.weight_scale", torch.ones(1))
     with pytest.raises(ValueError, match="quantized tensors is not supported"):
         list(weights([scale]))
+
+
+def test_fused_weights_of_skipped_towers_are_dropped(tmp_path, tp_init):
+    """The fused tensors of a tower the model skips, here Qianfan-OCR's vision
+    `attn.qkv` with images disabled, are left unsplit for the loader to drop."""
+    sizes = dict(hidden_size=64, intermediate_size=128, num_hidden_layers=2)
+    heads = dict(num_attention_heads=2, num_key_value_heads=1, head_dim=64)
+    config = AutoConfig.for_model(
+        "qianfan_ocr",
+        text_config=sizes | heads | dict(vocab_size=99),
+        vision_config=sizes | dict(num_attention_heads=2, image_size=32, patch_size=4),
+    )
+    # Saved in the layout of the Hub checkpoints (`vision_model.encoder.layers.*`)
+    AutoModelForMultimodalLM.from_config(config).save_pretrained(tmp_path)
+    checkpoint = load_file(tmp_path / "model.safetensors")
+    assert "vision_model.encoder.layers.0.attn.qkv.weight" in checkpoint
+    processor = "hf-internal-testing/tiny-processor-qianfan_ocr"
+    AutoProcessor.from_pretrained(processor).save_pretrained(tmp_path)
+
+    model_config = ModelConfig(
+        str(tmp_path), model_impl="transformers", limit_mm_per_prompt={"image": 0}
+    )
+    vllm_config = VllmConfig(model_config=model_config)
+    with set_current_vllm_config(vllm_config):
+        model = model_loader.get_model(vllm_config=vllm_config)
+
+    assert isinstance(model.model.vision_tower, StageMissingLayer)
