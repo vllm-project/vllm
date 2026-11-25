@@ -968,12 +968,11 @@ async fn dev_routes_follow_api_server_options() {
     for (server_dev_mode, expected) in [(false, StatusCode::NOT_FOUND), (true, StatusCode::OK)] {
         let (chat, engine_task) = test_chat_with_engine_handle().await;
         let app = build_router(Arc::new(
-            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
-                ApiServerOptions {
+            (AppState::new(vec!["model".to_string()], chat).with_engine_core_client())
+                .with_api_server_options(ApiServerOptions {
                     server_dev_mode,
                     ..Default::default()
-                },
-            ),
+                }),
         ));
 
         let response = app
@@ -1007,12 +1006,11 @@ async fn lora_routes_follow_api_server_options() {
     ] {
         let (chat, engine_task) = test_chat_with_engine_handle().await;
         let app = build_router(Arc::new(
-            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
-                ApiServerOptions {
+            (AppState::new(vec!["model".to_string()], chat).with_engine_core_client())
+                .with_api_server_options(ApiServerOptions {
                     allow_runtime_lora_updating,
                     ..Default::default()
-                },
-            ),
+                }),
         ));
 
         for uri in ["/v1/load_lora_adapter", "/v1/unload_lora_adapter"] {
@@ -1692,10 +1690,10 @@ async fn test_dev_mode_app_with_ready(
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     let app = build_router_with_gates(
-        Arc::new(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        )),
+        Arc::new(
+            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                .with_engine_core_client(),
+        ),
         RouteGates {
             dev_mode: true,
             ..RouteGates::default()
@@ -1881,10 +1879,10 @@ where
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), backend);
     (
-        Arc::new(configure(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        ))),
+        Arc::new(configure(
+            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                .with_engine_core_client(),
+        )),
         engine_task,
     )
 }
@@ -12459,7 +12457,7 @@ async fn llm_without_engine_core_serves_generation_routes_only() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn provided_engine_core_llm_is_rejected() {
+async fn provided_engine_core_llm_is_opaque() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_task = MockEngineTask::new(spawn_mock_engine_task(
@@ -12478,14 +12476,27 @@ async fn provided_engine_core_llm_is_rejected() {
     .await
     .expect("connect client");
 
-    // An `EngineCoreLlm` has to come through `LlmSource::EngineCore`; any other
-    // `Llm` may be provided.
-    let error = crate::reject_engine_core_llm(&test_llm(client)).unwrap_err();
-    assert!(
-        error.to_string().contains("LlmSource::EngineCore"),
-        "{error}"
+    // Only an `EngineCoreLlm` the server connected itself drives the
+    // engine-core routes; one passed in as `LlmSource::Provided` does not.
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let app = build_router_with_gates(
+        Arc::new(AppState::new(vec!["test-model".to_string()], chat)),
+        RouteGates {
+            dev_mode: true,
+            ..RouteGates::default()
+        },
     );
-    assert!(crate::reject_engine_core_llm(&UnavailableLlm::new()).is_ok());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/reset_prefix_cache")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     engine_task.abort_and_join().await;
 }

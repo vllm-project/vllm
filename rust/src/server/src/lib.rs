@@ -22,12 +22,11 @@ mod tls;
 mod tls_tests;
 mod utils;
 
-use std::any::Any;
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Context as _, Result, bail};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
@@ -197,7 +196,8 @@ async fn build_state(config: &ServerConfig, llm: LlmSource) -> Result<Arc<AppSta
         .with_access_log(config.access_log.clone())
         .with_system_fingerprint(system_fingerprint);
     if let Some((engine_core, server_info)) = &engine_core {
-        state = (state.with_server_info(server_info.clone()))
+        state = (state.with_engine_core_client())
+            .with_server_info(server_info.clone())
             .with_profiler(engine_core.profiler.clone())
             .with_default_mm_lora_modalities(
                 engine_core.default_mm_loras.keys().copied().collect(),
@@ -267,8 +267,9 @@ pub enum LlmSource {
     /// [`EngineCoreLlm`].
     EngineCore(EngineCoreConfig),
     /// A caller-built `Llm`, such as a router over several engines or a client
-    /// for a remote one. The server treats it as opaque: routes and gRPC
-    /// services that drive the engine-core client directly are not served.
+    /// for a remote one. The server treats it as opaque, even when it is an
+    /// [`EngineCoreLlm`]: routes and gRPC services that drive the engine-core
+    /// client directly are not served.
     Provided(Box<dyn Llm>),
 }
 
@@ -310,18 +311,6 @@ impl Server {
     }
 }
 
-/// Reject an [`EngineCoreLlm`] passed as [`LlmSource::Provided`]. The server
-/// would serve it without its engine-core settings, and its request histograms
-/// would already use the default buckets, since the server sets the custom
-/// ones while building its state.
-fn reject_engine_core_llm(llm: &dyn Llm) -> Result<()> {
-    ensure!(
-        !(llm as &dyn Any).is::<EngineCoreLlm>(),
-        "an `EngineCoreLlm` must be served through `LlmSource::EngineCore`"
-    );
-    Ok(())
-}
-
 async fn serve(
     config: ServerConfig,
     llm: LlmSource,
@@ -329,11 +318,8 @@ async fn serve(
     extend_router: RouterExtension,
 ) -> Result<()> {
     config.validate().context("invalid OpenAI frontend configuration")?;
-    match &llm {
-        LlmSource::EngineCore(engine_core) => {
-            (engine_core.validate(&config)).context("invalid engine-core configuration")?;
-        }
-        LlmSource::Provided(llm) => reject_engine_core_llm(llm.as_ref())?,
+    if let LlmSource::EngineCore(engine_core) = &llm {
+        (engine_core.validate(&config)).context("invalid engine-core configuration")?;
     }
     let manages_engine =
         matches!(&llm, LlmSource::EngineCore(engine_core) if engine_core.manages_engine);
