@@ -180,7 +180,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         # something to pull; a full local hit stays RUNNING.
                         num_external_tokens > 0,
                     )
-                    if num_external_tokens > 0:
+                    if num_external_tokens > 0 and self._host_pinned_kv:
                         self._reqs_receiving.add(request.request_id)
 
                 else:
@@ -200,7 +200,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         pulls into a host-pinned KV cache (see DeferredBlockRelease)."""
         transfer_config = self.vllm_config.kv_transfer_config
         return (
-            self.vllm_config.cache_config.kv_cache_host_pinned
+            self._host_pinned_kv
             and not self.use_host_buffer
             and transfer_config is not None
             and transfer_config.is_kv_consumer
@@ -239,8 +239,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         # Stop heartbeating for aborted requests that never reached finished_recving:
         # normal path cleans up in update_connector_output.
         self._stop_heartbeat(request.request_id)
-        receiving = request.request_id in self._reqs_receiving
-        self._reqs_receiving.discard(request.request_id)
+        receiving = False
+        if self._host_pinned_kv:
+            receiving = request.request_id in self._reqs_receiving
+            self._reqs_receiving.discard(request.request_id)
 
         if params.get("do_remote_prefill"):
             # If do_remote_prefill is still True when the request is finished,

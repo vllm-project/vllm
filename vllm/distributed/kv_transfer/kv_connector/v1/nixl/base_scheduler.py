@@ -57,6 +57,9 @@ class NixlBaseConnectorScheduler:
     # pull (READ) producer from a push (WRITE) one. Overridden by the push
     # scheduler.
     _TRANSFER_MODE: str = "pull"
+    # Set in __init__ with a host-pinned KV cache, which tracks pulls in flight
+    # and defers block releases (see DeferredBlockRelease).
+    _host_pinned_kv: bool = False
 
     def __init__(
         self,
@@ -74,6 +77,7 @@ class NixlBaseConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
+        self._host_pinned_kv = vllm_config.cache_config.kv_cache_host_pinned
         self._reqs_to_release: list[ReqId] = []
         # D side: requests whose pull is still in flight (cleared on recv done).
         self._reqs_receiving: set[ReqId] = set()
@@ -186,6 +190,15 @@ class NixlBaseConnectorScheduler:
                 "bidirectional_kv_xfer", False
             )
         )
+        if (
+            self.is_bidirectional_kv_xfer_enabled
+            and vllm_config.cache_config.kv_cache_host_pinned
+        ):
+            # D->P pulls land in the producer's blocks, which the release guard
+            # (DeferredBlockRelease) does not cover yet.
+            raise ValueError(
+                "kv_cache_host_pinned is not supported with bidirectional_kv_xfer yet."
+            )
         self.decoder_kv_blocks_ttl = (
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "decoder_kv_blocks_ttl", 480
@@ -588,8 +601,9 @@ class NixlBaseConnectorScheduler:
             self._build_save_meta(meta, scheduler_output)
 
         meta.reqs_to_send = self._reqs_need_send
-        meta.reqs_to_release = self._reqs_to_release
-        self._reqs_to_release = []
+        if self._host_pinned_kv:
+            meta.reqs_to_release = self._reqs_to_release
+            self._reqs_to_release = []
         # Clock reference for reqs_to_send: deadlines above are in this
         # process's perf_counter domain; workers (possibly on other nodes,
         # where perf_counter has a different epoch) rebase against this.
@@ -628,9 +642,11 @@ class NixlBaseConnectorScheduler:
         """Stop heartbeating for requests whose KV transfer completed."""
         for req_id in connector_output.finished_recving or ():
             self._stop_heartbeat(req_id)
-            self._reqs_receiving.discard(req_id)
-        for req_id in connector_output.failed_recving:
-            self._reqs_receiving.discard(req_id)
+        if self._host_pinned_kv:
+            self._reqs_receiving.difference_update(
+                connector_output.finished_recving or ()
+            )
+            self._reqs_receiving.difference_update(connector_output.failed_recving)
 
     def has_pending_push_work(self) -> bool:
         return False

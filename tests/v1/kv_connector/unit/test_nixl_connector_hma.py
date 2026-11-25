@@ -406,6 +406,73 @@ def test_region_pull_completion_zeros_only_own_padding(region_pull_worker):
 
 
 @pytest.mark.cpu_test
+def test_region_pull_completion_report_waits_for_post_processing(
+    region_pull_worker, monkeypatch
+):
+    """With a host-pinned KV cache, a receive whose completion queues GPU
+    post-processing is reported only once that work has completed: the report
+    frees an aborted request's blocks, which a zero-copy pull may reuse."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        RemoteMeta,
+        ReqMeta,
+    )
+
+    events: list[Any] = []
+
+    class FakeEvent:
+        def __init__(self):
+            self.done = False
+            events.append(self)
+
+        def record(self):
+            pass
+
+        def query(self):
+            return self.done
+
+    monkeypatch.setattr(torch.cuda, "Event", FakeEvent)
+    worker = region_pull_worker
+    worker.deferred_recv_report = bw.DeferredBlockRelease()
+    backing = torch.full((4, 3, 8), 7, dtype=torch.uint8)
+    caches = {"host": backing[:, 1], "indexer": backing[:, 2]}
+    worker.device_kv_caches = caches
+    worker.region_names = list(caches)
+    worker.kv_caches_base_addr = {"D": {0: [c.data_ptr() for c in caches.values()]}}
+    worker.region_num_blocks = [4, 4]
+    worker.block_len_per_layer = [8, 8]
+    worker.block_stride_per_layer = [24, 24]
+    worker._skip_dram_xfer = False
+    worker._recving_metadata = {
+        "request": ReqMeta(
+            local_block_ids=[[1, 2], [0, 1]],
+            local_physical_block_ids=[[1, 2], [0, 1]],
+            tp_size=1,
+            remote=RemoteMeta([[3]], "localhost", 1, "P", "request-P"),
+            region_blocks_to_zero=[[2], [1]],
+        )
+    }
+    worker._get_new_notifs = MagicMock(return_value=set())
+    worker._pop_done_transfers = MagicMock(return_value=({"request"}, set()))
+    worker._replicated_pcp_done_sending = set()
+    worker._failed_recv_reqs = queue.Queue()
+    worker._recv_failures = set()
+    worker._send_pending_recv_notifs = MagicMock()
+    worker._sync_device_after_direct_recv = MagicMock()
+    worker.use_host_buffer = False
+    worker._reqs_to_send = {}
+
+    # The zeroing is queued, so the receive is held back behind its event.
+    assert worker.get_transfer_results().finished_recving == set()
+    assert len(events) == 1
+
+    worker._pop_done_transfers = MagicMock(return_value=(set(), set()))
+    assert worker.get_transfer_results().finished_recving == set()
+    events[0].done = True
+    assert worker.get_transfer_results().finished_recving == {"request"}
+    assert worker.get_transfer_results().finished_recving == set()
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "swa_enabled,expected_sw_sizes",
     [

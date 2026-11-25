@@ -257,6 +257,10 @@ class DeferredBlockRelease:
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
+    # Created in __init__ with a host-pinned KV cache (see DeferredBlockRelease).
+    deferred_release: DeferredBlockRelease | None = None
+    deferred_recv_report: DeferredBlockRelease | None = None
+
     # Transfer mode included in the NIXL compatibility hash so that a push
     # (WRITE) connector and a pull (READ) connector never handshake together.
     # Overridden by NixlPushConnectorWorker.
@@ -1081,6 +1085,11 @@ class NixlBaseConnectorWorker:
             if vllm_config.cache_config.kv_cache_host_pinned
             and self.kv_buffer_device == "cuda"
             else None
+        )
+        # Same guard for receives that queue post-processing kernels: their
+        # report frees an aborted request's blocks, so it waits for the kernels.
+        self.deferred_recv_report = (
+            DeferredBlockRelease() if self.deferred_release is not None else None
         )
 
         # Note: host xfer buffer ops when use_host_buffer is True
@@ -3606,6 +3615,7 @@ class NixlBaseConnectorWorker:
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
         direct_device_recving = set[str]()
+        post_processed = set[str]()
         for req_id in done_recving:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
@@ -3633,6 +3643,7 @@ class NixlBaseConnectorWorker:
                 # P/D group positions differ. Use the actual region read plan,
                 # including any local allocation padding the read did not cover.
                 self._zero_region_blocks(meta.region_blocks_to_zero)
+                post_processed.add(req_id)
                 continue
 
             # Post processing for heteroblocksize/layout, and for blocks the
@@ -3665,11 +3676,13 @@ class NixlBaseConnectorWorker:
                     block_ids_for_blocksize_post_process[block_size_ratio].append(
                         (g, local_group, covered_sub_blocks)
                     )
+                    post_processed.add(req_id)
             # post processing for heterogeneous attention
             if self.enable_heterogeneous_attn_post_process:
                 block_ids_for_heterogeneous_attn_post_process.append(
                     meta.local_physical_block_ids[0]
                 )
+                post_processed.add(req_id)
         for (
             block_size_ratio,
             block_ids_list,
@@ -3687,6 +3700,12 @@ class NixlBaseConnectorWorker:
             self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)
 
         self._sync_device_after_direct_recv(direct_device_recving)
+
+        if self.deferred_recv_report is not None:
+            self.deferred_recv_report.on_step(sorted(post_processed))
+            done_recving = (
+                done_recving - post_processed
+            ) | self.deferred_recv_report.ready()
 
         # Handle timeout to avoid stranding blocks on remote.
         self._reap_expired_send_leases(done_sending)

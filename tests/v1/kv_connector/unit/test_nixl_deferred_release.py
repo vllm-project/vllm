@@ -231,3 +231,13 @@ def test_local_request_on_producer_node_is_not_deferred():
     _finish_locally(scheduler, request)
     assert connector._reqs_to_release == []
     assert request.request_id not in scheduler.requests
+
+
+def test_bidirectional_kv_xfer_is_rejected():
+    """D->P pulls land in a producer's blocks, which the guard does not cover."""
+    vllm_config = create_vllm_config(
+        kv_role="kv_both", kv_connector_extra_config={"bidirectional_kv_xfer": True}
+    )
+    vllm_config.cache_config.kv_cache_host_pinned = True
+    with pytest.raises(ValueError, match="bidirectional_kv_xfer"):
+        create_scheduler(vllm_config)
