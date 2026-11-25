@@ -65,6 +65,7 @@ pub struct RenderConfig {
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     pub max_model_len: Option<u32>,
     pub max_logprobs: Option<i32>,
+    pub return_sampling_mask: bool,
     /// LoRA adapters whose names are accepted as the request model. Rendering
     /// does not depend on adapter weights, so they are not loaded.
     pub lora_modules: Vec<LoraModulePath>,
@@ -228,7 +229,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     }
     let max_model_len = config.max_model_len.unwrap_or(u32::MAX);
     let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
-        .with_max_logprobs(config.max_logprobs);
+        .with_max_logprobs(config.max_logprobs)
+        .with_return_sampling_mask(config.return_sampling_mask);
     let chat = ChatRequestProcessor::new(loaded.chat_backend, model_dtype, config.max_model_len)
         .with_parser_selections(
             config.tool_call_parser.clone(),
@@ -432,6 +434,7 @@ mod tests {
                 chat_template_content_format: ChatTemplateContentFormatOption::Auto,
                 max_model_len: Some(128),
                 max_logprobs: None,
+                return_sampling_mask: false,
                 lora_modules: Vec::new(),
                 language_model_only: false,
                 dtype: None,

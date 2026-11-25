@@ -225,6 +225,9 @@ pub struct RenderArgs {
     /// Maximum accepted logprobs count; -1 disables the cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     max_logprobs: Option<i32>,
+    /// Validate sampling parameters for sampling-mask replay.
+    #[arg(long)]
+    return_sampling_mask: bool,
     /// LoRA adapters whose names are accepted as the request model, each as
     /// `name=path` or a JSON object: `{"name": "name", "path": "lora_path",
     /// "base_model_name": "id"}`. Rendering does not load adapter weights.
@@ -295,6 +298,7 @@ impl RenderArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_model_len: self.max_model_len,
             max_logprobs: self.max_logprobs,
+            return_sampling_mask: self.return_sampling_mask,
             lora_modules: self.lora_modules,
             language_model_only: self.language_model_only,
             dtype: self.dtype.model_dtype(),
@@ -422,6 +426,10 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub language_model_only: bool,
+    /// Require positive temperature and top-k when returning sampling masks.
+    #[arg(long)]
+    #[serde(default)]
+    pub return_sampling_mask: bool,
     /// Maximum number of log probabilities to return when `logprobs` is
     /// specified in sampling parameters. `-1` means no cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
@@ -1066,6 +1074,7 @@ impl SharedRuntimeArgs {
             structured_outputs_backend,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
+            return_sampling_mask: self.return_sampling_mask,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
@@ -1162,6 +1171,7 @@ impl SharedRuntimeArgs {
             structured_outputs_backend,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
+            return_sampling_mask: self.return_sampling_mask,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
@@ -1646,6 +1656,7 @@ impl ServeArgs {
         managed_engine.into_config(
             self.runtime.model.id.clone(),
             self.runtime.max_logprobs,
+            self.runtime.return_sampling_mask,
             profiler_config,
             reasoning_parser.as_deref(),
             self.runtime.language_model_only,

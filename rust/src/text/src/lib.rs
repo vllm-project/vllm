@@ -58,6 +58,8 @@ pub struct TextRequestProcessor {
     max_model_len: u32,
     /// Maximum number of top log probabilities accepted by this text facade.
     max_logprobs: i32,
+    /// Whether sampling-mask replay constraints are enabled.
+    return_sampling_mask: bool,
     /// Backend that compiles every structured-output constraint.
     structured_outputs_backend: StructuredOutputBackend,
 }
@@ -69,6 +71,7 @@ impl TextRequestProcessor {
             backend,
             max_model_len,
             max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
+            return_sampling_mask: false,
             structured_outputs_backend: StructuredOutputBackend::default(),
         }
     }
@@ -78,6 +81,12 @@ impl TextRequestProcessor {
         if let Some(max_logprobs) = max_logprobs {
             self.max_logprobs = max_logprobs;
         }
+        self
+    }
+
+    /// Require positive temperature and top-k when sampling-mask replay is enabled.
+    pub fn with_return_sampling_mask(mut self, return_sampling_mask: bool) -> Self {
+        self.return_sampling_mask = return_sampling_mask;
         self
     }
 
@@ -180,6 +189,7 @@ impl TextRequestProcessor {
         let sampling_limits = SamplingLimits {
             max_model_len: self.max_model_len,
             max_logprobs: self.max_logprobs,
+            return_sampling_mask: self.return_sampling_mask,
             model_vocab_size: self.backend.model_vocab_size(),
             tokenizer_vocab_size: self.backend.tokenizer_vocab_size(),
         };
@@ -240,6 +250,12 @@ impl TextLlm {
     /// Override the maximum accepted logprobs count.
     pub fn with_max_logprobs(mut self, max_logprobs: Option<i32>) -> Self {
         self.processor = self.processor.with_max_logprobs(max_logprobs);
+        self
+    }
+
+    /// Require positive temperature and top-k when sampling-mask replay is enabled.
+    pub fn with_return_sampling_mask(mut self, return_sampling_mask: bool) -> Self {
+        self.processor = self.processor.with_return_sampling_mask(return_sampling_mask);
         self
     }
 

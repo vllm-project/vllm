@@ -182,6 +182,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let text = TextLlm::new(llm, text_backend)
         .with_served_model_name(metrics_model_name)
         .with_max_logprobs(config.max_logprobs)
+        .with_return_sampling_mask(config.return_sampling_mask)
         .with_structured_outputs_backend(config.structured_outputs_backend);
 
     let chat = ChatLlm::new(text, chat_backend)

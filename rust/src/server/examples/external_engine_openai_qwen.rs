@@ -95,6 +95,7 @@ async fn main() -> Result<()> {
         default_mm_loras: Default::default(),
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         max_logprobs: None,
+        return_sampling_mask: false,
         stream_interval: NonZeroU32::MIN,
         admission_limits: Default::default(),
         api_server_options: ApiServerOptions::default(),

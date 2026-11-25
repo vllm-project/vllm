@@ -87,6 +87,7 @@ impl ManagedEngineArgs {
         self,
         model: String,
         max_logprobs: Option<i32>,
+        return_sampling_mask: bool,
         profiler_config: Option<String>,
         reasoning_parser: Option<&str>,
         language_model_only: bool,
@@ -109,6 +110,9 @@ impl ManagedEngineArgs {
         if let Some(max_logprobs) = max_logprobs {
             python_args.push("--max-logprobs".to_string());
             python_args.push(max_logprobs.to_string());
+        }
+        if return_sampling_mask {
+            python_args.push("--return-sampling-mask".to_string());
         }
         if let Some(profiler_config) = profiler_config {
             python_args.push("--profiler-config".to_string());

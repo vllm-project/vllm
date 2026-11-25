@@ -285,6 +285,14 @@ pub fn lower_sampling_params(
         routed_experts_prompt_start,
         stream_interval,
     };
+    if sampling_limits.return_sampling_mask {
+        if params.temperature <= 0.0 {
+            return Err(SamplingParamsError::SamplingMaskRequiresPositiveTemperature.into());
+        }
+        if params.top_k == 0 {
+            return Err(SamplingParamsError::SamplingMaskRequiresPositiveTopK.into());
+        }
+    }
     validate_resolved_sampling_params(&params)?;
     validate_vocab_range(&params, &sampling_limits)?;
     Ok(params)
@@ -492,6 +500,7 @@ mod tests {
         SamplingLimits {
             max_model_len: 1_000_000,
             max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
+            return_sampling_mask: false,
             model_vocab_size: 1000,
             tokenizer_vocab_size: 2000,
         }
@@ -520,6 +529,18 @@ mod tests {
             StructuredOutputBackend::Xgrammar,
             3,
             &stub_tokenizer(),
+        )
+    }
+
+    fn lower_sampling_params_with_sampling_mask(
+        sampling_params: SamplingParams,
+    ) -> Result<EngineCoreSamplingParams> {
+        lower_sampling_params_with_limits(
+            sampling_params,
+            SamplingLimits {
+                return_sampling_mask: true,
+                ..sample_sampling_limits()
+            },
         )
     }
 
@@ -1076,6 +1097,7 @@ mod tests {
             SamplingLimits {
                 max_model_len: 40960,
                 max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
+                return_sampling_mask: false,
                 model_vocab_size: backend.model_vocab_size(),
                 tokenizer_vocab_size: backend.tokenizer_vocab_size(),
             },
@@ -1300,6 +1322,7 @@ mod tests {
             },
             SamplingLimits {
                 max_logprobs: -1,
+                return_sampling_mask: false,
                 ..sample_sampling_limits()
             },
             StructuredOutputBackend::Xgrammar,
@@ -1334,6 +1357,51 @@ mod tests {
     }
 
     #[test]
+    fn sampling_mask_requires_positive_temperature() {
+        let error = lower_sampling_params_with_sampling_mask(SamplingParams {
+            temperature: Some(0.0),
+            top_k: Some(50),
+            ..Default::default()
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::SamplingParams(SamplingParamsError::SamplingMaskRequiresPositiveTemperature)
+        ));
+    }
+
+    #[test]
+    fn sampling_mask_requires_positive_top_k_including_disabled_sentinel() {
+        let disabled_top_k = crate::request::normalize_top_k(-1).unwrap();
+        for top_k in [None, disabled_top_k, Some(0)] {
+            let error = lower_sampling_params_with_sampling_mask(SamplingParams {
+                temperature: Some(1.0),
+                top_k,
+                ..Default::default()
+            })
+            .unwrap_err();
+
+            assert!(matches!(
+                error,
+                Error::SamplingParams(SamplingParamsError::SamplingMaskRequiresPositiveTopK)
+            ));
+        }
+    }
+
+    #[test]
+    fn sampling_mask_accepts_positive_temperature_and_bounded_top_k() {
+        let params = lower_sampling_params_with_sampling_mask(SamplingParams {
+            temperature: Some(1.0),
+            top_k: Some(50),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!((params.temperature, params.top_k), (1.0, 50));
+    }
+
+    #[test]
     fn lower_sampling_params_expands_full_vocab_logprobs_from_model_vocab() {
         let params = lower_sampling_params_with_limits(
             SamplingParams {
@@ -1342,6 +1410,7 @@ mod tests {
             },
             SamplingLimits {
                 max_logprobs: 1500,
+                return_sampling_mask: false,
                 ..sample_sampling_limits()
             },
         )

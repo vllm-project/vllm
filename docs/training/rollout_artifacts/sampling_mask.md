@@ -73,6 +73,13 @@ The engine rejects unsupported combinations at startup or request time:
 - Diffusion models
 - Custom logits processors (engine-level `--logits-processors`)
 
+## Rust frontend
+
+The Rust frontend forwards `--return-sampling-mask` to the Python engine.
+It also validates `temperature > 0` and `top_k > 0` after resolving the
+request's generation-config defaults, including for `/inference/v1/generate`.
+The engine retains the startup checks and produces the sampling masks.
+
 ## How it works
 
 1. The sampler applies all logit processors (penalties, logit bias, bad words,
