@@ -153,6 +153,13 @@ vllm serve ibm-granite/granite-4.0-h-tiny-base \
     --mamba-spare '{"rank":32,"basis_path":"/absolute/path/to/basis.safetensors","basis_sha256":"<sha256>"}'
 ```
 
+For a basis that records a Hugging Face repository ID, use that ID and the
+pinned revision with Hub access enabled, including when the weights are cached.
+With `HF_HUB_OFFLINE=1`, vLLM resolves the repository ID to a local snapshot
+path before SPARE checks the metadata. For a fully offline run using a local
+checkpoint path, use a trusted basis bound to that exact path and revision.
+Keep the basis file and its SHA-256 digest together.
+
 The file stores one FP32 tensor of shape `[heads, native_state_size, rank]`
 for each Mamba layer, keyed by `layer.<zero-based model layer index>`. Its
 SafeTensors metadata contains the string fields `format` (`spare-mamba2-v1`),
