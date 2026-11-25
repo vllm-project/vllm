@@ -21,6 +21,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.ec_transfer.ec_connector.utils import PlaceholderMetadataResolver
+from vllm.distributed.ec_transfer.ec_events import ECCacheEvent, ECEventBatch
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.utils import MROPE_POSITION_DELTA_KEY
@@ -99,6 +100,8 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
+    _encoder_cache_epoch: int = 0
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -117,6 +120,7 @@ class Scheduler(SchedulerInterface):
         self.model_uses_mrope = vllm_config.model_config.uses_mrope
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
+        self.ec_events_config = vllm_config.ec_events_config
         self.parallel_config = vllm_config.parallel_config
         self.collect_stats = collect_stats
         self.observability_config = vllm_config.observability_config
@@ -217,6 +221,10 @@ class Scheduler(SchedulerInterface):
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
+            self.parallel_config.data_parallel_index,
+        )
+        self.ec_event_publisher = EventPublisherFactory.create(
+            self.ec_events_config,
             self.parallel_config.data_parallel_index,
         )
         self.ec_connector = None
@@ -932,6 +940,19 @@ class Scheduler(SchedulerInterface):
                         break
 
                     if self.policy == SchedulingPolicy.PRIORITY:
+                        preempted_encoder_inputs = scheduled_encoder_inputs.get(
+                            preempted_req.request_id
+                        )
+                        if (
+                            preempted_encoder_inputs
+                            and not self.is_encoder_decoder
+                            and not self.encoder_cache_manager.try_rollback_allocations(
+                                preempted_req, preempted_encoder_inputs
+                            )
+                        ):
+                            # Let the scheduled encode run if another request
+                            # in this step is relying on its output.
+                            break
                         victim_index = self.running.index(preempted_req)
                         del self.running[victim_index]
                         if victim_index < req_index:
@@ -945,10 +966,8 @@ class Scheduler(SchedulerInterface):
                             input_budget += restored + draft_slots
                             req_to_new_blocks.pop(preempted_req_id)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
-                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
-                                preempted_req_id, None
-                            )
                             if preempted_encoder_inputs:
+                                del scheduled_encoder_inputs[preempted_req_id]
                                 # Restore encoder compute budget if the preempted
                                 # request had encoder inputs scheduled in this step.
                                 num_embeds_to_restore = sum(
@@ -1779,6 +1798,8 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            encoder_cache_events=self.encoder_cache_manager.take_events() or None,
+            encoder_cache_epoch=self._encoder_cache_epoch,
             encoder_input_updates=self._get_encoder_input_updates(
                 num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
             ),
@@ -2790,6 +2811,14 @@ class Scheduler(SchedulerInterface):
         # Updates dropped at turn end follow the turn's final output.
         self._emit_dropped_streaming_updates(outputs)
 
+        # A batch may complete after its encoder cache entries were reset.
+        ec_events = (
+            scheduler_output.encoder_cache_events
+            if scheduler_output.encoder_cache_epoch == self._encoder_cache_epoch
+            else None
+        )
+        self._publish_ec_events(ec_events or [])
+
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
         engine_core_outputs = {
@@ -2829,6 +2858,14 @@ class Scheduler(SchedulerInterface):
             eco.scheduler_stats = stats
 
         return engine_core_outputs
+
+    def _publish_ec_events(self, ec_events: list[ECCacheEvent]) -> None:
+        """Publish EC events together with the ones queued by the EC connector."""
+        if self.ec_connector is not None:
+            ec_events = [*ec_events, *self.ec_connector.take_events()]
+        if ec_events:
+            batch = ECEventBatch(ts=time.time(), events=ec_events)
+            self.ec_event_publisher.publish(batch)
 
     def _ec_transfer_pending(self, request: Request, num_computed_tokens: int) -> bool:
         """Whether an encoder input this request needs is still in transit."""
@@ -3508,8 +3545,12 @@ class Scheduler(SchedulerInterface):
         stale vision embeddings are not reused.
         """
         self.encoder_cache_manager.reset()
+        self._encoder_cache_epoch += 1
         if self.ec_connector is not None:
             self.ec_connector.reset()
+        # An idle engine does not call `update_from_output`, so publish the
+        # queued `AllECCleared` here instead of on the next request.
+        self._publish_ec_events(self.encoder_cache_manager.take_events())
 
     def make_stats(
         self,
@@ -3585,6 +3626,8 @@ class Scheduler(SchedulerInterface):
         logger.debug_once("[shutdown] Scheduler: start")
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+        if self.ec_event_publisher:
+            self.ec_event_publisher.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
 
@@ -3604,7 +3647,9 @@ class Scheduler(SchedulerInterface):
         return self.ec_connector
 
     def get_kv_event_publisher_config(self) -> KVEventsConfig | None:
-        return self.kv_event_publisher.get_publisher_config()
+        config = self.kv_event_publisher.get_publisher_config()
+        assert config is None or isinstance(config, KVEventsConfig)
+        return config
 
     def _connector_finished(
         self, request: Request
