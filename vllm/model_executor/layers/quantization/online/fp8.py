@@ -255,6 +255,13 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         )
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
+    def _expose_input_quant_key(self, layer: Module) -> None:
+        if not (
+            envs.VLLM_BATCH_INVARIANT
+            and not fp8_scaled_mm_is_batch_invariant(self.fp8_linear)
+        ):
+            expose_input_quant_key(layer, self.fp8_linear)
+
     def process_weights_after_loading(self, layer: Module) -> None:
         if is_weights_pre_processed():
             if not self.supports_pre_processed_weights:
@@ -262,6 +269,7 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
                     "Online FP8 backend cannot use pre-processed weights"
                 )
             layer.input_scale = None
+            self._expose_input_quant_key(layer)
             layer._already_called_process_weights_after_loading = True
             return
 
@@ -282,6 +290,7 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
         self.fp8_linear.process_weights_after_loading(layer)
+        self._expose_input_quant_key(layer)
         self.release_requantization_source_weights(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)

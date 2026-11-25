@@ -62,6 +62,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     get_input_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -173,3 +174,66 @@ def test_as_quantized_activation_validates_key():
         as_quantized_activation(qa, None)
     assert as_quantized_activation(torch.zeros(2, 4), kFp8StaticTensorSym) is None
     assert as_quantized_activation(qa, kFp8StaticTensorSym) is qa
+
+
+@pytest.mark.parametrize("batch_invariant", [False, True])
+@pytest.mark.parametrize("kernel_is_bi", [False, True])
+def test_fp8_linear_methods_expose_input_quant_key(
+    monkeypatch, batch_invariant: bool, kernel_is_bi: bool
+):
+    from vllm.model_executor.layers.quantization import fp8 as fp8_mod
+    from vllm.model_executor.layers.quantization.online import (
+        fp8 as online_fp8_mod,
+    )
+
+    kernel = _probe(CutlassFP8ScaledMMLinearKernel)
+    kernel.config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=kFp8StaticTensorSym,
+        activation_quant_key=kFp8DynamicTokenSym,
+        weight_shape=(16, 16),
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+    )
+
+    monkeypatch.setattr(fp8_mod.envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    monkeypatch.setattr(online_fp8_mod.envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    monkeypatch.setattr(
+        fp8_mod, "fp8_scaled_mm_is_batch_invariant", lambda _: kernel_is_bi
+    )
+    monkeypatch.setattr(
+        online_fp8_mod, "fp8_scaled_mm_is_batch_invariant", lambda _: kernel_is_bi
+    )
+    monkeypatch.setattr(fp8_mod, "is_weights_pre_processed", lambda: True)
+    monkeypatch.setattr(online_fp8_mod, "is_weights_pre_processed", lambda: True)
+
+    expected = None if (batch_invariant and not kernel_is_bi) else kFp8DynamicTokenSym
+
+    # Offline Fp8LinearMethod
+    offline = fp8_mod.Fp8LinearMethod.__new__(fp8_mod.Fp8LinearMethod)
+    offline.block_quant = False
+    offline.act_q_static = False
+    offline.use_marlin = False
+    offline.fp8_linear = kernel
+    offline_layer = torch.nn.Module()
+    offline.process_weights_after_loading(offline_layer)
+    assert get_input_quant_key(offline_layer) == expected
+
+    # Offline Fp8LinearMethod (Marlin W8A16 never exposes)
+    offline_marlin = fp8_mod.Fp8LinearMethod.__new__(fp8_mod.Fp8LinearMethod)
+    offline_marlin.block_quant = False
+    offline_marlin.act_q_static = False
+    offline_marlin.use_marlin = True
+    offline_marlin.fp8_linear = kernel
+    marlin_layer = torch.nn.Module()
+    offline_marlin.process_weights_after_loading(marlin_layer)
+    assert get_input_quant_key(marlin_layer) is None
+
+    # Online Fp8PerTensorOnlineLinearMethod
+    online = online_fp8_mod.Fp8PerTensorOnlineLinearMethod.__new__(
+        online_fp8_mod.Fp8PerTensorOnlineLinearMethod
+    )
+    online.requantization_source = None
+    online.fp8_linear = kernel
+    online_layer = torch.nn.Module()
+    online.process_weights_after_loading(online_layer)
+    assert get_input_quant_key(online_layer) == expected

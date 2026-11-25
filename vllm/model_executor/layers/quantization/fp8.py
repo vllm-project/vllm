@@ -33,6 +33,9 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     resolve_fp8_moe_weight_block_shape,
     select_fp8_moe_backend,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    expose_input_quant_key,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -363,6 +366,13 @@ class Fp8LinearMethod(LinearMethodBase):
 
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
+    def _expose_input_quant_key(self, layer: torch.nn.Module) -> None:
+        if self.block_quant or not (
+            envs.VLLM_BATCH_INVARIANT
+            and not fp8_scaled_mm_is_batch_invariant(self.fp8_linear)
+        ):
+            expose_input_quant_key(layer, self.fp8_linear)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if is_weights_pre_processed():
             # Weights are already in runtime format; the only state tensor
@@ -371,6 +381,8 @@ class Fp8LinearMethod(LinearMethodBase):
             # registered that parameter.
             if not self.act_q_static and not hasattr(layer, "input_scale"):
                 layer.input_scale = None
+            if not self.use_marlin:
+                self._expose_input_quant_key(layer)
             return
 
         if self.use_marlin:
@@ -416,6 +428,7 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.input_scale = None
 
         self.fp8_linear.process_weights_after_loading(layer)
+        self._expose_input_quant_key(layer)
 
     def apply(
         self,
