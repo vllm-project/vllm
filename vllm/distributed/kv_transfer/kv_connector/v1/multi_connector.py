@@ -34,10 +34,9 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    SlidingWindowSpec,
-    is_full_attention_spec,
-    iter_layer_specs,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
@@ -669,14 +668,11 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> RequestLoadPlan | None:
         groups = self._kv_cache_config.kv_cache_groups
         full = {
-            i for i, g in enumerate(groups) if is_full_attention_spec(g.kv_cache_spec)
+            i for i, g in enumerate(groups) if issubclass(g.manager_cls, FullAttentionManager)
         }
         windows = set(range(len(groups))) - full
         if any(
-            not all(
-                isinstance(s, SlidingWindowSpec)
-                for s in iter_layer_specs(groups[i].kv_cache_spec)
-            )
+            not issubclass(groups[i].manager_cls, SlidingWindowManager)
             for i in windows
         ):
             return None
@@ -741,11 +737,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 group_id
                 for group_id in loaded_groups
                 if group_id in windows
-                or not any(
-                    isinstance(spec, SlidingWindowSpec)
-                    for spec in iter_layer_specs(
-                        self._kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
-                    )
+                or not issubclass(
+                    self._kv_cache_config.kv_cache_groups[group_id].manager_cls,
+                    SlidingWindowManager,
                 )
             )
         return RequestLoadPlan(
@@ -864,7 +858,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
         if len(ranges) == 1 and all(
-            is_full_attention_spec(g.kv_cache_spec)
+            issubclass(g.manager_cls, FullAttentionManager)
             for g in self._kv_cache_config.kv_cache_groups
         ):
             return self._select_single_load(request, matches, num_computed_tokens)

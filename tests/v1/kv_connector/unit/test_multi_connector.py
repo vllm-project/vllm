@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import make_kv_cache_group
 from tests.v1.kv_connector.unit.utils import (
     create_model_runner_output,
     create_request,
@@ -52,17 +53,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.engine.core_client import InprocClient
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-    SlidingWindowMLASpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, MambaSpec
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, KVConnectorWorkerMetadata
 from vllm.v1.request import RequestStatus
@@ -465,9 +458,7 @@ class FailingLoadTransport(RangeTransport):
             self.pending_loads.add(request.request_id)
             if self.options.get("failure_signal") == "block":
                 (block_ids,) = blocks.get_block_ids()
-                block_size = self._kv_cache_config.kv_cache_groups[
-                    0
-                ].kv_cache_spec.block_size
+                block_size = self._kv_cache_config.kv_cache_groups[0].block_size
                 self.pending_invalid_blocks.add(
                     block_ids[load_range.start_token // block_size]
                 )
@@ -529,30 +520,15 @@ def _range_config(options, policy="range_aware"):
 
 
 def _range_cache(kind="full"):
-    full = FullAttentionSpec(
+    full = AttentionSpec(
         block_size=16, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
     )
-    groups = [KVCacheGroupSpec(["full"], full)]
+    groups = [make_kv_cache_group(["full"], full)]
     if kind != "full":
-        spec = (
-            SlidingWindowMLASpec(
-                block_size=16,
-                num_kv_heads=1,
-                head_size=64,
-                dtype=torch.bfloat16,
-                sliding_window=32,
-                bounded_replay=True,
-            )
-            if kind == "bounded"
-            else SlidingWindowSpec(
-                block_size=16,
-                num_kv_heads=1,
-                head_size=64,
-                dtype=torch.bfloat16,
-                sliding_window=32,
-            )
+        layer = SlidingWindowManager.layer_config(
+            full, sliding_window=32, bounded_replay=kind == "bounded"
         )
-        groups.append(KVCacheGroupSpec(["swa"], spec))
+        groups.append(make_kv_cache_group(["swa"], layer))
     return KVCacheConfig(num_blocks=1000, kv_cache_tensors=[], kv_cache_groups=groups)
 
 
@@ -757,17 +733,15 @@ def test_unknown_range_policy():
         _range_connector([{"endpoint": 64}], policy="range-aware")
 
 
-@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("multi_layer", [False, True])
 @pytest.mark.parametrize("range_capable", [False, True])
 @pytest.mark.cpu_test
-def test_recurrent_load_uses_single_source(wrapped, range_capable):
+def test_recurrent_load_uses_single_source(multi_layer, range_capable):
     spec = MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,))
-    if wrapped:
-        spec = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"mamba": spec})
     cache = KVCacheConfig(
         num_blocks=0,
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["mamba"], spec)],
+        kv_cache_groups=[make_kv_cache_group(["mamba", "mamba2"] if multi_layer else ["mamba"], spec)],
     )
     config = _range_config([{"endpoint": 64, "range": range_capable}, {"endpoint": 96}])
     connector = MultiConnector(config, KVConnectorRole.SCHEDULER, cache)
@@ -780,8 +754,8 @@ def test_recurrent_load_uses_single_source(wrapped, range_capable):
 @pytest.mark.cpu_test
 def test_range_hybrid_block_alignment():
     cache = _range_cache("swa")
-    cache.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(
-        block_size=256, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
+    cache.kv_cache_groups[0] = make_kv_cache_group(
+        ["full"], AttentionSpec(block_size=256, num_kv_heads=1, head_size=64, dtype=torch.bfloat16)
     )
     connector = MultiConnector(
         _range_config([{"endpoint": 384}, {"endpoint": 512, "groups": [0, 1]}]),
@@ -837,7 +811,6 @@ def test_range_scheduler_replay(policy, is_async, kind, endpoint, window_loaded)
         ],
         policy,
     )
-    register_all_kvcache_specs(config)
     scheduler = create_scheduler(
         config, num_blocks=1000, kv_cache_config=_range_cache(kind)
     )
@@ -941,7 +914,6 @@ def test_scheduler_uses_window_only_source_without_replay(is_async):
             {"endpoint": 32, "async": is_async, "windows": {"128": [1]}},
         ]
     )
-    register_all_kvcache_specs(config)
     scheduler = create_scheduler(
         config, num_blocks=1000, kv_cache_config=_range_cache("bounded")
     )
@@ -1007,7 +979,6 @@ def test_mooncake_window_hit_is_not_shortened_by_compute_budget(token_budget):
     config.kv_transfer_config.kv_connector_extra_config["connectors"].append(
         {"kv_connector": "MooncakeConnector", "kv_role": "kv_consumer"}
     )
-    register_all_kvcache_specs(config)
     scheduler = create_scheduler(config, kv_cache_config=_range_cache("bounded"))
     request = create_request(num_tokens=97, do_remote_prefill=True)
     request.kv_transfer_params.update(
@@ -1069,7 +1040,6 @@ def test_failed_load_with_persistent_hit_makes_progress(
     """Lookup stays a hit after GET failure; recompute must not load it again."""
     config = _range_config([{"endpoint": 64}, {"endpoint": 96}], load_policy)
     config.kv_transfer_config.kv_load_failure_policy = failure_policy
-    register_all_kvcache_specs(config)
     scheduler = create_scheduler(config, kv_cache_config=_range_cache(kind))
     request = create_request(request_id=99123, num_tokens=160)
     scheduler.add_request(request)
@@ -1464,9 +1434,10 @@ def test_multi_example_connector_consistency():
     storage2_scheduler_events = _events_from_request(
         _ignore_event_collection(events["storage2-SCHEDULER"])
     )
-    assert storage1_scheduler_events[:4] == [
+    assert storage1_scheduler_events[:5] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
+        f"get_loaded_kv_cache_group_ids_for_prefix {expected_num_matched_tokens}",
         (
             "update_state_after_alloc "
             f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}"
@@ -1507,9 +1478,10 @@ def test_multi_example_connector_consistency():
         f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
-    assert storage2_scheduler_events[:4] == [
+    assert storage2_scheduler_events[:5] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
+        f"get_loaded_kv_cache_group_ids_for_prefix {expected_num_matched_tokens}",
         (
             "update_state_after_alloc "
             f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}"
