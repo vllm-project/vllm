@@ -351,6 +351,15 @@ class CudaVmmDriver(VmmDriver):
         )
         return result == _SUCCESS and bool(flag.value)
 
+    def supports_gpudirect_rdma_with_vmm(self, device_index: int) -> bool:
+        """Return whether the device supports GPUDirect RDMA on VMM allocations."""
+        if (capable := self._rdma_capable.get(device_index)) is None:
+            capable = self._device_attribute(
+                _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device_index
+            )
+            self._rdma_capable[device_index] = capable
+        return capable
+
     def _make_alloc_prop(
         self, device_index: int, export_handle_types: int = 0
     ) -> _MemAllocationProp:
@@ -358,12 +367,9 @@ class CudaVmmDriver(VmmDriver):
         # allocator does: without it, KV connectors cannot register the
         # memory with RDMA NICs (ibv_reg_mr fails with EFAULT).
         prop = super()._make_alloc_prop(device_index, export_handle_types)
-        if (capable := self._rdma_capable.get(device_index)) is None:
-            capable = self._device_attribute(
-                _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device_index
-            )
-            self._rdma_capable[device_index] = capable
-        prop.allocFlags.gpuDirectRDMACapable = int(capable)
+        prop.allocFlags.gpuDirectRDMACapable = int(
+            self.supports_gpudirect_rdma_with_vmm(device_index)
+        )
         # UCX's cuda_ipc can only map driver-mapped memory through a FABRIC handle.
         if (fabric := self._fabric_capable.get(device_index)) is None:
             fabric = (

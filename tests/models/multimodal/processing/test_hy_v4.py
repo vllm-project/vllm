@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
-from vllm.models.hy_v4.nvidia.mm_preprocess import HYV4VLDataParser
+from vllm.models.hy_v4.common.mm_preprocess import HYV4VLDataParser
 from vllm.transformers_utils.configs.hy_v4 import HYV4VLVisionConfig
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -78,7 +78,7 @@ def test_hy_v4_rejects_invalid_video_timestamps(timestamps):
 
 @pytest.mark.parametrize("projector_type", [None, "rmsnorm_mlp_adapter"])
 def test_hy_v4_projector_outputs_contiguous_embeddings(projector_type):
-    from vllm.models.hy_v4.nvidia.vision import HYV4VisionPatchMerger
+    from vllm.models.hy_v4.common.vision import HYV4VisionPatchMerger
 
     config = VllmConfig(device_config=DeviceConfig(device="cpu"))
     with set_current_vllm_config(config), torch.inference_mode():
