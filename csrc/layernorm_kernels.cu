@@ -100,11 +100,44 @@ __global__ void rms_norm_kernel(
   }
 }
 
+/* Packed load/store of `width` elements for fused_add_rms_norm_kernel.
+   Aligned moves the vector with 128-bit global memory ops and needs a 16-byte
+   aligned pointer; otherwise the same vector is moved element by element. */
+template <typename scalar_t, int width, bool Aligned>
+__device__ __forceinline__ _f16Vec<scalar_t, width> load_f16vec(
+    const scalar_t* ptr) {
+  using Vec = _f16Vec<scalar_t, width>;
+  if constexpr (Aligned) {
+    return *reinterpret_cast<const Vec*>(ptr);
+  } else {
+    Vec vec;
+    auto* src = reinterpret_cast<const typename Vec::T1*>(ptr);
+#pragma unroll
+    for (int i = 0; i < width; ++i) vec.data[i] = src[i];
+    return vec;
+  }
+}
+
+template <typename scalar_t, int width, bool Aligned>
+__device__ __forceinline__ void store_f16vec(
+    scalar_t* ptr, const _f16Vec<scalar_t, width>& vec) {
+  using Vec = _f16Vec<scalar_t, width>;
+  if constexpr (Aligned) {
+    *reinterpret_cast<Vec*>(ptr) = vec;
+  } else {
+    auto* dst = reinterpret_cast<typename Vec::T1*>(ptr);
+#pragma unroll
+    for (int i = 0; i < width; ++i) dst[i] = vec.data[i];
+  }
+}
+
 /* Function specialization in the case of FP16/BF16 tensors.
    Additional optimizations we can make in this case are
    packed and vectorized operations, which help with the
-   memory latency bottleneck. */
-template <typename scalar_t, int width, bool HasWeight>
+   memory latency bottleneck.
+   The arithmetic does not depend on Aligned, so both forms return the same
+   bits for the same block size. */
+template <typename scalar_t, int width, bool HasWeight, bool Aligned>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
 fused_add_rms_norm_kernel(
     scalar_t* __restrict__ input,  // [..., hidden_size]
@@ -118,26 +151,17 @@ fused_add_rms_norm_kernel(
   static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
 
   const int vec_hidden_size = hidden_size / width;
-  const int64_t vec_input_stride = input_stride / width;
   __shared__ float s_variance;
   float variance = 0.0f;
-  /* These and the argument pointers are all declared `restrict` as they are
-     not aliased in practice. Argument pointers should not be dereferenced
-     in this kernel as that would be undefined behavior */
-  auto* __restrict__ input_v =
-      reinterpret_cast<_f16Vec<scalar_t, width>*>(input);
-  auto* __restrict__ residual_v =
-      reinterpret_cast<_f16Vec<scalar_t, width>*>(residual);
-  auto* __restrict__ weight_v =
-      reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
+  scalar_t* input_row = input + blockIdx.x * input_stride;
+  scalar_t* residual_row = residual + blockIdx.x * residual_stride;
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-    int64_t id = blockIdx.x * residual_stride / width + idx;
-    int64_t strided_id = blockIdx.x * vec_input_stride + idx;
-    _f16Vec<scalar_t, width> temp = input_v[strided_id];
-    temp += residual_v[id];
+    _f16Vec<scalar_t, width> temp =
+        load_f16vec<scalar_t, width, Aligned>(input_row + idx * width);
+    temp += load_f16vec<scalar_t, width, Aligned>(residual_row + idx * width);
     variance += temp.sum_squares();
-    residual_v[id] = temp;
+    store_f16vec<scalar_t, width, Aligned>(residual_row + idx * width, temp);
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -150,13 +174,13 @@ fused_add_rms_norm_kernel(
   __syncthreads();
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-    int64_t id = blockIdx.x * residual_stride / width + idx;
-    int64_t strided_id = blockIdx.x * vec_input_stride + idx;
-    _f16Vec<scalar_t, width> res = residual_v[id];
+    _f16Vec<scalar_t, width> res =
+        load_f16vec<scalar_t, width, Aligned>(residual_row + idx * width);
     _f16Vec<scalar_t, width> out;
     using Converter = _typeConvert<scalar_t>;
     if constexpr (HasWeight) {
-      _f16Vec<scalar_t, width> w = weight_v[idx];
+      _f16Vec<scalar_t, width> w =
+          load_f16vec<scalar_t, width, Aligned>(weight + idx * width);
 #pragma unroll
       for (int j = 0; j < width; ++j) {
         float x = Converter::convert(res.data[j]);
@@ -170,14 +194,15 @@ fused_add_rms_norm_kernel(
         out.data[j] = Converter::convert(x * s_variance);
       }
     }
-    input_v[strided_id] = out;
+    store_f16vec<scalar_t, width, Aligned>(input_row + idx * width, out);
   }
 }
 
 /* Generic fused_add_rms_norm_kernel
-   The width field is not used here but necessary for other specializations.
+   The width and Aligned fields are not used here but necessary for other
+   specializations.
  */
-template <typename scalar_t, int width, bool HasWeight>
+template <typename scalar_t, int width, bool HasWeight, bool Aligned>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
 fused_add_rms_norm_kernel(
     scalar_t* __restrict__ input,  // [..., hidden_size]
@@ -293,18 +318,18 @@ void rms_norm(torch::stable::Tensor& out,    // [..., hidden_size]
   });
 }
 
-#define LAUNCH_FUSED_ADD_RMS_NORM(width, has_weight)                       \
+#define LAUNCH_FUSED_ADD_RMS_NORM(width, aligned)                          \
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                     \
       input.scalar_type(), "fused_add_rms_norm_kernel", [&] {              \
         if (has_weight) {                                                  \
-          vllm::fused_add_rms_norm_kernel<scalar_t, width, true>           \
+          vllm::fused_add_rms_norm_kernel<scalar_t, width, true, aligned>  \
               <<<grid, block, 0, stream>>>(                                \
                   input.mutable_data_ptr<scalar_t>(), input_stride,        \
                   residual.mutable_data_ptr<scalar_t>(),                   \
                   weight->const_data_ptr<scalar_t>(), epsilon, num_tokens, \
                   hidden_size, residual_stride);                           \
         } else {                                                           \
-          vllm::fused_add_rms_norm_kernel<scalar_t, width, false>          \
+          vllm::fused_add_rms_norm_kernel<scalar_t, width, false, aligned> \
               <<<grid, block, 0, stream>>>(                                \
                   input.mutable_data_ptr<scalar_t>(), input_stride,        \
                   residual.mutable_data_ptr<scalar_t>(), nullptr, epsilon, \
@@ -350,25 +375,21 @@ void fused_add_rms_norm(torch::stable::Tensor& input,     // [..., hidden_size]
       hidden_size % vector_width == 0 && input_stride % vector_width == 0 &&
       residual_stride % vector_width == 0;
   const bool has_weight = weight.has_value();
+  bool ptrs_are_aligned =
+      inp_ptr % req_alignment_bytes == 0 && res_ptr % req_alignment_bytes == 0;
   if (has_weight) {
     auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight->data_ptr());
-    bool ptrs_are_aligned = inp_ptr % req_alignment_bytes == 0 &&
-                            res_ptr % req_alignment_bytes == 0 &&
-                            wt_ptr % req_alignment_bytes == 0;
-    if (ptrs_are_aligned && offsets_are_multiple_of_vector_width &&
-        !batch_invariant_launch) {
-      LAUNCH_FUSED_ADD_RMS_NORM(8, true);
-    } else {
-      LAUNCH_FUSED_ADD_RMS_NORM(0, true);
-    }
+    ptrs_are_aligned = ptrs_are_aligned && wt_ptr % req_alignment_bytes == 0;
+  }
+  /* The packed and the generic kernel sum in a different order. In
+     batch-invariant mode the choice must not follow pointer alignment, so
+     unaligned tensors keep the packed arithmetic with element-wise memory
+     ops. */
+  if (offsets_are_multiple_of_vector_width && ptrs_are_aligned) {
+    LAUNCH_FUSED_ADD_RMS_NORM(8, true);
+  } else if (offsets_are_multiple_of_vector_width && batch_invariant_launch) {
+    LAUNCH_FUSED_ADD_RMS_NORM(8, false);
   } else {
-    bool ptrs_are_aligned = inp_ptr % req_alignment_bytes == 0 &&
-                            res_ptr % req_alignment_bytes == 0;
-    if (ptrs_are_aligned && offsets_are_multiple_of_vector_width &&
-        !batch_invariant_launch) {
-      LAUNCH_FUSED_ADD_RMS_NORM(8, false);
-    } else {
-      LAUNCH_FUSED_ADD_RMS_NORM(0, false);
-    }
+    LAUNCH_FUSED_ADD_RMS_NORM(0, true);
   }
 }
