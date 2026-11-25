@@ -188,11 +188,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         stages = self._remote_stages[engine_id]
 
         dcp_active = self.dcp_size > 1 or remote_info.remote_dcp_size > 1
-        # Require real ints: MagicMock remotes make `!=` true and would
-        # wrongly take the unequal-block path.
-        remote_block_size = getattr(remote_info, "remote_block_size", None)
-        different_block_sizes = isinstance(remote_block_size, int) and (
-            self.block_size != remote_block_size
+        different_block_sizes = (
+            self.block_size != remote_info.remote_block_size
             or remote_info.remote_physical_blocks_per_logical
             != self._physical_blocks_per_logical_kv_block
         )
@@ -309,13 +306,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     ),
                     num_tokens=num_tokens,
                 )
-                # The remote rank may lack blocks we hold in two cases: a DCP
-                # rank allocates past the last token, and with different block
-                # sizes the receive post-process zeroes what no read covers.
-                may_lack_blocks = (dcp_active and not replicated) or (
-                    different_block_sizes and not dcp_active
-                )
-                if covered[group].start and not may_lack_blocks:
+                # Only a DCP-replicated group is read whole. Otherwise the
+                # remote rank may lack blocks we hold: a DCP rank allocates
+                # past the last token, and with different block sizes the
+                # receive post-process zeroes what no read covers.
+                if covered[group].start and replicated:
                     raise ValueError("Remote KV pages do not cover the requested range")
                 return local, remote
 
@@ -341,14 +336,13 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 meta.covered_sub_blocks = covered
 
         # D may have to perform multiple reads from different remote ranks.
-        remote_block_size = remote_info.remote_block_size
         for rank, (local_ids, remote_ids) in reads.items():
             logger.debug(
                 "Remote agent %s available, calling _read_blocks"
                 " on remote rank %s with remote block size %s for req %s",
                 meta.remote.engine_id,
                 rank,
-                remote_block_size,
+                remote_info.remote_block_size,
                 req_id,
             )
             # Read every stage of the remote rank; each holds a slice of the
