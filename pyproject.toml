@@ -177,6 +177,9 @@ directory = "htmlcov"
 [tool.coverage.xml]
 output = "coverage.xml"
 
+[tool.ty.src]
+include = ["vllm", "tests"]
+
 [tool.ty.rules]
 # Minimize noise from optional/extra dependencies not installed in pre-commit environment
 unresolved-import = "ignore"
