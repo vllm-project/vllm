@@ -1584,8 +1584,10 @@ def rocm_aiter_sparse_attn_indexer(
         )
         # Under ShardQ the chunks index the shardq_gather_indices tokens. The
         # candidate source and consumers keep their rows in that order too.
+        # The caller may have built q and weights for just those tokens.
         prefill_q, prefill_weights = q_fp8, weights
-        if (indices := prefill_metadata.shardq_gather_indices) is not None:
+        indices = prefill_metadata.shardq_gather_indices
+        if indices is not None and q_fp8.shape[0] != indices.shape[0]:
             prefill_q, prefill_weights = q_fp8[indices], weights[indices]
         for chunk in prefill_metadata.chunks:
             local_length = chunk.total_seq_lens
