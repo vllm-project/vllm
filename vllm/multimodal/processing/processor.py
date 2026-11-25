@@ -40,7 +40,7 @@ from ..inputs import (
     PlaceholderRange,
 )
 from ..parse import MultiModalDataItems, MultiModalUUIDItems
-from .context import BaseProcessingInfo, TimingContext
+from .context import BaseProcessingInfo, TimingContext, profiling_media
 from .dummy_inputs import BaseDummyInputsBuilder, MultiModalDummyOptions
 from .inputs import ProcessorInputs
 
@@ -1114,10 +1114,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
         processor_inputs.cache = cache
 
-        mm_inputs = self.apply(
-            processor_inputs,
-            timing_ctx=TimingContext(enabled=False),
-        )
+        with profiling_media():
+            mm_inputs = self.apply(
+                processor_inputs,
+                timing_ctx=TimingContext(enabled=False),
+            )
 
         prompt_token_ids = mm_inputs["prompt_token_ids"]
         total_len = len(prompt_token_ids)

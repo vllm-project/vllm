@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from vllm.multimodal.utils import strip_covered_mm_data
 from vllm.utils.gc_utils import untrack_long_lists
+from vllm.v1.metrics.iteration_workload import ScheduledWorkload
 
 if TYPE_CHECKING:
     import numpy as np
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
         AuxOutputConnectorMetadata,
     )
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
+    from vllm.distributed.ec_transfer.ec_events import ECCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
@@ -201,6 +203,8 @@ class IterationDetails:
     num_decode_tokens: int = 0
     num_encoder_inputs: int = 0
     num_encoder_output_tokens: int = 0
+    # Only with --enable-logging-iteration-details.
+    scheduled_workload: ScheduledWorkload | None = None
 
     # Temporary aliases for existing EngineCore and worker profiler consumers.
     @property
@@ -328,6 +332,11 @@ class SchedulerOutput:
     # (non-final prefill chunks, or requests sure to reach max_tokens), so the
     # drafter can skip proposing them.
     skip_drafts: bool = False
+
+    # Publish these events once this step's worker output is processed, even
+    # when the step schedules no tokens but frees encoder cache entries.
+    encoder_cache_events: "list[ECCacheEvent] | None" = None
+    encoder_cache_epoch: int = 0
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
