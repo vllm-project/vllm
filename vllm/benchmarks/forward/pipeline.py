@@ -5,6 +5,7 @@
 import gzip
 import json
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from typing import Any
 
@@ -26,6 +27,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.v1.executor.uniproc_executor import ExecutorWithExternalLauncher
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
 class ForwardPipelineExecutor(ExecutorWithExternalLauncher):
@@ -37,6 +39,34 @@ class ForwardPipelineExecutor(ExecutorWithExternalLauncher):
     """
 
     supports_pp = True
+
+    def collective_rpc(  # type: ignore[override]
+        self,
+        method: str | Callable,
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict | None = None,
+        non_block: bool = False,
+        single_value: bool = False,
+    ) -> list[Any]:
+        """Return every worker's result in world-rank order on every process."""
+        if non_block or single_value:
+            raise NotImplementedError(
+                "ForwardPipelineExecutor requires synchronous, all-worker RPC results."
+            )
+        (local_result,) = super().collective_rpc(method, timeout, args, kwargs)
+        world = get_world_group()
+        results: list[Any] = [None] * world.world_size
+        dist.all_gather_object(results, local_result, group=world.cpu_group)
+        return results
+
+    def determine_available_memory(self) -> list[int]:
+        available_memory = self.collective_rpc("determine_available_memory")
+        return [min(available_memory)] * len(available_memory)
+
+    def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
+        local_config = kv_cache_configs[get_world_group().rank]
+        super().initialize_from_config([local_config])
 
     def execute_model(self, *args, **kwargs):
         raise RuntimeError("ForwardPipelineExecutor requires PipelineBench")

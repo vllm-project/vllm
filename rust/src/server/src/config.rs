@@ -21,6 +21,7 @@ use vllm_chat::{
 use vllm_engine_core_client::protocol::multimodal::MmModality;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
+use vllm_llm::AdmissionLimits;
 use vllm_metrics::CustomHistogramBuckets;
 use vllm_text::backend::hf::{HfOverrides, HfToken, ModelSource};
 
@@ -91,19 +92,20 @@ pub struct ApiServerOptions {
     pub log_error_stack: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
     pub enable_scale_out: bool,
-    /// When `true`, register `/tokenizer_info`.
-    pub enable_tokenizer_info_endpoint: bool,
     /// Accept any requested model name, served by the base model unless it
     /// names a loaded LoRA adapter (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
     pub skip_model_name_validation: bool,
     /// When `true`, register the development routes (`VLLM_SERVER_DEV_MODE`).
     pub server_dev_mode: bool,
+    /// When `true`, register the LoRA load and unload routes
+    /// (`VLLM_ALLOW_RUNTIME_LORA_UPDATING`).
+    pub allow_runtime_lora_updating: bool,
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,
-    /// Maximum HTTP request body size in bytes
-    /// (`VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, default 32 MiB). `None` removes the
-    /// limit.
+    /// Maximum size in bytes of an HTTP request body and of a gRPC request
+    /// message (`VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, default 32 MiB). `None`
+    /// removes the limit.
     #[educe(Default(expression = Some(DEFAULT_REQUEST_BODY_LIMIT_BYTES)))]
     pub request_body_limit_bytes: Option<usize>,
     /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`, default 16384).
@@ -391,7 +393,7 @@ pub struct Config {
     /// `tool_choice` is `none`.
     pub exclude_tools_when_tool_choice_none: bool,
     /// Maximum number of input items allowed per prompt for each modality.
-    /// Unspecified modalities default to 999 items.
+    /// Unspecified modalities default to the model's default, else 999 items.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
     /// Default overrides for multimodal processor options.
     pub mm_processor_kwargs: HashMap<String, Value>,
@@ -411,6 +413,8 @@ pub struct Config {
     /// output after the first one. Requests can raise it with their own
     /// `stream_interval`.
     pub stream_interval: NonZeroU32,
+    /// Queue limits that reject new requests with HTTP 503.
+    pub admission_limits: AdmissionLimits,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
     /// What `system_fingerprint` reports on chat and completion responses.

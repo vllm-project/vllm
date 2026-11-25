@@ -134,6 +134,45 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
     return len(block_strides) == len(storage_ptrs) == 1
 
 
+def _splits_kernel_rows(
+    layer_name: str, cache: torch.Tensor, num_blocks: int, physical_page_size: int
+) -> bool:
+    """Return whether each kernel row of a `[B, H, N, C]` view holds several
+    NIXL pages.
+
+    The runner picks a kernel block size per KV cache group, while NIXL picks
+    one for all groups, so a group can keep rows larger than NIXL's pages. A
+    token-major row (a single head slot, or tokens outside heads as in LBNHC)
+    is byte-identical to consecutive NIXL pages, so the pages tile it densely.
+    Other rows would need a per-group block size, which NIXL does not support.
+
+    A token-major row may also end in padding, when its group shares a larger
+    page size (e.g. a drafter next to an MLA target). Its pages then cut
+    through tokens, so they only match a peer with the same row layout.
+    """
+    if cache.ndim != 4 or cache.shape[0] >= num_blocks:
+        return False
+    split, rem = divmod(num_blocks, cache.shape[0])
+    token_stride = cache.stride(2) * cache.element_size()
+    if (
+        rem
+        or cache.shape[2] % split
+        or (cache.shape[1] > 1 and cache.stride(1) > cache.stride(2))
+        or cache.stride(0) * cache.element_size() != split * physical_page_size
+        or token_stride * cache.shape[2] > split * physical_page_size
+    ):
+        raise NotImplementedError(
+            f"Layer {layer_name} uses kernel blocks of {cache.shape[2]} tokens, "
+            f"which NIXL cannot split into its {num_blocks} transfer blocks "
+            f"(cache_shape={tuple(cache.shape)}, "
+            f"cache_stride={tuple(cache.stride())}, "
+            f"physical_page_size={physical_page_size}). Lower --block-size so "
+            "every attention backend uses the same kernel block size, or set "
+            "VLLM_KV_CACHE_LAYOUT=LBNHC."
+        )
+    return True
+
+
 # Max slack (s) kept before a remote lease deadline when heartbeating or reading:
 # absorbs clock-offset estimation error and notification/read latency.
 _KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
@@ -220,8 +259,8 @@ class NixlBaseConnectorWorker:
         num_ssm_regions = 0
         if self._has_mamba:
             assert self._conv_decomp is not None
-            # NIXL regions per SSM layer = conv sub-projections + 1 SSM temporal
-            # (Mamba2/GDN: 3+1=4; Mamba1: 1+1=2).
+            # NIXL regions per SSM layer = 3 conv sub-projections + 1 SSM
+            # temporal.
             ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
             # Count only the regions that actually hold SSM state; must match
             # the descriptors emitted by _build_mamba_local.
@@ -1159,6 +1198,9 @@ class NixlBaseConnectorWorker:
         # e.g. a scratch page lands in the region of the page it overlays.
         self._group_region_indices = list[list[int] | None]()
         self._ple_region_index: int | None = None
+        # Whether NIXL pages cut through tokens of padded kernel rows.
+        # TODO: remove once the drafter has its own KV cache pool (#64611).
+        self._splits_padded_kernel_rows = False
         # Page length of the PLE short-conv state; its region may be shared with
         # pages of a different (smaller) size, so it cannot use the region's.
         self._ple_block_len: int | None = None
@@ -1719,6 +1761,7 @@ class NixlBaseConnectorWorker:
         self._ssm_region_indices = []
         region_groups: list[set[int]] = []
         self._ple_block_len = None
+        self._splits_padded_kernel_rows = False
         self._ple_region_index = None
 
         # A shared packed row may transfer whole only if every page in it is
@@ -1857,7 +1900,16 @@ class NixlBaseConnectorWorker:
                     and storage_is_block_major
                     and is_mla_region
                 )
-                if packed_mla and split_packed_rows:
+                if not self._has_packed_cache and _splits_kernel_rows(
+                    layer_name, cache, num_blocks, physical_page_size
+                ):
+                    # NIXL pages tile a larger, token-major kernel row densely.
+                    row_payload = cache.stride(2) * cache.shape[2]
+                    self._splits_padded_kernel_rows |= row_payload != cache.stride(0)
+                    region_specs = [
+                        (cache.data_ptr(), physical_page_size, physical_page_size)
+                    ]
+                elif packed_mla and split_packed_rows:
                     # PP>1 prefill stage: register only this layer's page of each row.
                     region_specs = [
                         (cache.data_ptr(), physical_page_size, block_stride)
@@ -2989,6 +3041,18 @@ class NixlBaseConnectorWorker:
         remote_physical_per_logical = (
             nixl_agent_meta.physical_blocks_per_logical_kv_block
         )
+        if self._splits_padded_kernel_rows and (
+            tp_ratio != 1
+            or self.dcp_size != remote_dcp_size
+            or block_size_ratio != 1
+            or remote_physical_per_logical != self._physical_blocks_per_logical_kv_block
+        ):
+            # A page of a padded row is a byte range, not a token range, so it
+            # names the same KV only on a peer with an identical row layout.
+            raise NotImplementedError(
+                "NIXL kernel rows ending in padding require matching TP, DCP and "
+                "block sizes on both peers."
+            )
         if (
             (self.dcp_size > 1 or remote_dcp_size > 1)
             and not all(
