@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""IPC-based weight transfer engine using CUDA IPC for communication."""
+"""IPC weight transfer with overridable device operations."""
 
 import pickle
 from dataclasses import asdict, dataclass
@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, ClassVar, Self
 
 import pybase64 as base64
 import torch
-from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 
 from vllm import envs
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -29,6 +28,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     PackedIpcConsumer,
     packed_ipc_producer,
 )
+from vllm.platforms import current_platform
 
 
 @dataclass
@@ -58,7 +58,7 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     dtype_names: list[str]
     shapes: list[list[int]]
     ipc_handles: list[dict[str, tuple]] | dict[str, tuple] | None = None
-    """IPC handles mapping physical GPU UUID to rebuild_cuda_tensor args.
+    """IPC handles mapping physical-device keys to native reconstruction args.
     For non-packed mode: list of per-parameter handle dicts.
     For packed mode: the packed buffer's handle dict in the first chunk of a
     transfer with bytes, else empty."""
@@ -113,11 +113,10 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 class IPCWeightTransferEngine(
     WeightTransferEngine[IPCWeightTransferInitInfo, IPCWeightTransferUpdateInfo]
 ):
-    """Weight transfer engine using CUDA IPC between trainer and workers.
+    """Weight transfer between colocated trainers and workers.
 
-    This implementation uses CUDA IPC to transfer weights from the trainer (rank 0)
-    to all inference workers in a process group. IPC handles are used to share
-    memory between processes on the same node.
+    CUDA IPC is the default; plugins override device identity and reconstruction
+    while sharing the packed/unpacked receive and reload lifecycle.
     """
 
     # Define backend-specific dataclass types
@@ -138,9 +137,23 @@ class IPCWeightTransferEngine(
         self._packed_consumer: PackedIpcConsumer | None = None
 
     def _local_gpu(self) -> tuple[str, int]:
-        """This worker's GPU UUID and device index, for rebuilding handles."""
-        device_index = self.device.index
-        return str(torch.cuda.get_device_properties(device_index).uuid), device_index
+        """This worker's physical-device key and local device index."""
+        return self._get_device_key(), self.device.index
+
+    def _get_device_key(self) -> str:
+        """Return the physical-device key used in the trainer's handle map."""
+        return str(current_platform.get_device_properties(self.device.index).uuid)
+
+    def _rebuild_ipc_tensor(self, args: tuple) -> torch.Tensor:
+        """Import a CUDA tensor on this worker's assigned device.
+
+        Plugins supply their native reconstruction and argument remapping here.
+        """
+        from torch.multiprocessing.reductions import rebuild_cuda_tensor
+
+        local_args = list(args)
+        local_args[6] = self.device.index
+        return rebuild_cuda_tensor(*local_args)
 
     def init_transfer_engine(self, init_info: IPCWeightTransferInitInfo) -> None:
         """Initialize the weight transfer mechanism. No data-plane rendezvous is
@@ -160,7 +173,12 @@ class IPCWeightTransferEngine(
         start_reload(self.model)
         if self.packed:
             gpu_uuid, device_index = self._local_gpu()
-            self._packed_consumer = PackedIpcConsumer(device_index, gpu_uuid)
+            self._packed_consumer = PackedIpcConsumer(
+                device_index,
+                gpu_uuid,
+                device=self.device,
+                rebuild_tensor=self._rebuild_ipc_tensor,
+            )
 
     def finish_weight_update(self) -> None:
         """Finish reloading after all weights have been received."""
@@ -172,7 +190,7 @@ class IPCWeightTransferEngine(
         finish_reload(self.model, self.model_config, self.device)
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
-        """Receive weights from the trainer via CUDA IPC handles and load them.
+        """Receive weights from the trainer via IPC handles and load them.
 
         Whether the transfer is packed is read from `self.packed`, set at the
         init handshake from the trainer's init info, so it is guaranteed to
@@ -181,7 +199,7 @@ class IPCWeightTransferEngine(
         Args:
             update_info: IPC update info containing parameter names, dtypes, shapes,
                         and IPC handles. Each IPC handle is a mapping between physical
-                        GPU UUID and the rebuild_cuda_tensor args tuple.
+                        device key and its native reconstruction arguments.
 
         """
         # Use the worker's assigned device rather than the ambient current
@@ -189,8 +207,6 @@ class IPCWeightTransferEngine(
         # `with torch.device(self.device)` by the caller, so the current device
         # is not guaranteed to match self.device. The IPC tensors must be
         # rebuilt on the device the model lives on.
-        device_index = self.device.index
-
         if self.packed:
             assert self._packed_consumer is not None, (
                 "packed IPC receive_weights called outside "
@@ -210,26 +226,19 @@ class IPCWeightTransferEngine(
         else:
             assert isinstance(update_info.ipc_handles, list)
             weights = []
+            physical_device_id, _ = self._local_gpu()
             for name, ipc_handle in zip(
                 update_info.names,
                 update_info.ipc_handles,
             ):
-                props = torch.cuda.get_device_properties(device_index)
-                physical_gpu_id = str(props.uuid)
-
-                if physical_gpu_id not in ipc_handle:
+                if physical_device_id not in ipc_handle:
                     raise ValueError(
-                        f"IPC handle not found for GPU UUID "
-                        f"{physical_gpu_id}. "
+                        f"IPC handle not found for device key "
+                        f"{physical_device_id}. "
                         f"Available UUIDs: {list(ipc_handle.keys())}"
                     )
 
-                args = ipc_handle[physical_gpu_id]
-                list_args = list(args)
-                # Index 6 of the args from reduce_tensor is the device_index.
-                # We need to overwrite it with the receiver's device index.
-                list_args[6] = device_index
-                weight = rebuild_cuda_tensor(*list_args)
+                weight = self._rebuild_ipc_tensor(ipc_handle[physical_device_id])
                 weights.append((name, weight))
 
         self.model.load_weights(weights)
@@ -239,7 +248,7 @@ class IPCWeightTransferEngine(
 
 
 class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitInfo]):
-    """Trainer-side CUDA IPC weight transfer engine.
+    """Trainer-side IPC weight transfer engine with CUDA defaults.
 
     Called on every trainer rank. For multi-rank (e.g. FSDP) trainers all ranks
     drive the source's `iter_full()` (materializing each tensor) and contribute
@@ -254,6 +263,8 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
     """
 
     init_info_cls = IPCTrainerInitInfo
+    worker_init_info_cls = IPCWeightTransferInitInfo
+    update_info_cls = IPCWeightTransferUpdateInfo
 
     def __init__(
         self,
@@ -267,8 +278,32 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         super().__init__(client=client, source=source, is_sender=is_sender)
         self.packed = packed
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
+        self._initialize_device()
+
+    def _initialize_device(self) -> None:
+        """Select the trainer's device and physical-device key.
+
+        Plugins may override this to initialize their native device context.
+        """
         self.device_index = torch.accelerator.current_device_index()
-        self.gpu_uuid = str(torch.cuda.get_device_properties(self.device_index).uuid)
+        self.device = torch.device(current_platform.device_type, self.device_index)
+        self.gpu_uuid = str(
+            current_platform.get_device_properties(self.device_index).uuid
+        )
+
+    def _export_ipc_tensor(self, tensor: torch.Tensor) -> tuple:
+        """Export native reconstruction arguments after device registration."""
+        _, args = torch.multiprocessing.reductions.reduce_tensor(tensor)
+        return args
+
+    def _synchronize_device(self) -> None:
+        """Complete writes at the existing trainer handle-gather boundary."""
+        torch.accelerator.synchronize()
+
+    @classmethod
+    def _build_worker_init_payload(cls, init_info: IPCTrainerInitInfo) -> dict:
+        """Construct the worker handshake using the selected backend schema."""
+        return asdict(cls.worker_init_info_cls(packed=init_info.packed))
 
     @classmethod
     def trainer_init(
@@ -302,7 +337,9 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         # IPC needs no data-plane rendezvous. The sender ships the must-agree
         # `packed` flag so the worker decodes exactly as this trainer encodes.
         if engine.is_sender:
-            engine.client.init_weight_transfer_engine({"packed": init_info.packed})
+            engine.client.init_weight_transfer_engine(
+                cls._build_worker_init_payload(init_info)
+            )
         return engine
 
     def send_weights(self) -> None:
@@ -342,7 +379,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         gathered: list[list[dict[str, tuple]] | None] = [None] * world_size
         torch.distributed.all_gather_object(gathered, handles)
         torch.distributed.barrier()
-        torch.accelerator.synchronize()
+        self._synchronize_device()
 
         if self.is_sender:
             merged: list[dict[str, tuple]] = []
@@ -393,7 +430,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
 
             weight = tensor.detach().contiguous()
             weight_refs.append(weight)
-            _, ipc_args = reduce_tensor(weight)
+            ipc_args = self._export_ipc_tensor(weight)
             ipc_handles.append({self.gpu_uuid: ipc_args})
 
         ipc_handles = self._all_gather_and_merge_handles(ipc_handles)
@@ -414,6 +451,8 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             device_index=self.device_index,
             post_iter_func=lambda item: item[1],
             buffer_size_bytes=self.packed_buffer_size_bytes,
+            device=self.device,
+            export_tensor=self._export_ipc_tensor,
         ):
             if chunk.ipc_handle is not None:
                 handle = self._all_gather_and_merge_handles([chunk.ipc_handle])[0]
@@ -447,7 +486,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         """
         if not self.is_sender:
             return
-        update_info = IPCWeightTransferUpdateInfo(
+        update_info = self.update_info_cls(
             names=names,
             dtype_names=dtype_names,
             shapes=shapes,

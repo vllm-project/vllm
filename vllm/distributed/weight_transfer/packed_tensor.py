@@ -10,7 +10,7 @@ from functools import cache
 from typing import Any, NamedTuple
 
 import torch
-from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
+from torch.multiprocessing.reductions import rebuild_cuda_tensor
 
 from vllm.utils.math_utils import round_down, round_up
 
@@ -114,7 +114,7 @@ def _record_sources(
         if t.device == device:
             t.record_stream(stream)
         elif t.device.type != "cpu":  # host copies are synchronous
-            t.record_stream(torch.cuda.current_stream(t.device))
+            t.record_stream(torch.get_device_module(t.device).current_stream(t.device))
 
 
 def dtype_name(dtype: torch.dtype) -> str:
@@ -437,6 +437,9 @@ def packed_ipc_producer(
     device_index: int,
     post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    *,
+    device: torch.device | None = None,
+    export_tensor: Callable[[torch.Tensor], tuple] | None = None,
 ) -> Iterator[PackedIpcChunk]:
     """Pack tensors into one IPC buffer, refilled and yielded per chunk.
 
@@ -446,16 +449,23 @@ def packed_ipc_producer(
 
     Args:
         iterator: Iterator of (name, tensor) pairs.
-        gpu_uuid: Physical GPU UUID string of `device_index`.
-        device_index: The CUDA device the IPC buffer is allocated on.
+        gpu_uuid: Physical-device key identifying the exported buffer.
+        device_index: Local device index used when `device` is omitted.
         post_iter_func: Applied to each (name, tensor) before packing.
         buffer_size_bytes: Chunk size; the IPC buffer grows up to it while the
             first chunk is packed.
+        device: Device owning the IPC buffer. Defaults to the active platform.
+        export_tensor: Native IPC exporter returning opaque rebuild arguments.
+            Defaults to the currently registered PyTorch tensor reducer.
 
     """
     capacity = chunk_capacity(buffer_size_bytes)
-    device = torch.device("cuda", device_index)
-    caller_stream = torch.cuda.current_stream(device)
+    if device is None:
+        from vllm.platforms import current_platform
+
+        device = torch.device(current_platform.device_type, device_index)
+    device_module = torch.get_device_module(device)
+    caller_stream = device_module.current_stream(device)
     buf: torch.Tensor | None = None  # at the first byte: none for no bytes
     filled = 0  # the bytes of the current chunk's copied pieces end at
     items = iter(iterator)
@@ -478,7 +488,7 @@ def packed_ipc_producer(
     def pack(pieces: list[Piece]) -> None:
         nonlocal buf, filled
         end = _bytes_end(pieces)
-        with torch.cuda.stream(caller_stream):
+        with device_module.stream(caller_stream):
             if end:
                 buf = grow_buffer(buf, end, capacity, device, filled)
                 filled = end
@@ -497,7 +507,12 @@ def packed_ipc_producer(
             last = ahead[0] is None
         handle = None
         if k == 0 and buf is not None:  # only the first chunk grows `buf`
-            handle = {gpu_uuid: reduce_tensor(buf)[1]}
+            args = (
+                torch.multiprocessing.reductions.reduce_tensor(buf)[1]
+                if export_tensor is None
+                else export_tensor(buf)
+            )
+            handle = {gpu_uuid: args}
         yield PackedIpcChunk(
             names=[name for name, _, _ in started],
             shapes=[shape for _, shape, _ in started],
@@ -517,9 +532,22 @@ class PackedIpcConsumer:
     `close()` releases it and raises if a transfer did not reach its last
     chunk."""
 
-    def __init__(self, device_index: int, gpu_uuid: str) -> None:
+    def __init__(
+        self,
+        device_index: int,
+        gpu_uuid: str,
+        *,
+        device: torch.device | None = None,
+        rebuild_tensor: Callable[[tuple], torch.Tensor] | None = None,
+    ) -> None:
         self._device_index = device_index
         self._gpu_uuid = gpu_uuid
+        if device is None:
+            from vllm.platforms import current_platform
+
+            device = torch.device(current_platform.device_type, device_index)
+        self._device = device
+        self._rebuild_tensor = rebuild_tensor
         self._buf: torch.Tensor | None = None
         self._unpacker: _Unpacker | None = None  # of the transfer in progress
 
@@ -537,7 +565,7 @@ class PackedIpcConsumer:
         producer refills the buffer.
 
         Args:
-            ipc_handle: GPU UUID to `rebuild_cuda_tensor` args; set on the
+            ipc_handle: Physical-device key to native rebuild args; set on the
                 first chunk of a transfer with bytes only.
             names: Names of the tensors that start in this chunk
             shapes: Their shapes
@@ -549,14 +577,20 @@ class PackedIpcConsumer:
         if self._unpacker is None:  # the first chunk of a transfer
             assert chunk_capacity is not None
             if ipc_handle:
-                args = local_rebuild_args(
-                    ipc_handle, self._gpu_uuid, self._device_index
-                )
-                self._buf = rebuild_cuda_tensor(*args)
+                if self._rebuild_tensor is None:
+                    args = local_rebuild_args(
+                        ipc_handle, self._gpu_uuid, self._device_index
+                    )
+                    self._buf = rebuild_cuda_tensor(*args)
+                else:
+                    if self._gpu_uuid not in ipc_handle:
+                        raise ValueError(
+                            f"IPC handle not found for device key {self._gpu_uuid}. "
+                            f"Available keys: {list(ipc_handle.keys())}"
+                        )
+                    self._buf = self._rebuild_tensor(ipc_handle[self._gpu_uuid])
             else:  # no bytes
-                self._buf = torch.empty(
-                    0, dtype=torch.uint8, device=f"cuda:{self._device_index}"
-                )
+                self._buf = torch.empty(0, dtype=torch.uint8, device=self._device)
             self._unpacker = _Unpacker(chunk_capacity, views=False)
         assert self._buf is not None
         unpacker = self._unpacker

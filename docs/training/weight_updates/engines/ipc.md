@@ -159,6 +159,46 @@ For different parameter subsets per worker, `update_info` may be a list indexed
 by worker rank. This form is IPC-only because collective backends require every
 worker to participate.
 
+## Hardware Plugin Extension Points
+
+Hardware plugins can subclass the IPC engines and reuse their handshake,
+handle gathering, packed/unpacked transfer loops, and reload lifecycle.
+Register the subclasses through the existing weight-transfer factories; the
+built-in `ipc` backend continues to use CUDA IPC.
+
+| Class | Extension point | Responsibility |
+| ----- | --------------- | -------------- |
+| `IPCWeightTransferEngine` | `_get_device_key()` | Match this worker to the trainer's physical-device handle key |
+| `IPCWeightTransferEngine` | `_rebuild_ipc_tensor(args)` | Reconstruct a native IPC tensor and remap the sender's device index to the worker's assigned device |
+| `IPCTrainerWeightTransferEngine` | `_initialize_device()` | Set `device`, `device_index`, and the opaque handle key in `gpu_uuid` |
+| `IPCTrainerWeightTransferEngine` | `_export_ipc_tensor(tensor)` | Return native reconstruction arguments |
+| `IPCTrainerWeightTransferEngine` | `_synchronize_device()` | Complete writes at the existing multi-rank handle-gather boundary |
+| `IPCTrainerWeightTransferEngine` | `_post_send_sync()` | Complete backend-specific post-send cleanup, retaining the trainer barrier |
+
+The worker uses the same reconstruction hook for packed and unpacked imports.
+The trainer passes its device and exporter to `packed_ipc_producer`; the packed
+helper uses that device's native stream module. Exporters resolve the PyTorch
+tensor reducer at call time, so device plugins may register it after importing
+the weight-transfer module. The hooks are local dependencies, not wire fields.
+
+The packed layout and completion protocol are unchanged: tensors can span chunks,
+the buffer is exported once per transfer with bytes, empty-only transfers export
+no buffer, and `finish_weight_update` checks that the last chunk was received.
+Packed results own their storage; unpacked tensors retain the existing aliasing
+contract with the trainer's exported storage.
+
+CUDA keeps its existing synchronization boundaries: packed publication waits
+for the packing stream, and post-send cleanup performs the trainer barrier
+followed by `torch.cuda.ipc_collect()`. Plugins implement any additional native
+waits in their overrides. A trainer-side device wait does not replace the worker's
+completion acknowledgement before reusing or releasing an export.
+
+For backend-specific request fields, select `worker_init_info_cls` and
+`update_info_cls` on the trainer to match the worker's schemas. Override
+`_build_worker_init_payload(init_info)` when additional handshake fields must be
+derived from trainer configuration. These extensions retain the existing CUDA
+request fields and handle format.
+
 ## Limitations
 
 - **Colocated only.** Each trainer rank shares memory with the inference worker

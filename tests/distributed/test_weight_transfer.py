@@ -1843,10 +1843,11 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
 def _packed_ipc_engine(monkeypatch, bufs: list[torch.Tensor]):
     """A packed IPC worker engine whose handle `(i, ...)` rebuilds to
     `bufs[i]`."""
-    import vllm.distributed.weight_transfer.packed_tensor as packed_mod
     import vllm.model_executor.model_loader.reload as reload_mod
 
-    monkeypatch.setattr(packed_mod, "rebuild_cuda_tensor", lambda *a: bufs[a[0]])
+    monkeypatch.setattr(
+        torch.multiprocessing.reductions, "rebuild_cuda_tensor", lambda *a: bufs[a[0]]
+    )
     monkeypatch.setattr(reload_mod, "start_reload", lambda model: None)
     monkeypatch.setattr(reload_mod, "finish_reload", lambda *args: None)
     model = MagicMock(spec=torch.nn.Module)
@@ -1920,6 +1921,157 @@ class RecordingClient:
 
     def finish_weight_update(self, weight_version: str | None = None) -> None:
         self.order.append("finish")
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_ipc_device_plugin_reuses_the_full_transfer_lifecycle(monkeypatch, packed):
+    """A plugin's opaque handles work in both modes, without replacing the loops.
+
+    CPU tensors exercise the real packing/reload path; only native accelerator
+    services are replaced. Repeated packed updates must not overwrite outputs
+    retained from an earlier chunk or transfer.
+    """
+    from dataclasses import dataclass
+
+    from vllm.config import DeviceConfig, VllmConfig
+
+    reductions = torch.multiprocessing.reductions
+    native_reduce = reductions.reduce_tensor
+    exports: list[tuple] = []
+
+    def rebuild(args):
+        kind, index = args
+        assert kind == "cpu-handle"
+        fn, native_args = exports[index]
+        return fn(*native_args)
+
+    def registered_reduce(tensor):
+        exports.append(native_reduce(tensor))
+        return rebuild, ("cpu-handle", len(exports) - 1)
+
+    monkeypatch.setattr(reductions, "reduce_tensor", registered_reduce)
+    monkeypatch.setattr(torch.accelerator, "synchronize", torch.cpu.synchronize)
+    monkeypatch.setattr(
+        torch.cpu.Stream,
+        "synchronize",
+        lambda self: torch.cpu.synchronize(),
+        raising=False,
+    )
+    native_record_stream = torch.Tensor.record_stream
+    monkeypatch.setattr(
+        torch.Tensor,
+        "record_stream",
+        lambda tensor, stream: (
+            None
+            if tensor.device.type == "cpu"
+            else native_record_stream(tensor, stream)
+        ),
+    )
+
+    @dataclass
+    class InitInfo(IPCWeightTransferInitInfo):
+        plugin: str = "cpu-plugin"
+
+    @dataclass
+    class UpdateInfo(IPCWeightTransferUpdateInfo):
+        plugin: str = "cpu-plugin"
+
+    class Worker(IPCWeightTransferEngine):
+        init_info_cls = InitInfo
+        update_info_cls = UpdateInfo
+
+        def _get_device_key(self):
+            return "cpu-plugin"
+
+        def _rebuild_ipc_tensor(self, args):
+            return rebuild(args)
+
+    class Trainer(IPCTrainerWeightTransferEngine):
+        worker_init_info_cls = InitInfo
+        update_info_cls = UpdateInfo
+
+        def _initialize_device(self):
+            self.device = torch.device("cpu")
+            self.device_index = 0
+            self.gpu_uuid = "cpu-plugin"
+
+        @classmethod
+        def _post_send_sync(cls):
+            torch.cpu.synchronize()
+
+    class Recorder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.received = {}
+
+        def load_weights(self, weights):
+            self.received.update(weights)
+
+    class Client(RecordingClient):
+        def init_weight_transfer_engine(self, info):
+            super().init_weight_transfer_engine(info)
+            worker.init_transfer_engine(worker.parse_init_info(info))
+
+        def start_weight_update(self):
+            super().start_weight_update()
+            model.received.clear()
+            worker.start_weight_update()
+
+        def update_weights(self, info):
+            super().update_weights(info)
+            worker.update_weights(info)
+
+        def finish_weight_update(self, weight_version=None):
+            super().finish_weight_update(weight_version)
+            worker.finish_weight_update()
+
+    source_module = _module_with(
+        ("wide", torch.arange(19, dtype=torch.float32)),
+        ("bytes", torch.tensor([1, 3, 5], dtype=torch.int8)),
+        ("strided", torch.arange(12, dtype=torch.float16).view(3, 4).T),
+        ("empty", torch.empty(0, 2)),
+    )
+    model = Recorder()
+    worker = Worker(
+        WeightTransferConfig(backend="ipc"),
+        VllmConfig(device_config=DeviceConfig(device="cpu")),
+        torch.device("cpu"),
+        model,
+    )
+    client = Client()
+    trainer = Trainer.trainer_init(
+        IPCTrainerInitInfo(rank=0, packed=packed, packed_buffer_size_bytes=32),
+        client=client,
+        source=ModuleSource(source_module),
+    )
+    trainer.send_weights()
+    first = dict(model.received)
+    expected = {
+        name: tensor.detach().clone()
+        for name, tensor in source_module.named_parameters()
+    }
+    assert first.keys() == expected.keys()
+    for name, tensor in first.items():
+        assert torch.equal(tensor, expected[name])
+        assert tensor.device.type == "cpu"
+        if packed:
+            assert tensor.untyped_storage().nbytes() == tensor.nbytes
+
+    with torch.no_grad():
+        for tensor in source_module.parameters():
+            tensor.add_(7)
+    trainer.send_weights()
+    assert client.order[0] == "init"
+    assert client.order.count("finish") == 2
+    assert client.last_init_info is not None
+    assert client.last_update_info is not None
+    assert client.last_init_info["plugin"] == "cpu-plugin"
+    assert client.last_update_info["plugin"] == "cpu-plugin"
+    for name, tensor in model.received.items():
+        assert torch.equal(tensor, expected[name] + 7)
+        if packed:
+            assert torch.equal(first[name], expected[name])
+    worker.shutdown()
 
 
 def _module_with(*pairs):

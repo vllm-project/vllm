@@ -400,6 +400,96 @@ class TestPackedBroadcastDeferredConsumer:
 # --- Unit Tests: packed_ipc_producer ---
 
 
+@pytest.fixture
+def cpu_ipc_streams(monkeypatch):
+    """Provide accelerator stream/allocator services for synchronous CPU copies."""
+    monkeypatch.setattr(
+        torch.cpu.Stream,
+        "synchronize",
+        lambda self: torch.cpu.synchronize(),
+        raising=False,
+    )
+    native_record_stream = torch.Tensor.record_stream
+    monkeypatch.setattr(
+        torch.Tensor,
+        "record_stream",
+        lambda tensor, stream: (
+            None
+            if tensor.device.type == "cpu"
+            else native_record_stream(tensor, stream)
+        ),
+    )
+
+
+@pytest.mark.parametrize("names", [[], ["empty"]])
+def test_packed_ipc_device_plugin_without_bytes_exports_nothing(cpu_ipc_streams, names):
+    """An empty transfer needs neither a native handle nor an accelerator buffer."""
+    produced = list(
+        packed_ipc_producer(
+            iter((name, torch.empty(0, 3)) for name in names),
+            "cpu-plugin",
+            0,
+            lambda item: item[1],
+            32,
+            device=torch.device("cpu"),
+            export_tensor=lambda tensor: pytest.fail(
+                "an empty transfer exported storage"
+            ),
+        )
+    )
+    assert [(c.names, c.ipc_handle, c.last) for c in produced] == [(names, None, True)][
+        : len(names)
+    ]
+    consumer = PackedIpcConsumer(0, "cpu-plugin", device=torch.device("cpu"))
+    for chunk in produced:
+        [(name, tensor)] = consumer.receive(
+            chunk.ipc_handle,
+            chunk.names,
+            chunk.shapes,
+            chunk.dtype_names,
+            chunk.chunk_capacity,
+            chunk.last,
+        )
+        assert name == "empty"
+        assert tensor.shape == (0, 3)
+        assert tensor.device.type == "cpu"
+    consumer.close()
+
+
+def test_packed_ipc_device_plugin_rejects_an_incomplete_transfer(cpu_ipc_streams):
+    """Native import overrides retain the shared split-tensor completion checks."""
+    producer = packed_ipc_producer(
+        iter([("wide", torch.arange(20, dtype=torch.float32))]),
+        "cpu-plugin",
+        0,
+        lambda item: item[1],
+        32,
+        device=torch.device("cpu"),
+        export_tensor=lambda tensor: (tensor,),
+    )
+    chunk = next(producer)
+    consumer = PackedIpcConsumer(
+        0,
+        "cpu-plugin",
+        device=torch.device("cpu"),
+        rebuild_tensor=lambda args: args[0],
+    )
+    assert (
+        consumer.receive(
+            chunk.ipc_handle,
+            chunk.names,
+            chunk.shapes,
+            chunk.dtype_names,
+            chunk.chunk_capacity,
+            chunk.last,
+        )
+        == []
+    )
+    with pytest.raises(RuntimeError, match="before its last chunk"):
+        consumer.close()
+    producer.close()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestPackedIpcProducer:
     """Test the packed_ipc_producer generator."""
