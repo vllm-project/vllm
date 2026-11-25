@@ -405,15 +405,21 @@ class MoERunner(MoERunnerInterface):
     def apply_routed_output_transform(
         self,
         fused_output: torch.Tensor,
+        residual: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Apply transform to routed expert output (e.g., latent to full dim).
 
         Used by latent MoE models (e.g., NemotronH) where routed experts
         operate in a compressed latent space and need projection back to
         the full hidden dimension before combining with shared expert output.
+        `residual` is passed only to transforms that set `accumulates_residual`.
         """
         if self.routed_output_transform is not None:
-            r = self.routed_output_transform(fused_output)
+            r = (
+                self.routed_output_transform(fused_output)
+                if residual is None
+                else self.routed_output_transform(fused_output, residual=residual)
+            )
             fused_output = r[0] if isinstance(r, tuple) else r
         return fused_output
 
@@ -831,13 +837,20 @@ class MoERunner(MoERunnerInterface):
             shared_output, fused_output
         )
 
-        # Apply output transform (e.g. latent -> full dim)
-        fused_output = self.apply_routed_output_transform(fused_output)
-
-        if shared_output is not None:
-            result = shared_output + fused_output
+        # Apply output transform (e.g. latent -> full dim). A transform that
+        # sets `accumulates_residual` adds the shared output itself, e.g. in
+        # its GEMM epilogue.
+        if shared_output is not None and getattr(
+            self.routed_output_transform, "accumulates_residual", False
+        ):
+            result = self.apply_routed_output_transform(
+                fused_output, residual=shared_output
+            )
         else:
-            result = fused_output
+            fused_output = self.apply_routed_output_transform(fused_output)
+            result = (
+                fused_output if shared_output is None else shared_output + fused_output
+            )
 
         result = self._maybe_reduce_final_output(
             result, og_hidden_dim_post_xform, fused_output_is_reduced

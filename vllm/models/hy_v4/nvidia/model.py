@@ -42,7 +42,6 @@ from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_ma
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -67,8 +66,13 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.models.hy_v4.nvidia.mrope import set_token_rope
-from vllm.models.hy_v4.weight_utils import HYV4_MLP_MAPPER, HYV4_WEIGHTS_MAPPER
+from vllm.models.hy_v4.common.mrope import set_token_rope
+from vllm.models.hy_v4.weight_utils import (
+    HYV4_MLP_MAPPER,
+    HYV4_PACKED_MODULES_MAPPING,
+    HYV4_WEIGHTS_MAPPER,
+    remap_block_fp8_scale,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -77,7 +81,7 @@ from .attention import (
     is_skip_topk_indexer_weight,
     sparse_layer_ids,
 )
-from .hc import HYV4HCHeadLayer, HYV4HCLayer
+from .hc import HYV4HCHeadLayer, HYV4HCLayer, IHCBoundary
 from .moe import HYV4FeedForward, HYV4MoEFused
 
 logger = init_logger(__name__)
@@ -94,6 +98,14 @@ def _normalize_hyv4_config(config: PreTrainedConfig) -> PreTrainedConfig:
     config.num_shared_experts = config.n_shared_experts
     config.route_norm = config.norm_topk_prob
     return config
+
+
+class IHCCarry(typing.NamedTuple):
+    """A decoder layer's MLP output whose iHC post step is still pending."""
+
+    mlp_out: torch.Tensor
+    residual: torch.Tensor
+    post_gates: torch.Tensor
 
 
 class HYV4DecoderLayer(nn.Module):
@@ -169,6 +181,52 @@ class HYV4DecoderLayer(nn.Module):
         self.hc_mlp_layer = HYV4HCLayer(
             config, layer_idx, prefix=f"{prefix}.hc_mlp_layer"
         )
+        self.init_ihc_boundaries()
+
+    def init_ihc_boundaries(self) -> None:
+        """Build the fused iHC boundaries used by `forward_ihc_fused`."""
+        self.ihc_attn_boundary: IHCBoundary | None = None
+        self.ihc_mlp_boundary: IHCBoundary | None = None
+        if (
+            self.enable_ihc
+            and not self.defer_reduction
+            and IHCBoundary.supported(self.config)
+        ):
+            self.ihc_attn_boundary = IHCBoundary(
+                self.hc_attn_layer.hc_pre, self.input_layernorm
+            )
+            self.ihc_mlp_boundary = IHCBoundary(
+                self.hc_mlp_layer.hc_pre, self.post_attention_layernorm
+            )
+
+    def forward_ihc_fused(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        carry: IHCCarry | None,
+    ) -> IHCCarry:
+        """IHC forward that leaves the MLP post step to the next boundary.
+
+        `carry` is the previous layer's unfinished MLP post (`None` for the
+        first layer, whose `hidden_states` are the iHC channels). Finish the
+        returned carry with `hc_mlp_layer.post(*carry)`.
+        """
+        assert self.ihc_attn_boundary is not None
+        assert self.ihc_mlp_boundary is not None
+        if carry is None:
+            boundary = self.ihc_attn_boundary(
+                self.hc_attn_layer.prepare_input(hidden_states)
+            )
+        else:
+            boundary = self.ihc_attn_boundary(
+                carry.residual, carry.mlp_out, carry.post_gates
+            )
+        residual, hidden_states, post_gates = boundary
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
+        residual, hidden_states, post_gates = self.ihc_mlp_boundary(
+            residual, hidden_states, post_gates
+        )
+        return IHCCarry(self.mlp(hidden_states), residual, post_gates)
 
     def forward(
         self,
@@ -460,8 +518,16 @@ class HYV4Model(nn.Module):
 
         if use_ihc_sequence_parallel:
             hidden_states = sp_shard(hidden_states)
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(positions, hidden_states, residual)
+        layers = islice(self.layers, self.start_layer, self.end_layer)
+        if self.uses_fused_ihc(use_ihc_sequence_parallel):
+            carry: IHCCarry | None = None
+            for layer in layers:
+                carry = layer.forward_ihc_fused(positions, hidden_states, carry)
+            assert carry is not None
+            hidden_states = layer.hc_mlp_layer.post(*carry)
+        else:
+            for layer in layers:
+                hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             buffers = {k: v[: positions.shape[0]] for k, v in self.pp_buffers.items()}
@@ -483,6 +549,13 @@ class HYV4Model(nn.Module):
         if use_ihc_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         return hidden_states
+
+    def uses_fused_ihc(self, use_ihc_sequence_parallel: bool) -> bool:
+        return (
+            self.start_layer < self.end_layer
+            and not use_ihc_sequence_parallel
+            and self.layers[self.start_layer].ihc_attn_boundary is not None
+        )
 
     def load_fused_expert_weights(
         self,
@@ -579,15 +652,7 @@ class HYV4Model(nn.Module):
             if is_expert or is_pp_missing_parameter(name, self):
                 continue
 
-            if (
-                isinstance(self.quant_config, Fp8Config)
-                and self.quant_config.weight_block_size is not None
-                and name.endswith(".scale")
-            ):
-                name = name.removesuffix(".scale") + ".weight_scale_inv"
-                if weight.dtype == torch.uint8:
-                    # UINT8 stores UE8M0 exponents, not numeric scales.
-                    weight = weight.view(torch.float8_e8m0fnu)
+            name, weight = remap_block_fp8_scale(name, weight, self.quant_config)
 
             if name not in params_dict:
                 if ".indexer." not in name:
@@ -617,11 +682,7 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             ".kv_a_proj_with_mqa": (".fused_qkv_a_proj", 1),
         }
     )
-    packed_modules_mapping = {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        # MLA runs both latent down-projections as one GEMM.
-        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
-    }
+    packed_modules_mapping = HYV4_PACKED_MODULES_MAPPING
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
