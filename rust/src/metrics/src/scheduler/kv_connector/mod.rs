@@ -18,6 +18,7 @@ use crate::EngineLabels;
 mod mooncake;
 mod mooncake_store;
 mod nixl;
+mod offloading;
 mod simple_cpu_offload;
 mod umbp;
 
@@ -27,6 +28,8 @@ use mooncake_store::MooncakeStoreMetrics;
 pub use mooncake_store::{MooncakeRecord, MooncakeStats};
 use nixl::NixlMetrics;
 pub use nixl::NixlStats;
+use offloading::OffloadingMetrics;
+pub use offloading::{OffloadingSample, OffloadingStats};
 use simple_cpu_offload::SimpleCpuOffloadMetrics;
 pub use simple_cpu_offload::{SimpleCpuOffloadData, SimpleCpuOffloadStats};
 use umbp::UmbpMetrics;
@@ -50,6 +53,8 @@ pub struct MultiConnectorStats {
     pub umbp: Option<UmbpStats>,
     #[serde(rename = "SimpleCPUOffloadConnector")]
     pub simple_cpu_offload: Option<SimpleCpuOffloadStats>,
+    #[serde(rename = "OffloadingConnector")]
+    pub offloading: Option<OffloadingStats>,
     /// Child connector payloads without a Rust telemetry implementation.
     #[serde(flatten)]
     pub other: BTreeMap<String, OpaqueValue>,
@@ -72,6 +77,8 @@ pub enum KvConnectorStats {
     Mooncake(MooncakeStats),
     Umbp(UmbpStats),
     SimpleCpuOffload(SimpleCpuOffloadStats),
+    /// After `SimpleCpuOffload`, whose payloads share its envelope.
+    Offloading(OffloadingStats),
     Multi(Box<MultiConnectorStats>),
     Other(BTreeMap<String, OpaqueValue>),
 }
@@ -85,6 +92,7 @@ pub(super) struct KvConnectorMetrics {
     nixl: NixlMetrics,
     umbp: UmbpMetrics,
     simple_cpu_offload: SimpleCpuOffloadMetrics,
+    offloading: OffloadingMetrics,
 }
 
 /// One engine's KV connector recording. The families stay unresolved, so a
@@ -108,6 +116,7 @@ impl KvConnectorMetrics {
             nixl: NixlMetrics::register(registry),
             umbp: UmbpMetrics::register(registry),
             simple_cpu_offload: SimpleCpuOffloadMetrics::register(registry),
+            offloading: OffloadingMetrics::register(registry),
         }
     }
 
@@ -125,6 +134,7 @@ impl KvConnectorMetrics {
             KvConnectorStats::SimpleCpuOffload(stats) => {
                 self.simple_cpu_offload.record(labels, stats)
             }
+            KvConnectorStats::Offloading(stats) => self.offloading.record(labels, stats),
             KvConnectorStats::Multi(stats) => self.record_multi(labels, stats),
             KvConnectorStats::Other(_) => {}
         }
@@ -145,6 +155,9 @@ impl KvConnectorMetrics {
         }
         if let Some(simple_cpu_offload) = &stats.simple_cpu_offload {
             self.simple_cpu_offload.record(labels, simple_cpu_offload);
+        }
+        if let Some(offloading) = &stats.offloading {
+            self.offloading.record(labels, offloading);
         }
     }
 }
