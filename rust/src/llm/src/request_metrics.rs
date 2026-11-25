@@ -237,7 +237,6 @@ impl WatermarkRequestCounters {
 /// events (`QUEUED`, `SCHEDULED`, `PREEMPTED`), which engines only emit when
 /// they record stats.
 struct EventMetricHandles {
-    num_preemptions: U64Counter,
     request_num_preemptions: HistogramMetric,
     request_queue_time_seconds: HistogramMetric,
     request_prefill_time_seconds: HistogramMetric,
@@ -429,12 +428,9 @@ impl RequestMetricsTracker {
                         self.scheduled_ts = event.timestamp;
                     }
                 }
-                EngineCoreEventType::Preempted => {
-                    self.num_preemptions += 1;
-                    if let Some(events) = &self.handles.events {
-                        events.num_preemptions.inc();
-                    }
-                }
+                // `vllm:num_preemptions` counts from scheduler stats; the
+                // event only feeds this request's preemption histogram.
+                EngineCoreEventType::Preempted => self.num_preemptions += 1,
             }
         }
     }
@@ -499,7 +495,6 @@ pub(crate) fn resolve_request_metric_handles(
             .request_time_per_output_token_seconds
             .get_or_create_owned(&labels),
         events: engine_stats_enabled.then(|| EventMetricHandles {
-            num_preemptions: metrics.num_preemptions.get_or_create_owned(&labels),
             request_num_preemptions: metrics.request_num_preemptions.get_or_create_owned(&labels),
             request_queue_time_seconds: metrics
                 .request_queue_time_seconds

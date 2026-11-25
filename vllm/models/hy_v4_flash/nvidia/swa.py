@@ -4,11 +4,11 @@
 
 from typing import Any
 
-import torch
 from torch import nn
 
 from vllm.forward_context import get_forward_context
 from vllm.models.hy_v4.nvidia.flashmla_sparse import HYV4FlashMLASparseBackend
+from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseMetadataBuilder
@@ -47,13 +47,40 @@ class FlashSWABackend(FlashSparseBackend):
         return True
 
 
-def window_indices(positions: torch.Tensor, window: int, width: int) -> torch.Tensor:
-    if window < 1 or width < window:
-        raise ValueError("SWA index width must cover its causal window")
-    columns = torch.arange(width, device=positions.device)
-    indices = positions[:, None] - window + 1 + columns
-    live = (positions[:, None] >= 0) & (columns < window) & (indices >= 0)
-    return torch.where(live, indices, -1).int()
+@triton.jit(do_not_specialize=["num_requests", "num_tokens"])
+def _window_indices_kernel(
+    Out,
+    Starts,
+    SeqLens,
+    num_requests,
+    num_tokens,
+    OUT_ROW,
+    WINDOW: tl.constexpr,
+    WIDTH: tl.constexpr,
+    WIDTH_P2: tl.constexpr,
+):
+    row = tl.program_id(0)
+    lo = 0
+    hi = num_requests
+    while lo < hi:
+        mid = (lo + hi) // 2
+        right = tl.load(Starts + mid + 1) <= row
+        lo = tl.where(right, mid + 1, lo)
+        hi = tl.where(right, hi, mid)
+    request = tl.minimum(lo, num_requests - 1)
+    start = tl.load(Starts + request)
+    end = tl.load(Starts + request + 1)
+    position = tl.load(SeqLens + request) - (end - start) + row - start
+    live = (row < num_tokens) & (row < tl.load(Starts + num_requests))
+    position = tl.where(live, position, -1)
+    column = tl.arange(0, WIDTH_P2)
+    index = position - WINDOW + 1 + column
+    valid = (position >= 0) & (column < WINDOW) & (index >= 0)
+    tl.store(
+        Out + row.to(tl.int64) * OUT_ROW + column,
+        tl.where(valid, index, -1),
+        column < WIDTH,
+    )
 
 
 class FlashWindowIndexer(nn.Module):
@@ -81,14 +108,16 @@ class FlashWindowIndexer(nn.Module):
         meta: Any = metadata[self.attention_prefix]
         if meta.num_actual_tokens == 0 or meta.seq_lens.numel() == 0:
             return output.fill_(-1)
-        rows = torch.arange(output.shape[0], device=output.device)
-        starts = meta.query_start_loc
-        requests = torch.searchsorted(starts[1:], rows, right=True)
-        requests = requests.clamp_max(starts.numel() - 2).long()
-        logical = meta.seq_lens[requests] - (starts[requests + 1] - starts[requests])
-        logical = logical + rows - starts[requests]
-        live = (rows < meta.num_actual_tokens) & (rows < starts[-1])
-        output.copy_(
-            window_indices(torch.where(live, logical, -1), self.window, output.shape[1])
+        num_requests = meta.query_start_loc.numel() - 1
+        _window_indices_kernel[(output.shape[0],)](
+            output,
+            meta.query_start_loc,
+            meta.seq_lens,
+            num_requests,
+            meta.num_actual_tokens,
+            output.stride(0),
+            self.window,
+            output.shape[1],
+            triton.next_power_of_2(output.shape[1]),
         )
         return output
