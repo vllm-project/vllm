@@ -1082,8 +1082,10 @@ def copy_kv_cache_blocks_inplace(
     # safe because copy-on-write destinations are freshly allocated blocks.
     if device.type == "cuda":
         assert not np.intersect1d(*block_ids).size, "Chained block copies"
-        runs = np.concatenate(
-            [_block_copy_runs(blocks, block_ids) for blocks in block_views], axis=1
+        runs = np.ascontiguousarray(
+            np.concatenate(
+                [_block_copy_runs(blocks, block_ids) for blocks in block_views], axis=1
+            )
         )
         # Copy in the widest word that divides every address and size.
         bits = int(np.bitwise_or.reduce(runs, axis=None))
