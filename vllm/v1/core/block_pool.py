@@ -157,6 +157,10 @@ class BlockPool:
             self.blocks
         )
         self.cached_block_hashes_by_block: dict[int, set[BlockHashWithGroupId]] = {}
+        # Physical blocks whose cached KV/state contents are populated by the
+        # current step (via CoW or forward()) and therefore not yet materialized
+        # on device before this step's forward pass starts.
+        self._unmaterialized_block_ids: set[int] = set()
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
@@ -200,6 +204,15 @@ class BlockPool:
             cached_blocks.append(block)
         return cached_blocks
 
+    def new_step_starts(self) -> None:
+        """Mark all blocks cached in prior steps as materialized on device."""
+        self._unmaterialized_block_ids.clear()
+
+    def is_block_unmaterialized(self, block: KVCacheBlock) -> bool:
+        """Whether `block` was newly cached in the current step and does not
+        yet hold materialized contents before forward()."""
+        return block.block_id in self._unmaterialized_block_ids
+
     def cache_full_blocks(
         self,
         request: Request,
@@ -209,6 +222,7 @@ class BlockPool:
         block_size: int,
         kv_cache_group_id: int,
         block_mask: list[bool] | None = None,
+        materialized: bool = False,
     ) -> None:
         """Cache a list of full blocks for prefix caching.
         This function takes a list of blocks that will have their block hash
@@ -233,6 +247,10 @@ class BlockPool:
                 consults a subset of blocks (e.g. SWA tail-window), so blocks
                 that can never serve a hit stay out of the prefix-cache hash
                 map.
+            materialized: Whether the blocks already hold committed KV/state
+                bytes on device from an earlier step (e.g. decode states cached
+                on free) and do not need to be treated as unmaterialized in the
+                current step.
 
         """
         if num_cached_blocks >= num_full_blocks:
@@ -274,6 +292,8 @@ class BlockPool:
                 blk,
                 num_tokens=num_hash_tokens,
             )
+            if not materialized:
+                self._unmaterialized_block_ids.add(blk.block_id)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
@@ -514,6 +534,11 @@ class BlockPool:
                 block_hash_with_group_id, block.block_id
             )
         )
+        newly_populated = (
+            replace_existing_hashes
+            or block.block_hash_num_tokens is None
+            or block.block_hash_num_tokens < num_hash_blocks * self.hash_block_size
+        )
         if replace_existing_hashes:
             removed_hashes = self._remove_cached_block_hashes(block)
             self._emit_block_removed_events(removed_hashes)
@@ -531,6 +556,8 @@ class BlockPool:
             block,
             num_tokens=num_hash_blocks * self.hash_block_size,
         )
+        if newly_populated:
+            self._unmaterialized_block_ids.add(block.block_id)
         if self.enable_kv_cache_events and not already_cached:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
                 request, num_tokens
@@ -674,9 +701,12 @@ class BlockPool:
         assert dst_block.block_hash is None
         assert dst_block.block_id not in self.cached_block_hashes_by_block
         num_tokens = src_block.block_hash_num_tokens
-        for block_hash in self._remove_cached_block_hashes(src_block):
+        moved_hashes = self._remove_cached_block_hashes(src_block)
+        for block_hash in moved_hashes:
             # `num_tokens` only applies to the first (primary) insertion.
             self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
+        if moved_hashes:
+            self._unmaterialized_block_ids.add(dst_block.block_id)
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
@@ -895,6 +925,7 @@ class BlockPool:
         # new map created after the startup gc.freeze() would not be frozen.
         self.cached_block_hash_to_block.clear()
         self.cached_block_hashes_by_block.clear()
+        self._unmaterialized_block_ids.clear()
         if self._reuse_watchers:
             self._notify_reuse(
                 [self.blocks[block_id] for block_id in list(self._reuse_watchers)]

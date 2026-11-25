@@ -2880,3 +2880,173 @@ def test_checkpoint_reservation_matches_worker(
         request.num_computed_tokens = end
         manager.new_step_starts()
         start = end
+
+
+def test_dcp_truncated_partial_hit_reuses_materialized_block_without_chained_cow():
+    """When a same-step full-attention block is truncated to an earlier
+    sub-block Mamba hit, fall back to the materialized partial block instead of
+    emitting a chained CoW copy `(B1 -> B3), (B3 -> B8)`."""
+    manager = make_full_mamba_manager(
+        dcp_world_size=8,
+        hash_block_size=128,
+        full_block_size=896,  # effective full-attn block = 7168
+        mamba_block_size=896,
+        num_blocks=64,
+        num_prefill_checkpoint_blocks=1,
+    )
+    manager.coordinator.retention_interval = 0
+
+    # Step 1: commit a partial full-attn block (B1) and Mamba checkpoint at 1024.
+    prefix_1024 = list(range(1024))
+    req0 = make_request("req0", prefix_1024 + [9999], 128, sha256)
+    cb0, nc0, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, len(req0.all_token_ids), nc0, cb0) is not None
+    manager.take_kv_cache_block_copies()
+    manager.free(req0)
+    manager.new_step_starts()
+
+    b1 = manager.block_pool.get_cached_block(req0.block_hashes[1024 // 128 - 1], [0])
+    assert b1 is not None
+
+    # Step 2: req1 and req2 share [0, 7500), crossing the 7168 full-attn block.
+    shared_7500 = prefix_1024 + list(range(10000, 10000 + 6476))
+    req1 = make_request("req1", shared_7500 + list(range(20000, 20500)), 128, sha256)
+    req2 = make_request("req2", shared_7500 + list(range(30000, 30500)), 128, sha256)
+
+    cb1, nc1, _ = manager.get_computed_blocks(req1)
+    assert nc1 == 1024
+    assert manager.allocate_slots(req1, len(req1.all_token_ids) - nc1, nc1, cb1)
+
+    cb2, nc2, spb2 = manager.get_computed_blocks(req2)
+    assert nc2 == 1024
+    assert spb2 == 7168
+    assert cb2.blocks[0] == b1
+    assert manager.allocate_slots(req2, len(req2.all_token_ids) - nc2, nc2, cb2)
+
+    copies, retained = manager.take_kv_cache_block_copies()
+    src_ids = {c.src_block_id for c in copies}
+    dst_ids = {c.dst_block_id for c in copies}
+    assert not (src_ids & dst_ids), f"Chained CoW copies: {copies}"
+    assert b1[0].block_id in src_ids
+    manager.block_pool.free_blocks(retained)
+
+
+def test_partial_hit_defers_when_only_unmaterialized_full_attention_block_exists():
+    """A partial hit whose only full-attention block was cached in the current
+    step must be deferred until next step instead of CoW-copying uncomputed KV."""
+    manager = make_full_mamba_manager(
+        dcp_world_size=8,
+        hash_block_size=128,
+        full_block_size=896,
+        mamba_block_size=896,
+        num_blocks=64,
+        num_prefill_checkpoint_blocks=1,
+    )
+    manager.coordinator.retention_interval = 0
+
+    prefix_1024 = list(range(1024))
+    req0 = make_request("req0", prefix_1024 + [9999], 128, sha256)
+    cb0, nc0, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, len(req0.all_token_ids), nc0, cb0) is not None
+    manager.take_kv_cache_block_copies()
+    manager.free(req0)
+    manager.new_step_starts()
+
+    # Evict the full-attention block while the Mamba checkpoint at 1024 stays.
+    b1 = manager.block_pool.get_cached_block(req0.block_hashes[1024 // 128 - 1], [0])
+    assert b1 is not None
+    manager.evict_blocks({b1[0].block_id})
+
+    # Step 2: req1 starts from 0 and caches fresh block B3 at 7168.
+    shared_7500 = prefix_1024 + list(range(10000, 10000 + 6476))
+    req1 = make_request("req1", shared_7500 + list(range(20000, 20500)), 128, sha256)
+    req2 = make_request("req2", shared_7500 + list(range(30000, 30500)), 128, sha256)
+
+    cb1, nc1, _ = manager.get_computed_blocks(req1)
+    assert nc1 == 0
+    assert manager.allocate_slots(req1, len(req1.all_token_ids), nc1, cb1) is not None
+    b3 = manager.get_blocks("req1").blocks[0][0]
+
+    # req2 hits B3 in full-attn, truncated to Mamba's 1024; no materialized
+    # partial full-attn block exists at 1024, so req2 must defer.
+    cb2, nc2, _ = manager.get_computed_blocks(req2)
+    assert nc2 == 1024
+    assert cb2.blocks[0] == [b3]
+    assert manager.allocate_slots(req2, len(req2.all_token_ids) - nc2, nc2, cb2) is None
+
+    # Step 3: B3 is now materialized, so req2 can CoW from it safely.
+    manager.new_step_starts()
+    assert (
+        manager.allocate_slots(req2, len(req2.all_token_ids) - nc2, nc2, cb2)
+        is not None
+    )
+    copies, retained = manager.take_kv_cache_block_copies()
+    assert any(c.src_block_id == b3.block_id for c in copies)
+    manager.block_pool.free_blocks(retained)
+
+
+def test_full_attention_decode_does_not_re_mark_committed_partial_block():
+    """Re-calling `cache_partial_block` on decode steps of an already-committed
+    partial full-attention block must not mark it unmaterialized."""
+    manager = make_full_mamba_manager(
+        dcp_world_size=8,
+        hash_block_size=128,
+        full_block_size=896,
+        mamba_block_size=896,
+        num_blocks=64,
+        num_prefill_checkpoint_blocks=1,
+    )
+    manager.coordinator.retention_interval = 0
+
+    # Prompt 897 -> boundary 896 is full for Mamba (no running Mamba CoW on
+    # decode) and partial for full-attention (896 < 7168).
+    prefix_896 = list(range(896))
+    req0 = make_request("req0", prefix_896 + [9999], 128, sha256)
+    cb0, nc0, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, len(req0.all_token_ids), nc0, cb0) is not None
+    req0.num_computed_tokens = len(req0.all_token_ids)
+    manager.new_step_starts()
+
+    # Step 2: req0 decodes one token (triggers _cache_partial_tail_block again).
+    req0.append_output_token_ids([10000])
+    assert manager.allocate_slots(req0, 1) is not None
+
+    # A sibling hitting 896 in Step 2 must not be falsely deferred.
+    req1 = make_request("req1", prefix_896 + [11111, 11112], 128, sha256)
+    cb1, nc1, _ = manager.get_computed_blocks(req1)
+    assert nc1 == 896
+    assert (
+        manager.allocate_slots(req1, len(req1.all_token_ids) - nc1, nc1, cb1)
+        is not None
+    )
+
+
+def test_same_step_duplicate_block_does_not_defer_materialized_hit():
+    """Caching a duplicate block under the same hash in Step 2 must not mark
+    the already-materialized Step 1 block unmaterialized."""
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=16,
+        full_block_size=16,
+        mamba_block_size=16,
+        num_blocks=32,
+        num_prefill_checkpoint_blocks=1,
+    )
+    tokens = list(range(33))
+
+    # Step 1: commit blocks for [0, 32).
+    req0 = make_request("req0", tokens, 16, sha256)
+    cb0, nc0, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, len(tokens), nc0, cb0) is not None
+    manager.new_step_starts()
+
+    # Step 2: req1 skips prefix lookup and caches duplicate blocks under the
+    # same hashes.
+    req1 = make_request("req1", tokens, 16, sha256)
+    assert manager.allocate_slots(req1, len(tokens)) is not None
+
+    # req2 hits the Step 1 materialized blocks and must be admitted in Step 2.
+    req2 = make_request("req2", tokens, 16, sha256)
+    cb2, nc2, _ = manager.get_computed_blocks(req2)
+    assert nc2 == 32
+    assert manager.allocate_slots(req2, len(tokens) - nc2, nc2, cb2) is not None

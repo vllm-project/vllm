@@ -437,10 +437,24 @@ class KVCacheCoordinator(ABC):
         """
         pass
 
+    def has_unmaterialized_hit(
+        self,
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
+        num_local_computed_tokens: int,
+    ) -> bool:
+        """Whether adopting `new_computed_blocks` would read a block cached in
+        the current step before its contents are materialized on device."""
+        return any(
+            manager.has_unmaterialized_hit(blocks, num_local_computed_tokens)
+            for manager, blocks in zip(self.single_type_managers, new_computed_blocks)
+        )
+
     def new_step_starts(self) -> None:
-        """Notify each manager that a new step is starting."""
+        """Notify each pool that a new step is starting."""
+        self.block_pool.new_step_starts()
         for manager in self.single_type_managers:
-            manager.new_step_starts()
+            if manager.block_pool is not self.block_pool:
+                manager.block_pool.new_step_starts()
 
 
 class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
@@ -773,9 +787,28 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 continue
             group_block_size = manager.block_size
             num_blocks = cdiv(hit_length, group_block_size)
+            partial_hash = (
+                block_hashes[hit_length // self.hash_block_size - 1]
+                if hit_length % group_block_size != 0
+                else None
+            )
+            block_pool = manager.block_pool
             for group_id in group.group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
+                    if (
+                        partial_hash is not None
+                        and blks
+                        and block_pool.is_block_unmaterialized(blks[-1])
+                    ):
+                        # Full attention is downward-closed only for
+                        # materialized blocks: an unmaterialized block from
+                        # this step cannot back a pre-forward CoW. Fall back to
+                        # an already-materialized partial block at `hit_length`
+                        # if one is cached.
+                        cached = block_pool.get_cached_block(partial_hash, [group_id])
+                        if cached and not block_pool.is_block_unmaterialized(cached[0]):
+                            blks[-1] = cached[0]
 
         # Uncached shared prefix detection: if any attn. group cached a longer
         # prefix than the reconciled hit, it is an uncached common prefix across
