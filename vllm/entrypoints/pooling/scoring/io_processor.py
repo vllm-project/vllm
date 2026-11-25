@@ -628,9 +628,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         # Priority for `chat_template_kwargs`:
         # explicit `prompt_extras` > `target_params.extra_kwargs` fallback.
         prompt_extras = dict(
-            ctx.build_prompt_extras(
-                target_params, self.model_config.multimodal_config
-            )
+            ctx.build_prompt_extras(target_params, self.model_config.multimodal_config)
         )
         fallback_chat_template_kwargs = (
             target_params.extra_kwargs.get("chat_template_kwargs")
