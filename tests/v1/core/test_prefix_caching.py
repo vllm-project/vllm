@@ -2601,6 +2601,36 @@ def test_prefill(hash_fn):
     )
 
 
+def test_extend_cached_prefix():
+    """Probes only the blocks after the given prefix, and stops before the last
+    token, which is always recomputed."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 20),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    prompt = [i for i in range(4) for _ in range(block_size)] + [4]
+    req = make_request("req", prompt, block_size, sha256)
+    assert manager.extend_cached_prefix(req, 0) == 0
+
+    def cache_prefix(req_id: str, num_tokens: int) -> None:
+        writer = make_request(req_id, prompt[:num_tokens], block_size, sha256)
+        assert manager.allocate_slots(writer, num_tokens) is not None
+
+    cache_prefix("a", 33)
+    assert manager.extend_cached_prefix(req, 0) == 32
+    cache_prefix("b", 49)
+    assert manager.extend_cached_prefix(req, 32) == 48
+    assert manager.extend_cached_prefix(req, 48) == 48
+
+    cache_prefix("c", 65)
+    assert manager.extend_cached_prefix(req, 48) == 64
+    req_64 = make_request("req_64", prompt[:64], block_size, sha256)
+    assert manager.extend_cached_prefix(req_64, 0) == 48
+
+
 def test_prefill_hybrid_model():
     block_size = 16
     manager = make_kv_cache_manager(
