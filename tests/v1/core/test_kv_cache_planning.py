@@ -37,9 +37,9 @@ from vllm.config.attention import HiSparseConfig
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_planning import (
+    DefaultKVCacheConfigBuilder,
+    _estimate_max_model_len_from_groups,
     can_share_block_table,
-    check_enough_kv_cache_memory,
-    estimate_max_model_len,
     get_kv_cache_groups,
     get_pipeline_stages,
     kv_cache_groups_tp_replicas,
@@ -1030,6 +1030,7 @@ def test_estimate_max_model_len(model_id, max_model_len, want_estimated_max_len)
         model_config=model_config,
         scheduler_config=scheduler_config,
     )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
 
     # Create KV cache specs
     kv_cache_spec = {}
@@ -1041,14 +1042,15 @@ def test_estimate_max_model_len(model_id, max_model_len, want_estimated_max_len)
             )
         )
     # Estimate the maximum model length, 16384 model_len need 8GB
-    estimated_max_len = estimate_max_model_len(
-        vllm_config, kv_cache_spec, 8 * GiB_bytes
+    groups = get_kv_cache_groups(vllm_config, kv_cache_spec)
+    estimated_max_len = _estimate_max_model_len_from_groups(
+        DefaultKVCacheConfigBuilder(), vllm_config, groups, 8 * GiB_bytes
     )
     assert estimated_max_len == want_estimated_max_len
 
 
 def test_get_kv_cache_config_one_worker():
-    # pass max_model_len to pass check_enough_kv_cache_memory
+    # pass max_model_len to pass _check_enough_kv_cache_memory
     model_config = ModelConfig(max_model_len=16)
     vllm_config = VllmConfig(model_config=model_config)
     vllm_config.cache_config.kv_cache_layout = "LBNHC"
@@ -2237,6 +2239,16 @@ def test_kv_cache_reserves_null_block_for_max_model_len(use_override):
             vllm_config, [{"layer1": full_layer(spec)}], available_memory
         )
 
+    # 33 blocks -> 32 usable after the null block -> accept.
+    if use_override:
+        vllm_config.cache_config.num_gpu_blocks_override = 33
+    else:
+        available_memory = [spec.page_size_bytes * 33]
+    configs = get_kv_cache_configs(
+        vllm_config, [{"layer1": full_layer(spec)}], available_memory
+    )
+    assert configs[0].num_blocks == 33
+
 
 def test_auto_fit_max_model_len_reserves_null_block():
     """Auto-fit (max_model_len=-1) must size max_model_len against usable
@@ -2257,31 +2269,6 @@ def test_auto_fit_max_model_len_reserves_null_block():
     get_kv_cache_configs(vllm_config, [{"layer1": full_layer(spec)}], available_memory)
 
     assert vllm_config.model_config.max_model_len == 63 * block_size
-
-
-def test_check_enough_kv_cache_memory_reserves_null_block():
-    """The public admission check must reject a KV cache sized to exactly the
-    blocks a max_model_len request needs. BlockPool keeps one block as the
-    null block, so only num_blocks - 1 are usable; accepting
-    num_blocks == needed would leave the request unschedulable and hang the
-    engine.
-    """
-    block_size = 16
-    max_model_len = 512  # needs 512 / 16 = 32 blocks
-    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
-    vllm_config.cache_config.kv_cache_layout = "LBNHC"
-    spec = new_kv_cache_spec(block_size=block_size)
-
-    # 32 blocks -> only 31 usable after the null block: one short -> reject.
-    with pytest.raises(ValueError, match="max seq len"):
-        check_enough_kv_cache_memory(
-            vllm_config, {"layer1": full_layer(spec)}, spec.page_size_bytes * 32
-        )
-
-    # 33 blocks -> 32 usable after the null block -> accept.
-    check_enough_kv_cache_memory(
-        vllm_config, {"layer1": full_layer(spec)}, spec.page_size_bytes * 33
-    )
 
 
 @pytest.mark.parametrize(

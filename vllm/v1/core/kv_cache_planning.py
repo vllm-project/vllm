@@ -4,9 +4,9 @@
 
 import math
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
-from functools import partial, reduce
+from functools import reduce
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
@@ -97,12 +97,13 @@ def _more_kv_cache_memory_hint(
 
 
 def _check_enough_kv_cache_memory(
+    builder: KVCacheConfigBuilder,
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroup],
     available_memory: int,
-    get_needed_memory: Callable[[], int],
-    max_model_len: int,
-    estimate_max_model_len: Callable[[int], int],
-    hint: str,
-):
+    after_warmup: bool = False,
+) -> None:
+    hint = _more_kv_cache_memory_hint(vllm_config, after_warmup=after_warmup)
     if available_memory <= 0:
         raise ValueError(
             f"No available memory for the cache blocks. {hint} "
@@ -110,10 +111,14 @@ def _check_enough_kv_cache_memory(
             "for more details."
         )
 
-    needed_memory = get_needed_memory()
+    needed_memory = _max_memory_usage_bytes_from_groups(
+        builder, vllm_config, kv_cache_groups
+    )
 
     if needed_memory > available_memory:
-        estimated_max_len = estimate_max_model_len(available_memory)
+        estimated_max_len = _estimate_max_model_len_from_groups(
+            builder, vllm_config, kv_cache_groups, available_memory
+        )
         estimated_msg = ""
         if estimated_max_len > 0:
             estimated_msg = (
@@ -123,110 +128,13 @@ def _check_enough_kv_cache_memory(
 
         raise ValueError(
             f"To serve at least one request with the model's max seq len "
-            f"({max_model_len}), ({format_gib(needed_memory)} GiB KV "
+            f"({vllm_config.model_config.max_model_len}), "
+            f"({format_gib(needed_memory)} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
             f"memory ({format_gib(available_memory)} GiB). {estimated_msg}"
             f"{hint} Decreasing `max_model_len` also reduces what is needed. "
             f"See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
             f"for more details."
-        )
-
-
-def max_memory_usage_bytes(
-    vllm_config: VllmConfig, layer_configs: Iterable[KVCacheLayerConfig]
-) -> int:
-    """Get the maximum memory usage in bytes for the given KV cache specs."""
-    return sum(layer.max_memory_usage_bytes(vllm_config) for layer in layer_configs)
-
-
-def estimate_max_model_len(
-    vllm_config: VllmConfig,
-    layer_configs: dict[str, KVCacheLayerConfig],
-    available_memory: int,
-) -> int:
-    """Estimates the maximum model length that can fit in the available memory
-    using binary search.
-
-    This function temporarily modifies max_model_len during estimation but
-    restores the original value before returning, ensuring no side effects.
-
-    Args:
-        vllm_config: The global VllmConfig
-        layer_configs: The KV cache config of each attention layer in the model
-        available_memory: Memory available for KV cache in bytes.
-
-    Returns:
-        The estimated maximum model length that can fit in the available memory.
-
-    """
-    # Save the original max_model_len to restore after estimation
-    original_max_model_len = vllm_config.model_config.max_model_len
-
-    # Define a function to check if a given model length fits in memory
-    def fits_in_memory(model_len: int) -> bool:
-        # Temporarily modify the max_model_len for this calculation
-        vllm_config.model_config.max_model_len = model_len
-        # Calculate memory needed for the given model length
-        memory_needed = max_memory_usage_bytes(vllm_config, layer_configs.values())
-        return memory_needed <= available_memory
-
-    try:
-        # Binary search for the maximum model length
-        left, right = 1, original_max_model_len
-
-        # If even the smallest model length doesn't fit, return 0
-        if not fits_in_memory(left):
-            return 0
-
-        # Binary search for the maximum model length that fits
-        result = 1
-        while left <= right:
-            mid = (left + right) // 2
-            if fits_in_memory(mid):
-                result = mid
-                left = mid + 1
-            else:
-                right = mid - 1
-        return result
-    finally:
-        # Always restore the original max_model_len to avoid side effects
-        vllm_config.model_config.max_model_len = original_max_model_len
-
-
-def check_enough_kv_cache_memory(
-    vllm_config: VllmConfig,
-    layer_configs: dict[str, KVCacheLayerConfig],
-    available_memory: int,
-):
-    """Checks whether `available_memory` is enough for the KV cache to hold at
-    least one request with the model's max_model_len.
-
-    Args:
-        vllm_config: The global VllmConfig
-        layer_configs: The KV cache config of each attention layer in the model
-        available_memory: Memory available for KV cache in bytes.
-
-    Raises:
-        ValueError: If there is not enough memory available for the KV cache.
-
-    """
-    # No need to check for available memory if there are no KV cache layers
-    if layer_configs:
-        # Reserve the null block BlockPool permanently holds back, so the check
-        # plans against usable blocks, as in get_kv_cache_configs. Group a copy
-        # of the specs since grouping may unify them in-place.
-        groups = get_kv_cache_groups(vllm_config, dict(layer_configs))
-        check_memory = (
-            available_memory - _pool_bytes_per_block(vllm_config, groups)
-            if groups
-            else available_memory
-        )
-        _check_enough_kv_cache_memory(
-            check_memory,
-            lambda: max_memory_usage_bytes(vllm_config, layer_configs.values()),
-            vllm_config.model_config.max_model_len,
-            lambda am: estimate_max_model_len(vllm_config, layer_configs, am),
-            _more_kv_cache_memory_hint(vllm_config),
         )
 
 
@@ -1565,13 +1473,7 @@ def get_kv_cache_configs(
     for groups, avail_mem in zip(projected_groups_per_worker, check_memory):
         if not groups:
             continue
-        _check_enough_kv_cache_memory(
-            avail_mem,
-            partial(_max_memory_usage_bytes_from_groups, builder, vllm_config, groups),
-            vllm_config.model_config.max_model_len,
-            partial(_estimate_max_model_len_from_groups, builder, vllm_config, groups),
-            _more_kv_cache_memory_hint(vllm_config),
-        )
+        _check_enough_kv_cache_memory(builder, vllm_config, groups, avail_mem)
 
     kv_cache_configs: list[KVCacheConfig] = []
     for projected_groups, layer_configs_one_worker, available_memory_one_worker in zip(
@@ -1778,16 +1680,12 @@ def shrink_kv_cache_configs(
             # The null block is held back by the BlockPool, as in the capacity
             # check of `get_kv_cache_configs`.
             _check_enough_kv_cache_memory(
+                builder,
+                vllm_config,
+                groups,
                 (num_blocks - 1)
                 * _pool_bytes_per_block_from_builder(builder, vllm_config, groups),
-                partial(
-                    _max_memory_usage_bytes_from_groups, builder, vllm_config, groups
-                ),
-                vllm_config.model_config.max_model_len,
-                partial(
-                    _estimate_max_model_len_from_groups, builder, vllm_config, groups
-                ),
-                _more_kv_cache_memory_hint(vllm_config, after_warmup=True),
+                after_warmup=True,
             )
         kv_cache_config.num_blocks = num_blocks
 
