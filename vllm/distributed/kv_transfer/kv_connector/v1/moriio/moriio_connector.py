@@ -123,6 +123,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheGroup,
     MambaSpec,
     MLAAttentionSpec,
 )
@@ -424,7 +425,7 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
             and self.connector_scheduler.mode == MoRIIOMode.READ
         ):
             attn_block_ids, mamba_block_groups = (
-                self.connector_scheduler.split_block_groups(block_ids)
+                self.connector_scheduler.split_block_groups(block_ids, request=request)
             )
             delay_free, params = self.connector_scheduler.request_finished(
                 request, attn_block_ids, mamba_block_groups
@@ -608,7 +609,6 @@ class MoRIIOConnectorScheduler:
         self._has_mamba = bool(self._mamba_group_ids)
         mamba_spec = None
         if self._has_mamba:
-            # READ drafters must share the target's attention groups (e.g. MTP).
             if not self._attn_group_ids:
                 raise MoRIIOError("MoRIIO hybrid transfer requires an attention group")
             mamba_specs = [
@@ -684,12 +684,16 @@ class MoRIIOConnectorScheduler:
                     "--disable-hybrid-kv-cache-manager to run without HMA."
                 )
             # Sliding-window MLA slots are MLA latents — WRITE handles them.
-            if self.mode == MoRIIOMode.WRITE and any(
-                issubclass(g.manager_cls, SlidingWindowManager)
-                and not any(
-                    isinstance(spec, MLAAttentionSpec) for spec in g.distinct_specs
+            if (
+                self.mode == MoRIIOMode.WRITE
+                and not self._has_mamba
+                and any(
+                    issubclass(g.manager_cls, SlidingWindowManager)
+                    and not any(
+                        isinstance(spec, MLAAttentionSpec) for spec in g.distinct_specs
+                    )
+                    for g in kv_cache_config.transfer_groups
                 )
-                for g in kv_cache_config.transfer_groups
             ):
                 raise NotImplementedError(
                     "MoRIIO WRITE mode does not support sliding-window "
@@ -714,11 +718,10 @@ class MoRIIOConnectorScheduler:
         self._group_block_sizes = [
             g.block_size for g in kv_cache_config.transfer_groups
         ]
-        # The WRITE-mode prompt-block clamp only covers full-attention groups, so
-        # MoRIIO + speculative decoding is not yet safe on sliding-window /
-        # hybrid models. TODO: lift once SWA + spec is validated end-to-end.
+        # Only grouped Mamba WRITE clips both peers' windows to the prompt.
         if (
             self.mode == MoRIIOMode.WRITE
+            and not self._has_mamba
             and vllm_config.speculative_config is not None
             and any(bps != 0 for bps in self.blocks_per_sw)
         ):
@@ -1136,7 +1139,9 @@ class MoRIIOConnectorScheduler:
                                 # the attention and recurrent-state suffixes
                                 # independently.
                                 attn_block_groups, mamba_block_groups = (
-                                    self.split_block_groups(blocks.get_block_ids())
+                                    self.split_block_groups(
+                                        blocks.get_block_ids(), request=request
+                                    )
                                 )
                                 num_attn = len(attn_block_groups)
                                 if len(remote_block_ids) != num_attn + len(
@@ -1223,7 +1228,9 @@ class MoRIIOConnectorScheduler:
                                 # Attention can be a complete local hit, but the
                                 # recurrent state is never prefix-cacheable.
                                 attn_block_groups, mamba_block_groups = (
-                                    self.split_block_groups(blocks.get_block_ids())
+                                    self.split_block_groups(
+                                        blocks.get_block_ids(), request=request
+                                    )
                                 )
                                 local_block_ids = [
                                     group if is_state else []
@@ -1426,6 +1433,10 @@ class MoRIIOConnectorScheduler:
                             list(blocks), config.params.num_speculative_blocks
                         )
                     )
+                elif issubclass(group.manager_cls, SlidingWindowManager):
+                    clamped_hybrid.append(
+                        self._prompt_window_blocks(req, group, list(blocks))
+                    )
                 else:
                     block_size = resolve_dcp_kv_block_size(group, dcp_size)
                     clamped_hybrid.append(
@@ -1444,6 +1455,18 @@ class MoRIIOConnectorScheduler:
                 clamped[g] = group_blocks[:num_prompt_blocks]
                 changed = True
         return clamped if changed else block_ids
+
+    def _prompt_window_blocks(
+        self, request: "Request", group: KVCacheGroup, blocks: list[int]
+    ) -> list[int]:
+        computed = request.num_prompt_tokens
+        if not self.is_producer:
+            computed = max(1, computed - 1)
+        block_size = resolve_dcp_kv_block_size(
+            group, self.vllm_config.parallel_config.decode_context_parallel_size
+        )
+        start = max(0, computed - group.sliding_window_reach) // block_size
+        return blocks[start : cdiv(computed, block_size)]
 
     def _is_final_prefill_chunk(
         self, req: "Request", scheduler_output: SchedulerOutput
@@ -1587,7 +1610,10 @@ class MoRIIOConnectorScheduler:
         self.paths.clear()
 
     def split_block_groups(
-        self, block_ids: list[list[int]] | tuple[list[int], ...]
+        self,
+        block_ids: list[list[int]] | tuple[list[int], ...],
+        *,
+        request: "Request | None" = None,
     ) -> tuple[list[list[int]], list[list[int]]]:
         """Select transferable attention and Mamba block groups.
 
@@ -1600,7 +1626,18 @@ class MoRIIOConnectorScheduler:
         if not self._has_mamba:
             raise MoRIIOError("Mamba block groups requested for a non-hybrid model")
         # Also window-clips sliding-window attention groups.
-        transfer_block_ids = self.get_exchange_clipped_blocks(block_ids)
+        transfer_block_ids = list(self.get_exchange_clipped_blocks(block_ids))
+        if request is not None and self._is_hma_required and any(self.blocks_per_sw):
+            raw_blocks = self.kv_cache_config.select_transfer_block_ids(block_ids)
+            for group_id in self._attn_group_ids:
+                group = self.kv_cache_config.transfer_groups[group_id]
+                if not issubclass(group.manager_cls, SlidingWindowManager):
+                    continue
+                # Bound the window by P's computed prefix, not D's allocated
+                # lookahead tail. Otherwise equal-length lists can be shifted.
+                transfer_block_ids[group_id] = self._prompt_window_blocks(
+                    request, group, list(raw_blocks[group_id])
+                )
         attn = [list(transfer_block_ids[group_id]) for group_id in self._attn_group_ids]
         mamba_groups = [
             clip_ssm_state_blocks(
