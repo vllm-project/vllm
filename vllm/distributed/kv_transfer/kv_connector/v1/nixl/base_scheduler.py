@@ -294,6 +294,17 @@ class NixlBaseConnectorScheduler:
         # whether this one caches a prefix and pin it for a remote read.
         extra = vllm_config.kv_transfer_config.get_from_extra_config
         self._peer_lookup_enabled = bool(extra("peer_lookup", False))
+        if (
+            self._peer_lookup_enabled
+            and vllm_config.parallel_config.prefill_context_parallel_size > 1
+        ):
+            # Pins and peer reads are only implemented for an unsharded
+            # layout; PCP splits KV across ranks.
+            logger.warning(
+                "Peer prefix lookup does not support prefill context "
+                "parallelism; it is disabled on this engine."
+            )
+            self._peer_lookup_enabled = False
         self._peer_pin_max_fraction = float(extra("peer_pin_max_fraction", 0.25))
         self._peer_pin_min_free_fraction = float(
             extra("peer_pin_min_free_fraction", 0.05)

@@ -284,7 +284,6 @@ class KVCacheManager:
             in (KVCacheSpecKind.FULL_ATTENTION, KVCacheSpecKind.MLA_ATTENTION)
             and type(coordinator.single_type_managers[0]) is FullAttentionManager
             and coordinator.dcp_world_size == 1
-            and coordinator.pcp_world_size == 1
         )
         # Live lookup_and_pin results, so they can be found and revoked.
         self._pins: set[PrefixPin] = set()
