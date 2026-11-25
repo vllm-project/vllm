@@ -8,7 +8,10 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.utils.platform_utils import is_uva_available
-from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+from vllm.utils.torch_utils import (
+    async_tensor_h2d,
+    get_accelerator_view_from_cpu_tensor,
+)
 from vllm.v1.token_buffer import TokenBuffer
 from vllm.v1.worker.gpu import buffer_utils
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor
@@ -18,6 +21,54 @@ DEVICES = [
     f"{DEVICE_TYPE}:{i}"
     for i in range(1 if torch.accelerator.device_count() == 1 else 2)
 ]
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not is_uva_available(),
+    reason="Requires CUDA UVA.",
+)
+@pytest.mark.parametrize("length", [1, 257, 1025])
+def test_sm_metadata_copy_matches_h2d(length):
+    """Masked copies preserve all offsets and leave neighboring entries intact."""
+    source = np.arange(length * 2, dtype=np.int32)[::2] - 17
+    expected = torch.full((length + 2,), -999, dtype=torch.int32, device="cuda:0")
+    actual = torch.full_like(expected, -999)
+    async_tensor_h2d(source, out=expected[1:-1])
+    copier = buffer_utils.SmMetadataCopy(length, torch.int32, max_concurrency=2)
+    copier.copy(source, actual[1:-1])
+    source[:] = -1
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not is_uva_available(),
+    reason="Requires CUDA UVA.",
+)
+@pytest.mark.parametrize("max_concurrency", [1, 2, 4])
+def test_sm_metadata_copy_preserves_inflight_sources(max_concurrency):
+    """Reusing a staging slot must preserve each queued copy's generation."""
+    copier = buffer_utils.SmMetadataCopy(257, torch.int32, max_concurrency)
+    source = np.arange(257, dtype=np.int32)
+    warmup = torch.empty(257, dtype=torch.int32, device="cuda:0")
+    copier.copy(source, warmup)
+    torch.accelerator.synchronize()
+    matrix = torch.ones((8192, 8192), dtype=torch.float16, device="cuda:0")
+    product = torch.empty_like(matrix)
+    stream = torch.Stream(device="cuda:0")
+    stream.wait_stream(torch.accelerator.current_stream())
+    pending = []
+    with stream:
+        # Queue real compute ahead of the uploads to keep their readers in flight.
+        torch.mm(matrix, matrix, out=product)
+        for step in range(2 * max_concurrency + 1):
+            values = source + step * 1000
+            result = torch.empty_like(warmup)
+            copier.copy(values, result)
+            pending.append((result, values.copy()))
+            values[:] = -1
+    stream.synchronize()
+    for result, expected in pending:
+        np.testing.assert_array_equal(result.cpu().numpy(), expected)
 
 
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
