@@ -337,15 +337,24 @@ def _copy_builder(monkeypatch, kernel_type=None):
     monkeypatch.setattr(
         rocm, "get_tp_group", lambda: SimpleNamespace(device_communicator=comm)
     )
-    monkeypatch.setattr(rocm, "ReplicatedLinear", lambda *args, **kwargs: copy)
+
+    def replicated_linear(*args, **kwargs):
+        copy.built_with = kwargs
+        return copy
+
+    monkeypatch.setattr(rocm, "ReplicatedLinear", replicated_linear)
     config = SimpleNamespace(lora_config=None, quant_config=None)
     build = rocm.DeepseekV41ROCMAiterMLAAttention._make_wo_b_full
     return lambda: build(attn, config), attn, comm, config, copy
 
 
 def test_the_copy_is_built_for_tensor_parallel_mxfp8(monkeypatch):
-    build, attn, _, _, copy = _copy_builder(monkeypatch)
+    build, attn, _, config, copy = _copy_builder(monkeypatch)
     assert build() is copy
+    # The copy is quantized as wo_b is: a config that excludes wo_b by name
+    # excludes the copy, which then fails the kernel check.
+    assert copy.built_with["prefix"] == "layers.0.attn.wo_b"
+    assert copy.built_with["quant_config"] is config.quant_config
     assert attn._wo_b_gather_min_rows == 256
 
 

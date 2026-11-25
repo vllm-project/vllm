@@ -822,7 +822,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             bias=False,
             quant_config=vllm_config.quant_config,
             return_bias=False,
-            prefix=f"{self.prefix}.wo_b_full",
+            # wo_b's own name: a quantization config that leaves wo_b out
+            # (ignored_layers) leaves the copy out too, and the kernel check
+            # below then keeps the all-reduce.
+            prefix=f"{self.prefix}.wo_b",
         )
         # The copy takes the gathered rows as they are only on wo_b's kernel.
         kernel = getattr(getattr(wo_b_full, "quant_method", None), "kernel", None)
