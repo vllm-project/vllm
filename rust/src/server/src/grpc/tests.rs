@@ -3859,23 +3859,16 @@ fn kv_event_batch_with_every_field() -> (KvEventBatch, pb::KvEventBatch) {
 
     let hash = |value| pb::BlockHash { value: Some(value) };
     let key = |value| pb::ExtraKeyValue { value: Some(value) };
-    let tokens = |token_ids: &[u64]| pb::TokenIdList {
-        token_ids: token_ids.to_vec(),
-    };
+    let tokens = |ids: &[u32]| pb::TokenIds { ids: ids.to_vec() };
     let events = vec![
         Event::BlockStored(pb::BlockStored {
             block_hashes: vec![hash(Hash::UnsignedValue(1)), hash(Hash::SignedValue(-2))],
             parent_block_hash: Some(hash(Hash::Digest(vec![0xab]))),
-            token_ids: Some(pb::BlockTokenIds {
-                ids: Some(pb::block_token_ids::Ids::Single(tokens(&[11, 12]))),
-            }),
+            token_ids: vec![11, 12],
             block_size: 1,
             lora_id: Some(7),
             medium: Some("GPU".to_string()),
             lora_name: Some("adapter".to_string()),
-            session_id: Some("session-1".to_string()),
-            cache_salt: None,
-            mm_routing_spans: vec![],
             extra_keys: vec![
                 pb::BlockExtraKeys {
                     keys: vec![
@@ -3896,6 +3889,7 @@ fn kv_event_batch_with_every_field() -> (KvEventBatch, pb::KvEventBatch) {
             kv_cache_spec_sliding_window: Some(4096),
             locality: Some("LOCAL".to_string()),
             ownership: Some("kvcr".to_string()),
+            session_id: Some("session-1".to_string()),
             lookahead_token_ids: vec![tokens(&[12]), tokens(&[13])],
         }),
         Event::BlockRemoved(pb::BlockRemoved {

@@ -4,11 +4,10 @@
 syntax = "proto3";
 package vllm;
 
+import "inference.proto";
+
 // KV cache events of the engine, as its ZMQ publisher emits them
 // (`vllm/distributed/kv_events.py`), with the same sequence numbers.
-//
-// The messages are shared with SGLang's `sglang.kv.v1` package so that one
-// client handles both engines; fields marked "SGLang" are never set by vLLM.
 service KvEvents {
   // Streams the KV cache events of one data-parallel rank.
   //
@@ -57,11 +56,10 @@ message KvEventStreamStart {
   uint32 data_parallel_rank = 2;
 }
 
-// `EventBatch` (`[ts, events, data_parallel_rank]`) and its sequence number.
+// `KVEventBatch` (`[ts, events, data_parallel_rank]`) and its sequence number.
 message KvEventBatch {
   uint64 sequence_number = 1;
   double ts = 2;
-  // SGLang: `attn_dp_rank`.
   optional uint32 data_parallel_rank = 3;
   repeated KvCacheEvent events = 4;
 }
@@ -77,34 +75,13 @@ message KvCacheEvent {
 // `ExternalBlockHash`.
 message BlockHash {
   oneof value {
-    // vLLM with VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES (the default).
+    // With VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES (the default).
     uint64 unsigned_value = 1;
-    // SGLang, and a vLLM connector that publishes a negative integer hash.
+    // A KV connector that publishes its own hashes as negative integers.
     int64 signed_value = 2;
-    // vLLM without VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES.
+    // Without VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES.
     bytes digest = 3;
   }
-}
-
-message BlockTokenIds {
-  oneof ids {
-    TokenIdList single = 1;
-    // SGLang EAGLE pages.
-    TokenIdPairList pairs = 2;
-  }
-}
-
-message TokenIdList {
-  repeated uint64 token_ids = 1;
-}
-
-message TokenIdPairList {
-  repeated TokenIdPair pairs = 1;
-}
-
-message TokenIdPair {
-  uint64 first = 1;
-  uint64 second = 2;
 }
 
 message BlockStored {
@@ -112,25 +89,22 @@ message BlockStored {
   // Unset for a block without a parent.
   BlockHash parent_block_hash = 2;
   // Across all blocks of the event.
-  BlockTokenIds token_ids = 3;
+  repeated uint32 token_ids = 3;
   uint32 block_size = 4;
+  // Deprecated in favor of `lora_name`.
   optional int64 lora_id = 5;
   optional string medium = 6;
   optional string lora_name = 7;
-  optional string session_id = 8;
-  // SGLang.
-  optional string cache_salt = 9;
-  // SGLang, one entry per block.
-  repeated BlockMmRoutingSpans mm_routing_spans = 10;
   // One entry per block, empty for a block without keys.
-  repeated BlockExtraKeys extra_keys = 11;
-  optional uint32 group_idx = 12;
-  optional string kv_cache_spec_kind = 13;
-  optional uint32 kv_cache_spec_sliding_window = 14;
-  optional string locality = 15;
-  optional string ownership = 16;
-  // One entry per block.
-  repeated TokenIdList lookahead_token_ids = 17;
+  repeated BlockExtraKeys extra_keys = 8;
+  optional uint32 group_idx = 9;
+  optional string kv_cache_spec_kind = 10;
+  optional uint32 kv_cache_spec_sliding_window = 11;
+  optional string locality = 12;
+  optional string ownership = 13;
+  optional string session_id = 14;
+  // One entry per block; empty when lookahead hashing is off.
+  repeated TokenIds lookahead_token_ids = 15;
 }
 
 message BlockRemoved {
@@ -160,14 +134,4 @@ message ExtraKeyValue {
 
 message ExtraKeyTuple {
   repeated ExtraKeyValue items = 1;
-}
-
-message BlockMmRoutingSpans {
-  repeated MmRoutingSpan spans = 1;
-}
-
-message MmRoutingSpan {
-  uint64 start = 1;
-  uint64 length = 2;
-  string label = 3;
 }

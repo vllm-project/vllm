@@ -182,9 +182,6 @@ fn event_to_proto(event: KvCacheEvent) -> pb::KvCacheEvent {
 }
 
 fn stored_to_proto(stored: BlockStored) -> pb::BlockStored {
-    let token_id_list = |token_ids: Vec<u32>| pb::TokenIdList {
-        token_ids: token_ids.into_iter().map(u64::from).collect(),
-    };
     let extra_keys =
         stored
             .extra_keys
@@ -197,26 +194,20 @@ fn stored_to_proto(stored: BlockStored) -> pb::BlockStored {
     pb::BlockStored {
         block_hashes: stored.block_hashes.into_iter().map(hash_to_proto).collect(),
         parent_block_hash: stored.parent_block_hash.map(hash_to_proto),
-        token_ids: Some(pb::BlockTokenIds {
-            ids: Some(pb::block_token_ids::Ids::Single(token_id_list(
-                stored.token_ids,
-            ))),
-        }),
+        token_ids: stored.token_ids,
         block_size: stored.block_size,
         lora_id: stored.lora_id,
         medium: stored.medium,
         lora_name: stored.lora_name,
-        session_id: stored.session_id,
-        cache_salt: None,
-        mm_routing_spans: Vec::new(),
         extra_keys: extra_keys.collect(),
         group_idx: stored.group_idx,
         kv_cache_spec_kind: stored.kv_cache_spec_kind,
         kv_cache_spec_sliding_window: stored.kv_cache_spec_sliding_window,
         locality: stored.locality,
         ownership: stored.ownership,
+        session_id: stored.session_id,
         lookahead_token_ids: (stored.lookahead_token_ids.unwrap_or_default().into_iter())
-            .map(token_id_list)
+            .map(|ids| pb::TokenIds { ids })
             .collect(),
     }
 }
