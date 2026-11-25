@@ -165,11 +165,17 @@ impl IntoResponse for ApiError {
 }
 
 /// Classify a text-pipeline submit failure: request validation failures are
-/// the client's fault and map to HTTP 400, mirroring the Python frontend.
-/// Everything else stays an internal 500.
+/// the client's fault and map to HTTP 400, mirroring the Python frontend. A
+/// request that cannot be taken now, such as one over a queue limit, maps to
+/// a retryable 503. Everything else stays an internal 500.
 pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiError {
     if error.is_request_validation_error() {
         return invalid_request!(param = error.param(), "{}", error.as_report());
+    }
+    if error.is_unavailable() {
+        return ApiError::ServiceUnavailable {
+            message: error.to_report_string(),
+        };
     }
     server_error!("{}: {}", context, error.to_report_string())
 }
@@ -182,6 +188,11 @@ pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiE
     }
     if error.is_request_validation_error() {
         return invalid_request!(param = error.param(), "{}", error.as_report());
+    }
+    if error.is_unavailable() {
+        return ApiError::ServiceUnavailable {
+            message: error.to_report_string(),
+        };
     }
     server_error!("{}: {}", context, error.to_report_string())
 }
@@ -512,6 +523,28 @@ mod tests {
         assert_eq!(response.error.error_type, "BadRequestError");
         assert!(response.error.message.contains("-2"));
         assert!(response.error.message.contains("must be >= -1"));
+    }
+
+    /// A request over a queue limit is retryable, with Python's message.
+    #[test]
+    fn queue_limit_errors_map_to_service_unavailable() {
+        let errors = [
+            text_submit_error(
+                "failed to submit completion request",
+                vllm_text::Error::Llm(vllm_llm::Error::QueueFull),
+            ),
+            chat_submit_error(
+                "failed to submit chat request",
+                vllm_chat::Error::Text(vllm_text::Error::Llm(vllm_llm::Error::PrefillBacklogFull)),
+            ),
+        ];
+        let rendered = errors
+            .iter()
+            .map(|error| serde_json::to_string(&error.to_error_response()).unwrap())
+            .join("\n");
+        expect![[r#"
+            {"error":{"message":"The engine is currently busy and cannot accept new requests. Please try again later or on a different instance.","type":"ServiceUnavailableError","param":null,"code":503}}
+            {"error":{"message":"The engine has reached its prefill token backlog limit. Please try again later or on a different instance.","type":"ServiceUnavailableError","param":null,"code":503}}"#]].assert_eq(&rendered);
     }
 
     #[test]
