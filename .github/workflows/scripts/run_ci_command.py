@@ -82,6 +82,8 @@ CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
 # for branches that predate .buildkite/scripts/rocm/build.sh.
 ROCM_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
 SETUP_STEP_KEYS = {"ensure-ci-base-amd", ROCM_REFRESH_STEP_KEY, "pre-commit"}
+# ci-infra adds it for the sharded steps a build runs; it is not selectable.
+SHARD_COVERAGE_STEP_KEY = "runtime-shard-coverage-check"
 # A PR to main that changes these builds a new ROCm base image. Its
 # rocm-image-cache-check step fails until reconcile_rocm_cache caches the image
 # a trusted user's CI build pushed, so main reuses it after the merge.
@@ -1226,6 +1228,7 @@ def handle_retry_failed(
         )
 
     failed_step_keys = {str(job["step_key"]) for job in failed_script_jobs}
+    failed_step_keys.discard(SHARD_COVERAGE_STEP_KEY)
     setup_failures = sorted(
         step_key
         for step_key in failed_step_keys
