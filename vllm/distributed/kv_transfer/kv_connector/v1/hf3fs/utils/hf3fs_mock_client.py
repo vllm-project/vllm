@@ -12,7 +12,14 @@ HF3FS_AVAILABLE = True
 class Hf3fsClient:
     """Mock HF3FS client using file backend for debugging and testing."""
 
-    def __init__(self, path: str, size: int, bytes_per_page: int, entries: int):
+    def __init__(
+        self,
+        path: str,
+        size: int,
+        bytes_per_page: int,
+        entries: int,
+        device: torch.device | None = None,
+    ):
         self._size = size
         self._bytes_per_page = bytes_per_page
         self._entries = entries
@@ -75,13 +82,13 @@ class Hf3fsClient:
             return torch.frombuffer(buffer_data, dtype=dtype)
 
     def batch_write(
-        self, offsets: list[int], tensors: list[torch.Tensor], event: torch.cuda.Event
+        self, offsets: list[int], tensors: list[torch.Tensor], event: torch.Event
     ) -> list[int]:
         """Write data from tensors to file at specified offsets."""
         results = []
 
         try:
-            torch.cuda.current_stream().wait_event(event)
+            torch.accelerator.current_stream().wait_event(event)
 
             # Convert tensors to bytes
             data_bytes_list = [self._tensor_to_bytes(tensor) for tensor in tensors]
