@@ -905,10 +905,11 @@ def test_handoff_partial_tail_excludes_sliding_window_groups(with_swa_group: boo
     """The hand-off handler reports no live chunk: its partial tail reads the
     request's block ids only for groups that are not CoW sources, and the
     scheduler zeroes only sliding-window groups. A sliding-window group that is
-    not a CoW source must therefore turn the partial tail off.
+    not a CoW source must therefore turn the partial tail off, even when core
+    otherwise reports fine-grained hits.
     """
     vllm_config = _make_vllm_config()
-    vllm_config.cache_config.prefix_match_unit = 4
+    vllm_config.cache_config.prefix_match_unit = 16 if with_swa_group else 4
     vllm_config.speculative_config = None
     kv_cache_config = _make_mamba_hybrid_kv_cache_config()
     kv_cache_config.cache_hit_alignment_tokens = 4
@@ -1256,6 +1257,53 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert dst_spec.group_sizes == [2, 1]
     assert dst_spec.block_indices == [0, 1]
     assert req_status.partial_tail_boundary is None
+
+
+def test_partial_tail_hit_still_stores_the_containing_chunk():
+    """Only a tail checkpoint of the hit chunk is in the CPU tier, so the rest
+    of that chunk must still be stored once it is computed."""
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler, num_tokens=32)
+    req_status = scheduler._req_status["req"]
+    req_status.num_locally_computed_tokens = 0
+    req_status.update_offload_keys()
+    _as_mock(scheduler.manager.lookup).return_value = LookupResult.HIT
+    _as_mock(scheduler.manager.prepare_store).side_effect = (
+        lambda keys, req_context, trigger: generate_store_output(keys)
+    )
+    assert scheduler._lookup(req_status) == 28
+
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(41)],
+            )
+        ),
+        num_external_tokens=28,
+    )
+    meta = scheduler.build_connector_meta(SchedulerOutput.make_empty())
+    assert isinstance(meta, OffloadingConnectorMetadata)
+    [load_job_id] = meta.load_jobs
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=OffloadingWorkerMetadata(
+                completed_jobs={load_job_id: 1}
+            )
+        )
+    )
+
+    # Compute the rest of the hit chunk (tokens 28-31).
+    request.num_computed_tokens = 28
+    output = SchedulerOutput.make_empty()
+    _schedule_new_request(output, request, ([31, 32], [0, 41]), 4)
+    meta = scheduler.build_connector_meta(output)
+    assert isinstance(meta, OffloadingConnectorMetadata)
+    [(store_job_id, store_job)] = meta.store_jobs.items()
+    assert scheduler._job_statuses[store_job_id].keys == (make_offload_key(b"h7", 0),)
+    assert isinstance(store_job.src_spec, GPULoadStoreSpec)
+    assert store_job.src_spec.block_ids.tolist() == [32]
 
 
 def test_partial_tail_lookup_delays_duplicate_inflight_load():

@@ -211,6 +211,10 @@ class CacheConfig:
     inside a physical block. It controls matching granularity only, not how
     often states are stored.
 
+    An explicit value fails at startup if prefix-cache hits would fall back
+    to the scheduler block size (for example, when a sliding-window group
+    requires block-aligned lookups).
+
     This equals to the `hash_block_size` used throughout the KV cache code.
     """
     gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
@@ -317,17 +321,20 @@ class CacheConfig:
     prompt tail. Off by default; only takes effect with prefix caching enabled
     and a prefix match unit smaller than the Mamba block size."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
-    """ReplaySSM logical history length B for Mamba2. Triton standard decode
-    uses B physical rows; FlashInfer and Triton speculative decoding use B+T,
-    where T is the target verification length. Kimi-K3 speculative decode does
-    not use B. Default 16."""
+    """ReplaySSM logical history length B. Mamba2 Triton standard decode and
+    Gated DeltaNet (Qwen3.5, Qwen4Exp) use B physical rows, at most 32 for Gated
+    DeltaNet; FlashInfer and Triton speculative decoding use B+T, where T is
+    the target verification length. Kimi-K3 speculative decode does not use B.
+    Default 16."""
     use_replayssm: bool = False
-    """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
-    the per-step full-state store, writing the checkpoint back only on flush.
-    Triton and FlashInfer support Mamba prefix caching on and off.
-    Mamba2 speculative decoding supports both backends. Pipeline parallelism is not
-    supported. Flushes are most efficient when mamba_block_size is a
-    multiple of replayssm_buffer_len, but this is not required."""
+    """Use the ReplaySSM decode kernels for Mamba2 and Gated DeltaNet (Qwen3.5,
+    Qwen4Exp): cache recent SSM inputs and skip the per-step full-state store,
+    writing the checkpoint back only on flush. Triton and FlashInfer support
+    Mamba prefix caching on and off. Mamba2 speculative decoding supports both
+    backends; Gated DeltaNet supports Triton standard decode only. Pipeline
+    parallelism is not supported. Flushes are most efficient when
+    mamba_block_size is a multiple of replayssm_buffer_len, but this is not
+    required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
@@ -336,9 +343,6 @@ class CacheConfig:
     """The number of blocks to allocate for GPU memory."""
     num_cpu_blocks: int | None = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
-
-    simple_cpu_offload_num_blocks: int | None = field(default=None, init=False)
-    """Worker-aligned offload block count for `SimpleCPUOffloadConnector`."""
 
     # Set after KV cache initialization.
     effective_attention_block_size: int | None = field(default=None, init=False)
@@ -440,7 +444,6 @@ class CacheConfig:
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
-            "simple_cpu_offload_num_blocks",
             "effective_attention_block_size",
             "kv_cache_size_tokens",
             "kv_cache_max_concurrency",
