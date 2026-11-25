@@ -766,7 +766,7 @@ async def test_layerwise_ack_without_another_model_thread_poll(complete_before_s
 @pytest.mark.asyncio
 async def test_async_layerwise_completes_unrelated_request_without_duplicate_sends():
     entered, release = Event(), Event()
-    blocked_sources = []
+    blocked_sources: list[int] = []
     names = ("model.layers.0.self_attn", "model.layers.1.self_attn")
 
     def before_copy(sources):
