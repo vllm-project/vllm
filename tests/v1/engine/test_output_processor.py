@@ -2073,7 +2073,7 @@ def test_pooling_request_ended_by_engine_finishes_with_error(
     pause, sleep or shutdown) or failed before it ran. The request finishes as a
     pooling output that carries an error, not as an empty vector, for `AsyncLLM`
     (queue) and `LLMEngine`."""
-    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    output_processor = OutputProcessor(tokenizer=None, collect_stats=False)
     request = _pooling_request()
     queue = (
         RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request.request_id)
@@ -2099,7 +2099,7 @@ def test_pooling_request_ended_by_engine_finishes_with_error(
 def test_pooling_request_rejected_by_engine_keeps_engine_error():
     """Without an output queue (`LLMEngine`), a pooling request the engine
     rejects with its own error finishes with that error."""
-    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    output_processor = OutputProcessor(tokenizer=None, collect_stats=False)
     request = _pooling_request()
     output_processor.add_request(request, prompt=None)
     error = RequestError(
