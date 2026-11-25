@@ -2,13 +2,13 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use thiserror::Error;
-use thiserror_ext::{AsReport as _, Macro};
+use thiserror_ext::{AsReport as _, Construct, Macro};
 
 use crate::RendererSelection;
 
 pub(crate) type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
-#[derive(Debug, Error, Macro)]
+#[derive(Debug, Error, Construct, Macro)]
 #[thiserror_ext(macro(path = "crate::error"))]
 pub enum Error {
     #[error("chat request must contain at least one message")]
@@ -106,6 +106,11 @@ pub enum Error {
         #[source]
         error: BoxedError,
     },
+    /// A parser that `auto` matched by model name but cannot build for the
+    /// model. This refuses the start rather than serving without the parser:
+    /// a managed engine gets the same selection, and would still wait for the
+    /// end of reasoning that the frontend no longer parses before applying
+    /// structured outputs.
     #[error(
         "{kind} parser `{name}` was selected automatically for model `{model_id}` but cannot be used with it; select a parser explicitly, or pass `{disable}` to disable {kind} parsing"
     )]

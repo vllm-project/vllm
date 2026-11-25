@@ -121,12 +121,12 @@ impl ResolvedParsers {
             };
             let name = unified.map_err(|error| {
                 if tool_auto && reasoning_auto {
-                    unusable_auto_parser(
+                    Error::unusable_auto_parser(
+                        error,
                         "unified",
                         unified_name,
-                        "--tool-call-parser none --reasoning-parser none",
                         model_id,
-                        error,
+                        "--tool-call-parser none --reasoning-parser none",
                     )
                 } else {
                     error
@@ -140,12 +140,12 @@ impl ResolvedParsers {
                     ToolParserFactory::global().create(name, &[], tokenizer.clone()).map_err(
                         |error| {
                             if tool_auto {
-                                unusable_auto_parser(
+                                Error::unusable_auto_parser(
+                                    error,
                                     "tool",
                                     name,
-                                    "--tool-call-parser none",
                                     model_id,
-                                    error,
+                                    "--tool-call-parser none",
                                 )
                             } else {
                                 error
@@ -162,12 +162,12 @@ impl ResolvedParsers {
                 ReasoningParserFactory::global().create(name, tokenizer.clone()).map_err(
                     |error| {
                         if reasoning_auto {
-                            unusable_auto_parser(
+                            Error::unusable_auto_parser(
+                                error,
                                 "reasoning",
                                 name,
-                                "--reasoning-parser none",
                                 model_id,
-                                error,
+                                "--reasoning-parser none",
                             )
                         } else {
                             error
@@ -264,27 +264,5 @@ impl ResolvedParsers {
         ToolParserFactory::global()
             .create(parser_name, tools, self.tokenizer.clone())
             .map(Some)
-    }
-}
-
-/// A parser that `auto` matched by model name but cannot build for this model.
-///
-/// This refuses the start rather than serving without the parser: a managed
-/// engine gets the same selection, and would still wait for the end of
-/// reasoning that the frontend no longer parses before applying structured
-/// outputs.
-fn unusable_auto_parser(
-    kind: &'static str,
-    name: &str,
-    disable: &'static str,
-    model_id: &str,
-    error: Error,
-) -> Error {
-    Error::UnusableAutoParser {
-        kind,
-        name: name.to_owned(),
-        model_id: model_id.to_owned(),
-        disable,
-        error: Box::new(error),
     }
 }
