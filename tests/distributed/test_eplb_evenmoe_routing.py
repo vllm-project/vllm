@@ -1042,6 +1042,37 @@ def test_placement_and_routing_share_one_balancer():
         reset_evenmoe_routing()
 
 
+def test_an_empty_l2_selection_reaches_evenmoe_as_no_routing():
+    """vLLM writes "no L2 routing" as "", which EvenMoE no longer accepts.
+
+    EvenMoE takes ``None`` for it and requires every string to name a policy,
+    so the empty selection has to be translated where it crosses over; a
+    balancer built from it then has no routing step.
+    """
+    from evenmoe import MoELoadBalancer
+    from evenmoe.core.routing_pipeline import RoutingPipeline
+
+    from vllm.distributed.eplb.evenmoe_runtime import (
+        VllmRoutingCollectives,
+        _algorithm_places_with_ultraep,
+        _routing_selection,
+    )
+
+    assert _routing_selection("") is None
+    assert _routing_selection("lplb") == "lplb"
+    assert RoutingPipeline.from_value(_routing_selection("")).steps == ()
+    assert not _algorithm_places_with_ultraep("")
+
+    balancer = MoELoadBalancer.from_algorithm(
+        _routing_selection(""),
+        ep_size=EP_SIZE,
+        source_rank=0,
+        experts_per_rank=(NUM_LOGICAL + 8) // EP_SIZE,
+        collectives=VllmRoutingCollectives(),
+    )
+    assert balancer.routing_pipeline.steps == ()
+
+
 def test_async_placement_commits_are_delivered_on_the_main_thread():
     """The async worker commits a layer's new map without telling the policy.
 

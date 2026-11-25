@@ -52,6 +52,19 @@ def evenmoe_l2_algorithm() -> str:
     return envs.VLLM_EVENMOE_L2_ALGORITHM
 
 
+def _routing_selection(algorithm: str) -> str | None:
+    """The value EvenMoE takes for a vLLM L2 selection.
+
+    vLLM writes "no L2 routing" as the empty string -- the default of both
+    ``EPLBConfig.l2_algorithm`` and ``VLLM_EVENMOE_L2_ALGORITHM`` -- while
+    EvenMoE takes ``None`` for it and requires every string to name a policy.
+    The translation happens here, where a selection crosses into EvenMoE, so
+    an empty selection builds a balancer with no routing step instead of
+    being parsed as a policy name.
+    """
+    return algorithm or None
+
+
 class VllmRoutingCollectives:
     """Expose vLLM's EP process group through EvenMoE's generic transport API.
 
@@ -90,7 +103,8 @@ def _algorithm_places_with_ultraep(algorithm: str) -> bool:
     from evenmoe.core.routing_pipeline import RoutingPipeline
 
     try:
-        return RoutingPipeline.from_value(algorithm).placement_policy == "ultraep"
+        pipeline = RoutingPipeline.from_value(_routing_selection(algorithm))
+        return pipeline.placement_policy == "ultraep"
     except Exception:
         return False
 
@@ -280,7 +294,7 @@ class EvenMoeRoutingRuntime:
             balancer
             if balancer is not None
             else MoELoadBalancer.from_algorithm(
-                algorithm,
+                _routing_selection(algorithm),
                 ep_size=ep_size,
                 source_rank=ep_rank,
                 experts_per_rank=num_physical_experts // ep_size,
@@ -1911,7 +1925,7 @@ class VllmEvenMoeIntegration:
                 self._balancer = self._placement_only_balancer()
             else:
                 self._balancer = MoELoadBalancer.from_algorithm(
-                    self.algorithm,
+                    _routing_selection(self.algorithm),
                     placement_policy=self._l1_policy(),
                     **self._balancer_kwargs,
                 )
@@ -1928,7 +1942,9 @@ class VllmEvenMoeIntegration:
             "collectives": VllmRoutingCollectives(),
         }
         self._balancer = MoELoadBalancer.from_algorithm(
-            self.algorithm, placement_policy=self._l1_policy(), **self._balancer_kwargs
+            _routing_selection(self.algorithm),
+            placement_policy=self._l1_policy(),
+            **self._balancer_kwargs,
         )
         self.routing = EvenMoeRoutingRuntime(
             self.algorithm, balancer=self._balancer, **kwargs
