@@ -48,10 +48,33 @@ pub enum Error {
     UnsupportedInputAudioFormat { format: String },
     #[error("`{modality}` input is not supported by this model")]
     UnsupportedModality { modality: String },
+    #[error(
+        "`{modality}` input is not supported by the Rust frontend for this model; set \
+         VLLM_USE_RUST_FRONTEND=0 to serve it with the Python frontend, or pass \
+         --limit-mm-per-prompt '{{\"{modality}\": 0}}' to disable it"
+    )]
+    RustFrontendUnsupportedModality { modality: &'static str },
     #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
     MmLimitExceeded { modality: String, limit: usize },
     #[error("invalid inline multimodal features: {message}")]
     InvalidPreprocessedMultimodal { message: String },
+    #[error(
+        "failed to prepare media after the last preprocessed feature range, ending at offset {offset}"
+    )]
+    MediaAfterPreprocessed {
+        offset: usize,
+        #[source]
+        source: Box<Error>,
+    },
+    #[error(
+        "the Rust frontend cannot serve multimodal input for model `{model_id}` \
+         (model_type `{model_type}`); pass --language-model-only to serve it as a text-only \
+         model, or set VLLM_USE_RUST_FRONTEND=0 to use the Python frontend"
+    )]
+    MultimodalModelUnsupported {
+        model_id: String,
+        model_type: String,
+    },
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
     #[error(transparent)]
@@ -141,17 +164,24 @@ impl Error {
             | Self::ToolChoiceFunctionNotFound { .. }
             | Self::ToolReferenceNotFound { .. }
             | Self::AllToolsDeferred
+            | Self::ParserUnavailableForModel { .. }
             | Self::ParserDisabled { .. }
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate
             | Self::UnsupportedRequestChatTemplate
             | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => true,
             Self::Text(error) => error.is_request_validation_error(),
+            Self::OutputGrammar { error } => matches!(
+                error.downcast_ref(),
+                Some(vllm_parser::output_grammar::OutputGrammarError::UnsupportedRequest(_))
+            ),
+            Self::MediaAfterPreprocessed { source, .. } => source.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
             | Self::UnsupportedContentPart(_)
             | Self::UnsupportedInputAudioFormat { .. }
             | Self::UnsupportedModality { .. }
+            | Self::RustFrontendUnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
             | Self::MmLimitExceeded { .. } => true,
             // A media host that timed out or failed, and a decoder that failed

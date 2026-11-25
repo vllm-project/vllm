@@ -433,7 +433,7 @@ steps:
     DECODE_BLOCK_SIZE: "256"
     MODEL_NAMES: "deepseek-ai/DeepSeek-V4-Flash"
     VLLM_ENGINE_READY_TIMEOUT_S: "1800"
-    VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--kv-cache-dtype,fp8"
+    VLLM_SERVE_EXTRA_ARGS: "--kv-cache-dtype,fp8"
     # The V4 indexer only supports block-outermost layouts; let it pick.
     PREFILLER_KV_LAYOUT: ""
     DECODER_KV_LAYOUT: ""
@@ -474,7 +474,7 @@ steps:
           DECODE_BLOCK_SIZE=256
           MODEL_NAMES=deepseek-ai/DeepSeek-V4-Flash
           VLLM_ENGINE_READY_TIMEOUT_S=1800
-          VLLM_SERVE_EXTRA_ARGS=--trust-remote-code,--kv-cache-dtype,fp8
+          VLLM_SERVE_EXTRA_ARGS=--kv-cache-dtype,fp8
           PREFILLER_KV_LAYOUT=
           DECODER_KV_LAYOUT=
           pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_accuracy
@@ -498,7 +498,7 @@ steps:
     # Keep TP=2 prefill and TP=1 decode above both hybrid page-size minima.
     PREFILL_BLOCK_SIZE: "2048"
     DECODE_BLOCK_SIZE: "2048"
-    VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--max-model-len 32768"
+    VLLM_SERVE_EXTRA_ARGS: "--max-model-len 32768"
   commands:
     - bash /vllm-workspace/.buildkite/scripts/check-kv-connectors.sh
     - pytest -v -s v1/kv_connector/nixl_integration/test_pd_scripts.py::test_accuracy

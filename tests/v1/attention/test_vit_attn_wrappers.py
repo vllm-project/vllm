@@ -35,6 +35,9 @@ def test_registered_attention_wrapper_fake_layouts():
             torch.ops.vllm.triton_attn_wrapper(
                 q, q, q, 1, None, cu_seqlens, max_seqlen
             ),
+            torch.ops.vllm.triton_attn_wrapper(
+                q, q, q, 1, None, cu_seqlens, max_seqlen, sequence_lengths
+            ),
             torch.ops.vllm.torch_sdpa_wrapper(q, q, q, None, None, False),
             torch.ops.vllm.flashinfer_wrapper(
                 q,
@@ -78,9 +81,12 @@ def test_aiter_flash_attn_omits_out_and_returns_contiguous_output(
     assert output.is_contiguous()
 
 
-@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="Requires GPU")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Requires GPU",
+)
 def test_sdpa_output_layout_without_cu_seqlens():
-    q = _noncontiguous_bshd(torch.device("cuda"))
+    q = _noncontiguous_bshd(torch.device(current_platform.device_type))
 
     output = vit_attn_wrappers.vit_torch_sdpa_wrapper(q, q, q)
 
