@@ -1157,6 +1157,10 @@ class BaseHfRenderer(BaseRenderer[_T]):
 
 
 class HfRenderer(BaseHfRenderer[HfTokenizer]):
+    _server_owned_chat_template_kwargs = frozenset(
+        {"tokenize", "padding", "max_length", "tokenizer_kwargs"}
+    )
+
     def __init__(
         self,
         config: VllmConfig,

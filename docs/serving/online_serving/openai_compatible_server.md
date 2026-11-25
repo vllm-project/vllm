@@ -189,6 +189,11 @@ With the Python frontend's HF renderer, an assistant message with `content` set 
 `null`, `""`, or `[]` and a non-empty top-level `refusal` string renders like an
 explicit refusal content part. Non-empty `content` takes precedence.
 
+With the Python frontend's HF renderer, `chat_template_kwargs` accepts
+template variables such as `enable_thinking`. The server reserves `tokenize`,
+`padding`, `max_length`, and `tokenizer_kwargs` for tokenizer configuration.
+Requests containing these keys in `chat_template_kwargs` receive HTTP 400.
+
 We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
 [Audio](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in)-related parameters;
 see our [Multimodal Inputs](../../features/multimodal_inputs.md) guide for more information.

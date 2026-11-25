@@ -11,7 +11,7 @@ from contextlib import ExitStack
 from dataclasses import replace
 from functools import cached_property
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Generic, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, cast, overload
 
 from typing_extensions import TypeVar
 
@@ -106,8 +106,23 @@ class _SwappableExecutor(Executor):
 
 
 class BaseRenderer(ABC, Generic[_T]):
+    _server_owned_chat_template_kwargs: ClassVar[frozenset[str]] = frozenset()
+
     def validate_request_chat_template(self) -> None:
         """Check whether this renderer accepts template source from a request."""
+
+    @classmethod
+    def validate_request_chat_template_kwargs(
+        cls, kwargs: Mapping[str, Any] | None
+    ) -> None:
+        if kwargs is None:
+            return
+        if reserved := cls._server_owned_chat_template_kwargs & kwargs.keys():
+            raise VLLMValidationError(
+                "chat_template_kwargs contains server-owned tokenizer options: "
+                f"{', '.join(sorted(reserved))}.",
+                parameter="chat_template_kwargs",
+            )
 
     def __init__(self, config: "VllmConfig", tokenizer: _T | None) -> None:
         super().__init__()
