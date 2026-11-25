@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ulysses attention for Muse Spark prefill on ROCm.
 
-Enabled with `additional_config={"ulysses_prefill": true}`. It runs on eager steps
-whose residual stream is token-sharded across the TP group (`TokenShard` in
-`model.py`) and replaces what that stream does around attention and the MoE input:
+Enabled with `additional_config={"ulysses_prefill": "full"}` (default "off"). It runs
+on eager steps whose residual stream is token-sharded across the TP group
+(`TokenShard` in `model.py`) and replaces what that stream does around attention
+and the MoE input:
 
 * attention: every rank projects its token shard with the full (all-gathered, FP8)
   QKV-gate weight, one all-to-all hands every rank all tokens of its own heads
@@ -14,10 +15,19 @@ whose residual stream is token-sharded across the TP group (`TokenShard` in
 * MoE input: the pre-expert-normed pooled rows are quantized to MXFP4 on the shard
   and gathered as FP4 bytes plus E8M0 scales instead of BF16 rows.
 
+The all-to-all payloads (QKV to heads, attention output back to tokens) are FP8 with
+one scale per token and head (`ops.fp8_a2a`), half the bytes of BF16.
+
 On these steps the QKV-gate and O projections run as FP8 W8A8 (per-channel weights,
 per-token activations) from FP8 copies of the BF16/FP16 weights. The copies stay
 resident on every rank; they are built after weight loading, so the KV cache
 sizing accounts for them.
+
+With `"ulysses_prefill": "output_only"` only the output side runs Ulysses: the
+normed rows are all-gathered as per-token FP8 rows and projected by the rank's own
+QKV-gate shard (the TP layout, so no QKV-gate copy is kept), the O-gate is applied
+to the rank's heads, and one all-to-all hands the gated heads to the full O copy on
+the token shard. Only the O weight is copied.
 """
 
 import time
@@ -35,6 +45,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 from . import fp8_dense
+from .ops import fp8_a2a
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -45,25 +56,38 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _OPTION = "ulysses_prefill"
+_MODES = ("off", "full", "output_only")
 
 
-def _enabled_option(vllm_config: VllmConfig) -> bool:
+def _mode(vllm_config: VllmConfig) -> str:
+    """The validated `additional_config` Ulysses prefill mode ("off" when unset)."""
     extra = vllm_config.additional_config
     if not isinstance(extra, dict):
-        return False
+        return "off"
     for key in extra:
         if key.startswith("ulysses") and key != _OPTION:
             raise ValueError(
                 f"Unknown additional_config key {key!r}; the Muse Spark Ulysses "
                 f"prefill key is {_OPTION!r}."
             )
-    value = extra.get(_OPTION, False)
-    # Exact type: a string such as "false" is truthy.
-    if type(value) is not bool:
+    value = extra.get(_OPTION, "off")
+    # Exact type: no booleans or other aliases.
+    if type(value) is not str or value not in _MODES:
         raise ValueError(
-            f"additional_config {_OPTION!r} must be a JSON boolean, got {value!r}."
+            f"additional_config {_OPTION!r} must be one of "
+            f"{', '.join(map(repr, _MODES))}, got {value!r}."
         )
     return value
+
+
+def _enabled_option(vllm_config: VllmConfig) -> bool:
+    return _mode(vllm_config) != "off"
+
+
+def output_only(vllm_config: VllmConfig) -> bool:
+    """Whether Ulysses runs on the attention output side only
+    (`additional_config={"ulysses_prefill": "output_only"}`)."""
+    return _mode(vllm_config) == "output_only"
 
 
 def _eager_min_tokens(vllm_config: VllmConfig, min_tokens: int) -> int:
@@ -89,7 +113,7 @@ def ulysses_prefill_enabled(
     vllm_config: VllmConfig, token_shard_min_tokens: int
 ) -> bool:
     """Whether the token-sharded eager steps run Ulysses
-    (`additional_config={"ulysses_prefill": true}`).
+    (`additional_config={"ulysses_prefill": "full"}` or `"output_only"`).
 
     `token_shard_min_tokens` is the model's token-sharded stream threshold (0 when
     the stream is never sharded).
@@ -193,6 +217,14 @@ def take_prequant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor] | None:
     return prequant
 
 
+def gather_rows_fp8(
+    x: torch.Tensor, shard: "TokenShard"
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """All-gather the shard's rows as per-token FP8 rows and their scales."""
+    xq, xs = quant_rows(x)
+    return gather_bytes(xq, shard), shard.gather(xs)
+
+
 def gather_bytes(xs: torch.Tensor, shard: "TokenShard") -> torch.Tensor:
     """All-gather a byte-typed tensor (fp4x2 / e8m0) as bf16 words, so the custom AG
     carries it.
@@ -231,9 +263,21 @@ def expand_rows(x: torch.Tensor, k: int) -> torch.Tensor:
 
 
 def a2a_tokens_to_heads(
-    ys: torch.Tensor, cols: int, shard: "TokenShard"
+    ys: torch.Tensor, cols: int, shard: "TokenShard", head_dim: int | None = None
 ) -> torch.Tensor:
-    """[rows, W*cols] (columns grouped by owning rank) -> [T, cols] (all tokens)."""
+    """[rows, W*cols] (columns grouped by owning rank) -> [T, cols] (all tokens).
+    With `head_dim`, the payload is FP8 with one scale per token and head."""
+    if head_dim is not None:
+        send = fp8_a2a.quant_pack(ys, shard.world, shard.rows, head_dim)
+        recv = torch.empty_like(send)
+        dist.all_to_all_single(recv, send, group=_group())
+        return fp8_a2a.dequant_unpack(
+            recv.view(1, shard.world * shard.rows, -1),
+            shard.num_tokens,
+            cols,
+            head_dim,
+            ys.dtype,
+        )
     view = _wide(ys.view(shard.rows, shard.world, cols))
     send = view.transpose(0, 1).contiguous().view(ys.dtype)
     recv = torch.empty_like(send)
@@ -241,9 +285,19 @@ def a2a_tokens_to_heads(
     return recv.view(shard.rows * shard.world, cols)[: shard.num_tokens]
 
 
-def a2a_heads_to_tokens(y: torch.Tensor, shard: "TokenShard") -> torch.Tensor:
-    """[T, cols] (this rank's heads) -> [rows, W*cols] (all heads, rank order)."""
+def a2a_heads_to_tokens(
+    y: torch.Tensor, shard: "TokenShard", head_dim: int | None = None
+) -> torch.Tensor:
+    """[T, cols] (this rank's heads) -> [rows, W*cols] (all heads, rank order).
+    With `head_dim`, the payload is FP8 with one scale per token and head."""
     cols = y.shape[1]
+    if head_dim is not None:
+        send = fp8_a2a.quant_pack(y, 1, shard.rows * shard.world, head_dim)
+        recv = torch.empty_like(send)
+        dist.all_to_all_single(recv, send, group=_group())
+        return fp8_a2a.dequant_unpack(
+            recv.view(shard.world, shard.rows, -1), shard.rows, cols, head_dim, y.dtype
+        )
     send = _pad(y, shard).contiguous()
     recv = torch.empty_like(send)
     dist.all_to_all_single(recv, send, group=_group())
@@ -257,15 +311,23 @@ FP8Weight = tuple[torch.Tensor, torch.Tensor]
 @dataclass(frozen=True)
 class UlyssesWeights:
     """One attention layer's full projection weights (all ranks' heads, rank-major)
-    as per-output-channel FP8 with `[1, N]` scales."""
+    as per-output-channel FP8 with `[1, N]` scales. `qkv` and `gate` are None when
+    only the output side runs Ulysses, or when `qkv_gate` holds both as the
+    rank-major concatenation of the fused `[q|k|v|o-gate]` shards."""
 
-    qkv: FP8Weight
-    gate: FP8Weight
+    qkv: FP8Weight | None
+    gate: FP8Weight | None
     o: FP8Weight
+    qkv_gate: FP8Weight | None = None
+
+    @property
+    def output_only(self) -> bool:
+        return self.qkv is None and self.qkv_gate is None
 
     @property
     def tensors(self) -> tuple[torch.Tensor, ...]:
-        return (*self.qkv, *self.gate, *self.o)
+        parts = (self.qkv, self.gate, self.qkv_gate, self.o)
+        return tuple(t for part in parts if part is not None for t in part)
 
     @property
     def nbytes(self) -> int:
@@ -302,24 +364,37 @@ def _rows(parts: list[torch.Tensor], rows: slice) -> torch.Tensor:
 
 
 def build_weights(
-    qkv_proj: torch.nn.Module, o_proj: torch.nn.Module, q: int, kv: int
+    qkv_proj: torch.nn.Module,
+    o_proj: torch.nn.Module,
+    q: int,
+    kv: int,
+    output_only: bool = False,
+    alias: bool = False,
 ) -> UlyssesWeights:
     """The full FP8 weights of the TP-sharded fused `[q|k|v|o-gate]` (`q`, `kv`:
-    this rank's sizes) and O projections."""
-    qkv_rows, gate_rows = slice(0, q + 2 * kv), slice(q + 2 * kv, 2 * q + 2 * kv)
+    this rank's sizes) and O projections; only O with `output_only`.
+
+    An FP8 `qkv_proj` gives the fused copy (`qkv_gate`), and with `alias` its own
+    weight becomes the view of its rows in that copy, so they are stored once."""
+    if output_only:
+        o = torch.cat(_all_gather_weight(o_proj), dim=1)
+        torch.accelerator.empty_cache()
+        return UlyssesWeights(None, None, _quant_weight(o))
     if fp8_dense.is_fp8(qkv_proj):
         # Rows are quantized independently, so the gathered FP8 rows and scales
         # equal quantizing the gathered BF16 weight.
         weights, scales = fp8_dense.full_weight_parts(
             qkv_proj, _group(), get_tensor_model_parallel_world_size()
         )
+        fused = torch.cat(weights), torch.cat(scales).view(1, -1)
+        del weights, scales
+        if alias:
+            rank = get_tp_group().rank_in_group
+            fp8_dense.alias_weight_rows(qkv_proj, fused[0], rank)
         o = torch.cat(_all_gather_weight(o_proj), dim=1)
         torch.accelerator.empty_cache()
-        qkv, gate = (
-            (_rows(weights, rows), _rows(scales, rows).view(1, -1))
-            for rows in (qkv_rows, gate_rows)
-        )
-        return UlyssesWeights(qkv, gate, _quant_weight(o))
+        return UlyssesWeights(None, None, _quant_weight(o), qkv_gate=fused)
+    qkv_rows, gate_rows = slice(0, q + 2 * kv), slice(q + 2 * kv, 2 * q + 2 * kv)
     parts = _all_gather_weight(qkv_proj)
     qkv, gate = _rows(parts, qkv_rows), _rows(parts, gate_rows)
     del parts
@@ -346,17 +421,13 @@ def quant_rows(x: torch.Tensor) -> FP8Weight:
     return rocm_aiter_ops.per_token_quant(x.contiguous(), current_platform.fp8_dtype())
 
 
-def gemm(
-    xq: FP8Weight, w: FP8Weight, out_dtype: torch.dtype, scaled_mm: bool = False
-) -> torch.Tensor:
-    """FP8 GEMM of per-token FP8 rows `xq` with `w`: aiter CK, or with `scaled_mm`
-    hipBLASLt's row-wise scaled GEMM."""
-    if scaled_mm:
-        return torch._scaled_mm(
-            xq[0],
-            w[0].t(),
-            scale_a=xq[1].view(-1, 1),
-            scale_b=w[1].view(1, -1),
-            out_dtype=out_dtype,
-        )
-    return rocm_aiter_ops.w8a8_gemm(xq[0], w[0], xq[1], w[1], None, out_dtype)
+def gemm(xq: FP8Weight, w: FP8Weight, out_dtype: torch.dtype) -> torch.Tensor:
+    """FP8 GEMM of the `quant_rows` output `xq` with `w` (hipBLASLt's row-wise
+    scaled GEMM)."""
+    return torch._scaled_mm(
+        xq[0],
+        w[0].t(),
+        scale_a=xq[1].view(-1, 1),
+        scale_b=w[1].view(1, -1),
+        out_dtype=out_dtype,
+    )

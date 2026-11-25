@@ -47,6 +47,19 @@ class MuseSparkRouter(BaseRouter):
         self.router_score_normalization = router_score_normalization
         self.router_score_division_eps = router_score_division_eps
 
+    def set_precomputed_routes(
+        self, topk_weights: torch.Tensor, topk_ids: torch.Tensor
+    ) -> None:
+        """Routes for the next call, which then returns them instead of routing its
+        router logits (a caller that routed the rows earlier, e.g. before gathering
+        them)."""
+        self._precomputed_routes = (topk_weights, topk_ids)
+
+    def take_precomputed_routes(self) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Detach the routes set by `set_precomputed_routes` (None when there are
+        none)."""
+        return self.__dict__.pop("_precomputed_routes", None)
+
     @property
     def routing_method_type(self) -> RoutingMethodType:
         """Classify this router in vLLM's routing vocabulary."""
@@ -67,6 +80,20 @@ class MuseSparkRouter(BaseRouter):
         input_ids: torch.Tensor | None = None,
         is_padding: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        routes = self.take_precomputed_routes()
+        if routes is not None:
+            weights, ids = routes
+            if ids.shape[0] != hidden_states.shape[0]:
+                raise RuntimeError(
+                    f"{ids.shape[0]} precomputed routes for "
+                    f"{hidden_states.shape[0]} tokens."
+                )
+            if is_padding is not None:
+                weights = weights.masked_fill(is_padding[:, None], 0)
+                ids = ids.masked_fill(is_padding[:, None], -1)
+            if indices_type is not None and indices_type != ids.dtype:
+                ids = ids.to(indices_type)
+            return weights, ids
         if not router_logits.is_cuda:
             weights, ids = self._compute_routing_native(router_logits, indices_type)
             if is_padding is not None:

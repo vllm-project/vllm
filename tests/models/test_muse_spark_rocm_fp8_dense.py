@@ -51,7 +51,15 @@ from vllm.utils.network_utils import get_open_port
 
 from ..utils import multi_gpu_marks, multi_gpu_test
 from .test_muse_spark_rocm_mono import TINY_TEXT, _checkpoint_config
-from .test_muse_spark_rocm_ulysses_sp import _random_weights
+from .test_muse_spark_rocm_ulysses_sp import (
+    LAYERS,
+    ON,
+    _check_reloads,
+    _copies,
+    _held_copies,
+    _random_weights,
+    _tiny_llm,
+)
 
 F8 = torch.float8_e4m3fn
 FP8_DENSE = {"linear": "fp8_per_channel", "ignore": ["*o_proj"]}
@@ -130,7 +138,9 @@ def _fp8_linear(weight: torch.Tensor, config: VllmConfig) -> _Linear:
     return layer
 
 
-def _gather_worker(rank: int, world_size: int, port: int, checkpoint) -> None:
+def _gather_worker(
+    rank: int, world_size: int, port: int, checkpoint, layout: str
+) -> None:
     q, kv, k = 16, 8, 32
 
     def weights(seed: int, rows: int, cols: int) -> list[torch.Tensor]:
@@ -151,7 +161,14 @@ def _gather_worker(rank: int, world_size: int, port: int, checkpoint) -> None:
         initialize_model_parallel(tensor_model_parallel_size=world_size, backend="gloo")
         config = _config(checkpoint)
         layer = _fp8_linear(shards[rank].clone(), config)
-        fp8 = usp.build_weights(layer, o_proj, q, kv)
+        if layout == "n_k":
+            # AiterPerToken stores the `[N, K]` tensor itself.
+            layer.weight = torch.nn.Parameter(
+                layer.weight.data.t(), requires_grad=False
+            )
+            assert layer.weight.is_contiguous()
+        own = layer.weight.data.clone()
+        fp8 = usp.build_weights(layer, o_proj, q, kv, alias=True)
         bf16 = usp.build_weights(_Linear(shards[rank].clone()), o_proj, q, kv)
 
         def quantize(w: torch.Tensor):
@@ -160,14 +177,18 @@ def _gather_worker(rank: int, world_size: int, port: int, checkpoint) -> None:
 
         # The gathered FP8 shards are the bytes that quantizing the gathered BF16
         # weight yields: rows are independent.
-        for (w, s), rows in (
-            (fp8.qkv, slice(0, q + 2 * kv)),
-            (fp8.gate, slice(q + 2 * kv, None)),
-        ):
-            ref_w, ref_s = quantize(torch.cat([shard[rows] for shard in shards]))
-            assert torch.equal(w.view(torch.uint8), ref_w.view(torch.uint8))
-            assert s.shape == (1, ref_s.numel())
-            assert torch.equal(s.view(-1), ref_s)
+        assert fp8.qkv is None and fp8.gate is None and fp8.qkv_gate is not None
+        w, s = fp8.qkv_gate
+        ref_w, ref_s = quantize(torch.cat(shards))
+        assert torch.equal(w.view(torch.uint8), ref_w.view(torch.uint8))
+        assert s.shape == (1, ref_s.numel())
+        assert torch.equal(s.view(-1), ref_s)
+        # The layer's own weight is now the view of its rows in the fused copy, in
+        # its original layout and with its original bytes.
+        rows = shards[rank].shape[0]
+        assert layer.weight.data_ptr() == w[rank * rows].data_ptr()
+        assert layer.weight.shape == own.shape and layer.weight.stride() == own.stride()
+        assert torch.equal(layer.weight.view(torch.uint8), own.view(torch.uint8))
         # O stays BF16 and is built as without FP8 dense.
         assert all(torch.equal(a, b) for a, b in zip(fp8.o, bf16.o))
         destroy_model_parallel()
@@ -181,14 +202,16 @@ def _gather_worker(rank: int, world_size: int, port: int, checkpoint) -> None:
         pytest.param(4, marks=multi_gpu_marks(num_gpus=4)),
     ],
 )
+@pytest.mark.parametrize("layout", ["k_n", "n_k"])
 def test_ulysses_gathers_the_fp8_qkv_shards_exactly(
-    checkpoint, world_size: int
+    checkpoint, world_size: int, layout: str
 ) -> None:
     """The FP8 qkv layer has no BF16 weight, so Ulysses builds its full FP8 weights
-    from the FP8 shards; they equal quantizing the gathered BF16."""
+    from the FP8 shards; they equal quantizing the gathered BF16. Both weight
+    layouts: the `[K, N]` view (RowWise) and the `[N, K]` tensor (AiterPerToken)."""
     mp.spawn(
         _gather_worker,
-        args=(world_size, get_open_port(), checkpoint),
+        args=(world_size, get_open_port(), checkpoint, layout),
         nprocs=world_size,
         join=True,
     )
@@ -584,10 +607,27 @@ def test_fp8_dense_prompt_logprobs_stay_close_to_the_bf16_path(
         del llm
         return torch.tensor(values)
 
-    base = {"ulysses_prefill": True} if stream == "ulysses" else {}
+    base = {"ulysses_prefill": "full"} if stream == "ulysses" else {}
     reference = prompt_logprobs(base, [])
     names = ["feed_forward.pooler", "feed_forward.unpooler", "self_attn.qkv_proj"]
     fp8_layers = sorted(f"{layer}.{name}" for layer in range(2) for name in names)
     fp8 = prompt_logprobs(base, fp8_layers, quantization_config=FP8_DENSE)
     delta = (reference - fp8).abs()
     assert delta.mean() < 0.06, delta.mean()
+
+
+@rocm_gfx950
+@multi_gpu_test(num_gpus=2)
+def test_ulysses_prefill_follows_fp8_weight_reloads(tmp_path, monkeypatch) -> None:
+    """With an online `fp8_per_channel` `qkv_proj`, a weight reload refills the
+    fused Ulysses copy in place, it equals one built fresh, the `qkv_proj` weight
+    stays the view of its rows in it, and the Ulysses step follows the weights."""
+    llm = _tiny_llm(
+        tmp_path,
+        monkeypatch,
+        ON,
+        init=_random_weights_fp8,
+        quantization_config=FP8_DENSE,
+    )
+    assert llm.apply_model(_held_copies) == [[_copies(ON, fp8=True)] * LAYERS] * 2
+    _check_reloads(llm, ON, fp8=True)

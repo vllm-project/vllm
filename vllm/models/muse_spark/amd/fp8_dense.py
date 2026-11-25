@@ -157,6 +157,27 @@ def require_plain_layout(layer: torch.nn.Module) -> None:
         )
 
 
+def alias_weight_rows(layer: torch.nn.Module, full: torch.Tensor, rank: int) -> None:
+    """Make the layer's `[N, K]` FP8 weight the view of rows `[rank*N, (rank+1)*N)`
+    of `full`, the rank-major concatenation of all ranks' weights, keeping its
+    layout (a `[K, N]` view for RowWise)."""
+    w = layer.weight.data
+    wq = w if w.is_contiguous() else w.t()
+    rows = wq.shape[0]
+    own = full[rank * rows : (rank + 1) * rows]
+    if (
+        own.shape != wq.shape
+        or own.dtype != wq.dtype
+        or not torch.equal(own.view(torch.uint8), wq.view(torch.uint8))
+    ):
+        raise RuntimeError(
+            f"Rows {rank * rows}:{(rank + 1) * rows} of the fused FP8 weight are not "
+            f"the {tuple(wq.shape)} {wq.dtype} weight of "
+            f"{getattr(layer, 'prefix', type(layer).__name__)}."
+        )
+    layer.weight.data = own if w.is_contiguous() else own.t()
+
+
 def full_weight_parts(layer: torch.nn.Module, group, world: int):
     """All-gather the `[N, K]` FP8 shards and their row scales: `([wq_r], [ws_r])`
     in rank order.
