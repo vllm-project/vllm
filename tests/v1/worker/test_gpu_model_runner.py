@@ -1,17 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
+from torch import nn
 
 import vllm.model_executor.model_loader.reload.inplace as reload_inplace_module
+from vllm.config.load import LoadConfig
 from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.model_loader.base_loader import (
+    BaseModelLoader,
+    bind_model_loader,
+)
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -490,6 +498,7 @@ def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
     # silently re-streams the original checkpoint.
     loader = Mock()
     loader.get_all_weights.return_value = iter(())
+    loader.reload_model.side_effect = partial(BaseModelLoader.reload_model, loader)
     monkeypatch.setattr(reload_inplace_module, "get_model_loader", lambda _: loader)
     monkeypatch.setattr(reload_inplace_module, "start_reload", Mock())
     monkeypatch.setattr(reload_inplace_module, "finish_reload", Mock())
@@ -505,9 +514,12 @@ def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
             quantization=None,
         ),
     )
-    model = Mock()
-    model.named_parameters.return_value = []
-    model.load_weights.return_value = None
+
+    class EmptyModel(torch.nn.Module):
+        def load_weights(self, weights):
+            return {name for name, _ in weights}
+
+    model = EmptyModel()
 
     reload_inplace_module.reload_weights(
         vllm_config,
@@ -520,6 +532,26 @@ def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
     loader.get_all_weights.assert_called_once_with(vllm_config.model_config, model)
     cfg = vllm_config.model_config
     assert (cfg.model, cfg.model_weights, cfg.revision) == ("org/new-model", "", None)
+
+
+def test_reload_weights_uses_fresh_generic_loader(monkeypatch):
+    """A loader without its own `reload_model` keeps per-load state (e.g. EP
+    expert filters) that must not leak into a reload."""
+    load_config = LoadConfig(load_format="auto")
+    model = nn.Module()
+    bind_model_loader(model, DefaultModelLoader(load_config))
+    fresh = Mock()
+    monkeypatch.setattr(reload_inplace_module, "get_model_loader", lambda _: fresh)
+
+    reload_inplace_module.reload_weights(
+        SimpleNamespace(load_config=load_config, model_config=SimpleNamespace()),
+        model,
+        weights_iterator=None,
+        weights_path=None,
+        is_checkpoint_format=True,
+    )
+
+    fresh.reload_model.assert_called_once()
 
 
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config):

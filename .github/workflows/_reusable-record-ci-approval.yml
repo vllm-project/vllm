@@ -1,0 +1,13 @@
+name: Reusable record CI approval
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  approved:
+    if: github.repository == 'vllm-project/vllm' && github.event_name == 'pull_request_review' && github.event.review.state == 'approved'
+    runs-on: [self-hosted, linux, x64, vllm-runners]
+    steps:
+      - run: echo "Approval recorded"

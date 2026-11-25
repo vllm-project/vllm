@@ -45,7 +45,7 @@ Set it below 1.0 only to leave memory for something vLLM doesn't measure:
   the operating system share the same memory.
 - **Weight updates**, for example in reinforcement learning. Weight transfer engines
   create their communicators and receive buffers (such as the NCCL backend's packed
-  buffers or [sharded RDT](../training/weight_transfer/sharded_rdt.md)'s receive
+  buffers or [sharded RDT](../training/weight_updates/engines/sharded_rdt.md)'s receive
   buffers) after the KV cache is sized, and vLLM doesn't reserve memory for them.
   During a pause that cleared the KV cache, a layer-by-layer update that is short of
   memory for the weights borrows the cache's memory, but that check doesn't count
@@ -379,7 +379,7 @@ from vllm import LLM
 llm = LLM(model="Qwen/Qwen3-8B")
 ```
 
-The `fastokens` Python package (>= 0.3.5) must be installed; if it isn't, or
+The `fastokens` Python package (>= 0.3.6) must be installed; if it isn't, or
 is older, vLLM raises a clear `ImportError` at tokenizer load. The override applies to
 any `--tokenizer-mode` that ends up loading an HF fast tokenizer (`hf`,
 `deepseek_v32`, `deepseek_v4`, …). Models that don't use the HF

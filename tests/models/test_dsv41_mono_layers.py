@@ -59,6 +59,15 @@ STEPS = 5  # decode steps after the prefill's token
 MERGE_AB = "DSV41_MONO_MERGE_AB"
 
 
+def _decodes(tp: int, arch: str) -> int:
+    """Decodes an engine runs, so that `_decodes(tp, arch) ** 2` pairs are pooled.
+
+    vLLM's path is not deterministic at TP8 on cdna4, so one decode's flipped
+    share is a draw rather than a rate.
+    """
+    return 4 if (tp, arch) == (8, "cdna4") else 1
+
+
 def _arch() -> str:
     """The GPU kind that the mono kernels build for, "cdna4" or "gfx942", or
     an empty string on any other GPU."""
@@ -277,6 +286,12 @@ class MonoProbe:
             gap = gap_hook(i, layer)
             layer.ffn.register_forward_pre_hook(_host_reads(gap), with_kwargs=True)
 
+    def reset_capture(self) -> None:
+        """Drop the last decode's capture, keeping the hooks registered: a
+        second `capture_steps` would register a second set of them."""
+        self._captured = {}
+        self._gaps = {}
+
     def save_capture(self, path: str) -> None:
         rank = self.rank  # type: ignore[attr-defined]
         torch.save((self._captured, self._gaps), f"{path}.rank{rank}")
@@ -455,13 +470,14 @@ def _decode(
     arch: str,
     graph_sizes: list[int] | None = None,
 ):
-    """Greedy decode of `prompts` with the mono path on or off: (each
-    prompt's output, the workers' mono layers); each decoder layer's outputs
-    for the decode tokens of decode-only steps, and vLLM's routing margins,
-    saved under `path`. With `graph_sizes`, the run captures FULL_DECODE_ONLY
-    CUDA graphs of those sizes instead of running eagerly, and keeps only the
-    outputs and the block's call counts (a probe cannot read the GPU inside a
-    replay)."""
+    """`_decodes(tp, arch)` greedy decodes of `prompts` on one engine with the
+    mono path on or off: (each decode's outputs, the workers' mono layers); each
+    decoder layer's outputs for the decode tokens of decode-only steps, and
+    vLLM's routing margins, saved under `path.d<decode>`. With `graph_sizes`,
+    the run captures FULL_DECODE_ONLY CUDA graphs of those sizes instead of
+    running eagerly, and keeps only the outputs and the block's call counts (a
+    probe cannot read the GPU inside a replay). Outputs carry the chosen
+    token's log-probability."""
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
 
@@ -507,17 +523,24 @@ def _decode(
         enable_prefix_caching=False,
         gpu_memory_utilization=0.5,
     ) as runner:
-        lens = [len(p) for p in prompts]
-        if graph_sizes is None:
-            runner.llm.collective_rpc("capture_steps", args=(lens,))
+        eager = graph_sizes is None
+        if eager:
+            runner.llm.collective_rpc(
+                "capture_steps", args=([len(p) for p in prompts],)
+            )
         params = SamplingParams(temperature=0.0, max_tokens=STEPS + 1, logprobs=0)
-        outs = runner.llm.generate(
-            [TokensPrompt(prompt_token_ids=p) for p in prompts], params
-        )
-        if graph_sizes is None:
-            runner.llm.collective_rpc("save_capture", args=(path,))
+        decodes = []
+        for d in range(_decodes(tp, arch)):
+            if eager:
+                runner.llm.collective_rpc("reset_capture")
+            outs = runner.llm.generate(
+                [TokensPrompt(prompt_token_ids=p) for p in prompts], params
+            )
+            if eager:
+                runner.llm.collective_rpc("save_capture", args=(f"{path}.d{d}",))
+            decodes.append([o.outputs[0] for o in outs])
         probe = runner.llm.collective_rpc("mono_layers")
-    return [o.outputs[0] for o in outs], probe
+    return decodes, probe
 
 
 def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -606,6 +629,7 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
             break
     prompts = [torch.randint(1000, 60000, (n,), generator=g).tolist() for n in lens]
 
+    decodes = _decodes(tp, arch)
     on, probe_on = _decode(
         vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on", arch
     )
@@ -628,24 +652,27 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
         }, rank
         if large:
             # enforce_eager and equal max_tokens: one block call a decode step,
-            # STEPS of them. The scheduler may split a step when requests
-            # arrive late, so this bounds the count from both sides.
-            assert all(STEPS <= n <= 2 * STEPS for n in rank["large_steps"].values()), (
-                rank
-            )
+            # STEPS of them a decode. The scheduler may split a step when
+            # requests arrive late, so this bounds the count from both sides.
+            n_min, n_max = STEPS * decodes, 2 * STEPS * decodes
+            assert all(n_min <= n <= n_max for n in rank["large_steps"].values()), rank
         else:
-            assert rank["epoch"] >= launches * STEPS, rank
+            assert rank["epoch"] >= launches * STEPS * decodes, rank
             assert rank["epoch"] % launches == 0, rank
     assert all(set(r["layers"].values()) == {None} for r in probe_off)
     assert all(set(r["large_steps"].values()) == {None} for r in probe_off)
-    # each decode token's input matches between the runs while the greedy
-    # tokens before it do: (prompt length, position) pairs to compare
-    same: set[tuple[int, int]] = set()
-    for prompt, a, b in zip(prompts, on, off):
-        for step in range(STEPS):
-            if a.token_ids[: step + 1] != b.token_ids[: step + 1]:
-                break
-            same.add((len(prompt), len(prompt) + step))
+
+    def matching(mono_outs, ref_outs) -> set[tuple[int, int]]:
+        """One mono decode against one vLLM decode: each decode token whose
+        input matches between them, which is while the greedy tokens before it
+        do. (prompt length, position) pairs to compare."""
+        same: set[tuple[int, int]] = set()
+        for prompt, a, b in zip(prompts, mono_outs, ref_outs):
+            for step in range(STEPS):
+                if a.token_ids[: step + 1] != b.token_ids[: step + 1]:
+                    break
+                same.add((len(prompt), len(prompt) + step))
+        return same
 
     # each layer's outputs for those tokens, mono against vLLM's path, token by
     # token. Layer 0 sees the same inputs on both paths, but its FFN input
@@ -673,27 +700,44 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
     later_tie = 2e-2 if arch == "gfx942" else 1e-2
     flip_divisor = 3 if arch == "gfx942" else 4
     for rank in range(tp):
-        got, _ = torch.load(f"{tmp_path}/on.rank{rank}")
-        want, gaps = torch.load(f"{tmp_path}/off.rank{rank}")
-        keys: list[tuple[int, int]] = sorted(
-            same & {k[1:] for k in got} & {k[1:] for k in want}
+        ref = [torch.load(f"{tmp_path}/off.d{b}.rank{rank}") for b in range(decodes)]
+        pooled_flips = pooled_keys = 0
+        per_pair: list = []
+        for a in range(decodes):
+            got, _ = torch.load(f"{tmp_path}/on.d{a}.rank{rank}")
+            for b, (want, gaps) in enumerate(ref):
+                same = matching(on[a], off[b])
+                keys: list[tuple[int, int]] = sorted(
+                    same & {k[1:] for k in got} & {k[1:] for k in want}
+                )
+                assert len(keys) >= len(prompts), (rank, a, b, keys)
+                flipped: set = set()
+                for i in sorted(WHOLE + FFN):
+                    for k in keys:
+                        if k in flipped:
+                            continue
+                        (x, res), (x_ref, res_ref) = got[(i, *k)], want[(i, *k)]
+                        err = _rel(res, res_ref)
+                        assert err < 0.03, (rank, a, b, i, k, "residual", err)
+                        bound = first_bound if i == 0 else 0.08
+                        err = _rel(x, x_ref)
+                        if err >= bound:
+                            tie = 5e-3 if i == 0 else later_tie
+                            assert gaps[(i, *k)] < tie, (rank, a, b, i, k, "x", err)
+                            flipped.add(k)
+                # the pooled rate, not the union over the pairs: a token that
+                # flips against one vLLM decode and not another is one flip of
+                # the two, and the union would only ever grow
+                pooled_flips += len(flipped)
+                pooled_keys += len(keys)
+                per_pair.append((a, b, sorted(flipped), len(keys)))
+        # every pair's (flipped, compared), on passing runs too
+        counts = [(len(flips), n) for _, _, flips, n in per_pair]
+        print(f"rank {rank}: {pooled_flips}/{pooled_keys} flipped, per pair {counts}")
+        # a string, so that pytest prints every pair: which flipped what
+        assert pooled_flips <= pooled_keys // flip_divisor, (
+            f"rank {rank}: {pooled_flips}/{pooled_keys} flipped, {per_pair}"
         )
-        assert len(keys) >= len(prompts), keys
-        flipped: set = set()
-        for i in sorted(WHOLE + FFN):
-            for k in keys:
-                if k in flipped:
-                    continue
-                (x, res), (x_ref, res_ref) = got[(i, *k)], want[(i, *k)]
-                err = _rel(res, res_ref)
-                assert err < 0.03, (rank, i, k, "residual", err)
-                bound = first_bound if i == 0 else 0.08
-                err = _rel(x, x_ref)
-                if err >= bound:
-                    tie = 5e-3 if i == 0 else later_tie
-                    assert gaps[(i, *k)] < tie, (rank, i, k, "x", err)
-                    flipped.add(k)
-        assert len(flipped) <= len(keys) // flip_divisor, (rank, sorted(flipped))
 
     # The K2 + K1 merge is CDNA4 only (`DSV41MonoLayer.merges`).
     if (tp, rows) == (8, 8) and arch == "cdna4":
@@ -737,10 +781,11 @@ def test_largestep_in_padded_cuda_graphs(
         torch.randint(1000, 60000, (n,), generator=g).tolist()
         for n in torch.randint(300, 2000, (rows,), generator=g).tolist()
     ]
-    eager, _ = _decode(
+    # gfx942 runs one decode an engine (`_decodes`), so [0] is the decode.
+    (eager,), _ = _decode(
         vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/eager", "gfx942"
     )
-    graphs, probe = _decode(
+    (graphs,), probe = _decode(
         vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/g", "gfx942", [graph]
     )
     for rank in probe:
