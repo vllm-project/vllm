@@ -272,6 +272,7 @@ mod tests {
             num_kv_expired_reqs: vec![1],
             num_notifications_after_expiry: vec![2],
             num_declined_expired_reads: vec![1, 1],
+            num_registration_expired: vec![1],
         }
     }
 
@@ -324,6 +325,7 @@ mod tests {
             vllm:nixl_num_failed_transfers_total{model_name="model",engine="0"} 2
             vllm:nixl_num_kv_expired_reqs_total{model_name="model",engine="0"} 1
             vllm:nixl_num_notifications_after_expiry_total{model_name="model",engine="0"} 2
+            vllm:nixl_num_registration_expired_total{model_name="model",engine="0"} 1
             vllm:nixl_post_time_seconds_count{model_name="model",engine="0"} 2
             vllm:nixl_post_time_seconds_sum{model_name="model",engine="0"} 0.003
             vllm:nixl_xfer_time_seconds_count{model_name="model",engine="0"} 2
@@ -377,6 +379,9 @@ mod tests {
         );
         assert!(rendered.contains(
             "vllm:nixl_num_notifications_after_expiry_total{model_name=\"model\",engine=\"0\"} 2"
+        ));
+        assert!(rendered.contains(
+            "vllm:nixl_num_registration_expired_total{model_name=\"model\",engine=\"0\"} 1"
         ));
         assert!(
             rendered
