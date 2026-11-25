@@ -274,7 +274,7 @@ def test_sparse_flashmla_prefill_on_the_kv_cache_at_allocation(
     config = get_kv_cache_config_from_groups(
         vllm_config,
         [new_kv_cache_group(layers, spec)],
-        available_memory=num_layers * spec.page_size_bytes * num_blocks,
+        num_blocks=num_blocks,
     )
     assert config.num_blocks == num_blocks
     config = pad_kv_cache_segments(

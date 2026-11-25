@@ -153,7 +153,7 @@ The adapter requires KVServe runtime API v2 with `resource_requirements` and
 
 ```bash
 # CUDA 13; use runtime-cu12 for CUDA 12. Keep the installed vLLM/Torch versions.
-uv pip install '/path/to/KVServe[runtime,runtime-cu13]'
+uv pip install 'kvserve_v1[runtime,runtime-cu13] @ https://github.com/hpdss-group/KVServe/archive/5efa848bef363a47d82fac0951ccddac409f74f7.tar.gz'
 ```
 
 The P/D endpoints exchange a versioned descriptor and valid buffer lengths.

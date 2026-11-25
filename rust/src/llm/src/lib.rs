@@ -18,6 +18,7 @@ use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_metrics::METRICS;
 
+mod admission;
 mod aux_output;
 mod error;
 mod inflight;
@@ -27,6 +28,7 @@ mod request;
 mod request_metrics;
 mod weight_versions;
 
+pub use admission::AdmissionLimits;
 pub use aux_output::AuxOutputRows;
 pub use error::{Error, Result};
 pub use output::{
@@ -38,6 +40,7 @@ pub use request_metrics::{RequestTimestamps, current_unix_timestamp_secs};
 pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
 pub use weight_versions::{WeightVersionSpan, WeightVersions};
 
+use crate::admission::{Admission, AdmissionGuard};
 use crate::inflight::InflightRequests;
 use crate::log_stats::StatsLogger;
 use crate::request_metrics::{
@@ -135,6 +138,7 @@ pub struct EngineCoreLlm {
     stream_interval: NonZeroU32,
     stats_logger: Option<StatsLogger>,
     inflight: InflightRequests,
+    admission: Admission,
     /// Request metric handles per connected engine index, resolved at
     /// construction so the request families export zero-valued series before
     /// the first request.
@@ -172,6 +176,7 @@ impl EngineCoreLlm {
             stream_interval: NonZeroU32::MIN,
             stats_logger: None,
             inflight: InflightRequests::new(),
+            admission: Admission::default(),
             request_metric_handles,
         }
     }
@@ -201,6 +206,12 @@ impl EngineCoreLlm {
     /// A request's own `stream_interval` can only raise it.
     pub fn with_stream_interval(mut self, stream_interval: NonZeroU32) -> Self {
         self.stream_interval = stream_interval;
+        self
+    }
+
+    /// Set the queue limits that reject new requests with a retryable error.
+    pub fn with_admission_limits(mut self, limits: AdmissionLimits) -> Self {
+        self.admission = Admission::new(limits);
         self
     }
 
@@ -294,6 +305,9 @@ impl EngineCoreLlm {
         let remote_prefill_cached_tokens = prepared.remote_prefill_cached_tokens();
         let prompt_token_ids = prepared.prompt_token_ids;
         let engine_request = prepared.engine_request;
+        // An unsubmitted sample's guard drops with the error, freeing its slot.
+        let mut admissions =
+            (self.admission).admit(n.get(), prompt_token_ids.len() as u64)?.into_iter();
 
         if n == NonZeroU32::MIN {
             let stream = self
@@ -302,6 +316,7 @@ impl EngineCoreLlm {
                     &prompt_token_ids,
                     remote_prefill_cached_tokens,
                     None,
+                    admissions.next().expect("one admission per sample"),
                 )
                 .await?;
             return Ok(vec![stream]);
@@ -326,6 +341,7 @@ impl EngineCoreLlm {
                     &prompt_token_ids,
                     remote_prefill_cached_tokens,
                     Some(parallel_sampling.clone()),
+                    admissions.next().expect("one admission per sample"),
                 )
                 .await?,
             );
@@ -340,6 +356,7 @@ impl EngineCoreLlm {
         prompt_token_ids: &Arc<[u32]>,
         remote_prefill_cached_tokens: Option<usize>,
         parallel_sampling: Option<Arc<ParallelSamplingStats>>,
+        admission: AdmissionGuard,
     ) -> Result<GenerateOutputStream> {
         let external_request_id = engine_request
             .external_req_id
@@ -356,7 +373,7 @@ impl EngineCoreLlm {
         let watermark_requested =
             (engine_request.sampling_params.as_ref()).is_some_and(|p| p.watermarking);
 
-        let stream = self.client.call(engine_request).await?;
+        let stream = self.client.call_observed(engine_request, Box::new(admission)).await?;
 
         let handles = (self.request_metric_handles.get(&stream.engine_index()))
             .expect("requests are routed only to connected engines")
