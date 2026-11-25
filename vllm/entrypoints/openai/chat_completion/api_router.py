@@ -73,7 +73,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 
     elif isinstance(generator, ChatCompletionResponse):
         return JSONResponse(
-            content=generator.model_dump(),
+            content=generator.model_dump(exclude_none=True),
             headers=metrics_header(metrics_header_format),
         )
 
