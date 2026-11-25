@@ -195,7 +195,7 @@ class _VllmLogger(Logger):
         _print_error_once(self, msg, *args)
 
 
-# Pre-defined methods mapping to avoid repeated dictionary creation
+# Pre-defined methods mapping to avoid repeated dictionary creation (staging 1)
 _METHODS_TO_PATCH = {
     "debug_once": _VllmLogger.debug_once,
     "info_once": _VllmLogger.info_once,
