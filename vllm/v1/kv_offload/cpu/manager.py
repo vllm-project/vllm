@@ -260,13 +260,12 @@ class CPUOffloadingManager(OffloadingManager):
         record_access: bool,
     ) -> LoadStoreSpec:
         chunks = []
-        now = monotonic()
         for key in keys:
             chunk = self._policy.get(key)
             assert chunk is not None, f"Chunk {key!r} not found in cache"
             assert chunk.is_ready, f"Chunk {key!r} is not ready for reading"
             if record_access:
-                self._mark_demand(chunk, now)
+                self._mark_demand(chunk, monotonic())
             if chunk.ref_cnt == 0:
                 self._policy.mark_non_evictable(key)
                 self._num_evictable_cache_chunks -= 1  # ref_cnt 0 -> 1
