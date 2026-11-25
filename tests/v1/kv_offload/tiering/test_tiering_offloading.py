@@ -2210,11 +2210,8 @@ def test_spec_rejects_invalid_access_mode():
         )
 
 
+# Tiering needs at least one CPU chunk to back its shared region.
 def test_spec_rejects_cpu_bytes_to_use_smaller_than_one_chunk():
-    """cpu_bytes_to_use smaller than one aligned chunk sizes the shared
-    region to zero bytes, which cannot be mmap'd. The spec must fail fast
-    with a clear configuration error instead of reaching SharedOffloadRegion.
-    """
     with pytest.raises(ValueError, match="at least one aligned chunk"):
         TieringOffloadingSpec(
             make_offloading_config(
