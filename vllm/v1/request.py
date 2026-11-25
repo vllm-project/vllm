@@ -229,6 +229,8 @@ class Request:
 
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
+        # A synchronous KV load failed; recompute rather than load again.
+        self.sync_kv_load_failed = False
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
@@ -364,7 +366,7 @@ class Request:
     def skip_reading_external_kv(self) -> bool:
         # KV connector hits are not bounded by prefix_cache_hit_limit, so a
         # bounded request reuses only the local prefix cache.
-        return self.prefix_cache_hit_limit is not None
+        return self.prefix_cache_hit_limit is not None or self.sync_kv_load_failed
 
     def get_prefix_cache_hit_limit(self) -> int | None:
         """Number of leading tokens that may be read from the prefix cache:

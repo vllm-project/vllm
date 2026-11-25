@@ -220,13 +220,76 @@ def test_sync_load_failure(
 
     scheduler.update_from_output(scheduler_output, model_runner_output)
 
-    assert len(scheduler.running) == 1
-    assert scheduler.running[0].request_id == request2.request_id
-    assert scheduler.running[0].num_computed_tokens == (
+    # The failed request restarts through preemption.
+    assert not scheduler.running
+    assert request2.status == RequestStatus.PREEMPTED
+    assert scheduler.connector.request_finished.call_count == 2
+
+    # It resumes from its valid local prefix without loading again.
+    scheduler_output = scheduler.schedule()
+    assert scheduler_output.preempted_req_ids == {request2.request_id}
+    (resumed,) = scheduler_output.scheduled_new_reqs
+    assert resumed.req_id == request2.request_id
+    assert resumed.num_computed_tokens == (
         min(invalid_block_idxs) * scheduler.block_size
     )
-    assert scheduler.connector.get_num_new_matched_tokens.call_count == 3
-    assert scheduler.connector.request_finished.call_count == 2
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_sync_load_failure_restarts_running_request(async_scheduling: bool):
+    """A running request cannot be rewound in place after its synchronous load
+    failed: the worker keeps its own progress for it, and with async scheduling
+    its next step is already in flight. It must be handed to the worker again
+    from its valid prefix, without the in-flight token and without another load.
+    """
+    vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
+    vllm_config.scheduler_config.async_scheduling = async_scheduling
+    scheduler = create_scheduler(vllm_config)
+    block_size = scheduler.block_size
+    num_external_tokens = 3 * block_size
+    request = create_request(num_tokens=num_external_tokens + 1, max_tokens=3)
+    scheduler.add_request(request)
+
+    # The connector offers the same hit on every lookup.
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = lambda *_: (
+        num_external_tokens,
+        False,
+    )
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+
+    load_step = scheduler.schedule()
+    (block_ids,) = load_step.scheduled_new_reqs[0].block_ids
+    in_flight_step = scheduler.schedule()
+    assert bool(in_flight_step.num_scheduled_tokens) == async_scheduling
+
+    scheduler.update_from_output(
+        load_step,
+        create_model_runner_output(
+            [request], invalid_block_ids={block_ids[1]}, token_id=7
+        ),
+    )
+    if async_scheduling:
+        scheduler.update_from_output(
+            in_flight_step, create_model_runner_output([request], token_id=8)
+        )
+    assert not request.output_token_ids
+
+    step = scheduler.schedule()
+    assert step.preempted_req_ids == {request.request_id}
+    (resumed,) = step.scheduled_new_reqs
+    assert resumed.num_computed_tokens == block_size
+    assert step.num_scheduled_tokens == {request.request_id: 2 * block_size + 1}
+
+    for _ in range(3):
+        assert not request.is_finished()
+        scheduler.update_from_output(
+            step, create_model_runner_output([request], token_id=9)
+        )
+        step = scheduler.schedule()
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert list(request.output_token_ids) == [9, 9, 9]
 
 
 @pytest.mark.parametrize(
@@ -297,19 +360,26 @@ def test_sync_load_failure_with_shared_blocks(
 
     scheduler.update_from_output(scheduler_output, model_runner_output)
 
-    # req_id -> num_computed_tokens
-    # all the common prefix blocks will be computed by request1
-    expected_computed_tokens = {
-        request1.request_id: min(invalid_block_idxs) * scheduler.block_size,
-        request2.request_id: common_prefix_len,
-    }
-
-    assert len(scheduler.running) == 2
-    for request in scheduler.running:
-        assert (
-            request.num_computed_tokens == expected_computed_tokens[request.request_id]
+    # Both requests read the invalid blocks, so both restart.
+    assert not scheduler.running
+    assert request1.status == request2.status == RequestStatus.PREEMPTED
+    # Nothing from the first invalid block on stays a prefix cache hit: request2
+    # computed its own blocks over the invalid ones.
+    num_valid_tokens = min(invalid_block_idxs) * scheduler.block_size
+    for request in (request1, request2):
+        _, num_cached_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(
+            request
         )
-    assert scheduler.connector.get_num_new_matched_tokens.call_count == 2
+        assert num_cached_tokens == num_valid_tokens
+
+    # request1 resumes first and recomputes the shared blocks.
+    scheduler_output = scheduler.schedule()
+    resumed = scheduler_output.scheduled_new_reqs
+    assert resumed[0].req_id == request1.request_id
+    assert resumed[0].num_computed_tokens == num_valid_tokens
+    for new_req in resumed[1:]:
+        assert new_req.req_id == request2.request_id
+        assert num_valid_tokens <= new_req.num_computed_tokens <= common_prefix_len
 
 
 @pytest.mark.parametrize(

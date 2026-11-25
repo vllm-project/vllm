@@ -3991,6 +3991,10 @@ class Scheduler(SchedulerInterface):
                 if block_id not in invalid_block_ids:
                     continue
 
+                if evict_blocks and not is_affected:
+                    # Everything from the first invalid block on was computed
+                    # over KV that never loaded.
+                    blocks_to_evict.update(req_block_ids[idx:])
                 is_affected = True
 
                 if block_id in marked_invalid_block_ids:
@@ -4016,10 +4020,6 @@ class Scheduler(SchedulerInterface):
                     req_num_computed_tokens - request.num_computed_tokens
                 )
                 total_affected_tokens += num_affected_tokens
-
-                # collect invalid block and all downstream dependent blocks
-                if evict_blocks:
-                    blocks_to_evict.update(req_block_ids[idx:])
 
             if is_affected:
                 if not marked_invalid_block:
@@ -4199,10 +4199,8 @@ class Scheduler(SchedulerInterface):
         if not total_failed_requests:
             return set()
 
-        # evict invalid blocks and downstream dependent blocks from cache
-        # only when not using recompute policy (where blocks will be recomputed
-        # and reused by other requests sharing them)
-        if sync_blocks_to_evict and not self.recompute_kv_load_failures:
+        # Evict invalid blocks and downstream dependent blocks from cache.
+        if sync_blocks_to_evict:
             self.kv_cache_manager.evict_blocks(sync_blocks_to_evict)
 
         if should_fail:
@@ -4225,5 +4223,19 @@ class Scheduler(SchedulerInterface):
 
         # Mark async requests with KV load failures for retry once loading completes
         self.failed_recving_kv_req_ids |= async_failed_req_ids
+        # A running request cannot be rewound in place: the model runner keeps
+        # its own progress for it and later steps may already be in flight.
+        # Preemption drops both and restarts it from its valid cached prefix.
+        timestamp = time.monotonic()
+        sync_failed_reqs = [
+            request
+            for request in self.running
+            if request.request_id in sync_failed_req_ids
+        ]
+        # Reverse order so they are re-admitted in FIFO order.
+        for request in reversed(sync_failed_reqs):
+            self.running.remove(request)
+            request.sync_kv_load_failed = True
+            self._preempt_request(request, timestamp, drop_stale_output=True)
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids

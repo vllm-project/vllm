@@ -4,8 +4,8 @@
 """Tests for correctness in invalid block handling.
 
 These tests verify correct behavior in three scenarios:
-1. Sync recompute case: Blocks should not be freed for running requests
-   that need to recompute invalid blocks
+1. Sync recompute case: A running request restarts from its valid prefix
+   to recompute invalid blocks
 2. Sync fail case: Invalid blocks must be evicted from cache when request fails
 3. Async recompute case: Invalid blocks should not be cached after transfer
 """
@@ -57,16 +57,16 @@ def recompute_scheduler():
     return create_scheduler(vllm_config)
 
 
-def test_sync_recompute_blocks_not_freed_for_running_requests(
+def test_sync_recompute_restarts_request_from_valid_prefix(
     recompute_scheduler: Scheduler,
 ):
-    """Test sync recompute case - blocks must not be freed for running requests.
+    """Test sync recompute case - the request restarts from its valid prefix.
 
-    When a running request has invalid blocks and retry_policy is 'recompute':
-    1. Request should remain in RUNNING state
-    2. num_computed_tokens should be truncated to invalid block boundary
-    3. Blocks should NOT be freed (request still needs them for recomputation)
-    4. Request should remain in scheduler.requests and scheduler.running
+    When a running request has invalid blocks and the policy is 'recompute':
+    1. No output is generated for the step that read the invalid blocks
+    2. The request is preempted, not finished, so the worker drops its state
+    3. The invalid block and the blocks after it leave the prefix cache
+    4. The request resumes from the blocks before the first invalid one
     """
     num_prompt_blocks = 100
     num_external_computed_blocks = 99
@@ -103,9 +103,6 @@ def test_sync_recompute_blocks_not_freed_for_running_requests(
     req_block_ids = scheduler_output.scheduled_new_reqs[0].block_ids[0]
     invalid_block_ids = {req_block_ids[invalid_block_idx]}
 
-    # store original num_computed_tokens for comparison
-    original_num_computed_tokens = request.num_computed_tokens
-
     model_runner_output = create_model_runner_output(
         [request],
         invalid_block_ids=invalid_block_ids,
@@ -116,65 +113,27 @@ def test_sync_recompute_blocks_not_freed_for_running_requests(
         scheduler_output, model_runner_output
     )
 
-    # critical assertions for recompute case:
+    # 1. no output for the step that read the invalid blocks
+    assert not [out for outs in outputs.values() for out in outs.outputs]
 
-    # 1. request should still be RUNNING (not finished, not aborted)
-    assert request.status == RequestStatus.RUNNING, (
-        f"Request should remain RUNNING for recompute, got {request.status}"
-    )
+    # 2. the request is preempted and still tracked
+    assert request.status == RequestStatus.PREEMPTED
+    assert not recompute_scheduler.running
+    assert request.request_id in recompute_scheduler.requests
 
-    # 2. num_computed_tokens should be truncated to first invalid block
-    expected_truncated_tokens = invalid_block_idx * recompute_scheduler.block_size
-    assert request.num_computed_tokens == expected_truncated_tokens, (
-        f"num_computed_tokens should be truncated to {expected_truncated_tokens}, "
-        f"got {request.num_computed_tokens}"
-    )
-    assert request.num_computed_tokens < original_num_computed_tokens, (
-        "num_computed_tokens should be reduced after invalid block detection"
-    )
+    # 3. only the blocks before the first invalid one stay cached
+    block_pool = recompute_scheduler.kv_cache_manager.block_pool
+    for idx, block_id in enumerate(req_block_ids[:num_external_computed_blocks]):
+        cached = block_pool.blocks[block_id].block_hash is not None
+        assert cached == (idx < invalid_block_idx)
 
-    # 3. no output should be generated (request is still running)
-    # the request should be skipped in the output loop
-    assert len(outputs) == 0 or request.request_id not in [
-        out.request_id for outs in outputs.values() for out in outs.outputs
-    ], "No output should be generated for recompute requests"
-
-    # 4. request should still be in running queue
-    assert request in recompute_scheduler.running, (
-        "Request should remain in running queue for recomputation"
-    )
-
-    # 5. request should still be in scheduler.requests (not deleted)
-    assert request.request_id in recompute_scheduler.requests, (
-        "Request should not be deleted from scheduler.requests"
-    )
-
-    # 6. blocks should NOT be freed - verify blocks are still allocated
-    try:
-        allocated_blocks = recompute_scheduler.kv_cache_manager.get_block_ids(
-            request.request_id
-        )
-        assert allocated_blocks is not None
-        assert len(allocated_blocks[0]) > 0, (
-            "Blocks should still be allocated for recomputation"
-        )
-    except KeyError:
-        pytest.fail(
-            "Blocks were freed incorrectly! Running requests need their blocks "
-            "to recompute invalid portions."
-        )
-
-    # 7. verify request can be rescheduled in next step
+    # 4. the request resumes from its valid prefix
     scheduler_output_2 = recompute_scheduler.schedule()
-
-    # request should appear in the new schedule to recompute invalid blocks
-    scheduled_req_ids = [req.req_id for req in scheduler_output_2.scheduled_new_reqs]
-    if scheduler_output_2.num_scheduled_tokens:
-        scheduled_req_ids.extend(scheduler_output_2.num_scheduled_tokens.keys())
-
-    assert (
-        request.request_id in scheduled_req_ids or len(recompute_scheduler.running) > 0
-    ), "Request should be reschedulable for recomputation"
+    assert scheduler_output_2.preempted_req_ids == {request.request_id}
+    (resumed,) = scheduler_output_2.scheduled_new_reqs
+    assert resumed.num_computed_tokens == (
+        invalid_block_idx * recompute_scheduler.block_size
+    )
 
 
 def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
