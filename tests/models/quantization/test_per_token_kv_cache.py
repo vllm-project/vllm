@@ -5,7 +5,7 @@
 
 Compares logprobs between a baseline bf16 model and the same model with
 per-token-head quantized KV cache (int4, int8 or fp8) using the Triton
-attention backend.
+attention backend, on the prompt tokens and on the greedy continuation.
 
 Run: pytest tests/models/quantization/test_per_token_kv_cache.py -v -s
 """
@@ -14,7 +14,17 @@ import pytest
 
 from vllm.platforms import current_platform
 
-from ..utils import check_logprobs_close
+from ..utils import check_logprobs_close, check_logprobs_shift
+
+# (mean, largest) logprob shift from bf16 allowed per position, see
+# `check_logprobs_shift`. On MI355X the mean is 0.21-0.24 for int4, 0.04-0.05
+# for int8 and 0.07-0.08 for fp8 with every request grouping and GEMM kernel
+# set; the largest is at most 1.51, 0.28 and 0.70.
+LOGPROB_SHIFT_BOUNDS = {
+    "int4_per_token_head": (0.3, 2.0),
+    "int8_per_token_head": (0.065, 0.45),
+    "fp8_per_token_head": (0.105, 1.0),
+}
 
 
 @pytest.mark.skipif(
@@ -52,20 +62,18 @@ def test_per_token_head_kv_cache_accuracy(
 ) -> None:
     """Compare logprobs between bf16 baseline and per-token-head quantized KV
     cache.
+
+    The logprob shift is bounded per dtype at every prompt and generated
+    position that shares its context with the baseline. int8 and fp8 must also
+    keep the baseline's greedy token in their top logprobs at the first
+    divergence. int4 cannot: its 16 levels move a flat distribution by more
+    than its top-8 spans (#69766), so it is held to the shift bounds alone.
     """
     with monkeypatch.context() as m:
         m.setenv("TOKENIZERS_PARALLELISM", "true")
 
         MAX_MODEL_LEN = 1024
         NUM_LOG_PROBS = 8
-
-        prompts = example_prompts
-        if kv_cache_dtype == "int4_per_token_head":
-            # After this prompt's first token "**" the next-token distribution
-            # is flat and int4 logprobs move by over a nat with bf16 rounding
-            # (which GEMM kernel ran), so top-8 membership there is not stable.
-            # See #69766.
-            prompts = [p for p in prompts if "major milestones" not in p]
 
         with vllm_runner(
             base_model,
@@ -76,7 +84,10 @@ def test_per_token_head_kv_cache_accuracy(
             attention_config={"backend": backend},
         ) as vllm_model:
             baseline_outputs = vllm_model.generate_greedy_logprobs(
-                prompts, max_tokens, NUM_LOG_PROBS
+                example_prompts,
+                max_tokens,
+                NUM_LOG_PROBS,
+                num_prompt_logprobs=NUM_LOG_PROBS,
             )
 
         with vllm_runner(
@@ -88,12 +99,27 @@ def test_per_token_head_kv_cache_accuracy(
             attention_config={"backend": backend},
         ) as vllm_model:
             test_outputs = vllm_model.generate_greedy_logprobs(
-                prompts, max_tokens, NUM_LOG_PROBS
+                example_prompts,
+                max_tokens,
+                NUM_LOG_PROBS,
+                num_prompt_logprobs=NUM_LOG_PROBS,
             )
 
-        check_logprobs_close(
+        max_mean_shift, max_shift = LOGPROB_SHIFT_BOUNDS[kv_cache_dtype]
+        check_logprobs_shift(
             outputs_0_lst=baseline_outputs,
             outputs_1_lst=test_outputs,
             name_0="bf16_kv_cache",
             name_1=f"{kv_cache_dtype}_kv_cache",
+            num_logprobs=NUM_LOG_PROBS,
+            max_mean_shift=max_mean_shift,
+            max_shift=max_shift,
         )
+
+        if kv_cache_dtype != "int4_per_token_head":
+            check_logprobs_close(
+                outputs_0_lst=[outputs[:3] for outputs in baseline_outputs],
+                outputs_1_lst=[outputs[:3] for outputs in test_outputs],
+                name_0="bf16_kv_cache",
+                name_1=f"{kv_cache_dtype}_kv_cache",
+            )
