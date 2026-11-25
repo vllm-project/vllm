@@ -58,6 +58,25 @@ def test_chat_template_fuel_is_not_compile_factor(monkeypatch: pytest.MonkeyPatc
     assert "VLLM_CHAT_TEMPLATE_FUEL" not in envs.compile_factors()
 
 
+def test_frontend_and_install_envs_are_not_compile_factors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Switching between the Python and Rust frontends, or between worktrees
+    # with their own vllm-rs, must not invalidate the compile cache.
+    frontend_envs = {
+        "VLLM_USE_PRECOMPILED": "1",
+        "VLLM_USE_PRECOMPILED_RUST": "1",
+        "VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX": "1",
+        "VLLM_USE_RUST_FRONTEND": "1",
+        "VLLM_USE_RUST_BENCH": "1",
+        "VLLM_RUST_FRONTEND_PATH": "/opt/vllm-rs",
+    }
+    for name, value in frontend_envs.items():
+        monkeypatch.setenv(name, value)
+
+    assert frontend_envs.keys().isdisjoint(envs.compile_factors())
+
+
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
