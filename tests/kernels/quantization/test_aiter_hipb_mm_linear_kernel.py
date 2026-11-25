@@ -314,6 +314,22 @@ def test_hipb_mm_kernel_forward_matches_raw_aiter_hipb_mm(enable_hipb_mm_kernel)
     torch.testing.assert_close(out, expected)
 
 
+def _ptpc_fp8_reference(
+    x: torch.Tensor,
+    w_dequant: torch.Tensor,
+    bias: torch.Tensor,
+    fp8_dtype: torch.dtype,
+    fp8_max: float,
+) -> torch.Tensor:
+    # Quantize x per-token the same way the kernel does, then run the matmul
+    # in fp32 against the dequantized weight.
+    x_amax = x.abs().amax(dim=1, keepdim=True).to(torch.float32)
+    x_scale_ref = (x_amax / fp8_max).clamp(min=1e-12)
+    x_q = (x.to(torch.float32) / x_scale_ref).clamp(-fp8_max, fp8_max).to(fp8_dtype)
+    x_dequant = x_q.to(torch.float32) * x_scale_ref
+    return (x_dequant @ w_dequant.t() + bias.to(torch.float32)).to(torch.bfloat16)
+
+
 def test_hipb_mm_kernel_forward_accuracy(enable_hipb_mm_kernel):
     """Kernel output should match a dequantized fp32 reference within
     fp8 per-token / per-channel quantization noise."""
@@ -356,14 +372,7 @@ def test_hipb_mm_kernel_forward_accuracy(enable_hipb_mm_kernel):
         _skip_if_no_hipb_mm_solution(exc)
         raise
 
-    # Reference: quantize x per-token the same way the kernel does, then run
-    # the matmul in fp32 against the dequantized weight. This isolates plumbing
-    # / reduction bugs from inherent fp8 quantization noise.
-    x_amax = x.abs().amax(dim=1, keepdim=True).to(torch.float32)
-    x_scale_ref = (x_amax / fp8_max).clamp(min=1e-12)
-    x_q = (x.to(torch.float32) / x_scale_ref).clamp(-fp8_max, fp8_max).to(fp8_dtype)
-    x_dequant = x_q.to(torch.float32) * x_scale_ref
-    expected = (x_dequant @ w_dequant.t() + bias.to(torch.float32)).to(torch.bfloat16)
+    expected = _ptpc_fp8_reference(x, w_dequant, bias, fp8_dtype, fp8_max)
 
     assert out.shape == (num_tokens, weight_shape[0])
     # K=4096 fp8 reduction leaves room for accumulation order drift and
@@ -375,7 +384,7 @@ def test_hipb_mm_kernel_forward_accuracy(enable_hipb_mm_kernel):
 
 def test_hipb_mm_kernel_1d_vs_2d_scale_forward_bit_exact(enable_hipb_mm_kernel):
     """1-D (N,) and 2-D (N, 1) scales must yield bit-exact outputs and match
-    an fp32 dequantized reference."""
+    a per-token quantized fp32 reference."""
     weight_shape = (512, 4096)
     num_tokens = 32
     _check_bpreshuffle_runtime_support(weight_shape, num_tokens=num_tokens)
@@ -432,11 +441,8 @@ def test_hipb_mm_kernel_1d_vs_2d_scale_forward_bit_exact(enable_hipb_mm_kernel):
     assert out_1d.shape == (num_tokens, weight_shape[0])
     assert torch.equal(out_1d, out_2d)
 
-    expected_fp32 = x.to(torch.float32) @ w_dequant.t() + bias.to(torch.float32)
-    cos = torch.nn.functional.cosine_similarity(
-        out_1d.float().flatten(), expected_fp32.flatten(), dim=0
-    ).item()
-    assert cos > 0.999
+    expected = _ptpc_fp8_reference(x, w_dequant, bias, fp8_dtype, fp8_max)
+    torch.testing.assert_close(out_1d, expected, atol=5.0, rtol=0.1)
 
 
 def test_hipb_mm_kernel_online_tuning_writes_csv(
@@ -485,14 +491,70 @@ def test_hipb_mm_kernel_online_tuning_writes_csv(
     assert row is not None
 
 
-def test_quant_fp8_forward_hip_honors_scale_ub(monkeypatch: pytest.MonkeyPatch):
-    """FBGEMMFp8 input_scale_ub must still clip scales when AITER is enabled."""
-    from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+def test_fbgemm_fp8_with_hipb_mm_clips_input_scale_ub(
+    enable_hipb_mm_kernel,
+    default_vllm_config,
+):
+    """FBGEMMFp8LinearMethod must select AiterHipbMM and still clip dynamic
+    activation scales via layer.input_scale_ub."""
+    from tests.single_rank_group import SingleRankGroup, override_parallel_groups
+    from vllm.config import ModelConfig
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.model_executor.layers.quantization.fbgemm_fp8 import (
+        FBGEMMFp8Config,
+        FBGEMMFp8LinearMethod,
+    )
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.utils.torch_utils import set_default_torch_dtype
 
-    q = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
-    monkeypatch.setattr(q, "use_aiter", True)
-    x = torch.full((4, 64), 1000.0, dtype=torch.bfloat16, device="cuda")
-    scale_ub = torch.tensor([0.5], dtype=torch.float32, device="cuda")
-    _, out_scale = q.forward_hip(x, scale=None, scale_ub=scale_ub)
-    assert (out_scale <= scale_ub).all()
+    n_out, k_in = 512, 4096
+    num_tokens = 16
+    _check_bpreshuffle_runtime_support((n_out, k_in), num_tokens=num_tokens)
+
+    scale_ub = 2.0
+    default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
+    quant_config = FBGEMMFp8Config(ignore_list=[], input_scale_ub=scale_ub)
+    with (
+        override_parallel_groups(SingleRankGroup()),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cuda"),
+    ):
+        layer = ReplicatedLinear(
+            k_in,
+            n_out,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+            prefix="proj",
+        )
+    assert isinstance(layer.quant_method, FBGEMMFp8LinearMethod)
+    assert isinstance(
+        layer.quant_method.fp8_linear, AiterHipbMMPerTokenFp8ScaledMMLinearKernel
+    )
+
+    # Serialized FBGEMM checkpoints store float8_e4m3fn weights + (N, 1) fp32 scale.
+    layer.weight.weight_loader(
+        layer.weight,
+        torch.ones((n_out, k_in), dtype=torch.float8_e4m3fn, device="cuda"),
+    )
+    layer.weight_scale.weight_loader(
+        layer.weight_scale,
+        torch.full((n_out, 1), 1.0 / k_in, dtype=torch.float32, device="cuda"),
+    )
+    process_weights_after_loading(
+        layer, default_vllm_config.model_config, torch.device("cuda")
+    )
+
+    # Input 100.0 >> input_scale_ub=2.0: clipping clamps token absmax to 2.0
+    # so sum_{k=1..4096}(2.0 * (1 / 4096)) == 2.0 (unclipped would be ~100.0).
+    x = torch.full((num_tokens, k_in), 100.0, dtype=torch.bfloat16, device="cuda")
+    try:
+        out, _ = layer(x)
+    except RuntimeError as exc:
+        _skip_if_no_hipb_mm_solution(exc)
+        raise
+
+    expected = torch.full(
+        (num_tokens, n_out), scale_ub, dtype=torch.bfloat16, device="cuda"
+    )
+    torch.testing.assert_close(out, expected, atol=0.1, rtol=0.05)
