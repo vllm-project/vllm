@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Muse-Spark-Open dummy video inputs must reflect the model's frame budget.
 
-Regression test: the profiling dummy hardcoded ``num_frames=4`` while the
-model samples up to ``num_frames_per_video`` (600 by default) frames per
+Regression test: the profiling dummy hardcoded `num_frames=4` while the
+model samples up to `num_frames_per_video` (600 by default) frames per
 video. Encoder profiling therefore measured a 150x smaller activation than a
 real maximum-length video request, and a single 600-frame video OOMed every
-TP rank at default ``gpu-memory-utilization``. The dummy now carries the
+TP rank at default `gpu-memory-utilization`. The dummy now carries the
 model's per-video frame cap, matching the token budget that
-``get_mm_max_tokens_per_item`` already declares for video regardless of
-``seq_len`` (which is clamped to ``max_num_batched_tokens`` under chunked
+`get_mm_max_tokens_per_item` already declares for video regardless of
+`seq_len` (which is clamped to `max_num_batched_tokens` under chunked
 prefill and must not shrink the per-item dummy).
 
 Tests use small caps to stay light; the default cap is asserted separately.
@@ -39,8 +39,10 @@ def test_muse_spark_dummy_video_uses_model_frame_cap():
         seq_len=8192, mm_counts={"video": 2}, mm_options={}
     )
 
-    assert len(data["video"]) == 2
-    for video, meta in data["video"]:
+    videos = data["video"]
+    assert isinstance(videos, list)
+    assert len(videos) == 2
+    for video, meta in videos:
         assert video.shape[0] == 8
         assert meta["total_num_frames"] == 8
         assert meta["frames_indices"] == list(range(8))
@@ -56,7 +58,9 @@ def test_muse_spark_dummy_video_override_can_reduce():
         mm_options={"video": VideoDummyOptions(num_frames=4)},
     )
 
-    video, _ = data["video"][0]
+    videos = data["video"]
+    assert isinstance(videos, list)
+    video, _ = videos[0]
     assert video.shape[0] == 4
 
 
