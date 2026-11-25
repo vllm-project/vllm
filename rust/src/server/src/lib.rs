@@ -58,6 +58,7 @@ pub use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
+pub use vllm_llm::AdmissionLimits;
 use vllm_llm::EngineCoreLlm;
 pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
@@ -176,7 +177,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let llm = EngineCoreLlm::new(client)
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
         .with_request_id_randomization(!config.disable_request_id_randomization)
-        .with_stream_interval(config.stream_interval);
+        .with_stream_interval(config.stream_interval)
+        .with_admission_limits(config.admission_limits);
     let text = TextLlm::new(llm, text_backend)
         .with_served_model_name(metrics_model_name)
         .with_max_logprobs(config.max_logprobs)

@@ -195,7 +195,14 @@ QWEN4_EXP_SM100_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
     },
     # LM head, TP=4.
     (62080, 2560): {
-        1: SkinnyGemmConfig(1, 128, 2, k_unroll=4, vector_width=4),
+        1: SkinnyGemmConfig(1, 160, 2, k_unroll=4, vector_width=4),
+        2: SkinnyGemmConfig(2, 160, 4, k_unroll=2),
+    },
+    # Router, replicated at every TP size.
+    (512, 2560): {
+        1: SkinnyGemmConfig(1, 256, 1, k_unroll=4, vector_width=2, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 2, vector_width=4, static_k=2560),
+        8: SkinnyGemmConfig(8, 128, 1, vector_width=4, static_k=2560),
     },
     # GDN fused B/A projection, TP=8.
     (12, 2560): {
@@ -238,10 +245,6 @@ QWEN4_EXP_SM100_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
     # GDN fused B/A projection, TP=1.
     (96, 2560): {
         1: SkinnyGemmConfig(1, 128, 4, k_unroll=2, vector_width=2, static_k=2560),
-    },
-    # Router, TP=1.
-    (512, 2560): {
-        1: SkinnyGemmConfig(1, 256, 1, k_unroll=4, vector_width=2, static_k=2560),
     },
     # Shared-expert fused gate/up projection, TP=1.
     (1280, 2560): {
