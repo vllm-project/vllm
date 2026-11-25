@@ -756,7 +756,7 @@ mod tests {
         };
 
         type Mutate = fn(&mut ChatRequest);
-        let cases: [(&str, Mutate, crate::ErrorKind); 6] = [
+        let cases: &[(&str, Mutate, crate::ErrorKind)] = &[
             (
                 "temperature",
                 |r| r.sampling_params.temperature = Some(3.0),
@@ -792,7 +792,7 @@ mod tests {
             ),
         ];
 
-        for (label, mutate, expected_kind) in cases {
+        for &(label, mutate, expected_kind) in cases {
             let mut request = base_request();
             mutate(&mut request);
             let error = processor.prepare_for_tokenization(request).await.expect_err(label);

@@ -342,6 +342,9 @@ impl TextRequest {
     }
 
     /// Validate the minimum invariants before tokenization or request lowering.
+    ///
+    /// Keep prompt-independent checks shared with `vllm_chat::ChatRequest::validate`
+    /// so chat requests short-circuit before rendering and outbound media fetches.
     pub fn validate(&self) -> Result<()> {
         if matches!(&self.prompt, Prompt::TokenIds(ids) if ids.is_empty()) {
             return Err(Error::EmptyPromptTokenIds {

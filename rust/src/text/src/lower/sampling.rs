@@ -76,6 +76,8 @@ fn validate_repetition_penalty(value: f32) -> Result<(), SamplingParamsError> {
     })
 }
 
+/// Validate explicit sampling-parameter values that do not depend on model
+/// defaults or prompt length.
 pub(crate) fn validate_explicit_sampling_params(
     params: &SamplingParams,
 ) -> Result<(), SamplingParamsError> {

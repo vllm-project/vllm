@@ -198,8 +198,9 @@ pub(crate) async fn render_chat<S: RenderContext>(
         .await
         .map_err(|error| match error {
             // TODO: remove once client vs server ChatTemplate / Multimodal
-            // errors are split in `vllm-chat`; keeps `render_chat` from
-            // regressing 400 -> 500 in the meantime.
+            // errors are split in `vllm-chat` (alongside the gRPC render
+            // mapping in `grpc/render.rs`); keeps `render_chat` from
+            // regressing 400 -> 500 for these variants in the meantime.
             vllm_chat::Error::ChatTemplate(_) | vllm_chat::Error::Multimodal(_) => {
                 ApiError::invalid_request(error.to_report_string(), None)
             }
