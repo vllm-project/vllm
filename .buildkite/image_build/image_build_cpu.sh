@@ -104,7 +104,8 @@ else
   docker buildx create --name vllm-cpu-builder --driver docker-container --driver-opt network=host --use
   docker buildx inspect --bootstrap
 
-  # build and push
+  # build and push. ignore-error=true covers the cache export only: a failed
+  # cache write is a warning, a failed build or image push still fails the step.
   docker buildx build --file docker/Dockerfile.cpu \
     --build-arg max_jobs=16 \
     --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
