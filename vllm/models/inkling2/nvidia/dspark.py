@@ -48,6 +48,7 @@ from .ops.dspark import (
     silu_and_mul,
 )
 from .ops.linear import linear
+from .ops.ll_gemm_sm120 import refresh_fp8_decode_weights
 
 
 class _RMSNorm(nn.Module):
@@ -194,7 +195,7 @@ class Inkling2DraftSelfAttention(nn.Module):
     def forward(
         self, positions: torch.Tensor, x: torch.Tensor, cos_sin_cache: torch.Tensor
     ) -> torch.Tensor:
-        qkv = linear(x, self.qkv_proj.weight)
+        qkv = linear(x, self.qkv_proj.weight, fp8_scope="draft")
         qk_norm_rope_(
             qkv,
             positions,
@@ -244,7 +245,7 @@ class Inkling2DraftSelfAttention(nn.Module):
                 window=self.window,
                 num_splits=num_splits,
             )
-        return linear(out, self.o_proj.weight)
+        return linear(out, self.o_proj.weight, fp8_scope="draft")
 
     def store_context_kv(
         self,
@@ -253,7 +254,7 @@ class Inkling2DraftSelfAttention(nn.Module):
         cos_sin_cache: torch.Tensor,
         slot_mapping: torch.Tensor | None,
     ) -> None:
-        k, v = linear(context, self.kv_proj_ctx.weight).split(
+        k, v = linear(context, self.kv_proj_ctx.weight, fp8_scope="draft").split(
             [self.kv_size, self.kv_size], -1
         )
         k = self.k_norm_ctx(k.reshape(-1, self.head_dim))
@@ -282,8 +283,8 @@ class Inkling2DraftMLP(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = silu_and_mul(linear(x, self.gate_up_proj.weight))
-        return linear(x, self.down_proj.weight)
+        x = silu_and_mul(linear(x, self.gate_up_proj.weight, fp8_scope="draft"))
+        return linear(x, self.down_proj.weight, fp8_scope="draft")
 
 
 class Inkling2DraftLayer(nn.Module):
@@ -507,6 +508,9 @@ class Inkling2DSparkModel(nn.Module):
             torch.softmax(self.model.fuse_weight.float(), dim=-1)
         )
 
+    def process_weights_after_loading(self) -> None:
+        refresh_fp8_decode_weights(self)
+
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         return [layer.self_attn.attn.layer_name for layer in self.model.layers]
 
@@ -544,7 +548,7 @@ class Inkling2DSparkModel(nn.Module):
     def compute_base_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """TP-local bf16 base logits (bf16 GEMM, as the reference)."""
         assert self.lm_head is not None
-        return linear(hidden_states, self.lm_head.weight)
+        return linear(hidden_states, self.lm_head.weight, fp8_scope="draft")
 
     def markov_step(
         self, state: torch.Tensor, prev_tokens: torch.Tensor, context: torch.Tensor

@@ -60,7 +60,8 @@ from .ops.attention import (
 )
 from .ops.attention_sm90 import MODE_OUT_LSE, rel_attention
 from .ops.linear import linear
-from .ops.ll_gemm_sm120 import qkv_bmm, use_qkv_bmm
+from .ops.linear import use_fp8_decode_weights
+from .ops.ll_gemm_sm120 import fp8_decode_weight, qkv_bmm, use_qkv_bmm
 from .ops.sconv import attention_prologue, shift_rel_proj
 from .sconv import K_STREAM, V_STREAM, Inkling2ShortConv, conv_metadata
 
@@ -341,7 +342,13 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         q_side, kv_size = sum(self.split_sizes[:4]), self.split_sizes[4]
         k_end = q_side + kv_size
         if use_qkv_bmm(x_q, x_k, x_v, weight):
-            projected = qkv_bmm(x_q, x_k, x_v, weight, q_side, k_end)
+            copy = (
+                fp8_decode_weight(weight) if use_fp8_decode_weights("target") else None
+            )
+            if copy is not None:
+                projected = qkv_bmm(x_q, x_k, x_v, copy[0], q_side, k_end, copy[1])
+            else:
+                projected = qkv_bmm(x_q, x_k, x_v, weight, q_side, k_end)
             splits = projected.split(self.split_sizes, dim=-1)
             add_linear_lora(self.qkvr, projected, x_q, range(4))
             add_linear_lora(self.qkvr, splits[4], x_k, [4])
