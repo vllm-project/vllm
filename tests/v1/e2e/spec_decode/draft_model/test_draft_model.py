@@ -174,6 +174,7 @@ def test_draft_model_tensor_parallelism(vllm_runner):
 
 
 @multi_gpu_only(num_gpus=2)
+@pytest.mark.skipif(current_platform.is_xpu(), reason="CUDA Only Test")
 @pytest.mark.parametrize(
     "load_kwargs",
     [

@@ -42,7 +42,7 @@ def _run(
         tensor_parallel_size=1,
         pipeline_parallel_size=pp_size,
         max_model_len=max_model_len,
-        gpu_memory_utilization=0.45,
+        gpu_memory_utilization=0.9,
         disable_log_stats=False,
         compilation_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
         speculative_config={
