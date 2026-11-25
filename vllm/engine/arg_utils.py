@@ -8,7 +8,6 @@ import functools
 import json
 import os
 import sys
-import warnings
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
 from types import UnionType
@@ -42,6 +41,7 @@ from vllm.config import (
     ConfigType,
     DeviceConfig,
     DiffusionConfig,
+    ECEventsConfig,
     ECTransferConfig,
     EncoderCacheManagerConfig,
     EngramConfig,
@@ -458,12 +458,6 @@ _IR_OP_PRIORITY_DEPRECATION_MESSAGE = (
 )
 
 
-_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE = (
-    "--disable-cascade-attn is deprecated and has no effect since cascade "
-    "attention has been removed. It will be removed in v0.33.0."
-)
-
-
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -583,7 +577,6 @@ class EngineArgs:
         CacheConfig, "prefix_cache_retention_interval"
     )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
-    disable_cascade_attn: bool | None = None
     offload_backend: str = OffloadConfig.offload_backend
     cpu_offload_gb: float = UVAOffloadConfig.cpu_offload_gb
     cpu_offload_params: set[str] = get_field(UVAOffloadConfig, "cpu_offload_params")
@@ -600,6 +593,7 @@ class EngineArgs:
     long_prefill_token_threshold_adaptive: bool = (
         SchedulerConfig.long_prefill_token_threshold_adaptive
     )
+    pp_microbatch_min_tokens: int = SchedulerConfig.pp_microbatch_min_tokens
     max_num_seqs: int | None = None
     max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
     max_num_inflight_kv_loads: int | None = SchedulerConfig.max_num_inflight_kv_loads
@@ -670,7 +664,7 @@ class EngineArgs:
         MultiModalConfig.mm_encoder_fp8_scale_save_margin
     )
     io_processor_plugin: str | None = None
-    renderer_num_workers: int = 1
+    renderer_num_workers: int | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     video_pruning_method: str = MultiModalConfig.video_pruning_method
@@ -781,6 +775,7 @@ class EngineArgs:
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
 
+    ec_events_config: ECEventsConfig | None = None
     ec_transfer_config: ECTransferConfig | None = None
     ec_manager_config: EncoderCacheManagerConfig = get_field(
         VllmConfig, "ec_manager_config"
@@ -794,6 +789,7 @@ class EngineArgs:
     sleep_preserve_parameter_names: list[str] = get_field(
         ModelConfig, "sleep_preserve_parameter_names"
     )
+    masked_token_ids: list[int] | None = ModelConfig.masked_token_ids
     enable_cumem_allocator: bool = ModelConfig.enable_cumem_allocator
     enable_nccl_comm_suspend: bool = ModelConfig.enable_nccl_comm_suspend
     checkpoint_prepare_on_startup: bool = ModelConfig.checkpoint_prepare_on_startup
@@ -1011,12 +1007,6 @@ class EngineArgs:
             "--disable-sliding-window", **model_kwargs["disable_sliding_window"]
         )
         model_group.add_argument(
-            "--disable-cascade-attn",
-            action=argparse.BooleanOptionalAction,
-            default=None,
-            help=_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE,
-        )
-        model_group.add_argument(
             "--skip-tokenizer-init", **model_kwargs["skip_tokenizer_init"]
         )
         model_group.add_argument(
@@ -1051,6 +1041,9 @@ class EngineArgs:
         model_group.add_argument(
             "--sleep-preserve-parameter-names",
             **model_kwargs["sleep_preserve_parameter_names"],
+        )
+        model_group.add_argument(
+            "--masked-token-ids", **model_kwargs["masked_token_ids"]
         )
         model_group.add_argument(
             "--enable-cumem-allocator", **model_kwargs["enable_cumem_allocator"]
@@ -1781,6 +1774,10 @@ class EngineArgs:
             "--long-prefill-token-threshold-adaptive",
             **scheduler_kwargs["long_prefill_token_threshold_adaptive"],
         )
+        scheduler_group.add_argument(
+            "--pp-microbatch-min-tokens",
+            **scheduler_kwargs["pp_microbatch_min_tokens"],
+        )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
         scheduler_group.add_argument(
@@ -1900,6 +1897,7 @@ class EngineArgs:
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
+        vllm_group.add_argument("--ec-events-config", **vllm_kwargs["ec_events_config"])
         vllm_group.add_argument(
             "--ec-transfer-config", **vllm_kwargs["ec_transfer_config"]
         )
@@ -2007,8 +2005,6 @@ class EngineArgs:
                 "launched vLLM.",
                 self.seed,
             )
-        if self.disable_cascade_attn is not None:
-            warnings.warn(_DISABLE_CASCADE_ATTN_DEPRECATION_MESSAGE, stacklevel=1)
 
         return ModelConfig(
             model=self.model,
@@ -2070,6 +2066,7 @@ class EngineArgs:
             sleep_mode_backend=self.sleep_mode_backend,
             sleep_mode_offload_cudagraph=self.sleep_mode_offload_cudagraph,
             sleep_preserve_parameter_names=self.sleep_preserve_parameter_names,
+            masked_token_ids=self.masked_token_ids,
             enable_cumem_allocator=self.enable_cumem_allocator,
             enable_nccl_comm_suspend=self.enable_nccl_comm_suspend,
             checkpoint_prepare_on_startup=self.checkpoint_prepare_on_startup,
@@ -2703,6 +2700,7 @@ class EngineArgs:
             long_prefill_token_threshold_adaptive=(
                 self.long_prefill_token_threshold_adaptive
             ),
+            pp_microbatch_min_tokens=self.pp_microbatch_min_tokens,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
@@ -2941,6 +2939,7 @@ class EngineArgs:
             compilation_config=compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            ec_events_config=self.ec_events_config,
             ec_transfer_config=self.ec_transfer_config,
             ec_manager_config=self.ec_manager_config,
             reasoning_config=self.reasoning_config,
