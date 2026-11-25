@@ -326,11 +326,12 @@ class TestPushScheduler:
         assert d_req.request_id not in sched._push_registration_deadlines
         assert d_req.request_id not in sched._push_pending_registrations
         assert d_req.request_id not in meta.push_registrations
-        assert meta.push_registration_expired == [d_req.request_id]
+        stats = sched.get_kv_connector_stats()
+        assert stats is not None
+        assert stats.data["num_registration_expired"] == [1]
+        assert sched.get_kv_connector_stats() is None
 
-    def test_registration_watchdog_no_expiry_leaves_field_empty(self):
-        """When nothing has expired, the metadata field stays empty rather
-        than a stale/leftover list from a previous step."""
+    def test_registration_watchdog_no_expiry_records_nothing(self):
         sched = make_nixl_push_scheduler()
         _stub_sw_clipping(sched)
 
@@ -349,9 +350,9 @@ class TestPushScheduler:
             "build_connector_meta",
             return_value=NixlConnectorMetadata(),
         ):
-            meta = sched.build_connector_meta(scheduler_output)
+            sched.build_connector_meta(scheduler_output)
 
-        assert meta.push_registration_expired == []
+        assert sched.get_kv_connector_stats() is None
 
 
 # ----------------------------------------------------------------- #
@@ -688,27 +689,6 @@ class TestPushWriterStartLoadKv:
         assert w._finished_blocks_inbox.qsize() == 1
         assert w._push_writer_wake.is_set()
         assert w.start_push_calls == []
-
-    def test_start_load_kv_records_expired_registrations(self):
-        """Registrations the scheduler's watchdog gave up on are recorded as
-        a stat on the D worker, one entry per expired request."""
-        w = _StubWriterWorker.fresh()
-        w._send_heartbeats = lambda metadata: None
-
-        meta = NixlConnectorMetadata()
-        meta.push_registration_expired = ["req-timed-out-1", "req-timed-out-2"]
-
-        w.start_load_kv(meta)
-
-        assert w.xfer_stats.data["num_registration_expired"] == [1, 1]
-
-    def test_start_load_kv_with_no_expired_registrations_records_nothing(self):
-        w = _StubWriterWorker.fresh()
-        w._send_heartbeats = lambda metadata: None
-
-        w.start_load_kv(NixlConnectorMetadata())
-
-        assert w.xfer_stats.data["num_registration_expired"] == []
 
     @pytest.mark.parametrize("sharded", [False, True])
     def test_noncanonical_pcp_rank_only_pushes_distinct_shards(

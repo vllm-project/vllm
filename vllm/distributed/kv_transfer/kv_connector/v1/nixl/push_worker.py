@@ -251,10 +251,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._reg_send_inbox.put((req_id, reg_data))
             self._push_writer_wake.set()
 
-        # --- D-side: registrations the scheduler's watchdog gave up on ---
-        for _ in metadata.push_registration_expired:
-            self.xfer_stats.record_registration_expired()
-
         # Batch + lease tracking (same as pull).
         for req_id in metadata.reqs_in_batch:
             self._reqs_to_process.add(req_id)
