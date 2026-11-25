@@ -645,6 +645,8 @@ steps:
       - tests/distributed/test_aiter_rms_fallback.py
       - tests/distributed/test_muse_spark_token_shard.py
       - tests/distributed/test_muse_spark_decode_moe.py
+      - tests/quantization/test_online.py
+      - tests/quantization/test_online_mxfp4.py
       - vllm/models/muse_spark/amd/model.py
       - vllm/models/muse_spark/amd/
       - tests/models/test_muse_spark_rocm_mono.py
@@ -670,6 +672,7 @@ steps:
       - pytest -v -s tests/distributed/test_aiter_rms_fallback.py
       - pytest -v -s tests/distributed/test_muse_spark_token_shard.py
       - pytest -v -s tests/distributed/test_muse_spark_decode_moe.py
+      - pytest -v -s tests/quantization/test_online.py -k 'requantization_numerics and tp2'
 
 - label: ":nvidia: (B200) [Nightly] Distributed"
   key: distributed-tests-2xb200

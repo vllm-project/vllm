@@ -14,16 +14,9 @@ from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import ModelConfig
-from vllm.model_executor.kernels.linear import _POSSIBLE_MXFP4_KERNELS
-from vllm.model_executor.kernels.linear.mxfp4.aiter import (
-    AiterMxfp4LinearKernel,
-)
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
-from vllm.model_executor.layers.quantization.online.mxfp4 import (
-    Mxfp4OnlineLinearMethod,
-    Mxfp4OnlineMoEMethod,
-)
+from vllm.model_executor.layers.quantization.online.mxfp4 import Mxfp4OnlineMoEMethod
 from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkOCP_MX_MoEMethod,
 )
@@ -42,9 +35,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import PlatformEnum, current_platform
+from vllm.platforms import current_platform
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
@@ -185,125 +177,15 @@ def test_mxfp4_quantization_correctness(backend: str, dtype: torch.dtype):
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Only tested on ROCm/CUDA."
 )
-@pytest.mark.parametrize("tp_size", [2, 4, 8])
-def test_online_mxfp4_tp_weight_quant_matches_unsharded(tp_size: int):
-    """TP-aligned MXFP4 shards match slices of unsharded quantization."""
-    torch.manual_seed(3)
-
-    device = current_platform.device_type
-    hidden_size = 1024
-    intermediate_size = 512
-
-    dense_weight = torch.randn(
-        hidden_size, intermediate_size, dtype=torch.bfloat16, device=device
-    )
-    w13_weight = torch.randn(
-        2,
-        2 * intermediate_size,
-        hidden_size,
-        dtype=torch.bfloat16,
-        device=device,
-    )
-    w2_weight = torch.randn(
-        2,
-        hidden_size,
-        intermediate_size,
-        dtype=torch.bfloat16,
-        device=device,
-    )
-
-    dense_quantized, dense_scales = mxfp4_quantize(dense_weight)
-    w13_quantized, w13_scales = mxfp4_quantize(w13_weight)
-    w2_quantized, w2_scales = mxfp4_quantize(w2_weight)
-
-    for tp_rank in range(tp_size):
-        output_per_partition = hidden_size // tp_size
-        input_per_partition = intermediate_size // tp_size
-        output_start = tp_rank * output_per_partition
-        input_start = tp_rank * input_per_partition
-
-        column_quantized, column_scales = mxfp4_quantize(
-            dense_weight.narrow(0, output_start, output_per_partition)
-        )
-        assert torch.equal(
-            column_quantized,
-            dense_quantized.narrow(0, output_start, output_per_partition),
-        )
-        assert torch.equal(
-            column_scales,
-            dense_scales.narrow(0, output_start, output_per_partition),
-        )
-
-        row_quantized, row_scales = mxfp4_quantize(
-            dense_weight.narrow(1, input_start, input_per_partition)
-        )
-        assert torch.equal(
-            row_quantized,
-            dense_quantized.narrow(1, input_start // 2, input_per_partition // 2),
-        )
-        assert torch.equal(
-            row_scales,
-            dense_scales.narrow(1, input_start // 32, input_per_partition // 32),
-        )
-
-        w13_quantized_shard, w13_scales_shard = mxfp4_quantize(
-            w13_weight.narrow(1, 2 * input_start, 2 * input_per_partition)
-        )
-        assert torch.equal(
-            w13_quantized_shard,
-            w13_quantized.narrow(1, 2 * input_start, 2 * input_per_partition),
-        )
-        assert torch.equal(
-            w13_scales_shard,
-            w13_scales.narrow(1, 2 * input_start, 2 * input_per_partition),
-        )
-
-        w2_quantized_shard, w2_scales_shard = mxfp4_quantize(
-            w2_weight.narrow(2, input_start, input_per_partition)
-        )
-        assert torch.equal(
-            w2_quantized_shard,
-            w2_quantized.narrow(2, input_start // 2, input_per_partition // 2),
-        )
-        assert torch.equal(
-            w2_scales_shard,
-            w2_scales.narrow(2, input_start // 32, input_per_partition // 32),
-        )
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Only tested on ROCm/CUDA."
-)
 @pytest.mark.parametrize("moe_backend", ["aiter", "emulation"])
-@pytest.mark.parametrize(
-    "unpadded_hidden_size,unpadded_intermediate_size",
-    [
-        pytest.param(256, 256, id="no_padding"),
-        # Not multiples of the MXFP4 block size (32), so that every backend --
-        # including emulation, whose round-up granularity is 32 -- has to pad.
-        pytest.param(240, 208, id="padding"),
-    ],
-)
 @pytest.mark.skip_global_cleanup
 @override_parallel_groups(SingleRankGroup())
-def test_online_mxfp4_moe_matches_quark(
-    moe_backend: MoEBackend,
-    unpadded_hidden_size: int,
-    unpadded_intermediate_size: int,
-    default_vllm_config,
-    monkeypatch,
+def test_online_mxfp4_moe_zeroes_uninitialized_padding(
+    moe_backend: MoEBackend, default_vllm_config, monkeypatch
 ):
-    """Ensures `Mxfp4OnlineMoEMethod` (online quantization)
-    and `QuarkOCP_MX_MoEMethod` (AMD Quark checkpoints) produce the same weights,
-    with same MOE backend used.
-
-    The `padding` case additionally covers `maybe_roundup_sizes`: the online
-    path allocates its bf16 weights with `torch.empty_strided` and the loader
-    only writes the unpadded slice, so the padding is filled with NaN here to
-    reproduce that uninitialized state. It must be zeroed before quantization
-    for the two paths to agree, since Quark allocates its padding with
-    `torch.zeros`.
-    """
+    """NaNs in unloaded padding must become zeros before online quantization."""
+    # Neither dimension is a multiple of the MXFP4 block size, so both backends pad.
+    unpadded_hidden_size, unpadded_intermediate_size = 240, 208
     if moe_backend == "aiter":
         from vllm._aiter_ops import rocm_aiter_ops
 
@@ -375,10 +257,8 @@ def test_online_mxfp4_moe_matches_quark(
             intermediate_size,
         ) == checkpoint_method.maybe_roundup_sizes(**roundup_arguments)
 
-        if unpadded_hidden_size == 240:
-            # Padded case.
-            assert hidden_size > unpadded_hidden_size
-            assert intermediate_size > unpadded_intermediate_size
+        assert hidden_size > unpadded_hidden_size
+        assert intermediate_size > unpadded_intermediate_size
 
         for layer in (checkpoint_layer, online_layer):
             assert layer.moe_config.hidden_dim_unpadded == unpadded_hidden_size
@@ -487,129 +367,6 @@ def test_online_mxfp4_moe_matches_quark(
         online_layer,
         keys=("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"),
         packed_weight_keys=("w13_weight", "w2_weight"),
-    )
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Only tested on ROCm/CUDA."
-)
-@pytest.mark.parametrize("linear_backend", ["emulation", "aiter", "marlin"])
-@pytest.mark.skip_global_cleanup
-@override_parallel_groups(SingleRankGroup())
-def test_online_mxfp4_dense_matches_quark(
-    linear_backend: str, default_vllm_config, monkeypatch
-):
-    """Ensures `Mxfp4OnlineLinearMethod` (online quantization)
-    and `QuarkOCP_MX` (AMD Quark checkpoints) produce the same weights,
-    with same linear backend used.
-    """
-    if linear_backend == "marlin" and not current_platform.is_cuda():
-        # `MarlinMxFp4LinearKernel.process_weights_after_loading` is CUDA-only
-        pytest.skip(
-            "MarlinMxFp4LinearKernel.process_weights_after_loading is CUDA-only."
-        )
-
-    if linear_backend == "aiter":
-        # `AiterMxfp4LinearKernel` is registered only for ROCm in
-        # `_POSSIBLE_MXFP4_KERNELS`, and `is_supported` gates on
-        # `current_platform.supports_mx()`. Force it onto the CUDA
-        # kernel list and bypass the platform gate so this backend can
-        # be exercised on CUDA hosts too.
-
-        monkeypatch.setattr(
-            AiterMxfp4LinearKernel,
-            "is_supported",
-            classmethod(lambda cls, compute_capability=None: (True, None)),
-        )
-        monkeypatch.setitem(
-            _POSSIBLE_MXFP4_KERNELS,
-            PlatformEnum.CUDA,
-            [
-                AiterMxfp4LinearKernel,
-                *_POSSIBLE_MXFP4_KERNELS.get(PlatformEnum.CUDA, []),
-            ],
-        )
-    elif linear_backend == "emulation":
-        # `EmulationMxfp4LinearKernel.can_implement` gates on `has_quark()`,
-        # EmulationMxfp4LinearKernel.process_weights_after_loading does not require it.
-        monkeypatch.setattr(
-            "vllm.model_executor.kernels.linear.mxfp4.emulation.has_quark",
-            lambda: True,
-        )
-
-    default_vllm_config.model_config = ModelConfig()
-    default_vllm_config.kernel_config.linear_backend = linear_backend
-
-    input_size = 256
-    output_size = 128
-    device = current_platform.device_type
-
-    # `create_weights` implementations use plain `torch.empty` with no explicit
-    # device, so without this context they would default to CPU and diverge
-    # from the (GPU) tensors produced by `mxfp4_quantize`/`replace_parameter`.
-    with torch.device(device):
-        checkpoint_layer = torch.nn.Module()
-        online_layer = torch.nn.Module()
-        for layer in (checkpoint_layer, online_layer):
-            # `LinearBase` subclasses normally set these attributes on the
-            # layer before `create_weights` is called; the marlin kernel's
-            # `process_weights_after_loading` reads them directly off the
-            # layer, so a bare `torch.nn.Module` needs them set explicitly.
-            layer.input_size = input_size
-            layer.output_size = output_size
-            layer.input_size_per_partition = input_size
-            layer.output_size_per_partition = output_size
-            layer.params_dtype = torch.bfloat16
-
-        weight = torch.randn(output_size, input_size, dtype=torch.bfloat16)
-
-        scalings = [2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]
-        for i in range(input_size // 32):
-            weight[:, i * 32 : (i + 1) * 32] *= scalings[i % len(scalings)]
-
-        # Checkpoint path: pre-quantize the source weight to MXFP4 with the
-        # ~same RTN recipe as a real Quark checkpoint, then feed the
-        # already-packed tensors into `QuarkOCP_MX`.
-        checkpoint_weight, checkpoint_weight_scale = mxfp4_quantize(weight)
-
-        checkpoint_scheme = QuarkOCP_MX(
-            weight_quant_key=kMxfp4Static,
-            activation_quant_key=kMxfp4Dynamic,
-        )
-        checkpoint_scheme.create_weights(
-            layer=checkpoint_layer,
-            output_partition_sizes=[output_size],
-            input_size_per_partition=input_size,
-            params_dtype=torch.bfloat16,
-            weight_loader=default_weight_loader,
-        )
-        checkpoint_layer.weight.data.copy_(checkpoint_weight)
-        checkpoint_layer.weight_scale.data.copy_(checkpoint_weight_scale)
-        checkpoint_scheme.process_weights_after_loading(checkpoint_layer)
-
-        # Online path: feed the *same* raw bf16 source weight and let
-        # `Mxfp4OnlineLinearMethod` quantize it during
-        # `process_weights_after_loading`.
-        online_method = Mxfp4OnlineLinearMethod()
-        online_method.create_weights(
-            layer=online_layer,
-            input_size_per_partition=input_size,
-            output_partition_sizes=[output_size],
-            input_size=input_size,
-            output_size=output_size,
-            params_dtype=torch.bfloat16,
-            weight_loader=default_weight_loader,
-        )
-        replace_parameter(online_layer, "weight", weight.clone())
-        online_method.process_weights_after_loading(online_layer)
-
-    assert type(checkpoint_scheme.ocp_mx_linear) is type(online_method.kernel)
-
-    assert_quantized_weights_equal(
-        checkpoint_layer,
-        online_layer,
-        keys=("weight", "weight_scale"),
-        packed_weight_keys=("weight",),
     )
 
 

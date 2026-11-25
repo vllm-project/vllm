@@ -877,7 +877,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             num_w13_shards=self.moe.w13_num_shards,
             weight_block_size=self.weight_block_size,
             static_input_scales=self.static_input_scales,
-            out_dtype=layer.orig_dtype,
+            out_dtype=torch.float32,
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
@@ -2334,7 +2334,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
             layer.w2_weight,
             layer.w2_weight_scale,
             layer.w2_weight_scale_2,
-            layer.params_dtype,
+            torch.float32,
             group_size=self.group_size,
             invert_global_scales=False,
         )

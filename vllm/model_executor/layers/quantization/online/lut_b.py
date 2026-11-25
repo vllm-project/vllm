@@ -94,7 +94,7 @@ class LutBOnlineMoEMethod(OnlineMoEMethodBase):
             if self.experts_cls is LutBSm107Experts:
                 weight = lut_b_to_sm107_tiles(packed, codebooks, scales)
             else:
-                weight = dequantize_lut_b(packed, codebooks, scales, weight.dtype)
+                weight = dequantize_lut_b(packed, codebooks, scales, layer.orig_dtype)
             replace_parameter(layer, name, weight)
         self.release_requantization_source_weights(layer)
 

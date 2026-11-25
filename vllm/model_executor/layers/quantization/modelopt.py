@@ -98,7 +98,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
-    dequant_mxfp8_to_bf16,
+    dequant_mxfp8,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_nvfp4_linear_weight,
@@ -984,7 +984,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             layer.w2_weight,
             layer.w2_weight_scale,
             layer.w2_weight_scale_2,
-            layer.params_dtype,
+            torch.float32,
             group_size=self.quant_config.group_size,
             invert_global_scales=False,
         )
@@ -3384,7 +3384,7 @@ class ModelOptLinearMethod(LinearMethodBase):
     def dequantize_weight(self, layer: torch.nn.Module) -> torch.Tensor:
         """Reconstruct serialized weights for online requantization."""
         if self.wkey.key is kMxfp8Static:
-            return dequant_mxfp8_to_bf16(
+            return dequant_mxfp8(
                 layer.weight.contiguous(), layer.weight_scale.contiguous()
             )
         if self.wkey.key is kNvfp4Static:
@@ -3394,7 +3394,7 @@ class ModelOptLinearMethod(LinearMethodBase):
                 layer.weight_scale,
                 layer.weight_scale_2,
                 layer.logical_widths,
-                self.out_dtype,
+                torch.float32,
                 self.ctx.group_size,
                 invert_global_scales=False,
             )

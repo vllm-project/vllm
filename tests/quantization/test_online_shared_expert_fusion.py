@@ -48,7 +48,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     mxfp4_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-    dequant_mxfp8_to_bf16,
+    dequant_mxfp8,
     mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
@@ -1125,7 +1125,7 @@ def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
             packed[None],
             scale[None],
             (1.0 / global_scale).reshape(1),
-            torch.bfloat16,
+            torch.float32,
             block_size=16,
             swizzle=False,
         )[0]
@@ -1220,7 +1220,7 @@ def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
         )
     check_slot(
         shared_slot,
-        *(dequant_mxfp8_to_bf16(*shared[projection]) for projection in shapes),
+        *(dequant_mxfp8(*shared[projection]) for projection in shapes),
     )
 
 

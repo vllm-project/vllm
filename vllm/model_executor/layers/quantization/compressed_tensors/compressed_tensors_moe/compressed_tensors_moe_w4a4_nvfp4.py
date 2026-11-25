@@ -218,7 +218,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_packed,
             layer.w2_weight_scale,
             layer.w2_weight_global_scale,
-            layer.params_dtype,
+            torch.float32,
             group_size=self.group_size,
             invert_global_scales=True,
         )

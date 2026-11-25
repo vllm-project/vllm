@@ -3,7 +3,7 @@
 """Block-FP8 routed experts re-quantized to MXFP4 at load (ROCm).
 
 `VLLM_FP8_MOE_REQUANT=mxfp4` keeps the checkpoint's block-FP8 expert
-weights for loading and, once loaded, dequantizes each expert to bf16 and
+weights for loading and, once loaded, dequantizes each expert to FP32 and
 quantizes it to MXFP4 (e2m1 values, e8m0 block-32 scales) for the aiter MXFP4
 MoE kernels: half the expert bytes of FP8. `VLLM_FP8_MOE_REQUANT_ACT` selects
 the activation dtype: a8w4 (fp8 per-token; aiter's interleaved FlyDSL kernels,
@@ -45,7 +45,7 @@ class Fp8BlockExpertsAsMxfp4FusedMoE(Mxfp4OnlineMoEMethod):
     `weight_scale_inv`), so the checkpoint loader is unchanged; the
     re-quantization happens in `process_weights_after_loading`. Rounding the
     values to the e2m1 grid with power-of-two block-32 scales is lossy: the
-    weight error is of the order of an MXFP4 quantization of the bf16 weights.
+    error is of the order of an MXFP4 quantization of the dequantized weights.
     """
 
     # FP8 expert parameters live on the meta device and are materialized one
@@ -151,10 +151,10 @@ class Fp8BlockExpertsAsMxfp4FusedMoE(Mxfp4OnlineMoEMethod):
             device=weight.device,
         )
         for e in range(num_experts):
-            bf16 = dequant_block_fp8(
-                weight[e], scale_inv[e], self.fp8_block_size, torch.bfloat16
+            dequantized = dequant_block_fp8(
+                weight[e], scale_inv[e], self.fp8_block_size
             )
-            q, s = mxfp4_quantize(bf16)
+            q, s = mxfp4_quantize(dequantized)
             out[e] = q.view(torch.uint8)
             out_scale[e] = s.view(torch.uint8)
         return out, out_scale

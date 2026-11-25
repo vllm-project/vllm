@@ -79,7 +79,7 @@ from vllm.model_executor.layers.quantization.utils.config_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mxfp4_quantize
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-    dequant_mxfp8_to_bf16,
+    dequant_mxfp8,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -147,7 +147,7 @@ ONLINE_SHARED_EXPERT_QUANTIZERS: dict[
 ONLINE_SHARED_EXPERT_DEQUANTIZERS: dict[
     QuantKey, Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 ] = {
-    kMxfp8Static: dequant_mxfp8_to_bf16,
+    kMxfp8Static: dequant_mxfp8,
 }
 
 
