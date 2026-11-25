@@ -42,6 +42,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorWorkerMemoryPlan,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.compression import (
+    BufferSpan,
+    CompressedChunk,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
@@ -3648,43 +3652,31 @@ class MooncakeConnectorWorker:
 
     def _send_compressed_blocks(
         self,
-        encoded,
+        chunk: CompressedChunk,
         remote_session: str,
-        source_payload_addr: int,
-        source_aux_addr: int,
-        destination_payload_addr: int,
-        destination_aux_addr: int,
-        destination_tail_addr: int,
-        aux_bytes: int,
-    ) -> int:
-        encoded.event.synchronize()
-        codec_bytes = encoded.codec_bytes
-        tail_bytes = encoded.raw_tail_bytes
-        source_addrs = [source_payload_addr] if codec_bytes else []
-        destination_addrs = [destination_payload_addr] if codec_bytes else []
-        lengths = [codec_bytes] if codec_bytes else []
-        if aux_bytes:
-            source_addrs.append(source_aux_addr)
-            destination_addrs.append(destination_aux_addr)
-            lengths.append(aux_bytes)
-        if tail_bytes:
-            source_addrs.append(encoded.raw_tail_addr)
-            destination_addrs.append(destination_tail_addr)
-            lengths.append(tail_bytes)
-        error = self._send_blocks(
-            remote_session,
-            np.asarray(source_addrs, dtype=np.uint64),
-            np.asarray(destination_addrs, dtype=np.uint64),
-            np.asarray(lengths, dtype=np.uint64),
-        )
-        if error is not None:
-            raise RuntimeError(
-                "Mooncake compressed transfer failed: "
-                f"remote={remote_session} error={error} "
-                f"codec_bytes={codec_bytes} aux_bytes={aux_bytes} "
-                f"tail_bytes={tail_bytes}"
+        remote_buffers: tuple[BufferSpan, ...],
+    ) -> None:
+        if len(chunk.buffers) != len(remote_buffers):
+            raise ValueError("Compressed buffer count differs between peers")
+        sources, destinations, lengths = [], [], []
+        for (source, length), (destination, capacity) in zip(
+            chunk.buffers, remote_buffers, strict=True
+        ):
+            if not 0 <= length <= capacity or (length and not (source and destination)):
+                raise ValueError("Compressed buffer exceeds the peer slot capacity")
+            if length:
+                sources.append(source)
+                destinations.append(destination)
+                lengths.append(length)
+        if lengths:
+            error = self._send_blocks(
+                remote_session,
+                np.asarray(sources, dtype=np.uint64),
+                np.asarray(destinations, dtype=np.uint64),
+                np.asarray(lengths, dtype=np.uint64),
             )
-        return codec_bytes
+            if error is not None:
+                raise RuntimeError(f"Mooncake compressed transfer failed: {error}")
 
     def _sweep_expired_sends(self) -> None:
         """Free blocks of requests that were never sent to the remote side."""

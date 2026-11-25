@@ -148,20 +148,17 @@ layouts are rejected. Padding and strided layer views of dense K/V are supported
 The compression runtime, algorithms, Python/CUDA backends and kernel tests are
 maintained in [KVServe](https://github.com/hpdss-group/KVServe), outside vLLM.
 vLLM adapts cache geometry and retains Mooncake transfer and session ownership.
-The adapter requires runtime API version 1. Install the same pinned KVServe
-revision on both endpoints.
-No KVServe checkout or `PYTHONPATH` change is required: the command below builds
-the immutable source archive as a normal wheel in the active vLLM environment.
+The adapter requires the KVServe runtime with `resource_requirements` and
+`ChunkIO`. Install the same revision on both endpoints in the vLLM environment.
 
 ```bash
 # CUDA 13; use runtime-cu12 for CUDA 12. Keep the installed vLLM/Torch versions.
-uv pip install 'kvserve_v1[runtime,runtime-cu13] @ https://github.com/hpdss-group/KVServe/archive/14a87a227a935257f8ab6749f809539d3a24ca60.tar.gz'
+uv pip install '/path/to/KVServe[runtime,runtime-cu13]'
 ```
 
-See KVServe's [runtime API and compatibility guide](https://github.com/hpdss-group/KVServe/blob/14a87a227a935257f8ab6749f809539d3a24ca60/docs/compression-runtime.md)
-for buffer/event ownership and backend requirements. Both endpoints must use the
-same wire-profile version; this runtime uses version 2 and rejects the older
-vendored implementation's profile. Disabled compression imports no KVServe code.
+The P/D endpoints exchange a versioned descriptor and valid buffer lengths.
+Both endpoints must use the same compression profile and transfer protocol
+version. Disabled compression imports no KVServe code.
 
 Use the same lossless profile on both workers. Set `kv_role=kv_producer` on P
 and `kv_role=kv_consumer` on D.

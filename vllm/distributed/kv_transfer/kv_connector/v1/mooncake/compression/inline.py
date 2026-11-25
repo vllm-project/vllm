@@ -17,6 +17,7 @@ import zmq
 from vllm import envs
 from vllm.logger import init_logger
 
+from .adapter import create_chunk_io
 from .protocol import (
     CompressionAbort,
     CompressionAbortAck,
@@ -61,6 +62,8 @@ class InlineCompression:
         self.worker = worker
         assert worker.compression is not None
         self.runtime = worker.compression
+        self.chunk_io = create_chunk_io(self.runtime)
+        self.profile = f"buffers-v1:{self.chunk_io.wire_profile}"
         self.timeout = float(envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT)
         self._request_decoder = msgspec.msgpack.Decoder(CompressionRequest)
         self._response_decoder = msgspec.msgpack.Decoder(CompressionResponse)
@@ -139,7 +142,7 @@ class InlineCompression:
         cancelled = self._cancelled.setdefault(key, asyncio.Event())
         send_meta = self.worker.reqs_need_send.get(key[0])
         try:
-            if request.profile != self.runtime.wire_profile:
+            if request.profile != self.profile:
                 raise ValueError("Mooncake compression profile mismatch")
             metadata = request.metadata
             if (
@@ -205,9 +208,7 @@ class InlineCompression:
             self._transfers[key] = transfer
             if chunks == 0:
                 self._finish(key)
-            return CompressionSessionOpened(
-                count, chunks, profile=self.runtime.wire_profile
-            )
+            return CompressionSessionOpened(count, chunks, profile=self.profile)
         except Exception as exc:
             self._closed[key] = time.monotonic() + self.timeout
             if send_meta is not None and send_meta.p_req_id:
@@ -254,21 +255,14 @@ class InlineCompression:
             request.chunk_id,
         )
         try:
-            encoded = self.runtime.encode(
-                slot_id, blocks, part, valid_tokens_by_group=tokens
+            plan = self.chunk_io.plan(slot_id, blocks, part, tokens)
+            chunk = self.chunk_io.compress(plan)
+            self.worker._send_compressed_blocks(chunk, transfer.remote, request.buffers)
+            return CompressionChunkReady(
+                request.chunk_id,
+                tuple(length for _, length in chunk.buffers),
+                chunk.descriptor,
             )
-            slot = self.runtime.slots[slot_id]
-            size = self.worker._send_compressed_blocks(
-                encoded,
-                transfer.remote,
-                slot.arena_a.data_ptr(),
-                slot.aux.data_ptr(),
-                request.payload_addr,
-                request.aux_addr,
-                request.tail_addr,
-                self.runtime.aux_bytes(part, tokens),
-            )
-            return encoded.u8_bytes, size
         except BaseException:
             try:
                 self.runtime.streams[slot_id].synchronize()
@@ -280,28 +274,26 @@ class InlineCompression:
     async def _send_chunk(self, key: tuple, request: CompressionChunkPull):
         transfer = self._transfers.get(key)
         if transfer is None or self._cancelled[key].is_set():
-            return CompressionChunkReady(request.chunk_id, 0, 0, error="Pull is closed")
+            return CompressionChunkReady(request.chunk_id, error="Pull is closed")
         if (
             request.chunk_id in transfer.seen
             or not 0 <= request.chunk_id < transfer.chunks
         ):
-            return CompressionChunkReady(request.chunk_id, 0, 0, error="Invalid chunk")
+            return CompressionChunkReady(request.chunk_id, error="Invalid chunk")
         transfer.seen.add(request.chunk_id)
         transfer.last_activity = time.monotonic()
         slot = await self._sender_slots.get()
         try:
             if self._cancelled[key].is_set():
                 raise RuntimeError("Pull was cancelled")
-            decoded, encoded = await self._execute(
-                self._encode_send, slot, transfer, request
-            )
+            response = await self._execute(self._encode_send, slot, transfer, request)
             transfer.completed += 1
             transfer.last_activity = time.monotonic()
             if transfer.completed == transfer.chunks:
                 self._finish(key)
-            return CompressionChunkReady(request.chunk_id, decoded, encoded)
+            return response
         except Exception as exc:
-            return CompressionChunkReady(request.chunk_id, 0, 0, error=str(exc))
+            return CompressionChunkReady(request.chunk_id, error=str(exc))
         finally:
             if self._fatal is None:
                 self._sender_slots.put_nowait(slot)
@@ -375,15 +367,10 @@ class InlineCompression:
             pull_meta.local_block_ids, valid, count, ready.chunk_id
         )
         try:
-            event = self.runtime.decode(
-                slot_id,
-                blocks,
-                part,
-                ready.codec_bytes,
-                ready.u8_bytes,
-                valid_tokens_by_group=tokens,
-            )
-            event.synchronize()
+            plan = self.chunk_io.plan(slot_id, blocks, part, tokens)
+            self.chunk_io.decompress(
+                plan, ready.lengths, ready.descriptor
+            ).synchronize()
         except BaseException:
             try:
                 self.runtime.streams[slot_id].synchronize()
@@ -400,9 +387,7 @@ class InlineCompression:
         metadata = self.worker._build_pull_metadata(
             {pull_meta.d_req_id: pull_meta}, include_layout=True
         )
-        request = CompressionSessionOpen(
-            metadata, nonce=key[2], profile=self.runtime.wire_profile
-        )
+        request = CompressionSessionOpen(metadata, nonce=key[2], profile=self.profile)
         sock = self.worker.async_zmq_ctx.socket(zmq.DEALER)
         sock.setsockopt(zmq.LINGER, 0)
         sock.setsockopt(zmq.RCVTIMEO, int((self.timeout + 60) * 1000))
@@ -420,7 +405,7 @@ class InlineCompression:
                 raise RuntimeError(
                     getattr(opened, "error", None) or "Invalid open reply"
                 )
-            if opened.profile != self.runtime.wire_profile:
+            if opened.profile != self.profile:
                 raise RuntimeError("Mooncake compression profile mismatch")
             sizes = self.worker._compression_block_sizes()
             expected = (
@@ -450,14 +435,11 @@ class InlineCompression:
                     slot_id = await self._receiver_slots.get()
                     owned.add(slot_id)
                     inflight[chunk] = slot_id
-                    slot = self.runtime.slots[slot_id]
                     message = CompressionChunkPull(
                         key[0],
                         key[1],
                         chunk,
-                        slot.arena_a.data_ptr(),
-                        slot.aux.data_ptr(),
-                        slot.raw_tail.data_ptr() if slot.raw_tail is not None else 0,
+                        self.chunk_io.slot_buffers(slot_id),
                         key[2],
                     )
                     await sock.send(self.worker._encoder.encode(message))

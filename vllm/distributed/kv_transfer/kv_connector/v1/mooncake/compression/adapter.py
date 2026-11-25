@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_current_attn_backends,
     get_current_attn_backends_and_specs,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.compression import ChunkIO
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
@@ -115,7 +116,10 @@ def build_memory_plan(
     logical_block_size = block_sizes.pop()
     if logical_block_size % kernel_block_size:
         raise ValueError("Logical attention blocks must contain whole kernel blocks.")
-    return backend.build_memory_plan(
+    resource_requirements = getattr(backend, "resource_requirements", None)
+    if resource_requirements is None:
+        raise RuntimeError("KVServe runtime does not expose resource requirements")
+    return resource_requirements(
         config,
         cache_specs,
         blocks_per_logical=logical_block_size // kernel_block_size,
@@ -138,3 +142,11 @@ def create_worker_runtime(plan: Any, cache_layout: str, block_factor: int, devic
         blocks_per_logical=block_factor,
         device=device,
     )
+
+
+def create_chunk_io(runtime: Any) -> ChunkIO:
+    backend = load_backend()
+    factory = getattr(backend, "ChunkIO", None)
+    if factory is None:
+        raise RuntimeError("KVServe runtime does not expose the shared chunk API")
+    return factory(runtime)

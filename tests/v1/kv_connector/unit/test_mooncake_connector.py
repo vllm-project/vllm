@@ -3984,8 +3984,8 @@ def test_transfer_engine_init_restores_worker_device(monkeypatch):
 @pytest.mark.asyncio
 async def test_inline_abort_waits_for_inflight_mooncake_write(monkeypatch):
     """A failed chunk cannot release a slot while another Mooncake write runs."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.compression.inline import (  # noqa: E501
-        InlineCompression,
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.compression import (
+        inline as inline_module,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.compression.protocol import (  # noqa: E501
         CompressionAbort,
@@ -4023,33 +4023,23 @@ async def test_inline_abort_waits_for_inflight_mooncake_write(monkeypatch):
         worker = connector.connector_worker
         assert worker is not None
 
-        def encoded(*args, **kwargs):
-            return SimpleNamespace(
-                event=SimpleNamespace(synchronize=lambda: None),
-                codec_bytes=8,
-                u8_bytes=8,
-                raw_tail_bytes=0,
-            )
-
-        slots = [
-            SimpleNamespace(
-                arena_a=torch.empty(8, dtype=torch.uint8),
-                aux=torch.empty(8, dtype=torch.uint8),
-                raw_tail=None,
-            )
-            for _ in range(2)
-        ]
+        slots = [object(), object()]
         worker.compression = SimpleNamespace(
             slots=slots,
             config=SimpleNamespace(logical_blocks_per_chunk=1),
-            wire_profile="f" * 64,
             fa_group_indices={0},
             streams=[SimpleNamespace(synchronize=lambda: None) for _ in slots],
-            encode=encoded,
-            aux_bytes=lambda *args: 0,
             shutdown=lambda: None,
         )
-        inline = InlineCompression(worker)
+        provider = SimpleNamespace(
+            wire_profile="test-provider:fixed",
+            plan=lambda *args: args,
+            compress=lambda plan: SimpleNamespace(
+                buffers=((9, 8),), descriptor=b"opaque"
+            ),
+        )
+        monkeypatch.setattr(inline_module, "create_chunk_io", lambda runtime: provider)
+        inline = inline_module.InlineCompression(worker)
         context = zmq.asyncio.Context()
         router = context.socket(zmq.ROUTER)
         port = router.bind_to_random_port("tcp://127.0.0.1")
@@ -4083,15 +4073,20 @@ async def test_inline_abort_waits_for_inflight_mooncake_write(monkeypatch):
                 kv_block_lens=[],
             )
             await dealer.send(
-                encoder.encode(CompressionSessionOpen(pull, "nonce", "f" * 64))
+                encoder.encode(
+                    CompressionSessionOpen(
+                        pull, "nonce", "buffers-v1:test-provider:fixed"
+                    )
+                )
             )
             opened = decoder.decode(await asyncio.wait_for(dealer.recv(), 5))
             assert isinstance(opened, CompressionSessionOpened)
             assert opened.total_chunks == 4
+            assert opened.profile == "buffers-v1:test-provider:fixed"
             for chunk in (0, 1):
                 await dealer.send(
                     encoder.encode(
-                        CompressionChunkPull("t", "d", chunk, 1, 2, 0, "nonce")
+                        CompressionChunkPull("t", "d", chunk, ((1, 8),), "nonce")
                     )
                 )
             failed = decoder.decode(await asyncio.wait_for(dealer.recv(), 5))
@@ -4113,6 +4108,8 @@ async def test_inline_abort_waits_for_inflight_mooncake_write(monkeypatch):
                     decoder.decode(await asyncio.wait_for(dealer.recv(), 5))
                 )
             assert isinstance(responses[0], CompressionChunkReady)
+            assert responses[0].lengths == (8,)
+            assert responses[0].descriptor == b"opaque"
             assert responses[-1].error is None
             assert worker._finished_sending.get_nowait() == "p"
         finally:

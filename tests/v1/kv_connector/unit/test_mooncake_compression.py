@@ -85,7 +85,7 @@ def planned_adapter(monkeypatch):
         calls.append((config, specs, kwargs))
         return SimpleNamespace(reserved_bytes=123)
 
-    monkeypatch.setattr(backend, "build_memory_plan", plan)
+    monkeypatch.setattr(backend, "resource_requirements", plan)
     monkeypatch.setattr(adapter, "get_tensor_model_parallel_rank", lambda: 1)
     monkeypatch.setattr(adapter, "get_current_attn_backends", lambda config: [])
     monkeypatch.setattr(
@@ -198,7 +198,7 @@ async def test_abort_ack_drains_queued_replies_and_checks_identity(request_id):
         abort = CompressionAbort("transfer", "request", "cancelled", "nonce")
         for reply in (
             CompressionSessionOpened(0, 0, error="Pull was cancelled"),
-            CompressionChunkReady(0, 0, 0, error="Pull is closed"),
+            CompressionChunkReady(0, error="Pull is closed"),
             CompressionAbortAck(abort.transfer_id, request_id, abort.nonce),
         ):
             await producer.send(msgspec.msgpack.encode(reply))
