@@ -24,12 +24,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.model_loader.reload import (
-    record_metadata_for_reloading,
-    set_torchao_reload_attrs,
-)
+from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
 from vllm.model_executor.model_loader.weight_cache.protocol import (
-    TensorKind,
     check_ipc_quant_support,
 )
 from vllm.model_executor.model_loader.weight_cache.utils import (
@@ -223,11 +219,6 @@ def process_weights_after_loading(
 
     finalize_model_weights(model, target_device)
 
-    # Needed for torchao model reloading via model.reload_weights
-    # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
-    if model_config.quantization == "torchao":
-        set_torchao_reload_attrs(model, model_config)
-
 
 @contextmanager
 def device_loading_context(module: torch.nn.Module, target_device: torch.device | None):
@@ -290,14 +281,15 @@ def online_quantization_timing_context(
 
     assert isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
     quant_config = layer.quant_config
-    assert quant_config is not None
     online_quantization_config = (
         quant_config
-        if isinstance(quant_config, OnlineQuantizationConfig)
+        if quant_config is None or isinstance(quant_config, OnlineQuantizationConfig)
         else quant_config.online_quantization_config
     )
     # reload/layerwise.py's _layerwise_process calls this for experts_int8,
-    # whose online MoE method has no OnlineQuantizationConfig.
+    # whose online MoE method has no OnlineQuantizationConfig, and for layers
+    # built with an online method but no quant config (a drafter's own
+    # quantized lm_head).
     if online_quantization_config is None:
         yield
         return
@@ -445,7 +437,7 @@ def build_model_from_processed_weights(
     model_config: ModelConfig,
     prefix: str,
     tensors: dict[str, torch.Tensor],
-    kinds: dict[str, TensorKind],
+    manifest: dict[str, Any],
     aliases: dict[str, str],
     attrs: dict[str, Any],
     load_config: LoadConfig,
@@ -460,7 +452,7 @@ def build_model_from_processed_weights(
                 prefix=prefix,
             )
         check_ipc_quant_support(model)
-        _register_processed_tensors(model, tensors, kinds, aliases)
+        _register_processed_tensors(model, tensors, manifest, aliases)
         # Flags that load_weights would have set (e.g. EAGLE ownership of
         # embed_tokens / lm_head); the source ran it, this process did not.
         for name, value in attrs.items():
@@ -492,7 +484,7 @@ def _load_device(
 def _register_processed_tensors(
     model: nn.Module,
     tensors: dict[str, torch.Tensor],
-    kinds: dict[str, TensorKind],
+    manifest: dict[str, Any],
     aliases: dict[str, str],
 ) -> None:
     """Replace the meta model's parameters and buffers, keeping ties."""
@@ -522,7 +514,7 @@ def _register_processed_tensors(
         registered[name] = obj
 
     for name, tensor in tensors.items():
-        _register(name, tensor, kinds[name] == "param")
+        _register(name, tensor, manifest["tensors"][name]["is_param"])
 
     for alias_name, canonical_name in aliases.items():
         obj = registered.get(canonical_name)
