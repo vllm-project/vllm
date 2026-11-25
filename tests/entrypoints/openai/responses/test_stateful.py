@@ -29,6 +29,19 @@ async def test_store(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
+async def test_input_list_reports_only_first_invalid_item(client: openai.AsyncOpenAI):
+    invalid_item = {"type": "message", "role": "user"}
+    with pytest.raises(openai.BadRequestError) as first:
+        await client.responses.create(input=[invalid_item], store=True)
+    with pytest.raises(openai.BadRequestError) as multiple:
+        await client.responses.create(input=[invalid_item, invalid_item], store=True)
+
+    first_error = first.value.response.json()["error"]["message"]
+    multiple_error = multiple.value.response.json()["error"]["message"]
+    assert multiple_error.splitlines()[0] == first_error.splitlines()[0]
+
+
+@pytest.mark.asyncio
 async def test_background(client: openai.AsyncOpenAI):
     # NOTE: This query should be easy enough for the model to answer
     # within the 10 seconds.

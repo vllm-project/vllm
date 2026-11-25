@@ -362,6 +362,7 @@ fn qwen_multimodal_model_info(
         },
         Arc::new(TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID)),
         limit_mm_per_prompt,
+        &std::collections::HashMap::new(),
     )
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
@@ -503,7 +504,7 @@ async fn start_grpc_test_server(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> (Channel, tokio::task::JoinHandle<()>) {
     let (health_reporter, health_service) = health_reporter();
-    let health_monitor = HealthMonitor::register(health_reporter, engine_health).await;
+    let health_monitor = HealthMonitor::register(health_reporter, engine_health, true).await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
     let addr = listener.local_addr().expect("local addr");

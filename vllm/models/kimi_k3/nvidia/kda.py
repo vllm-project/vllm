@@ -430,11 +430,13 @@ def _flashkda_prefill(
         A_log.contiguous(),
         dt_bias.view(-1, q.shape[-1]).contiguous(),
         lower_bound,
-        initial_state.contiguous(),
-        final_state,
-        cu_seqlens.contiguous(),
-        checkpoint_state,
-        checkpoint_offsets.contiguous() if checkpoint_offsets is not None else None,
+        cu_seqlens=cu_seqlens.contiguous(),
+        initial_state=initial_state.contiguous(),
+        final_state=final_state,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=(
+            checkpoint_offsets.contiguous() if checkpoint_offsets is not None else None
+        ),
     )
     return out, final_state
 
@@ -774,7 +776,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     self.local_num_heads,
                     self.spec_query_len,
                     self.conv1d.weight.device,
-                    align=self.cache_config.mamba_cache_mode == "align",
+                    align=self.cache_config.enable_prefix_caching,
                 )
         decode_conv1d_weight = None
         if (

@@ -1,6 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Overlap the DSV4.1 mHC gate projection with the next sublayer on ROCm."""
+"""The DSV4.1 delayed mHC seams on ROCm.
+
+On gfx950, `mhc_pre_delayed_overlap` moves the gate projection onto a side
+stream, overlapped with the next sublayer. On gfx942, `mhc_pre_delayed_seam`
+runs AITER's `mhc_fused_post_pre_delayed`, which applies the previous
+sublayer's post, collapses the residual with the carried pre-mix and computes
+the next gates in one call, from `MHC_SEAM_MIN_TOKENS` tokens on seams that
+have a post block and no fused norm.
+"""
+
+import functools
 
 import torch
 
@@ -9,6 +19,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.kernels.mhc.triton import mhc_post_collapse_rms_norm_triton
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.mhc import (
+    HAS_AITER_MHC,
     HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM,
     MHCPreDelayedOp,
     _aiter_mhc_supported,
@@ -250,4 +261,93 @@ def mhc_pre_delayed_mxfp8(
         comb_mix,
         layer_input,
         next_pre_mix,
+    )
+
+
+# Chosen so decode-only steps at low concurrency keep their current path. With
+# DSpark (1 + 5 tokens per request) decode steps reach it from 11 requests.
+MHC_SEAM_MIN_TOKENS = 64
+
+
+@functools.cache
+def supports_mhc_seam(hidden_size: int, hc_mult: int) -> bool:
+    """True on gfx942 when AITER's probe accepts this shape."""
+    if not HAS_AITER_MHC or get_cdna_version() != 3:
+        return False
+    from aiter.ops.mhc import mhc_fused_post_pre_delayed_asm_supported
+
+    return bool(mhc_fused_post_pre_delayed_asm_supported(hidden_size, hc_mult))
+
+
+def mhc_pre_delayed_seam(
+    pre_delayed: MHCPreDelayedOp,
+    residual: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    pre_mix: torch.Tensor | None = None,
+    x: torch.Tensor | None = None,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 1e-6,
+    sublayer_out: torch.Tensor | None = None,
+    post_layer_mix: torch.Tensor | None = None,
+    comb_res_mix: torch.Tensor | None = None,
+    fn_packed: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """`pre_delayed` with the seam run as one AITER call where it applies.
+
+    Same arguments and returns as `MHCPreDelayedOp`. Layer 0 (`x`), seams
+    without a post block (Engram), and seams with a fused norm or a packed
+    `fn` (Mega-MHC) keep `pre_delayed`. The caller checks `supports_mhc_seam`
+    once.
+    """
+    if (
+        sublayer_out is None
+        or post_layer_mix is None
+        or comb_res_mix is None
+        or x is not None
+        or norm_weight is not None
+        or fn_packed is not None
+        or residual.shape[0] < MHC_SEAM_MIN_TOKENS
+    ):
+        return pre_delayed(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+            pre_mix=pre_mix,
+            x=x,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
+            sublayer_out=sublayer_out,
+            post_layer_mix=post_layer_mix,
+            comb_res_mix=comb_res_mix,
+            fn_packed=fn_packed,
+        )
+    from aiter.ops.mhc import mhc_fused_post_pre_delayed
+
+    return mhc_fused_post_pre_delayed(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_mult_value,
+        sinkhorn_repeat,
+        pre_mix,
+        sublayer_out,
+        post_layer_mix,
+        comb_res_mix,
     )

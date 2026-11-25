@@ -71,6 +71,7 @@ def test_linear_attention_spec_decode_full_graph_metadata_pads_cache_slots():
         num_speculative_tokens=1,
     )
     vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+    vllm_config.cache_config.enable_prefix_caching = False
 
     builder = BailingLinearAttentionMetadataBuilder(
         kv_cache_spec=_create_mamba_spec(),
@@ -123,6 +124,7 @@ def test_linear_attention_full_graph_metadata_uses_stable_decode_buffers():
         num_speculative_tokens=1,
     )
     vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+    vllm_config.cache_config.enable_prefix_caching = False
 
     builder = BailingLinearAttentionMetadataBuilder(
         kv_cache_spec=_create_mamba_spec(),

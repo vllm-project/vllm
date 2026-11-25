@@ -15,7 +15,6 @@ from vllm.model_executor.model_loader.utils import (
     build_model_from_processed_weights,
 )
 from vllm.model_executor.model_loader.weight_cache.protocol import (
-    TensorKind,
     check_weight_cache_loader_support,
 )
 from vllm.model_executor.model_loader.weight_cache.transport import SeedTransport
@@ -73,16 +72,12 @@ class PeerModelLoader(BaseModelLoader):
         )
         tensors = mover.fill(manifest, payload["seed"], device)
         acknowledge_lease(transport)
-        kinds: dict[str, TensorKind] = {
-            name: "param" if view["is_param"] else "buffer"
-            for name, view in manifest["tensors"].items()
-        }
         model = build_model_from_processed_weights(
             vllm_config,
             model_config,
             prefix,
             tensors,
-            kinds,
+            manifest,
             aliases=dict(payload["aliases"]),
             attrs=dict(payload["attrs"]),
             load_config=self.load_config,
