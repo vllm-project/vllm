@@ -20,6 +20,7 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForMultimodalLM,
+    AutoProcessor,
     PreTrainedConfig,
     core_model_loading,
 )
@@ -36,7 +37,7 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode
 from vllm.model_executor import model_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
-from vllm.model_executor.models.transformers.base import Base, SplitWeights
+from vllm.model_executor.models.transformers.base import Base, ConvertWeights
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
@@ -1093,11 +1094,11 @@ def test_ignored_unexpected_patterns_match_renamed_keys():
 @pytest.mark.skipif(
     not hasattr(core_model_loading, "Split"), reason="`Split` needs Transformers 5.22"
 )
-def test_split_weights_splits_fused_gqa_qkv():
+def test_convert_weights_splits_fused_gqa_qkv():
     """A checkpoint that fuses GQA `[q|k|v]` into one tensor (Sarvam-30B) is split
-    into each projection's size, matched before and named after the renamings. Like
-    in Transformers, a longer name that only starts with the pattern is not split,
-    and a quantization scale for the fused tensor is rejected, not split."""
+    into each projection's size. Like in Transformers, a longer name that only starts
+    with the pattern is not split, and a quantization scale for the fused tensor is
+    rejected, not split."""
     with torch.device("meta"):
         model = nn.Module()
         model.config = PreTrainedConfig()
@@ -1110,25 +1111,73 @@ def test_split_weights_splits_fused_gqa_qkv():
         target_patterns=["q_proj", "k_proj", "v_proj"],
         operations=[core_model_loading.Split(dim=0)],
     )
-    mapper = WeightsMapper(
-        orig_to_new_renaming=[WeightRenaming(r"^attention\.", "self_attn.")]
-    )
     fused = torch.arange(12 * 8, dtype=torch.float32).reshape(12, 8)
 
-    weights = SplitWeights(converter, mapper, model)
-    other = ("attention.query_key_value_norm.weight", torch.zeros(12))
-    pieces = dict(weights([("attention.query_key_value.weight", fused), other]))
+    weights = ConvertWeights(converter, model)
+    other = ("self_attn.query_key_value_norm.weight", torch.zeros(12))
+    pieces = dict(weights([("self_attn.query_key_value.weight", fused), other]))
 
     assert list(pieces) == [
-        "attention.q_proj.weight",
-        "attention.k_proj.weight",
-        "attention.v_proj.weight",
-        "attention.query_key_value_norm.weight",
+        "self_attn.q_proj.weight",
+        "self_attn.k_proj.weight",
+        "self_attn.v_proj.weight",
+        "self_attn.query_key_value_norm.weight",
     ]
-    split = [pieces[f"attention.{p}_proj.weight"] for p in "qkv"]
+    split = [pieces[f"self_attn.{p}_proj.weight"] for p in "qkv"]
     torch.testing.assert_close(torch.cat(split), fused)
     assert [p.shape[0] for p in split] == [8, 2, 2]
 
-    scale = ("attention.query_key_value.weight_scale", torch.ones(1))
+    scale = ("self_attn.query_key_value.weight_scale", torch.ones(1))
     with pytest.raises(ValueError, match="quantized tensors is not supported"):
         list(weights([scale]))
+
+
+def test_converters_apply_to_renamed_weights(tmp_path, tp_init):
+    """Converters see the renamed checkpoint names, as in Transformers, so those scoped
+    to a sub-model apply too. Molmo2's text model splits `att_proj` and `ff_proj`, and
+    concatenates `wte.embedding` with `wte.new_embedding` into `embed_tokens`."""
+    pytest.importorskip("transformers.models.molmo2")
+    model_id = get_model("Molmo2ForConditionalGeneration")
+    sizes = dict(hidden_size=64, intermediate_size=128, num_hidden_layers=1)
+    heads = dict(num_attention_heads=2, num_key_value_heads=2, head_dim=32)
+    gqa = dict(num_attention_heads=2, num_key_value_heads=1, head_dim=64)
+    config = AutoConfig.for_model(
+        "molmo2",
+        text_config=sizes | gqa | dict(vocab_size=128),
+        vision_config=sizes | heads | dict(image_size=[28, 28]),
+        adapter_config=sizes | heads | dict(vision_feature_layer=[0]),
+    )
+    # Saved in the layout of the Hub checkpoints (`model.transformer.blocks.*`)
+    AutoModelForMultimodalLM.from_config(config).save_pretrained(tmp_path)
+    AutoProcessor.from_pretrained(model_id).save_pretrained(tmp_path)
+    checkpoint = {
+        name: tensor.to(torch.bfloat16)
+        for name, tensor in load_file(tmp_path / "model.safetensors").items()
+    }
+
+    model_config = ModelConfig(
+        str(tmp_path), model_impl="transformers", dtype="bfloat16"
+    )
+    vllm_config = VllmConfig(model_config=model_config)
+    with set_current_vllm_config(vllm_config):
+        model = model_loader.get_model(vllm_config=vllm_config)
+
+    def param(name: str) -> torch.Tensor:
+        return model.get_parameter(f"model.language_model.{name}").cpu()
+
+    wte, block = "model.transformer.wte", "model.transformer.blocks.0"
+    embedding = torch.cat(
+        [checkpoint[f"{wte}.embedding"], checkpoint[f"{wte}.new_embedding"]]
+    )
+    torch.testing.assert_close(
+        param("embed_tokens.weight")[: len(embedding)], embedding
+    )
+    # `att_proj` is `[q|k|v]` and `ff_proj` is `[up|gate]`
+    up, gate = checkpoint[f"{block}.mlp.ff_proj.weight"].chunk(2)
+    torch.testing.assert_close(
+        param("layers.0.self_attn.qkv_proj.weight"),
+        checkpoint[f"{block}.self_attn.att_proj.weight"],
+    )
+    torch.testing.assert_close(
+        param("layers.0.mlp.gate_up_proj.weight"), torch.cat([gate, up])
+    )

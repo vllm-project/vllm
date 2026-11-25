@@ -19,6 +19,7 @@
 import os
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
+from dataclasses import replace
 from functools import cached_property
 from itertools import chain
 from operator import attrgetter
@@ -104,21 +105,16 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class SplitWeights:
-    """Apply a Transformers conversion that only splits a checkpoint tensor (e.g. a
-    fused `query_key_value` into `q_proj`, `k_proj` and `v_proj`) to the weights.
+class ConvertWeights:
+    """Apply a Transformers conversion that splits or concatenates checkpoint tensors
+    (e.g. a fused `query_key_value` into `q_proj`, `k_proj` and `v_proj`) to the
+    renamed weights.
 
     `Split` sizes each piece like its target parameter, which vLLM may replace (e.g.
     by fusing the projections), so the shapes are recorded on construction."""
 
-    def __init__(
-        self,
-        converter: WeightConverter,
-        mapper: WeightsMapper,
-        model: nn.Module,
-    ):
+    def __init__(self, converter: WeightConverter, model: nn.Module):
         self.converter = converter
-        self.mapper = mapper
         self.config = model.config
         tensors = chain(model.named_parameters(), model.named_buffers())
         self.shapes = {name: t.shape for name, t in tensors}
@@ -132,31 +128,38 @@ class SplitWeights:
     ) -> Iterable[tuple[str, torch.Tensor]]:
         converter = self.converter
         sources, targets = converter.source_patterns, converter.target_patterns
+        # Sources collected so far, by the name of the first target
+        pending: dict[str, dict[str, torch.Tensor]] = {}
         for name, tensor in weights:
-            # Match like Transformers does (whole names, scoped, first occurrence)
+            # Match like Transformers does (after the renamings, whole names, scoped)
             first, source = converter.rename_source_key(name)
             if source is None:
                 yield name, tensor
                 continue
-            full_layer_name = self.mapper.map_name(first)
-            if full_layer_name not in self.shapes:
+            if first not in self.shapes:
                 raise ValueError(
-                    f"Cannot split {name!r} into {targets}: {full_layer_name!r} is "
-                    "not a tensor of the model. Splitting quantized tensors is not "
+                    f"Cannot convert {name!r} into {targets}: {first!r} is "
+                    "not a tensor of the model. Converting quantized tensors is not "
                     "supported."
                 )
-            pieces = {source: tensor}
+            pieces = pending.setdefault(first, {})
+            pieces[source] = tensor
+            if len(pieces) < len(sources):
+                continue
+            del pending[first]
             for op in converter.operations:
                 pieces = op.convert(
                     pieces,
                     sources,
                     targets,
-                    full_layer_name=full_layer_name,
+                    full_layer_name=first,
                     model=self,
                     config=self.config,
                 )
             for target, piece in pieces.items():
                 yield first.replace(targets[0], target), piece
+        if pending:
+            raise ValueError(f"Missing some of {sources} for {list(pending)}")
 
 
 VLLM_ATTN_ATTR = "attn"
@@ -208,6 +211,7 @@ class Base(
     EagleModelMixin,
 ):
     hf_to_vllm_mapper: WeightsMapper
+    weight_converters: list[WeightsTransformFn]
     supports_aux_hidden_states_over_pp = True
     _tower_model_names: tuple[str, ...] = ()
     """Read by `recursive_replace`, so text-only models need this empty default."""
@@ -459,18 +463,24 @@ class Base(
         """
         orig_to_new_renaming: list[WeightRenaming] = []
         orig_to_new_regex: dict[re.Pattern, str | None] = {}
-        weight_converters: list[WeightConverter] = []
+        converters: list[WeightConverter] = []
 
         for mapping in self._weight_conversions():
             # Handle weights which have been renamed in Transformers
             if isinstance(mapping, WeightRenaming):
                 orig_to_new_renaming.append(mapping)
-            # Handle weights which Transformers splits into several
+            # Handle weights which Transformers splits or concatenates, unless a source
+            # pattern is a wildcard, which can match several tensors per target
             # TODO: Use `isinstance` once the minimum Transformers version is >= 5.22
-            elif isinstance(mapping, WeightConverter) and all(
-                type(op).__name__ in ("Chunk", "Split") for op in mapping.operations
+            elif (
+                isinstance(mapping, WeightConverter)
+                and all(
+                    type(op).__name__ in ("Chunk", "Split", "Concatenate")
+                    for op in mapping.operations
+                )
+                and not any("*" in source for source in mapping.source_patterns)
             ):
-                weight_converters.append(mapping)
+                converters.append(mapping)
 
         # Standardise base model prefix
         bmp = self.model.base_model_prefix
@@ -504,12 +514,8 @@ class Base(
             orig_to_new_renaming=orig_to_new_renaming,
             orig_to_new_regex=orig_to_new_regex,
         )
-        # `Split` looks targets up by their names before vLLM's fusions are mapped
-        mapper = self.hf_to_vllm_mapper
-        split_weights: list[WeightsTransformFn] = [
-            SplitWeights(c, mapper, self) for c in weight_converters
-        ]
-        self.hf_to_vllm_mapper |= WeightsMapper(weights_transforms=split_weights)
+        # `Split` reads the sizes of its targets before vLLM's fusions replace them
+        self.weight_converters = [ConvertWeights(c, self) for c in converters]
 
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()
@@ -1088,7 +1094,16 @@ class Base(
             ignore_unexpected_prefixes=self.ignore_unexpected_prefixes,
             ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        mapper = self.hf_to_vllm_mapper
+        if self.weight_converters:
+            # As in Transformers, converters act on the renamed weights. Their targets
+            # are Transformers module names, so vLLM's fusions are mapped after them
+            weights = replace(mapper, orig_to_new_stacked={}).apply(weights)
+            mapper = WeightsMapper(
+                weights_transforms=self.weight_converters,
+                orig_to_new_stacked=mapper.orig_to_new_stacked,
+            )
+        return loader.load_weights(weights, mapper=mapper)
 
     def _drop_ignored_unexpected(
         self, weights: Iterable[tuple[str, torch.Tensor]]
