@@ -43,7 +43,11 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
         description=(
             "Which side to truncate from when truncate_prompt_tokens is active. "
             "'right' keeps the first N tokens. "
-            "'left' keeps the last N tokens."
+            "'left' keeps the last N tokens. "
+            "In a text prompt, special tokens that the tokenizer adds (such as "
+            "BOS, CLS or SEP) are kept and count toward N, unless there are more "
+            "of them than N. Token-ID prompts, multimodal prompts and "
+            "cross-encoder query/document pairs are sliced without this exception."
         ),
     )
     request_id: str = Field(

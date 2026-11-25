@@ -94,7 +94,10 @@ class CompletionRequest(OpenAIBaseModel):
         description=(
             "Which side to truncate from when truncate_prompt_tokens is active. "
             "'right' keeps the first N tokens. "
-            "'left' keeps the last N tokens."
+            "'left' keeps the last N tokens. "
+            "In a text prompt, special tokens that the tokenizer adds (such as "
+            "BOS) are kept and count toward N, unless there are more of them than "
+            "N. Token-ID and multimodal prompts are sliced without this exception."
         ),
     )
     allowed_token_ids: list[int] | None = None
