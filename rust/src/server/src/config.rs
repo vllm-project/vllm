@@ -91,13 +91,14 @@ pub struct ApiServerOptions {
     pub log_error_stack: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
     pub enable_scale_out: bool,
-    /// When `true`, register `/tokenizer_info`.
-    pub enable_tokenizer_info_endpoint: bool,
     /// Accept any requested model name, served by the base model unless it
     /// names a loaded LoRA adapter (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
     pub skip_model_name_validation: bool,
     /// When `true`, register the development routes (`VLLM_SERVER_DEV_MODE`).
     pub server_dev_mode: bool,
+    /// When `true`, register the LoRA load and unload routes
+    /// (`VLLM_ALLOW_RUNTIME_LORA_UPDATING`).
+    pub allow_runtime_lora_updating: bool,
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,
