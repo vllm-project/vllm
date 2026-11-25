@@ -170,6 +170,7 @@ if TYPE_CHECKING:
     VLLM_GEMMA4_HD512_CHUNK: bool = False
     VLLM_GEMMA4_HD512_CASCADE: bool = False
     VLLM_GEMMA4_HD512_CASCADE_MIXED: bool = False
+    VLLM_GEMMA4_HD512_CASCADE_HOOK: str = "1"
     VLLM_GEMMA4_HD512_CHUNK_PREFIX: int = 7000
     VLLM_GEMMA4_HD512_CHUNK_SEGS: int = 8
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1384,6 +1385,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # VLLM_GEMMA4_HD512_CASCADE; without it this flag is inert.
     "VLLM_GEMMA4_HD512_CASCADE_MIXED": lambda: (
         os.getenv("VLLM_GEMMA4_HD512_CASCADE_MIXED", "False").lower() in ("true", "1")
+    ),
+    "VLLM_GEMMA4_HD512_CASCADE_HOOK": lambda: os.getenv(
+        "VLLM_GEMMA4_HD512_CASCADE_HOOK", "1"
     ),
     # gfx942 (MI300X/MI325X): route head_size 512 prefill/chunk rows with a
     # long-enough prefix through the split-KV MFMA chunk kernel in

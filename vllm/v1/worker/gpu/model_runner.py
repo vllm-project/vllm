@@ -1745,7 +1745,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         creates each group's CPU block-table shadow."""
         ctx = []
         for gid in range(len(self.kv_cache_config.kv_cache_groups)):
-            spec = self.kv_cache_config.kv_cache_groups[gid].kv_cache_spec
+            group = self.kv_cache_config.kv_cache_groups[gid]
+            specs = getattr(group, "kv_cache_specs", None)
+            spec = next(iter(specs.values())) if specs else group.kv_cache_spec
             if getattr(spec, "head_size", None) != 512:
                 continue
             if getattr(spec, "num_kv_heads", None) != 2:
@@ -2005,7 +2007,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # shadow. FULL-CG decode replay never rebuilds attention
             # metadata, so without this every replayed step runs the
             # cascade kernels on the previous step's (or empty) groups.
-            if envs.VLLM_GEMMA4_HD512_CASCADE:
+            if envs.VLLM_GEMMA4_HD512_CASCADE and envs.VLLM_GEMMA4_HD512_CASCADE_HOOK != "0":
                 self._hd512_cascade_set_step_v2(input_batch)
             block_tables, slot_mappings = self.prepare_attn(input_batch)
             # Mamba prefix-cache pre-copy: migrate recurrent state across block

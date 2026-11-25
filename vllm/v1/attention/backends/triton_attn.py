@@ -476,6 +476,9 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         block table and per-row block counts directly (the V2 model runner
         keeps no runner-side CPU block_table object)."""
         bufs = self.hd512_cascade_bufs
+        if os.environ.get("VLLM_GEMMA4_HD512_CASCADE_DBG") == "1":
+            print(f"[hd512] set_step_np n={num_reqs} bufs={bufs is not None} "
+                  f"capturing={torch.cuda.is_current_stream_capturing()}", flush=True)
         if bufs is None:
             return
         (
@@ -526,12 +529,20 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         pin = self._cascade_pin
         step = self._cascade_step
         self._cascade_step = None
-        if step is None:
+        if os.environ.get("VLLM_GEMMA4_HD512_CASCADE_DBG") == "1":
+            print(f"[hd512] commit step={'set' if step is not None else 'none'} "
+                  f"capturing={torch.cuda.is_current_stream_capturing()}", flush=True)
+        if step is None or torch.cuda.is_current_stream_capturing():
             # No hook this step (CUDA-graph capture builds, draft-decode
-            # refresh): the persistent buffers hold the previous step's
-            # values or the zeroed defaults from __init__; emitting device
-            # ops here would capture them into decode CUDA graphs, where
-            # they would zero this step's committed descriptors on replay.
+            # refresh) or a capture-build running on current main: fall
+            # back to the zeroed defaults from __init__, which the HIP kernels
+            # treat as "no groups, take the plain path" (pad-safe).
+            bufs.it_row.zero_()
+            bufs.it_mem.fill_(-1)
+            bufs.it_sblk.zero_()
+            bufs.grp_flag.zero_()
+            bufs.sq_shifted.zero_()
+            bufs.bt_shifted.zero_()
             return
         n, it_row, it_mem, it_sblk, grp_flag, bt_sh, sq_sh, max_sqb = step
         pin["it_row"].zero_()
@@ -540,8 +551,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         pin["it_mem"].copy_(torch.from_numpy(it_mem), non_blocking=False)
         pin["it_sblk"].zero_()
         pin["it_sblk"].copy_(torch.from_numpy(it_sblk), non_blocking=False)
+        pin["grp_flag"].zero_()
         pin["grp_flag"][:n].copy_(torch.from_numpy(grp_flag), non_blocking=False)
-        pin["grp_flag"][n:].zero_()
+        pin["bt_shifted"].zero_()
+        pin["sq_shifted"].zero_()
         pin["sq_shifted"][:n].copy_(torch.from_numpy(sq_sh), non_blocking=False)
         # bt_sh is trimmed to the longest row's block count; a single
         # (ungrouped) row whose length is block-aligned makes
@@ -866,7 +879,8 @@ class TritonAttentionImpl(AttentionImpl):
         # gfx942 hd512 cascade decode (VLLM_GEMMA4_HD512_CASCADE): same
         # kernel geometry as _hd512_mfma_decode, armed by its own flag.
         self._hd512_mfma_cascade = (
-            envs.VLLM_GEMMA4_HD512_CASCADE
+            not os.environ.get("VLLM_GEMMA4_HD512_CASCADE_NO_DISPATCH")
+            and envs.VLLM_GEMMA4_HD512_CASCADE
             and current_platform.is_rocm()
             and head_size == 512
             and num_heads == 8
@@ -1030,6 +1044,7 @@ class TritonAttentionImpl(AttentionImpl):
         # falls through to the stock full-batch path.
         if (
             self._hd512_mfma_chunk
+            and not torch.cuda.is_current_stream_capturing()
             and attn_metadata.max_query_len > 1
             and kv_cache.shape[2] == 16
             and kv_cache.dtype == torch.bfloat16
