@@ -498,10 +498,12 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("required_draft_method", [None, "dspark"])
 async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
     monkeypatch,
+    required_draft_method,
 ):
-    """Producer sends its PP layer shard to the matching consumer layer address."""
+    """Transfer the matching PP shard or reject missing draft context KV."""
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = _make_worker_vllm_config("kv_producer")
 
@@ -556,6 +558,12 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
             ],
             {"d-req-layer-align": (transfer_id, [[20]])},
         )
+        if required_draft_method is not None:
+            payload = msgspec.structs.asdict(xfer_meta)
+            payload["required_draft_context_method"] = required_draft_method
+            xfer_meta = prefill_worker._xfer_meta_decoder.decode(
+                msgspec.msgpack.encode(payload)
+            )
         mock_socket = AsyncMock(spec=zmq.asyncio.Socket)
         mock_socket.send_multipart = AsyncMock()
         identity = b"consumer-layer-align"
@@ -565,19 +573,25 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
         ) as mock_send_blocks:
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
 
-        src_ptrs, dst_ptrs, lengths = mock_send_blocks.call_args[0][1:]
-        np.testing.assert_array_equal(src_ptrs, [0x1000 + 10 * block_len])
-        np.testing.assert_array_equal(dst_ptrs, [0xB000 + 20 * block_len])
-        np.testing.assert_array_equal(lengths, [block_len])
+        prefill_worker.sender_loop = origin_sender_loop
+        prefill_worker.shutdown()
 
         sent_identity, sent_payload = mock_socket.send_multipart.call_args[0][0]
         assert sent_identity == identity
         response = prefill_worker._xfer_resp_decoder.decode(sent_payload)
-        assert response.status == MooncakeXferResponseStatus.FINISH
-        assert response.ok_reqs == ["d-req-layer-align"]
-
-        prefill_worker.sender_loop = origin_sender_loop
-        prefill_worker.shutdown()
+        if required_draft_method is not None:
+            assert response.status == MooncakeXferResponseStatus.ERROR
+            assert response.err_msg is not None
+            assert "requires dspark draft context KV" in response.err_msg
+            assert "Configure the same drafter on prefill" in response.err_msg
+            mock_send_blocks.assert_not_called()
+        else:
+            assert response.status == MooncakeXferResponseStatus.FINISH
+            assert response.ok_reqs == ["d-req-layer-align"]
+            src_ptrs, dst_ptrs, lengths = mock_send_blocks.call_args[0][1:]
+            np.testing.assert_array_equal(src_ptrs, [0x1000 + 10 * block_len])
+            np.testing.assert_array_equal(dst_ptrs, [0xB000 + 20 * block_len])
+            np.testing.assert_array_equal(lengths, [block_len])
 
 
 def test_basic_interface():

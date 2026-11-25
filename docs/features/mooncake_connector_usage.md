@@ -41,6 +41,13 @@ Now you can send requests to the proxy server through port 8000.
 For multimodal Encode-Prefill-Decode (encoder embeddings rather than KV
 cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 
+### Speculative decoding with draft context KV
+
+If decode uses a drafter that projects context KV from the target model's hidden
+states, such as DSpark or DFlash, configure the same drafter on prefill. You can
+optionally set `prefill_context_kv_only: true` in prefill's speculative config
+to write draft context KV without proposing draft tokens.
+
 ## Environment Variables
 
 - `VLLM_MOONCAKE_BOOTSTRAP_PORT`: Port for Mooncake bootstrap server

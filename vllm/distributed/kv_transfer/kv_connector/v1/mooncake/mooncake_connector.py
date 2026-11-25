@@ -678,6 +678,9 @@ class MooncakeXferMetadata(
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
     layout_id: int = 0
+    # Sent with the full layout when decode needs context KV from a drafter
+    # that projects it from target hidden states.
+    required_draft_context_method: str | None = None
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -1811,6 +1814,23 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
+        required_method = meta.required_draft_context_method
+        if required_method is not None:
+            spec = self.vllm_config.speculative_config
+            prefill_method = (
+                (spec.custom_method or spec.method) if spec is not None else None
+            )
+            if prefill_method != required_method:
+                response = MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.ERROR,
+                    err_msg=(
+                        f"Mooncake decode requires {required_method} draft context "
+                        "KV. Configure the same drafter on prefill "
+                        f"(currently {prefill_method or 'no drafter'})."
+                    ),
+                )
+                await sock.send_multipart((identity, self._encoder.encode(response)))
+                return
         if _pp_mismatch_hides_packed_layers(
             self.pp_size,
             meta.remote_pp_size,
@@ -3331,6 +3351,10 @@ class MooncakeConnectorWorker:
                 block_lens=[],
                 kv_block_lens=[],
             )
+        spec = self.vllm_config.speculative_config
+        required_draft_context_method = None
+        if spec is not None and spec.speculator_config.projects_context_kv:
+            required_draft_context_method = spec.custom_method or spec.method
         return MooncakeXferMetadata(
             remote_hostname=self.hostname,
             remote_port=self.rpc_port,
@@ -3349,6 +3373,7 @@ class MooncakeConnectorWorker:
                 list(groups) for groups in self.region_shared_groups
             ],
             registered_row_offsets=self.region_row_offsets,
+            required_draft_context_method=required_draft_context_method,
         )
 
     def _validate_head_resharding_layout(
