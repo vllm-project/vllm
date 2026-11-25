@@ -475,7 +475,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/sampler.cu"
     "csrc/attention/dsa/topk/top_k_per_row.cu"
     "csrc/attention/dsa/topk/topk.cu"
-    "csrc/mamba/selective_scan_fwd.cu"
     "csrc/cache_kernels.cu"
     "csrc/cache_kernels_fused.cu"
     "csrc/custom_all_gather_reduce_scatter.cu"
@@ -487,6 +486,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/fused_qknorm_rope_cache_kernel.cu")
+    # CUDA-only: the tanh.approx inline PTX does not hipify.
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/mamba/gdn_prefill_conv.cu")
+    # The f32x2 path needs an sm_103a image (see GDN_HAS_F32X2).
+    if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
+       CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.9)
+      set_gencode_flags_for_srcs(
+        SRCS "csrc/mamba/gdn_prefill_conv.cu"
+        CUDA_ARCHS "10.3a")
+    endif()
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA" AND

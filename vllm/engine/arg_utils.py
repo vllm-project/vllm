@@ -41,6 +41,7 @@ from vllm.config import (
     ConfigType,
     DeviceConfig,
     DiffusionConfig,
+    ECEventsConfig,
     ECTransferConfig,
     EncoderCacheManagerConfig,
     EngramConfig,
@@ -592,6 +593,7 @@ class EngineArgs:
     long_prefill_token_threshold_adaptive: bool = (
         SchedulerConfig.long_prefill_token_threshold_adaptive
     )
+    pp_microbatch_min_tokens: int = SchedulerConfig.pp_microbatch_min_tokens
     max_num_seqs: int | None = None
     max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
     max_num_inflight_kv_loads: int | None = SchedulerConfig.max_num_inflight_kv_loads
@@ -662,7 +664,7 @@ class EngineArgs:
         MultiModalConfig.mm_encoder_fp8_scale_save_margin
     )
     io_processor_plugin: str | None = None
-    renderer_num_workers: int = 1
+    renderer_num_workers: int | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     video_pruning_method: str = MultiModalConfig.video_pruning_method
@@ -773,6 +775,7 @@ class EngineArgs:
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
 
+    ec_events_config: ECEventsConfig | None = None
     ec_transfer_config: ECTransferConfig | None = None
     ec_manager_config: EncoderCacheManagerConfig = get_field(
         VllmConfig, "ec_manager_config"
@@ -1771,6 +1774,10 @@ class EngineArgs:
             "--long-prefill-token-threshold-adaptive",
             **scheduler_kwargs["long_prefill_token_threshold_adaptive"],
         )
+        scheduler_group.add_argument(
+            "--pp-microbatch-min-tokens",
+            **scheduler_kwargs["pp_microbatch_min_tokens"],
+        )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
         scheduler_group.add_argument(
@@ -1890,6 +1897,7 @@ class EngineArgs:
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
+        vllm_group.add_argument("--ec-events-config", **vllm_kwargs["ec_events_config"])
         vllm_group.add_argument(
             "--ec-transfer-config", **vllm_kwargs["ec_transfer_config"]
         )
@@ -2693,6 +2701,7 @@ class EngineArgs:
             long_prefill_token_threshold_adaptive=(
                 self.long_prefill_token_threshold_adaptive
             ),
+            pp_microbatch_min_tokens=self.pp_microbatch_min_tokens,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
@@ -2930,6 +2939,7 @@ class EngineArgs:
             compilation_config=compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            ec_events_config=self.ec_events_config,
             ec_transfer_config=self.ec_transfer_config,
             ec_manager_config=self.ec_manager_config,
             reasoning_config=self.reasoning_config,

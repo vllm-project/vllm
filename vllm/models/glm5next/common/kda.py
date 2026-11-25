@@ -732,13 +732,15 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.A_log.view(-1),
             self.dt_bias.view(-1, self.head_dim),
             self.kda_lower_bound,
-            initial_state.contiguous(),
-            final_state,
-            cu_seqlens.contiguous(),
-            checkpoint_state,
-            checkpoint.checkpoint_offsets.contiguous()
-            if checkpoint is not None
-            else None,
+            cu_seqlens=cu_seqlens.contiguous(),
+            initial_state=initial_state.contiguous(),
+            final_state=final_state,
+            checkpoint_state=checkpoint_state,
+            checkpoint_offsets=(
+                checkpoint.checkpoint_offsets.contiguous()
+                if checkpoint is not None
+                else None
+            ),
         )
         if checkpoint is not None:
             assert self._checkpoint_exporter is not None
