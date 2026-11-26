@@ -145,6 +145,44 @@ class TestBuildEngineInputSkipMmCache:
         assert engine_input["mm_kwargs"]["image"][0]["pixel_values"].skip_mm_cache is True
 
     @pytest.mark.asyncio
+    async def test_completion_returns_single_engine_input(self):
+        serving = _make_serving_for_build_input()
+        expected = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+        serving.online_renderer.preprocess_completion = AsyncMock(
+            return_value=[expected]
+        )
+
+        engine_input = await serving.build_engine_input(_make_request())
+
+        assert engine_input is expected
+        serving.online_renderer.preprocess_completion.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_feature_validation_error_is_raised(self):
+        serving = _make_serving_for_build_input()
+        serving._validate_mm_cache_handles.side_effect = ValueError("bad cache handle")
+        request = _make_request(
+            features=_make_features(
+                mm_hashes={"image": ["hash-1"]},
+                placeholders={"image": [(0, 1)]},
+                kwargs_data={"image": ["encoded-tensor"]},
+            )
+        )
+
+        with (
+            patch(
+                f"{SERVING_MOD}.rebuild_mm_placeholders",
+                side_effect=lambda p: p,
+            ),
+            patch(
+                f"{SERVING_MOD}.mm_kwargs_from_features",
+                return_value={"image": [_FakeElem(data="tensor")]},
+            ),
+            pytest.raises(ValueError, match="bad cache handle"),
+        ):
+            await serving.build_engine_input(request)
+
+    @pytest.mark.asyncio
     async def test_metadata_only_does_not_set_skip_mm_cache(self):
         serving = _make_serving_for_build_input()
         features = _make_features(
