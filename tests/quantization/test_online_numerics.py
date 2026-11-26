@@ -17,7 +17,6 @@ from compressed_tensors.quantization import (
 
 from tests.quantization.test_online import (
     DEVICE,
-    _enable_aiter_mxfp4_moe,
     _fully_quantized_modelopt_mxfp8_config,
     _make_nvfp4_moe_source,
     _materialize_requantization_source,
@@ -39,6 +38,8 @@ from vllm.config.vllm import (
     set_current_vllm_config,
 )
 from vllm.distributed import parallel_state
+from vllm.model_executor.kernels.linear import _POSSIBLE_MXFP4_KERNELS
+from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     FusedMoEMethodBase,
@@ -119,7 +120,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
     amax_for_tp_weight_quant,
     get_fp8_min_max,
     kFp8Dynamic128Sym,
@@ -138,7 +138,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
+from vllm.platforms import PlatformEnum, current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -151,7 +151,8 @@ _ReferencePack = tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]
 _ReferencePacker = Callable[[str, torch.Tensor], _ReferencePack]
 
 
-LINEAR_SOURCE_QUANT_METHODS: dict[str, Callable[[], QuantizationConfig]] = {
+LINEAR_SOURCE_QUANT_METHODS: dict[str, Callable[[], QuantizationConfig] | None] = {
+    "bf16": None,
     "mxfp8": _fully_quantized_modelopt_mxfp8_config,
     "nvfp4": partial(ModelOptNvFp4Config, is_checkpoint_nvfp4_serialized=True),
 }
@@ -166,21 +167,23 @@ MOE_SOURCE_QUANT_METHODS: dict[
     str, Callable[[RoutedExperts], FusedMoEMethodBase] | None
 ] = {
     "bf16": None,
-    "fp8/block": lambda layer: _make_fp8_moe_source(layer, blockwise=True),
-    "fp8/tensor": lambda layer: _make_fp8_moe_source(layer, blockwise=False),
+    "fp8/block": lambda layer: Fp8MoEMethod(
+        Fp8Config(weight_block_size=[128, 128]), layer
+    ),
+    "fp8/tensor": lambda layer: Fp8MoEMethod(Fp8Config(), layer),
     "compressed_tensors/block": lambda layer: _make_ct_fp8_moe_source(layer, "block"),
     "compressed_tensors/tensor": lambda layer: _make_ct_fp8_moe_source(layer, "tensor"),
     "compressed_tensors/channel": lambda layer: _make_ct_fp8_moe_source(
         layer, "channel"
     ),
-    "quark/block": lambda layer: _make_quark_fp8_moe_source(
-        layer, kFp8Static128BlockSym, kFp8Dynamic128Sym
+    "quark/block": lambda layer: QuarkW8A8Fp8MoEMethod(
+        layer.moe_config, kFp8Static128BlockSym, kFp8Dynamic128Sym
     ),
-    "quark/tensor": lambda layer: _make_quark_fp8_moe_source(
-        layer, kFp8StaticTensorSym, kFp8DynamicTensorSym
+    "quark/tensor": lambda layer: QuarkW8A8Fp8MoEMethod(
+        layer.moe_config, kFp8StaticTensorSym, kFp8DynamicTensorSym
     ),
-    "quark/channel": lambda layer: _make_quark_fp8_moe_source(
-        layer, kFp8StaticChannelSym, kFp8DynamicTokenSym
+    "quark/channel": lambda layer: QuarkW8A8Fp8MoEMethod(
+        layer.moe_config, kFp8StaticChannelSym, kFp8DynamicTokenSym
     ),
     "compressed_tensors/nvfp4": lambda layer: _make_nvfp4_moe_source(
         "compressed_tensors", layer.moe_config
@@ -207,6 +210,15 @@ _MOE_PADDING_TARGETS = (
     "nvfp4_per_token",
     "int8",
 )
+# Per-block amplitudes spanning many MXFP4 scale exponents.
+_BLOCK_AMPLITUDES = (2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4)
+
+
+def _vary_block_scales(weight: torch.Tensor) -> None:
+    """Scale each 32-wide input block of `weight` in place."""
+    amplitudes = torch.tensor(_BLOCK_AMPLITUDES, dtype=weight.dtype)
+    blocks = torch.arange(weight.shape[-1]) // 32
+    weight.mul_(amplitudes[blocks % len(amplitudes)].to(weight.device))
 
 
 @pytest.mark.skipif(
@@ -215,6 +227,7 @@ _MOE_PADDING_TARGETS = (
 )
 @pytest.mark.parametrize("source", tuple(LINEAR_SOURCE_QUANT_METHODS))
 @pytest.mark.parametrize("target", tuple(LINEAR_ONLINE_QUANT_METHODS))
+@pytest.mark.parametrize("linear_backend", ("auto", "emulation", "aiter", "marlin"))
 @pytest.mark.parametrize(
     "projection,shard_dim",
     [
@@ -223,42 +236,80 @@ _MOE_PADDING_TARGETS = (
         pytest.param(ReplicatedLinear, None, id="replicated"),
     ],
 )
+@pytest.mark.parametrize("parallelism", ("tp1", "tp2", "tp4", "tp8"), indirect=True)
 def test_online_linear_requantization_numerics(
     parallelism: str,
     numerics_model_config: ModelConfig,
     source: str,
     target: str,
+    linear_backend: str,
     projection: type[RowParallelLinear | ColumnParallelLinear | ReplicatedLinear],
     shard_dim: int | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Check that sharding and requantizing linear weights agree in either order.
 
-    - Loading a source checkpoint shard and requantizing it online produces
-      the same weights and scales as quantizing the full weight first and
-      loading the matching shard with the offline target method.
-    - This holds for replicated, row-parallel, and column-parallel layers.
+    - Loading a source checkpoint shard (or BF16 shard) and quantizing it online
+      produces the same weights and scales as quantizing the full weight first
+      and loading the matching shard with the offline target method.
+    - This holds for replicated, row-parallel, and column-parallel layers, and
+      for each MXFP4 linear backend.
     - Before requantization, the dequantized source exactly matches the
       independently reconstructed reference rounded to BF16.
-    - Scale reductions use the expected local and peer shard maxima.
+    - Scale reductions use the expected local and full-weight maxima.
     """
+    tp_size = int(parallelism.removeprefix("tp"))
+    if linear_backend != "auto" and target != "mxfp4":
+        pytest.skip("Linear backends are parametrized for MXFP4 only.")
+    if linear_backend == "marlin" and not current_platform.is_cuda():
+        pytest.skip(
+            "MarlinMxFp4LinearKernel.process_weights_after_loading is CUDA-only."
+        )
+    if target == "fp8_per_block" and tp_size > 2:
+        pytest.skip("TP shards must hold whole 128x128 blocks.")
+    if linear_backend == "aiter":
+        # AITER is registered for ROCm only; make it selectable on CUDA too.
+        monkeypatch.setattr(
+            AiterMxfp4LinearKernel,
+            "is_supported",
+            classmethod(lambda cls, compute_capability=None: (True, None)),
+        )
+        monkeypatch.setitem(
+            _POSSIBLE_MXFP4_KERNELS,
+            PlatformEnum.CUDA,
+            [
+                AiterMxfp4LinearKernel,
+                *_POSSIBLE_MXFP4_KERNELS.get(PlatformEnum.CUDA, []),
+            ],
+        )
+    elif linear_backend == "emulation":
+        # Emulation gates on Quark, but its weight processing does not need it.
+        monkeypatch.setattr(
+            "vllm.model_executor.kernels.linear.mxfp4.emulation.has_quark",
+            lambda: True,
+        )
     # Check the portable NVFP4 packer even when the W4A16 GEMM is unavailable.
     pack_only = target == "nvfp4_weight_only" and not is_fp4_marlin_supported()
     effective_target = "fp8_per_tensor" if pack_only else target
 
-    tp_size = 1 if parallelism == "tp1" else 2
     for rank in range(tp_size):
-        with _emulate_rank(numerics_model_config, rank, tp_size):
+        with _emulate_rank(
+            numerics_model_config, rank, tp_size, linear_backend=linear_backend
+        ):
 
-            def shard(tensor: torch.Tensor, shard_rank: int = rank) -> torch.Tensor:
+            def shard(tensor: torch.Tensor, rank: int = rank) -> torch.Tensor:
                 if shard_dim is None:
                     return tensor
-                return tensor.chunk(tp_size, dim=shard_dim)[shard_rank].contiguous()
+                return tensor.chunk(tp_size, dim=shard_dim)[rank].contiguous()
 
-            source_config = LINEAR_SOURCE_QUANT_METHODS[source]()
-            source_config.online_quantization_config = OnlineQuantizationConfig(
+            quant_config = online_config = OnlineQuantizationConfig(
                 quant_config_args(linear=effective_target)
             )
-            online_layer = projection(256, 256, bias=False, quant_config=source_config)
+            source_factory = LINEAR_SOURCE_QUANT_METHODS[source]
+            if source_factory is not None:
+                quant_config = source_factory()
+                quant_config.online_quantization_config = online_config
+            online_layer = projection(256, 256, bias=False, quant_config=quant_config)
             method = online_layer.quant_method
             assert isinstance(method, LINEAR_ONLINE_QUANT_METHODS[effective_target])
             # Global scales span both axes; channel scales span only the input axis.
@@ -276,18 +327,17 @@ def test_online_linear_requantization_numerics(
             torch.testing.assert_close(reconstructed, local_reference, rtol=0, atol=0)
 
             maxima = []
-            if tp_size == 2 and shard_dim is not None:
-                local_abs = local_reference.abs()
-                peer_abs = shard(reference, 1 - rank).abs()
+            if tp_size > 1 and shard_dim is not None:
+                local_abs, full_abs = local_reference.abs(), reference.abs()
                 if target in ("fp8_per_tensor", "nvfp4_weight_only"):
                     maxima.append(
-                        (local_abs.amax().reshape(1), peer_abs.amax().reshape(1))
+                        (local_abs.amax().reshape(1), full_abs.amax().reshape(1))
                     )
                 elif target == "fp8_per_channel" and shard_dim == 1:
                     maxima.append(
                         (
-                            local_abs.amax(dim=-1, keepdim=True),
-                            peer_abs.amax(dim=-1, keepdim=True),
+                            local_abs.amax(-1, keepdim=True),
+                            full_abs.amax(-1, keepdim=True),
                         )
                     )
 
@@ -325,7 +375,7 @@ def test_online_linear_requantization_numerics(
                 assert not hasattr(online_layer, "weight_scale")
                 assert online_layer.weight_scale_inv.numel() > 0
 
-            offline_layer = _prepare_offline_linear(
+            offline_layer, offline_method = _prepare_offline_linear(
                 projection,
                 target,
                 reference,
@@ -333,6 +383,11 @@ def test_online_linear_requantization_numerics(
                 shard_dim,
                 local_reference.shape[-1],
             )
+            if target == "mxfp4":
+                # Compare packed bytes only after both paths select the same kernel.
+                assert isinstance(offline_method, QuarkOCP_MX)
+                assert isinstance(method, Mxfp4OnlineLinearMethod)
+                assert type(offline_method.ocp_mx_linear) is type(method.kernel)
             if target == "nvfp4_weight_only":
                 torch.testing.assert_close(
                     online_layer.weight_global_scale,
@@ -355,7 +410,9 @@ def test_online_linear_requantization_numerics(
         "nan-padding-emulation",
     ),
 )
-@pytest.mark.parametrize("parallelism", ("tp1", "tp2", "ep2"), indirect=True)
+@pytest.mark.parametrize(
+    "parallelism", ("tp1", "tp2", "tp4", "tp8", "ep2"), indirect=True
+)
 def test_online_moe_requantization_numerics(
     parallelism: str,
     numerics_model_config: ModelConfig,
@@ -385,6 +442,10 @@ def test_online_moe_requantization_numerics(
     check_padding = case.startswith("padding-")
     if not current_platform.is_cuda_alike():
         pytest.skip("Requires CUDA or ROCm.")
+    if parallelism in ("tp4", "tp8") and (target, case) != ("mxfp4", "packing"):
+        pytest.skip("Wider TP checks MXFP4 shard alignment only.")
+    if parallelism in ("tp4", "tp8") and source.endswith("block"):
+        pytest.skip("Block-FP8 sources need TP shards of whole 128-row blocks.")
     if (check_padding or poison_padding) and parallelism == "ep2":
         pytest.skip("Padding checks exercise TP layouts only.")
     if poison_padding and (source, target) != ("bf16", "mxfp4"):
@@ -410,7 +471,7 @@ def test_online_moe_requantization_numerics(
         case == "packing" and target == "mxfp4" and on_gfx950()
     )
 
-    world_size = 1 if parallelism == "tp1" else 2
+    world_size = 2 if parallelism == "ep2" else int(parallelism.removeprefix("tp"))
     for rank in range(world_size):
         with (
             _emulate_rank(
@@ -437,7 +498,8 @@ def test_online_moe_requantization_numerics(
             if world_size == 2 and case == "packing":
                 patch.setattr(fp8_utils, "_DEQUANT_CHUNK_BYTES", 1)
 
-            sizes = (208,) if poison_padding else (256,)
+            # Keep 64-wide intermediate shards so wider TP does not pad MXFP4.
+            sizes = (208,) if poison_padding else (max(256, 64 * world_size),)
             if use_aiter and source == "fp8/block" and world_size == 1:
                 # The second shape exercises a refined source block grid.
                 sizes = (256, 192)
@@ -522,7 +584,11 @@ def test_online_moe_requantization_numerics(
                     assert (
                         list(online_layer.load_weights(entries(nonlocal_experts))) == []
                     )
-                _process_online_moe(online_rank, checkpoint, target)
+                with _emulate_max_reductions(
+                    parallel_state.get_ep_group().device_group,
+                    _moe_weight_maxima(online_rank, checkpoint, target),
+                ):
+                    online_rank.method.process_weights_after_loading(online_layer)
                 if intermediate_size == 192:
                     assert not hasattr(online_layer, "w13_weight_scale_inv")
                     assert not hasattr(online_layer, "w2_weight_scale_inv")
@@ -598,13 +664,26 @@ def numerics_model_config(
     return ModelConfig(model=str(path), dtype="bfloat16", skip_tokenizer_init=True)
 
 
+def _enable_aiter_mxfp4_moe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the MoE oracle pick the AITER MXFP4 backends (as on gfx950)."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
+    rocm_aiter_ops.refresh_env_variables()
+
+
 @contextmanager
 def _emulate_rank(
-    model_config: ModelConfig, rank: int, world_size: int, expert_parallel: bool = False
+    model_config: ModelConfig,
+    rank: int,
+    world_size: int,
+    expert_parallel: bool = False,
+    linear_backend: str = "auto",
 ) -> Iterator[None]:
     """Expose one logical rank on device 0 without real process groups."""
     torch.accelerator.set_device_index(0)
     config = VllmConfig(model_config=model_config)
+    config.kernel_config.linear_backend = linear_backend
     # The synthetic Llama config is dense; tests build the MoE after validation.
     config.parallel_config.enable_expert_parallel = expert_parallel
     with (
@@ -625,7 +704,7 @@ def _emulate_rank(
 def _emulate_max_reductions(
     expected_group: object, expected_maxima: Iterable[tuple[torch.Tensor, torch.Tensor]]
 ) -> Iterator[None]:
-    """Check each local contribution and add the peer's shard maximum."""
+    """Check each local contribution, then return the full-weight maximum."""
     pending = iter(expected_maxima)
 
     def all_reduce(tensor: torch.Tensor, op: object, group: object) -> None:
@@ -634,10 +713,10 @@ def _emulate_max_reductions(
         assert group is expected_group
         pair = next(pending, None)
         assert pair is not None, "Unexpected weight MAX reduction"
-        local_maximum, peer_maximum = pair
+        local_maximum, full_maximum = pair
         # Validate the actual local contribution before simulating the merge.
         torch.testing.assert_close(tensor, local_maximum, rtol=0, atol=0)
-        tensor.copy_(torch.maximum(tensor, peer_maximum))
+        tensor.copy_(full_maximum)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(torch.distributed, "all_reduce", all_reduce)
@@ -726,6 +805,11 @@ def _load_linear_checkpoint(
     """Load the local source shard and return the full BF16 reference."""
     input_size, output_size = online_layer.input_size, online_layer.output_size
     _materialize_requantization_source(online_layer)
+    if source == "bf16":
+        weight = torch.randn(output_size, input_size)
+        _vary_block_scales(weight)
+        online_layer.weight.data.copy_(shard(weight))
+        return weight
     if source == "mxfp8":
         weight = torch.randn(output_size, input_size).to(MXFP8_VALUE_DTYPE)
         scale = torch.randint(
@@ -769,7 +853,7 @@ def _prepare_offline_linear(
     shard: Callable[[torch.Tensor], torch.Tensor],
     shard_dim: int | None,
     local_input_size: int,
-) -> LinearBase:
+) -> tuple[LinearBase, object]:
     """Quantize the full reference, then prepare the matching offline shard."""
     output_size, input_size = reference.shape
     if target == "nvfp4_weight_only":
@@ -787,7 +871,7 @@ def _prepare_offline_linear(
         offline_layer.weight_scale_2.data.fill_(global_scale)
         assert offline_layer.quant_method is not None
         offline_layer.quant_method.process_weights_after_loading(offline_layer)
-        return offline_layer
+        return offline_layer, offline_layer.quant_method
 
     reference_weights, reference_scales = _offline_quantize(reference, target)
     offline_layer = projection(input_size, output_size, bias=False)
@@ -824,19 +908,7 @@ def _prepare_offline_linear(
     scale_name = "weight_scale_inv" if target == "fp8_per_block" else "weight_scale"
     getattr(offline_layer, scale_name).data.copy_(reference_scales)
     checkpoint.process_weights_after_loading(offline_layer)
-    return offline_layer
-
-
-def _make_fp8_moe_source(layer: RoutedExperts, blockwise: bool) -> Fp8MoEMethod:
-    return Fp8MoEMethod(
-        Fp8Config(weight_block_size=[128, 128] if blockwise else None), layer
-    )
-
-
-def _make_quark_fp8_moe_source(
-    layer: RoutedExperts, weight_key: QuantKey, activation_key: QuantKey
-) -> QuarkW8A8Fp8MoEMethod:
-    return QuarkW8A8Fp8MoEMethod(layer.moe_config, weight_key, activation_key)
+    return offline_layer, checkpoint
 
 
 def _make_ct_fp8_moe_source(
@@ -1134,20 +1206,18 @@ class _OnlineMoERank:
         tensor: torch.Tensor,
         projection: str,
         channel_scale: bool = False,
-        shard_rank: int | None = None,
     ) -> torch.Tensor:
         local = tensor[self.local_experts.start : self.local_experts.stop]
         tp_size = self.layer.moe_config.tp_size
         if tp_size == 1:
             return local.contiguous()
 
-        rank = self.rank if shard_rank is None else shard_rank
         if projection == "w13" and local.ndim == 3:
             # Split gate and up separately before restoring their packed order.
             gate_up = local.unflatten(1, (self.num_gate_up_projections, -1))
-            return gate_up.chunk(tp_size, dim=2)[rank].flatten(1, 2)
+            return gate_up.chunk(tp_size, dim=2)[self.rank].flatten(1, 2)
         if projection == "w2" and local.ndim == 3 and not channel_scale:
-            return local.chunk(tp_size, dim=-1)[rank].contiguous()
+            return local.chunk(tp_size, dim=-1)[self.rank].contiguous()
         return local
 
 
@@ -1295,12 +1365,8 @@ def _make_moe_checkpoint(
             num_experts, hidden_size, intermediate_size, dtype=torch.bfloat16
         )
         if vary_block_scales:
-            amplitudes = torch.tensor(
-                [2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4], dtype=torch.bfloat16
-            )
-            for weight in (gate_up, down):
-                blocks = torch.arange(weight.shape[-1]) // 32
-                weight.mul_(amplitudes[blocks % len(amplitudes)])
+            _vary_block_scales(gate_up)
+            _vary_block_scales(down)
         return _MoECheckpoint(
             {"w13_weight": gate_up, "w2_weight": down}, (gate_up, down)
         )
@@ -1378,7 +1444,7 @@ def _reference_shard(
 def _moe_weight_maxima(
     online_rank: _OnlineMoERank, checkpoint: _MoECheckpoint, target: str
 ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
-    if online_rank.layer.moe_config.tp_size != 2:
+    if online_rank.layer.moe_config.tp_size == 1:
         return
     for projection, weight in zip(("w13", "w2"), checkpoint.reference, strict=True):
         if target in ("fp8_per_tensor", "nvfp4_per_token"):
@@ -1389,21 +1455,13 @@ def _moe_weight_maxima(
         else:
             continue
 
+        # Under TP every rank holds all experts, so the full weight is the reference.
         local = online_rank.shard(weight, projection)
-        peer = online_rank.shard(weight, projection, shard_rank=1 - online_rank.rank)
         keepdim = target == "fp8_per_channel"
         yield (
             local.abs().amax(dim=dimensions, keepdim=keepdim),
-            peer.abs().amax(dim=dimensions, keepdim=keepdim),
+            weight.abs().amax(dim=dimensions, keepdim=keepdim),
         )
-
-
-def _process_online_moe(
-    online_rank: _OnlineMoERank, checkpoint: _MoECheckpoint, target: str
-) -> None:
-    maxima = _moe_weight_maxima(online_rank, checkpoint, target)
-    with _emulate_max_reductions(parallel_state.get_ep_group().device_group, maxima):
-        online_rank.method.process_weights_after_loading(online_rank.layer)
 
 
 def _prepare_offline_moe(
