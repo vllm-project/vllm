@@ -103,7 +103,6 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv, round_up
 
-from ..nvidia.specialized_decode.runtime import specialized_decode_config
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
 from .multimodal import (
@@ -116,7 +115,45 @@ from .multimodal import (
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_states.interface import ModelState
 
-    from ..nvidia.specialized_decode.runtime.decode import SpecializedDecode
+    if current_platform.is_rocm():
+        from ..amd.specialized_decode.runtime.decode import SpecializedDecode
+    else:
+        from ..nvidia.specialized_decode.runtime.decode import (  # type: ignore[assignment,no-redef]
+            SpecializedDecode,
+        )
+
+# The specialized decode (RFC #60904) is the vendor's, picked here by platform. Both
+# vendors expose `specialized_decode_config(vllm_config)`, `SpecializedDecode(backbone,
+# config)` and `Glm5NextModelState`; the rest of this file does not know which one it
+# has. The executor and the model state are imported on first use.
+if current_platform.is_rocm():
+    from ..amd.specialized_decode.runtime import specialized_decode_config
+
+    def _specialized_decode_cls() -> "type[SpecializedDecode]":
+        from ..amd.specialized_decode.runtime.decode import SpecializedDecode
+
+        return SpecializedDecode
+
+    def _model_state_cls() -> "type[ModelState]":
+        from ..amd.model_state import Glm5NextModelState
+
+        return Glm5NextModelState
+
+else:
+    from ..nvidia.specialized_decode.runtime import (  # type: ignore[assignment]
+        specialized_decode_config,
+    )
+
+    def _specialized_decode_cls() -> "type[SpecializedDecode]":
+        from ..nvidia.specialized_decode.runtime.decode import SpecializedDecode
+
+        return SpecializedDecode  # type: ignore[return-value]
+
+    def _model_state_cls() -> "type[ModelState]":
+        from ..nvidia.model_state import Glm5NextModelState
+
+        return Glm5NextModelState
+
 
 logger = init_logger(__name__)
 
@@ -1263,23 +1300,21 @@ class Glm5NextForCausalLM(
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=_LOGIT_SCALE
         )
-        # decode_backend=latency_specialized: a specialized decode executor over
-        # self.model, built by the model state once the weights are loaded.
+        # The vendor's specialized decode over self.model (None when off), built by
+        # the model state once the weights are loaded.
         self.specialized_decode_config = specialized_decode_config(vllm_config)
         self.specialized_decode: SpecializedDecode | None = None
 
     def build_specialized_decode(self) -> None:
-        from ..nvidia.specialized_decode.runtime.decode import SpecializedDecode
-
-        self.specialized_decode = SpecializedDecode(
+        """Called by the vendor's `Glm5NextModelState` once the weights are loaded."""
+        assert self.specialized_decode_config is not None
+        self.specialized_decode = _specialized_decode_cls()(
             self.model, self.specialized_decode_config
         )
         self.specialized_decode.build_logits(self.logits_processor, self.lm_head)
 
     def get_model_state_cls(self) -> "type[ModelState]":
-        from ..nvidia.model_state import Glm5NextModelState
-
-        return Glm5NextModelState
+        return _model_state_cls()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
