@@ -311,8 +311,10 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
     ) -> Qwen4ExpQSANvidiaMetadata:
         cm = common_attn_metadata
         # Exact under adaptive verification, which trims drafts only on device.
-        num_decodes, _, num_decode_tokens, _ = split_decodes_and_prefills(
-            cm, decode_threshold=self.reorder_batch_threshold or 1
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+            split_decodes_and_prefills(
+                cm, decode_threshold=self.reorder_batch_threshold or 1
+            )
         )
         metadata = Qwen4ExpQSANvidiaMetadata(
             num_actual_tokens=cm.num_actual_tokens,
@@ -323,12 +325,9 @@ class Qwen4ExpQSANvidiaMetadataBuilder(
             num_decode_tokens=num_decode_tokens,
             flashinfer_prefill=None,
         )
-        if not self.use_flashinfer or fast_build:
+        if not self.use_flashinfer or fast_build or num_prefills == 0:
             return metadata
         query_start_loc = cm.query_start_loc_cpu[num_decodes : cm.num_reqs + 1]
-        num_prefill_tokens = int(query_start_loc[-1]) - num_decode_tokens
-        if num_prefill_tokens == 0:
-            return metadata
         from flashinfer.attention.prims_ts import make_q_token_kv_block_sparse_qo_indptr
 
         qo_indptr = make_q_token_kv_block_sparse_qo_indptr(

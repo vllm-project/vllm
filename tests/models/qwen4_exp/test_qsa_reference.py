@@ -237,6 +237,7 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
         qkv=torch.zeros(2, 4),
         slot_mapping=torch.arange(2),
         main_kv_cache=attn.kv_cache,
+        block_indices=torch.empty(2, 1, dtype=torch.int32),
     )
 
     assert actual is rows
@@ -703,6 +704,7 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
         torch.zeros(8, dtype=torch.long, device=device),
         torch.full((5, 5), -1, dtype=torch.int32, device=device),
         attn=SimpleNamespace(use_fused_qsa_prepare=False),
+        block_indices=torch.empty(8, 1, dtype=torch.int32, device=device),
     )
     torch.testing.assert_close(raw_cache[0, :, 0], keys[[4, 1, 2, 3]])
     expected_compressed = torch.zeros_like(compressed_cache)
@@ -1365,7 +1367,7 @@ def test_qsa_flashinfer_prefill_correctness(heads: int, kv_heads: int) -> None:
     # ending on a block boundary. A leading decode request owns block table row
     # 0 but no rows here, so prefill requests index the table from row 1.
     num_decodes = 1
-    requests = [(0, 37), (0, 301), (2500, 503)]
+    requests = [(0, 5), (0, 301), (2500, 503)]
     kv_rows = torch.full(
         ((num_decodes + len(requests)) * pages, page_size, kv_heads, 2 * head_dim),
         torch.nan,
