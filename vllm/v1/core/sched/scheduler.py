@@ -2183,6 +2183,7 @@ class Scheduler(SchedulerInterface):
         assert len(mm_features) > 0
         external_load_encoder_input = []
         duplicate_encoder_inputs = []
+        request_start_budget = encoder_compute_budget
 
         # NOTE: since scheduler operates on the request level (possibly with
         # multiple encoder inputs per request), we need to create temporary
@@ -2325,9 +2326,14 @@ class Scheduler(SchedulerInterface):
             scheduled_encoder_tokens = (
                 self.max_num_encoder_input_tokens - encoder_compute_budget
             )
+            cap_start_budget = (
+                encoder_compute_budget
+                if self.scheduler_config.enable_chunked_prefill
+                else request_start_budget
+            )
             if (
                 not external_load
-                and scheduled_encoder_tokens > 0
+                and cap_start_budget < self.max_num_encoder_input_tokens
                 and self.encoder_profile_tokens > 0
             ):
                 item_compute_budget = min(
