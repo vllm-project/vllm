@@ -152,6 +152,17 @@ ResponseInputOutputMessage: TypeAlias = (
 ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
 
 
+class _HashableFailFast(FailFast):
+    """`FailFast` that can be a union member on Python 3.11.
+
+    Python 3.11 hashes every union member, including `Annotated` metadata, and
+    pydantic's `FailFast` is an unhashable dataclass, so `str | Annotated[...,
+    FailFast()]` raises "unhashable type: 'FailFast'" when the module is imported.
+    """
+
+    __hash__ = object.__hash__
+
+
 def _default_input_image_details(value: Any) -> Any:
     """Set the API default for input images before SDK type validation."""
     if not isinstance(value, dict):
@@ -340,7 +351,7 @@ class ResponsesRequest(OpenAIBaseModel):
                     BeforeValidator(_default_input_image_details),
                 ]
             ],
-            FailFast(),
+            _HashableFailFast(),
         ]
     )
     instructions: str | None = None

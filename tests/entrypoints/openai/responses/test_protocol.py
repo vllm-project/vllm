@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import typing
+
 import pytest
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai_harmony import (
     Message,
 )
-from pydantic import ValidationError
+from pydantic import FailFast, ValidationError
 
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
@@ -120,6 +122,21 @@ def test_input_list_validation_stops_at_first_invalid_item() -> None:
         ResponsesRequest(input=[valid_item, invalid_item, invalid_item])
 
     assert multiple.value.error_count() == first.value.error_count()
+
+
+def test_input_fail_fast_metadata_is_hashable() -> None:
+    # Python 3.11 hashes union members, so unhashable metadata on `input`
+    # breaks importing the module there.
+    def metadata(tp):
+        yield from getattr(tp, "__metadata__", ())
+        for arg in typing.get_args(tp):
+            yield from metadata(arg)
+
+    annotation = ResponsesRequest.model_fields["input"].annotation
+    fail_fast = [m for m in metadata(annotation) if isinstance(m, FailFast)]
+    assert fail_fast
+    for marker in fail_fast:
+        hash(marker)
 
 
 def test_custom_tool_grammar_format_rejected() -> None:
