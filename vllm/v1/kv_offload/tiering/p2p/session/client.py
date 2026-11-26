@@ -346,7 +346,7 @@ class ClientRole:
             for load in st.loads.values()
         )
 
-    def finish(self, kv_request_id: str) -> None:
+    def finish(self, kv_request_id: str, *, notify_peer: bool = False) -> None:
         """Finish a request: abort in-flight loads and release lookup state.
 
         Called from the session's `finish_request`. Sends an
@@ -357,6 +357,9 @@ class ClientRole:
         `cb.finish_request`). A later round's supply can be parked
         while an earlier round's load is still in flight, so both can be
         owed at once.
+
+        notify_peer also sends the terminal for a PD consumer that never
+        fetched and therefore has no client state.
 
         Then drop all probe/lookup state. Never-sent fetches fail locally on
         the next poll. Sent loads fail at once and keep their blocks until
@@ -370,7 +373,9 @@ class ClientRole:
         ]
         st = self._requests.get(kv_request_id)
         if st is None:
-            return
+            if not notify_peer:
+                return
+            st = self._get_or_create_request(kv_request_id)
         for round_seq, load in st.loads.items():
             load.request_finished = True
             if load.aborted_at is not None:
@@ -382,7 +387,7 @@ class ClientRole:
         st.probes.clear()
         st.unsent.clear()
         st.known_misses.clear()
-        if st.peer_lookup_open:
+        if st.peer_lookup_open or notify_peer:
             st.peer_lookup_open = False
             self._send(
                 {

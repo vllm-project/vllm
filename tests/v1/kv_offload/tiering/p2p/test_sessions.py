@@ -2653,7 +2653,7 @@ class TestFinishRequestServerSide:
         fetches = [m for m in consumer_conn._sent if m[TYPE_KEY] == FetchMsg.TYPE]
         assert len(fetches) == 1
         producer_conn.enqueue(fetches[0])
-        assert [r.job_id for r in producer.poll().stores] == [1]
+        assert producer.poll().stores == [StoreResult(1, True)]
         assert producer.poll().stores == []
 
         producer_conn.enqueue(
@@ -2665,7 +2665,7 @@ class TestFinishRequestServerSide:
                 FetchMsg.ROUND_SEQ: 0,
             }
         )
-        assert [r.job_id for r in producer.poll().stores] == [2]
+        assert producer.poll().stores == [StoreResult(2, True)]
 
     def _last_transfer_done(self, conn: FakeConnection) -> dict | None:
         for msg in reversed(conn._sent):

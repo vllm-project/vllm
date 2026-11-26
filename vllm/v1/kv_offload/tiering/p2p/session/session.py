@@ -295,18 +295,8 @@ class P2PSession:
         this id are silent no-ops. A PD consumer that needed no fetch can
         still notify the prefiller to release its already parked stores.
         """
-        self._client.finish(kv_request_id)
+        self._client.finish(kv_request_id, notify_peer=notify_peer)
         self._server.finish(kv_request_id)
-        if notify_peer:
-            self._send(
-                {
-                    TYPE_KEY: FetchMsg.TYPE,
-                    FetchMsg.KV_REQUEST_ID: kv_request_id,
-                    FetchMsg.KEYS: [],
-                    FetchMsg.BLOCK_INDEXES: [],
-                    FetchMsg.ROUND_SEQ: 0,
-                }
-            )
 
     def abort_loads(self) -> None:
         """Abort every inbound load, failing each now; see `ClientRole`."""
@@ -801,6 +791,11 @@ class P2PSession:
             and not msg[FetchMsg.BLOCK_INDEXES]
             and not self._client.can_send_terminal_fetch(msg[FetchMsg.KV_REQUEST_ID])
         ):
+            logger.debug(
+                "P2PSession %s: dropping terminal fetch for %s: newer round active",
+                self.peer_id,
+                msg[FetchMsg.KV_REQUEST_ID],
+            )
             return
         try:
             self._conn.send(msg)

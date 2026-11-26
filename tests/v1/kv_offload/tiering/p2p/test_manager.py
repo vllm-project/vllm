@@ -936,10 +936,9 @@ class TestOnRequestFinished:
         session = _FakeSession(peer_id=peer_id)
         mgr._sessions[peer_id] = session
         ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-1"))
-        source = ctx.get_state(P2PSourceInfo)
-        assert source is not None
-        source.pd_fetch_submitted = True
-        mgr.on_request_finished(ctx)
+        job = _job_metadata(1, kv_params=ctx.kv_transfer_params)
+        mgr.submit_load(job)
+        mgr.on_request_finished(job.req_context)
         assert session.finishes == ["req-1"]
         assert not session.notify_finishes
 
@@ -3898,3 +3897,60 @@ class TestNonDictRoleParamsRejected:
         result = mgr.on_new_request(ctx)
         assert result.policy is OffloadPolicy.CHUNK_LEVEL
         assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+
+
+@pytest.mark.parametrize("park_before_finish", [False, True])
+def test_pd_terminal_rejects_late_stores(monkeypatch, lookup_clock, park_before_finish):
+    """A finished local-hit consumer must not pin later prefill chunks."""
+    controls = {}
+
+    def make_control(local_id, host, port):
+        controls[local_id] = _LoopbackControl(local_id)
+        return controls[local_id]
+
+    monkeypatch.setattr(manager_module, "ZmqTransport", make_control)
+    monkeypatch.setattr(
+        manager_module, "NixlTransport", lambda name, view, **kw: _FakeData(name)
+    )
+    init_none_hash(sha256)
+    spec = CPUOffloadingSpec(make_offloading_config())
+    consumer = P2PSecondaryTierManager(
+        spec, memoryview(bytearray(4096)), host="A", port=1
+    )
+    producer = P2PSecondaryTierManager(
+        spec, memoryview(bytearray(4096)), host="B", port=2
+    )
+    controls["A:1"].pair(controls["B:2"])
+
+    def poll():
+        results: list[JobResult] = []
+        for _ in range(4):
+            results.extend(producer.get_finished_jobs())
+            list(consumer.get_finished_jobs())
+        return results
+
+    try:
+        ctx = _req_context(_remote_prefiller_kv_params("B", 2, "local-hit"))
+        consumer.on_new_request(ctx)
+        poll()
+        if park_before_finish:
+            producer.submit_store(
+                _job_metadata(0, kv_params=_remote_decoder_kv_params("local-hit"))
+            )
+        consumer.on_request_finished(ctx)
+        assert poll() == ([JobResult(0, False)] if park_before_finish else [])
+        for job_id in (1, 2):
+            lookup_clock.now = float(job_id)
+            producer.submit_store(
+                _job_metadata(job_id, kv_params=_remote_decoder_kv_params("local-hit"))
+            )
+            assert poll() == [JobResult(job_id, False)]
+            assert "local-hit" not in producer._unbound_stores
+        producer.submit_store(
+            _job_metadata(3, kv_params=_remote_decoder_kv_params("other"))
+        )
+        assert poll() == []
+        assert "other" in producer._unbound_stores
+    finally:
+        consumer.shutdown()
+        producer.shutdown()
