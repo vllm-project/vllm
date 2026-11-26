@@ -150,11 +150,12 @@ class ConvertWeights:
             converter = self.pattern_to_converter[source]
             sources, targets = converter.source_patterns, converter.target_patterns
             full_layer_name = self.mapper.map_name(first)
-            # The loader drops the weights of modules not on this rank or stage
+            # The loader drops the weights of modules not on this rank or stage, by the
+            # target name checked here
             if full_layer_name is None or is_pp_missing_parameter(
                 full_layer_name, self.model
             ):
-                yield rename_source_key(name, self.renamings, [])[0], tensor
+                yield first, tensor
                 continue
             if full_layer_name not in self.shapes:
                 raise ValueError(

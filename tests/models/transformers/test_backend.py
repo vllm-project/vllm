@@ -1149,7 +1149,7 @@ def test_convert_weights_splits_fused_gqa_qkv():
         list(weights([scale]))
 
     skipped = ("vision_model.query_key_value.weight", fused)
-    assert list(weights([skipped])) == [("vision_tower.query_key_value.weight", fused)]
+    assert list(weights([skipped])) == [("vision_tower.q_proj.weight", fused)]
 
 
 def test_converters_apply_to_renamed_weights():
