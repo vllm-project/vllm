@@ -428,5 +428,6 @@ vllm serve baselabs/mammoth-1
   decoding, context parallelism, micro-batching, `--prefix-match-unit` and
   `--scheduler-cls` are refused.
 - `instructions` returns 400, as does any `chat_template_kwargs` other than
-  `{"enable_thinking": false}`. On these models, `/v1/decisions` returns 400
-  for score levels with the same label.
+  `{"enable_thinking": false}`. On these models, `/v1/decisions` accepts score
+  levels with the same label when their descriptions distinguish them. Duplicate
+  level text returns 400.

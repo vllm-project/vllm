@@ -1549,16 +1549,15 @@ class SlotLMStrategy(NextTokenStrategy):
         if q.raw is not None:
             instructions, criteria = q.raw
         else:
-            names = [o.name for o in q.options]
-            if len(set(names)) != len(names):
-                raise StructuredDecisionError(
-                    f"question {q.id!r}: option labels must be distinct for this model"
-                )
             instructions = q.instructions
             if q.type.name == "score":
                 criteria = [o.text for o in q.options]
             else:
                 criteria = {o.name: o.description for o in q.options}
+            if len(set(criteria)) != len(q.options):
+                raise StructuredDecisionError(
+                    f"question {q.id!r}: options must be distinct for this model"
+                )
         return slot_prompt.render_suffix(q.type.name, instructions, criteria)
 
     async def read(
