@@ -187,12 +187,15 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
 
         Processors that reject a prompt without multi-modal data (e.g. PaliGemma) or
         add anything other than a prefix get none."""
+        # Non-empty, so that tokens added after the text don't pass for a prefix
+        text = "a"
+        hf_processor = self.get_hf_processor()
         try:
-            outputs = self.ctx.call_hf_processor(self.get_hf_processor(), dict(text=""))
+            outputs = self.ctx.call_hf_processor(hf_processor, dict(text=text))
             ids = outputs["input_ids"][0].tolist()
         except (ValueError, KeyError, IndexError, AttributeError):
             return []
-        tail = cached_encode(self.get_tokenizer(), "")
+        tail = cached_encode(self.get_tokenizer(), text)
         split = len(ids) - len(tail)
         return ids[:split] if split > 0 and ids[split:] == tail else []
 
