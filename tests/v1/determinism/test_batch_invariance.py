@@ -1122,9 +1122,11 @@ def test_tied_top_logprob_ids_do_not_depend_on_k(wide: int):
     # Column 0 is the sampled token, the top-k follows.
     narrow = compute_topk_scores(logits, 1, sampled).logprob_token_ids[:, 1:]
     batch = compute_topk_scores(logits, wide, sampled).logprob_token_ids[:, 1:]
-    assert torch.equal(narrow[:, 0], batch[:, 0])
-    assert torch.equal(narrow[:, 0], torch.minimum(top, other))
-    assert torch.equal(batch[:, 1], torch.maximum(top, other))
+    # bf16 rounding can tie more tokens at the max, so compare the whole top-k
+    # with a stable sort, which puts tied logits in token id order.
+    ref = torch.sort(logits, dim=-1, descending=True, stable=True).indices[:, :wide]
+    assert torch.equal(batch, ref)
+    assert torch.equal(narrow, ref[:, :1])
 
 
 def LLM_with_max_seqs(
