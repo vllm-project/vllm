@@ -30,7 +30,11 @@ from tests.single_rank_group import SingleRankGroup, override_parallel_groups
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.model import ModelConfig
-from vllm.config.vllm import VllmConfig, set_current_vllm_config
+from vllm.config.vllm import (
+    VllmConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.distributed import parallel_state
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.linear import (
@@ -55,6 +59,7 @@ from vllm.model_executor.layers.quantization.online.base import (
 )
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
+    Fp8PerBlockOnlineMoEMethod,
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
     Fp8PtpcOnlineLinearMethod,
@@ -62,13 +67,16 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     _is_tp_sharded,
 )
 from vllm.model_executor.layers.quantization.online.int8 import Int8OnlineMoEMethod
+from vllm.model_executor.layers.quantization.online.lut_b import LutBOnlineMoEMethod
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineLinearMethod,
     Mxfp4OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.mxfp8 import Mxfp8OnlineMoEMethod
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
     Nvfp4WeightOnlyOnlineLinearMethod,
+    _quantize_moe_weight_to_nvfp4,
     _quantize_nvfp4,
 )
 from vllm.model_executor.layers.quantization.online.requantization import (
@@ -78,12 +86,17 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkOCP_MX_MoEMethod,
     QuarkW8A8Fp8MoEMethod,
     QuarkW8A8Int8MoEMethod,
+    QuarkW8A8Mxfp8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import (
     QuarkOCP_MX,
 )
 from vllm.model_executor.layers.quantization.quark.schemes.quark_w8a8_fp8 import (
     QuarkW8A8Fp8,
+)
+from vllm.model_executor.layers.quantization.utils.lut_b_utils import (
+    dequantize_lut_b,
+    quantize_lut_b,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     is_fp4_marlin_supported,
@@ -92,9 +105,11 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mxfp4_quan
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
+    mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_tp_weight_quant,
+    get_fp8_min_max,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -105,6 +120,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticChannelSym,
     kMxfp4Dynamic,
     kMxfp4Static,
+    kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4DynamicToken,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -112,6 +129,30 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_default_torch_dtype
+
+# The parametrized cases restore their emulated groups without initializing
+# torch.distributed. Run the expensive global cleanup once at module exit.
+pytestmark = pytest.mark.skip_global_cleanup
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_numerics_module():
+    yield
+    parallel_state.cleanup_dist_env_and_memory()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def dynamo_reset(reset_dynamo_caches):
+    """Reuse compiled FP8 casts across the source/target matrix."""
+    try:
+        # Cover the different rank shapes, dtypes, and strides without falling
+        # back to eager when their combined specializations exceed the default.
+        with torch._dynamo.config.patch(
+            recompile_limit=32, fail_on_recompile_limit_hit=True
+        ):
+            yield
+    finally:
+        reset_dynamo_caches()
 
 
 class _EmulatedRankGroup(SingleRankGroup):
@@ -142,13 +183,17 @@ def run_numerics(request, tmp_path_factory):
         model=str(path), dtype="bfloat16", skip_tokenizer_init=True
     )
 
-    def run(test, source, target, *options):
+    def run(test, source, target, *options, expert_parallel=False):
         torch.accelerator.set_device_index(0)
         for rank in range(tp_size):
+            config = VllmConfig(model_config=model_config)
+            # The synthetic Llama config describes a dense model; the test
+            # constructs the MoE layer separately after config validation.
+            config.parallel_config.enable_expert_parallel = expert_parallel
             with (
                 override_parallel_groups(SingleRankGroup()),
                 pytest.MonkeyPatch.context() as patch,
-                set_current_vllm_config(VllmConfig(model_config=model_config)),
+                set_current_vllm_config(config),
                 set_default_torch_dtype(torch.bfloat16),
                 torch.device(f"{DEVICE}:0"),
             ):
@@ -192,7 +237,8 @@ def _offline_quantize(weight, target):
         tiles = weight.reshape(n // 128, 128, k // 128, 128)
         fp8_dtype = current_platform.fp8_dtype()
         scale = tiles.abs().amax((1, 3), keepdim=True).clamp_min(1e-4)
-        scale = scale / torch.finfo(fp8_dtype).max
+        _, fp8_max = get_fp8_min_max()
+        scale = scale / fp8_max
         return (tiles * scale.reciprocal()).to(fp8_dtype).reshape(n, k), scale[
             :, 0, :, 0
         ]
@@ -501,10 +547,50 @@ def _fp8_moe_checkpoint_tensors(source_format, scheme, e, h, i, block, num_shard
 
 def _nvfp4_target_checkpoint(weight):
     # Encode scales from the full experts, before any TP slicing.
-    amax = weight.abs().flatten(1).amax(dim=1).clamp_min(1e-8)
+    amax = weight.abs().flatten(1).amax(dim=1).float().clamp_min(1e-8)
     encode_scale = (6 * torch.finfo(torch.float8_e4m3fn).max) / amax
     q, s, _ = _serialize_nvfp4_experts(weight, encode_scale)
     return q, s, 1.0 / encode_scale
+
+
+def _pack_moe_reference(weight, source, target):
+    if target == "lut_b":
+        packed, codebooks, scales = quantize_lut_b(weight)
+        return dequantize_lut_b(packed, codebooks, scales), None, None
+    if target == "nvfp4_per_token":
+        # Compare BF16 shards to the whole native pack, which can choose
+        # different tie codes from the FP32 reference.
+        if source == "bf16":
+            return _quantize_moe_weight_to_nvfp4(weight)
+        return _nvfp4_target_checkpoint(weight)
+    if target == "int8":
+        s = weight.abs().amax(dim=-1, keepdim=True) / 127
+        q = (weight / s).round().clamp(-127, 127).to(torch.int8)
+    elif target in ("fp8_per_block", "mxfp8"):
+        quantized = (
+            _offline_quantize(w.float(), target)
+            if target == "fp8_per_block"
+            else mxfp8_e4m3_quantize(w, is_sf_swizzled_layout=False)
+            for w in weight
+        )
+        q, s = (torch.stack(parts) for parts in zip(*quantized, strict=True))
+    else:
+        q, s = _offline_quantize(weight, target)
+    return q, s, None
+
+
+@pytest.fixture
+def unsharded_moe_reference(source, target):
+    """Pack each full projection once per source/target parity case."""
+    packs = {}
+
+    def pack(stem, weight):
+        # Run lazily inside the first rank's device and backend contexts.
+        if stem not in packs:
+            packs[stem] = _pack_moe_reference(weight, source, target)
+        return packs[stem]
+
+    return pack
 
 
 def _expert_output(inputs, w13, w2):
@@ -519,12 +605,22 @@ _MOE_TARGETS = {
     "nvfp4_per_token": Nvfp4OnlineMoEMethod,
     "int8": Int8OnlineMoEMethod,
 }
+_MOE_PARITY_TARGETS = {
+    **_MOE_TARGETS,
+    "fp8_per_block": Fp8PerBlockOnlineMoEMethod,
+    "mxfp8": Mxfp8OnlineMoEMethod,
+    "lut_b": LutBOnlineMoEMethod,
+}
 
 
 def _moe_offline_method(target, layer):
     moe = layer.moe_config
     if target == "mxfp4":
         return QuarkOCP_MX_MoEMethod(moe, kMxfp4Static, kMxfp4Dynamic)
+    if target == "mxfp8":
+        return QuarkW8A8Mxfp8MoEMethod(moe, kMxfp8Static, kMxfp8Dynamic)
+    if target == "fp8_per_block":
+        return Fp8MoEMethod(Fp8Config(weight_block_size=[128, 128]), layer)
     if target == "fp8_per_channel":
         return QuarkW8A8Fp8MoEMethod(moe, kFp8StaticChannelSym, kFp8DynamicTokenSym)
     if target == "int8":
@@ -544,7 +640,7 @@ def _make_moe_layer(prefix, e, h, i, backend, num_shards=2):
         intermediate_size=i,
         activation="silu" if num_shards == 2 else "silu_no_mul",
         ckpt_names=("gate_proj", "down_proj", "up_proj" if num_shards == 2 else None),
-        prefix=f"{prefix}_{i}",
+        prefix=f"{prefix}_{i}.experts",
     ).routed_experts
     layer.moe_config.moe_backend = backend
     return layer
@@ -613,22 +709,62 @@ def _check_moe_padding(method, layer, expected):
             )
 
 
-def _moe_requantization_numerics(source, target, rank, tp_size, case, i=256):
+def _moe_requantization_numerics(
+    source,
+    target,
+    rank,
+    world_size,
+    case,
+    i=256,
+    *,
+    load_checkpoint=False,
+    pack_reference=None,
+):
     padding = case != "packing"
     e, h = (2, 128) if padding else (4, 256)
     num_shards = 1 if case == "padding-ungated" else 2
     dtype = torch.bfloat16
-    source_format, scheme = source.split("/")
+    source_format, _, scheme = source.partition("/")
     partial_block = source == "fp8/block" and i % 128 != 0
     backend = {
         "mxfp4": "aiter" if on_gfx950() else "emulation",
+        "mxfp8": "auto",
+        "lut_b": "emulation",
         "nvfp4_per_token": "auto",
     }.get(target, "triton")
 
     def layer(prefix):
         return _make_moe_layer(prefix, e, h, i, backend, num_shards)
 
+    online = layer("online")
+    moe = online.moe_config
+    tp_size = moe.tp_size
+    assert (
+        moe.use_ep == get_current_vllm_config().parallel_config.enable_expert_parallel
+    )
+    if moe.use_ep:
+        assert tp_size == 1 and moe.ep_size == world_size
+        local_experts = e // world_size
+        # The default linear placement assigns contiguous experts to each rank.
+        expert_slice = slice(rank * local_experts, (rank + 1) * local_experts)
+        torch.testing.assert_close(
+            online.expert_map[expert_slice],
+            torch.arange(
+                local_experts,
+                device=online.expert_map.device,
+                dtype=online.expert_map.dtype,
+            ),
+        )
+    else:
+        assert tp_size == world_size
+        local_experts = e
+        expert_slice = slice(None)
+    assert online.local_num_experts == local_experts
+
     def shard(tensor, stem, *, channel_scale=False, shard_rank=rank):
+        tensor = tensor[expert_slice]
+        if tp_size == 1:
+            return tensor.contiguous()
         if stem == "w13" and tensor.ndim == 3:
             shards = tensor.unflatten(1, (num_shards, -1)).chunk(tp_size, dim=2)
             return shards[shard_rank].flatten(1, 2)
@@ -636,23 +772,30 @@ def _moe_requantization_numerics(source, target, rank, tp_size, case, i=256):
             return tensor.chunk(tp_size, dim=-1)[shard_rank].contiguous()
         return tensor
 
-    online = layer("online")
-    # A passing comparison must actually use the requested number of logical shards.
-    assert online.moe_config.tp_size == tp_size
-    checkpoint = _moe_source_method(source_format, scheme, online)
+    checkpoint = (
+        None if source == "bf16" else _moe_source_method(source_format, scheme, online)
+    )
     # Padding runs before backend packing, including for ungated layouts that some
     # backends cannot execute. Keep the real methods without selecting a GEMM.
     with skip_checkpoint_backend_selection() if padding else nullcontext():
-        method = _MOE_TARGETS[target](moe=online.moe_config)
-    method.set_requantization_source(checkpoint)
+        method = _MOE_PARITY_TARGETS[target](moe=moe)
+    if checkpoint is not None:
+        method.set_requantization_source(checkpoint)
+    if load_checkpoint:
+        # The factory installed an unquantized child module; the online method
+        # must be visible to RoutedExperts.weight_loader instead.
+        del online.quant_method
+        del online.w13_weight
+        del online.w2_weight
+        online._replace_quant_method(method)
     sizes = dict(
-        num_experts=e,
+        num_experts=local_experts,
         hidden_size=h,
         intermediate_size_per_partition=i // tp_size,
         params_dtype=dtype,
         global_num_experts=e,
     )
-    method.create_weights(layer=online, **sizes)
+    method.create_weights(layer=online, weight_loader=online.weight_loader, **sizes)
     block = [128, 128]
     if source == "fp8/block":
         assert isinstance(checkpoint, Fp8MoEMethod)
@@ -663,10 +806,19 @@ def _moe_requantization_numerics(source, target, rank, tp_size, case, i=256):
         assert method.uses_meta_device
         assert online.weight_block_size != [128, 128]
         assert block != [128, 128], "The source should refine its block grid"
-    _materialize_requantization_source(online)
+    if checkpoint is not None or load_checkpoint:
+        _materialize_requantization_source(online)
     if partial_block:
         assert online.w13_weight.dtype == torch.float8_e4m3fn
-    if scheme == "nvfp4":
+    # Use the same global checkpoint regardless of layer construction or sharding.
+    torch.manual_seed(11)
+    if source == "bf16":
+        references = (
+            torch.randn(e, num_shards * i, h, dtype=dtype),
+            torch.randn(e, h, i, dtype=dtype),
+        )
+        tensors = dict(zip(("w13_weight", "w2_weight"), references, strict=True))
+    elif scheme == "nvfp4":
         w1 = torch.randn(e, i, h)
         w3 = torch.randn_like(w1) if num_shards == 2 else None
         w2 = torch.randn(e, h, i)
@@ -678,14 +830,36 @@ def _moe_requantization_numerics(source, target, rank, tp_size, case, i=256):
         tensors, references = _fp8_moe_checkpoint_tensors(
             source_format, scheme, e, h, i, block, num_shards
         )
-    for name, tensor in tensors.items():
-        param = getattr(online, name)
-        shard_tensor = shard(
-            tensor,
-            name.split("_")[0],
-            channel_scale=scheme == "channel" and "scale" in name,
-        )
-        param.data.copy_(shard_tensor.reshape_as(param))
+
+    def checkpoint_entries(experts):
+        for expert in experts:
+            for name, tensor in tensors.items():
+                stem, _, suffix = name.partition("_")
+                data = tensor[expert]
+                if source == "quark/channel" and suffix == "weight_scale":
+                    data = data.squeeze(-1)
+                if stem == "w2":
+                    yield f"{expert}.down_proj.{suffix}", data
+                else:
+                    for projection, part in zip(
+                        ("gate_proj", "up_proj")[:num_shards],
+                        data.chunk(num_shards),
+                        strict=True,
+                    ):
+                        yield f"{expert}.{projection}.{suffix}", part
+
+    if load_checkpoint:
+        local_entries = list(checkpoint_entries(range(e)[expert_slice]))
+        assert len(list(online.load_weights(local_entries))) == len(local_entries)
+    else:
+        for name, tensor in tensors.items():
+            param = getattr(online, name)
+            shard_tensor = shard(
+                tensor,
+                name.split("_")[0],
+                channel_scale=scheme == "channel" and "scale" in name,
+            )
+            param.data.copy_(shard_tensor.reshape_as(param))
 
     if padding:
         # Compare staged FP32 weights with an independently padded reference.
@@ -694,6 +868,38 @@ def _moe_requantization_numerics(source, target, rank, tp_size, case, i=256):
             for stem, weight in zip(("w13", "w2"), references, strict=True)
         )
         _check_moe_padding(method, online, expected)
+        return
+
+    def process_online(maxima):
+        with _emulate_max_reductions(
+            parallel_state.get_ep_group().device_group, maxima
+        ):
+            method.process_weights_after_loading(online)
+        if load_checkpoint and moe.use_ep and checkpoint is not None:
+            # Requantization can release source params before nonlocal experts
+            # arrive in the checkpoint stream (PR #70018).
+            nonlocal_experts = (
+                expert for expert in range(e) if expert not in range(e)[expert_slice]
+            )
+            assert list(online.load_weights(checkpoint_entries(nonlocal_experts))) == []
+
+    def reference_pack(stem, weight):
+        if pack_reference is not None:
+            return pack_reference(stem, weight)
+        return _pack_moe_reference(weight, source, target)
+
+    if target == "lut_b":
+        # LUT-B has no offline loader. Compare its emulated weights against
+        # reference quantization of the full weights before slicing.
+        process_online([])
+        for stem, reference in zip(("w13", "w2"), references, strict=True):
+            expected, _, _ = reference_pack(stem, reference)
+            torch.testing.assert_close(
+                getattr(online, f"{stem}_weight"),
+                shard(expected, stem),
+                rtol=0,
+                atol=0,
+            )
         return
 
     offline = layer("offline")
@@ -710,7 +916,12 @@ def _moe_requantization_numerics(source, target, rank, tp_size, case, i=256):
     ):
         local = shard(reference, stem)
         torch.testing.assert_close(actual, local, rtol=0, atol=0)
-        if tp_size == 2 and target != "mxfp4":
+        if tp_size == 2 and target in (
+            "fp8_per_tensor",
+            "fp8_per_channel",
+            "int8",
+            "nvfp4_per_token",
+        ):
             peer = shard(reference, stem, shard_rank=1 - rank)
             if target in ("fp8_per_tensor", "nvfp4_per_token"):
                 maxima.append(
@@ -724,28 +935,23 @@ def _moe_requantization_numerics(source, target, rank, tp_size, case, i=256):
                         peer.abs().amax(dim=-1, keepdim=keepdim),
                     )
                 )
-        if target == "nvfp4_per_token":
-            q, s, g = _nvfp4_target_checkpoint(reference)
+        q, s, g = reference_pack(stem, reference)
+        if g is not None:
             if stem == "w13":
                 g = g[:, None].expand(-1, 2)
-            getattr(offline, f"{stem}_weight_scale_2").data.copy_(g)
-        elif target == "int8":
-            s = reference.abs().amax(dim=-1, keepdim=True) / 127
-            q = (reference / s).round().to(torch.int8)
-        else:
-            q, s = _offline_quantize(reference, target)
-            if target == "fp8_per_tensor":
-                requantized.append(q.float() * s[:, None, None])
-                if stem == "w13":
-                    s = s[:, None].expand(-1, 2)
+            getattr(offline, f"{stem}_weight_scale_2").data.copy_(shard(g, stem))
+        if target == "fp8_per_tensor":
+            requantized.append(q.float() * s[:, None, None])
+            if stem == "w13":
+                s = s[:, None].expand(-1, 2)
         getattr(offline, f"{stem}_weight").data.copy_(shard(q, stem))
-        param = getattr(offline, f"{stem}_weight_scale")
+        scale_name = "weight_scale_inv" if target == "fp8_per_block" else "weight_scale"
+        param = getattr(offline, f"{stem}_{scale_name}")
         local_scale = shard(
             s, stem, channel_scale=target in ("fp8_per_channel", "int8")
         )
         param.data.copy_(local_scale.reshape_as(param))
-    with _emulate_max_reductions(parallel_state.get_ep_group().device_group, maxima):
-        method.process_weights_after_loading(online)
+    process_online(maxima)
     offline_method.process_weights_after_loading(offline)
     _assert_requantized_weights(offline, online, target, "w13_", "w2_")
     if partial_block:
@@ -861,6 +1067,11 @@ _MOE_SOURCES = (
     ],
 )
 def test_online_moe_requantization_numerics(run_numerics, source, target, case):
+    _skip_unsupported_moe_case(source, target, case)
+    run_numerics(_run_moe_with_backend, source, target, case)
+
+
+def _skip_unsupported_moe_case(source, target, case):
     from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
     from vllm.utils.import_utils import has_quark
 
@@ -876,10 +1087,32 @@ def test_online_moe_requantization_numerics(run_numerics, source, target, case):
         and (case != "packing" or has_flashinfer_trtllm_fused_moe())
     ):
         pytest.skip("Per-token NVFP4 MoE requires Blackwell and FlashInfer TRTLLM.")
-    run_numerics(_run_moe_with_backend, source, target, case)
 
 
-def _run_moe_with_backend(source, target, rank, tp_size, case):
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm."
+)
+@pytest.mark.parametrize("run_numerics", [2], indirect=True, ids=["ranks2"])
+@pytest.mark.parametrize("source", ("bf16", *_MOE_SOURCES))
+@pytest.mark.parametrize("target", tuple(_MOE_PARITY_TARGETS))
+def test_online_moe_tp_ep_parity(run_numerics, source, target, unsharded_moe_reference):
+    """TP and EP must both match their shards of the same full checkpoint."""
+    _skip_unsupported_moe_case(source, target, "packing")
+    for expert_parallel in (False, True):
+        run_numerics(
+            _run_moe_with_backend,
+            source,
+            target,
+            "packing",
+            True,
+            unsharded_moe_reference,
+            expert_parallel=expert_parallel,
+        )
+
+
+def _run_moe_with_backend(
+    source, target, rank, tp_size, case, load_checkpoint=False, pack_reference=None
+):
     from vllm.model_executor.layers.quantization.utils import fp8_utils
 
     use_aiter = case == "nan-padding-aiter" or (
@@ -889,7 +1122,7 @@ def _run_moe_with_backend(source, target, rank, tp_size, case):
         with pytest.MonkeyPatch.context() as patch:
             if use_aiter:
                 _enable_aiter_mxfp4_moe(patch)
-            if source == "bf16":
+            if case.startswith("nan-padding"):
                 if not use_aiter:
                     # Exercise weights-only emulation without requiring Quark's runtime.
                     patch.setattr(
@@ -904,7 +1137,15 @@ def _run_moe_with_backend(source, target, rank, tp_size, case):
             if tp_size == 2 and case == "packing":
                 # Exercise one-expert chunks in addition to the no-copy path.
                 patch.setattr(fp8_utils, "_DEQUANT_CHUNK_BYTES", 1)
-            _moe_requantization_numerics(source, target, rank, tp_size, case)
+            _moe_requantization_numerics(
+                source,
+                target,
+                rank,
+                tp_size,
+                case,
+                load_checkpoint=load_checkpoint,
+                pack_reference=pack_reference,
+            )
             if use_aiter and source == "fp8/block" and tp_size == 1:
                 # The unaligned intermediate size requires a refined source grid.
                 _moe_requantization_numerics(source, target, rank, tp_size, case, i=192)
