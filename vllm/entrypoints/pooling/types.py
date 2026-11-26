@@ -133,15 +133,30 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     late_interaction_doc_keys: list[str] | None = None
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class OfflineInputsContext:
     pooling_task: PoolingTask
-    tokenization_kwargs: dict[str, Any] | None
-    lora_request: Sequence[LoRARequest | None] | None
-    priorities: int | Sequence[int] | None
-    late_chunking: list[LateChunkingSlot | None] = field(
-        default_factory=list, kw_only=True
-    )
+    lora_request: Sequence[LoRARequest | None] | None = None
+    priorities: int | Sequence[int] | None = None
+    late_chunking: list[LateChunkingSlot | None] = field(default_factory=list)
+
+    # tok_params:
+    # Tri-state: `None` means "not specified" and falls back to the per-path default
+    add_special_tokens: bool | None = None
+    tokenization_kwargs: dict[str, Any] | None = None
+
+    def build_tok_params(
+        self,
+        default_tok_params: TokenizeParams,
+    ) -> TokenizeParams:
+        # User-provided `tokenization_kwargs` still wins over the default.
+        tok_kwargs: dict[str, Any] = {}
+        if self.add_special_tokens is not None:
+            tok_kwargs["add_special_tokens"] = self.add_special_tokens
+        tok_kwargs.update(self.tokenization_kwargs or {})
+        if not tok_kwargs:
+            return default_tok_params
+        return default_tok_params.with_kwargs(**tok_kwargs)
 
 
 @dataclass(slots=True)

@@ -874,7 +874,11 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                 num_video_frames = min(num_video_frames, video_overrides.num_frames)
             if video_overrides.width or video_overrides.height:
                 video_frame_overrides = ImageDummyOptions(
-                    count=video_overrides.count,
+                    count=(
+                        video_overrides.count
+                        if video_overrides.count is not None
+                        else 999
+                    ),
                     width=video_overrides.width,
                     height=video_overrides.height,
                 )
@@ -2137,6 +2141,7 @@ class MiniCPMV2_5(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
             all_pixel_values,
             patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=None,
+            use_varlen=True,
         )
 
         return self.resampler(vision_embedding, tgt_sizes)
@@ -2237,6 +2242,7 @@ class MiniCPMV2_6(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
             all_pixel_values,
             patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=tgt_sizes,
+            use_varlen=True,
         )
 
         return self.resampler(vision_embedding, tgt_sizes)
@@ -2336,6 +2342,7 @@ class MiniCPMV4_0(_MiniCPMVEncoderCudaGraphMixin, SupportsLoRA):
             all_pixel_values,
             patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=tgt_sizes,
+            use_varlen=True,
         )
 
         return self.resampler(vision_embedding, tgt_sizes)
@@ -2440,6 +2447,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
             all_pixel_values,
             patch_attention_mask=patch_attn_mask.unsqueeze(1),
             tgt_sizes=tgt_sizes,
+            use_varlen=True,
         )
 
         return self.resampler(vision_embedding, tgt_sizes, all_temporal_ids)

@@ -113,7 +113,7 @@ def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
 def run_glmasr(question: str, audio_count: int) -> ModelRequestData:
     model_name = "zai-org/GLM-ASR-Nano-2512"
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # GLM-ASR uses <|pad|> token for audio
     audio_placeholder = "<|pad|>" * audio_count
@@ -125,7 +125,6 @@ def run_glmasr(question: str, audio_count: int) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
         max_model_len=4096,
         max_num_seqs=2,
         limit_mm_per_prompt={"audio": audio_count},
@@ -172,7 +171,6 @@ def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
         max_model_len=2048,
         max_num_seqs=2,
         enable_lora=True,

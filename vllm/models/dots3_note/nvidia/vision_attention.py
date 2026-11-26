@@ -165,6 +165,16 @@ class _VisionAttentionBase(nn.Module):
             self.q_norm = VisionRMSNorm(self.head_dim, eps=params.rms_norm_eps)
             self.k_norm = VisionRMSNorm(self.head_dim, eps=params.rms_norm_eps)
 
+    def _segment_ids(self, cu_seqlens: torch.Tensor, seq_length: int) -> torch.Tensor:
+        """Assign every token position to its varlen segment, on the device.
+
+        Using the `cu_seqlens` elements as Python slice bounds would copy
+        them back to the host once per segment.
+        """
+        positions = torch.arange(seq_length, device=cu_seqlens.device)
+        boundaries = cu_seqlens[1:].to(torch.int64)
+        return torch.searchsorted(boundaries, positions, right=True)
+
     def _qkv_with_rope(
         self,
         hidden_states: torch.Tensor,
@@ -201,18 +211,13 @@ class VisionAttention(_VisionAttentionBase):
         seq_length = hidden_states.shape[0]
         q, k, v = self._qkv_with_rope(hidden_states, rotary_pos_emb)
 
-        attention_mask = torch.full(
-            [1, seq_length, seq_length],
+        seg_ids = self._segment_ids(cu_seqlens, seq_length)
+        attention_mask = torch.zeros(
+            [1, seq_length, seq_length], device=q.device, dtype=q.dtype
+        ).masked_fill_(
+            (seg_ids[:, None] != seg_ids[None, :]).unsqueeze(0),
             torch.finfo(q.dtype).min,
-            device=q.device,
-            dtype=q.dtype,
         )
-        for i in range(1, len(cu_seqlens)):
-            attention_mask[
-                ...,
-                cu_seqlens[i - 1] : cu_seqlens[i],
-                cu_seqlens[i - 1] : cu_seqlens[i],
-            ] = 0
 
         q = q.transpose(0, 1)
         k = k.transpose(0, 1)
@@ -260,7 +265,7 @@ class VisionAttentionV2(_VisionAttentionBase):
         return self.proj(attn_output)
 
 
-# MoE checkpoints historically named this implementation ``VisionEagerAttention``.
+# MoE checkpoints historically named this implementation `VisionEagerAttention`.
 VisionEagerAttention = VisionAttentionV2
 
 
@@ -340,15 +345,8 @@ class VisionSdpaAttention(_VisionAttentionBase):
         seq_length = hidden_states.shape[0]
         q, k, v = self._qkv_with_rope(hidden_states, rotary_pos_emb)
 
-        attention_mask = torch.zeros(
-            [1, seq_length, seq_length], device=q.device, dtype=torch.bool
-        )
-        for i in range(1, len(cu_seqlens)):
-            attention_mask[
-                ...,
-                cu_seqlens[i - 1] : cu_seqlens[i],
-                cu_seqlens[i - 1] : cu_seqlens[i],
-            ] = True
+        seg_ids = self._segment_ids(cu_seqlens, seq_length)
+        attention_mask = (seg_ids[:, None] == seg_ids[None, :]).unsqueeze(0)
 
         q = q.transpose(0, 1).unsqueeze(0)
         k = k.transpose(0, 1).unsqueeze(0)

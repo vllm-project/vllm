@@ -352,7 +352,6 @@ def test_tp1_fp4_mixed_precision_act_fusion(
         compilation_config=compilation_config,
         tensor_parallel_size=1,
         disable_custom_all_reduce=True,
-        trust_remote_code=False,
         enable_chunked_prefill=None,
         block_size=None,
         kernel_config={"enable_jit_warmup": True},

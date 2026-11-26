@@ -52,7 +52,8 @@ pub(super) fn prepare_generate_request(
     ctx: ResolvedRequestContext,
     mm_features: Option<MmFeatures>,
 ) -> Result<PreparedRequest, ApiError> {
-    validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+    lora_resolution.model_names.check(request.model.as_deref())?;
+    validate::validate_request(&request)?;
 
     let n = resolve_n(request.sampling_params.n)?;
     let stream = request.stream;
@@ -78,7 +79,7 @@ pub(super) fn prepare_generate_request(
         && (output_mode == GenerateOutputMode::Text
             || stop_strings.as_ref().is_some_and(|stops| !stops.is_empty()));
     let decode_options = TextDecodeOptions {
-        skip_special_tokens: request.sampling_params.skip_special_tokens.unwrap_or(true),
+        skip_special_tokens: request.sampling_params.skip_special_tokens,
         include_stop_str_in_output: request
             .sampling_params
             .include_stop_str_in_output
@@ -262,7 +263,7 @@ mod tests {
                 }),
             ),
             TextDecodeOptions {
-                skip_special_tokens: false,
+                skip_special_tokens: Some(false),
                 include_stop_str_in_output: true,
                 stop_strings: Some(vec!["\n".to_string()]),
                 min_tokens: 2,

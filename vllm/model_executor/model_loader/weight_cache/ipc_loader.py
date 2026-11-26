@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""IPC model loader: maps post-quantized weights from a local weight cache
-daemon via CUDA IPC instead of loading from disk."""
+"""Map post-processed weights from a local daemon's pluggable sharing backend."""
 
 import contextlib
 import dataclasses
@@ -15,47 +14,43 @@ from typing import TypeVar
 import torch
 import torch.nn as nn
 
-from vllm.config import (
-    CacheConfig,
-    KernelConfig,
-    ModelConfig,
-    ParallelConfig,
-    VllmConfig,
-    get_current_vllm_config,
-)
+from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
-from vllm.distributed import (
-    get_dp_group,
-    get_pp_group,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import (
-    _load_device,
     build_model_from_processed_weights,
     get_draft_load_config,
 )
+from vllm.model_executor.model_loader.weight_cache.ipc_backends import IPC_BACKENDS
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.base import (
+    rebuild_entries,
+    record_bytes,
+)
+from vllm.model_executor.model_loader.weight_cache.ipc_backends.serial_utils import (
+    recv_msg,
+    send_msg,
+)
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     CacheConfigMismatchError,
-    TensorKind,
-    UnsupportedQuantForIPCError,
     WeightCacheKey,
     WeightCacheState,
     WeightCacheUnavailableError,
     check_weight_cache_loader_support,
     get_current_device_uuid,
     get_socket_path,
-    recv_msg,
-    send_msg,
     verify_socket_owner,
 )
 from vllm.model_executor.model_loader.weight_cache.utils import (
+    build_weight_cache_key,
     is_draft_model_cacheable,
     record_external_weight_charge,
     record_external_weight_fallback,
+)
+from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+    rebuild_tensors,
 )
 from vllm.tracing import instrument
 
@@ -69,32 +64,29 @@ _T = TypeVar("_T")
 
 
 class IpcModelLoader(BaseModelLoader):
-    """Loads a model by mapping the weight cache daemon's tensors via CUDA IPC.
+    """Zero-copy loads a model using the weight cache daemon's sharing backend.
 
     The model is initialized on the meta device and every parameter/buffer is
     replaced by the daemon's post-quantized tensor, so
-    process_weights_after_loading is skipped entirely. In "zero_copy" mode the
-    engine shares the daemon's GPU memory; in "copy" mode the tensors are
-    cloned into engine-owned memory and the daemon is asked to release its
-    cache afterwards.
+    process_weights_after_loading is skipped entirely. The engine shares the
+    daemon's GPU memory.
 
     Extra config keys (via --model-loader-extra-config):
 
     - socket_path: explicit daemon socket path. Defaults to a per-GPU path
       derived from the physical GPU uuid and the cache role (target/draft).
     - socket_dir: directory containing the daemon sockets.
-    - mode: "zero_copy" (default) or "copy".
-    - fallback: fall back to disk loading when the daemon is unavailable or
-      the fingerprints mismatch (default: True).
+    - fallback: fall back to disk loading when fetching state fails because the
+      daemon is unavailable or the fingerprints mismatch (default: True).
     - connect_timeout_s: socket connect timeout (default: 5.0).
     - state_timeout_s: timeout for the weight-transfer request (default: 300.0).
 
-    Note: in zero-copy mode the weights live in the daemon's CUDA IPC
-    allocations, so sleep mode (CuMemAllocator weight offloading) must not be
-    used with this loader. If the daemon exits, the CUDA driver keeps the
-    mapped weights alive until the engine exits, so the engine keeps serving;
-    the loader watches the daemon and warns since a restarted daemon then holds
-    a second copy of the weights on the GPU.
+    The weights live in externally held backend allocations, so sleep mode
+    (CuMemAllocator weight offloading) must not be used with this loader. If
+    the daemon exits, the CUDA driver keeps the mapped weights alive until the
+    engine exits, so the engine keeps serving; the loader watches the daemon
+    and warns since a restarted daemon then holds a second copy of the weights
+    on the GPU.
     """
 
     def __init__(self, load_config: LoadConfig):
@@ -111,7 +103,6 @@ class IpcModelLoader(BaseModelLoader):
                 "use socket_dir so the target and draft sockets are derived "
                 "independently"
             )
-        self.mode: str = extra_config.pop("mode", "zero_copy")
         self.fallback: bool = extra_config.pop("fallback", True)
         self.connect_timeout_s: float = float(
             extra_config.pop("connect_timeout_s", _CONNECT_TIMEOUT_S)
@@ -119,26 +110,13 @@ class IpcModelLoader(BaseModelLoader):
         self.state_timeout_s: float = float(
             extra_config.pop("state_timeout_s", _STATE_TIMEOUT_S)
         )
-        if self.mode not in ("zero_copy", "copy"):
-            raise ValueError(
-                f"Invalid weight cache mode {self.mode!r}, "
-                "expected 'zero_copy' or 'copy'"
-            )
         if extra_config:
             raise ValueError(
                 f"Unexpected extra config keys for load format "
                 f"{load_config.load_format}: {sorted(extra_config)}"
             )
-        # Set once the daemon serving the zero-copy weights has exited.
-        self.daemon_lost = threading.Event()
-        # Fingerprint computed by load_model, reused by standalone
-        # load_weights so a reload keys on the same configuration.
-        self._cache_key: WeightCacheKey | None = None
 
     def get_external_weight_memory(self, vllm_config: VllmConfig) -> int:
-        # Copy mode clones the weights into this process; nothing external.
-        if self.mode != "zero_copy":
-            return 0
         total = self._daemon_memory()
         # The engine runs the draft model only on the last pipeline stage.
         if (
@@ -150,10 +128,9 @@ class IpcModelLoader(BaseModelLoader):
             draft_config = get_draft_load_config(vllm_config)
             if draft_config.load_format == "ipc_cache":
                 draft_loader = IpcModelLoader(draft_config)
-                # Only a zero-copy draft-group daemon holds external weights;
-                # an explicit draft_load_config without is_draft would resolve
+                # An explicit draft_load_config without is_draft would resolve
                 # back to the target socket and double-count it.
-                if draft_loader.is_draft and draft_loader.mode == "zero_copy":
+                if draft_loader.is_draft:
                     total += draft_loader._daemon_memory()
         return total
 
@@ -180,47 +157,19 @@ class IpcModelLoader(BaseModelLoader):
             response = recv_msg(conn)
         if response.get("status") != "ok":
             raise WeightCacheUnavailableError(
-                "Weight cache daemon rejected the memory query: "
-                f"{response.get('message')}"
+                f"Weight cache daemon rejected the memory query: {response['message']}"
             )
-        memory_bytes = int(response.get("memory_bytes", 0))
-        record_external_weight_charge(
-            self._resolve_socket_path(), self.is_draft, memory_bytes
-        )
+        memory_bytes = int(response["memory_bytes"])
+        record_external_weight_charge(self._resolve_socket_path(), memory_bytes)
         return memory_bytes
 
     def download_model(self, model_config: ModelConfig) -> None:
         DefaultModelLoader(self._fallback_load_config()).download_model(model_config)
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
-        """Best-effort in-place reload for an already-initialized model.
-
-        Copies daemon tensors into matching parameters/buffers. The model is
-        expected to already be in the post-quantized layout (e.g. previously
-        loaded through this loader).
-        """
-        device_index = torch.accelerator.current_device_index()
-        cache_key = self._cache_key
-        if cache_key is None:
-            vllm_config = get_current_vllm_config()
-            entries = self._fetch_entries(
-                model_config,
-                vllm_config.cache_config,
-                vllm_config.parallel_config,
-                vllm_config.kernel_config,
-                is_reload=True,
-            ).entries
-        else:
-            entries = self._state_for_key(cache_key, is_reload=True).entries
-        params = dict(model.named_parameters())
-        buffers = dict(model.named_buffers())
-        for name, entry in entries.items():
-            target = params.get(name, buffers.get(name))
-            source = entry.rebuild(device_index)
-            if target is None or target.shape != source.shape:
-                logger.warning("Skipping mismatched cached tensor %s", name)
-                continue
-            target.data.copy_(source)
+        raise NotImplementedError(
+            "Standalone weight reload is not supported for load format 'ipc_cache'"
+        )
 
     @instrument(span_name="Load model")
     def load_model(
@@ -232,53 +181,23 @@ class IpcModelLoader(BaseModelLoader):
         check_weight_cache_loader_support(
             vllm_config, model_config, is_draft=self.is_draft
         )
-        state_fetched = False
         try:
-            state = self._fetch_entries(
-                model_config,
-                vllm_config.cache_config,
-                vllm_config.parallel_config,
-                vllm_config.kernel_config,
-            )
-            state_fetched = True
-            model = self._build_model(vllm_config, model_config, prefix, state)
+            state = self._fetch_state(vllm_config, model_config)
         except (WeightCacheUnavailableError, CacheConfigMismatchError) as e:
             if not self.fallback:
                 raise
             logger.warning(
                 "Weight cache unusable (%s); falling back to disk loading", e
             )
-        except UnsupportedQuantForIPCError:
-            # Unsupported quantization is a permanent misconfiguration rather
-            # than a transient daemon outage, so it is raised even when
-            # fallback is on.
-            raise
-        except Exception:
-            if not self.fallback:
-                raise
-            logger.exception(
-                "Weight cache IPC loading failed; falling back to disk loading"
-            )
-            # _build_model failed after fetching state without reaching its
-            # copy-mode release, so the daemon still holds the full cache;
-            # release it so the disk fallback does not OOM against it.
-            if state_fetched and self.mode == "copy":
-                self._send_release()
-            torch.accelerator.empty_cache()
-        else:
-            if self.mode == "copy":
-                self._send_release()
-            else:
-                self._watch_daemon()
-            logger.info(
-                "Mapped %d tensors from the weight cache daemon (%s mode)",
-                len(state.entries),
-                self.mode,
-            )
+            model = self._fallback_load(vllm_config, model_config, prefix)
+            record_external_weight_fallback(self._resolve_socket_path())
             return model
-        model = self._fallback_load(vllm_config, model_config, prefix)
-        if self.mode == "zero_copy":
-            record_external_weight_fallback(self._resolve_socket_path(), self.is_draft)
+        model = self._build_model(vllm_config, model_config, prefix, state)
+        self._watch_daemon()
+        logger.info(
+            "Mapped %d tensors from the weight cache daemon via zero-copy sharing",
+            len(state.manifest["tensors"]),
+        )
         return model
 
     def _build_model(
@@ -288,83 +207,37 @@ class IpcModelLoader(BaseModelLoader):
         prefix: str,
         state: WeightCacheState,
     ) -> nn.Module:
-        _, device_index = _load_device(self.load_config, vllm_config)
-        tensors, kinds = self._apply_entries(state, device_index)
-        model = build_model_from_processed_weights(
+        tensors = self._rebuild_storages(state)
+        return build_model_from_processed_weights(
             vllm_config,
             model_config,
             prefix,
             tensors,
-            kinds,
+            state.manifest,
             aliases=state.aliases,
             attrs=state.attrs,
             load_config=self.load_config,
         )
-        return model
 
-    def _apply_entries(
-        self, state: WeightCacheState, device_index: int
-    ) -> tuple[dict[str, torch.Tensor], dict[str, TensorKind]]:
-        """Resolve the daemon's entries to this process's tensors and kinds.
+    def _rebuild_storages(self, state: WeightCacheState) -> dict[str, torch.Tensor]:
+        """Rebuild manifest tensors from one imported buffer per storage."""
+        buffers = [
+            record_bytes(record, storage["nbytes"])
+            for record, storage in zip(
+                state.storages, state.manifest["storages"], strict=True
+            )
+        ]
+        return rebuild_tensors(state.manifest, buffers)
 
-        In "copy" mode every tensor is cloned into engine-owned memory so the
-        daemon can be asked to release its cache afterwards.
-        """
-        tensors: dict[str, torch.Tensor] = {}
-        kinds: dict[str, TensorKind] = {}
-        for name, entry in state.entries.items():
-            tensor = entry.rebuild(device_index)
-            if self.mode == "copy":
-                tensor = tensor.clone()
-            tensors[name] = tensor
-            kinds[name] = entry.kind
-        return tensors, kinds
-
-    def _fetch_entries(
+    def _fetch_state(
         self,
+        vllm_config: VllmConfig,
         model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        kernel_config: KernelConfig,
-        *,
-        is_reload: bool = False,
     ) -> WeightCacheState:
-        dp_group = get_dp_group()
-        pp_group = get_pp_group()
-        cache_key = WeightCacheKey.from_model_config(
-            model_config,
-            cache_config=cache_config,
-            tp_size=get_tensor_model_parallel_world_size(),
-            tp_rank=get_tensor_model_parallel_rank(),
-            pp_size=pp_group.world_size,
-            pp_rank=pp_group.rank_in_group,
-            dp_size=dp_group.world_size,
-            dp_rank=dp_group.rank_in_group,
-            is_draft=self.is_draft,
-            enable_expert_parallel=parallel_config.enable_expert_parallel,
-            expert_placement_strategy=parallel_config.expert_placement_strategy,
-            kernel_config=kernel_config,
+        cache_key = build_weight_cache_key(
+            vllm_config, model_config, is_draft=self.is_draft
         )
-        # Recorded before model construction so that a later standalone
-        # load_weights reload keys on the same pre-construction values the
-        # daemon fingerprinted, unaffected by any cache_config mutation
-        # during model construction.
-        self._cache_key = cache_key
-        return self._state_for_key(cache_key, is_reload=is_reload)
-
-    def _state_for_key(
-        self, cache_key: WeightCacheKey, *, is_reload: bool = False
-    ) -> WeightCacheState:
-        if not self.fallback:
-            return self._request_state_with_startup_wait(cache_key, is_reload=is_reload)
-        return self._request_state(cache_key, is_reload=is_reload)
-
-    def _request_state_with_startup_wait(
-        self, cache_key: WeightCacheKey, *, is_reload: bool = False
-    ) -> WeightCacheState:
-        return self._with_startup_wait(
-            lambda: self._request_state(cache_key, is_reload=is_reload)
-        )
+        return self._request_state(cache_key)
 
     def _with_startup_wait(self, op: Callable[[], _T]) -> _T:
         """Retry op until the daemon answers or the state timeout elapses;
@@ -390,33 +263,37 @@ class IpcModelLoader(BaseModelLoader):
                     )
                 )
 
-    def _request_state(
-        self, cache_key: WeightCacheKey, *, is_reload: bool = False
-    ) -> WeightCacheState:
+    def _request_state(self, cache_key: WeightCacheKey) -> WeightCacheState:
+        if self.fallback:
+            return self._request_state_once(cache_key)
+        return self._with_startup_wait(lambda: self._request_state_once(cache_key))
+
+    def _request_state_once(self, cache_key: WeightCacheKey) -> WeightCacheState:
         with self._connect(self.state_timeout_s) as conn:
-            send_msg(
-                conn,
-                {
-                    "cmd": "get_state",
-                    "cache_key": cache_key,
-                    "is_reload": is_reload,
-                },
-            )
+            send_msg(conn, {"cmd": "get_state", "cache_key": cache_key})
             response = recv_msg(conn)
         status = response.get("status")
         if status == "mismatch":
             raise CacheConfigMismatchError(
-                f"WeightCacheKey mismatch on fields: {response.get('fields')}"
+                f"WeightCacheKey mismatch on fields: {response['fields']}"
             )
         if status != "ok":
             raise WeightCacheUnavailableError(
-                f"Weight cache daemon error: {response.get('message')}"
+                f"Weight cache daemon error: {response['message']}"
             )
-        self._check_gpu_uuid(response.get("gpu_uuid"))
+        self._check_gpu_uuid(response["gpu_uuid"])
+        backend = response.get("backend")
+        if backend not in IPC_BACKENDS:
+            raise CacheConfigMismatchError(
+                f"weight_cache_backend mismatch: unsupported backend {backend!r}"
+            )
+        device_index = torch.accelerator.current_device_index()
+        records = rebuild_entries(response["storages"], device_index)
         return WeightCacheState(
-            entries=response["entries"],
-            aliases=response.get("aliases", {}),
-            attrs=response.get("attrs", {}),
+            manifest=response["manifest"],
+            storages=records,
+            aliases=response["aliases"],
+            attrs=response["attrs"],
         )
 
     def _connect(self, timeout: float) -> socket.socket:
@@ -451,30 +328,13 @@ class IpcModelLoader(BaseModelLoader):
             is_draft=self.is_draft,
         )
 
-    def _check_gpu_uuid(self, daemon_uuid: str | None) -> None:
-        if daemon_uuid is None:
-            return
+    def _check_gpu_uuid(self, daemon_uuid: str) -> None:
         local_uuid = get_current_device_uuid()
         if daemon_uuid != local_uuid:
             raise CacheConfigMismatchError(
                 f"Daemon GPU {daemon_uuid} != engine GPU {local_uuid}; "
                 "check the socket path / GPU mapping"
             )
-
-    def _send_release(self) -> None:
-        with self._connect(self.connect_timeout_s) as conn:
-            conn.settimeout(self.state_timeout_s)
-            send_msg(conn, {"cmd": "release"})
-            response = recv_msg(conn)
-            if not isinstance(response, dict) or response.get("status") != "ok":
-                message = (
-                    response.get("message", response)
-                    if isinstance(response, dict)
-                    else response
-                )
-                raise WeightCacheUnavailableError(
-                    f"Weight cache daemon refused release: {message}"
-                )
 
     def _watch_daemon(self) -> threading.Thread | None:
         """Watch for the exit of the daemon serving the zero-copy weights.
@@ -492,21 +352,14 @@ class IpcModelLoader(BaseModelLoader):
         try:
             send_msg(conn, {"cmd": "watch"})
             response = recv_msg(conn)
+            if response.get("status") != "ok":
+                raise WeightCacheUnavailableError(response["message"])
         except Exception as e:
             # Best effort: the weights are already mapped, so a failed watch
             # must not send load_model down the disk fallback.
             conn.close()
             logger.warning(
                 "Cannot watch the weight cache daemon at %s: %s", socket_path, e
-            )
-            return None
-        if response.get("status") != "ok":
-            # Daemons predating the watch command reject it.
-            conn.close()
-            logger.info(
-                "Weight cache daemon at %s does not support watching (%s)",
-                socket_path,
-                response.get("message"),
             )
             return None
         conn.settimeout(None)
@@ -525,7 +378,6 @@ class IpcModelLoader(BaseModelLoader):
             # b"" once it exits.
             while conn.recv(1):
                 pass
-        self.daemon_lost.set()
         logger.warning(
             "Weight cache daemon at %s exited. This engine keeps serving: the "
             "CUDA driver keeps its mapped weights alive until the engine exits. "

@@ -261,7 +261,9 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         ]
         num_requests = len(parsed_prompts)
 
-        tok_params = request.build_tok_params(self.model_config)
+        tok_params = request.build_tok_params(
+            self.model_config, self.renderer.default_cmpl_tok_params
+        )
         params_seq = self._params_to_seq(ctx.pooling_params, num_requests)
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
@@ -556,7 +558,13 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             request=request
         )
 
-        tok_params = request.build_tok_params(self.model_config)
+        cmpl_tok_params = request.build_tok_params(
+            self.model_config, self.renderer.default_cmpl_tok_params
+        )
+        chat_tok_params = request.build_tok_params(
+            self.model_config, self.renderer.default_chat_tok_params
+        )
+
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
@@ -564,11 +572,13 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             ScoringRenderParams(
                 data_1=data_1[i],
                 data_2=data_2[i],
+                tok_params=chat_tok_params
+                if isinstance(data_1[i], list)
+                else cmpl_tok_params,
                 chat_template=self.chat_template,
                 chat_template_content_format=self.chat_template_content_format,
                 max_tokens_per_query=max_tokens_per_query,
                 max_tokens_per_doc=max_tokens_per_doc,
-                tok_params=tok_params,
                 prompt_extras=ctx.prompt_extras,
                 skip_mm_cache=False,
                 params=ctx.pooling_params,
@@ -598,9 +608,10 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             pooling_params=ctx.pooling_params
         )
-        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
-            **(ctx.tokenization_kwargs or {})
-        )
+
+        cmpl_tok_params = ctx.build_tok_params(self.renderer.default_cmpl_tok_params)
+        chat_tok_params = ctx.build_tok_params(self.renderer.default_chat_tok_params)
+
         prompt_extras = ctx.pooling_params.extra_kwargs
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
@@ -619,7 +630,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     chat_template_content_format=ctx.chat_template_content_format,
                     max_tokens_per_query=max_tokens_per_query,
                     max_tokens_per_doc=max_tokens_per_doc,
-                    tok_params=tok_params,
+                    tok_params=chat_tok_params
+                    if isinstance(data_1[i], list)
+                    else cmpl_tok_params,
                     prompt_extras=prompt_extras,
                     skip_mm_cache=False,
                     params=ctx.pooling_params,
