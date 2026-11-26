@@ -181,7 +181,6 @@ class SingleTypeKVCacheManager(ABC):
         kv_cache_group_id: int,
         scheduler_block_size: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         needs_kv_cache_zeroing: bool = False,
         max_admission_blocks_per_request: int | None = None,
         retention_interval: int | None = None,
@@ -196,7 +195,6 @@ class SingleTypeKVCacheManager(ABC):
             scheduler_block_size: The scheduling granularity (LCM of all group
                 block sizes); a multiple of this manager's `block_size`.
             dcp_world_size: Decode context parallel world size.
-            pcp_world_size: Prefill context parallel world size.
             needs_kv_cache_zeroing: Whether worker-side KV cache zeroing needs
                 newly allocated block IDs from this manager.
             max_admission_blocks_per_request: Recycling-aware per-request
@@ -216,7 +214,6 @@ class SingleTypeKVCacheManager(ABC):
         self.cache_hit_alignment_tokens = scheduler_block_size
         # The block size for this manager; used for actual block allocation.
         self.dcp_world_size = dcp_world_size if kv_cache_group.dcp_sharded else 1
-        self.pcp_world_size = pcp_world_size if kv_cache_group.dcp_sharded else 1
         # The group's block size before DCP scaling.
         self.group_block_size = kv_cache_group.block_size
         self.block_size = kv_cache_group.block_size * self.dcp_world_size
@@ -808,7 +805,6 @@ class SingleTypeKVCacheManager(ABC):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """Get the longest cache hit prefix of the blocks that is not longer than
@@ -827,7 +823,6 @@ class SingleTypeKVCacheManager(ABC):
                 be a multiple of this value (in tokens). By default, it should
                 be set to the block_size.
             dcp_world_size: The world size of decode context parallelism.
-            pcp_world_size: The world size of prefill context parallelism.
             num_request_tokens: The length of the request being looked up, for
                 managers whose hit rule depends on where it ends. `None`
                 means `max_length`.
@@ -941,7 +936,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         if dcp_world_size > 1:
@@ -1101,11 +1095,16 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         must delay freeing/caching of blocks."""
         bounded_replay: bool = False
         """DeepSeek-V4.1: replay the window instead of prefix caching it."""
+        rebuilt_by_replay: bool = False
+        """Left out of prefix caching without a replay window of its own:
+        another group's bounded replay recomputes enough tokens to rebuild it
+        (e.g. the DeepSeek-V4 compressor states under the SWA replay)."""
 
     @classmethod
     def prefix_cacheable(cls, config: ManagerConfig) -> bool:
-        assert isinstance(config.params, SlidingWindowManager.Params)
-        return not config.params.bounded_replay
+        params = config.params
+        assert isinstance(params, SlidingWindowManager.Params)
+        return not (params.bounded_replay or params.rebuilt_by_replay)
 
     @classmethod
     def prefix_replay_tokens(cls, config: ManagerConfig) -> int:
@@ -1186,14 +1185,12 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         assert isinstance(manager_config.params, SlidingWindowManager.Params), (
             "SlidingWindowManager can only be used for sliding window groups"
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
-        assert pcp_world_size == 1, "PCP not support sliding window attn now."
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
@@ -1665,7 +1662,6 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """Longest hit whose blocks in `[L - sliding_window + 1, hit)` are cached.
@@ -1675,7 +1671,7 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         Underestimating `L` only asks for more blocks than needed.
         """
         assert isinstance(manager_config.params, DFlashSlidingWindowManager.Params)
-        assert dcp_world_size == 1 and pcp_world_size == 1
+        assert dcp_world_size == 1
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
@@ -1850,7 +1846,6 @@ class CircularBufferManager(SingleTypeKVCacheManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         return tuple([] for _ in kv_cache_group_ids), 0
@@ -1925,7 +1920,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """For chunked local attention, we need to find the longest cache hit
@@ -1955,7 +1949,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             block_size: The groups' block size.
             manager_config: The groups' manager config.
             dcp_world_size: The world size of decode context parallelism.
-            pcp_world_size: The world size of prefill context parallelism.
             alignment_tokens: The returned cache hit length (in tokens) should
                 be a multiple of this value (in tokens).
             num_request_tokens: Unused; see the base class.
@@ -1970,7 +1963,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             "chunked local attention groups"
         )
         assert dcp_world_size == 1, "DCP not support chunked local attn now."
-        assert pcp_world_size == 1, "PCP not support chunked local attn now."
         assert block_size == alignment_tokens, (
             "KV cache groups with different block sizes are not compatible with "
             "chunked local attention now"
@@ -2181,11 +2173,9 @@ class MambaManager(SingleTypeKVCacheManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         assert dcp_world_size == 1, "DCP not support mamba now."
-        assert pcp_world_size == 1, "PCP not support mamba now."
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
@@ -3004,7 +2994,6 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         # Cross-attention does not benefit from prefix caching since:
@@ -3219,7 +3208,6 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
         manager_config: ManagerConfig,
         alignment_tokens: int,
         dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
         num_request_tokens: int | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         return tuple([] for _ in kv_cache_group_ids), 0
@@ -3263,9 +3251,15 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         assert isinstance(self.manager_config.params, HiSparseHotManager.Params)
         self.blocks_per_request = self.manager_config.params.blocks_per_request
         self.hot_required: set[str] = set()
+        self.preallocated: dict[str, list[KVCacheBlock]] = {}
 
     def require_hot(self, request_id: str) -> None:
         self.hot_required.add(request_id)
+
+    def preallocate(self, request_id: str) -> None:
+        """Allocate Hot ahead of the step's allocation, which then reports it."""
+        self.require_hot(request_id)
+        self.preallocated[request_id] = self.allocate_new_blocks(request_id, 0, 0)
 
     def has_hot(self, request_id: str) -> bool:
         return len(self.req_to_blocks.get(request_id, ())) == self.blocks_per_request
@@ -3327,6 +3321,8 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
     ) -> list[KVCacheBlock]:
         # Cold admissions can bypass add_local_computed_blocks.
         self.num_cached_block[request_id] = 0
+        if (preallocated := self.preallocated.pop(request_id, None)) is not None:
+            return preallocated
         if request_id not in self.hot_required:
             return []
         req_blocks = self.req_to_blocks[request_id]
@@ -3339,6 +3335,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         self.hot_required.discard(request_id)
+        assert request_id not in self.preallocated
         return super().pop_blocks_for_free(request_id)
 
 

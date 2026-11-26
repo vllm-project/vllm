@@ -61,6 +61,11 @@ RUN echo "$REFRESH" >/etc/vllm-rocm-refresh && mkdir -p /app
 WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
 
+# apt retries a transient failure (e.g. a deadsnakes PPA 503) only 3 times
+# by default, about 100 s in all; ride out longer outages.
+RUN printf 'Acquire::Retries "10";\nAcquire::Retries::Delay::Maximum "60";\n' \
+    > /etc/apt/apt.conf.d/80-retries
+
 # Install Python and other dependencies
 # pip runs with a cache mount, so its downloads (several GB of SDK
 # and torch wheels) never land in an image layer.

@@ -558,10 +558,12 @@ async def test_stop_string_workflow(client, tokenizer, messages):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("server", [["--tokens-only"]], indirect=True)
-async def test_stop_strings_rejected_when_tokens_only(client):
-    """--tokens-only forces detokenize=False after request validation, so
-    stop strings must be rejected explicitly rather than silently ignored."""
+@pytest.mark.parametrize(
+    "server", [["--tokens-only"], ["--skip-tokenizer-init"]], indirect=True
+)
+async def test_stop_strings_rejected_without_tokenizer(client):
+    """A server without a tokenizer (or with detokenization forced off) must
+    reject stop strings explicitly rather than silently ignore them."""
     sampling_params = {"max_tokens": 5, "stop": ["never"]}
     payload = {
         "model": MODEL_NAME,

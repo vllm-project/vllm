@@ -18,6 +18,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     compute_mamba_prefill_checkpoints,
 )
 from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockCopy,
     get_block_hash,
@@ -1255,7 +1256,8 @@ def test_connector_finish_registers_partial_tail_before_cleanup():
             return False, None
 
     scheduler = object.__new__(Scheduler)
-    scheduler.connector = _Connector()
+    connector = _Connector()
+    scheduler.connector = connector
     scheduler.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_producer=True)
     )
@@ -1278,7 +1280,7 @@ def test_connector_finish_registers_partial_tail_before_cleanup():
 
     assert delay_free is True
     assert kv_xfer_params is None
-    assert scheduler.connector.registered == (
+    assert connector.registered == (
         request,
         ([3], [9]),
         [(1, 9, 12)],
@@ -2685,6 +2687,7 @@ def test_resolved_cache_hit_alignment_matches_coordinator(
         hash_block_size=hash_block_size,
     ).coordinator
 
+    assert isinstance(coordinator, HybridKVCacheCoordinator)
     assert coordinator.enable_partial_hash_hits == (
         extra_group is None
         or (extra_group == "sliding_window" and prefix_match_unit is not None)
@@ -2797,9 +2800,11 @@ def test_kpool_tail_supports_128_token_partial_hash_hits():
         hash_block_size=hash_block_size,
     )
 
-    assert manager.coordinator.scheduler_block_size == cache_block_size
-    assert manager.coordinator.hash_block_size == hash_block_size
-    assert manager.coordinator.enable_partial_hash_hits
+    coordinator = manager.coordinator
+    assert isinstance(coordinator, HybridKVCacheCoordinator)
+    assert coordinator.scheduler_block_size == cache_block_size
+    assert coordinator.hash_block_size == hash_block_size
+    assert coordinator.enable_partial_hash_hits
 
     shared_prefix = [10] * (12 * hash_block_size)
     req0 = make_request("0", shared_prefix + [11], hash_block_size, sha256)

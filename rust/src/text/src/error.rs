@@ -121,7 +121,12 @@ impl Error {
     /// Whether the request could not be taken now, so retrying later may
     /// succeed.
     pub fn is_unavailable(&self) -> bool {
-        matches!(self, Self::Llm(LlmError::Unavailable { .. }))
+        matches!(
+            self,
+            Self::Llm(
+                LlmError::Unavailable { .. } | LlmError::QueueFull | LlmError::PrefillBacklogFull
+            )
+        )
     }
 
     /// The request parameter a validation error refers to, reported as the

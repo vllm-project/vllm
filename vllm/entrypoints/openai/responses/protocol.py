@@ -181,6 +181,73 @@ def _tool_field(tool: Any, field: str) -> Any:
     return tool.get(field) if isinstance(tool, dict) else getattr(tool, field, None)
 
 
+def _merge_additional_tools(tools: list[Any], added: list[Any]) -> list[Any]:
+    """Append `added` to `tools`, keeping one definition per tool.
+
+    Named tools are keyed by (type, namespace, name). A repeated key replaces
+    the earlier definition in place, so the latest one wins (a client resending
+    its history carries every redefinition), and a namespace that is already
+    present is updated and gains only its new tools.
+    """
+
+    def is_namespace(tool: Any) -> bool:
+        return (
+            isinstance(tool, dict)
+            and tool.get("type") == "namespace"
+            and isinstance(tool.get("name"), str)
+            and isinstance(tool.get("tools"), list)
+        )
+
+    def key(tool: Any, namespace: str | None = None) -> tuple | None:
+        if isinstance(tool, dict) and isinstance(tool.get("name"), str):
+            return (tool.get("type"), namespace, tool["name"])
+        return None
+
+    # Namespaces get their own tools list, so updating one never mutates input.
+    merged = [{**t, "tools": list(t["tools"])} if is_namespace(t) else t for t in tools]
+    namespaces: dict[str, int] = {}
+    # Where each named tool lives: its index, or its namespace's index and its
+    # index within that namespace.
+    top_level: dict[tuple, int] = {}
+    namespaced: dict[tuple, tuple[int, int]] = {}
+    for index, tool in enumerate(merged):
+        if is_namespace(tool):
+            namespaces.setdefault(tool["name"], index)
+            for position, namespaced_tool in enumerate(tool["tools"]):
+                if (k := key(namespaced_tool, tool["name"])) is not None:
+                    namespaced.setdefault(k, (index, position))
+        elif (k := key(tool)) is not None:
+            top_level.setdefault(k, index)
+
+    for tool in added:
+        if not is_namespace(tool):
+            k = key(tool)
+            if k in top_level:
+                merged[top_level[k]] = tool
+            else:
+                if k is not None:
+                    top_level[k] = len(merged)
+                merged.append(tool)
+            continue
+        name = tool["name"]
+        if name in namespaces:
+            index = namespaces[name]
+            merged[index] = {**tool, "tools": merged[index]["tools"]}
+        else:
+            index = namespaces[name] = len(merged)
+            merged.append({**tool, "tools": []})
+        for namespaced_tool in tool["tools"]:
+            k = key(namespaced_tool, name)
+            if k in namespaced:
+                owner, slot = namespaced[k]
+                merged[owner]["tools"][slot] = namespaced_tool
+            else:
+                if k is not None:
+                    namespaced[k] = (index, len(merged[index]["tools"]))
+                merged[index]["tools"].append(namespaced_tool)
+    return merged
+
+
 def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
     """Resolve a named tool choice to the flat `<namespace>__<name>` form."""
     from vllm.tool_parsers.utils import flat_namespace_tool_name
@@ -879,6 +946,9 @@ class ResponsesRequest(OpenAIBaseModel):
             return data
 
         tools = data.get("tools")
+        if tools is not None and not isinstance(tools, list):
+            # Leave it to field validation, which answers with a 400.
+            return data
         tool_choice = data.get("tool_choice", "auto")
         has_tools = tools is not None and len(tools) > 0
         is_named_tool_choice = isinstance(tool_choice, dict) and tool_choice.get(
@@ -909,6 +979,50 @@ class ResponsesRequest(OpenAIBaseModel):
             if resolved != tool_name:
                 data["tool_choice"] = {**tool_choice, "name": resolved}
 
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def hoist_additional_tools_items(cls, data):
+        """Move tools declared by `additional_tools` input items into `tools`.
+
+        Clients such as Codex declare tools through an input item
+        (`{"type": "additional_tools", "role": "developer", "tools": [...]}`)
+        rather than the top-level `tools` field. Everything downstream reads
+        `request.tools`, so merge them there and drop the item from `input`.
+
+        Defined last on purpose: Pydantic runs `before` validators in reverse
+        definition order, so this runs before the validators that read `tools`.
+        """
+        if not isinstance(data, dict):
+            return data
+        input_data = data.get("input")
+        if not isinstance(input_data, list):
+            return data
+
+        remaining_input = []
+        additional_tools = []
+        for item in input_data:
+            if not (isinstance(item, dict) and item.get("type") == "additional_tools"):
+                remaining_input.append(item)
+                continue
+            item_tools = item.get("tools")
+            if not isinstance(item_tools, list):
+                raise VLLMValidationError(
+                    "`additional_tools` input items must contain a `tools` list.",
+                    parameter="input",
+                )
+            additional_tools.extend(item_tools)
+
+        if len(remaining_input) == len(input_data):
+            return data
+        data["input"] = remaining_input
+        tools = data.get("tools")
+        # A non-list `tools` is left to field validation, which rejects it. The
+        # items still leave `input`, so an openai SDK without the
+        # `additional_tools` input type adds no errors of its own to that one.
+        if isinstance(tools, list | None):
+            data["tools"] = _merge_additional_tools(tools or [], additional_tools)
         return data
 
 
