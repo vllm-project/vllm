@@ -418,7 +418,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # rejects them so the request falls back to local prefill.
         self._failed_req_ids: set[str] = set()
         # req_id -> consumer-side request, from on_new_request until
-        # on_request_finished.
+        # on_request_finished. A req_id is assumed unique for the lifetime of
+        # its request.
         self._fetching: dict[str, _FetchingRequest] = {}
         # Synthetic lookup ctxs from reaped sessions still owing a
         # ``parent.on_request_finished`` (the session's failed_serves). The

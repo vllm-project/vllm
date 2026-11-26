@@ -10,6 +10,7 @@ from typing_extensions import override
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
+from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     ConfigInfoMapping,
     LoadStoreSpec,
@@ -32,6 +33,11 @@ from vllm.v1.kv_offload.cpu.common import (
 from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+
+logger = init_logger(__name__)
+
+# How many finished req_ids to remember for detecting late accesses.
+_MAX_RECENTLY_FINISHED_REQ_IDS = 1024
 
 
 @dataclass(slots=True)
@@ -92,8 +98,11 @@ class CPUOffloadingManager(OffloadingManager):
         self.stores_skipped_in_current_batch: int = 0
         self.allocation_sizes_in_current_batch: list[int] = []
         # Unfinished requests' cache accesses, by req_id. Dropped when the
-        # request finishes or the cache is reset.
+        # request finishes or the cache is reset. A req_id is assumed unique
+        # for the lifetime of its request.
         self._request_accesses: dict[str, _RequestCacheAccess] = {}
+        # Recently finished req_ids, oldest first.
+        self._finished_req_ids: OrderedDict[str, None] = OrderedDict()
 
         # Number of chunk references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
@@ -162,6 +171,13 @@ class CPUOffloadingManager(OffloadingManager):
     def _get_request_cache_access(self, req_context: ReqContext) -> _RequestCacheAccess:
         state = self._request_accesses.get(req_context.req_id)
         if state is None:
+            if req_context.req_id in self._finished_req_ids:
+                del self._finished_req_ids[req_context.req_id]
+                logger.warning(
+                    "Request %s used the CPU offload cache after it finished; "
+                    "tracking it as a new request.",
+                    req_context.req_id,
+                )
             state = _RequestCacheAccess()
             self._request_accesses[req_context.req_id] = state
         return state
@@ -195,6 +211,7 @@ class CPUOffloadingManager(OffloadingManager):
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        self._finished_req_ids.pop(req_context.req_id, None)
         self._get_request_cache_access(req_context)
         return RequestOffloadingContext()
 
@@ -496,6 +513,10 @@ class CPUOffloadingManager(OffloadingManager):
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:
         state = self._request_accesses.pop(req_context.req_id, None)
+        self._finished_req_ids[req_context.req_id] = None
+        self._finished_req_ids.move_to_end(req_context.req_id)
+        if len(self._finished_req_ids) > _MAX_RECENTLY_FINISHED_REQ_IDS:
+            self._finished_req_ids.popitem(last=False)
         if state is None:
             return
         key_groups = []
@@ -525,6 +546,7 @@ class CPUOffloadingManager(OffloadingManager):
         # can begin, preventing a cross-direction data race on reused offload chunk IDs.
         self._policy.clear()
         self._request_accesses.clear()
+        self._finished_req_ids.clear()
         self._num_evictable_cache_chunks = 0
         self._num_write_pending_chunks = 0
 

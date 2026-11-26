@@ -7,7 +7,7 @@ import mmap
 import socket
 import time
 import uuid
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -74,7 +74,6 @@ from vllm.v1.kv_offload.base import (
     get_offload_block_hash,
 )
 from vllm.v1.kv_offload.config import OffloadAccessMode
-from vllm.v1.kv_offload.cpu.policies.base import order_request_keys
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     ParentManager,
@@ -573,7 +572,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     def _poll_finished_jobs(self) -> list[JobResult]:
         results: list[JobResult] = []
-        completed_prefixes: list[tuple[ReqContext, int]] = []
+        completed_prefixes: list[tuple[str, dict[OffloadKey, int], int]] = []
         for op_handle, entries in self._kvcr.poll_completed():
             job_state = self._jobs_by_op.get(op_handle)
             if job_state is None:
@@ -596,15 +595,15 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 )
                 continue
             self._jobs_by_op.pop(op_handle, None)
+            req_id = job.req_context.req_id
             positions = job.req_context._offload_key_positions
             end_token = max((positions.get(key, -1) for key in job.keys), default=-1)
             # Preserve ordering across requests, which may share prefix keys.
-            if (
-                completed_prefixes
-                and completed_prefixes[-1][0].req_id == job.req_context.req_id
-            ):
-                end_token = max(end_token, completed_prefixes.pop()[1])
-            completed_prefixes.append((job.req_context, end_token))
+            if completed_prefixes and completed_prefixes[-1][0] == req_id:
+                _, prev_positions, prev_end_token = completed_prefixes.pop()
+                positions = prev_positions | positions
+                end_token = max(end_token, prev_end_token)
+            completed_prefixes.append((req_id, positions, end_token))
             results.append(
                 JobResult(
                     job_id=job.job_id,
@@ -612,12 +611,10 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                     successful_keys=successful_keys if not success else None,
                 )
             )
-        for req_context, end_token in completed_prefixes:
+        for _, positions, end_token in completed_prefixes:
             # Include earlier resident keys, even when only the tail transferred.
-            positions = req_context._offload_key_positions
             self._align_sequence(
-                [key for key, position in positions.items() if position <= end_token],
-                req_context,
+                {key: pos for key, pos in positions.items() if pos <= end_token}
             )
         results.extend(self._framework_pin_adapter.take_pin_job_results())
         return results
@@ -644,13 +641,12 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     def _align_sequence(
         self,
-        keys: Collection[OffloadKey],
-        req_context: ReqContext,
+        positions: Mapping[OffloadKey, int],
         use_current_time: bool = False,
     ) -> None:
-        if not keys:
+        if not positions:
             return
-        ordered_keys = order_request_keys((list(keys),), req_context)
+        ordered_keys = sorted(positions, key=positions.__getitem__)
         self._kvcr.align_sequence(
             [self._key_adapter.decode_from_framework(key) for key in ordered_keys],
             use_current_time=use_current_time,
@@ -675,12 +671,12 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 max(0, computed_tokens - in_flight),
                 max(prompt_tokens, num_tokens - 1),
             )
-        keys = [
-            key
+        positions = {
+            key: position
             for key, position in req_context._offload_key_positions.items()
             if processed_tokens is None or position <= processed_tokens
-        ]
-        self._align_sequence(keys, req_context, use_current_time=True)
+        }
+        self._align_sequence(positions, use_current_time=True)
         self._kvcr.discard_hint(req_context.req_id)
 
     @override
