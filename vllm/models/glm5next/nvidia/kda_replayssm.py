@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5.3-Flash KDA ReplaySSM decode and verify step (CUDA, sm_100a / sm_103a).
+"""GLM-5.3-Flash KDA ReplaySSM decode and verify step (CUDA, sm_90a/100a/103a).
 
 One launch per layer covers the `f_b` / `g_b` projections, the short conv, the
 replay of the committed ring records onto the checkpoint, the new tokens and the
@@ -101,8 +101,8 @@ def check_supported(
             *state_dtypes[:2],
         )
         != (torch.bfloat16, torch.bfloat16, torch.float32),
-        "GPUs other than SM100 / SM103": current_platform.get_device_capability()
-        not in ((10, 0), (10, 3)),
+        "GPUs other than SM90 / SM100 / SM103": current_platform.get_device_capability()
+        not in ((9, 0), (10, 0), (10, 3)),
     }
     reasons = [reason for reason, bad in unsupported.items() if bad]
     if reasons:
@@ -115,7 +115,7 @@ def _module():
     import tvm_ffi.cpp
 
     arch_list = os.environ.get("TVM_FFI_CUDA_ARCH_LIST")
-    os.environ["TVM_FFI_CUDA_ARCH_LIST"] = "10.0a 10.3a"
+    os.environ["TVM_FFI_CUDA_ARCH_LIST"] = "9.0a 10.0a 10.3a"
     try:
         return tvm_ffi.cpp.load(
             "glm5next_kda_replayssm",
