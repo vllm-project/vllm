@@ -4282,6 +4282,14 @@ fn derender_stop_string(stop: &str) -> pb::FinishInfo {
 async fn derender_stream_responses(
     requests: Vec<pb::DerenderStreamRequest>,
 ) -> Result<Vec<pb::DerenderStreamResponse>, tonic::Status> {
+    derender_stream_responses_with_request_id(requests, None).await
+}
+
+/// `derender_stream_responses`, sending `request_id` as `x-request-id` metadata.
+async fn derender_stream_responses_with_request_id(
+    requests: Vec<pb::DerenderStreamRequest>,
+    request_id: Option<&str>,
+) -> Result<Vec<pb::DerenderStreamResponse>, tonic::Status> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
     let addr = listener.local_addr().expect("local addr");
     let server = tokio::spawn(async move {
@@ -4297,7 +4305,13 @@ async fn derender_stream_responses(
         .await
         .expect("connect grpc channel");
     let mut client = pb::render_client::RenderClient::new(channel);
-    let mut responses = client.derender_stream(futures::stream::iter(requests)).await?.into_inner();
+    let mut request = tonic::Request::new(futures::stream::iter(requests));
+    if let Some(request_id) = request_id {
+        request
+            .metadata_mut()
+            .insert("x-request-id", request_id.parse().expect("metadata value"));
+    }
+    let mut responses = client.derender_stream(request).await?.into_inner();
     let mut collected = Vec::new();
     while let Some(response) = tokio::time::timeout(Duration::from_secs(5), responses.message())
         .await
@@ -4421,6 +4435,27 @@ async fn derender_stream_returns_the_json_body_for_a_non_streaming_request() {
     assert_eq!(responses[0].finished.len(), 1);
 }
 
+/// A gateway matches the client response to its own request by `x-request-id`,
+/// as on the HTTP route.
+#[tokio::test]
+async fn derender_stream_uses_the_x_request_id_metadata() {
+    let responses = derender_stream_responses_with_request_id(
+        vec![
+            derender_start_request(derender_body(serde_json::json!({}))).await,
+            derender_output_request("one", Some(derender_eos())),
+        ],
+        Some("gateway-req-1"),
+    )
+    .await
+    .expect("derender");
+
+    let Some(pb::derender_stream_response::Output::Body(body)) = &responses[0].output else {
+        panic!("expected a body, got {:?}", responses[0].output);
+    };
+    let body: serde_json::Value = serde_json::from_slice(body).expect("body json");
+    assert_eq!(body["id"], "chatcmpl-gateway-req-1");
+}
+
 #[tokio::test]
 async fn derender_stream_cuts_at_the_stop_string_the_worker_reports() {
     let body = derender_body(serde_json::json!({"stream": true, "stop": ["END"]}));
@@ -4472,7 +4507,7 @@ async fn derender_stream_rejects_a_reported_stop_string_outside_the_request() {
     .await
     .expect_err("unknown stop string");
 
-    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+    assert_eq!(status.code(), tonic::Code::Internal, "{status:?}");
 }
 
 #[tokio::test]
@@ -4480,10 +4515,6 @@ async fn derender_stream_rejects_protocol_violations() {
     let start = derender_start_request(derender_body(serde_json::json!({"stream": true}))).await;
     let cases = [
         ("output first", vec![derender_output_request("Hi", None)]),
-        (
-            "closed before finish",
-            vec![start.clone(), derender_output_request("Hi", None)],
-        ),
         (
             "second start",
             vec![
@@ -4500,6 +4531,29 @@ async fn derender_stream_rejects_protocol_violations() {
             tonic::Code::InvalidArgument,
             "{name}: {status:?}"
         );
+    }
+}
+
+/// Bad worker output is not the client's fault, so a gateway must be able to
+/// tell it from a bad request.
+#[tokio::test]
+async fn derender_stream_rejects_bad_worker_output_as_internal() {
+    let start = derender_start_request(derender_body(serde_json::json!({"stream": true}))).await;
+    let mut second_sequence = derender_sequence_output("Hi", Some(derender_eos()));
+    second_sequence.index = 1;
+    let cases = [
+        (
+            "closed before finish",
+            vec![start.clone(), derender_output_request("Hi", None)],
+        ),
+        (
+            "index out of range",
+            vec![start.clone(), derender_output_frame(second_sequence)],
+        ),
+    ];
+    for (name, requests) in cases {
+        let status = derender_stream_responses(requests).await.expect_err(name);
+        assert_eq!(status.code(), tonic::Code::Internal, "{name}: {status:?}");
     }
 }
 
@@ -4561,7 +4615,7 @@ async fn derender_stream_rejects_a_reported_stop_string_the_output_does_not_cont
     .await
     .expect_err("stop string not in the output");
 
-    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+    assert_eq!(status.code(), tonic::Code::Internal, "{status:?}");
 }
 
 #[tokio::test]
@@ -4656,11 +4710,7 @@ async fn derender_stream_rejects_misaligned_logprobs() {
         .await
         .expect_err(name);
 
-        assert_eq!(
-            status.code(),
-            tonic::Code::InvalidArgument,
-            "{name}: {status:?}"
-        );
+        assert_eq!(status.code(), tonic::Code::Internal, "{name}: {status:?}");
     }
 }
 
@@ -4676,7 +4726,7 @@ async fn derender_stream_rejects_a_reported_stop_string_the_decoder_did_not_matc
     .await
     .expect_err("stop string mismatch");
 
-    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+    assert_eq!(status.code(), tonic::Code::Internal, "{status:?}");
     assert!(
         status.message().contains("stops on \"END\" first"),
         "{status:?}"
@@ -4807,7 +4857,7 @@ async fn chat_over_http_and_derender(
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(
         EngineCoreLlm::new(client),
-        Arc::new(FakeRenderBackend) as Arc<dyn ChatTextBackend>,
+        Arc::new(FakeRenderBackend::default()) as Arc<dyn ChatTextBackend>,
     )
     .with_served_model_name("test-model");
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));

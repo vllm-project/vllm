@@ -200,7 +200,7 @@ impl RenderContext for RenderState {
     }
 
     fn counts_reasoning_tokens(&self) -> bool {
-        self.chat.reasoning_parser_name(&self.model).is_some()
+        self.chat.reasoning_parser_name().is_some()
     }
 }
 

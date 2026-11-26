@@ -420,17 +420,15 @@ impl ChatRequestProcessor {
         Ok(ChatEventStream::new(request.request_id, sampling, events))
     }
 
-    /// Effective reasoning parser name for `model_id`, if parsing is enabled.
-    pub fn reasoning_parser_name(&self, model_id: &str) -> Option<&str> {
-        self.reasoning_parser.resolve_reasoning_name(model_id)
+    /// Effective reasoning parser name, if parsing is enabled.
+    pub fn reasoning_parser_name(&self) -> Option<&str> {
+        self.backend.reasoning_parser_name()
     }
 
     fn new_output_processor(&self, request: &mut ChatRequest) -> Result<DynChatOutputProcessor> {
         self.backend.new_chat_output_processor(
             request,
             NewChatOutputProcessorOptions {
-                tool_call_parser: &self.tool_call_parser,
-                reasoning_parser: &self.reasoning_parser,
                 tool_strict_level: self.tool_strict_level,
             },
         )

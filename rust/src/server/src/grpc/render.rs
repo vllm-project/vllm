@@ -85,9 +85,10 @@ impl<S: RenderContext> Render for RenderServiceImpl<S> {
         &self,
         request: Request<pb::RenderRequest>,
     ) -> Result<Response<pb::RenderResponse>, Status> {
+        let headers = request.metadata().clone().into_headers();
         let request = request.into_inner();
         let span = info_span!("grpc_render", rpc = "Render");
-        let result = render(self.state.as_ref(), request).instrument(span.clone()).await;
+        let result = render(self.state.as_ref(), request, &headers).instrument(span.clone()).await;
         log_failure(&span, &result);
         result.map(Response::new)
     }
@@ -100,7 +101,8 @@ impl<S: RenderContext> Render for RenderServiceImpl<S> {
         request: Request<Streaming<pb::DerenderStreamRequest>>,
     ) -> Result<Response<Self::DerenderStreamStream>, Status> {
         let span = info_span!("grpc_render", rpc = "DerenderStream");
-        let result = derender_stream(self.state.as_ref(), request.into_inner())
+        let headers = request.metadata().clone().into_headers();
+        let result = derender_stream(self.state.as_ref(), request.into_inner(), &headers)
             .instrument(span.clone())
             .await;
         log_failure(&span, &result);
@@ -125,6 +127,7 @@ fn log_failure<T>(span: &tracing::Span, result: &Result<T, Status>) {
 async fn render(
     state: &impl RenderContext,
     request: pb::RenderRequest,
+    headers: &HeaderMap,
 ) -> Result<pb::RenderResponse, Status> {
     check_chat_api(request.api)?;
 
@@ -134,7 +137,7 @@ async fn render(
             pb::MmPayload::None => true,
         };
 
-    let RawChat { prepared, .. } = prepare_raw_chat(state, &request.body).await?;
+    let RawChat { prepared, .. } = prepare_raw_chat(state, &request.body, headers).await?;
 
     let RenderedChat {
         prompt_token_ids,
@@ -171,18 +174,22 @@ struct RawChat {
 }
 
 /// Parse, validate and lower a raw Chat Completions body, shared by `Render`
-/// and `DerenderStream` so both lower the same body the same way.
-async fn prepare_raw_chat(state: &impl RenderContext, body: &[u8]) -> Result<RawChat, Status> {
+/// and `DerenderStream` so both lower the same body the same way. `headers` is the
+/// gRPC metadata, read as the HTTP route reads its headers.
+async fn prepare_raw_chat(
+    state: &impl RenderContext,
+    body: &[u8],
+    headers: &HeaderMap,
+) -> Result<RawChat, Status> {
     // Parse exactly as the HTTP extractor does, so a body gets the same result
     // and error on both protocols.
     let Json(body) = Json::<ChatCompletionRequest>::from_bytes(body)
         .map_err(|rejection| api_error_to_status(rejection.into()))?;
     let stream = body.stream;
 
-    let LoweredChatRender { prepared, .. } =
-        lower_chat_render_request(state, body, &HeaderMap::new())
-            .await
-            .map_err(api_error_to_status)?;
+    let LoweredChatRender { prepared, .. } = lower_chat_render_request(state, body, headers)
+        .await
+        .map_err(api_error_to_status)?;
 
     Ok(RawChat { prepared, stream })
 }
@@ -299,6 +306,7 @@ async fn prepare_and_render_chat(
 async fn derender_stream(
     state: &impl RenderContext,
     mut inbound: Streaming<pb::DerenderStreamRequest>,
+    headers: &HeaderMap,
 ) -> Result<
     Pin<Box<dyn Stream<Item = Result<pb::DerenderStreamResponse, Status>> + Send + 'static>>,
     Status,
@@ -321,7 +329,7 @@ async fn derender_stream(
         return Err(Status::invalid_argument("`start.request` is required"));
     };
     check_chat_api(request.api)?;
-    let RawChat { prepared, stream } = prepare_raw_chat(state, &request.body).await?;
+    let RawChat { prepared, stream } = prepare_raw_chat(state, &request.body, headers).await?;
     // `UNIMPLEMENTED` lets a gateway fall back to HTTP for these.
     let unsupported = [
         (prepared.n.get() > 1, "`n` greater than 1"),
@@ -462,14 +470,14 @@ impl DerenderInbound {
                     ));
                 }
                 None => {
-                    return Err(Status::invalid_argument(
+                    return Err(Status::internal(
                         "the DerenderStream request stream closed before a finished output",
                     ));
                 }
             }
         };
         if output.index != 0 {
-            return Err(Status::invalid_argument(format!(
+            return Err(Status::internal(format!(
                 "output index {} is out of range for a single sequence",
                 output.index
             )));
@@ -477,7 +485,7 @@ impl DerenderInbound {
         if let Some(stop) = reported_stop_string(&output)
             && !self.stop_strings.contains(stop)
         {
-            return Err(Status::invalid_argument(format!(
+            return Err(Status::internal(format!(
                 "output stopped on stop string {stop:?}, which is not in the request's `stop`"
             )));
         }
@@ -620,7 +628,7 @@ fn detokenized_finish_info(
             (PbFinishReason::Stop as i32, Some(stop.clone()))
         }
         (FinishReason::Length, Some(PbStopReason::StopString(stop))) => {
-            return Err(Status::invalid_argument(format!(
+            return Err(Status::internal(format!(
                 "output stopped on stop string {stop:?}, which the decoded output does not \
                  contain past `min_tokens`"
             )));
@@ -629,7 +637,7 @@ fn detokenized_finish_info(
             FinishReason::Stop(Some(StopReason::Text(matched))),
             Some(PbStopReason::StopString(stop)),
         ) if matched != stop => {
-            return Err(Status::invalid_argument(format!(
+            return Err(Status::internal(format!(
                 "output stopped on stop string {stop:?}, but the decoded output stops on \
                  {matched:?} first"
             )));

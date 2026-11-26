@@ -512,7 +512,7 @@ pub(super) fn output_logprobs_from_proto(
         || output.ranks.len() != len
         || !(output.candidate_tokens.is_empty() || output.candidate_tokens.len() == len)
     {
-        return Err(Status::invalid_argument(
+        return Err(Status::internal(
             "output logprobs, ranks and candidate_tokens must align with token_ids",
         ));
     }

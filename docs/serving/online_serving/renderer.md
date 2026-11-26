@@ -95,7 +95,9 @@ a gRPC error status, and for a streaming client on an in-band error event
 forward to the client as is.
 
 Set `response.output_token_ids = true` on the `GenerateRequest`:
-`DerenderStream` decodes `token_ids` and does not read `text`. The `stop`
+`DerenderStream` decodes `token_ids` and does not read `text`. When the body
+sets `logprobs`, also set `response.output_logprobs`, and when it sets
+`top_logprobs`, set `response.output_candidates`. The `stop`
 strings of the `GenerateRequest` must match the body's `stop`, because the
 stream applies the same stop matching as the worker. It rejects a stop string
 the body does not list, and one that differs from where its own decoding
@@ -111,6 +113,13 @@ Not supported yet: `n > 1`, prompt logprobs, `return_prompt_text`,
 rejects these at `start` with `UNIMPLEMENTED`, so a gateway can fall back to
 HTTP. Send `start` before submitting `GenerateStream` so that a rejected request
 generates nothing. `DerenderStream` reports no per-request metrics.
+
+A request the body itself makes invalid fails with `INVALID_ARGUMENT`, which a
+gateway can return to the client as HTTP 400. `GenerateStream` output that
+`DerenderStream` cannot use, such as a stream that closes before a finished
+output or a stop string the body does not list, fails with `INTERNAL`. As on
+the HTTP route, the `x-request-id` metadata sets the response `id`
+(`chatcmpl-<x-request-id>`).
 
 The render server uses default response options, so the output can differ from
 a `vllm serve` started with `--enable-prompt-tokens-details` or
