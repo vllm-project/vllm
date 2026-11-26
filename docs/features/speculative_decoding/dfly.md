@@ -6,6 +6,13 @@ This guide covers DFly with HY4 Flash. DFly is disabled by default; enable it
 with `--speculative_config '{"num_speculative_tokens":5,"method":"dfly"}'`.
 The HY4 Flash checkpoint must include DFly configuration and draft weights.
 
+If `num_speculative_tokens` is omitted, DFly reads
+`speculative_config.num_speculative_tokens` from the checkpoint's `config.json`.
+This value excludes the anchor query. An explicitly supplied token count takes
+precedence. Older checkpoints without the nested configuration can still use
+`dfly_block_size`, which includes the anchor query. The resolved token count must
+be an integer in `[1, 16]`.
+
 DFly is introduced in [AngelSpec: Towards Real-World High Performance Inference
 with Speculative Decoding](https://arxiv.org/abs/2607.25852).
 

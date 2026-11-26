@@ -20,6 +20,7 @@ from transformers import AutoConfig, Glm5NextConfig, PreTrainedConfig
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.transformers_utils.configs.hy_v4 import HYV4Config
 
 _YARN_ROPE_PARAMETERS = {
     "mrope_interleaved": True,
@@ -30,6 +31,72 @@ _YARN_ROPE_PARAMETERS = {
     "factor": 4.0,
     "original_max_position_embeddings": 262_144,
 }
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("checkpoint_options", "num_speculative_tokens", "expected"),
+    [
+        ({"speculative_config": {"num_speculative_tokens": 5}}, None, 5),
+        ({"speculative_config": {"num_speculative_tokens": 5}}, 3, 3),
+        (
+            {
+                "speculative_config": {"num_speculative_tokens": 5},
+                "dfly_block_size": 9,
+            },
+            None,
+            5,
+        ),
+        ({"dfly_block_size": 6}, None, 5),
+    ],
+)
+def test_dfly_checkpoint_width_defaults(
+    tmp_path, checkpoint_options, num_speculative_tokens, expected
+):
+    """Checkpoint defaults exclude the anchor and never override user input."""
+    HYV4Config(
+        architectures=["HYV4ForCausalLM"],
+        dfly_num_hidden_layers=1,
+        dfly_mask_token_id=120009,
+        dfly_target_index_layer=[1],
+        dfly_target_kv_layers=[1],
+        **checkpoint_options,
+    ).save_pretrained(tmp_path)
+    target = ModelConfig(model=str(tmp_path), dtype="bfloat16", max_model_len=128)
+    options = {}
+    if num_speculative_tokens is not None:
+        options["num_speculative_tokens"] = num_speculative_tokens
+    spec = SpeculativeConfig(
+        method="dfly",
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+        **options,
+    )
+
+    assert spec.num_speculative_tokens == expected
+    assert spec.speculator_config.num_lookahead_tokens == expected + 1
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("checkpoint_width", [None, True, 0, 17, "5"])
+def test_dfly_rejects_invalid_checkpoint_width(tmp_path, checkpoint_width):
+    """Malformed checkpoint widths cannot silently become valid draft sizes."""
+    HYV4Config(
+        architectures=["HYV4ForCausalLM"],
+        dfly_num_hidden_layers=1,
+        dfly_mask_token_id=120009,
+        dfly_target_index_layer=[1],
+        dfly_target_kv_layers=[1],
+        speculative_config={"num_speculative_tokens": checkpoint_width},
+    ).save_pretrained(tmp_path)
+    target = ModelConfig(model=str(tmp_path), dtype="bfloat16", max_model_len=128)
+
+    with pytest.raises(ValueError, match="num_speculative_tokens in"):
+        SpeculativeConfig(
+            method="dfly",
+            target_model_config=target,
+            target_parallel_config=ParallelConfig(),
+        )
 
 
 def _make_hf_config(**kwargs) -> PreTrainedConfig:

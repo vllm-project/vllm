@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 from vllm.v1.worker.gpu.spec_decode.speculator_config import DraftModelSpeculatorConfig
@@ -41,13 +41,20 @@ class DFlySpeculatorConfig(DraftModelSpeculatorConfig):
     def resolve_num_speculative_tokens(cls, spec: "SpeculativeConfig") -> None:
         n = spec.num_speculative_tokens
         if n is None:
-            block_size = getattr(
-                spec.target_model_config.hf_config, "dfly_block_size", None
-            )
-            if type(block_size) is not int or not 2 <= block_size <= 17:
-                raise ValueError("DFly requires dfly_block_size in [2, 17]")
-            # The checkpoint block includes the separate anchor query.
-            n = block_size - 1
+            hf_config = spec.target_model_config.hf_config
+            checkpoint_spec = getattr(hf_config, "speculative_config", None)
+            if checkpoint_spec is not None:
+                if not isinstance(checkpoint_spec, Mapping):
+                    raise ValueError(
+                        "DFly checkpoint speculative_config must be a mapping"
+                    )
+                n = checkpoint_spec.get("num_speculative_tokens")
+            else:
+                block_size = getattr(hf_config, "dfly_block_size", None)
+                if type(block_size) is not int or not 2 <= block_size <= 17:
+                    raise ValueError("DFly requires dfly_block_size in [2, 17]")
+                # The checkpoint block includes the separate anchor query.
+                n = block_size - 1
         if type(n) is not int or not 1 <= n <= 16:
             raise ValueError("DFly requires num_speculative_tokens in [1, 16]")
         spec.num_speculative_tokens = n
