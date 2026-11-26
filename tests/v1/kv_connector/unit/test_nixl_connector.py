@@ -278,6 +278,31 @@ def test_basic_interface():
         assert block_id == block.block_id
 
 
+@pytest.mark.parametrize("has_block_ids_field", [False, True], ids=["missing", "empty"])
+def test_remote_prefill_without_blocks_falls_back_to_local_prefill(
+    has_block_ids_field: bool,
+):
+    scheduler = create_scheduler(create_vllm_config())
+    request = create_request(do_remote_prefill=True, num_remote_blocks=0)
+    params = request.kv_transfer_params
+    assert params is not None
+    if not has_block_ids_field:
+        del params["remote_block_ids"]
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {
+        request.request_id: request.num_prompt_tokens
+    }
+    assert request.status == RequestStatus.RUNNING
+    assert params["do_remote_prefill"] is False
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, NixlConnectorMetadata)
+    assert not metadata.reqs_to_recv
+    assert not metadata.heartbeat_by_engine
+
+
 def test_prompt_less_than_block_size():
     """
     Test that we can handle case where prompt is < block.

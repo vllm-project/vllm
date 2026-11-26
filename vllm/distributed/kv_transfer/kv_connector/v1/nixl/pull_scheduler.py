@@ -20,6 +20,18 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _pull_remote_params_ready(params: dict[str, Any]) -> bool:
+    return bool(params.get("remote_block_ids")) and all(
+        params.get(key) is not None
+        for key in (
+            "remote_engine_id",
+            "remote_request_id",
+            "remote_host",
+            "remote_port",
+        )
+    )
+
+
 class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
     """Pull-specific scheduler logic (READ-based KV transfer)."""
 
@@ -30,6 +42,15 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+
+    def on_new_request(self, request: "Request") -> None:
+        params = request.kv_transfer_params
+        if not isinstance(params, dict):
+            return
+        if params.get("do_remote_prefill") and not _pull_remote_params_ready(params):
+            logger.warning("Ignoring incomplete NIXL Pull remote prefill parameters.")
+            params["do_remote_prefill"] = False
+        super().on_new_request(request)
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -57,24 +78,13 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             params,
         )
 
-        if params is not None and params.get("do_remote_prefill"):
-            # Remote prefill: get all prompt blocks from remote.
-            # Require peer coordinates before claiming external tokens so
-            # incomplete client params cannot reach the assert below.
-            if not all(
-                p in params
-                for p in (
-                    "remote_engine_id",
-                    "remote_request_id",
-                    "remote_host",
-                    "remote_port",
-                )
-            ):
-                logger.warning(
-                    "Got invalid KVTransferParams: %s. This "
-                    "request will not utilize KVTransfer",
-                    params,
-                )
+        if not isinstance(params, dict):
+            return 0, False
+
+        if params.get("do_remote_prefill"):
+            if not _pull_remote_params_ready(params):
+                params["do_remote_prefill"] = False
+                self._stop_heartbeat(request.request_id)
                 return 0, False
             token_ids = request.prompt_token_ids or []
             actual = self._get_remote_prefill_token_count(len(token_ids))
@@ -82,20 +92,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             if count > 0:
                 return count, True
 
-        if (
-            params is not None
-            and params.get("do_remote_decode")
-            and params.get("remote_block_ids")
-            and all(
-                p in params
-                for p in (
-                    "remote_engine_id",
-                    "remote_request_id",
-                    "remote_host",
-                    "remote_port",
-                )
-            )
-        ):
+        if params.get("do_remote_decode") and _pull_remote_params_ready(params):
             # Decode node has kv blocks for part of prefill request, so, provide them
             # as an external token count to scheduler.
             # The tokens will be loaded if not already present
@@ -134,7 +131,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             params,
         )
 
-        if not params:
+        if not isinstance(params, dict) or not params:
             return
 
         if params.get("do_remote_decode") or (
@@ -150,60 +147,32 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             and self.is_bidirectional_kv_xfer_enabled
             and not params.get("_remote_blocks_processed")
         ):
-            if params.get("remote_block_ids"):
-                if all(
-                    p in params
-                    for p in (
-                        "remote_engine_id",
-                        "remote_request_id",
-                        "remote_host",
-                        "remote_port",
+            if _pull_remote_params_ready(params):
+                # A full local cache hit still needs an empty receive so the
+                # worker can notify the producer to release its blocks.
+                unhashed_local_block_ids: BlockIds = (
+                    blocks.get_unhashed_block_ids_all_groups()
+                    if num_external_tokens > 0
+                    else ()
+                )
+                local_block_ids = self.get_exchange_clipped_blocks(
+                    unhashed_local_block_ids
+                )
+                # Each group's local cache hit fixes where its DCP slice starts.
+                local_num_computed_blocks = tuple(
+                    sum(
+                        block.block_hash is not None and not block.is_null
+                        for block in group
                     )
-                ):
-                    # If remote_blocks and num_external_tokens = 0, we have
-                    # a full prefix cache hit on the local node. We need to call
-                    # send_notif in _read_blocks to free the memory on the remote node.
-
-                    unhashed_local_block_ids: BlockIds = (
-                        blocks.get_unhashed_block_ids_all_groups()
-                        if num_external_tokens > 0
-                        else ()
-                    )
-                    local_block_ids = self.get_exchange_clipped_blocks(
-                        unhashed_local_block_ids
-                    )
-                    # Blocks covered by the local prefix cache, per KV cache group.
-                    # Each count fixes where that group's DCP slice starts, which the
-                    # worker needs to line up with the remote's slice.
-                    local_num_computed_blocks = tuple(
-                        sum(
-                            block.block_hash is not None and not block.is_null
-                            for block in group
-                        )
-                        for group in blocks.blocks
-                    )
-
-                    # Get unhashed blocks to pull from remote. Mind that a full prefix
-                    # cache hit is indicated with an empty list.
-                    self._reqs_need_recv[request.request_id] = (
-                        request,
-                        local_block_ids,
-                        local_num_computed_blocks,
-                    )
-
-                else:
-                    logger.warning(
-                        "Got invalid KVTransferParams: %s. This "
-                        "request will not utilize KVTransfer",
-                        params,
-                    )
-            else:
-                if num_external_tokens > 0:
-                    logger.warning(
-                        "Got invalid KVTransferParams: %s. This "
-                        "request will not utilize KVTransfer",
-                        params,
-                    )
+                    for group in blocks.blocks
+                )
+                self._reqs_need_recv[request.request_id] = (
+                    request,
+                    local_block_ids,
+                    local_num_computed_blocks,
+                )
+            elif num_external_tokens > 0 or params.get("remote_block_ids"):
+                logger.warning("Ignoring incomplete NIXL Pull remote parameters.")
             # Only trigger 1 KV transfer per request.
             params["do_remote_prefill"] = False
             params["_remote_blocks_processed"] = True
@@ -227,7 +196,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             request.status,
             params,
         )
-        if not params:
+        if not isinstance(params, dict) or not params:
             return False, None
 
         is_p_node = bool(params.get("do_remote_decode"))
@@ -246,7 +215,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # To avoid stranding the prefill blocks in the prefill instance,
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
-            self._reqs_need_recv[request.request_id] = (request, [], ())
+            if _pull_remote_params_ready(params):
+                self._reqs_need_recv[request.request_id] = (request, [], ())
             params["do_remote_prefill"] = False
             return False, None
 
