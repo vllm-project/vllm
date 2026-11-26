@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
+from vllm.models.inkling2.configs import Inkling2DSparkConfig
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 
@@ -11,6 +12,15 @@ if TYPE_CHECKING:
 
 class Inkling2DSparkSpeculatorConfig(DSparkSpeculatorConfig):
     speculator_class = "vllm.models.inkling2.speculator.Inkling2DSparkSpeculator"
+
+    @classmethod
+    def apply_options(cls, spec: "SpeculativeConfig") -> None:
+        super().apply_options(spec)
+        # Generic draft loading forwards only rope-related dict overrides.
+        target = Inkling2DSparkConfig.from_target(spec.target_model_config.hf_config)
+        draft = spec.draft_model_config.hf_config
+        draft.draft_weight_quantization = target.draft_weight_quantization
+        draft.draft_quantize_layers = target.draft_quantize_layers
 
     @classmethod
     def adapt_draft_model_config(cls, spec: "SpeculativeConfig") -> None:

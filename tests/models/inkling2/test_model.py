@@ -110,12 +110,18 @@ class ZeroHeadDummyLoader(DummyModelLoader):
             model.get_language_model().lm_head.weight.zero_()
 
 
-def _int8_draft_is_active(worker) -> bool:
+def _int8_draft_is_active(worker, quantize_layers: bool) -> bool:
     draft = worker.model_runner.speculator.model
     return (
         draft.lm_head_q8 is not None
         and draft.lm_head_q8[0].dtype == torch.int8
         and draft.model.markov_head.fold_q8 is not None
+        and draft.config.draft_quantize_layers == quantize_layers
+        and all(
+            (getattr(layer.self_attn.qkv_proj, "q8", None) is not None)
+            == quantize_layers
+            for layer in draft.model.layers
+        )
     )
 
 
@@ -287,9 +293,14 @@ def test_tiny_model_generates(
     with the DSpark draft (target feature capture, draft KV and graphs).
     Probabilistic drafting caches the draft's bf16 logits for rejection."""
     config = copy.deepcopy(TINY_LOOP_CONFIG if looped else TINY_CONFIG)
-    config["dspark_weight_quantization"] = draft_weight_quantization
     (tmp_path / "config.json").write_text(json.dumps(config))
+    # Exercise full draft quantization and heads-only through CLI-style overrides.
+    quantize_layers = draft_sample_method == "greedy"
     llm = LLM(
+        hf_overrides={
+            "dspark_weight_quantization": draft_weight_quantization,
+            "dspark_quantize_layers": quantize_layers,
+        },
         speculative_config=(
             None
             if draft_sample_method is None
@@ -350,7 +361,9 @@ def test_tiny_model_generates(
         assert 0 <= accepted <= drafted
         if draft_weight_quantization is not None:
             assert accepted > 0
-            assert all(llm.collective_rpc(_int8_draft_is_active))
+            assert all(
+                llm.collective_rpc(_int8_draft_is_active, args=(quantize_layers,))
+            )
 
 
 def _record_moe_routing(model: torch.nn.Module) -> None:
