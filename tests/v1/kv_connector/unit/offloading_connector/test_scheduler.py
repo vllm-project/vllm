@@ -1392,7 +1392,64 @@ def test_sync_load_budget_is_shared_per_step():
 
     assert scheduler.get_num_new_matched_tokens(first, 0) == (28, False)
     assert scheduler.get_num_new_matched_tokens(second, 0) == (28, True)
-    assert scheduler._current_batch_sync_loads == {"a"}
+    assert scheduler._current_batch_sync_loads == {
+        "a": 28 * scheduler.config.kv_bytes_per_token,
+    }
+
+
+def test_declined_hit_frees_sync_load_reservation_for_co_scheduled_request():
+    """Same step, A and B: A reserves the sync-load budget but the scheduler
+    declines the hit (num_external_tokens=0 -- an opt-in load/recompute policy,
+    or prefix-replay trimming the hit to zero). The reservation must be
+    released, otherwise B cannot sync-load this step even though the budget
+    was never consumed. Charge only accepted loads."""
+    scheduler = _make_partial_tail_scheduler()
+    hit_bytes = 28 * scheduler.config.kv_bytes_per_token
+    assert hit_bytes > 0
+    scheduler.config = scheduler.config._replace(sync_load_budget_bytes=hit_bytes)
+    first = _make_partial_tail_request(scheduler, request_id="a")
+    second = _make_partial_tail_request(scheduler, request_id="b")
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+
+    # Step order is per request: query -> alloc -> update_state_after_alloc.
+    assert scheduler.get_num_new_matched_tokens(first, 0) == (28, False)
+    assert scheduler.get_num_new_matched_tokens(second, 0) == (28, True)
+
+    # The scheduler declines A's hit; the connector must free the reservation.
+    scheduler.update_state_after_alloc(
+        first, cast(KVCacheBlocks, SimpleNamespace(blocks=[])), 0
+    )
+    assert scheduler._current_batch_sync_loads == {}
+    assert scheduler._current_batch_sync_load_bytes == 0
+
+    # B now fits in the freed budget and sync-loads.
+    external, load_async = scheduler.get_num_new_matched_tokens(second, 0)
+    assert (external, load_async) == (28, False)
+    scheduler.update_state_after_alloc(
+        second, cast(KVCacheBlocks, SimpleNamespace(blocks=[])), external
+    )
+    assert "b" in scheduler._current_batch_sync_loads
+
+
+def test_accepted_hit_consumes_budget_so_later_request_stays_async():
+    """Control: when A accepts its hit (update with N>0) the reservation is
+    consumed and B stays async -- the fix is a release of declined budget, not
+    a budget increase."""
+    scheduler = _make_partial_tail_scheduler()
+    hit_bytes = 28 * scheduler.config.kv_bytes_per_token
+    assert hit_bytes > 0
+    scheduler.config = scheduler.config._replace(sync_load_budget_bytes=hit_bytes)
+    first = _make_partial_tail_request(scheduler, request_id="a")
+    second = _make_partial_tail_request(scheduler, request_id="b")
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+
+    assert scheduler.get_num_new_matched_tokens(first, 0) == (28, False)
+    scheduler.update_state_after_alloc(
+        first, cast(KVCacheBlocks, SimpleNamespace(blocks=[])), 28
+    )
+    assert first.request_id in scheduler._current_batch_sync_loads
+
+    assert scheduler.get_num_new_matched_tokens(second, 0) == (28, True)
 
 
 def test_lookup_cap_stops_at_authoritative_prefix_boundary():
