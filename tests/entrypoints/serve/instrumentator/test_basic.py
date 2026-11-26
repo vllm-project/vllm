@@ -97,6 +97,12 @@ async def test_check_health(server: RemoteOpenAIServer):
     assert response.status_code == HTTPStatus.OK
 
 
+@pytest.mark.skipif(envs.VLLM_USE_RUST_FRONTEND, reason="Python frontend only")
+def test_worker_liveness_endpoint(server: RemoteOpenAIServer):
+    response = requests.get(server.url_for("liveness"))
+    assert response.status_code == HTTPStatus.OK
+
+
 @pytest.mark.parametrize(
     "server_args",
     [

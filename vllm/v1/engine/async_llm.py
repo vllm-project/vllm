@@ -219,6 +219,7 @@ class AsyncLLM(EngineClient):
         self._client_count = client_count
 
         self.output_handler: asyncio.Task | None = None
+        self._worker_liveness_probe: asyncio.Task | None = None
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
             asyncio.get_running_loop()
@@ -314,6 +315,10 @@ class AsyncLLM(EngineClient):
 
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown(timeout=timeout)
+
+        probe = getattr(self, "_worker_liveness_probe", None)
+        if probe is not None:
+            cancel_task_threadsafe(probe)
 
         handler = getattr(self, "output_handler", None)
         if handler is not None:
@@ -1153,6 +1158,30 @@ class AsyncLLM(EngineClient):
             return
         if self.errored:
             raise self.dead_error
+
+    async def check_worker_liveness(self, timeout: float) -> None:
+        await self.check_health()
+        probe = self._worker_liveness_probe
+        if probe is None or probe.done():
+            probe = asyncio.create_task(self._probe_workers(timeout))
+            self._worker_liveness_probe = probe
+            probe.add_done_callback(self._read_liveness_probe_exception)
+
+        # Keep one in-flight RPC per frontend even when callers time out.
+        await asyncio.wait_for(asyncio.shield(probe), timeout=timeout)
+
+    async def _probe_workers(self, timeout: float) -> None:
+        results = await self.engine_core.call_utility_all_async(
+            "collective_rpc", "check_health", timeout, (), None, return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
+    @staticmethod
+    def _read_liveness_probe_exception(probe: asyncio.Task) -> None:
+        if not probe.cancelled():
+            probe.exception()
 
     async def start_profile(
         self,

@@ -93,6 +93,9 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - `/load` - Server load metrics
 - `/v1/models` - List available models
 - `/health` - Health check
+- `/liveness` - Python frontend worker round-trip check across the engines it
+  manages. Returns 503 when a worker fails to respond within
+  `VLLM_WORKER_LIVENESS_TIMEOUT_S` (5 seconds by default).
 
 ### Metrics APIs
 

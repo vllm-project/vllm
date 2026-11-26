@@ -1337,13 +1337,16 @@ class AsyncMPClient(MPClient):
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method, *args, engine=self.core_engine)
 
-    async def call_utility_all_async(self, method: str, *args) -> list[Any]:
+    async def call_utility_all_async(
+        self, method: str, *args, return_exceptions: bool = False
+    ) -> list[Any]:
         # Like the Rust client's call_utility: one result per managed engine.
         return await asyncio.gather(
             *[
                 self._call_utility_async(method, *args, engine=engine)
                 for engine in self.core_engines
-            ]
+            ],
+            return_exceptions=return_exceptions,
         )
 
     async def call_utility_consensus_async(self, method: str, *args) -> Any:
