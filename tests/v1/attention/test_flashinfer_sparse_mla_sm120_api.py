@@ -34,6 +34,40 @@ def test_sm120_backend_uses_dedicated_backend_name() -> None:
     )
 
 
+def test_sm120_dense_prefill_requires_rope_tail(monkeypatch) -> None:
+    monkeypatch.setattr(fi_utils, "has_flashinfer_sparse_mla_sm120", lambda: True)
+    vllm_config = _fake_vllm_config("deepseek_v32")
+    vllm_config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
+
+    def build_impl(qk_rope_head_dim: int):
+        def fake_common_init(self, *args, **kwargs) -> None:
+            self.qk_rope_head_dim = qk_rope_head_dim
+            self.topk_indices_buffer = kwargs["topk_indices_buffer"]
+
+        monkeypatch.setattr(
+            "vllm.model_executor.layers.attention.sparse_mla_attention."
+            "SparseMLACommonImpl.__init__",
+            fake_common_init,
+        )
+        with set_current_vllm_config(vllm_config):
+            return FlashInferMLASparseSM120Backend.get_impl_cls()(
+                num_heads=64,
+                head_size=512 + qk_rope_head_dim,
+                scale=1.0,
+                num_kv_heads=1,
+                alibi_slopes=None,
+                sliding_window=None,
+                kv_cache_dtype="fp8_ds_mla",
+                logits_soft_cap=None,
+                attn_type="decoder",
+                kv_sharing_target_layer_name=None,
+                topk_indices_buffer=torch.empty(1, dtype=torch.int32),
+            )
+
+    assert build_impl(qk_rope_head_dim=64).supports_dense_mha_prefill
+    assert not build_impl(qk_rope_head_dim=0).supports_dense_mha_prefill
+
+
 def test_v32_glm_sm120_backend_accepts_glm_block_size(
     monkeypatch,
 ) -> None:
