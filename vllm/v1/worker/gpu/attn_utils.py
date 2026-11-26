@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheLayerConfig,
     KVCacheSpec,
+    ManagerConfig,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.ubatch_utils import get_num_ubatches
@@ -504,10 +505,10 @@ def build_attn_metadata(
 
     attn_metadata: dict[str, Any] = {}
     token_to_req_indices: torch.Tensor | None = None
-    # Groups with the same spec and builder differ only in the blocks they hold,
-    # so later groups derive their metadata from the first group's.
-    # Also at capture, so FULL graphs share the batch-level buffers.
-    cached_metadata: dict[tuple[KVCacheSpec, type], Any] = {}
+    # Groups with the same spec, allocation policy and builder differ only in
+    # the blocks they hold, so later groups derive their metadata from the first
+    # group's. Also at capture, so FULL graphs share the batch-level buffers.
+    cached_metadata: dict[tuple[KVCacheSpec, ManagerConfig, type], Any] = {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
     for i in range(num_kv_cache_groups):
         groups = groups_with_metadata_builders(attn_groups[i])
@@ -563,7 +564,11 @@ def build_attn_metadata(
             attn_metadata_builder = attn_group.get_metadata_builder(ubatch_idx)
             reuse_key = None
             if attn_metadata_builder.supports_update_block_table:
-                reuse_key = (attn_group.kv_cache_spec, type(attn_metadata_builder))
+                reuse_key = (
+                    attn_group.kv_cache_spec,
+                    kv_cache_config.kv_cache_groups[i].manager_config,
+                    type(attn_metadata_builder),
+                )
             if reuse_key in cached_metadata:
                 metadata = attn_metadata_builder.update_block_table(
                     cached_metadata[reuse_key],
