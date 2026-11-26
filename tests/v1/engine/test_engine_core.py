@@ -26,6 +26,12 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.engine.arg_utils import EngineArgs
+from vllm.multimodal.cache import MultiModalCacheMissError
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
@@ -216,6 +222,50 @@ def test_engine_core():
 
     assert len(scheduler.waiting) == 0
     assert len(scheduler.running) == 0
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("receiver_cache_enabled", [False, True])
+def test_admission_requires_resolved_multimodal_data(receiver_cache_enabled: bool):
+    engine_args = EngineArgs(
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+        load_format="dummy",
+        enforce_eager=True,
+        max_model_len=4096,
+        max_num_seqs=1,
+        skip_mm_profiling=True,
+        mm_processor_cache_type="lru",
+        mm_processor_cache_gb=1 if receiver_cache_enabled else 0,
+    )
+    config = engine_args.create_engine_config()
+    core = EngineCore(config, Executor.get_class(config), log_stats=False)
+    try:
+        request = make_request()
+        request.mm_features = [
+            MultiModalFeatureSpec(
+                data=None,
+                modality="image",
+                identifier="shared-image",
+                mm_position=PlaceholderRange(offset=1, length=1),
+            )
+        ]
+        if not receiver_cache_enabled:
+            with pytest.raises(MultiModalCacheMissError) as exc_info:
+                core.preprocess_add_request(request)
+            assert exc_info.value.mm_hashes == ["shared-image"]
+            return
+
+        item = MultiModalKwargsItem.dummy()
+        seed_request = make_request()
+        seed_request.mm_features = [copy.copy(request.mm_features[0])]
+        seed_request.mm_features[0].data = item
+        core.preprocess_add_request(seed_request)
+
+        admitted, _ = core.preprocess_add_request(request)
+        assert admitted.mm_features is not None
+        assert admitted.mm_features[0].data is item
+    finally:
+        core.shutdown()
 
 
 @create_new_process_for_each_test()

@@ -58,6 +58,61 @@ async def client(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
+async def test_layout_only_features_return_bad_request_and_server_recovers(
+    client, test_image
+):
+    """Layout-only render output must fail before reaching the model runner."""
+    render_payload = {
+        "model": MODEL_NAME,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": encode_image_url(test_image, format="PNG")
+                        },
+                    },
+                    {"type": "text", "text": "What color is this image?"},
+                ],
+            }
+        ],
+        "mm_payload": "none",
+    }
+    rendered = await client.post(RENDER_ENDPOINT, json=render_payload)
+    rendered.raise_for_status()
+    data = rendered.json()
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "token_ids": data["token_ids"],
+            "features": data["features"],
+            "sampling_params": {"max_tokens": 1},
+        },
+    )
+    assert response.status_code == 400
+    assert "payload data or metadata" in response.json()["error"]["message"]
+
+    render_payload["mm_payload"] = "tensors"
+    rendered = await client.post(RENDER_ENDPOINT, json=render_payload)
+    rendered.raise_for_status()
+    data = rendered.json()
+    response = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "token_ids": data["token_ids"],
+            "features": data["features"],
+            "sampling_params": {"max_tokens": 1},
+        },
+    )
+    response.raise_for_status()
+    assert response.json()["choices"][0]["token_ids"]
+
+
+@pytest.mark.asyncio
 async def test_render_to_generate_roundtrip(client, test_image):
     """End-to-end: render a multimodal chat -> feed into generate -> decode.
 
@@ -232,12 +287,7 @@ async def test_content_parts_generates_tokens(client, test_image):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cached", [False, True])
 async def test_features_with_content_parts(client, test_image, cached):
-    """Earlier items as features plus a new raw item must match /render.
-
-    With `cached`, features carry only the `mm_hashes` and `mm_placeholders`
-    returned by turn 1 (as in the docs), so the earlier item resolves from the
-    cache that request filled.
-    """
+    """Hash-only features stay invalid after a prior request fills the cache."""
     old_url = encode_image_url(test_image, format="PNG")
     new_url = encode_image_url(Image.new("RGB", (224, 224)), format="PNG")
     render_data = await _render_image_prompt(client, old_url, new_url)
@@ -275,6 +325,11 @@ async def test_features_with_content_parts(client, test_image, cached):
             "return_token_ids": True,
         },
     )
+    if cached:
+        assert gen_resp.status_code == 400, gen_resp.text
+        assert "payload data or metadata" in gen_resp.json()["error"]["message"]
+        return
+
     gen_resp.raise_for_status()
     assert gen_resp.json()["prompt_token_ids"] == expanded
     assert gen_resp.json()["mm_placeholders"] == features["mm_placeholders"]

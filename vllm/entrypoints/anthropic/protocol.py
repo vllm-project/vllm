@@ -297,10 +297,10 @@ class AnthropicMessagesRequest(BaseModel):
             "`ec_transfer_params`. 'none' sets both to null for callers that "
             "need only the token layout and item hashes, such as cache-aware "
             "routers. `mm_metadata` is null if any modality has no metadata, "
-            "which 'metadata' rejects. Do not send a 'none' response to "
-            "`/inference/v1/generate` which reads a null `kwargs_data` as "
-            "every item being cached. Only supported on the render endpoints. "
-            "Ignored on regular generation endpoints."
+            "which 'metadata' rejects. `/inference/v1/generate` rejects "
+            "multimodal items without payload data or metadata with HTTP 400. "
+            "Only supported on the render endpoints. Ignored on regular "
+            "generation endpoints."
         ),
     )
     return_mm_kwargs: bool | None = Field(

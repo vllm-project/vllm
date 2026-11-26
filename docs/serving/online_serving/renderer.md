@@ -205,9 +205,9 @@ The arrays in `mm_hashes`, `mm_placeholders`, `kwargs_data`, and
 should split those fields:
 
 - Encode requests keep `kwargs_data`.
-- Prefill requests may omit `kwargs_data` and send `mm_metadata` only when
-  `ec_transfer_params` is also set, so embeddings are loaded by the EC
-  connector. Omitting `kwargs_data` without `ec_transfer_params` is rejected.
+- Prefill requests may omit `kwargs_data` when every item carries
+  `mm_metadata` and `ec_transfer_params` is set, so embeddings are loaded by
+  the EC connector.
 - Legacy clients that ignore `mm_metadata` and keep sending `kwargs_data`
   continue to work.
 
@@ -322,18 +322,17 @@ sequenceDiagram
     W-->>Client: generated output
 ```
 
-Do not forward this response to `/inference/v1/generate`, which reads a null
-`kwargs_data` as every item being cached.
+`/inference/v1/generate` returns HTTP 400 for this response because each
+multimodal item requires payload data or metadata.
 
 #### Null `mm_metadata`
 
-`mm_metadata` is null if any modality in the request has no metadata fields,
-for example an image and a video on LLaVA-OneVision, which has them only for
-images. Do not use the prefill form for such a request.
-
-With `"metadata"`, the response would then have both fields null, which
-`/inference/v1/generate` reads as every item being cached. Render returns a
-400 error instead, so render that request with `"tensors"`.
+`mm_metadata` is null if any modality in the request has no metadata fields.
+This includes LLaVA models that emit no metadata and mixed image and video
+requests on LLaVA-OneVision, which emits metadata only for images. Render
+these requests with `"tensors"` and keep `kwargs_data` on the prefill request.
+Omitting it returns HTTP 400 even when `ec_transfer_params` is present.
+Render also returns HTTP 400 if you request `"metadata"` for these inputs.
 
 ## Example
 

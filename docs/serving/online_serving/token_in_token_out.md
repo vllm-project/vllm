@@ -127,6 +127,9 @@ The server returns a 400 for:
 - `output_mode: "text"` or `"derender"` with `sampling_params.detokenize: false`.
 - `output_mode: "derender"` without `parse_context` on a server with a tool or reasoning parser or with a named `tool_choice` in `parse_context` that matches none of its `tools`. This is checked before generating.
 - An unsupported `output_mode` value.
+- A multimodal feature with neither payload data nor metadata. Render with
+  `mm_payload: "tensors"` to include the payload. Metadata-only inputs require
+  `ec_transfer_params` and the model's position metadata.
 
 For using `output_mode` with separate prefill and decode pools, see [Disaggregated Prefilling](../../features/disagg_prefill.md#generate-api-output-modes).
 
@@ -150,7 +153,7 @@ The final output of every choice carries `weight_versions`, the label of the wei
 A request can carry media in two ways, and can use both at once:
 
 - `content_parts`: raw media (`image_url`, `audio_url` or `video_url`, each with an optional `uuid`). `token_ids` holds one placeholder token per item, and the server expands it.
-- `features`: items whose placeholders are already expanded in `token_ids`, at the ranges given in `mm_placeholders`. Pass the processed tensors in `kwargs_data`, or omit them to look the items up in the processor cache by `mm_hashes`.
+- `features`: items whose placeholders are already expanded in `token_ids`, at the ranges given in `mm_placeholders`. Include the processed tensors in `kwargs_data`, or provide `mm_metadata` with `ec_transfer_params` for a supported prefill flow. Hashes alone do not provide a payload for `/inference/v1/generate`.
 
 When both are set, every `content_parts` placeholder must come after the last `features` range. Only the tokens after that range are processed, so the expanded runs before it are left as they are. Models that insert media at the start of the prompt (such as PaliGemma, BLIP-2 and Molmo) would place a new item right after that range without an error, so don't combine the two fields for them.
 
@@ -161,10 +164,20 @@ import httpx
 
 url = "http://localhost:8000/inference/v1/generate"
 
-# Turn 1: turn1_ids holds one <|image_pad|> for image A.
+# Turn 1: render the prompt with image A and retain its processed features.
+rendered = httpx.post(
+    "http://localhost:8000/v1/chat/completions/render",
+    json={
+        "model": model_name,
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": url_a}},
+        ]}],
+        "mm_payload": "tensors",
+    },
+).json()
 turn1 = httpx.post(url, json={
-    "token_ids": turn1_ids,
-    "content_parts": [{"type": "image_url", "url": url_a}],
+    "token_ids": rendered["token_ids"],
+    "features": rendered["features"],
     "sampling_params": {"max_tokens": 256},
     "return_token_ids": True,
 }).json()
@@ -175,21 +188,14 @@ turn2 = httpx.post(url, json={
     "token_ids": (
         turn1["prompt_token_ids"] + turn1["choices"][0]["token_ids"] + turn2_ids
     ),
-    "features": {
-        "mm_hashes": turn1["mm_hashes"],
-        "mm_placeholders": turn1["mm_placeholders"],
-    },
+    "features": rendered["features"],
     "content_parts": [{"type": "image_url", "url": url_b, "uuid": "img-b"}],
     "sampling_params": {"max_tokens": 256},
     "return_token_ids": True,
 }).json()
 ```
 
-With `return_token_ids`, the response carries `mm_hashes` next to `mm_placeholders`: the processor cache key of each item, in the same order. Pass them back unchanged rather than building keys yourself because the key format depends on the server's options and on whether the item was sent with a `uuid`. Send the item with `kwargs_data` instead in three cases:
-
-- The item has been evicted from the cache, so a request by key fails.
-- The processor cache is disabled (`--mm-processor-cache-gb 0`), so the returned keys can't be reused.
-- The server runs the Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) which doesn't support omitting `kwargs_data` yet. It still returns `mm_hashes`.
+With `return_token_ids`, the response carries `mm_hashes` next to `mm_placeholders`: the processor cache key of each item, in the same order. Keep these values unchanged alongside the payload. They cannot replace `kwargs_data` in a generate request, even if an earlier request filled the processor cache.
 
 ## Aborting requests
 
