@@ -20,9 +20,8 @@ if TYPE_CHECKING:
     from benchmark_tiering import Scenario
 
 
-VLLM_GRACEFUL_SHUTDOWN_TIMEOUT_S = 30.0
-VLLM_FORCE_SHUTDOWN_TIMEOUT_S = 10.0
-VLLM_SURVIVOR_TIMEOUT_S = 60.0
+VLLM_GRACEFUL_SHUTDOWN_TIMEOUT_S = 45.0
+VLLM_FORCE_SHUTDOWN_TIMEOUT_S = 45.0
 VLLM_PORT_RELEASE_TIMEOUT_S = 15.0
 
 
@@ -208,7 +207,6 @@ class VLLMServer:
         self.signal_handlers = _SignalHandlers(self._handle_termination)
         self.graceful_shutdown_timeout_s = VLLM_GRACEFUL_SHUTDOWN_TIMEOUT_S
         self.force_shutdown_timeout_s = VLLM_FORCE_SHUTDOWN_TIMEOUT_S
-        self.survivor_timeout_s = VLLM_SURVIVOR_TIMEOUT_S
         self.port_release_timeout_s = VLLM_PORT_RELEASE_TIMEOUT_S
         self._stopped = False
         self.pgid: int | None = None
@@ -272,7 +270,7 @@ class VLLMServer:
         )
 
     def stop(self) -> None:
-        """Terminate the server process group and reap surviving workers."""
+        """Stop the server and wait for its process group to exit."""
         if self._stopped:
             return
         self._stopped = True
@@ -282,15 +280,23 @@ class VLLMServer:
 
         try:
             pgid = self.pgid
+            deadline = time.monotonic() + self.graceful_shutdown_timeout_s
             if proc.poll() is None:
                 print(f"      Sending SIGTERM to vLLM process {proc.pid}...")
                 proc.terminate()
             with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=self.graceful_shutdown_timeout_s)
+                proc.wait(timeout=max(0, deadline - time.monotonic()))
 
-            if proc.poll() is None:
+            # Wait for the process group to exit
+            while self._find_process_group_members(pgid):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(5, remaining))
+
+            if proc.poll() is None or self._find_process_group_members(pgid):
                 print(
-                    "      vLLM did not exit gracefully. "
+                    "      The vLLM process group did not exit gracefully. "
                     "Force killing its process group..."
                 )
                 self._signal_process_group(pgid, signal.SIGKILL)
@@ -303,19 +309,11 @@ class VLLMServer:
                     "likely still locked. Aborting to prevent cascading failures."
                 )
 
-            self._signal_process_group(pgid, signal.SIGKILL)
-            survivors = self._find_process_group_members(pgid)
-            if survivors:
+            if survivors := self._find_process_group_members(pgid):
                 print(
-                    f"      {len(survivors)} vLLM worker process(es) remain; "
-                    "waiting for them to exit..."
+                    f"      WARNING: vLLM workers {survivors} are still alive "
+                    "after shutdown. Continuing."
                 )
-                if not self._wait_for_processes(survivors, self.survivor_timeout_s):
-                    print(
-                        f"      WARNING: vLLM workers {survivors} did not exit "
-                        f"within {self.survivor_timeout_s}s; they may still be "
-                        "tearing down GPU runtime state. Continuing."
-                    )
 
             if not self._wait_for_port_release():
                 raise RuntimeError(
@@ -348,16 +346,6 @@ class VLLMServer:
                 if os.getpgid(pid) == pgid and VLLMServer._process_exists(pid):
                     members.append(pid)
         return members
-
-    def _wait_for_processes(self, pids: list[int], timeout_s: float) -> bool:
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            pids = [pid for pid in pids if self._process_exists(pid)]
-            if not pids:
-                return True
-            time.sleep(min(5, deadline - time.monotonic()))
-        pids = [pid for pid in pids if self._process_exists(pid)]
-        return not pids
 
     @staticmethod
     def _process_exists(pid: int) -> bool:
