@@ -455,3 +455,34 @@ def test_writer_blocks_a_full_queue_until_a_write_ends_or_misses_its_deadline(
     writer.close()
     writer._thread.join(10)
     assert list(client.objects) == written
+
+
+def test_writer_does_not_block_while_the_store_refuses_every_write(monkeypatch):
+    monkeypatch.setattr(object_store, "_MAX_QUEUED_BATCHES", 2)
+    accept = threading.Event()
+    client, _, writer = _writer(lambda keys: None if accept.is_set() else -200, 1.0)
+    writer.put(_objects("g/0"))
+    writer.put(_objects("g/1"))
+    # The first full queue waits until the head misses its deadline.
+    start = time.monotonic()
+    writer.put(_objects("g/2"))
+    assert time.monotonic() - start >= 0.5
+    # From then on queuing never waits, over several deadlines, while one
+    # batch at a time keeps trying the store.
+    longest, start = 0.0, time.monotonic()
+    while time.monotonic() - start < 3.5:
+        before = time.monotonic()
+        writer.put(_objects(f"h/{before}"))
+        longest = max(longest, time.monotonic() - before)
+        assert len(writer._pending) <= 1
+        time.sleep(0.01)
+    assert longest < 0.5
+    # A put that lands ends it: later batches are queued and written again.
+    accept.set()
+    for key in ("k/0", "k/1", "k/2"):
+        wait_for_writer(writer)
+        writer.put(_objects(key))
+    writer.put(_objects("k/3"))
+    wait_for_writer(writer)
+    assert {"k/1", "k/2", "k/3"} <= set(client.objects)
+    writer.close()

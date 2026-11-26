@@ -203,12 +203,13 @@ class AuxObjectWriter:
     """Write objects in the background, as safetensors with one array per
     field. A batch not written within `timeout_s` of being queued is dropped:
     the store refused it until then (refusals are retried every
-    `_RETRY_INTERVAL_S`), its put failed, or it was still queued behind a put
-    that had not returned. Its keys are missing; nothing else changes.
-    Queuing waits while `_MAX_QUEUED_BATCHES` batches are queued, at most
-    until the first of them is written or misses its deadline. While a batch
-    past its deadline is still queued, the store is not taking writes:
-    queuing drops the batch without waiting."""
+    `_RETRY_INTERVAL_S`), or it was still queued behind a put that had not
+    returned. A batch whose put fails otherwise is dropped at once. Its keys
+    are missing; nothing else changes. Queuing waits while
+    `_MAX_QUEUED_BATCHES` batches are queued, at most until the first of them
+    is written or misses its deadline. Once a batch has missed its deadline,
+    until a put succeeds, queuing drops the batch without waiting unless
+    nothing is queued, so that one batch at a time tries the store."""
 
     def __init__(self, store: AuxObjectStore, *, timeout_s: float) -> None:
         self._store = store
@@ -217,6 +218,7 @@ class AuxObjectWriter:
         self._cond = threading.Condition()
         # The batches not written yet, in queue order.
         self._pending: deque[_Batch] = deque()
+        self._failing = False
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="vllm-aux-object-writer"
         )
@@ -227,19 +229,15 @@ class AuxObjectWriter:
         per step waits at most once per step."""
         with self._cond:
             self._expire(time.monotonic())
-            while len(self._pending) >= _MAX_QUEUED_BATCHES and not self._stuck():
+            while len(self._pending) >= _MAX_QUEUED_BATCHES and not self._failing:
                 self._cond.wait(self._pending[0].deadline - time.monotonic())
                 self._expire(time.monotonic())
-            if self._stuck():
+            if self._failing and self._pending:
                 _drop(objects, "an earlier write missed its deadline")
                 return
             batch = _Batch(objects, time.monotonic() + self._timeout_s)
             self._pending.append(batch)
             self._queue.put(batch)
-
-    def _stuck(self) -> bool:
-        # Deadlines follow queue order, so dropped batches come first.
-        return bool(self._pending) and self._pending[0].objects is None
 
     def _expire(self, now: float) -> None:
         """Drop the pending batches past their deadline."""
@@ -249,20 +247,26 @@ class AuxObjectWriter:
             if batch.objects is not None:
                 _drop(batch.objects, f"not written within {self._timeout_s:g} s")
                 batch.objects = None
+                self._failing = True
 
     def _run(self) -> None:
         try:
             while (batch := self._queue.get()) is not None:
-                error = None
+                error: object = None
+                late = False
                 if (objects := batch.objects) is not None:
                     try:
                         error = self._write(batch.deadline, objects)
+                        late = error is not None
                     except Exception as e:
                         error = e
                 with self._cond:
-                    if error is not None and batch.objects is not None:
+                    if objects is not None and error is None:
+                        self._failing = False
+                    elif error is not None and batch.objects is not None:
                         _drop(batch.objects, error)
                         batch.objects = None
+                        self._failing |= late
                     self._expire(time.monotonic())
                     self._pending.popleft()
                     self._cond.notify_all()
