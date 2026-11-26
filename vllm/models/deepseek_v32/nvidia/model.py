@@ -240,7 +240,7 @@ class DeepseekV32Model(torch.nn.Module):
             )
             and not envs.VLLM_BATCH_INVARIANT
         )
-        self.shardq_min_tokens = 1024
+        self.residual_sp_min_tokens = 1024
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -270,7 +270,7 @@ class DeepseekV32Model(torch.nn.Module):
         use_sequence_parallel = self.use_sequence_parallel or (
             self.use_residual_sequence_parallel
             and is_sequence_parallel_active(
-                True, full_num_tokens, self.shardq_min_tokens
+                True, full_num_tokens, self.residual_sp_min_tokens
             )
         )
         attn_in = None
