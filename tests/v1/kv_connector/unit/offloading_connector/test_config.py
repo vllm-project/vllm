@@ -49,6 +49,7 @@ from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 def _make_vllm_config(
     *,
     extra_config: dict[str, Any] | None = None,
+    use_mla: bool = False,
     tensor_parallel_size: int = 1,
     pipeline_parallel_size: int = 1,
     prefill_context_parallel_size: int = 1,
@@ -63,7 +64,7 @@ def _make_vllm_config(
     config.cache_config.prefix_cache_retention_interval = None
     config.model_config.model = "test-model"
     config.model_config.max_model_len = 4096
-    config.model_config.use_mla = False
+    config.model_config.use_mla = use_mla
     # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate
     # requires the head shard to cover the model's KV heads exactly
     config.model_config.get_total_num_kv_heads.return_value = 4
@@ -296,7 +297,7 @@ def _parallelism_agnostic(
     canonical: bool = False,
 ) -> bool:
     config = _make_vllm_config(
-        extra_config={"canonical_layout": True} if canonical else None
+        extra_config={"canonical_layout": True} if canonical else None,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=0,
@@ -311,6 +312,7 @@ def _parallelism_agnostic(
 def _replicated_layout(
     kv_cache_config: KVCacheConfig,
     *,
+    extra_config: dict[str, Any] | None = None,
     tensor_parallel_size: int = 4,
     pipeline_parallel_size: int = 1,
     prefill_context_parallel_size: int = 1,
@@ -321,12 +323,13 @@ def _replicated_layout(
     world_size: int | None = None,
 ) -> bool:
     config = _make_vllm_config(
+        extra_config=extra_config,
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         prefill_context_parallel_size=prefill_context_parallel_size,
         decode_context_parallel_size=decode_context_parallel_size,
+        use_mla=use_mla,
     )
-    config.model_config.use_mla = use_mla
     config.parallel_config.distributed_executor_backend = distributed_executor_backend
     config.parallel_config.nnodes = nnodes
     if world_size is not None:
@@ -1128,7 +1131,7 @@ def test_replicated_layout_for_dsa_style_groups(
         ({"distributed_executor_backend": "ray"}, "ray"),
         ({"distributed_executor_backend": "uni"}, "uni"),
         ({"distributed_executor_backend": type("DummyExecutor", (), {})}, "class"),
-        ({"nnodes": 2}, "multi-node"),
+        ({"nnodes": 4}, "one-rank-per-node"),
     ],
     ids=[
         "tp1",
@@ -1140,11 +1143,17 @@ def test_replicated_layout_for_dsa_style_groups(
         "ray",
         "uni",
         "class",
-        "multi-node",
+        "one-rank-per-node",
     ],
 )
 def test_replicated_layout_parallel_gate(kwargs: dict[str, Any], case: str):
     assert not _replicated_layout(_make_mla_kv_cache_config(), **kwargs), case
+
+
+def test_multi_node_mla_replication_is_independent_of_backend():
+    assert _replicated_layout(
+        _make_mla_kv_cache_config(), nnodes=2, extra_config={"spec_name": "CustomSpec"}
+    )
 
 
 _SWA_SPEC = SlidingWindowManager.layer_config(
@@ -1222,8 +1231,8 @@ def test_uncertifiable_canonical_layout_resets_replication(
         config = _make_vllm_config(
             tensor_parallel_size=2,
             extra_config={"canonical_layout": True} if canonical else None,
+            use_mla=True,
         )
-        config.model_config.use_mla = True
 
         group = make_kv_cache_group(["layer"], spec)
         PAGE = group.page_size_bytes

@@ -94,6 +94,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
     FullAttentionManager,
 )
+from vllm.v1.hisparse.runtime import get_hisparse_host_leader_rank
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
@@ -145,6 +146,10 @@ def _splits_kernel_rows(
     token-major row (a single head slot, or tokens outside heads as in LBNHC)
     is byte-identical to consecutive NIXL pages, so the pages tile it densely.
     Other rows would need a per-group block size, which NIXL does not support.
+
+    A token-major row may also end in padding, when its group shares a larger
+    page size (e.g. a drafter next to an MLA target). Its pages then cut
+    through tokens, so they only match a peer with the same row layout.
     """
     if cache.ndim != 4 or cache.shape[0] >= num_blocks:
         return False
@@ -155,7 +160,7 @@ def _splits_kernel_rows(
         or cache.shape[2] % split
         or (cache.shape[1] > 1 and cache.stride(1) > cache.stride(2))
         or cache.stride(0) * cache.element_size() != split * physical_page_size
-        or token_stride * (cache.shape[2] // split) != physical_page_size
+        or token_stride * cache.shape[2] > split * physical_page_size
     ):
         raise NotImplementedError(
             f"Layer {layer_name} uses kernel blocks of {cache.shape[2]} tokens, "
@@ -255,8 +260,8 @@ class NixlBaseConnectorWorker:
         num_ssm_regions = 0
         if self._has_mamba:
             assert self._conv_decomp is not None
-            # NIXL regions per SSM layer = conv sub-projections + 1 SSM temporal
-            # (Mamba2/GDN: 3+1=4; Mamba1: 1+1=2).
+            # NIXL regions per SSM layer = 3 conv sub-projections + 1 SSM
+            # temporal.
             ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
             # Count only the regions that actually hold SSM state; must match
             # the descriptors emitted by _build_mamba_local.
@@ -1049,8 +1054,8 @@ class NixlBaseConnectorWorker:
         self.region_names: list[str] = []
         self.region_num_blocks: list[int] = []
         self._mixed_mem_types = False
-        # True on TP ranks that share a HiSparse host pool with TP rank 0 and
-        # leave its NIXL registration and DRAM reads to rank 0.
+        # True on TP ranks that share a HiSparse host pool with their node's
+        # host leader and leave its NIXL registration and DRAM reads to it.
         self._skip_dram_xfer = False
         self._desc_is_dram_by_block_size: dict[int, np.ndarray] = {}
         self._desc_pos_by_block_size: dict[int, np.ndarray] = {}
@@ -1194,6 +1199,9 @@ class NixlBaseConnectorWorker:
         # e.g. a scratch page lands in the region of the page it overlays.
         self._group_region_indices = list[list[int] | None]()
         self._ple_region_index: int | None = None
+        # Whether NIXL pages cut through tokens of padded kernel rows.
+        # TODO: remove once the drafter has its own KV cache pool (#64611).
+        self._splits_padded_kernel_rows = False
         # Page length of the PLE short-conv state; its region may be shared with
         # pages of a different (smaller) size, so it cannot use the region's.
         self._ple_block_len: int | None = None
@@ -1756,6 +1764,7 @@ class NixlBaseConnectorWorker:
         self._ssm_region_indices = []
         region_groups: list[set[int]] = []
         self._ple_block_len = None
+        self._splits_padded_kernel_rows = False
         self._ple_region_index = None
 
         # A shared packed row may transfer whole only if every page in it is
@@ -1898,6 +1907,8 @@ class NixlBaseConnectorWorker:
                     layer_name, cache, num_blocks, physical_page_size
                 ):
                     # NIXL pages tile a larger, token-major kernel row densely.
+                    row_payload = cache.stride(2) * cache.shape[2]
+                    self._splits_padded_kernel_rows |= row_payload != cache.stride(0)
                     region_specs = [
                         (cache.data_ptr(), physical_page_size, physical_page_size)
                     ]
@@ -2068,7 +2079,7 @@ class NixlBaseConnectorWorker:
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = sum(self.region_num_blocks)
 
-        self._skip_dram_xfer = self._leaves_dram_xfer_to_rank0()
+        self._skip_dram_xfer = self._leaves_dram_xfer_to_host_leader()
         if self._mixed_mem_types:
             assert self.use_mla and not self._has_mamba, (
                 "Mixed-device KV registration is only supported for MLA "
@@ -3033,6 +3044,18 @@ class NixlBaseConnectorWorker:
         remote_physical_per_logical = (
             nixl_agent_meta.physical_blocks_per_logical_kv_block
         )
+        if self._splits_padded_kernel_rows and (
+            tp_ratio != 1
+            or self.dcp_size != remote_dcp_size
+            or block_size_ratio != 1
+            or remote_physical_per_logical != self._physical_blocks_per_logical_kv_block
+        ):
+            # A page of a padded row is a byte range, not a token range, so it
+            # names the same KV only on a peer with an identical row layout.
+            raise NotImplementedError(
+                "NIXL kernel rows ending in padding require matching TP, DCP and "
+                "block sizes on both peers."
+            )
         if (
             (self.dcp_size > 1 or remote_dcp_size > 1)
             and not all(
@@ -3438,22 +3461,25 @@ class NixlBaseConnectorWorker:
                 indices=indices,
             )
 
-    def _leaves_dram_xfer_to_rank0(self) -> bool:
-        """Whether this rank leaves the DRAM regions' NIXL work to TP rank 0.
+    def _leaves_dram_xfer_to_host_leader(self) -> bool:
+        """Whether this rank leaves the DRAM regions' NIXL work to its node's
+        HiSparse host leader.
 
-        A HiSparse host pool shared by the local TP ranks (one mmap per DP
-        rank) is registered with NIXL and filled by TP rank 0 alone: every
-        rank would otherwise register the same pages on every NIC and READ the
-        same host KV into them. Private pools are unaffected.
+        A HiSparse host pool shared by a node's TP ranks (one mmap per node)
+        is registered with NIXL and filled by the node's host leader alone:
+        every rank would otherwise register the same pages on every NIC and
+        READ the same host KV into them. Private pools are unaffected.
         """
         if not (
             self._mixed_mem_types and self.kv_cache_config.hisparse_shared_host_pool
         ):
             return False
-        skip = self.tp_rank != 0
+        leader = get_hisparse_host_leader_rank(self.vllm_config, self.tp_rank)
+        skip = self.tp_rank != leader
         logger.info(
-            "HiSparse host pool: NIXL DRAM registration and reads on TP rank 0 "
-            "only (tp_rank=%d, skip=%s)",
+            "HiSparse host pool: NIXL DRAM registration and reads on host "
+            "leader TP rank %d only (tp_rank=%d, skip=%s)",
+            leader,
             self.tp_rank,
             skip,
         )
@@ -3468,7 +3494,7 @@ class NixlBaseConnectorWorker:
             if not blocks:
                 continue
             if self._skip_dram_xfer and self.region_mem_types[region] == "DRAM":
-                # The shared pool is rank 0's to write.
+                # The shared pool is the node's host leader's to write.
                 continue
             cache = self.device_kv_caches[self.region_names[region]]
             storage = cache.untyped_storage()
