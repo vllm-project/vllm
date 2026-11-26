@@ -64,7 +64,7 @@ class MediaDownloadSizeExceededError(ValueError):
 
 
 class MediaFetchDeadlineExceededError(ValueError):
-    """Raised when a synchronous media download exceeds its total time limit."""
+    """Raised when a media download exceeds its total time limit."""
 
 
 class MediaRequestDownloadSizeExceededError(ValueError):

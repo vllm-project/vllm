@@ -807,11 +807,11 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
     export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
     ```
 
-    For synchronous media fetching, vLLM limits response-body streaming and
-    retries to twice the configured per-read timeout. This prevents a server
-    that continuously sends a few response-body bytes from occupying a
-    renderer worker indefinitely. The same limit applies to audio and video
-    URLs using `VLLM_AUDIO_FETCH_TIMEOUT` and `VLLM_VIDEO_FETCH_TIMEOUT`.
+    vLLM limits response-body streaming and retries to twice the configured
+    fetch timeout. For asynchronous fetching, the limit covers the whole HTTP
+    download, including connection setup and response headers. The same limit
+    applies to audio and video URLs using `VLLM_AUDIO_FETCH_TIMEOUT` and
+    `VLLM_VIDEO_FETCH_TIMEOUT`.
     When a fetch exceeds this limit, the API returns HTTP 422 with `error.param`
     set to the request field that supplied the URL.
 

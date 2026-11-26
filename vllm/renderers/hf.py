@@ -6,6 +6,7 @@ import asyncio
 import copy
 import inspect
 import itertools
+import time
 import weakref
 from collections import defaultdict, deque
 from collections.abc import Sequence
@@ -1160,6 +1161,7 @@ class _RequestTemplateExecutor:
                 "All request chat template workers are busy. "
                 "Retry later or omit the request template."
             )
+        deadline = time.monotonic() + timeout if timeout > 0 else None
         try:
             job = self._executor.submit(fn)
         except BaseException:
@@ -1177,9 +1179,14 @@ class _RequestTemplateExecutor:
         try:
             # The thread may still be running after the caller times out or
             # disconnects. Only the executor future can release its slot.
-            return await asyncio.wait_for(
-                asyncio.shield(result), timeout=timeout if timeout > 0 else None
-            )
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError
+            rendered = await asyncio.wait_for(asyncio.shield(result), timeout=remaining)
+            # The result can become ready before the loop processes the timer.
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError
+            return rendered
         except TimeoutError:
             raise TimeoutError(
                 f"Chat template rendering timed out after {timeout}s."

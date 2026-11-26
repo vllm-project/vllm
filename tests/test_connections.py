@@ -227,6 +227,28 @@ def test_media_connector_deadline_interrupts_slow_stream(
 
 
 @pytest.mark.asyncio
+async def test_async_media_connector_deadline_encompasses_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    local_media_server: str,
+) -> None:
+    monkeypatch.setattr(envs, "VLLM_IMAGE_FETCH_TIMEOUT", 0.2)
+    monkeypatch.setattr(envs, "VLLM_MEDIA_FETCH_MAX_RETRIES", 2)
+    connection = HTTPConnection()
+    connector = MediaConnector(connection=connection)
+
+    async with await connection.get_async_client():
+        with pytest.raises(
+            VLLMUnprocessableEntityError, match="Media fetch exceeded its time limit"
+        ) as exc_info:
+            await connector.fetch_image_async(f"{local_media_server}/drip")
+
+        assert exc_info.value.parameter == "image_url"
+        assert isinstance(exc_info.value.__cause__, MediaFetchDeadlineExceededError)
+        body = await connection.async_get_bytes(f"{local_media_server}/gzip", timeout=2)
+        assert body == _SMALL_BODY
+
+
+@pytest.mark.asyncio
 async def test_async_get_bytes_with_limit_streams_instead_of_materializing() -> None:
     response = _AsyncResponse([b"abcd", b"efgh", b"ijkl"])
     connection = HTTPConnection()
