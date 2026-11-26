@@ -14,11 +14,15 @@ steps:
     - vllm/model_executor/layers/sparse_attn_indexer.py
     - vllm/v1/attention
     - vllm/models/glm5next/nvidia/ops/kpool_compress.py
+    - vllm/models/hy_v4/nvidia/flashmla_sparse.py
     - vllm/v1/hisparse/
     - csrc/hisparse_kernels.cu
     - tests/v1/attention
+    - vllm/models/hy_v4_flash/nvidia/
+    - tests/models/hy_v4/test_flash_swa_kv_cache_dtype.py
   commands:
     - pytest -v -s v1/attention
+    - pytest -v -s models/hy_v4/test_flash_swa_kv_cache_dtype.py
   mirror:
     amd:
       label: ":amd: (MI300) V1 Attention"
