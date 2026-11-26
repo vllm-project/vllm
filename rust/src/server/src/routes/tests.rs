@@ -25,7 +25,7 @@ use tower::{Service as _, ServiceExt as _};
 use vllm_chat::{
     ChatBackend, ChatContent, ChatContentPart, ChatLlm, ChatMessage, ChatRenderer, ChatRequest,
     ChatRequestProcessor, ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor,
-    DynChatRenderer, NewChatOutputProcessorOptions, ParserSelection,
+    DynChatRenderer, NewChatOutputProcessorOptions, ParserSelection, ResolvedParsers,
 };
 use vllm_engine_core_client::mock_engine::DEFAULT_MOCK_MAX_MODEL_LEN;
 use vllm_engine_core_client::mock_engine::default_ready_response;
@@ -462,6 +462,7 @@ struct FakeChatBackend {
     skip_tokenizer_init: bool,
     /// A model's own renderer replacing the fake chat format.
     chat_renderer: Option<DynChatRenderer>,
+    parsers: ResolvedParsers,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -486,13 +487,7 @@ fn fake_chat_tokenizer() -> TestTokenizer {
 
 impl FakeChatBackend {
     fn new() -> Self {
-        Self {
-            model_id: "test-model".to_string(),
-            multimodal_model_info: None,
-            sampling_hints: Default::default(),
-            skip_tokenizer_init: false,
-            chat_renderer: None,
-        }
+        Self::with_model_id("test-model")
     }
 
     fn with_chat_renderer(chat_renderer: DynChatRenderer) -> Self {
@@ -510,10 +505,37 @@ impl FakeChatBackend {
     }
 
     fn with_model_id(model_id: impl Into<String>) -> Self {
+        let model_id = model_id.into();
+        let parsers = ResolvedParsers::new(
+            &model_id,
+            Arc::new(fake_chat_tokenizer()),
+            &ParserSelection::Auto,
+            &ParserSelection::Auto,
+        )
+        .unwrap();
         Self {
-            model_id: model_id.into(),
-            ..Self::new()
+            model_id,
+            multimodal_model_info: None,
+            sampling_hints: Default::default(),
+            skip_tokenizer_init: false,
+            chat_renderer: None,
+            parsers,
         }
+    }
+
+    fn with_parser_selections(
+        mut self,
+        tool_call_parser: ParserSelection,
+        reasoning_parser: ParserSelection,
+    ) -> Self {
+        self.parsers = ResolvedParsers::new(
+            &self.model_id,
+            Arc::new(fake_chat_tokenizer()),
+            &tool_call_parser,
+            &reasoning_parser,
+        )
+        .unwrap();
+        self
     }
 
     fn with_multimodal_model_info(
@@ -567,16 +589,21 @@ impl ChatBackend for FakeChatBackend {
     fn new_chat_output_processor(
         &self,
         request: &mut ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
+        options: NewChatOutputProcessorOptions,
     ) -> vllm_chat::Result<DynChatOutputProcessor> {
         Ok(Box::new(DefaultChatOutputProcessor::new(
             request,
-            &self.model_id,
-            self.tokenizer(),
-            options.tool_call_parser,
-            options.reasoning_parser,
+            &self.parsers,
             options.tool_strict_level,
         )?))
+    }
+
+    fn tool_call_parser_name(&self) -> Option<&str> {
+        self.parsers.tool_call_parser_name()
+    }
+
+    fn reasoning_parser_name(&self) -> Option<&str> {
+        self.parsers.reasoning_parser_name()
     }
 }
 
@@ -809,45 +836,21 @@ async fn test_app() -> (axum::Router, MockEngineTask) {
 }
 
 fn test_render_app() -> axum::Router {
-    test_render_app_with_parser_selections(ParserSelection::Auto, ParserSelection::Auto)
-}
-
-fn test_render_app_with_parser_selections(
-    tool_call_parser: ParserSelection,
-    reasoning_parser: ParserSelection,
-) -> axum::Router {
-    test_render_app_with(Some(128), tool_call_parser, reasoning_parser)
+    test_render_app_with_max_model_len(Some(128))
 }
 
 fn test_render_app_with_max_model_len(max_model_len: Option<u32>) -> axum::Router {
-    test_render_app_with(max_model_len, ParserSelection::Auto, ParserSelection::Auto)
+    build_render_router(Arc::new(test_render_state(max_model_len)))
 }
 
-fn test_render_app_with(
-    max_model_len: Option<u32>,
-    tool_call_parser: ParserSelection,
-    reasoning_parser: ParserSelection,
-) -> axum::Router {
-    build_render_router(Arc::new(test_render_state(
-        max_model_len,
-        tool_call_parser,
-        reasoning_parser,
-    )))
-}
-
-fn test_render_state(
-    max_model_len: Option<u32>,
-    tool_call_parser: ParserSelection,
-    reasoning_parser: ParserSelection,
-) -> RenderState {
+fn test_render_state(max_model_len: Option<u32>) -> RenderState {
     let backend = Arc::new(FakeChatBackend::new());
     RenderState {
         model: "backend-model".to_string(),
         served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
         max_model_len,
         text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
-        chat: ChatRequestProcessor::new(backend, None, None)
-            .with_parser_selections(tool_call_parser, reasoning_parser),
+        chat: ChatRequestProcessor::new(backend, None, None),
         lora_modules: Vec::new(),
     }
 }
@@ -891,13 +894,16 @@ async fn chat_completions_with_tools_returns_400_without_tool_parser() {
         let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
             b"engine-no-tool-parser",
             default_stream_output_specs(),
-            Arc::new(FakeChatBackend::new()),
+            Arc::new(
+                FakeChatBackend::new()
+                    .with_parser_selections(tool_call_parser, ParserSelection::Auto),
+            ),
         )
         .await;
         let mut app = build_router_with_gates(
             Arc::new(AppState::new(
                 vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-                chat.with_tool_call_parser(tool_call_parser),
+                chat,
             )),
             RouteGates::default(),
         );
@@ -2519,41 +2525,6 @@ async fn render_chat_omits_unset_sampling_params() {
 }
 
 #[tokio::test]
-async fn render_chat_uses_processor_owned_parser_selections() {
-    let mut app = test_render_app_with_parser_selections(
-        ParserSelection::Auto,
-        ParserSelection::Explicit("definitely_missing_reasoning_parser".to_string()),
-    );
-    let response = app
-        .call(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions/render")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "model": "render-model",
-                        "messages": [{"role": "user", "content": "hello"}],
-                        "max_completion_tokens": 8
-                    })
-                    .to_string(),
-                ))
-                .expect("build request"),
-        )
-        .await
-        .expect("call app");
-
-    // A nonexistent server-configured parser is a server error, matching
-    // `/v1/chat/completions`.
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    let body = String::from_utf8(body.to_vec()).expect("decode body");
-    assert!(
-        body.contains("reasoning parser `definitely_missing_reasoning_parser` is not registered")
-    );
-}
-
-#[tokio::test]
 async fn render_completion_returns_generate_request_with_body_request_id() {
     let mut app = test_render_app();
     let response = app
@@ -2661,7 +2632,7 @@ async fn render_list_models_reports_configured_max_model_len() {
 async fn render_accepts_lora_adapter_model() {
     let mut app = build_render_router(Arc::new(RenderState {
         lora_modules: vec!["adapter-a=org/adapter-a".parse().expect("lora module")],
-        ..test_render_state(Some(128), ParserSelection::Auto, ParserSelection::Auto)
+        ..test_render_state(Some(128))
     }));
 
     let response = app
@@ -5170,13 +5141,15 @@ async fn chat_structured_outputs_use_configured_backend() {
         StructuredOutputBackend::Xgrammar,
         StructuredOutputBackend::Guidance,
     ] {
-        let chat_backend = Arc::new(FakeChatBackend::new());
+        let chat_backend = Arc::new(FakeChatBackend::new().with_parser_selections(
+            ParserSelection::Explicit("qwen3_coder".to_string()),
+            ParserSelection::Auto,
+        ));
         let (app, engine_task) = test_app_with_chat_and_engine_request_check(
             |llm| {
                 let text = TextLlm::new(llm, chat_backend.clone())
                     .with_structured_outputs_backend(backend);
                 ChatLlm::new(text, chat_backend)
-                    .with_tool_call_parser(ParserSelection::Explicit("qwen3_coder".to_string()))
             },
             move |request| {
                 let params = request.sampling_params.as_ref().expect("sampling params");
@@ -5252,12 +5225,12 @@ async fn chat_allowed_tools_restrict_the_call_grammar() {
         (allowed("auto"), ["get_time"].as_slice()),
     ] {
         let case = tool_choice.to_string();
-        let chat_backend = Arc::new(FakeChatBackend::new());
+        let chat_backend = Arc::new(FakeChatBackend::new().with_parser_selections(
+            ParserSelection::Explicit("qwen3_coder".to_string()),
+            ParserSelection::Auto,
+        ));
         let (app, engine_task) = test_app_with_chat_and_engine_request_check(
-            |llm| {
-                ChatLlm::new(TextLlm::new(llm, chat_backend.clone()), chat_backend)
-                    .with_tool_call_parser(ParserSelection::Explicit("qwen3_coder".to_string()))
-            },
+            |llm| ChatLlm::new(TextLlm::new(llm, chat_backend.clone()), chat_backend),
             {
                 let case = case.clone();
                 move |request| {
@@ -6128,7 +6101,7 @@ fn multimodal_render_app() -> axum::Router {
     build_render_router(Arc::new(RenderState {
         text: TextRequestProcessor::new(backend.clone(), u32::MAX),
         chat: ChatRequestProcessor::new(backend, Some(ModelDtype::BFloat16), None),
-        ..test_render_state(None, ParserSelection::Auto, ParserSelection::Auto)
+        ..test_render_state(None)
     }))
 }
 
@@ -6149,7 +6122,7 @@ async fn render_startup_mm_processor_kwargs_control_engine_features() {
         let mut app = build_render_router(Arc::new(RenderState {
             text: TextRequestProcessor::new(backend.clone(), u32::MAX),
             chat: ChatRequestProcessor::new(backend, Some(ModelDtype::BFloat16), None),
-            ..test_render_state(None, ParserSelection::Auto, ParserSelection::Auto)
+            ..test_render_state(None)
         }));
         let (status, result) = post_json(&mut app, "/v1/chat/completions/render", json!({
             "model": "render-model",
