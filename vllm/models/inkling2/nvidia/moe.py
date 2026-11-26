@@ -10,7 +10,7 @@ gets the output of its own tokens. Checkpoint names under
 """
 
 from collections.abc import Callable, Sequence
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 import torch
 from torch import nn
@@ -479,7 +479,8 @@ class Inkling2MoE(nn.Module):
                 [x, is_padding.view(torch.uint8)], 0, sizes
             )
             is_padding = is_padding.view(torch.bool)
-        down, src2dst = self._forward(gathered, is_padding, reduce=False)
+        result = self._forward(gathered, is_padding, reduce=False)
+        down, src2dst = cast(tuple[torch.Tensor, torch.Tensor], result)
         out = combine(down, src2dst, self.experts.topk, x.dtype)
         return ep_group.reduce_scatterv(out, 0, sizes)
 
