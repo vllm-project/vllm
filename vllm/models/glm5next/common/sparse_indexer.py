@@ -4,6 +4,8 @@
 
 import torch
 
+from vllm.distributed.parallel_state import get_tp_group
+
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
@@ -146,6 +148,29 @@ def _fill_short_decode_causal_indices(
         topk_indices_buffer[:num_decode_tokens], positions[:num_decode_tokens]
     )
     return True
+
+
+def all_gather_shardq_pool_ids(
+    local_pool_ids: torch.Tensor,
+    num_tokens_per_rank: list[int],
+    rows: torch.Tensor,
+    num_pools: int,
+    start: int = 0,
+) -> torch.Tensor:
+    """Every rank's ShardQ pool top-k, in token order, exchanged pre-expansion.
+    `rows` are the tokens' rows, counted from `start`."""
+    group = get_tp_group()
+    send = local_pool_ids
+    # Halve the exchange where ids and the -1 sentinel fit; RCCL has no int16.
+    narrow = 0 < num_pools <= torch.iinfo(torch.int16).max
+    if narrow:
+        send = local_pool_ids.to(torch.int16).view(torch.float16)
+    gathered = group.all_gatherv(send, dim=0, sizes=num_tokens_per_rank)
+    if narrow:
+        gathered = gathered.view(torch.int16).to(local_pool_ids.dtype)
+    ordered = gathered.new_empty((start + gathered.shape[0], gathered.shape[1]))
+    ordered[rows] = gathered
+    return ordered[start:]
 
 
 def _gather_workspace_shapes(

@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.config import CUDAGraphMode, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_dcp_group,
     get_tensor_model_parallel_world_size,
@@ -58,6 +58,7 @@ from vllm.v1.attention.ops.shardq import (
     ShardQMetadata,
     ShardQSplit,
     build_shardq_split,
+    shardq_allowed,
 )
 from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
@@ -997,9 +998,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         )
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
-        cudagraph_mode = (
-            vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
-        )
         dcp_size = parallel_config.decode_context_parallel_size
         kv_transfer_config = vllm_config.kv_transfer_config
         # A disaggregated decode instance receives its prefills' KV, so it
@@ -1011,9 +1009,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         # The attention layer decides whether to use ShardQ.
         self.use_shardq = (
             self.supports_shardq
-            and vllm_config.attention_config.sparse_mla_shard_q
-            and vllm_config.attention_config.hisparse_config is None
-            and parallel_config.tensor_parallel_size > 1
+            and shardq_allowed(vllm_config)
             and (
                 dcp_size == 1
                 or (
@@ -1029,8 +1025,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                     and symm_mem_available
                 )
             )
-            and parallel_config.prefill_context_parallel_size == 1
-            and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
         )
 
     def record_logical_topk_ready(self) -> None:

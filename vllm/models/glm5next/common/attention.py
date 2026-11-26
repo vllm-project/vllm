@@ -11,11 +11,13 @@ from transformers import Glm5NextTextConfig
 
 from vllm.config import (
     CacheConfig,
+    CUDAGraphMode,
     VllmConfig,
 )
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -337,13 +339,38 @@ class Indexer(nn.Module):
         fuse_indexer_wk_weights_proj(self)
         self.wk_weights_proj.process_weights_after_loading()
 
+    def _shardq_rows(self) -> torch.Tensor | None:
+        """The rows this rank scores in a ShardQ step, else None. Never in a
+        cudagraph, which would bake in the capture batch's rows."""
+        if not getattr(self.indexer_op, "gather_shardq_topk", False):
+            return None
+        forward_context = get_forward_context()
+        if (
+            forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return None
+        attn_metadata = forward_context.attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return None
+        prefill = getattr(attn_metadata.get(self.k_cache.prefix), "prefill", None)
+        return None if prefill is None else prefill.shardq_gather_indices
+
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
     ) -> torch.Tensor:
+        # A ShardQ step projects only this rank's query rows; the op detects it.
+        rows = self._shardq_rows()
+        q_positions = positions
+        if rows is not None:
+            qr = qr[rows]
+            q_positions = positions[rows]
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
 
         k, weights = self.wk_weights_proj(hidden_states)
+        if rows is not None:
+            weights = weights[rows]
 
         k = _fused_indexer_k_norm(
             k, self.k_norm.weight, self.k_norm.bias, self.head_dim, self.k_norm.eps
@@ -357,7 +384,11 @@ class Indexer(nn.Module):
                 k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
             )
 
-            q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
+            if rows is None:
+                q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
+            else:
+                q_pe, _ = rotary_emb(q_positions, q_pe)
+                k_pe, _ = rotary_emb(positions, k_pe.unsqueeze(1))
             # Note: RoPE (NeoX) can introduce extra leading dimensions during
             # compilation so we need to reshape back to token-flattened shapes
             q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
@@ -574,6 +605,8 @@ class Glm5NextMLAAttention(nn.Module):
                 topk_indices_buffer,
                 f"{prefix}.indexer",
             )
+            if shardq_eligible and current_platform.is_rocm():
+                self.indexer.indexer_op.enable_shardq()
 
         else:
             self.indexer_rope_emb = None

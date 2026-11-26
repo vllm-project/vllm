@@ -153,9 +153,9 @@ class AttentionConfig:
     tokens stay sharded by head (on the DCP path under DCP). On ROCm, models
     that opt in (currently HY4) shard on `ROCM_AITER_MLA_SPARSE` with an
     `fp8_ds_mla` KV cache or `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1`, and
-    only with fewer than 16 local heads (e.g. HY4 at TP8). DeepSeek-V4.1 on
-    ROCm shards only its indexer prefill this way and all-gathers the top-k
-    back, with its attention sharded by head."""
+    only with fewer than 16 local heads (e.g. HY4 at TP8). DeepSeek-V4.1 and
+    GLM-5.3-Flash on ROCm shard only their indexer prefill this way and
+    all-gather the top-k back, with their attention sharded by head."""
 
     sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
     """Minimum number of tokens after a step's decodes (requests of at most

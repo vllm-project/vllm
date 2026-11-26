@@ -23,6 +23,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
+from vllm.config import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -109,6 +110,19 @@ class ShardQSplit(NamedTuple):
         rank = get_tp_group().rank_in_group
         start = self.num_tokens_per_rank[:rank].sum()
         return self.token_ids[start : start + self.num_tokens_per_rank[rank]]
+
+
+def shardq_allowed(vllm_config: "VllmConfig") -> bool:
+    """The ShardQ rules every backend shares; DCP rules are the caller's."""
+    parallel_config = vllm_config.parallel_config
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
+    return (
+        vllm_config.attention_config.sparse_mla_shard_q
+        and vllm_config.attention_config.hisparse_config is None
+        and parallel_config.tensor_parallel_size > 1
+        and parallel_config.prefill_context_parallel_size == 1
+        and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
+    )
 
 
 def build_shardq_split(
