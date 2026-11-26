@@ -12,10 +12,10 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 
 use crate::error::{ApiError, chat_submit_error, text_submit_error};
-use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::tokenize::types::{
     DetokenizeRequest, DetokenizeResponse, TokenizeChatRequest, TokenizeCompletionRequest,
     TokenizeRequest, TokenizeResponse,
@@ -39,8 +39,9 @@ fn token_strs(tokenizer: &vllm_text::tokenizer::DynTokenizer, ids: &[u32]) -> Ve
 pub async fn tokenize(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<TokenizeRequest>,
+    body: Result<Json<TokenizeRequest>, JsonRejection>,
 ) -> Result<Json<TokenizeResponse>, ApiError> {
+    let Json(body) = body?;
     let request_id = tokenize_request_id(&headers)?;
     let tokenizer = state.chat.text().tokenizer();
     let max_model_len = state.llm().info().max_model_len;
@@ -105,8 +106,9 @@ async fn tokenize_chat(
 
 pub async fn detokenize(
     State(state): State<Arc<AppState>>,
-    ValidatedJson(body): ValidatedJson<DetokenizeRequest>,
+    body: Result<Json<DetokenizeRequest>, JsonRejection>,
 ) -> Result<Json<DetokenizeResponse>, ApiError> {
+    let Json(body) = body?;
     state.base_model_names().check(body.model.as_deref())?;
     let tokenizer = state.chat.text().tokenizer();
     let prompt = tokenizer
