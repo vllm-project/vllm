@@ -12,6 +12,7 @@ from vllm.v1.kv_identity import (
     CACHE_FACTORS_OUTSIDE_KV,
     MODEL_FACTORS_OUTSIDE_KV,
     compute_kv_identity,
+    kv_config_digest,
 )
 
 MODEL = "facebook/opt-125m"
@@ -23,7 +24,7 @@ def _identity(model: str = MODEL, **cache_kwargs) -> str:
         model_config=ModelConfig(model, **model_kwargs),
         cache_config=CacheConfig(**cache_kwargs),
     )
-    return compute_kv_identity(config).digest
+    return compute_kv_identity(config, kv_config_digest(config)).digest
 
 
 def test_factors_outside_kv_name_config_fields():
@@ -53,6 +54,7 @@ def test_settings_outside_kv_keep_identity(kwargs):
         {"cache_dtype": "fp8", "kv_cache_dtype_skip_layers": ["0"]},
         {"model_kwargs": {"dtype": "float32"}},
         {"model_kwargs": {"max_model_len": 1024}},
+        {"model_kwargs": {"quantization": "fp8_per_tensor"}},
         {"model_kwargs": {"hf_overrides": {"num_hidden_layers": 6}}},
     ],
 )

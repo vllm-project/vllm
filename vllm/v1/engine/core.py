@@ -114,7 +114,7 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
 )
-from vllm.v1.kv_identity import compute_kv_identity
+from vllm.v1.kv_identity import compute_kv_identity, kv_config_digest
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -164,6 +164,7 @@ class EngineCore:
         # Opaque weight version supplied by the caller.
         self._weight_version = "default"
 
+        self._kv_config_digest = kv_config_digest(vllm_config)
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
         self._pooler_config_logged = False
@@ -295,7 +296,7 @@ class EngineCore:
         enable_envs_cache()
 
     def _set_kv_identity(self, vllm_config: VllmConfig) -> None:
-        identity = compute_kv_identity(vllm_config)
+        identity = compute_kv_identity(vllm_config, self._kv_config_digest)
         vllm_config.cache_config.kv_identity = identity.digest
         vllm_config.cache_config.kv_identity_components = identity.components
         self.collective_rpc(

@@ -72,14 +72,20 @@ def kv_config_factors(vllm_config: VllmConfig) -> dict[str, object]:
     }
 
 
-def compute_kv_identity(vllm_config: VllmConfig) -> KVIdentity:
+def kv_config_digest(vllm_config: VllmConfig) -> str:
+    """Digest the configuration before the model is loaded: memory auto-fit
+    lowers `max_model_len` afterwards without changing the KV of the model."""
+    return hash_factors(kv_config_factors(vllm_config))
+
+
+def compute_kv_identity(vllm_config: VllmConfig, config_digest: str) -> KVIdentity:
     """Compute the identity, with the weights identified by the model path and
     revision."""
     weights = path_checkpoint_digest(vllm_config.model_config, vllm_config.load_config)
 
     components = {
         "weights": weights["weights"],
-        "config": hash_factors(kv_config_factors(vllm_config)),
+        "config": config_digest,
         # TODO: hash the files that compute the KV instead of the version.
         "code": f"vllm=={vllm_version}",
         "libraries": f"transformers=={transformers.__version__}",
