@@ -802,7 +802,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         tp_size = get_tensor_model_parallel_world_size()
         self._wo_b_gather_min_rows = _wo_b_gather_min_rows(tp_size)
         if not (
-            tp_size > 1
+            tp_size in (2, 4)
             and _ON_GFX950
             # The path depends on the step's row count.
             and not envs.VLLM_BATCH_INVARIANT
@@ -810,10 +810,23 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             and vllm_config.lora_config is None
             and not self.use_pcp
             and self._o_proj_block_size == 32
-            # The thresholds are for AITER's all-gather.
-            and getattr(
-                get_tp_group().device_communicator, "use_aiter_tp_all_gather", False
-            )
+            # Both microbatches must make the same all-reduce hand-offs.
+            and not vllm_config.parallel_config.use_ubatching
+            and vllm_config.scheduler_config.max_num_batched_tokens
+            >= self._wo_b_gather_min_rows
+        ):
+            return None
+        # These thresholds assume AITER. The ROCm communicator falls back
+        # when either PyNccl or the AITER collective is unavailable.
+        comm = get_tp_group().device_communicator
+        pynccl = getattr(comm, "pynccl_comm", None)
+        aiter = getattr(comm, "aiter_ar_comm", None)
+        if (
+            not getattr(comm, "use_aiter_tp_all_gather", False)
+            or pynccl is None
+            or pynccl.disabled
+            or aiter is None
+            or aiter.disabled
         ):
             return None
         wo_b_full = ReplicatedLinear(

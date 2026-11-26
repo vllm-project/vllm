@@ -11,6 +11,7 @@ import torch.nn as nn
 
 rocm = pytest.importorskip("vllm.models.deepseek_v41.amd.rocm")
 
+from vllm.config import VllmConfig  # noqa: E402
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa: E402
     _mxfp8_e4m3_quantize_torch,
 )
@@ -331,7 +332,11 @@ def _copy_builder(monkeypatch, kernel_type=None):
         hidden_size=5120,
         prefix="layers.0.attn",
     )
-    comm = SimpleNamespace(use_aiter_tp_all_gather=True)
+    comm = SimpleNamespace(
+        use_aiter_tp_all_gather=True,
+        pynccl_comm=SimpleNamespace(disabled=False),
+        aiter_ar_comm=SimpleNamespace(disabled=False),
+    )
     monkeypatch.delenv("VLLM_BATCH_INVARIANT", raising=False)
     monkeypatch.setattr(rocm, "_ON_GFX950", True)
     monkeypatch.setattr(rocm, "get_tensor_model_parallel_world_size", lambda: 2)
@@ -344,25 +349,36 @@ def _copy_builder(monkeypatch, kernel_type=None):
         return copy
 
     monkeypatch.setattr(rocm, "ReplicatedLinear", replicated_linear)
-    config = SimpleNamespace(lora_config=None, quant_config=None)
+    config = VllmConfig()
     build = rocm.DeepseekV41ROCMAiterMLAAttention._make_wo_b_full
     return lambda: build(attn, config), attn, comm, config, copy
 
 
-def test_the_copy_is_built_for_tensor_parallel_mxfp8(monkeypatch):
+@pytest.mark.parametrize(("tp_size", "threshold"), [(2, 256), (4, 1024)])
+def test_the_copy_is_built_for_tensor_parallel_mxfp8(monkeypatch, tp_size, threshold):
     build, attn, _, config, copy = _copy_builder(monkeypatch)
+    monkeypatch.setattr(rocm, "get_tensor_model_parallel_world_size", lambda: tp_size)
+    config.scheduler_config.max_num_batched_tokens = threshold
     assert build() is copy
     # The copy is quantized as wo_b is: a config that excludes wo_b by name
     # excludes the copy, which then fails the kernel check.
     assert copy.built_with["prefix"] == "layers.0.attn.wo_b"
     assert copy.built_with["quant_config"] is config.quant_config
-    assert attn._wo_b_gather_min_rows == 256
+    assert attn._wo_b_gather_min_rows == threshold
 
 
 @pytest.mark.parametrize(
     "case",
     [
         "tp1",
+        "tp8",
+        "dbo",
+        "ubatching",
+        "small_budget",
+        "no_pynccl",
+        "disabled_pynccl",
+        "no_aiter",
+        "disabled_aiter",
         "gfx942",
         "batch_invariant",
         "lora",
@@ -377,6 +393,22 @@ def test_the_copy_is_not_built(monkeypatch, case):
     build, attn, comm, config, _ = _copy_builder(monkeypatch, kernel_type)
     if case == "tp1":
         monkeypatch.setattr(rocm, "get_tensor_model_parallel_world_size", lambda: 1)
+    elif case == "tp8":
+        monkeypatch.setattr(rocm, "get_tensor_model_parallel_world_size", lambda: 8)
+    elif case == "dbo":
+        config.parallel_config.enable_dbo = True
+    elif case == "ubatching":
+        config.parallel_config.ubatch_size = 2
+    elif case == "small_budget":
+        config.scheduler_config.max_num_batched_tokens = 255
+    elif case == "no_pynccl":
+        comm.pynccl_comm = None
+    elif case == "disabled_pynccl":
+        comm.pynccl_comm.disabled = True
+    elif case == "no_aiter":
+        comm.aiter_ar_comm = None
+    elif case == "disabled_aiter":
+        comm.aiter_ar_comm.disabled = True
     elif case == "gfx942":
         monkeypatch.setattr(rocm, "_ON_GFX950", False)
     elif case == "batch_invariant":
