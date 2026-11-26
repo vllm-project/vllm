@@ -2076,6 +2076,48 @@ def test_ipc_device_plugin_reuses_the_full_transfer_lifecycle(monkeypatch, packe
     worker.shutdown()
 
 
+@pytest.mark.parametrize("is_sender", [False, True])
+def test_ipc_trainer_merges_multi_rank_device_handles(monkeypatch, is_sender):
+    """Merge opaque handles on the sender after the shared synchronization."""
+    from vllm.distributed.weight_transfer import ipc_engine
+    from vllm.platforms.cpu import CpuPlatform
+
+    class Trainer(IPCTrainerWeightTransferEngine):
+        def _get_device_key(self):
+            return "device-0"
+
+    monkeypatch.setattr(ipc_engine, "current_platform", CpuPlatform())
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    engine = Trainer(
+        client=RecordingClient(),
+        source=ModuleSource(_module_with(("w", torch.ones(1)))),
+        is_sender=is_sender,
+    )
+    local = [{"device-0": (0,)}, {"device-0": (1,)}]
+    remote = [{"device-1": (2,)}, {"device-1": (3,)}]
+    events = []
+
+    def gather(output, handles):
+        assert handles is local
+        output[:] = [local, remote]
+        events.append("gather")
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    monkeypatch.setattr(torch.distributed, "all_gather_object", gather)
+    monkeypatch.setattr(torch.distributed, "barrier", lambda: events.append("barrier"))
+    monkeypatch.setattr(
+        torch.accelerator, "synchronize", lambda: events.append("device")
+    )
+    result = engine._all_gather_and_merge_handles(local)
+    assert events == ["gather", "barrier", "device"]
+    assert result == (
+        [{**left, **right} for left, right in zip(local, remote)]
+        if is_sender
+        else [{}, {}]
+    )
+
+
 def _module_with(*pairs):
     """A tiny nn.Module exposing the given (name, tensor) pairs as parameters,
     so trainer tests can build a ModuleSource without a real model."""
