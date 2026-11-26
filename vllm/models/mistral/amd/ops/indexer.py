@@ -382,8 +382,8 @@ def _launch_indexer_k(
         cache, cache_scale = cache_u8.view(_FP8_DTYPE), cache_u8.view(scale_dtype)
         cache_block_size, cache_block_stride = kv_cache.shape[1], kv_cache.stride(0)
         if shuffled:
-            # The block size is validated when the cache spec is built
-            # (MistralIndexerCache.get_kv_cache_spec); this guards direct callers.
+            # The block size is validated when the cache config is built
+            # (MistralIndexerCache.get_kv_cache_config); this guards direct callers.
             assert cache_block_size % _INDEXER_CACHE_BLOCK_TILE == 0, (
                 f"indexer K cache block size {cache_block_size} must be a "
                 f"multiple of {_INDEXER_CACHE_BLOCK_TILE} for the shuffled layout"

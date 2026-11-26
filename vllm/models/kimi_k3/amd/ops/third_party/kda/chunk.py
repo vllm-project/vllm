@@ -490,6 +490,8 @@ def _chunk_kda_fwd_with_cumulative_g(
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
     chunk_size: int = FLA_CHUNK_SIZE,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
     safe_gate: bool = False,
 ):
     # `g` must already be chunk-local cumulatively-summed AND scaled by
@@ -528,6 +530,8 @@ def _chunk_kda_fwd_with_cumulative_g(
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
         use_exp2=True,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
     )
     del w, u, kg
     o = chunk_gla_fwd_o_gk(
@@ -602,6 +606,8 @@ def chunk_kda_with_fused_gate_fwd(
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
 ):
     chunk_size = FLA_CHUNK_SIZE
     # Building chunk metadata from a device `cu_seqlens` costs a blocking
@@ -632,6 +638,8 @@ def chunk_kda_with_fused_gate_fwd(
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
         chunk_size=chunk_size,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
         safe_gate=lower_bound is not None,
     )
 
@@ -686,6 +694,8 @@ def chunk_kda_with_fused_gate(
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
     **kwargs,
 ):
     """Run chunk KDA from raw gate and beta projections."""
@@ -711,6 +721,8 @@ def chunk_kda_with_fused_gate(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
     )
     return o, final_state
 

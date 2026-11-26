@@ -126,6 +126,11 @@ class ModelState(ABC):
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         return None
 
+    def get_mrope_position_delta(self, req_index: int) -> int | None:
+        """M-RoPE position delta of the request at `req_index`, or None if the
+        model does not use M-RoPE."""
+        return None
+
     def remove_request(self, req_id: str) -> None:
         return None
 
@@ -167,7 +172,7 @@ class ModelState(ABC):
         num_computed_tokens: torch.Tensor,
     ) -> None:
         """Hook run on real batches before the forward pass (after block tables
-        are gathered). Used by mamba "align" prefix caching to pre-copy state
+        are gathered). Used by mamba prefix caching to pre-copy state
         across block boundaries. No-op by default."""
         return None
 

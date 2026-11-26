@@ -10,6 +10,7 @@ data integrity throughout the process.
 import errno
 import mmap
 import os
+import signal
 import threading
 import time
 from unittest.mock import MagicMock
@@ -77,6 +78,7 @@ def _make_offloading_spec(
         parallel=OffloadingParallelConfig(
             rank=rank,
             world_size=world_size,
+            local_world_size=world_size,
             tp_size=tp_size,
             pp_size=1,
             pcp_size=1,
@@ -368,6 +370,137 @@ def test_factory_forwards_locality_to_fs_tier(tmp_path):
         tier.shutdown()
 
 
+@pytest.mark.parametrize(
+    "access_mode, can_read, can_write",
+    [
+        (None, True, True),
+        ("readwrite", True, True),
+        ("read", True, False),
+        ("write", False, True),
+        # The configured value is parsed, so case and padding are accepted.
+        (" READ ", True, False),
+    ],
+)
+def test_access_mode_sets_can_read_and_can_write(
+    tmp_path, access_mode, can_read, can_write
+):
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    kwargs = {} if access_mode is None else {"access_mode": access_mode}
+    tier = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(tensor.numpy()),
+        tier_type="fs",
+        root_dir=str(tmp_path),
+        n_read_threads=1,
+        n_write_threads=1,
+        **kwargs,
+    )
+    try:
+        assert tier.access_mode.can_read is can_read
+        assert tier.access_mode.can_write is can_write
+    finally:
+        tier.shutdown()
+
+
+@pytest.mark.parametrize("access_mode", ["both", "ro", ""])
+def test_invalid_access_mode_raises_at_construction(tmp_path, access_mode):
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+
+    with pytest.raises(ValueError, match="Invalid access_mode"):
+        FileSystemTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=memoryview(tensor.numpy()),
+            tier_type="fs",
+            root_dir=str(tmp_path),
+            access_mode=access_mode,
+        )
+
+
+def test_factory_forwards_access_mode_to_fs_tier(tmp_path):
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    tier = SecondaryTierFactory.create_secondary_tier(
+        {
+            "type": "fs",
+            "root_dir": str(tmp_path),
+            "n_read_threads": 1,
+            "n_write_threads": 1,
+            "access_mode": "read",
+        },
+        memoryview(tensor.numpy()),
+        _MOCK_OFFLOADING_SPEC,
+    )
+    try:
+        assert isinstance(tier, FileSystemTierManager)
+        assert tier.access_mode.can_read
+        assert not tier.access_mode.can_write
+    finally:
+        tier.shutdown()
+
+
+def test_read_access_mode_writes_nothing_and_serves_a_shared_cache(tmp_path):
+    """`read` creates no files but reads blocks written by another instance."""
+    root = str(tmp_path)
+    writer_tensor = _page_aligned_rand_tensor(4, _BLOCK_ELEMENTS)
+    expected = writer_tensor[0].clone()
+    writer = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(writer_tensor.numpy()),
+        tier_type="fs",
+        root_dir=root,
+        n_read_threads=1,
+        n_write_threads=1,
+    )
+    try:
+        writer.submit_store(make_job(1, [key(7)], [0]))
+        assert all(r.success for r in drain(writer))
+    finally:
+        writer.shutdown()
+    stored_path = writer.file_mapper.get_file_name(key(7))
+    config_path = writer.file_mapper.get_config_file_path()
+
+    # The reader gets a fresh directory, so anything present afterwards was
+    # created by the read-only tier itself.
+    read_root = str(tmp_path / "read_only")
+    os.makedirs(read_root)
+    reader_tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    reader = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(reader_tensor.numpy()),
+        tier_type="fs",
+        root_dir=read_root,
+        n_read_threads=1,
+        n_write_threads=1,
+        access_mode="read",
+    )
+    try:
+        assert not os.path.exists(reader.file_mapper.get_config_file_path())
+        assert os.listdir(read_root) == []
+    finally:
+        reader.shutdown()
+
+    # Sharing the writer's root_dir: the block written elsewhere is readable.
+    reader_tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
+    reader = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=memoryview(reader_tensor.numpy()),
+        tier_type="fs",
+        root_dir=root,
+        n_read_threads=1,
+        n_write_threads=1,
+        access_mode="read",
+    )
+    try:
+        assert reader.file_mapper.get_file_name(key(7)) == stored_path
+        assert lookup_and_wait(reader, [key(7)]) == [LookupResult.HIT]
+        reader.submit_load(make_job(2, [key(7)], [1], is_promotion=True))
+        assert all(r.success for r in drain(reader))
+        assert torch.allclose(reader_tensor[1], expected)
+        # Reading does not create the config file the writer already made.
+        assert os.path.exists(config_path)
+    finally:
+        reader.shutdown()
+
+
 def test_failed_load_missing_file(fs_tier):
     """Test that loading a block whose file does not exist results in a failed job."""
     tier, _ = fs_tier
@@ -548,9 +681,50 @@ def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
         tier.shutdown()
 
 
-def test_wait_idle_blocks_until_tasks_complete():
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_store_short_write_names_likely_cause(tmp_path, monkeypatch, use_c_ext):
+    """A store that runs out of space partway through a block raises an error
+    that says it was a short write and may mean a full filesystem, instead of
+    EIO, which reads as a device error.
+
+    A soft RLIMIT_FSIZE below the block size makes write(2) return a short
+    count, as a nearly full filesystem does. The hard limit is left alone, so
+    the soft limit can be restored afterwards.
+    """
+    resource = pytest.importorskip("resource")
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    block = 192 * 1024
+    dest = tmp_path / "block.bin"
+    buf = memoryview(bytearray(block))
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    old_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024, hard))
+    try:
+        with pytest.raises(OSError) as exc_info:
+            io_mod.batch_store_block([str(dest)], buf, [0], block, use_o_direct=False)
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+        signal.signal(signal.SIGXFSZ, old_handler)
+
+    assert exc_info.value.errno is None
+    assert str(exc_info.value) == (
+        f"Encountered short-write error when writing {dest}. This could be a "
+        "hardware error or the filesystem may be full (ENOSPC)"
+    )
+    # Neither the block nor its temp file is left behind.
+    assert os.listdir(tmp_path) == []
+
+
+def test_wait_idle_blocks_until_tasks_complete(monkeypatch):
     """wait_idle must not return while a task is still in flight."""
     pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
+    worker_notify_all = MagicMock(wraps=pool._condition.notify_all)
+    monkeypatch.setattr(pool._condition, "notify_all", worker_notify_all)
     gate = threading.Event()
     pool.enqueue_store(job_id=1, n_tasks=1, tasks=[lambda: gate.wait(timeout=5.0)])
 
@@ -562,6 +736,7 @@ def test_wait_idle_blocks_until_tasks_complete():
         gate.set()
         waiter.join(timeout=5.0)
         assert not waiter.is_alive(), "wait_idle did not unblock"
+        worker_notify_all.assert_not_called()
     finally:
         gate.set()
         pool.shutdown(wait=True)

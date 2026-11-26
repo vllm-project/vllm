@@ -52,7 +52,8 @@ pub(super) fn prepare_generate_request(
     ctx: ResolvedRequestContext,
     mm_features: Option<MmFeatures>,
 ) -> Result<PreparedRequest, ApiError> {
-    validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+    lora_resolution.model_names.check(request.model.as_deref())?;
+    validate::validate_request(&request)?;
 
     let n = resolve_n(request.sampling_params.n)?;
     let stream = request.stream;
@@ -78,7 +79,7 @@ pub(super) fn prepare_generate_request(
         && (output_mode == GenerateOutputMode::Text
             || stop_strings.as_ref().is_some_and(|stops| !stops.is_empty()));
     let decode_options = TextDecodeOptions {
-        skip_special_tokens: request.sampling_params.skip_special_tokens.unwrap_or(true),
+        skip_special_tokens: request.sampling_params.skip_special_tokens,
         include_stop_str_in_output: request
             .sampling_params
             .include_stop_str_in_output
@@ -105,7 +106,7 @@ pub(super) fn prepare_generate_request(
         decode_options,
         intermediate: stream,
         prompt_truncation: None,
-        priority: request.priority,
+        priority: ctx.priority.unwrap_or(request.priority),
         cache_salt: request.cache_salt,
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
@@ -136,6 +137,7 @@ pub(super) fn prepare_generate_request(
 
 #[cfg(test)]
 mod tests {
+    use axum::http::HeaderMap;
     use serde_json::json;
     use vllm_text::{Prompt, TextDecodeOptions};
 
@@ -143,7 +145,7 @@ mod tests {
     use crate::lora::LoraModelResolution;
     use crate::model_names::ServedModelNames;
     use crate::routes::inference::generate::types::GenerateRequest;
-    use crate::utils::ResolvedRequestContext;
+    use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
     fn served(names: &[&str]) -> LoraModelResolution {
         LoraModelResolution {
@@ -261,13 +263,34 @@ mod tests {
                 }),
             ),
             TextDecodeOptions {
-                skip_special_tokens: false,
+                skip_special_tokens: Some(false),
                 include_stop_str_in_output: true,
                 stop_strings: Some(vec!["\n".to_string()]),
                 min_tokens: 2,
                 detokenize: false,
             }
         );
+    }
+
+    #[test]
+    fn prepare_generate_request_header_priority_overrides_body() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [11, 22],
+            "sampling_params": {},
+            "priority": 10,
+        }))
+        .expect("parse request");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Vllm-Priority", "-5".parse().unwrap());
+        let prepared = prepare_generate_request(
+            request,
+            &served(&["test-model"]),
+            resolve_request_context(&headers, None).expect("valid headers"),
+            None,
+        )
+        .expect("prepare");
+        assert_eq!(prepared.text_request.priority, -5);
     }
 
     #[test]

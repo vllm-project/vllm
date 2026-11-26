@@ -4,13 +4,14 @@ meta:
   provider: "GLM (Z-AI)"
   description: "GLM-5.3-Flash is a 320B-total / 18B-active multimodal MoE with hybrid KDA and sparse MLA attention, native FP8 weights, MTP, and a 1M-token context window."
   date_added: 2026-08-27
-  date_updated: 2026-11-05
+  date_updated: 2026-11-24
   tasks:
     - text
     - multimodal
   performance_headline: "320B MoE with 18B active parameters and 1M-token context"
   hardware:
     h100: verified
+    h200: verified
     b200: verified
     gb200: verified
     # FP8 TP4 with MTP, stock and latency_specialized decode, validated 2026-10
@@ -145,6 +146,20 @@ hardware_notes:
       `--additional-config '{"decode_backend":"latency_specialized"}'`. See the guide's
       GB300 section for the requirements.
 
+presets:
+  h200_dep_mega_moe:
+    label: "Mega MoE"
+    hardware: h200
+    strategy: single_node_dep
+    variants: [default]
+    description: "Routed and shared FP8 experts in DeepGEMM Mega MoE. Needs TP1 (DP + EP). Text only."
+    source: { label: "vLLM #66812", href: "https://github.com/vllm-project/vllm/pull/66812" }
+    args:
+      - "--moe-backend"
+      - "deep_gemm_mega_moe"
+      - "--limit-mm-per-prompt"
+      - '{"image":0,"video":0}'
+
 strategy_overrides:
   pd_cluster:
     # KDA conv-state / KV-cache layouts must match on both pools for NIXL
@@ -260,6 +275,39 @@ guide: |
   `additional_config.policy` overrides its per-token-count entry; for example
   `{"decode_backend":"latency_specialized","policy":{"boundary":""}}` runs the fused all-reduce +
   mHC boundary stock.
+
+  ### FP8 Mega MoE on H200 (DP + EP)
+
+  `--moe-backend deep_gemm_mega_moe` runs the FP8 routed and shared experts in one DeepGEMM
+  kernel ([vLLM #66812](https://github.com/vllm-project/vllm/pull/66812)). It needs DP + EP with
+  TP1 and is the opt-in **Mega MoE** preset of the **Data + Expert Parallel** strategy. On 8×H200
+  it served 22-44% more output tokens/s than the default MoE backend. It is text only for now:
+  with image or video input, H200 DP ranks fail encoder profiling. On 4 GPUs, also pass
+  `--max-num-seqs 948`.
+
+  ```bash
+  VLLM_USE_RUST_FRONTEND=1 vllm serve zai-org/GLM-5.3-Flash \
+    --tokenizer-mode glm5_next \
+    --data-parallel-size 8 \
+    --enable-expert-parallel \
+    --moe-backend deep_gemm_mega_moe \
+    --limit-mm-per-prompt '{"image":0,"video":0}' \
+    --disable-flashinfer-autotune \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm47 \
+    --enable-auto-tool-choice \
+    --served-model-name zai-org/GLM-5.3-Flash
+  ```
+
+  ### Chunked-prefill KDA conv kernel (SM10x)
+
+  On compute-capability 10.x GPUs (B200, GB200, GB300) the KDA layers' q|k|v short convolution
+  in chunked prefill runs a planar Triton kernel by default
+  ([vLLM #66884](https://github.com/vllm-project/vllm/pull/66884)); a per-step guard keeps the
+  stock kernel for short prefill chunks and decode-heavy steps, and decode steps are unchanged.
+  `--additional-config '{"kda_prefill_conv":"causal_conv1d"}'` restores the stock kernel
+  everywhere; `"planar"` forces the new one on other CUDA GPUs (bf16 activations with bf16 conv
+  states, or fp32 states under fp32 conv weights).
 
   ### Prefill/Decode disaggregation (single node, TP4 + TP4)
 

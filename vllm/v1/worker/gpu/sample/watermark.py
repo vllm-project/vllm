@@ -44,6 +44,16 @@ _TOKEN_DOMAIN = tl.constexpr(_TOKEN_DOMAIN_VALUE) if HAS_TRITON else _TOKEN_DOMA
 
 
 @triton.jit
+def _unmask_prompt_token(token, all_token_ids_row_ptr, position, prompt_len):
+    """Return the prompt token at `position`, or `token` outside the prompt."""
+    in_prompt = (position >= 0) & (position < prompt_len)
+    prompt_token = tl.load(
+        all_token_ids_row_ptr + tl.maximum(position, 0), mask=in_prompt, other=-1
+    )
+    return tl.where(in_prompt, prompt_token, token)
+
+
+@triton.jit
 def _repeated_context_mask_kernel(
     output_ptr,
     all_token_ids_ptr,
@@ -155,6 +165,14 @@ def _repeated_context_mask_kernel(
                     mask=in_history,
                     other=-2,
                 )
+                if INCLUDE_PROMPT:
+                    # Contexts hold -1 at prompt positions, the history does not.
+                    prior_token = _unmask_prompt_token(
+                        prior_token,
+                        all_token_ids_ptr + req_idx * all_token_ids_stride,
+                        total_len + local_pos - offset - CONTEXT_WIDTH + context_offset,
+                        prompt_len,
+                    )
                 matches &= context_token == prior_token
             repeated |= matches
 
@@ -184,6 +202,13 @@ def _repeated_context_mask_kernel(
                     + prior_step * prior_contexts_stride_1
                     + context_offset
                 )
+                if INCLUDE_PROMPT:
+                    prior_token = _unmask_prompt_token(
+                        prior_token,
+                        all_token_ids_ptr + req_idx * all_token_ids_stride,
+                        total_len + prior_step - CONTEXT_WIDTH + context_offset,
+                        prompt_len,
+                    )
                 matches &= context_token == prior_token
             repeated |= matches
 
@@ -245,6 +270,26 @@ def _repeated_context_mask_cpu(
     return repeated
 
 
+def _unmask_prompt_tokens_cpu(
+    all_token_ids: torch.Tensor,
+    req_indices: torch.Tensor,
+    prompt_lens: torch.Tensor,
+    total_lens: torch.Tensor,
+    contexts: torch.Tensor,
+    local_positions: torch.Tensor,
+) -> torch.Tensor:
+    """Reference for `_unmask_prompt_token` on contexts at `local_positions`.
+
+    `req_indices` and `local_positions` have the shape of `contexts[..., 0]`.
+    """
+    req_indices = req_indices.long().clamp_min(0).unsqueeze(-1)
+    offsets = torch.arange(-contexts.shape[-1], 0)
+    positions = total_lens[req_indices] + local_positions.unsqueeze(-1) + offsets
+    in_prompt = (positions >= 0) & (positions < prompt_lens[req_indices])
+    prompt_tokens = all_token_ids[req_indices, torch.where(in_prompt, positions, 0)]
+    return torch.where(in_prompt, prompt_tokens, contexts)
+
+
 def repeated_context_mask(
     all_token_ids: torch.Tensor,
     req_indices: torch.Tensor,
@@ -302,12 +347,22 @@ def repeated_context_mask(
             history_offsets,
         )
         if local_positions is not None:
+            block_contexts = contexts
+            if include_prompt:
+                block_contexts = _unmask_prompt_tokens_cpu(
+                    all_token_ids,
+                    req_indices,
+                    prompt_lens,
+                    total_lens,
+                    contexts,
+                    local_positions,
+                )
             max_offset = num_speculative_steps + 1
             if max_history is not None:
                 max_offset = min(max_offset, max_history + 1)
             for offset in range(1, max_offset):
                 prior_contexts = torch.cat(
-                    (contexts[:offset], contexts[:-offset]), dim=0
+                    (block_contexts[:offset], block_contexts[:-offset]), dim=0
                 )
                 prior_requests = torch.cat(
                     (req_indices[:offset], req_indices[:-offset]), dim=0
@@ -394,9 +449,19 @@ def draft_watermarking_mask(
         in_history = prior_steps < steps.unsqueeze(1)
         if max_history is not None:
             in_history &= prior_steps >= steps.unsqueeze(1) - max_history
+        block_contexts = prior_contexts[: len(contexts)]
+        if include_prompt:
+            block_steps = prior_steps.expand(len(contexts), -1)
+            block_contexts = _unmask_prompt_tokens_cpu(
+                all_token_ids,
+                req_indices.unsqueeze(1).expand_as(block_steps),
+                prompt_lens,
+                total_lens,
+                block_contexts,
+                block_steps,
+            )
         repeated |= (
-            (prior_contexts[: len(contexts)] == contexts.unsqueeze(1)).all(dim=-1)
-            & in_history
+            (block_contexts == contexts.unsqueeze(1)).all(dim=-1) & in_history
         ).any(dim=-1)
         if include_prompt:
             repeated |= (contexts < 0).any(dim=-1)

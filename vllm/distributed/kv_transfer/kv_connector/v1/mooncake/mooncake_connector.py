@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import contextlib
 import itertools
 import logging
 import os
@@ -21,6 +22,7 @@ import torch
 import zmq
 import zmq.asyncio
 from huggingface_hub.utils import httpx
+from numpy.typing import NDArray
 
 from vllm import envs
 from vllm.config import KVTransferConfig, VllmConfig
@@ -55,7 +57,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.backend import (
     MemoryRegion,
-    RangeRequest,
     TransferBackend,
     TransferOp,
     TransferState,
@@ -79,6 +80,7 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.utils.torch_utils import is_non_overlapping_and_dense
+from vllm.utils.vmm_driver import CudaVmmDriver, get_vmm_driver
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -105,6 +107,14 @@ _BOOTSTRAP_MAX_ATTEMPTS: Final[int] = 3
 # Decode restarts mint new layout ids, so stale peer layouts pile up. Evicting
 # one only costs that peer a LAYOUT_MISS and one layout resend.
 _MAX_PEER_LAYOUTS: Final[int] = 1024
+# A pull's reply can only arrive on the connection it was sent on: P's ROUTER
+# drops replies to a lost connection, and a refused reconnect means nothing
+# listens there.
+_PULL_LOST_EVENTS: Final[int] = zmq.EVENT_DISCONNECTED | zmq.EVENT_CONNECT_RETRIED
+# ZMTP heartbeats also drop the connection to a P worker that stopped
+# answering, such as a frozen process or an unreachable host.
+_PULL_HEARTBEAT_IVL_MS: Final[int] = 2000
+_PULL_HEARTBEAT_TIMEOUT_MS: Final[int] = 10000
 
 try:
     from mooncake.engine import TransferEngine
@@ -668,6 +678,7 @@ class MooncakeXferMetadata(
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
     layout_id: int = 0
+    requires_draft_context_kv: bool = False
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -1380,19 +1391,10 @@ class MooncakeConnectorWorker:
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
-        # nvidia-peermem cannot pin VMM-backed memory; the transfer engine must
-        # register the extensible KV cache through DMA-BUF. Read at
-        # engine.initialize(), so settle it before constructing the engine.
-        if (
-            vllm_config.cache_config.enable_extensible_kv_cache
-            and os.environ.setdefault("WITH_NVIDIA_PEERMEM", "0") != "0"
-        ):
-            raise RuntimeError(
-                "WITH_NVIDIA_PEERMEM=1 is incompatible with the extensible KV "
-                "cache: nvidia-peermem cannot register VMM-backed memory. "
-                "Unset it to use Mooncake's DMA-BUF registration, or disable "
-                "the extensible KV cache."
-            )
+        spec = vllm_config.speculative_config
+        self.projects_draft_context_kv = (
+            spec is not None and spec.speculator_config.projects_context_kv
+        )
         # Capture device BEFORE TransferEngine init — MNNVL's NVLink allocator
         # may change the current CUDA device during engine.initialize().
         self.device_id = torch.accelerator.current_device_index()
@@ -1413,6 +1415,22 @@ class MooncakeConnectorWorker:
         protocol = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "mooncake_protocol", "rdma"
         )
+        if vllm_config.cache_config.enable_extensible_kv_cache:
+            # Default to DMA-BUF before initializing the transfer engine.
+            use_peermem = os.environ.setdefault("WITH_NVIDIA_PEERMEM", "0") != "0"
+            if protocol == "rdma" and use_peermem:
+                driver = get_vmm_driver()
+                if not (
+                    isinstance(driver, CudaVmmDriver)
+                    and driver.supports_gpudirect_rdma_with_vmm(self.device_id)
+                ):
+                    raise RuntimeError(
+                        "Mooncake's nvidia-peermem registration with the "
+                        "extensible KV cache requires GPUDirect RDMA support "
+                        f"for CUDA VMM on device {self.device_id}. "
+                        "Unset WITH_NVIDIA_PEERMEM to use DMA-BUF, or disable "
+                        "the extensible KV cache."
+                    )
         device_name = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "device_name", ""
         )
@@ -1970,7 +1988,7 @@ class MooncakeConnectorWorker:
                 if d_req_id not in err_req_set
             ]
 
-            if src_ptrs:
+            if len(src_ptrs):
                 remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
                 transfer_err_msg = await self.sender_loop.run_in_executor(
                     self._sender_executor,
@@ -2066,10 +2084,16 @@ class MooncakeConnectorWorker:
         agent_meta: MooncakeXferMetadata,
         local_regions: list[TransferRegion],
         remote_regions: list[TransferRegion],
-    ) -> tuple[list[int], list[int], list[int], list[ReqId], str | None]:
-        src_ptrs = []
-        dst_ptrs = []
-        lengths = []
+    ) -> tuple[
+        NDArray[np.uint64],
+        NDArray[np.uint64],
+        NDArray[np.uint64],
+        list[ReqId],
+        str | None,
+    ]:
+        src_chunks: list[NDArray[np.uint64]] = []
+        dst_chunks: list[NDArray[np.uint64]] = []
+        length_chunks: list[NDArray[np.uint64]] = []
         err_reqs: list[ReqId] = []
         err_msg: str | None = None
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
@@ -2110,7 +2134,7 @@ class MooncakeConnectorWorker:
                 )
                 if is_mamba_group:
                     # Mamba/GDN prefix caching can use null blocks only as
-                    # align-mode placeholders. They do not carry transferable
+                    # placeholders. They do not carry transferable
                     # state, so skip them on both producer and consumer sides.
                     local_group = [
                         block_id
@@ -2241,20 +2265,20 @@ class MooncakeConnectorWorker:
                 if can_coalesce:
                     local_ids = local_ids[run_starts]
                     remote_ids = remote_ids[run_starts]
-                    lengths.extend((run_lens * transfer_len).tolist())
+                    length_chunks.append(
+                        run_lens.astype(np.uint64) * np.uint64(transfer_len)
+                    )
                 else:
-                    lengths.extend([transfer_len] * len(local_ids))
-                src_ptrs.extend(
-                    (
-                        local_ids * local_region.block_len
-                        + (local_region.base_addr + src_region_offset)
-                    ).tolist()
+                    length_chunks.append(
+                        np.full(len(local_ids), transfer_len, dtype=np.uint64)
+                    )
+                src_chunks.append(
+                    local_ids.astype(np.uint64) * np.uint64(local_region.block_len)
+                    + np.uint64(local_region.base_addr + src_region_offset)
                 )
-                dst_ptrs.extend(
-                    (
-                        remote_ids * remote_region.block_len
-                        + (remote_region.base_addr + dst_region_offset)
-                    ).tolist()
+                dst_chunks.append(
+                    remote_ids.astype(np.uint64) * np.uint64(remote_region.block_len)
+                    + np.uint64(remote_region.base_addr + dst_region_offset)
                 )
 
             logger.debug(
@@ -2264,6 +2288,18 @@ class MooncakeConnectorWorker:
                 remote_session,
             )
 
+        if not src_chunks:
+            src_ptrs = np.empty(0, dtype=np.uint64)
+            dst_ptrs = np.empty(0, dtype=np.uint64)
+            lengths = np.empty(0, dtype=np.uint64)
+        elif len(src_chunks) == 1:
+            src_ptrs = src_chunks[0]
+            dst_ptrs = dst_chunks[0]
+            lengths = length_chunks[0]
+        else:
+            src_ptrs = np.concatenate(src_chunks)
+            dst_ptrs = np.concatenate(dst_chunks)
+            lengths = np.concatenate(length_chunks)
         return src_ptrs, dst_ptrs, lengths, err_reqs, err_msg
 
     def _bind_sender_thread_device(self) -> None:
@@ -2275,33 +2311,28 @@ class MooncakeConnectorWorker:
     def _send_blocks(
         self,
         remote_session: str,
-        src_ptrs: list[int],
-        dst_ptrs: list[int],
-        lengths: list[int],
+        src_ptrs: NDArray[np.uint64],
+        dst_ptrs: NDArray[np.uint64],
+        lengths: NDArray[np.uint64],
     ) -> str | None:
         """Moves one submission and returns why it failed, or None on success."""
-        ranges = [
-            RangeRequest(local_addr=src, remote_addr=dst, length=length)
-            for src, dst, length in zip(src_ptrs, dst_ptrs, lengths, strict=True)
-        ]
+        total_bytes = int(lengths.sum())
+        num_ranges = len(src_ptrs)
         start_time = time.perf_counter()
-        events = self.transfer_backend.transfer(
-            remote_session, TransferOp.WRITE, ranges
+        result = self.transfer_backend.transfer_sync_arrays(
+            remote_session, TransferOp.WRITE, src_ptrs, dst_ptrs, lengths
         )
         duration = time.perf_counter() - start_time
-        if len(events) != len(ranges):
+        if result.num_ranges != num_ranges:
             raise RuntimeError(
-                f"The transfer backend returned {len(events)} events for "
-                f"{len(ranges)} ranges."
+                f"The transfer backend returned a result for {result.num_ranges} "
+                f"ranges, expected {num_ranges}."
             )
-        failed_event = next(
-            (event for event in events if event.state is TransferState.FAILED), None
-        )
-        if failed_event is None:
+        if result.state is TransferState.COMPLETED:
             self.xfer_stats.record_transfer(
                 duration_s=duration,
-                total_bytes=sum(lengths),
-                num_descs=len(src_ptrs),
+                total_bytes=total_bytes,
+                num_descs=num_ranges,
             )
             logger.debug("Sending to %s done, took %s", remote_session, duration)
             return None
@@ -2309,12 +2340,12 @@ class MooncakeConnectorWorker:
         logger.warning(
             "Sending to %s failed (%s) after %s (%d descriptors, %d bytes)",
             remote_session,
-            failed_event.error,
+            result.error,
             duration,
-            len(src_ptrs),
-            sum(lengths),
+            num_ranges,
+            total_bytes,
         )
-        return failed_event.error or "Mooncake transfer engine failed"
+        return result.error or "Mooncake transfer engine failed"
 
     @staticmethod
     def _memory_regions(
@@ -2724,16 +2755,39 @@ class MooncakeConnectorWorker:
                 "Sending kv transfer request for %s on path: %s", req_ids, worker_addr
             )
             try:
-                with make_zmq_socket(
-                    self.async_zmq_ctx, worker_addr, zmq.DEALER, bind=False, linger=0
-                ) as sock:
+                with (
+                    make_zmq_socket(
+                        self.async_zmq_ctx,
+                        worker_addr,
+                        zmq.DEALER,
+                        bind=False,
+                        linger=0,
+                        heartbeat_ivl_ms=_PULL_HEARTBEAT_IVL_MS,
+                        heartbeat_timeout_ms=_PULL_HEARTBEAT_TIMEOUT_MS,
+                    ) as sock,
+                    _lost_peer_monitor(sock) as monitor,
+                ):
                     sock.setsockopt(
                         zmq.RCVTIMEO,
                         (envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 60) * 1000,
                     )
                     await sock.send(encoded_data)
                     while True:
-                        ret_msg = await sock.recv()
+                        ret_msg = await _recv_unless_lost(sock, monitor)
+                        if ret_msg is None:
+                            # Look P up again: it may have restarted elsewhere.
+                            for engine_id, agents in list(self._remote_agents.items()):
+                                if any(
+                                    worker_addr in pp_addrs.values()
+                                    for pp_addrs in agents.values()
+                                ):
+                                    del self._remote_agents[engine_id]
+                            self._handle_failed_recv(
+                                pull_metas,
+                                req_ids,
+                                f"lost connection to prefill worker {worker_addr}",
+                            )
+                            return
                         response = self._xfer_resp_decoder.decode(ret_msg)
                         status = response.status
                         if status == MooncakeXferResponseStatus.LAYOUT_MISS:
@@ -3069,9 +3123,9 @@ class MooncakeConnectorWorker:
                         ready=asyncio.Event(),
                     )
         for transfer_id in metadata.reqs_not_processed:
-            send_meta = self.reqs_need_send.pop(transfer_id)
-            if send_meta:
-                assert not send_meta.ready.is_set()
+            aborted_meta = self.reqs_need_send.pop(transfer_id, None)
+            if aborted_meta is not None:
+                assert not aborted_meta.ready.is_set()
 
     async def _send_lease_heartbeats(
         self, lease_heartbeats: dict[EngineId, LeaseHeartbeat]
@@ -3109,6 +3163,9 @@ class MooncakeConnectorWorker:
         `send_kv_to_decode` runs on every scheduler batch. The registered
         layout does not change until the next `register_kv_caches`.
         """
+        if meta.requires_draft_context_kv and not self.projects_draft_context_kv:
+            msg = "Missing draft context KV. Configure the same drafter on prefill."
+            return [], [], msg
         cache_key = (
             meta.remote_hostname,
             meta.remote_port,
@@ -3300,6 +3357,7 @@ class MooncakeConnectorWorker:
                 list(groups) for groups in self.region_shared_groups
             ],
             registered_row_offsets=self.region_row_offsets,
+            requires_draft_context_kv=self.projects_draft_context_kv,
         )
 
     def _validate_head_resharding_layout(
@@ -3425,6 +3483,30 @@ def get_mooncake_side_channel_port(vllm_config: VllmConfig) -> int:
         + vllm_config.parallel_config.data_parallel_index
         * vllm_config.parallel_config.tensor_parallel_size
     )
+
+
+@contextlib.contextmanager
+def _lost_peer_monitor(sock: zmq.asyncio.Socket):
+    monitor = sock.get_monitor_socket(_PULL_LOST_EVENTS)
+    try:
+        yield monitor
+    finally:
+        sock.disable_monitor()
+        monitor.close(linger=0)
+
+
+async def _recv_unless_lost(
+    sock: zmq.asyncio.Socket, monitor: zmq.asyncio.Socket
+) -> bytes | None:
+    """Return the peer's next reply, or None once its connection is lost."""
+    recv = asyncio.ensure_future(sock.recv())
+    lost = asyncio.ensure_future(monitor.recv_multipart())
+    try:
+        await asyncio.wait((recv, lost), return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        recv.cancel()
+        lost.cancel()
+    return recv.result() if recv.done() and not recv.cancelled() else None
 
 
 def _async_loop(loop: asyncio.AbstractEventLoop):
