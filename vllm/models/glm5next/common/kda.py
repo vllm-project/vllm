@@ -610,6 +610,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 self.head_dim,
                 self.conv_size,
                 self.get_state_dtype(),
+                self.kda_lower_bound,
+                (self.f_b_proj, self.g_b_proj),
             )
             self.use_replayssm_trackers = vllm_config.use_replayssm_trackers
             self.replayssm_buffer_len = kda_replayssm.WINDOW

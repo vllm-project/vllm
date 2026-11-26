@@ -18,6 +18,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.mamba import MambaBackendEnum
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.gdn_attn import (
@@ -69,10 +70,15 @@ def check_supported(
     head_dim: int,
     conv_size: int,
     state_dtypes: tuple[torch.dtype, ...],
+    lower_bound: float | None,
+    gate_projs: tuple[LinearBase, ...],
 ) -> None:
     """Reject at startup every configuration the kernel was not built for."""
     cache_config = vllm_config.cache_config
     query_len = 1 + vllm_config.num_speculative_tokens
+    # The step's fp32 exp of the summed gates (each >= lower_bound) of up to
+    # `query_len` tokens must not flush to zero.
+    min_lower_bound = math.log(torch.finfo(torch.float32).tiny) / query_len
     unsupported = {
         f"{query_len - 1} speculative tokens (needs 5 or 8)": query_len not in (6, 9),
         f"{num_heads} local heads (needs 8 or 16: TP8 or TP4)": num_heads
@@ -94,6 +100,12 @@ def check_supported(
         != (torch.bfloat16, torch.bfloat16, torch.float32),
         "GPUs other than SM90 / SM100 / SM103": current_platform.get_device_capability()
         not in ((9, 0), (10, 0), (10, 3)),
+        f"a gate lower bound outside ({min_lower_bound:.2f}, 0)": lower_bound is None
+        or not min_lower_bound < lower_bound < 0,
+        "quantized f_b / g_b projections": not all(
+            isinstance(p.quant_method, UnquantizedLinearMethod) for p in gate_projs
+        ),
+        "LoRA": vllm_config.lora_config is not None,
     }
     reasons = [reason for reason, bad in unsupported.items() if bad]
     if reasons:
