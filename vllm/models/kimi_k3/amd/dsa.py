@@ -295,9 +295,12 @@ def _fp4_indexer(
     out[: q.shape[0]].fill_(-1)
     if m.num_prefills:
         assert m.prefill is not None
+        prefill_q, prefill_weights = q, weights
+        if (indices := m.prefill.shardq_gather_indices) is not None:
+            prefill_q, prefill_weights = q[indices], weights[indices]
         prefill_chunks(
-            q,
-            weights,
+            prefill_q,
+            prefill_weights,
             cache,
             out,
             m.prefill,
@@ -813,7 +816,12 @@ class KimiK3DSAAttention(nn.Module):
             cache_config,
             quant_config,
             prefix,
+            shardq_eligible=True,
         )
+        # The FP4 indexer is not an indexer_op, so its cache follows the MLA
+        # layer's ShardQ split here.
+        if self.mla_attn.mla_attn.use_shardq:
+            self.dsa_indexer.k_cache.use_shardq = True
 
     def get_input_quant_key(self) -> None:
         # The generic MLA wrapper also feeds these activations to the gate.

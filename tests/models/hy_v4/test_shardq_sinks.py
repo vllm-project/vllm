@@ -42,10 +42,12 @@ def _rocm_sink_check(layer, rank, world, device):
     local heads and, from a graph captured once, the reloaded full sinks to
     ShardQ's all-head query."""
     from vllm import _custom_ops as ops
-    from vllm.models.hy_v4.amd.aiter_mla_sparse import HYV4ShardQAiterMLASparseImpl
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+    )
 
     impl = layer.mla_attn.impl
-    assert isinstance(impl, HYV4ShardQAiterMLASparseImpl)
+    assert type(impl) is ROCMAiterMLASparseImpl
     num_heads = impl.num_heads * world
     block_size, num_slots, rank_dim = 64, 128, impl.kv_lora_rank
     gen = torch.Generator(device).manual_seed(0)

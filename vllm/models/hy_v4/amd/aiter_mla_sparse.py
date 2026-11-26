@@ -9,8 +9,6 @@ causal block, so its live entries are not at the front of the row and their
 count depends on the target's history. This backend packs every row in place
 and rebuilds `paged_kv_indptr` from the live counts before each layer reads it,
 without a host sync.
-
-`HYV4ShardQAiterMLASparseBackend` adds full-head sinks for ShardQ prefill.
 """
 
 from typing import ClassVar
@@ -19,7 +17,6 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
-from vllm.models.hy_v4.common.sinks import gather_full_sinks_
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
@@ -89,6 +86,8 @@ def pack_live_indices_(indices: torch.Tensor) -> torch.Tensor:
 class HYV4AiterMLASparseImpl(ROCMAiterMLASparseImpl):
     """Sparse MLA that packs and counts each top-k row before reading it."""
 
+    supports_shardq: ClassVar[bool] = False
+
     def forward_mqa(self, q, kv_c_and_k_pe_cache, attn_metadata, layer):
         assert self.topk_indices_buffer is not None
         num_tokens = (q[0] if isinstance(q, tuple) else q).shape[0]
@@ -112,28 +111,3 @@ class HYV4AiterMLASparseBackend(ROCMAiterMLASparseBackend):
     @classmethod
     def supports_dcp(cls):
         return False
-
-
-class HYV4ShardQAiterMLASparseImpl(ROCMAiterMLASparseImpl):
-    """Sparse MLA with full-head sinks for ShardQ prefill."""
-
-    supports_shardq: ClassVar[bool] = True
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._sinks_full: torch.Tensor | None = None
-
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
-        super().process_weights_after_loading(act_dtype)
-        if self.sinks is None or not self.use_shardq:
-            return
-        self._sinks_full = gather_full_sinks_(self.sinks, self._sinks_full)
-
-    def _attn_sink(self, q: torch.Tensor) -> torch.Tensor | None:
-        return self.sinks if q.shape[1] == self.num_heads else self._sinks_full
-
-
-class HYV4ShardQAiterMLASparseBackend(ROCMAiterMLASparseBackend):
-    @staticmethod
-    def get_impl_cls():
-        return HYV4ShardQAiterMLASparseImpl

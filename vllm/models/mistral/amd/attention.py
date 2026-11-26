@@ -168,6 +168,7 @@ class MistralMLAAttention(nn.Module):
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
             non_causal_multi_token_decode=non_causal,
             sliding_window=sliding_window,
+            shardq_eligible=not non_causal,
         )
 
     def _project_qkv(

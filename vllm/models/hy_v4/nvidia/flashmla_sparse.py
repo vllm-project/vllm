@@ -27,7 +27,6 @@ import torch
 
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
-from vllm.models.hy_v4.common.sinks import gather_full_sinks_
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
@@ -41,6 +40,7 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
 )
+from vllm.v1.attention.ops.shardq import gather_full_sinks_
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:

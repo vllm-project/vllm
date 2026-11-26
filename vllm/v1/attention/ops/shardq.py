@@ -367,3 +367,18 @@ def unshard_out(
     if decode_out is not None:
         restored[: metadata.num_decode_tokens] = decode_out
     return restored
+
+
+def gather_full_sinks_(sinks: torch.Tensor, out: torch.Tensor | None) -> torch.Tensor:
+    """All-gather this rank's attention sinks into `out` across TP, for
+    ShardQ's all-head query.
+
+    `out` is filled in place, so captured graphs read reloaded sinks. It is
+    allocated on the first call, when `out` is None.
+    """
+    tp_group = get_tp_group()
+    full = tp_group.all_gather(sinks.to(tp_group.device), dim=0)
+    if out is None:
+        out = torch.empty_like(full)
+    out.copy_(full)
+    return out
