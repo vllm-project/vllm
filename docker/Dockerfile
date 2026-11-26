@@ -877,9 +877,22 @@ RUN set -eux; \
     if ! grep -q '^activate = 1' /etc/ssl/openssl.cnf; then \
         sed -i 's|^\[default_sect\]|[default_sect]\nactivate = 1|' /etc/ssl/openssl.cnf; \
     fi; \
+    # Install a FIPS-safe hashlib.md5 fallback in sitecustomize.py so that \
+    # third-party GPU JIT libraries (flashinfer, nvidia-cutlass-dsl, humming, \
+    # tilelang, depyf) calling hashlib.md5() for non-cryptographic cache keys \
+    # do not crash with UnsupportedDigestmodError when FIPS mode is active. \
+    SITE_CUSTOMIZE="/usr/lib/python${PYTHON_VERSION}/sitecustomize.py"; \
+    printf '%s\n' \
+        'import functools, hashlib' \
+        '_orig_md5 = hashlib.md5' \
+        '@functools.wraps(_orig_md5)' \
+        'def _fips_safe_md5(data=b"", *, usedforsecurity=False):' \
+        '    return _orig_md5(data, usedforsecurity=usedforsecurity)' \
+        'hashlib.md5 = _fips_safe_md5' \
+        >> "${SITE_CUSTOMIZE}"; \
     echo "1" > /tmp/fips_test_switch; \
     OPENSSL_FIPS_MODE_SWITCH_PATH=/tmp/fips_test_switch openssl list -providers | grep -q "OpenSSL FIPS Provider"; \
-    OPENSSL_FIPS_MODE_SWITCH_PATH=/tmp/fips_test_switch python3 -c "import ssl; ctx = ssl.create_default_context()"; \
+    OPENSSL_FIPS_MODE_SWITCH_PATH=/tmp/fips_test_switch python3 -c "import ssl, hashlib; ctx = ssl.create_default_context(); assert hashlib.md5(b'fips').hexdigest()"; \
     rm -f /tmp/fips_test_switch
 
 # Install uv for faster pip installs

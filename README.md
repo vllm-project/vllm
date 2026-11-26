@@ -37,6 +37,9 @@ except ImportError:
     -p 8000:8000 \
     --ipc=host \
     --env "HF_TOKEN=${HF_TOKEN}" \
+    --env "HF_HUB_OFFLINE=1" \
+    --env "TRANSFORMERS_OFFLINE=1" \
+    --env "VLLM_NO_USAGE_STATS=1" \
     vllm-fips:v0.2 
 
 ## About (Forked Repo Info)
