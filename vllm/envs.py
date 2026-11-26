@@ -876,7 +876,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENGINE_READY_TIMEOUT_S": lambda: int(
         os.environ.get("VLLM_ENGINE_READY_TIMEOUT_S", "600")
     ),
-    # Startup timeout in seconds for the DP coordinator to publish its sockets.
+    # Seconds for the rank 0 frontend to wait for the DP coordinator to report
+    # its ZMQ socket addresses at startup. Default is 120 seconds. Remote DP
+    # engines using the multiprocessing backend have a separate 5-minute
+    # timeout for the frontend's reply to their startup handshake.
     "VLLM_DP_COORDINATOR_READY_TIMEOUT_S": lambda: int(
         os.environ.get("VLLM_DP_COORDINATOR_READY_TIMEOUT_S", "120")
     ),

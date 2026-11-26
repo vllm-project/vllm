@@ -18,6 +18,7 @@ from vllm.config.utils import hash_config
 from vllm.utils import torch_utils
 from vllm.v1.engine import core as core_module
 from vllm.v1.engine import utils as engine_utils
+from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
 from vllm.v1.engine.utils import (
     CoreEngine,
@@ -30,6 +31,25 @@ from vllm.v1.engine.utils import (
 from vllm.v1.executor import UniProcExecutor, multiproc_executor
 
 pytestmark = pytest.mark.skip_global_cleanup
+
+
+@pytest.mark.timeout(30)
+def test_dp_coordinator_wait_uses_configured_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env_name = "VLLM_DP_COORDINATOR_READY_TIMEOUT_S"
+    monkeypatch.delenv(env_name, raising=False)
+    coordinator = DPCoordinator(
+        ParallelConfig(data_parallel_size=2, data_parallel_size_local=2)
+    )
+    try:
+        monkeypatch.setenv(env_name, "1")
+        reader, writer = connection.Pipe(duplex=False)
+        # Keep the pipe open and empty so the wait can only end by timing out.
+        with reader, writer, pytest.raises(RuntimeError, match="timeout=1 seconds"):
+            coordinator._wait_for_zmq_addrs(reader)
+    finally:
+        coordinator.shutdown()
 
 
 @pytest.mark.parametrize(

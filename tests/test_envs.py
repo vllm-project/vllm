@@ -56,7 +56,9 @@ def test_ray_bundle_indices_is_not_compile_factor(monkeypatch: pytest.MonkeyPatc
     assert "VLLM_RAY_BUNDLE_INDICES" not in envs.compile_factors()
 
 
-def test_dp_coordinator_ready_timeout_default_and_override(monkeypatch):
+def test_dp_coordinator_ready_timeout_default_and_override(
+    monkeypatch: pytest.MonkeyPatch,
+):
     env_name = "VLLM_DP_COORDINATOR_READY_TIMEOUT_S"
     monkeypatch.delenv(env_name, raising=False)
     assert envs.VLLM_DP_COORDINATOR_READY_TIMEOUT_S == 120
