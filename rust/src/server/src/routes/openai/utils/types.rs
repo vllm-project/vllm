@@ -99,33 +99,9 @@ impl StringOrArray {
     }
 }
 
-fn max_stop_strings() -> usize {
-    std::env::var("VLLM_MAX_STOP_STRINGS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(4)
-}
-
-/// Validates stop sequences (at most the configured number of non-empty strings).
-pub fn validate_stop(stop: &StringOrArray) -> Result<(), validator::ValidationError> {
-    let stop = stop.as_slice();
-    let max_stop_strings = max_stop_strings();
-    if stop.len() > max_stop_strings {
-        let mut error = validator::ValidationError::new("too_many_stop_strings");
-        error.code = format!("stop strings must contain at most {max_stop_strings} items").into();
-        return Err(error);
-    }
-    if stop.iter().any(|s| s.is_empty()) {
-        return Err(validator::ValidationError::new(
-            "stop strings cannot be empty",
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ChatMessage, ImageDetail, ImageUrl, StringOrArray, validate_stop};
+    use super::{ChatMessage, ImageDetail, ImageUrl};
 
     /// OpenAI accepts `"detail": null` as omitted, and `original` as its own value.
     #[test]
@@ -135,32 +111,6 @@ mod tests {
         assert_eq!(
             detail(r#"{"url": "u", "detail": "original"}"#),
             Some(ImageDetail::Original)
-        );
-    }
-
-    #[test]
-    fn validate_stop_accepts_four_stop_strings() {
-        let stop = StringOrArray::Array(
-            ["one", "two", "three", "four"].into_iter().map(str::to_string).collect(),
-        );
-
-        validate_stop(&stop).expect("four stop strings should be accepted");
-    }
-
-    #[test]
-    fn validate_stop_rejects_more_than_four_stop_strings() {
-        let stop = StringOrArray::Array(
-            ["one", "two", "three", "four", "five"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-        );
-
-        let error = validate_stop(&stop).expect_err("five stop strings should be rejected");
-
-        assert_eq!(
-            error.code.as_ref(),
-            "stop strings must contain at most 4 items"
         );
     }
 
@@ -204,20 +154,6 @@ mod tests {
             assert_eq!(reasoning.as_deref(), expected, "{fields}");
         }
     }
-}
-
-// ============================================================================
-// Validation helpers
-// ============================================================================
-
-/// Validates top_p: 0.0 < top_p <= 1.0.
-pub fn validate_top_p_value(top_p: f32) -> Result<(), validator::ValidationError> {
-    if !(top_p > 0.0 && top_p <= 1.0) {
-        return Err(validator::ValidationError::new(
-            "top_p must be in (0, 1] - greater than 0.0 and at most 1.0",
-        ));
-    }
-    Ok(())
 }
 
 // ============================================================================
@@ -986,34 +922,4 @@ pub struct ModelObject {
 pub struct ListModelsResponse {
     pub object: String,
     pub data: Vec<ModelObject>,
-}
-
-// ============================================================================
-// Shared validation helpers
-// ============================================================================
-
-/// Validates a messages array is non-empty.
-///
-/// Used by both `POST /v1/chat/completions` and `POST /tokenize` (chat form)
-/// so validation behaviour stays in lockstep. Message content may be empty,
-/// like in the Python frontend, which renders it as an empty turn.
-pub(crate) fn validate_messages(
-    messages: &[ChatMessage],
-) -> Result<(), validator::ValidationError> {
-    if messages.is_empty() {
-        return Err(validator::ValidationError::new("messages cannot be empty"));
-    }
-    Ok(())
-}
-
-// ============================================================================
-// Normalizable trait
-// ============================================================================
-
-/// Trait for request types that need post-deserialization normalization.
-pub trait Normalizable {
-    /// Normalize the request by applying defaults and transformations.
-    fn normalize(&mut self) {
-        // Default: no-op
-    }
 }

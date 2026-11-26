@@ -1489,8 +1489,8 @@ async fn scale_out_abort_requests_validates_body() {
         None {"request_ids": ["unknown"]} -> 200 OK 
         Some("text/plain") {"request_ids": "unknown"} -> 200 OK 
         Some("application/json") {} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: missing field `request_ids` at line 1 column 2","type":"Bad Request","param":null,"code":400}}
-        Some("application/json") {"request_ids": null} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 21","type":"Bad Request","param":null,"code":400}}
-        Some("application/json") {"request_ids": [1]} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 20","type":"Bad Request","param":null,"code":400}}
+        Some("application/json") {"request_ids": null} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 21","type":"Bad Request","param":"body.request_ids","code":400}}
+        Some("application/json") {"request_ids": [1]} -> 400 Bad Request {"error":{"message":"Failed to deserialize the JSON body into the target type: request_ids: data did not match any variant of untagged enum StringOrArray at line 1 column 20","type":"Bad Request","param":"body.request_ids","code":400}}
         Some("application/json") {"request_ids":  -> 400 Bad Request {"error":{"message":"Failed to parse the request body as JSON: request_ids: EOF while parsing a value at line 1 column 16","type":"Bad Request","param":null,"code":400}}
         None  -> 400 Bad Request {"error":{"message":"Failed to parse the request body as JSON: EOF while parsing a value at line 1 column 0","type":"Bad Request","param":null,"code":400}}"#]].assert_eq(&results.join("\n"));
     engine_task.abort_and_join().await;
@@ -2543,7 +2543,9 @@ async fn render_chat_uses_processor_owned_parser_selections() {
         .await
         .expect("call app");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // A nonexistent server-configured parser is a server error, matching
+    // `/v1/chat/completions`.
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let body = String::from_utf8(body.to_vec()).expect("decode body");
     assert!(
@@ -11021,7 +11023,7 @@ async fn chat_render_treats_empty_tools_as_omitted() {
               "error": {
                 "message": "tool_choice requires at least one available tool",
                 "type": "BadRequestError",
-                "param": null,
+                "param": "tool_choice",
                 "code": 400
               }
             }"#]]
@@ -11038,7 +11040,7 @@ async fn chat_render_treats_empty_tools_as_omitted() {
           "error": {
             "message": "tool_choice function `f` was not found in the available tools",
             "type": "BadRequestError",
-            "param": null,
+            "param": "tool_choice",
             "code": 400
           }
         }"#]]
@@ -15315,4 +15317,258 @@ async fn render_forwards_n_to_the_generate_request() {
     .await;
     assert_eq!(status, StatusCode::OK, "{json}");
     assert_eq!(json["sampling_params"]["n"], 2, "{json}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn request_validation_reports_canonical_param_across_routes() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-validation-params",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                enable_scale_out: true,
+                ..Default::default()
+            },
+        ),
+    ));
+
+    let chat_base = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "messages": [{"role": "user", "content": "hello"}],
+    });
+    let completion_base = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "prompt": "hello",
+    });
+    let responses_base = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "input": "hello",
+    });
+    let generate_base = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "token_ids": [1, 2],
+        "sampling_params": {},
+    });
+
+    let with_patch = |mut base: serde_json::Value, patch: serde_json::Value| {
+        base.as_object_mut().unwrap().extend(patch.as_object().unwrap().clone());
+        base
+    };
+
+    for (uri, body, expected_param) in [
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"temperature": -1.0})),
+            Some("temperature"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"top_p": 0.0})),
+            Some("top_p"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"min_p": 1.5})),
+            Some("min_p"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"repetition_penalty": 0.0})),
+            Some("repetition_penalty"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"max_completion_tokens": 0})),
+            Some("max_tokens"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"max_tokens": 0})),
+            Some("max_tokens"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(
+                chat_base.clone(),
+                json!({"min_tokens": 10, "max_completion_tokens": 5}),
+            ),
+            None,
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(
+                chat_base.clone(),
+                json!({"min_tokens": 2, "max_tokens": 8, "max_completion_tokens": 1}),
+            ),
+            None,
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"cache_salt": ""})),
+            Some("cache_salt"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"stop": [""]})),
+            Some("stop"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(
+                chat_base.clone(),
+                json!({"stop": ["a", "b", "c", "d", "e"]}),
+            ),
+            Some("stop"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"top_logprobs": 1})),
+            Some("top_logprobs"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(
+                chat_base.clone(),
+                json!({"logprobs": true, "top_logprobs": -2}),
+            ),
+            Some("logprobs"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(
+                chat_base.clone(),
+                json!({"stream": false, "stream_options": {"include_usage": true}}),
+            ),
+            Some("stream_options"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"messages": []})),
+            Some("messages"),
+        ),
+        (
+            "/v1/chat/completions",
+            with_patch(chat_base.clone(), json!({"continue_final_message": true})),
+            Some("continue_final_message"),
+        ),
+        (
+            "/v1/completions",
+            with_patch(completion_base.clone(), json!({"temperature": -0.5})),
+            Some("temperature"),
+        ),
+        (
+            "/v1/completions",
+            with_patch(completion_base.clone(), json!({"max_tokens": 0})),
+            Some("max_tokens"),
+        ),
+        (
+            "/v1/completions",
+            with_patch(completion_base.clone(), json!({"cache_salt": ""})),
+            Some("cache_salt"),
+        ),
+        (
+            "/v1/completions",
+            with_patch(
+                completion_base.clone(),
+                json!({"stop": ["a", "b", "c", "d", "e"]}),
+            ),
+            Some("stop"),
+        ),
+        (
+            "/v1/responses",
+            with_patch(responses_base.clone(), json!({"max_output_tokens": 0})),
+            Some("max_tokens"),
+        ),
+        (
+            "/v1/responses",
+            with_patch(responses_base.clone(), json!({"top_p": 0.0})),
+            Some("top_p"),
+        ),
+        (
+            "/v1/responses",
+            with_patch(responses_base.clone(), json!({"cache_salt": ""})),
+            Some("cache_salt"),
+        ),
+        (
+            "/v1/responses",
+            with_patch(
+                responses_base.clone(),
+                json!({"stop": ["a", "b", "c", "d", "e"]}),
+            ),
+            Some("stop"),
+        ),
+        (
+            "/inference/v1/generate",
+            with_patch(
+                generate_base.clone(),
+                json!({"sampling_params": {"max_tokens": 0}}),
+            ),
+            Some("max_tokens"),
+        ),
+        (
+            "/inference/v1/generate",
+            with_patch(
+                generate_base.clone(),
+                json!({"sampling_params": {"top_p": 0.0}}),
+            ),
+            Some("top_p"),
+        ),
+        (
+            "/inference/v1/generate",
+            with_patch(
+                generate_base.clone(),
+                json!({"sampling_params": {"bad_words_token_ids": [[999_999]]}}),
+            ),
+            Some("bad_words_token_ids"),
+        ),
+        (
+            "/inference/v1/generate",
+            with_patch(generate_base.clone(), json!({"cache_salt": ""})),
+            Some("cache_salt"),
+        ),
+        (
+            "/inference/v1/generate",
+            with_patch(
+                generate_base.clone(),
+                json!({"sampling_params": {"stop": ["a", "b", "c", "d", "e"]}}),
+            ),
+            Some("stop"),
+        ),
+    ] {
+        let (status, json) = post_json(&mut app, uri, body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {body} -> {json}");
+        let expected_value = match expected_param {
+            Some(param) => serde_json::Value::String(param.to_string()),
+            None => serde_json::Value::Null,
+        };
+        assert_eq!(
+            json["error"].as_object().and_then(|obj| obj.get("param")),
+            Some(&expected_value),
+            "{uri} {body} -> {json}"
+        );
+    }
+
+    // Valid values previously rejected by `validator`'s artificial bounds are
+    // now accepted, matching Python's `SamplingParams` and `JsonSchemaFormat`;
+    // `min_tokens` is checked against the effective `max_completion_tokens`.
+    let body = with_patch(
+        chat_base,
+        json!({
+            "min_tokens": 2,
+            "max_tokens": 1,
+            "max_completion_tokens": 8,
+            "repetition_penalty": 2.5,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "", "schema": {"type": "object"}},
+            }
+        }),
+    );
+    let (status, json) = post_json(&mut app, "/v1/chat/completions", body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body} -> {json}");
 }
