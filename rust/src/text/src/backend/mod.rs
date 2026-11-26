@@ -148,6 +148,11 @@ pub trait TextBackend: Send + Sync {
         None
     }
 
+    /// Return the model config's context limit, if declared.
+    fn max_model_len(&self) -> Result<Option<u32>> {
+        Ok(None)
+    }
+
     /// Return the full tokenizer vocabulary size (Python `len(tokenizer)`).
     /// Used to range-check `bad_words` token IDs and token-id prompts.
     fn tokenizer_vocab_size(&self) -> usize {

@@ -1040,6 +1040,7 @@ impl SharedRuntimeArgs {
 
         ServerConfig {
             model: model.id,
+            max_model_len: None,
             revision: model.revision,
             tokenizer,
             hf_config,
