@@ -7184,8 +7184,7 @@ def _run_mamba_finished_request(
     return hit
 
 
-@pytest.mark.parametrize("deprioritize", [False, True])
-def test_mamba_deprioritize_superseded_state(deprioritize):
+def test_mamba_deprioritize_superseded_state():
     """States two or more turns behind the latest tip are deprioritized across
     all Mamba groups sharing one tracker (evicted after uncached blocks but
     before normal LRU-cached blocks), while the immediate predecessor stays in
@@ -7197,10 +7196,8 @@ def test_mamba_deprioritize_superseded_state(deprioritize):
         enable_caching=True,
         hash_block_size=block_size,
         retention_interval=0,
-        deprioritize_superseded_mamba_states=deprioritize,
     )
-    if deprioritize:
-        assert manager._mamba_group_ids == (1, 2)
+    assert manager._mamba_group_ids == [1, 2]
     older = make_request("o", [9] * 40, block_size, sha256)
     assert _run_mamba_finished_request(manager, older, [32, 40]) == 0
     turn1 = make_request("t1", [1] * 40, block_size, sha256)
@@ -7211,12 +7208,11 @@ def test_mamba_deprioritize_superseded_state(deprioritize):
     pool = manager.block_pool
     # After turn2, turn1 is the immediate predecessor fallback and must stay
     # behind older's blocks in normal LRU order (not deprioritized yet).
-    if deprioritize:
-        free_blocks = pool.free_block_queue.get_all_free_blocks()
-        t1_block = pool.get_cached_block(turn1.block_hashes[1], [1])
-        older_block = pool.get_cached_block(older.block_hashes[1], [1])
-        assert t1_block is not None and older_block is not None
-        assert free_blocks.index(t1_block[0]) > free_blocks.index(older_block[0])
+    free_blocks = pool.free_block_queue.get_all_free_blocks()
+    t1_block = pool.get_cached_block(turn1.block_hashes[1], [1])
+    older_block = pool.get_cached_block(older.block_hashes[1], [1])
+    assert t1_block is not None and older_block is not None
+    assert free_blocks.index(t1_block[0]) > free_blocks.index(older_block[0])
 
     # A third turn makes turn1 two turns behind (superseded) and promotes turn2
     # to the one-turn fallback.
@@ -7232,16 +7228,12 @@ def test_mamba_deprioritize_superseded_state(deprioritize):
     assert pool.get_cached_block(turn1.block_hashes[1], [1, 2]) is not None
 
     # The first 2 cached evictions take turn1's superseded states across both
-    # Mamba groups when enabled (keeping turn2's fallback intact), or older's
-    # blocks when disabled.
+    # Mamba groups while keeping turn2's fallback and older's prefix intact.
     pool.get_new_blocks(2)
-    turn1_g1 = pool.get_cached_block(turn1.block_hashes[1], [1])
-    turn1_g2 = pool.get_cached_block(turn1.block_hashes[1], [2])
-    turn2_state = pool.get_cached_block(turn2.block_hashes[4], [1, 2])
-    older_prefix = pool.get_cached_block(older.block_hashes[1], [0, 1, 2])
-    assert (turn1_g1 is None and turn1_g2 is None) == deprioritize
-    assert turn2_state is not None
-    assert (older_prefix is None) == (not deprioritize)
+    assert pool.get_cached_block(turn1.block_hashes[1], [1]) is None
+    assert pool.get_cached_block(turn1.block_hashes[1], [2]) is None
+    assert pool.get_cached_block(turn2.block_hashes[4], [1, 2]) is not None
+    assert pool.get_cached_block(older.block_hashes[1], [0, 1, 2]) is not None
 
 
 def test_mamba_deprioritize_keeps_shared_prefix_junction():
@@ -7254,7 +7246,6 @@ def test_mamba_deprioritize_keeps_shared_prefix_junction():
         enable_caching=True,
         hash_block_size=block_size,
         retention_interval=0,
-        deprioritize_superseded_mamba_states=True,
     )
     shared = [7] * (2 * block_size)
     primer = make_request("p", shared + [50] * 32, block_size, sha256)
@@ -7286,7 +7277,6 @@ def test_mamba_deprioritize_skips_referenced_state():
         enable_caching=True,
         hash_block_size=block_size,
         retention_interval=0,
-        deprioritize_superseded_mamba_states=True,
     )
     older = make_request("o", [9] * 40, block_size, sha256)
     assert _run_mamba_finished_request(manager, older, [32, 40]) == 0
@@ -7318,7 +7308,6 @@ def test_mamba_deprioritize_preempted_request_keeps_old_state():
         enable_caching=True,
         hash_block_size=block_size,
         retention_interval=0,
-        deprioritize_superseded_mamba_states=True,
     )
     older = make_request("o", [9] * 40, block_size, sha256)
     assert _run_mamba_finished_request(manager, older, [32, 40]) == 0
@@ -7357,7 +7346,6 @@ def test_mamba_deprioritize_preserves_shared_fork_fallback():
         enable_caching=True,
         hash_block_size=block_size,
         retention_interval=0,
-        deprioritize_superseded_mamba_states=True,
     )
     older = make_request("o", [9] * 40, block_size, sha256)
     assert _run_mamba_finished_request(manager, older, [32, 40]) == 0

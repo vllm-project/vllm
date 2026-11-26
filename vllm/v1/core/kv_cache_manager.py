@@ -19,7 +19,6 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
     KVCacheBlockCopy,
     get_block_hash,
-    make_block_hash_with_group_id,
     trim_null_head,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -155,7 +154,6 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
         enable_mamba_shared_prefix_checkpoint: bool = False,
-        deprioritize_superseded_mamba_states: bool = True,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -198,23 +196,21 @@ class KVCacheManager:
                     manager.shared_prefix_checkpoint = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
-        mamba_managers = [
+        mamba_mgrs = [
             m
             for m in self.coordinator.single_type_managers
             if isinstance(m, MambaManager)
             and m.prefix_caching
             and m.block_pool is self.block_pool
         ]
-        self._mamba_group_ids: tuple[int, ...] = (
-            tuple(
+        self._mamba_group_ids: list[int] = (
+            [
                 m.kv_cache_group_id
-                for m in mamba_managers
-                if m.block_size == mamba_managers[0].block_size
-            )
-            if enable_caching
-            and deprioritize_superseded_mamba_states
-            and mamba_managers
-            else ()
+                for m in mamba_mgrs
+                if m.block_size == mamba_mgrs[0].block_size
+            ]
+            if enable_caching and mamba_mgrs
+            else []
         )
         # Tracks Mamba tip chains (None = root tip, BlockHash = t-1 fallback,
         # _FALLBACK_TIP = already extended once). Shared junctions/forks are popped.
@@ -754,18 +750,14 @@ class KVCacheManager:
         if not request.is_finished():
             return
 
-        block_pool = self.block_pool
-        get_cached = block_pool.cached_block_hash_to_block.get_one_block
+        pool = self.block_pool
         block_hashes = request.block_hashes
-        hash_block_size = block_pool.hash_block_size
-        leader_gid = self._mamba_group_ids[0]
-        leader = self.coordinator.single_type_managers[leader_gid]
-        alignment = leader.cache_hit_alignment_tokens
+        hbs = pool.hash_block_size
+        leader_gids = self._mamba_group_ids[:1]
+        leader = self.coordinator.single_type_managers[leader_gids[0]]
+        align = leader.cache_hit_alignment_tokens
 
-        junction_idx = (
-            request.shared_prefix_boundary // alignment * alignment // hash_block_size
-            - 1
-        )
+        junction_idx = request.shared_prefix_boundary // align * align // hbs - 1
         junction_hash = (
             block_hashes[junction_idx]
             if 0 <= junction_idx < len(block_hashes)
@@ -777,27 +769,23 @@ class KVCacheManager:
 
         # Deepest cached Mamba state is either a decode-crossed block boundary
         # or the prompt tail checkpoint.
-        computed = min(request.num_computed_tokens, len(block_hashes) * hash_block_size)
-        prompt_tok = get_reusable_prefix_length(
-            request.num_prompt_tokens,
-            num_hash_lookahead_tokens=block_pool.num_hash_lookahead_tokens,
-            alignment_tokens=alignment,
+        computed = min(request.num_computed_tokens, len(block_hashes) * hbs)
+        prompt_end = min(
+            get_reusable_prefix_length(
+                request.num_prompt_tokens,
+                num_hash_lookahead_tokens=pool.num_hash_lookahead_tokens,
+                alignment_tokens=align,
+            ),
+            computed,
         )
         tip_hash: BlockHash | None = None
         for tok in sorted(
-            {
-                computed // leader.block_size * leader.block_size,
-                min(prompt_tok, computed),
-            },
+            {computed // leader.block_size * leader.block_size, prompt_end},
             reverse=True,
         ):
-            idx = tok // hash_block_size - 1
-            if (
-                0 <= idx < len(block_hashes)
-                and get_cached(
-                    make_block_hash_with_group_id(block_hashes[idx], leader_gid)
-                )
-                is not None
+            idx = tok // hbs - 1
+            if 0 <= idx < len(block_hashes) and pool.get_cached_block(
+                block_hashes[idx], leader_gids
             ):
                 tip_hash = block_hashes[idx]
                 break
@@ -816,25 +804,15 @@ class KVCacheManager:
                 new_prev = hit_hash
                 if prev is not None and prev in tips:
                     tips.pop(prev)
-                    stale_blocks = [
-                        block
-                        for gid in self._mamba_group_ids
-                        if (
-                            block := get_cached(
-                                make_block_hash_with_group_id(prev, gid)
-                            )
-                        )
-                        is not None
-                    ]
-                    if stale_blocks:
-                        block_pool.deprioritize_blocks(stale_blocks)
+                    if stale := pool.get_cached_block(prev, self._mamba_group_ids):
+                        pool.deprioritize_blocks(stale)
 
         tips[tip_hash] = new_prev
-        if len(tips) > block_pool.num_gpu_blocks:
+        if len(tips) > pool.num_gpu_blocks:
             self._mamba_tips = {
                 h: v
                 for h, v in tips.items()
-                if get_cached(make_block_hash_with_group_id(h, leader_gid)) is not None
+                if pool.get_cached_block(h, leader_gids) is not None
             }
 
     def evict_blocks(self, block_ids: set[int]) -> None:
