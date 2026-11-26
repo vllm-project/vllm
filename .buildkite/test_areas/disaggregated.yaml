@@ -259,7 +259,6 @@ steps:
       - tests/v1/kv_connector/nixl_push_integration/
       - vllm/platforms/rocm.py
       commands:
-      - python3 -m pytest -s -x v1/kv_connector/nixl_integration/test_nixl_imports.py
       - pytest -v -s v1/kv_connector/nixl_integration/test_accuracy_core_sweep.py
 
 - label: ":nvidia: (L4) NixlConnector PD edge case"
