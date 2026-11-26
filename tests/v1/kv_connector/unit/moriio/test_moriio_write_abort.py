@@ -68,6 +68,8 @@ def _setup(*, mamba=False, empty=False):
         _consumer_notification_counts={},
         _completed_consumer_notifications=set(),
         get_engine_name_with_dp=lambda engine, dp: f"{engine}_dp{dp}",
+        _has_mamba=mamba,
+        layer_to_group={"layer": 0},
         _is_mamba_layer=lambda layer: mamba,
         _get_built_session=lambda engine: ([SimpleNamespace(batch_write=submit)], None),
     )
@@ -86,6 +88,7 @@ def _setup(*, mamba=False, empty=False):
         7000,
         "127.0.0.2",
         remote_tp_size=1,
+        num_prompt_tokens=8,
     )
 
     def prepare(*args, **kwargs):
@@ -103,7 +106,7 @@ def _setup(*, mamba=False, empty=False):
         _prepare_transfer_plan=prepare,
         _prepare_mamba_transfer_plans=lambda *args: [prepare()],
     )
-    allocation = RemoteAllocInfo([[2]])
+    allocation = RemoteAllocInfo([[2]], num_prompt_tokens=8)
     wrapper.done_remote_allocate_req_dict[meta.transfer_id] = allocation
     return SimpleNamespace(
         worker=worker,
