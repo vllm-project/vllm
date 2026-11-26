@@ -584,6 +584,103 @@ def _split_qkv(
     return q, k, v
 
 
+def _rank_head_ids(
+    num_heads: int, num_kv_heads: int, tp_rank: int, tp_size: int
+) -> tuple[list[int], list[int]]:
+    """The Q and KV heads `tp_rank` owns.
+
+    When there are fewer KV heads than ranks, vLLM replicates them
+    (`num_kv_head_replicas`) and rank r owns KV head r // replicas, which
+    keeps every Q head grouped with the KV head it attends to.
+    """
+    if tp_size <= num_kv_heads:
+        assert num_kv_heads % tp_size == 0, (
+            f"num_kv_heads={num_kv_heads} must be divisible by tp_size={tp_size}."
+        )
+        kv_head_ids = list(
+            range(
+                tp_rank * (num_kv_heads // tp_size),
+                (tp_rank + 1) * (num_kv_heads // tp_size),
+            )
+        )
+    else:
+        assert tp_size % num_kv_heads == 0, (
+            f"tp_size={tp_size} must be divisible by num_kv_heads={num_kv_heads}."
+        )
+        kv_head_ids = [tp_rank // (tp_size // num_kv_heads)]
+    q_head_ids = list(
+        range(tp_rank * (num_heads // tp_size), (tp_rank + 1) * (num_heads // tp_size))
+    )
+    return q_head_ids, kv_head_ids
+
+
+def _rank_rows(
+    q_head_ids: list[int],
+    kv_head_ids: list[int],
+    q_heads_per_chunk: int,
+    kv_heads_per_chunk: int,
+    head_dim: int,
+    v_head_dim: int,
+    rows_per_chunk: int,
+) -> torch.Tensor:
+    """Checkpoint rows of a pre-sharded fused QKV for the given heads, in the
+    rank's `[Q heads | K heads | V heads]` order."""
+    q_per_chunk = q_heads_per_chunk * head_dim
+    k_per_chunk = kv_heads_per_chunk * head_dim
+    head_rows = torch.arange(head_dim)
+    v_head_rows = torch.arange(v_head_dim)
+    row_index: list[torch.Tensor] = []
+    for head in q_head_ids:
+        chunk = head // q_heads_per_chunk
+        row_index.append(
+            chunk * rows_per_chunk + (head % q_heads_per_chunk) * head_dim + head_rows
+        )
+    for head in kv_head_ids:
+        chunk = head // kv_heads_per_chunk
+        row_index.append(
+            chunk * rows_per_chunk
+            + q_per_chunk
+            + (head % kv_heads_per_chunk) * head_dim
+            + head_rows
+        )
+    for head in kv_head_ids:
+        chunk = head // kv_heads_per_chunk
+        row_index.append(
+            chunk * rows_per_chunk
+            + q_per_chunk
+            + k_per_chunk
+            + (head % kv_heads_per_chunk) * v_head_dim
+            + v_head_rows
+        )
+    return torch.cat(row_index)
+
+
+def _mimo_fp8_scale_name(
+    name: str,
+    params_dict: dict[str, torch.nn.Parameter],
+    stacked_params_mapping: list[tuple[str, str, str | int]],
+) -> str | None:
+    """The `weight_scale` name for a checkpoint `weight_scale_inv`, when the
+    layer is a ModelOpt FP8_PB_WO linear (4-D scale), else None.
+
+    ModelOpt exports keep MiMo's own block-FP8 layers as released (source
+    format `mimo_fp8`, 2-D `weight_scale_inv`); the linear method holds the
+    same dequantization scale as `weight_scale`.
+    """
+    if not name.endswith(".weight_scale_inv"):
+        return None
+    renamed = name.removesuffix("_inv")
+    target = renamed
+    for param_name, weight_name, _ in stacked_params_mapping:
+        if weight_name in target:
+            target = target.replace(weight_name, param_name)
+            break
+    param = params_dict.get(target)
+    if param is None or f"{target}_inv" in params_dict or param.dim() != 4:
+        return None
+    return renamed
+
+
 def _shard_fp8_qkv_proj(
     w_full: torch.Tensor,
     s_full: torch.Tensor,
@@ -637,27 +734,7 @@ def _shard_fp8_qkv_proj(
             f"fused qkv_proj is pre-sharded at {ckpt_tp} chunks, which do not "
             f"divide num_heads={num_heads} / num_kv_heads={num_kv_heads}."
         )
-    # When there are fewer KV heads than ranks, vLLM replicates them
-    # (`num_kv_head_replicas`) and rank r owns KV head r // replicas, which
-    # keeps every Q head grouped with the KV head it attends to.
-    if tp_size <= num_kv_heads:
-        assert num_kv_heads % tp_size == 0, (
-            f"num_kv_heads={num_kv_heads} must be divisible by tp_size={tp_size}."
-        )
-        kv_head_ids = list(
-            range(
-                tp_rank * (num_kv_heads // tp_size),
-                (tp_rank + 1) * (num_kv_heads // tp_size),
-            )
-        )
-    else:
-        assert tp_size % num_kv_heads == 0, (
-            f"tp_size={tp_size} must be divisible by num_kv_heads={num_kv_heads}."
-        )
-        kv_head_ids = [tp_rank // (tp_size // num_kv_heads)]
-    q_head_ids = list(
-        range(tp_rank * (num_heads // tp_size), (tp_rank + 1) * (num_heads // tp_size))
-    )
+    q_head_ids, kv_head_ids = _rank_head_ids(num_heads, num_kv_heads, tp_rank, tp_size)
 
     rows_per_chunk = w_full.shape[0] // ckpt_tp
     q_per_chunk = (num_heads // ckpt_tp) * head_dim
@@ -742,35 +819,15 @@ def _shard_fp8_qkv_proj(
             f"got {s_full.shape[0]} scale rows at tp_size={tp_size}."
         )
 
-    # Gather this rank's Q, K and V rows from the chunks that hold them.
-    q_heads_per_chunk = num_heads // ckpt_tp
-    kv_heads_per_chunk = num_kv_heads // ckpt_tp
-    head_rows = torch.arange(head_dim)
-    v_head_rows = torch.arange(v_head_dim)
-    row_index: list[torch.Tensor] = []
-    for head in q_head_ids:
-        chunk = head // q_heads_per_chunk
-        row_index.append(
-            chunk * rows_per_chunk + (head % q_heads_per_chunk) * head_dim + head_rows
-        )
-    for head in kv_head_ids:
-        chunk = head // kv_heads_per_chunk
-        row_index.append(
-            chunk * rows_per_chunk
-            + q_per_chunk
-            + (head % kv_heads_per_chunk) * head_dim
-            + head_rows
-        )
-    for head in kv_head_ids:
-        chunk = head // kv_heads_per_chunk
-        row_index.append(
-            chunk * rows_per_chunk
-            + q_per_chunk
-            + k_per_chunk
-            + (head % kv_heads_per_chunk) * v_head_dim
-            + v_head_rows
-        )
-    index = torch.cat(row_index)
+    index = _rank_rows(
+        q_head_ids,
+        kv_head_ids,
+        num_heads // ckpt_tp,
+        num_kv_heads // ckpt_tp,
+        head_dim,
+        v_head_dim,
+        rows_per_chunk,
+    )
     grouped = w_full[index].to(torch.float32) * s_full[
         scale_index[index]
     ].repeat_interleave(block, dim=1)
@@ -906,6 +963,10 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
                 continue
             if "mtp" in name:
                 continue
+            if scale_name := _mimo_fp8_scale_name(
+                name, params_dict, stacked_params_mapping
+            ):
+                name, loaded_weight = scale_name, loaded_weight[:, None, :, None]
 
             expert_matched = False
             for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
@@ -940,6 +1001,10 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
                 break
 
             if expert_matched:
+                continue
+            if self._try_load_nvfp4_qkv_proj(
+                name, loaded_weight, params_dict, loaded_params, tp_rank, tp_size
+            ):
                 continue
             # Support fused qkv_proj checkpoint (Pro format)
             if self._try_load_fp8_qkv_proj(
@@ -1067,6 +1132,55 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
                 tensor = tensor[: param.shape[0]]
             default_weight_loader(param, tensor)
             loaded_params.add(param_name)
+        return True
+
+    def _try_load_nvfp4_qkv_proj(
+        self,
+        name: str,
+        tensor: torch.Tensor,
+        params_dict: dict[str, torch.nn.Parameter],
+        loaded_params: set[str],
+        tp_rank: int,
+        tp_size: int,
+    ) -> bool:
+        """Load a fused NVFP4 qkv_proj (ModelOpt export of the Pro format).
+
+        The packed weight and its block scales are pre-sharded like the fp8
+        checkpoint and their scales follow the rows, so each rank takes its
+        rows as they are. The per-tensor scales hold one value per Q, K and V.
+
+        Returns:
+            True if `tensor` belonged to an NVFP4 qkv_proj and was consumed.
+
+        """
+        prefix, kind = name.rsplit(".", 1)
+        weight = params_dict.get(f"{prefix}.weight")
+        if (
+            not prefix.endswith("qkv_proj")
+            or kind not in ("weight", "weight_scale", "weight_scale_2", "input_scale")
+            or weight is None
+            or weight.dtype != torch.uint8
+        ):
+            return False
+        param = params_dict[name]
+        if kind in ("weight_scale_2", "input_scale"):
+            for shard, value in zip("qkv", tensor.reshape(3, 1), strict=True):
+                param.weight_loader(param, value, shard)
+        else:
+            attn = self.get_submodule(prefix.rsplit(".", 1)[0])
+            ckpt_tp = self.config.num_key_value_heads
+            rows = _rank_rows(
+                *_rank_head_ids(
+                    attn.total_num_heads, attn.total_num_kv_heads, tp_rank, tp_size
+                ),
+                attn.total_num_heads // ckpt_tp,
+                attn.total_num_kv_heads // ckpt_tp,
+                attn.head_dim,
+                attn.v_head_dim,
+                tensor.shape[0] // ckpt_tp,
+            )
+            default_weight_loader(param, tensor[rows])
+        loaded_params.add(name)
         return True
 
 

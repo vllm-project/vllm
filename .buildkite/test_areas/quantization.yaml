@@ -165,6 +165,7 @@ steps:
   - vllm/model_executor/layers/sparse_attn_indexer.py
   - vllm/model_executor/model_loader/reload/
   - vllm/model_executor/models/deepseek_v2.py
+  - vllm/model_executor/models/mimo_v2.py
   - vllm/models/deepseek_v32/
   - vllm/models/glm5next/
   - vllm/models/hy_v4/
