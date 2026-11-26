@@ -118,18 +118,63 @@ def test_multimodal_features_reject_mismatched_parallel_fields():
         )
 
 
-def test_multimodal_features_reject_overlapping_placeholders():
-    with pytest.raises(ValueError, match="non-overlapping"):
-        MultiModalFeatures(
-            mm_hashes={"image": ["a", "b"]},
-            mm_placeholders={
-                "image": [
-                    PlaceholderRangeInfo(offset=1, length=2),
-                    PlaceholderRangeInfo(offset=2, length=2),
-                ]
+def _features(placeholders: dict[str, list[tuple[int, int, list[bool] | None]]]):
+    return MultiModalFeatures(
+        mm_hashes={
+            modality: [f"{modality}-{i}" for i in range(len(ranges))]
+            for modality, ranges in placeholders.items()
+        },
+        mm_placeholders={
+            modality: [
+                PlaceholderRangeInfo(offset=offset, length=length, is_embed=is_embed)
+                for offset, length, is_embed in ranges
+            ]
+            for modality, ranges in placeholders.items()
+        },
+    )
+
+
+def test_multimodal_features_accept_a_span_shared_across_modalities():
+    """Qwen2.5-Omni and Qwen3-Omni place a video and its audio track on one
+    span with `use_audio_in_video`, each embedding its own positions."""
+    _features(
+        {
+            "image": [(0, 2, None)],
+            "video": [(2, 4, [True, False, True, False])],
+            "audio": [(2, 4, [False, True, False, True])],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "placeholders",
+    [
+        pytest.param({"image": [(1, 2, None), (2, 2, None)]}, id="partial"),
+        pytest.param({"video": [(0, 4, None)], "audio": [(1, 2, None)]}, id="nested"),
+        pytest.param(
+            {
+                "video": [(0, 4, [True, False, True, False])],
+                "audio": [(0, 2, [False, True])],
             },
-            kwargs_data={"image": ["a", "b"]},
-        )
+            id="same-offset",
+        ),
+        pytest.param(
+            {"video": [(0, 2, [True, False]), (0, 2, [False, True])]},
+            id="same-modality",
+        ),
+        pytest.param(
+            {"video": [(0, 2, [True, False])], "audio": [(0, 2, [True, True])]},
+            id="intersecting-masks",
+        ),
+        pytest.param(
+            {"video": [(0, 2, None)], "audio": [(0, 2, [False, True])]},
+            id="absent-mask",
+        ),
+    ],
+)
+def test_multimodal_features_reject_overlapping_placeholders(placeholders):
+    with pytest.raises(ValueError, match="non-overlapping"):
+        _features(placeholders)
 
 
 def test_generate_request_rejects_placeholder_outside_prompt():

@@ -1,20 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
+import httpx
 import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 from PIL import Image
-from transformers import BatchEncoding
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import BatchEncoding, LlavaConfig, TokenizersBackend
 
+from tests.utils import RemoteLaunchRenderServer
 from vllm import envs
-from vllm.config import MultiModalConfig
+from vllm.config import ModelConfig, MultiModalConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.model_executor.models.nano_nemotron_vl import (
     NanoNemotronVLDummyInputsBuilder,
@@ -28,6 +34,8 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
     VideoProcessorItems,
 )
+from vllm.multimodal.processing.context import profiling_media
+from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
 from vllm.transformers_utils.processors import nano_nemotron_vl as nemotron_processors
 from vllm.transformers_utils.processors.nano_nemotron_vl import (
@@ -233,21 +241,47 @@ class _CharTokenizer:
         return BatchEncoding({"input_ids": self.encode(text)})
 
 
+@pytest.mark.parametrize("select_token_ids", [True, False])
+def test_nemotron_video_repl_embedding_mask(select_token_ids: bool):
+    tokenizer = _CharTokenizer()
+    img_context_token_ids = [3]
+    repl = NanoNemotronVLProcessor.get_video_repl(
+        tokens_per_frame=[2],
+        frames_indices=[0],
+        frame_duration_ms=500,
+        tokenizer=tokenizer,
+        img_start_token_ids=[1],
+        img_end_token_ids=[2],
+        img_context_token_ids=img_context_token_ids,
+        select_token_ids=select_token_ids,
+    )
+
+    if select_token_ids:
+        assert repl.is_embed is not None
+        assert repl.is_embed(repl.full).tolist() == [
+            token_id in img_context_token_ids for token_id in repl.full
+        ]
+    else:
+        assert repl.is_embed is None
+
+
 _NORM_MEAN = [0.485, 0.456, 0.406]
 _NORM_STD = [0.229, 0.224, 0.225]
 
 
-def _make_processor(**kwargs) -> NanoNemotronVLProcessor:
+def _make_processor(
+    *, static_tiling: bool = False, use_thumbnail: bool = False, **kwargs
+) -> NanoNemotronVLProcessor:
     config = SimpleNamespace(
         force_image_size=16,
         patch_size=4,
         downsample_ratio=0.5,
-        use_thumbnail=False,
+        use_thumbnail=use_thumbnail,
         norm_mean=_NORM_MEAN,
         norm_std=_NORM_STD,
         dtype=torch.bfloat16,
         vision_config=SimpleNamespace(
-            args={"min_num_patches": 4, "max_num_patches": 64},
+            args={} if static_tiling else {"min_num_patches": 4, "max_num_patches": 64},
             # As in the Nemotron 3 Nano Omni checkpoints.
             video_target_num_patches=16,
             video_maintain_aspect_ratio=True,
@@ -257,6 +291,276 @@ def _make_processor(**kwargs) -> NanoNemotronVLProcessor:
     return NanoNemotronVLProcessor(
         config=config, tokenizer=_CharTokenizer(), max_model_len=1024, **kwargs
     )
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("do_cpu_normalize", [False, True])
+@pytest.mark.parametrize("single_image", [False, True])
+def test_static_image_preprocessing_budget(
+    do_cpu_normalize: bool,
+    single_image: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+):
+    processor = _make_processor(
+        static_tiling=True,
+        use_thumbnail=True,
+        do_rescale=do_cpu_normalize,
+        do_normalize=do_cpu_normalize,
+    )
+    images = [Image.new("RGB", (8, 8)), Image.new("RGB", (16, 8))]
+    expected_patches = [1, 3]
+    if single_image:
+        images = images[1:]
+        expected_patches = expected_patches[1:]
+    text = "<image>" * len(images)
+    dtype = torch.bfloat16 if do_cpu_normalize else torch.uint8
+    # One tile for the first image, two tiles and a thumbnail for the second.
+    # The outputs coexist with their concatenated copy.
+    itemsize = torch.float32.itemsize if do_cpu_normalize else torch.uint8.itemsize
+    required_bytes = 2 * sum(expected_patches) * 3 * 16**2 * itemsize
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", required_bytes - 1)
+    with pytest.raises(VLLMValidationError, match="VLLM_MAX_MEDIA_PREPROCESSING_BYTES"):
+        processor(text=text, images=images, max_num_tiles=2)
+    with profiling_media():
+        processor(text=text, images=images, max_num_tiles=2)
+    with pytest.raises(VLLMValidationError, match="VLLM_MAX_MEDIA_PREPROCESSING_BYTES"):
+        processor(text=text, images=images, max_num_tiles=2)
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", required_bytes)
+    output = processor(text=text, images=images, max_num_tiles=2)
+    assert output["image_num_patches"].tolist() == expected_patches
+    assert output["pixel_values_flat"].dtype == dtype
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize(
+    ("static_tiling", "target_pixels"),
+    [(True, 2 * 16**2), (False, 32**2 + 8**2)],
+    ids=["static", "dynamic"],
+)
+def test_cpu_image_preprocessing_budget_counts_largest_source(
+    static_tiling: bool,
+    target_pixels: int,
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+):
+    processor = _make_processor(static_tiling=static_tiling)
+    images = [Image.new("RGB", (64, 64)), Image.new("RGB", (8, 8))]
+    # The source float32 copies are created one at a time.
+    budget = (target_pixels + 64**2) * 3 * torch.float32.itemsize
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget - 1)
+    with pytest.raises(VLLMValidationError, match="Image preprocessing exceeds"):
+        processor(text="<image><image>", images=images, max_num_tiles=1)
+    with profiling_media():
+        profiled = processor(text="<image><image>", images=images, max_num_tiles=1)
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget)
+    output = processor(text="<image><image>", images=images, max_num_tiles=1)
+    torch.testing.assert_close(
+        output["pixel_values_flat"], profiled["pixel_values_flat"], rtol=0, atol=0
+    )
+
+
+@pytest.mark.core_model
+def test_dynamic_uint8_image_budget_counts_resize_temporary(
+    monkeypatch: pytest.MonkeyPatch, default_vllm_config
+):
+    processor = _make_processor(do_rescale=False, do_normalize=False)
+    image = Image.new("RGB", (48, 64))
+    # The 40x24 output may coexist with the source and horizontal resize buffer.
+    budget = 3 * (40 * 24 + 64 * 48 + 64 * 24)
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget - 1)
+    with pytest.raises(VLLMValidationError, match="Image preprocessing exceeds"):
+        processor(text="<image>", images=[image])
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget)
+    output = processor(text="<image>", images=[image])
+    assert output["imgs_sizes"] == [(40, 24)]
+    assert output["pixel_values_flat"].shape == (60, 3 * 4**2)
+    assert output["pixel_values_flat"].dtype == torch.uint8
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("do_cpu_normalize", [False, True])
+def test_dynamic_image_budget_counts_patch_packing(
+    do_cpu_normalize: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+):
+    processor = _make_processor(
+        do_rescale=do_cpu_normalize, do_normalize=do_cpu_normalize
+    )
+    images = [Image.new("RGB", (8, 8)) for _ in range(3)]
+    text = "<image>" * len(images)
+    dtype = torch.bfloat16 if do_cpu_normalize else torch.uint8
+    # The resized images, rearranged patches, and packed tensor coexist.
+    budget = 3 * len(images) * 8**2 * 3 * dtype.itemsize
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget - 1)
+    with pytest.raises(VLLMValidationError, match="Image preprocessing exceeds"):
+        processor(text=text, images=images)
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget)
+    output = processor(text=text, images=images)
+    assert output["image_num_patches"].tolist() == [4, 4, 4]
+    assert output["pixel_values_flat"].nbytes == budget // 3
+
+
+@pytest.mark.core_model
+def test_device_resize_image_budget_counts_staged_source_pixels(
+    monkeypatch: pytest.MonkeyPatch, default_vllm_config
+):
+    # Only configure the capability here. Actual resizing occurs in the model.
+    monkeypatch.setattr(nemotron_processors, "_cvcuda_available", lambda: True)
+    processor = _make_processor(
+        do_rescale=False, do_normalize=False, device_resize=True
+    )
+    images = [Image.new("RGB", (96, 96)), Image.new("RGB", (8, 8))]
+    budget = 3 * (96**2 + 8**2)
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget - 1)
+    with pytest.raises(VLLMValidationError, match="Image preprocessing exceeds"):
+        processor(text="<image><image>", images=images)
+
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_PREPROCESSING_BYTES", budget)
+    output = processor(text="<image><image>", images=images)
+    assert sum(tensor.nbytes for tensor in output["pixel_values_raw"]) == budget
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize(
+    ("static_tiling", "normalize_on_cpu", "first_image_size", "budget"),
+    [(True, False, 8, 2000), (False, False, 8, 650), (False, True, 64, 20_000)],
+    ids=["static", "dynamic", "dynamic-cpu-normalize"],
+)
+def test_render_rejects_over_budget_image_patches(
+    tmp_path, static_tiling, normalize_on_cpu, first_image_size, budget
+):
+    vision_args = {} if static_tiling else {"min_num_patches": 4, "max_num_patches": 64}
+    LlavaConfig(
+        architectures=["NemotronH_Nano_VL_V2"],
+        vision_config={"model_type": "clip_vision_model", "args": vision_args},
+        force_image_size=16,
+        patch_size=4,
+        downsample_ratio=0.5,
+        use_thumbnail=False,
+        norm_mean=_NORM_MEAN,
+        norm_std=_NORM_STD,
+    ).save_pretrained(tmp_path)
+    image_tokens = ["<img>", "<image>", "</img>"]
+    vocab = {token: i for i, token in enumerate(["[UNK]", *image_tokens])}
+    TokenizersBackend(
+        tokenizer_object=Tokenizer(WordLevel(vocab, unk_token="[UNK]")),
+        unk_token="[UNK]",
+        additional_special_tokens=image_tokens,
+        chat_template="{% for msg in messages %}{{ msg.content }}{% endfor %}",
+    ).save_pretrained(tmp_path)
+    images = [
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": encode_image_url(Image.new("RGB", (size, size), color))
+            },
+        }
+        for size, color in ((first_image_size, "red"), (8, "blue"))
+    ]
+    model = str(tmp_path)
+    args = ["--host", "127.0.0.1", "--dtype", "float32", "--max-model-len", "128"]
+    if normalize_on_cpu:
+        args.append("--no-mm-device-do-normalize")
+    with RemoteLaunchRenderServer(
+        model,
+        args,
+        env_dict={"VLLM_MAX_MEDIA_PREPROCESSING_BYTES": str(budget)},
+    ) as server:
+        url = server.url_for("v1/chat/completions/render")
+        for content, status in ((images, 400), (images[1:], 200)):
+            response = httpx.post(
+                url,
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": content}],
+                },
+            )
+            assert response.status_code == status, response.text[:512]
+            if status == 400:
+                assert (
+                    "VLLM_MAX_MEDIA_PREPROCESSING_BYTES"
+                    in response.json()["error"]["message"]
+                )
+
+
+def test_nemotron_processor_keeps_videos_of_different_sizes_apart():
+    videos = [
+        (np.zeros((2, h, w, 3), dtype=np.uint8), {"fps": 2.0, "frames_indices": [0, 1]})
+        for h, w in [(8, 32), (32, 8)]
+    ]
+    _, inputs = _make_processor()._preprocess_video(["<video><video>"], videos)
+
+    sizes = [tuple(frames.shape[-2:]) for frames in inputs["pixel_values_flat_video"]]
+    assert sizes == [(8, 32), (32, 8)]
+    assert inputs["video_frame_sizes"].tolist() == [list(size) for size in sizes]
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize(
+    ("vision_fields", "image_processor_values", "expected"),
+    [
+        pytest.param(
+            {},
+            (64, False),
+            {"video_target_num_patches": 64, "video_maintain_aspect_ratio": False},
+            id="explicit-false",
+        ),
+        pytest.param(
+            {"video_target_num_patches": 16, "video_maintain_aspect_ratio": True},
+            (64, False),
+            {"video_target_num_patches": 16, "video_maintain_aspect_ratio": True},
+            id="vision-patch-count",
+        ),
+        pytest.param(
+            {"video_target_img_size": 32, "video_maintain_aspect_ratio": True},
+            (64, False),
+            {"video_maintain_aspect_ratio": True},
+            id="vision-image-size",
+        ),
+        pytest.param({}, (None, None), {}, id="null-values"),
+    ],
+)
+def test_nemotron_video_frame_size_config_precedence(
+    tmp_path, vision_fields, image_processor_values, expected
+):
+    # Use local metadata to control which sizing fields each file provides.
+    hf_config = LlavaConfig(architectures=["NemotronH_Omni_Reasoning_V3"])
+    hf_config.vision_config.update(vision_fields)
+    hf_config.save_pretrained(tmp_path)
+    target_patches, maintain_aspect_ratio = image_processor_values
+    image_processor_config = {
+        "video_target_num_patches": target_patches,
+        "video_maintain_aspect_ratio": maintain_aspect_ratio,
+    }
+    (tmp_path / "preprocessor_config.json").write_text(
+        json.dumps(image_processor_config)
+    )
+
+    config = ModelConfig(model=str(tmp_path), skip_tokenizer_init=True)
+
+    vision_config = config.hf_config.vision_config
+    assert {
+        key: getattr(vision_config, key)
+        for key in image_processor_config
+        if hasattr(vision_config, key)
+    } == expected
+
+
+@pytest.mark.core_model
+def test_super_vl_video_frame_size_uses_image_processor_config():
+    config = ModelConfig(
+        model="nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+        skip_tokenizer_init=True,
+    )
+
+    assert config.hf_config.vision_config.video_target_num_patches == 1024
+    assert config.hf_config.vision_config.video_maintain_aspect_ratio is True
 
 
 @pytest.mark.parametrize(
@@ -308,6 +612,47 @@ def _sources(modality: str) -> list[np.ndarray]:
     return [rng.integers(0, 256, shape, dtype=np.uint8) for shape in shapes]
 
 
+def test_nemotron_dynamic_cpu_pixels_are_patch_flat(default_vllm_config):
+    processor = _make_processor()
+    sources = _sources("image")
+    _, inputs = _preprocess(processor, "image", sources)
+
+    tiler = processor.dynamic_tiler
+    assert tiler is not None
+    text_prompt_length = len(
+        processor.tokenizer(" Describe.", add_special_tokens=False).input_ids
+    )
+    params = tiler.compute_params(
+        [Image.fromarray(source) for source in sources],
+        tiler.max_num_tokens_available(text_prompt_length),
+    )
+    resized, expected_tokens = tiler.get_image_tensors(params, dtype=processor.dtype)
+    expected = DynamicResolutionImageTiler.stack(resized, processor.config.patch_size)[
+        0
+    ]
+    expected_num_patches = [
+        (image.shape[-2] // processor.config.patch_size)
+        * (image.shape[-1] // processor.config.patch_size)
+        for image in resized
+    ]
+
+    assert len({image.shape[-2:] for image in resized}) == len(sources)
+    assert inputs["imgs_sizes"] == [image.shape[-2:] for image in resized]
+    assert inputs["num_tokens_per_image"] == expected_tokens
+    assert inputs["image_num_patches"].tolist() == expected_num_patches
+    pixels = inputs["pixel_values_flat"]
+    assert pixels.shape == (sum(expected_num_patches), 3 * 4 * 4)
+    torch.testing.assert_close(pixels, expected, rtol=0, atol=0)
+
+    model = _uninitialized_model()
+    model.dynamic_resolution = True
+    model.patch_size = processor.config.patch_size
+    parsed = model._parse_and_validate_image_input(**inputs)
+    assert isinstance(parsed, NanoNemotronVLImagePixelInputsDynamic)
+    assert parsed.pixel_values_flat.shape == (1, *expected.shape)
+    torch.testing.assert_close(parsed.pixel_values_flat[0], pixels, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("modality", ["image", "video"])
 def test_nemotron_processor_device_resize_sends_source_pixels(
     modality: str, default_vllm_config
@@ -329,16 +674,24 @@ def test_nemotron_processor_device_resize_sends_source_pixels(
     if modality == "image":
         resized = inputs.pop("pixel_values_flat")
         raw = raw_inputs.pop("pixel_values_raw")
-        sizes = raw_inputs["imgs_sizes"]
-        assert raw_inputs == inputs
+        assert raw_inputs.keys() == inputs.keys()
+        assert raw_inputs["imgs_sizes"] == inputs["imgs_sizes"]
+        assert raw_inputs["num_tokens_per_image"] == inputs["num_tokens_per_image"]
+        torch.testing.assert_close(
+            raw_inputs["image_num_patches"], inputs["image_num_patches"]
+        )
+        assert resized.shape == (
+            inputs["image_num_patches"].sum().item(),
+            3 * 4 * 4,
+        )
     else:
-        resized = [inputs["pixel_values_flat_video"]]
+        resized = inputs["pixel_values_flat_video"]
         raw = raw_inputs["pixel_values_raw_video"]
         sizes = raw_inputs["video_frame_sizes"].tolist()
         torch.testing.assert_close(
             raw_inputs["video_num_patches"], inputs["video_num_patches"]
         )
-    assert [tuple(size) for size in sizes] == [tuple(r.shape[-2:]) for r in resized]
+        assert [tuple(size) for size in sizes] == [tuple(r.shape[-2:]) for r in resized]
     for raw_pixels, source in zip(raw, sources, strict=True):
         assert raw_pixels.dtype == torch.uint8
         assert torch.equal(raw_pixels, torch.from_numpy(source))
@@ -374,7 +727,7 @@ def test_nemotron_device_resize_profiles_a_real_video_resize(default_vllm_config
     shape, (text, inputs) = results[False]
     raw_shape, (raw_text, raw_inputs) = results[True]
     # Without device_resize, profiling frames are already at the target size.
-    assert tuple(inputs["pixel_values_flat_video"].shape[-2:]) == shape[1:3]
+    assert tuple(inputs["pixel_values_flat_video"][0].shape[-2:]) == shape[1:3]
     # With it, they are twice the target, so the profile run includes the
     # resize on the device; the prompt and token counts are unchanged.
     assert raw_text == text
@@ -519,7 +872,10 @@ def _uninitialized_model() -> NemotronH_Nano_VL_V2:
     return object.__new__(NemotronH_Nano_VL_V2)  # type: ignore[type-abstract]
 
 
-def test_nemotron_device_resize_embeds_videos_of_different_sizes_separately():
+@pytest.mark.parametrize(
+    "pixels_key", ["pixel_values_raw_video", "pixel_values_flat_video"]
+)
+def test_nemotron_embeds_videos_of_different_sizes_separately(pixels_key: str):
     # Videos that keep their aspect ratio can get different frame sizes, and
     # one encoder batch can hold several of them.
     model = _uninitialized_model()
@@ -536,7 +892,7 @@ def test_nemotron_device_resize_embeds_videos_of_different_sizes_separately():
         torch.zeros(2, 6, 6, 3, dtype=torch.uint8),
     ]
     kwargs = dict(
-        pixel_values_raw_video=frames,
+        **{pixels_key: frames},
         video_frame_sizes=torch.tensor([[32, 64], [48, 48]]),
         video_num_patches=torch.tensor([2, 2]),
         frames_indices=torch.tensor([[0, 1], [0, 1]]),
@@ -544,7 +900,7 @@ def test_nemotron_device_resize_embeds_videos_of_different_sizes_separately():
     )
     model.embed_multimodal(**kwargs)
     assert [k["video_frame_sizes"].tolist() for k in seen] == [[[32, 64]], [[48, 48]]]
-    assert all(k["pixel_values_raw_video"][0] is f for k, f in zip(seen, frames))
+    assert all(k[pixels_key][0] is f for k, f in zip(seen, frames))
     assert [k["video_num_patches"].tolist() for k in seen] == [[2], [2]]
 
     seen.clear()

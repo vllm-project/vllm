@@ -2033,7 +2033,7 @@ def gpu_model_runner_for_requests(dist_init, tmp_path):
             max_model_len=1024,
         ),
     )
-    device = torch.device("cuda", 0)
+    device = torch.device(current_platform.device_type)
     runner = GPUModelRunner(config, device)
     runner.model_state = DefaultModelState(config, nn.Module(), None, device)
     runner.block_tables = BlockTables(
