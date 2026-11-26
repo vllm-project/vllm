@@ -1118,46 +1118,6 @@ impl SharedRuntimeArgs {
         }
     }
 
-    /// Build the OpenAI-server config for the managed `serve` path that still
-    /// owns the startup handshake and binds its own HTTP listener.
-    fn to_managed_config(
-        &self,
-        server: ServerConfig,
-        handshake_address: String,
-        advertised_host: String,
-        topology: &DataParallelTopology,
-        local_input_address: Option<String>,
-        local_output_address: Option<String>,
-        manages_engine: bool,
-    ) -> FrontendConfig {
-        FrontendConfig {
-            server,
-            engine_core: EngineCoreConfig {
-                transport_mode: TransportMode::HandshakeOwner {
-                    handshake_address,
-                    advertised_host,
-                    engine_start_index: topology.frontend_engine_start_index(),
-                    engine_count: topology.frontend_engine_count(),
-                    data_parallel_size: topology.data_parallel_size,
-                    ready_timeout: self.ready_timeout(),
-                    local_input_address,
-                    local_output_address,
-                },
-                coordinator_mode: CoordinatorMode::MaybeInProc,
-                lora_modules: self.lora_modules.clone(),
-                default_mm_loras: self.default_mm_loras.clone(),
-                stream_interval: self.stream_interval,
-                admission_limits: self.admission_limits(),
-                disable_log_stats: self.disable_log_stats,
-                log_stats_interval: self.log_stats_interval(),
-                custom_histogram_buckets: self.custom_histogram_buckets.clone(),
-                disable_request_id_randomization: self.disable_request_id_randomization,
-                manages_engine,
-                profiler: self.profiler(),
-            },
-        }
-    }
-
     /// The model arguments with `--tokens-only` applied, which implies
     /// `--skip-tokenizer-init` as in Python's `EngineArgs`.
     fn model_args(&self) -> ModelArgs {
@@ -1533,26 +1493,52 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
-    /// Build the OpenAI-server runtime config used after the managed Python
-    /// engine starts.
+    /// Build the server and engine-core settings for `serve` when the frontend
+    /// owns the handshake, whether the engines are launched locally or externally.
     pub fn to_frontend_config(
         &self,
         handshake_address: String,
         topology: &DataParallelTopology,
     ) -> FrontendConfig {
+        FrontendConfig {
+            server: self.to_server_config(),
+            engine_core: self.to_engine_core_config(handshake_address, topology),
+        }
+    }
+
+    /// Build the engine-core config for the `serve` path that owns the startup handshake.
+    fn to_engine_core_config(
+        &self,
+        handshake_address: String,
+        topology: &DataParallelTopology,
+    ) -> EngineCoreConfig {
         // Prefer IPC sockets for local engine input/output.
         let (local_input_address, local_output_address) =
             topology.frontend_local_only().then(frontend_ipc_addresses).unzip();
-        self.runtime.to_managed_config(
-            self.to_server_config(),
-            handshake_address,
-            self.managed_engine.handshake_host.clone(),
-            topology,
-            local_input_address,
-            local_output_address,
+        EngineCoreConfig {
+            transport_mode: TransportMode::HandshakeOwner {
+                handshake_address,
+                advertised_host: self.managed_engine.handshake_host.clone(),
+                engine_start_index: topology.frontend_engine_start_index(),
+                engine_count: topology.frontend_engine_count(),
+                data_parallel_size: topology.data_parallel_size,
+                ready_timeout: self.runtime.ready_timeout(),
+                local_input_address,
+                local_output_address,
+            },
+            coordinator_mode: CoordinatorMode::MaybeInProc,
+            lora_modules: self.runtime.lora_modules.clone(),
+            default_mm_loras: self.runtime.default_mm_loras.clone(),
+            stream_interval: self.runtime.stream_interval,
+            admission_limits: self.runtime.admission_limits(),
+            disable_log_stats: self.runtime.disable_log_stats,
+            log_stats_interval: self.runtime.log_stats_interval(),
+            custom_histogram_buckets: self.runtime.custom_histogram_buckets.clone(),
+            disable_request_id_randomization: self.runtime.disable_request_id_randomization,
             // `--data-parallel-size-local 0` runs the frontend without a local engine.
-            self.managed_engine.data_parallel_size_local != Some(0),
-        )
+            manages_engine: self.managed_engine.data_parallel_size_local != Some(0),
+            profiler: self.runtime.profiler(),
+        }
     }
 
     pub(super) fn grpc_llm(&self, url: &str) -> anyhow::Result<GrpcLlm> {
