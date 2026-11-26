@@ -328,6 +328,13 @@ def memory_profiling(
         result.before_create.free_memory - result.after_profile.free_memory
     )
 
+    # Fallback when mem_get_info() does not decrease or driver returns static
+    # free == total (e.g. Intel XPU / Level Zero driver under WSL2, iGPUs).
+    if result.total_consumed <= 0 and (
+        weights_memory > 0 or diff_from_create.torch_allocated > 0
+    ):
+        result.total_consumed = max(weights_memory, diff_from_create.torch_allocated)
+
     # total_consumed already covers persistent torch allocations; add only the
     # transient peak headroom to avoid double-counting.
     result.transient_peak_headroom = (
