@@ -208,8 +208,7 @@ class AuxObjectWriter:
     are missing; nothing else changes. Queuing waits while
     `_MAX_QUEUED_BATCHES` batches are queued, at most until the first of them
     is written or misses its deadline. Once a batch has missed its deadline,
-    until a put succeeds, queuing drops the batch without waiting unless
-    nothing is queued, so that one batch at a time tries the store."""
+    until a put succeeds, queuing never waits: a full queue drops the batch."""
 
     def __init__(self, store: AuxObjectStore, *, timeout_s: float) -> None:
         self._store = store
@@ -232,8 +231,8 @@ class AuxObjectWriter:
             while len(self._pending) >= _MAX_QUEUED_BATCHES and not self._failing:
                 self._cond.wait(self._pending[0].deadline - time.monotonic())
                 self._expire(time.monotonic())
-            if self._failing and self._pending:
-                _drop(objects, "an earlier write missed its deadline")
+            if len(self._pending) >= _MAX_QUEUED_BATCHES:
+                _drop(objects, "the queue is full after a write missed its deadline")
                 return
             batch = _Batch(objects, time.monotonic() + self._timeout_s)
             self._pending.append(batch)

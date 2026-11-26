@@ -411,16 +411,17 @@ def test_writer_drops_the_batches_queued_behind_a_put_that_does_not_return(
     time.sleep(1.2)
     # Past their deadline the batches are dropped, also those queued behind
     # the put that does not return, and the writer no longer holds their
-    # objects. While the put has not returned, queuing drops without waiting.
+    # objects. While the put has not returned, queuing does not wait.
     start = time.monotonic()
-    writer.put(_objects("k/0"))
+    k0 = _objects("k/0")
+    writer.put(k0)
     assert time.monotonic() - start < 0.5
-    assert [batch.objects for batch in writer._pending] == [None] * 3
-    assert logger.error.call_count == 4
-    # Every deadline has passed: closing does not wait for the put.
+    assert [batch.objects for batch in writer._pending] == [None] * 3 + [k0]
+    assert logger.error.call_count == 3
+    # Closing waits for the put until the last deadline only.
     start = time.monotonic()
     writer.close()
-    assert time.monotonic() - start < 0.5
+    assert time.monotonic() - start < 1.5
     # The writer thread closes the store once the put returns, and writes
     # none of the dropped batches.
     assert not client.closed
@@ -428,6 +429,7 @@ def test_writer_drops_the_batches_queued_behind_a_put_that_does_not_return(
     writer._thread.join(10)
     assert client.closed
     assert calls == [["g/0"]]
+    assert logger.error.call_count == 4
 
 
 @pytest.mark.parametrize(
@@ -478,22 +480,37 @@ def test_writer_does_not_block_while_the_store_refuses_every_write(monkeypatch):
     start = time.monotonic()
     writer.put(_objects("g/2"))
     assert time.monotonic() - start >= 0.5
-    # From then on queuing never waits, over several deadlines, while one
-    # batch at a time keeps trying the store.
-    longest, start = 0.0, time.monotonic()
+    # From then on queuing never waits, over several deadlines, also when it
+    # finds the queue full.
+    longest, fullest, start = 0.0, 0, time.monotonic()
     while time.monotonic() - start < 3.5:
         before = time.monotonic()
         writer.put(_objects(f"h/{before}"))
         longest = max(longest, time.monotonic() - before)
-        assert len(writer._pending) <= 1
+        fullest = max(fullest, len(writer._pending))
         time.sleep(0.01)
-    assert longest < 0.5
-    # A put that lands ends it: later batches are queued and written again.
+    assert longest < 0.5 and fullest == 2
+    # A put that lands ends it: batches are written again.
     accept.set()
-    for key in ("k/0", "k/1", "k/2"):
-        wait_for_writer(writer)
-        writer.put(_objects(key))
-    writer.put(_objects("k/3"))
     wait_for_writer(writer)
-    assert {"k/1", "k/2", "k/3"} <= set(client.objects)
+    writer.put(_objects("k/0"))
+    writer.put(_objects("k/1"))
+    wait_for_writer(writer)
+    assert {"k/0", "k/1"} <= set(client.objects)
+    writer.close()
+
+
+def test_writer_keeps_the_batches_queued_while_the_store_fails():
+    accept = threading.Event()
+    client, _, writer = _writer(lambda keys: None if accept.is_set() else -200, 1.0)
+    writer.put(_objects("g/0"))
+    # g/0 misses its deadline: the store is failing.
+    wait_for_writer(writer)
+    for key in ("h/0", "h/1", "h/2"):
+        writer.put(_objects(key))
+    # The store recovers before their deadline: all of them are written.
+    accept.set()
+    wait_for_writer(writer)
+    assert {"h/0", "h/1", "h/2"} <= set(client.objects)
+    assert "g/0" not in client.objects
     writer.close()
