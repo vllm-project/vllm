@@ -126,11 +126,22 @@ def _rel_l2(a: torch.Tensor, b: torch.Tensor) -> float:
     return ((a.float() - b.float()).norm() / b.float().norm()).item()
 
 
+def _mismatch(
+    out: torch.Tensor, control: torch.Tensor, ref: torch.Tensor
+) -> str | None:
+    """None if `out` is within 0.1 % of Humming (`control`), or no more than
+    1 % further from the FP32 reference than Humming is; else the errors."""
+    vs_humming, vs_ref = _rel_l2(out, control), _rel_l2(out, ref)
+    humming_vs_ref = _rel_l2(control, ref)
+    if vs_humming <= 1e-3 or vs_ref <= 1.01 * humming_vs_ref:
+        return None
+    return f"{vs_humming=:.2e} {vs_ref=:.2e} {humming_vs_ref=:.2e}"
+
+
 @pytest.mark.parametrize("layer", [0, 9, 19])
 def test_mega_moe_matches_humming(dist_init, checkpoint, monkeypatch, layer: int):
-    """Within 0.1 % of Humming, or no more than 1 % further from the FP32
-    reference than Humming is, across the decode and prefill BLOCK_M. The
-    launch runs Inkling's softcapped SiTU, not the op's SwiGLU default."""
+    """Matches Humming (`_mismatch`) across the decode and prefill BLOCK_M.
+    The launch runs Inkling's softcapped SiTU, not the op's SwiGLU default."""
     from vllm.utils.deep_gemm import _import_deep_gemm
 
     deep_gemm = _import_deep_gemm()
@@ -152,12 +163,8 @@ def test_mega_moe_matches_humming(dist_init, checkpoint, monkeypatch, layer: int
     for tokens in (1, 8, 128, 1024):
         x = _input(checkpoint, layer, tokens)
         ours, control = mega(x), humming(x)
-        ref = _reference(checkpoint, layer, humming, x)
-        vs_humming, vs_ref = _rel_l2(ours, control), _rel_l2(ours, ref)
-        humming_vs_ref = _rel_l2(control, ref)
-        assert vs_humming <= 1e-3 or vs_ref <= 1.01 * humming_vs_ref, (
-            f"{tokens} tokens: {vs_humming=:.2e} {vs_ref=:.2e} {humming_vs_ref=:.2e}"
-        )
+        mismatch = _mismatch(ours, control, _reference(checkpoint, layer, humming, x))
+        assert mismatch is None, f"{tokens} tokens: {mismatch}"
     assert len(launches) == 4
     for kwargs in launches:
         assert kwargs["activation"] == "situ"
@@ -241,15 +248,10 @@ def _data_parallel_worker(rank: int, world: int, port: int, path: str, queue) ->
                     ours, ep_control = ep_mega(x), ep_humming(x)
                 replicated, control = dp_mega(x), humming(x)
                 ref = _reference(checkpoint, layer, humming, x)
-                humming_vs_ref = _rel_l2(control, ref)
                 case = f"layer {layer} counts {counts}"
                 for name, out in (("ep", ours), ("replicated", replicated)):
-                    vs_humming, vs_ref = _rel_l2(out, control), _rel_l2(out, ref)
-                    if not (vs_humming <= 1e-3 or vs_ref <= 1.01 * humming_vs_ref):
-                        failures.append(
-                            f"{case} {name}: {vs_humming=:.2e} {vs_ref=:.2e} "
-                            f"{humming_vs_ref=:.2e}"
-                        )
+                    if mismatch := _mismatch(out, control, ref):
+                        failures.append(f"{case} {name}: {mismatch}")
                 # Each of the 4 partials is rounded to bf16 (up to 2**-9 of it).
                 scale = control.abs().max().item()
                 if not torch.allclose(
