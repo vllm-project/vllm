@@ -27,13 +27,15 @@ impl FingerprintMode {
     /// Build the fingerprint of the engine that `fingerprint` describes, like
     /// Python's `build_system_fingerprint`.
     pub(crate) fn fingerprint(&self, fingerprint: Option<&LlmFingerprint>) -> Option<String> {
-        let hash8 = fingerprint
-            .and_then(|info| info.config_hash.as_deref())
-            .map_or("nohash", |hash| hash.get(..8).unwrap_or(hash));
+        let hash8 = || {
+            fingerprint
+                .and_then(|info| info.config_hash.as_deref())
+                .map_or("nohash", |hash| hash.get(..8).unwrap_or(hash))
+        };
         match self {
             Self::None => None,
             Self::Custom(value) => Some(value.clone()),
-            Self::Hash => Some(format!("vllm-{}-{hash8}", fingerprint?.vllm_version)),
+            Self::Hash => Some(format!("vllm-{}-{}", fingerprint?.vllm_version, hash8())),
             Self::Full => {
                 let fingerprint = fingerprint?;
                 let mut parts = vec![format!("vllm-{}", fingerprint.vllm_version)];
@@ -49,7 +51,7 @@ impl FingerprintMode {
                 if fingerprint.enable_expert_parallel {
                     parts.push("ep".to_string());
                 }
-                parts.push(hash8.to_string());
+                parts.push(hash8().to_string());
                 Some(parts.join("-"))
             }
         }

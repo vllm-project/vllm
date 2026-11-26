@@ -73,30 +73,6 @@ pub(crate) struct PreparedGenerateRequest {
 }
 
 impl GenerateRequest {
-    /// Create a tokenized request with default priority and no optional metadata.
-    pub fn new(
-        request_id: String,
-        prompt_token_ids: Vec<u32>,
-        sampling_params: EngineCoreSamplingParams,
-    ) -> Self {
-        Self {
-            request_id,
-            prompt_token_ids,
-            sampling_params,
-            mm_features: None,
-            arrival_time: None,
-            cache_salt: None,
-            trace_headers: None,
-            priority: 0,
-            data_parallel_rank: None,
-            session_id: None,
-            kv_hints: None,
-            reasoning_parser_kwargs: None,
-            reasoning_ended: None,
-            lora_request: None,
-        }
-    }
-
     /// Validate and lower this request into the raw engine-core request format.
     pub(crate) fn prepare(self, randomize_request_id: bool) -> Result<PreparedGenerateRequest> {
         if self.prompt_token_ids.is_empty() {
@@ -204,6 +180,10 @@ mod tests {
 
     fn sample_request() -> GenerateRequest {
         GenerateRequest {
+            request_id: "req-1".to_string(),
+            prompt_token_ids: vec![11, 22, 33],
+            sampling_params: EngineCoreSamplingParams::for_test(),
+            mm_features: None,
             arrival_time: Some(42.5),
             cache_salt: Some("salt".to_string()),
             trace_headers: Some(BTreeMap::from([(
@@ -232,11 +212,8 @@ mod tests {
                 )]
                 .into(),
             }),
-            ..GenerateRequest::new(
-                "req-1".into(),
-                vec![11, 22, 33],
-                EngineCoreSamplingParams::for_test(),
-            )
+            reasoning_ended: None,
+            lora_request: None,
         }
     }
 

@@ -194,7 +194,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                     .await;
             }
 
-            let shutdown_timeout = server_config.shutdown_timeout;
+            let shutdown_timeout = args.runtime.shutdown_timeout();
             // The frontend owning rank 0 hosts the deployment's handshake. In hybrid or
             // external DP LB, another node's frontend serves only its engines' second
             // handshake, on a local IPC endpoint.
