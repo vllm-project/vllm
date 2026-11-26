@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.online.mxfp4 import (
     MXFP4_BLOCK_SIZE,
     Mxfp4OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import dequant_block_fp8
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     mxfp4_quantize,
 )
@@ -35,17 +36,6 @@ from vllm.model_executor.model_loader.reload.layerwise import (
 from vllm.model_executor.utils import replace_parameter
 
 logger = init_logger(__name__)
-
-
-def dequant_block_fp8_to_bf16(
-    weight: torch.Tensor, scale_inv: torch.Tensor, block_size: list[int]
-) -> torch.Tensor:
-    """`[N, K]` fp8 x `[ceil(N/bn), ceil(K/bk)]` fp32 block scales -> bf16."""
-    n, k = weight.shape
-    bn, bk = block_size
-    scale = scale_inv.to(torch.float32)
-    scale = scale.repeat_interleave(bn, dim=0)[:n].repeat_interleave(bk, dim=1)[:, :k]
-    return (weight.to(torch.float32) * scale).to(torch.bfloat16)
 
 
 class Fp8BlockExpertsAsMxfp4FusedMoE(Mxfp4OnlineMoEMethod):
@@ -161,8 +151,8 @@ class Fp8BlockExpertsAsMxfp4FusedMoE(Mxfp4OnlineMoEMethod):
             device=weight.device,
         )
         for e in range(num_experts):
-            bf16 = dequant_block_fp8_to_bf16(
-                weight[e], scale_inv[e], self.fp8_block_size
+            bf16 = dequant_block_fp8(
+                weight[e], scale_inv[e], self.fp8_block_size, torch.bfloat16
             )
             q, s = mxfp4_quantize(bf16)
             out[e] = q.view(torch.uint8)

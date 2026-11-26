@@ -127,7 +127,7 @@ class OnlineDerenderer:
         # Like the coupled chat endpoint, report
         # `usage.completion_tokens_details` only when a reasoning parser
         # is configured.
-        self._include_reasoning_tokens_details = bool(reasoning_parser)
+        self.include_reasoning_tokens_details = bool(reasoning_parser)
 
         self.chat_template = chat_template
         self.chat_template_content_format: ChatTemplateContentFormatOption = (
@@ -412,18 +412,17 @@ class OnlineDerenderer:
         prompt_logprobs = _resolve_prompt_logprobs(
             generate_response.prompt_logprobs, tokenizer
         )
-        completion_tokens_details = (
-            CompletionTokenUsageInfo(reasoning_tokens=reasoning_tokens)
-            if self._include_reasoning_tokens_details
-            else None
-        )
 
         if chat_request is not None and chat_request.echo:
             echo = self._echo_content(chat_request, role)
             for chat_choice in choices:
                 chat_choice.message.content = echo + (chat_choice.message.content or "")
 
-        return choices, prompt_logprobs, completion_tokens_details
+        return (
+            choices,
+            prompt_logprobs,
+            self._completion_tokens_details(reasoning_tokens),
+        )
 
     async def derender_text_choices(
         self,
@@ -431,7 +430,7 @@ class OnlineDerenderer:
         chat_request: ChatCompletionRequest | None,
         history_tool_call_cnt: int,
         prompt_token_ids: list[int] | None,
-    ) -> list[tuple[ChatMessage, str]]:
+    ) -> tuple[list[tuple[ChatMessage, str]], CompletionTokenUsageInfo | None]:
         """Parse the engine's decoded output text into assistant messages.
 
         Args:
@@ -442,7 +441,9 @@ class OnlineDerenderer:
             prompt_token_ids: Prompt token IDs, if known.
 
         Returns:
-            One message and chat `finish_reason` per output in order.
+            One message and chat `finish_reason` per output in order, and
+            `completion_tokens_details` (reasoning tokens summed over the
+            outputs; None without a reasoning parser).
 
         """
         return await self._derender_text_choices_async(
@@ -455,15 +456,16 @@ class OnlineDerenderer:
         chat_request: ChatCompletionRequest | None,
         history_tool_call_cnt: int,
         prompt_token_ids: list[int] | None,
-    ) -> list[tuple[ChatMessage, str]]:
+    ) -> tuple[list[tuple[ChatMessage, str]], CompletionTokenUsageInfo | None]:
         tokenizer = self.renderer.get_tokenizer()
         results: list[tuple[ChatMessage, str]] = []
         role = self._response_role(chat_request)
+        reasoning_tokens = 0
         for output in outputs:
             if self.parser is None or chat_request is None:
                 message = ChatMessage(role=role, content=output.text)
             else:
-                message, _ = self._parse_and_assemble(
+                message, choice_reasoning_tokens = self._parse_and_assemble(
                     tokenizer,
                     output.text,
                     output.token_ids,
@@ -473,11 +475,48 @@ class OnlineDerenderer:
                     role,
                     history_tool_call_count=history_tool_call_cnt,
                 )
+                reasoning_tokens += choice_reasoning_tokens
             finish_reason = resolve_finish_reason(
                 output.finish_reason, chat_request, bool(message.tool_calls)
             )
             results.append((message, finish_reason))
-        return results
+        return results, self._completion_tokens_details(reasoning_tokens)
+
+    def _completion_tokens_details(
+        self, reasoning_tokens: int
+    ) -> CompletionTokenUsageInfo | None:
+        if not self.include_reasoning_tokens_details:
+            return None
+        return CompletionTokenUsageInfo(reasoning_tokens=reasoning_tokens)
+
+    def stream_completion_tokens_details(
+        self,
+        processors: Sequence[ChatStreamProcessor],
+        output_token_ids: Sequence[Sequence[int]],
+    ) -> CompletionTokenUsageInfo | None:
+        """Count reasoning tokens over every streamed choice.
+
+        Args:
+            processors: The processor of each choice, from
+                `make_stream_processor`.
+            output_token_ids: Every token streamed so far for each choice.
+
+        Returns:
+            Reasoning tokens summed over the choices, or None without a
+            reasoning parser.
+
+        """
+        if not self.include_reasoning_tokens_details:
+            return None
+        return CompletionTokenUsageInfo(
+            reasoning_tokens=sum(
+                processor.parser.count_reasoning_tokens(token_ids)
+                for processor, token_ids in zip(
+                    processors, output_token_ids, strict=True
+                )
+                if processor.parser is not None and token_ids
+            )
+        )
 
     def make_stream_processor(
         self,
@@ -602,7 +641,7 @@ class OnlineDerenderer:
         )
         reasoning_tokens = (
             parser.count_reasoning_tokens(token_ids)
-            if self._include_reasoning_tokens_details
+            if self.include_reasoning_tokens_details
             else 0
         )
         return message, reasoning_tokens
@@ -1047,7 +1086,7 @@ class OnlineDerenderer:
             # count can't cover every choice the way `completion_tokens`
             # does; leave the details out then.
             count_reasoning = (
-                self._include_reasoning_tokens_details and (chat_request.n or 1) == 1
+                self.include_reasoning_tokens_details and (chat_request.n or 1) == 1
             )
             completion_tokens_details = (
                 CompletionTokenUsageInfo(

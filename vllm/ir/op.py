@@ -244,6 +244,7 @@ class IrOp:
         supported: bool = True,
         supports_args: Callable[..., bool] | None = None,
         inplace: bool = False,
+        functional_impl: Callable[..., Any] | None = None,
     ) -> Callable[[Callable[..., Any]], "IrOpImpl"]:
         """Register an implementation for this custom op.
 
@@ -252,6 +253,9 @@ class IrOp:
             supported: Static support check, use this to check platform support.
             supports_args: Dynamic arg support check, used for types and shapes.
             inplace: Does this op reuse activation input memory for outputs
+            functional_impl: Optional out-of-place variant of an inplace impl.
+                Used for the functional overload (e.g. Inductor lowering)
+                instead of cloning activations before the inplace impl.
 
         Returns:
             A decorator that registers the implementation.
@@ -283,7 +287,16 @@ class IrOp:
         def _register_impl(f: Callable):
             # Slice out the decorator function from the stack
             stack = traceback.format_stack()[:-1]
-            impl = IrOpImpl(self, provider, f, supported, supports_args, inplace, stack)
+            impl = IrOpImpl(
+                self,
+                provider,
+                f,
+                supported,
+                supports_args,
+                inplace,
+                stack,
+                functional_impl=functional_impl,
+            )
             self.impls[provider] = impl
 
             if self.get_priority():
@@ -539,6 +552,7 @@ class IrOpImpl:
         supports_args: Callable[..., bool] | None,
         inplace: bool = False,
         registration_stack: list[str] | None = None,
+        functional_impl: Callable | None = None,
     ):
         assert provider not in op.impls, (
             f"Implementation for provider {provider} already registered."
@@ -604,6 +618,15 @@ class IrOpImpl:
                 f"Inplace implementation cannot be registered for op {op.name}"
                 f" that does not allow inplace."
             )
+        if functional_impl is not None:
+            assert inplace, "functional_impl is only valid for inplace impls."
+            functional_schema = infer_schema(functional_impl, mutates_args=[])
+            if functional_schema != op._schema_str:
+                raise ValueError(
+                    f"functional_impl for provider {provider} has schema "
+                    f"'{functional_schema}' which does not match native schema "
+                    f"'{op._schema_str}' for op {op.name}."
+                )
 
         self.op = op
         self.provider = provider
@@ -611,6 +634,7 @@ class IrOpImpl:
         self.supported = supported
         self._supports_args = supports_args
         self.inplace = inplace
+        self.functional_impl = functional_impl
         self._registration_stack = registration_stack or []
 
     @property
@@ -635,6 +659,8 @@ class IrOpImpl:
         TODO(luka): Cache the file hash as multiple impls are likely in the same file.
         """
         sources = [Path(inspect.getfile(self.impl_fn))]
+        if self.functional_impl is not None:
+            sources.append(Path(inspect.getfile(self.functional_impl)))
         return hash_source(*sources)
 
     def func_impl_fn(self, *args, **kwargs) -> Any:
@@ -643,6 +669,8 @@ class IrOpImpl:
         """
         if not self.inplace:
             return self.impl_fn(*args, **kwargs)
+        if self.functional_impl is not None:
+            return self.functional_impl(*args, **kwargs)
 
         # copy activations to ensure functional semantics
         new_args = list(args)

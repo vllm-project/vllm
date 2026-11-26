@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DeepSeek-V4.1 mono decode path through the real model: a five-layer
-DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, and at TP4 on gfx942, served with
+DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, and at TP4 and TP8 on gfx942, served with
 `--monokernel` on and off on the same random weights: every decoder layer's
 outputs at every decode step must match. Unlike
 `test_dsv41_mono_numerics.py`, which checks the kernels against vLLM's ops
@@ -59,6 +59,15 @@ STEPS = 5  # decode steps after the prefill's token
 MERGE_AB = "DSV41_MONO_MERGE_AB"
 
 
+def _decodes(tp: int, arch: str) -> int:
+    """Decodes an engine runs, so that `_decodes(tp, arch) ** 2` pairs are pooled.
+
+    vLLM's path is not deterministic at TP8 on cdna4, so one decode's flipped
+    share is a draw rather than a rate.
+    """
+    return 4 if (tp, arch) == (8, "cdna4") else 1
+
+
 def _arch() -> str:
     """The GPU kind that the mono kernels build for, "cdna4" or "gfx942", or
     an empty string on any other GPU."""
@@ -72,9 +81,12 @@ def _arch() -> str:
 
 
 # The (tensor parallel size, decode rows) cases of each GPU. The gfx942 kernels
-# build for TP4 only. 8 rows are two GEMV passes of 6 rows there, the second
+# build for TP4 and TP8. 8 rows are two GEMV passes of 6 rows there, the second
 # one padded, and 42 rows are the most that they take.
-CASES = {"cdna4": [(2, 8), (4, 8), (8, 8), (8, 28)], "gfx942": [(4, 8), (4, 42)]}
+CASES = {
+    "cdna4": [(2, 8), (4, 8), (8, 8), (8, 28)],
+    "gfx942": [(4, 8), (4, 42), (8, 8), (8, 42)],
+}
 
 
 @torch.no_grad()
@@ -233,6 +245,12 @@ class MonoProbe:
             layer.register_forward_pre_hook(pos_hook, with_kwargs=True)
             gap = gap_hook(i, layer)
             layer.ffn.register_forward_pre_hook(_host_reads(gap), with_kwargs=True)
+
+    def reset_capture(self) -> None:
+        """Drop the last decode's capture, keeping the hooks registered: a
+        second `capture_steps` would register a second set of them."""
+        self._captured = {}
+        self._gaps = {}
 
     def save_capture(self, path: str) -> None:
         rank = self.rank  # type: ignore[attr-defined]
@@ -401,10 +419,10 @@ if os.environ.get(MERGE_AB):
 def _decode(
     vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str, arch: str
 ):
-    """Greedy decode of `prompts` with the mono path on or off: (each
-    prompt's output, the workers' mono layers); each decoder layer's outputs
-    for the decode tokens of decode-only steps, and vLLM's routing margins,
-    saved under `path`."""
+    """`_decodes(tp, arch)` greedy decodes of `prompts` on one engine with the
+    mono path on or off: (each decode's outputs, the workers' mono layers); each decoder
+    layer's outputs for the decode tokens of decode-only steps, and vLLM's
+    routing margins, saved under `path.d<decode>`."""
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
 
@@ -443,12 +461,16 @@ def _decode(
     ) as runner:
         runner.llm.collective_rpc("capture_steps", args=([len(p) for p in prompts],))
         params = SamplingParams(temperature=0.0, max_tokens=STEPS + 1)
-        outs = runner.llm.generate(
-            [TokensPrompt(prompt_token_ids=p) for p in prompts], params
-        )
-        runner.llm.collective_rpc("save_capture", args=(path,))
+        decodes = []
+        for d in range(_decodes(tp, arch)):
+            runner.llm.collective_rpc("reset_capture")
+            outs = runner.llm.generate(
+                [TokensPrompt(prompt_token_ids=p) for p in prompts], params
+            )
+            runner.llm.collective_rpc("save_capture", args=(f"{path}.d{d}",))
+            decodes.append([o.outputs[0] for o in outs])
         probe = runner.llm.collective_rpc("mono_layers")
-    return [o.outputs[0] for o in outs], probe
+    return decodes, probe
 
 
 def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -466,6 +488,9 @@ def _merged_matches_two_launches(vllm_runner, monkeypatch) -> None:
         "VLLM_USE_BREAKABLE_CUDAGRAPH",
     ):
         monkeypatch.setenv(name, "1")
+    # The workers must import this module with MERGE_AB set: forked ones keep
+    # the pytest process's import, made without it, and skip the patches.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     g = torch.Generator().manual_seed(0)
     prompt = torch.randint(1000, 60000, (1000,), generator=g).tolist()
     with vllm_runner(
@@ -504,7 +529,9 @@ def _merged_matches_two_launches(vllm_runner, monkeypatch) -> None:
         assert not any(r["target"] + r["draft"]), r
 
 
-@pytest.mark.parametrize(("tp", "rows"), [(2, 8), (4, 8), (4, 42), (8, 8), (8, 28)])
+@pytest.mark.parametrize(
+    ("tp", "rows"), [(2, 8), (4, 8), (4, 42), (8, 8), (8, 28), (8, 42)]
+)
 def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, rows):
     arch = _arch()
     if not arch:
@@ -528,6 +555,7 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
             break
     prompts = [torch.randint(1000, 60000, (n,), generator=g).tolist() for n in lens]
 
+    decodes = _decodes(tp, arch)
     on, probe_on = _decode(
         vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on", arch
     )
@@ -543,17 +571,21 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
         assert rank["layers"] == {
             i: ["whole" if i in WHOLE else "ffn", True, copies] for i in WHOLE + FFN
         }, rank
-        assert rank["epoch"] >= launches * STEPS, rank
+        assert rank["epoch"] >= launches * STEPS * decodes, rank
         assert rank["epoch"] % launches == 0, rank
     assert all(set(r["layers"].values()) == {None} for r in probe_off)
-    # each decode token's input matches between the runs while the greedy
-    # tokens before it do: (prompt length, position) pairs to compare
-    same: set[tuple[int, int]] = set()
-    for prompt, a, b in zip(prompts, on, off):
-        for step in range(STEPS):
-            if a.token_ids[: step + 1] != b.token_ids[: step + 1]:
-                break
-            same.add((len(prompt), len(prompt) + step))
+
+    def matching(mono_outs, ref_outs) -> set[tuple[int, int]]:
+        """One mono decode against one vLLM decode: each decode token whose
+        input matches between them, which is while the greedy tokens before it
+        do. (prompt length, position) pairs to compare."""
+        same: set[tuple[int, int]] = set()
+        for prompt, a, b in zip(prompts, mono_outs, ref_outs):
+            for step in range(STEPS):
+                if a.token_ids[: step + 1] != b.token_ids[: step + 1]:
+                    break
+                same.add((len(prompt), len(prompt) + step))
+        return same
 
     # each layer's outputs for those tokens, mono against vLLM's path, token by
     # token. Layer 0 sees the same inputs on both paths, but its FFN input
@@ -581,27 +613,44 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
     later_tie = 2e-2 if arch == "gfx942" else 1e-2
     flip_divisor = 3 if arch == "gfx942" else 4
     for rank in range(tp):
-        got, _ = torch.load(f"{tmp_path}/on.rank{rank}")
-        want, gaps = torch.load(f"{tmp_path}/off.rank{rank}")
-        keys: list[tuple[int, int]] = sorted(
-            same & {k[1:] for k in got} & {k[1:] for k in want}
+        ref = [torch.load(f"{tmp_path}/off.d{b}.rank{rank}") for b in range(decodes)]
+        pooled_flips = pooled_keys = 0
+        per_pair: list = []
+        for a in range(decodes):
+            got, _ = torch.load(f"{tmp_path}/on.d{a}.rank{rank}")
+            for b, (want, gaps) in enumerate(ref):
+                same = matching(on[a], off[b])
+                keys: list[tuple[int, int]] = sorted(
+                    same & {k[1:] for k in got} & {k[1:] for k in want}
+                )
+                assert len(keys) >= len(prompts), (rank, a, b, keys)
+                flipped: set = set()
+                for i in sorted(WHOLE + FFN):
+                    for k in keys:
+                        if k in flipped:
+                            continue
+                        (x, res), (x_ref, res_ref) = got[(i, *k)], want[(i, *k)]
+                        err = _rel(res, res_ref)
+                        assert err < 0.03, (rank, a, b, i, k, "residual", err)
+                        bound = first_bound if i == 0 else 0.08
+                        err = _rel(x, x_ref)
+                        if err >= bound:
+                            tie = 5e-3 if i == 0 else later_tie
+                            assert gaps[(i, *k)] < tie, (rank, a, b, i, k, "x", err)
+                            flipped.add(k)
+                # the pooled rate, not the union over the pairs: a token that
+                # flips against one vLLM decode and not another is one flip of
+                # the two, and the union would only ever grow
+                pooled_flips += len(flipped)
+                pooled_keys += len(keys)
+                per_pair.append((a, b, sorted(flipped), len(keys)))
+        # every pair's (flipped, compared), on passing runs too
+        counts = [(len(flips), n) for _, _, flips, n in per_pair]
+        print(f"rank {rank}: {pooled_flips}/{pooled_keys} flipped, per pair {counts}")
+        # a string, so that pytest prints every pair: which flipped what
+        assert pooled_flips <= pooled_keys // flip_divisor, (
+            f"rank {rank}: {pooled_flips}/{pooled_keys} flipped, {per_pair}"
         )
-        assert len(keys) >= len(prompts), keys
-        flipped: set = set()
-        for i in sorted(WHOLE + FFN):
-            for k in keys:
-                if k in flipped:
-                    continue
-                (x, res), (x_ref, res_ref) = got[(i, *k)], want[(i, *k)]
-                err = _rel(res, res_ref)
-                assert err < 0.03, (rank, i, k, "residual", err)
-                bound = first_bound if i == 0 else 0.08
-                err = _rel(x, x_ref)
-                if err >= bound:
-                    tie = 5e-3 if i == 0 else later_tie
-                    assert gaps[(i, *k)] < tie, (rank, i, k, "x", err)
-                    flipped.add(k)
-        assert len(flipped) <= len(keys) // flip_divisor, (rank, sorted(flipped))
 
     if (tp, rows) == (8, 8):
         _merged_matches_two_launches(vllm_runner, monkeypatch)

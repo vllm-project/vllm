@@ -539,8 +539,8 @@ class TestXgrammarBackend:
         _VOCAB_SIZE = 50257
         tokenizer: ClassVar[PreTrainedTokenizerBase]
 
-        @classmethod
         @pytest.fixture(scope="class", autouse=True)
+        @classmethod
         def _shared_tokenizer(cls):
             cls.tokenizer = AutoTokenizer.from_pretrained(cls._TOKENIZER)
 

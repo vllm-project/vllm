@@ -1,13 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Host memory registration for CUDA/HIP DMA transfers."""
+"""Host memory registration for CUDA/HIP DMA transfers, and core dump exclusion."""
 
 import math
 import mmap
 
 import torch
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 HOST_REGISTER_CHUNK_BYTES = 256 << 30
+
+
+def exclude_from_core_dump(mmap_obj: mmap.mmap) -> None:
+    """Leave the mapping out of core dumps (MADV_DONTDUMP, Linux 3.4+).
+
+    A CPU KV cache can be hundreds of GiB, so a crashing worker would
+    otherwise write all of it to disk. Failure only costs a larger dump.
+    """
+    madv_dontdump = getattr(mmap, "MADV_DONTDUMP", None)
+    if madv_dontdump is None:
+        return
+    try:
+        mmap_obj.madvise(madv_dontdump)
+    except OSError as e:
+        logger.warning(
+            "MADV_DONTDUMP failed; core dumps will include the CPU KV cache: %s", e
+        )
 
 
 def pin_tensor(tensor: torch.Tensor) -> None:

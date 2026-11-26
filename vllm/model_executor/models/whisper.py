@@ -742,6 +742,19 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
 
 
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
+    def should_skip_decoder_start_token(
+        self,
+        decoder_prompt_token_ids: list[int],
+    ) -> bool:
+        # A prompted decoder input opens with `<|startofprev|>`, ahead of the
+        # SOT sequence (reference layout), so nothing may be prepended to it.
+        tokenizer = self.info.ctx.tokenizer
+        if tokenizer is None or not decoder_prompt_token_ids:
+            return False
+
+        startofprev_id = tokenizer.convert_tokens_to_ids("<|startofprev|>")
+        return decoder_prompt_token_ids[0] == startofprev_id
+
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
@@ -858,7 +871,7 @@ class WhisperForConditionalGeneration(
         stt_config = stt_params.stt_config
         language = stt_params.language
         task_type = stt_params.task_type
-        request_prompt = stt_params.request_prompt
+        request_prompt = stt_params.request_prompt.strip()
 
         if language is None:
             raise ValueError(
@@ -866,7 +879,7 @@ class WhisperForConditionalGeneration(
             )
 
         decoder_text = (
-            f"<|prev|>{request_prompt}" if request_prompt else ""
+            f"<|startofprev|> {request_prompt}" if request_prompt else ""
         ) + f"<|startoftranscript|><|{language}|><|{task_type}|><|notimestamps|>"
 
         return ExplicitEncoderDecoderPrompt(

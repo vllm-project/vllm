@@ -10,7 +10,7 @@ probabilities.
 import math
 import string
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 
@@ -36,6 +36,9 @@ class Question:
     instructions: str
     options: tuple[Option, ...]
     labels: tuple[str, ...]
+    #: The request's instructions and criteria as sent. Holds dicts, so it is
+    #: left out of equality and hashing.
+    raw: tuple[Any, Any] | None = field(default=None, compare=False, repr=False)
 
 
 class QuestionType(ABC):
@@ -120,6 +123,7 @@ def build_question(
         raise StructuredDecisionError(
             f"question {qid!r}: at most {limit} options for this model"
         )
+    raw_instructions = instructions
     if not isinstance(instructions, str):
         instructions = "" if instructions is None else str(instructions)
     return Question(
@@ -128,6 +132,7 @@ def build_question(
         instructions=instructions,
         options=tuple(options),
         labels=qtype.label_set[: len(options)],
+        raw=(raw_instructions, criteria),
     )
 
 
