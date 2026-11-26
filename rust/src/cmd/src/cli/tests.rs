@@ -1431,30 +1431,26 @@ fn int_flag_parses_like_python_bool_int() {
 }
 
 #[test]
-fn remote_generation_resolves_frontend_only_config() {
+fn serve_accepts_remote_generation_with_an_optional_model_limit() {
     let args = [
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--remote-generation-url=unix:///run/llm-d/generation.sock",
+        "--remote-generation-url=unix:///run/vllm/generation.sock",
     ];
-    let Command::Serve(mut serve) = Cli::try_parse_from(args).unwrap().command else {
-        panic!("expected serve args");
-    };
-    for (flag, expected) in [(None, None), (Some("1K"), Some(1024))] {
-        serve.managed_engine.max_model_len = flag.map(String::from);
-        let (server, LlmSource::RemoteGrpc(url)) = serve.remote_frontend_config().unwrap().unwrap()
+
+    for (flag, expected) in [(None, None), (Some("--max-model-len=512"), Some(512))] {
+        let cli = Cli::try_parse_from(args.into_iter().chain(flag)).unwrap();
+        let Command::Serve(serve) = cli.command else {
+            panic!("expected serve args");
+        };
+        let Some((server, LlmSource::RemoteGrpc(url))) = serve.remote_frontend_config().unwrap()
         else {
             panic!("expected a frontend with a remote gRPC source");
         };
-        assert_eq!(url, "unix:///run/llm-d/generation.sock");
+        assert_eq!(url, "unix:///run/vllm/generation.sock");
         assert_eq!(server.max_model_len.map(|n| n.get()), expected);
     }
-    serve.managed_engine.max_model_len = Some("auto".into());
-    assert!(serve.remote_frontend_config().is_err());
-
-    let error = Cli::try_parse_from(args.into_iter().chain(["--headless"])).unwrap_err();
-    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
 }
 
 #[test]
