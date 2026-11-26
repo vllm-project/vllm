@@ -20,7 +20,7 @@ use llm_multimodal::ImageDetail;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use validator::Validate;
+use vllm_chat::AllowedToolsMode;
 
 /// Responses API `input` field: either a plain string (single user message)
 /// or a list of input/output items.
@@ -271,9 +271,8 @@ pub enum ResponseToolChoice {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseToolChoiceObject {
     Function(FunctionChoice),
-    /// TODO: support `allowed_tools` tool choices.
     AllowedTools {
-        mode: String,
+        mode: AllowedToolsMode,
         tools: Vec<ToolReference>,
     },
 }
@@ -292,7 +291,7 @@ pub enum ResponseToolChoiceObject {
 /// are accepted for Codex/Python compatibility, without generating encrypted
 /// state, summaries, or applying a verbosity policy. Other `include` values
 /// that this frontend cannot produce are rejected.
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ResponsesRequest {
     /// Fields echoed back unchanged; see [`ResponseEchoFields`].
     #[serde(flatten)]
@@ -397,7 +396,6 @@ pub struct ResponsesRequest {
     #[serde(default)]
     pub priority: Option<i32>,
     #[serde(default)]
-    #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
     #[serde(default)]
     pub chat_template_kwargs: Option<HashMap<String, Value>>,
@@ -417,8 +415,6 @@ pub struct ResponsesRequest {
     #[serde(default)]
     pub vllm_xargs: Option<HashMap<String, Value>>,
 }
-
-impl crate::routes::openai::utils::types::Normalizable for ResponsesRequest {}
 
 /// One typed input/output item of [`ResponsesInput::Items`].
 ///
@@ -846,17 +842,6 @@ mod tests {
 
             assert_eq!(request.top_k, expected);
         }
-    }
-
-    #[test]
-    fn request_rejects_empty_cache_salt() {
-        let request: ResponsesRequest = serde_json::from_value(json!({
-            "input": "hello",
-            "cache_salt": "",
-        }))
-        .expect("deserialize request");
-
-        assert!(request.validate().is_err());
     }
 
     #[test]

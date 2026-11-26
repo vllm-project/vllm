@@ -31,7 +31,7 @@ def do_sample(
 
 
 @pytest.mark.parametrize("tp_size", [4])
-def test_mixtral_lora(mixtral_lora_files, tp_size):
+def test_mixtral_lora(vllm_runner, mixtral_lora_files, tp_size):
     """Original test, the LoRA model has the common target modules, not all."""
     if (
         torch.accelerator.device_count() < tp_size
@@ -46,32 +46,37 @@ def test_mixtral_lora(mixtral_lora_files, tp_size):
         "[system] Given a target sentence construct the underlying meaning representation\nof the input sentence as a single function with attributes and attribute\nvalues. This function should describe the target string accurately and the\nfunction must be one of the following ['inform', 'request', 'give_opinion',\n'confirm', 'verify_attribute', 'suggest', 'request_explanation',\n'recommend', 'request_attribute'].\n\nThe attributes must be one of the following:\n['name', 'exp_release_date', 'release_year', 'developer', 'esrb', 'rating',\n'genres', 'player_perspective', 'has_multiplayer', 'platforms',\n'available_on_steam', 'has_linux_release', 'has_mac_release', 'specifier'] [/system] [user] Here is the target sentence:\nBioShock is a good role-playing, action-adventure, shooter that released for PlayStation, Xbox, and PC in 2007. It is available on Steam, and it has a Mac release but not a Linux release. [/user] [assistant]",  # noqa: E501
     ]
 
-    llm = vllm.LLM(
+    with vllm_runner(
         MODEL_PATH,
         enable_lora=True,
         max_num_seqs=16,
         max_loras=4,
         distributed_executor_backend="ray",
         tensor_parallel_size=tp_size,
-    )
+        enable_chunked_prefill=None,
+        max_model_len=None,
+    ) as runner:
+        expected_lora_output = [
+            [
+                "give_opinion(name[SpellForce 3], release_year[2017], developer[Grimlore Games], rating[poor])"  # noqa: E501
+            ],
+            [
+                "give_opinion(name[SpellForce 3], developer[Grimlore Games], release_year[2017], rating[poor])",  # noqa: E501
+                "give_opinion(name[SpellForce 3], release_year[2017], developer[Grimlore Games], rating[poor])",  # noqa: E501
+            ],
+            [
+                "inform(name[BioShock], release_year[2007], rating[good], genres[action-adventure, role-playing, shooter], platforms[PlayStation, Xbox, PC], available_on_steam[yes], has_linux_release[no], has_mac_release[yes])"  # noqa: E501
+            ],
+        ]
 
-    expected_lora_output = [
-        [
-            "give_opinion(name[SpellForce 3], release_year[2017], developer[Grimlore Games], rating[poor])"  # noqa: E501
-        ],
-        [
-            "give_opinion(name[SpellForce 3], developer[Grimlore Games], release_year[2017], rating[poor])",  # noqa: E501
-            "give_opinion(name[SpellForce 3], release_year[2017], developer[Grimlore Games], rating[poor])",  # noqa: E501
-        ],
-        [
-            "inform(name[BioShock], release_year[2007], rating[good], genres[action-adventure, role-playing, shooter], platforms[PlayStation, Xbox, PC], available_on_steam[yes], has_linux_release[no], has_mac_release[yes])"  # noqa: E501
-        ],
-    ]
+        def check_outputs(generated: list[str]):
+            assert len(generated) == len(expected_lora_output)
+            for gen, gt_choices in zip(generated, expected_lora_output):
+                assert gen in gt_choices
 
-    def check_outputs(generated: list[str]):
-        assert len(generated) == len(expected_lora_output)
-        for gen, gt_choices in zip(generated, expected_lora_output):
-            assert gen in gt_choices
-
-    check_outputs(do_sample(llm, mixtral_lora_files, lora_id=1, prompts=prompts))
-    check_outputs(do_sample(llm, mixtral_lora_files, lora_id=2, prompts=prompts))
+        check_outputs(
+            do_sample(runner.llm, mixtral_lora_files, lora_id=1, prompts=prompts)
+        )
+        check_outputs(
+            do_sample(runner.llm, mixtral_lora_files, lora_id=2, prompts=prompts)
+        )

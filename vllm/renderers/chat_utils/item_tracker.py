@@ -274,6 +274,14 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             else None
         )
 
+    @cached_property
+    def video_io_defaults(self) -> dict[str, Any]:
+        """The HF video processor's frame caps, applied unless `media_io_kwargs`
+        overrides them. Read only when a request carries a video."""
+        if not self._model_config.is_multimodal_model:
+            return {}
+        return self.mm_processor.info.get_video_frame_limits()
+
     @property
     def allowed_local_media_path(self):
         return self._model_config.allowed_local_media_path
@@ -359,7 +367,11 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             # Embeddings bypass limit when enable_mm_embeds=True
             skip_validation = mm_config.get_limit_per_prompt(input_modality) == 0
         if not skip_validation:
-            self.mm_processor.info.validate_num_items(input_modality, num_items)
+            self.mm_processor.info.validate_num_input_items(
+                input_modality,
+                num_items,
+                is_embedding=original_modality.endswith("_embeds"),
+            )
 
         return input_modality, original_modality, use_vision_chunk, num_items
 

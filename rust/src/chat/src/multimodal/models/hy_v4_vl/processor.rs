@@ -32,7 +32,7 @@
 //! OPENAI_CLIP_STD): in the Python serving path the on-device
 //! `FusedMMInputNorm` is built from the image processor config and applies to
 //! `pixel_values` and `pixel_values_videos` alike
-//! (`models/hy_v4/nvidia/vision.py`, `vl_model.py`), and the video
+//! (`models/hy_v4/common/vision.py`, `vl_model.py`), and the video
 //! processor's own 0.5/0.5 class defaults are never exercised in serving
 //! (`do_normalize` is forced off, `config/multimodal.py`). A checkpoint's
 //! `image_mean`/`image_std`/`rescale_factor` still override the defaults,

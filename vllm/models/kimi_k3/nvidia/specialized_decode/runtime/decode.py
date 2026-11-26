@@ -132,7 +132,9 @@ class SpecializedDecode:
         # Steps up to the model's specialized-vs-stock crossover (wider: stock).
         cap = step_cap(config.dsa, config.dcp > 1)
         cap = min(cap, PREPARED_MAX)
-        batches = {b for b in (*BATCHES, *verify) if b <= cap}
+        # The decode loop runs only while a CUDA graph is captured (`plan`), so only
+        # the captured sizes are prepared; BATCHES when none are known.
+        batches = {b for b in verify if b <= cap} or {b for b in BATCHES if b <= cap}
         self.batches, self.q = tuple(sorted(batches)), q
         # Wide verify steps (cap < rows <= ATTENTION_MAX): the stock layer loop with
         # each attention layer kind's projection and core specialized up to its own

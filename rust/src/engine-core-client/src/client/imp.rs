@@ -14,19 +14,18 @@ use thiserror_ext::AsReport as _;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, trace, warn};
-use vllm_metrics::METRICS;
+use vllm_metrics::{LoraInfoExporter, METRICS};
 use zeromq::RouterSendHalf;
 
 use crate::client::readiness::{Readiness, RecheckGuard};
 use crate::client::state::{
-    OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver, UtilityRegistry,
+    OutputReceiver, OutputSender, RequestObserver, RequestRegistry, UtilityReceiver,
+    UtilityRegistry,
 };
 use crate::client::stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
-use crate::metrics::{
-    EngineSleepState, IterationMetricHandles, LoraInfoExporter, SchedulerStatsRecorder,
-};
+use crate::metrics::{EngineSleepState, IterationMetricHandles, SchedulerStatsRecorder};
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::stats::SchedulerStats;
@@ -134,12 +133,22 @@ impl ClientInner {
         lora_name: Option<String>,
         data_parallel_rank: Option<u32>,
         stream_interval: NonZeroU32,
+        observer: Option<Box<dyn RequestObserver>>,
     ) -> Result<(EngineId, OutputReceiver)> {
         let mut registry = self.request_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
         }
-        registry.register(request_id, lora_name, data_parallel_rank, stream_interval)
+        let registered = registry.register(
+            request_id.clone(),
+            lora_name,
+            data_parallel_rank,
+            stream_interval,
+        )?;
+        if let Some(observer) = observer {
+            registry.observe(&request_id, observer);
+        }
+        Ok(registered)
     }
 
     /// Allocate the next utility `call_id` and register its waiting receiver.

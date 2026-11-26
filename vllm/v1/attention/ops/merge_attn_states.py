@@ -101,6 +101,9 @@ def merge_attn_states(
             shape [NUM_HEADS, NUM_TOKENS].
         output_lse: Optional tensor to store the merged LSE values,
             shape [NUM_HEADS, NUM_TOKENS]. If None, LSE is not written out.
+            Must not alias `prefix_lse` or `suffix_lse`: the native kernel
+            may write a head's merged LSE before all of that head's threads
+            have read its input LSE. `output` may alias `prefix_output`.
         prefill_tokens_with_context: Number of prefill tokens that have
             prefix context and therefore require merging. Tokens at indices
             >= this value are decode or context-free prefill tokens whose

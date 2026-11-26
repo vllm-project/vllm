@@ -70,6 +70,15 @@ variants:
     vram_minimum_gb: 22
     description: "Full precision BF16 — single 24 GB GPU or Intel Arc Pro B60/B70"
 
+    hardware_overrides:
+      arc_pro_b60:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
+      arc_pro_b70:
+        extra_args:
+          - "--max-model-len"
+          - "8192"
   fp8:
     model_id: "RedHatAI/Qwen3.5-9B-FP8-dynamic"
     precision: fp8
