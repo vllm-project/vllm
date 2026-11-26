@@ -665,32 +665,6 @@ def load_nvlm_d(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-# OpenPangu
-def load_openpangu_vl(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "FreedomIntelligence/openPangu-VL-7B"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=8192,
-        max_num_seqs=2,
-        enforce_eager=True,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = "[unused18][unused19][unused20]" * len(image_urls)
-    prompt = (
-        f"<s>[unused9]系统：[unused10][unused9]用户：{question}{placeholders}"
-        "[unused10][unused9]助手："
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
 # Ovis
 def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "AIDC-AI/Ovis2-1B"
@@ -699,7 +673,6 @@ def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
         model=model_name,
         max_model_len=8192,
         max_num_seqs=2,
-        trust_remote_code=True,
         dtype="half",
         limit_mm_per_prompt={"image": len(image_urls)},
     )
@@ -709,7 +682,7 @@ def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
     )
     messages = [{"role": "user", "content": f"{placeholders}\n{question}"}]
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     prompt = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
@@ -754,7 +727,6 @@ def load_paddleocr_vl(question: str, image_urls: list[str]) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
         max_model_len=8192,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
@@ -1252,7 +1224,6 @@ def load_molmo2(question: str, image_urls: list[str]) -> ModelRequestData:
 def load_unlimited_ocr2(question: str, image_urls: list[str]) -> ModelRequestData:
     engine_args = EngineArgs(
         model="baidu/Unlimited-OCR-2",
-        attention_config={"backend": "FLASH_ATTN"},
         enable_chunked_prefill=True,
         enable_prefix_caching=False,
         max_model_len=32768,
@@ -1293,7 +1264,6 @@ model_example_map = {
     "mistral3": load_mistral3,
     "molmo2": load_molmo2,
     "NVLM_D": load_nvlm_d,
-    "openpangu_vl": load_openpangu_vl,
     "ovis": load_ovis,
     "ovis2_5": load_ovis2_5,
     "paddleocr_vl": load_paddleocr_vl,

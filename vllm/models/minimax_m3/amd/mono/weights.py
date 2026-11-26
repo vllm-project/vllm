@@ -61,7 +61,7 @@ def _bf16_vec(t: torch.Tensor, n: int, name: str) -> torch.Tensor:
     return t.data
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SparseMoeLayer:
     """Everything the layer kernel reads for one sparse-attention MoE layer."""
 

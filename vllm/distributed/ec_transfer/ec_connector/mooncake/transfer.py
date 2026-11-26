@@ -32,7 +32,7 @@ def ensure_mooncake_available() -> None:
         ) from _MOONCAKE_IMPORT_ERROR
 
 
-@dataclass
+@dataclass(slots=True)
 class _SourceRegistration:
     """Retain one transient source range while batches reference it."""
 

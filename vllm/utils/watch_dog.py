@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import faulthandler
 import os
+import sys
 import threading
 import time
+import traceback
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager
 from logging import Logger
 
@@ -31,7 +33,7 @@ class NoopWatchDog(WatchDog):
         pass
 
     @contextmanager
-    def disable(self) -> Iterator[None]:
+    def disable(self) -> Generator[None]:
         yield
 
     def handle_failure(self, reason: str) -> None:
@@ -40,6 +42,10 @@ class NoopWatchDog(WatchDog):
 
 class ThreadedWatchDog(WatchDog):
     """Dumps the stacks of all threads when not fed within the timeout."""
+
+    # Reentrant: handle_failure() may be re-entered from a signal handler.
+    lock = threading.RLock()
+    handler = None
 
     def __init__(self, name: str, watchdog_config: WatchdogConfig, logger: Logger):
         self.name = name
@@ -55,17 +61,15 @@ class ThreadedWatchDog(WatchDog):
         # 0.0 so that the first timeout is always dumped.
         self.last_timeout_log = 0.0
         self.active = True
-        # Reentrant: handle_failure() may be re-entered from a signal handler.
-        self.lock = threading.RLock()
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
-        self.handler = None
+        self.main_thread_id = 0
 
     def feed(self) -> None:
         self.last_feed_time = time.monotonic()
 
     @contextmanager
-    def disable(self) -> Iterator[None]:
+    def disable(self) -> Generator[None]:
         assert self.active, "WatchDog.disable() is not re-entrant"
         self.active = False
         try:
@@ -76,10 +80,13 @@ class ThreadedWatchDog(WatchDog):
     def handle_failure(self, reason: str) -> None:
         """Append a numbered dump of all thread stacks to the dump file."""
         with self.lock:
-            if self.handler is None:
-                self.dump_stack(reason)
-            else:
-                self.handler(reason)
+            self.dump_stack(reason)
+            # Read via the class to bypass the function descriptor, so a
+            # plain `def handler(reason)` or lambda installed on `cls.handler`
+            # is invoked as `handler(reason)`, not `handler(self, reason)`.
+            handler = type(self).handler
+            if handler is not None:
+                handler(reason)
 
     def dump_stack(self, reason: str) -> None:
         try:
@@ -89,7 +96,13 @@ class ThreadedWatchDog(WatchDog):
                     f"\n>>> Call stack dump #{self.dump_seq} at "
                     f"{time.ctime()} due to {reason}\n\n"
                 )
-                faulthandler.dump_traceback(file=f, all_threads=True)
+                frames = sys._current_frames()
+                for tid, frame in reversed(list(frames.items())):
+                    name = ""
+                    if tid == self.main_thread_id:
+                        name = "(Main)"
+                    f.write(f"--- {name}thread {tid} ---\n")
+                    traceback.print_stack(frame, file=f)
                 f.write("\n" + "=" * 64 + "\n")
             self.dump_seq += 1
             self.logger.info(
@@ -102,8 +115,10 @@ class ThreadedWatchDog(WatchDog):
                 e,
             )
 
-    def set_handler(self, handler) -> None:
-        self.handler = handler
+    @classmethod
+    def set_handler(cls, handler) -> None:
+        with cls.lock:
+            cls.handler = handler
 
     def _check_loop(self) -> None:
         while not self.stop_event.wait(self.check_interval):
@@ -125,6 +140,7 @@ class ThreadedWatchDog(WatchDog):
         if self.thread is not None and self.thread.is_alive():
             return
         self.stop_event.clear()
+        self.main_thread_id = threading.get_ident()
         self.thread = threading.Thread(target=self._check_loop, daemon=True)
         self.feed()
         self.thread.start()

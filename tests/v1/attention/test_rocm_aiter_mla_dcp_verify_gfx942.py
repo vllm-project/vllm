@@ -251,7 +251,6 @@ def test_dcp_verify_matches_attention(
             head_size=HEAD_SIZE,
             dtype=kv_cache_src.dtype,
             cache_dtype_str="fp8" if fp8_kv else None,
-            non_causal_multi_token_decode=False,
         )
         shards = [
             _run_rank(

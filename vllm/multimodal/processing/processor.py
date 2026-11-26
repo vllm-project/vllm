@@ -40,7 +40,7 @@ from ..inputs import (
     PlaceholderRange,
 )
 from ..parse import MultiModalDataItems, MultiModalUUIDItems
-from .context import BaseProcessingInfo, TimingContext
+from .context import BaseProcessingInfo, TimingContext, profiling_media
 from .dummy_inputs import BaseDummyInputsBuilder, MultiModalDummyOptions
 from .inputs import ProcessorInputs
 
@@ -89,7 +89,7 @@ class _GetTextMatchIndex(Protocol):
     ) -> int | None: ...
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptIndex:
     """Resolves to an index in the prompt."""
 
@@ -172,7 +172,7 @@ instead of a function if it does not depend on the input.
 """
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptUpdateDetails:
     """Details about the token sequence that is part of the update."""
 
@@ -244,7 +244,7 @@ class UpdateMode(StrEnum):
     REPLACE = "replace"
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptUpdate(ABC):
     """Defines how to update a prompt with placeholder tokens.
 
@@ -306,7 +306,7 @@ class PromptUpdate(ABC):
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptInsertion(PromptUpdate):
     """Defines how to insert placeholder tokens into a prompt.
 
@@ -374,7 +374,7 @@ class PromptInsertion(PromptUpdate):
         return UpdateMode.INSERT
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptReplacement(PromptUpdate):
     """Defines how to replace portions of an input prompt with placeholder tokens.
 
@@ -455,7 +455,7 @@ class PromptTargetMatch(NamedTuple):
     end_idx: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResolvedPromptUpdate:
     """A [`PromptUpdate`][vllm.multimodal.processing.PromptUpdate] with its
     lazy attributes resolved.
@@ -576,7 +576,7 @@ def replace_token_matches(
     return flatten_2d_lists(out_seqs)
 
 
-@dataclass
+@dataclass(slots=True)
 class PlaceholderFeaturesInfo:
     modality: str
     item_idx: int
@@ -1114,10 +1114,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
         processor_inputs.cache = cache
 
-        mm_inputs = self.apply(
-            processor_inputs,
-            timing_ctx=TimingContext(enabled=False),
-        )
+        with profiling_media():
+            mm_inputs = self.apply(
+                processor_inputs,
+                timing_ctx=TimingContext(enabled=False),
+            )
 
         prompt_token_ids = mm_inputs["prompt_token_ids"]
         total_len = len(prompt_token_ids)
@@ -1273,7 +1274,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _postprocess_hf_mm_data(
         self,
-        mm_inputs: Mapping[str, object],
+        mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
@@ -1363,6 +1364,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         }
 
         mm_missing_data = {}
+        mm_missing_idxs_without_data: dict[str, list[int]] = {}
         for modality, idxs in mm_missing_idxs.items():
             if not idxs:
                 continue
@@ -1371,14 +1373,20 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for idx in idxs:
                 data = mm_data_items[modality][idx]
                 if data is None:
-                    raise ValueError(
-                        f"Cache miss for {modality} at index {idx} "
-                        f"but data is not provided."
-                    )
+                    mm_missing_idxs_without_data.setdefault(modality, []).append(idx)
                 else:
                     missing_modality_data.append(data)
 
             mm_missing_data[modality] = missing_modality_data
+
+        if mm_missing_idxs_without_data:
+            missing_items = "; ".join(
+                f"{modality} at index {', '.join(map(str, idxs))}"
+                for modality, idxs in mm_missing_idxs_without_data.items()
+            )
+            raise ValueError(
+                f"Cache miss for {missing_items} but data is not provided."
+            )
 
         mm_missing_items = self.info.parse_mm_data(mm_missing_data, validate=False)
 
@@ -1858,6 +1866,19 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
     skip_decoder_start_token: bool = False
+    """Set this if the decoder prompt always carries its complete prefix,
+    so the decoder start token must not be prepended to it."""
+
+    def should_skip_decoder_start_token(
+        self,
+        decoder_prompt_token_ids: list[int],
+    ) -> bool:
+        """Whether to leave the decoder start token out of this decoder prompt.
+
+        Override this instead of setting `skip_decoder_start_token` if only
+        some decoder prompts carry their complete prefix.
+        """
+        return self.skip_decoder_start_token
 
     @abstractmethod
     def create_encoder_prompt(

@@ -31,7 +31,7 @@ embed_parameters = ["dimensions", "use_activation"]
 step_pooling_parameters = ["step_tag_id", "returned_token_ids"]
 
 
-@dataclass()
+@dataclass(slots=True)
 class MockModelConfig:
     pooler_config: PoolerConfig
 
@@ -121,7 +121,7 @@ def test_embed_dimensions(model_info: EmbedModelInfo):
         pooling_params.verify(model_config)
 
 
-@dataclass()
+@dataclass(slots=True)
 class MockMatryoshkaModelConfig:
     pooler_config: PoolerConfig
     is_matryoshka: bool = True

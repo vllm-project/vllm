@@ -70,6 +70,7 @@ from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
+from vllm.v1.metrics.stats import SchedulerIterationDetails
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
@@ -453,8 +454,8 @@ class MultiprocExecutor(Executor):
             ec_output_aggregator=self.ec_output_aggregator,
         )
 
-    def execute_dummy_batch(self) -> None:
-        self.collective_rpc(
+    def execute_dummy_batch(self) -> list[SchedulerIterationDetails] | None:
+        return self.collective_rpc(
             "execute_dummy_batch",
             unique_reply_rank=self.output_rank,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
@@ -701,7 +702,7 @@ class MultiprocExecutor(Executor):
         return True
 
 
-@dataclass
+@dataclass(slots=True)
 class UnreadyWorkerProcHandle:
     """WorkerProcess handle before READY."""
 
@@ -711,7 +712,7 @@ class UnreadyWorkerProcHandle:
     death_writer: Connection | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class WorkerProcHandle:
     proc: BaseProcess
     rank: int
@@ -1011,6 +1012,8 @@ class WorkerProc:
                 logger.debug(
                     "WorkerProc handling signal %d, raising SystemExit", signum
                 )
+                if signum == signal.SIGTERM:
+                    get_watch_dog().handle_failure(signal.Signals(signum).name)
                 raise SystemExit()
 
         # Either SIGTERM or SIGINT will terminate the worker

@@ -86,7 +86,7 @@ CopyBlocksOp = Callable[
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class KVConnectorTransferResults:
     """Asynchronous transfer completions from one worker snapshot.
 
@@ -199,11 +199,8 @@ class KVConnectorBase_V1(ABC):
     def supports_lookahead_block_hashes(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> bool:
-        """Whether the connector supports core lookahead hashing.
-
-        If False, `num_hash_lookahead_tokens` is 0 and block hashes cover only
-        each block's own tokens.
-        """
+        """Whether the connector supports hash lookahead. If False, EAGLE/MTP
+        acceptance may drop."""
         return True
 
     @classmethod
@@ -240,6 +237,18 @@ class KVConnectorBase_V1(ABC):
 
         Attention backends may then keep fast paths that assume no foreign
         bytes (e.g. NaNs in unwritten slots) ever reach the KV cache.
+        """
+        return False
+
+    @classmethod
+    def requests_sliding_window_replay(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        """Whether models that support SWA bounded replay should enable it.
+
+        Such a model keeps its sliding-window state out of prefix caching and
+        rebuilds it after a hit by recomputing the hit's last window, so the
+        connector only needs to store the compressed, prefix-cacheable KV.
         """
         return False
 
@@ -328,6 +337,18 @@ class KVConnectorBase_V1(ABC):
         Args:
             kv_caches: dictionary of layer names, kv cache
 
+        """
+        return
+
+    def on_kv_cache_ready(self) -> None:
+        """Finish deferred registration after final KV sizing.
+
+        Called on each worker before requests, after preceding device work.
+        Normally follows warmup and capture. With VLLM_ELASTIC_EP_SCALE_UP_LAUNCH,
+        it precedes deferred warmup/capture in warm_and_capture().
+        Must return in bounded time: an unbounded wait blocks engine startup.
+        No hook timeout or cancellation is provided. Exceptions fail startup;
+        background tasks are not awaited. Not called on sleep/wake.
         """
         return
 
@@ -633,7 +654,9 @@ class KVConnectorBase_V1(ABC):
         FIXME: one exception:
         synchronous READ connectors may remove attention blocks they fully
         overwrite this step from new_block_ids_to_zero. They must complete
-        those loads before the blocks are used and fail the step if a load fails.
+        those loads before the blocks are used. If a load fails, they must fail
+        the step, or add the removed blocks to new_block_ids_to_zero in the next
+        step, before the scheduler recomputes into them or reuses them.
         Calling this function will reset the state of the connector.
 
         Args:

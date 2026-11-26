@@ -103,6 +103,8 @@ def _build_model(mode: str, has_bias: bool) -> tuple[DFlashQwen3Model, list]:
         model._context_kv_proj = model._make_mxfp8_context_kv_proj(attentions)
         for i, tensors in enumerate(checkpoint):
             for name, tensor in tensors.items():
+                if name == "weight_scale":  # as a trainer that holds E8M0 sends
+                    tensor = tensor.view(torch.float8_e8m0fnu)
                 model._load_context_kv(i, "k", name, tensor[Q_SIZE : Q_SIZE + KV_SIZE])
                 model._load_context_kv(i, "v", name, tensor[Q_SIZE + KV_SIZE :])
     return model, attentions
@@ -140,8 +142,14 @@ def test_context_kv_matches_qkv_projection(bf16_on_device, mode, has_bias):
 
     torch.testing.assert_close(project(), expected, rtol=0.02, atol=0.02)
 
-    graph = torch.accelerator.Graph()
-    with graph:
+    # torch.accelerator.Graph has no CUDA backend in torch 2.14.
+    if current_platform.is_xpu():
+        graph = torch.accelerator.Graph()
+        capture = graph
+    else:
+        graph = torch.cuda.CUDAGraph()
+        capture = torch.cuda.graph(graph)
+    with capture:
         captured = project()
     x.normal_()
     graph.replay()

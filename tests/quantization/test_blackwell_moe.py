@@ -49,7 +49,6 @@ def can_initialize(
         "256",
         "--load-format",
         "dummy",
-        "--trust-remote-code",
         "--limit-mm-per-prompt",
         json.dumps({"image": 0}),
         *extra_args,
@@ -88,7 +87,7 @@ def test_llama4_fp8_tensor_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatc
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
         hf_overrides=HF_OVERRIDE_MM,
-        extra_args=["--moe-backend=flashinfer_cutlass"],
+        extra_args=["--moe-backend=flashinfer_cutlass", "--trust-remote-code"],
     )
 
 
@@ -96,7 +95,7 @@ def test_llama4_fp8_tensor_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
         hf_overrides=HF_OVERRIDE_MM,
-        extra_args=["--moe-backend=flashinfer_trtllm"],
+        extra_args=["--moe-backend=flashinfer_trtllm", "--trust-remote-code"],
     )
 
 
@@ -104,7 +103,7 @@ def test_llama4_nvfp4_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
         hf_overrides=HF_OVERRIDE_MM,
-        extra_args=["--moe-backend=flashinfer_cutlass"],
+        extra_args=["--moe-backend=flashinfer_cutlass", "--trust-remote-code"],
     )
 
 
@@ -112,7 +111,7 @@ def test_llama4_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
         hf_overrides=HF_OVERRIDE_MM,
-        extra_args=["--moe-backend=flashinfer_trtllm"],
+        extra_args=["--moe-backend=flashinfer_trtllm", "--trust-remote-code"],
     )
 
 

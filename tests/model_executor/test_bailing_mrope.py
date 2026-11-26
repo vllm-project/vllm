@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
-import json
 import math
-from pathlib import Path
 
 import pytest
 import torch
@@ -18,7 +16,6 @@ from vllm.model_executor.layers.rotary_embedding.bailing_mrope import (
 )
 from vllm.model_executor.models.bailing_moe_v3 import _build_mla_rotary_embedding
 from vllm.platforms import current_platform
-from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.configs.bailing_moe_v3_vl import BailingMoeV3TextConfig
 
 
@@ -142,53 +139,6 @@ def test_bailing_yarn_matches_hf_without_halving_mla_width(
         192**-0.5 * (1 + 0.1 * mscale_all_dim * math.log(2)) ** 2
     )
     assert vars(config) == original
-
-
-def _load_yarn_config(tmp_path: Path, rope_field: str, parameters: dict):
-    (tmp_path / "config.json").write_text(
-        json.dumps(
-            {
-                "model_type": "bailing_moe_v3_vl",
-                "mrope_section": [8, 12, 12],
-                "text_config": {
-                    "max_position_embeddings": 256,
-                    rope_field: parameters,
-                },
-            }
-        )
-    )
-    return get_config(tmp_path, trust_remote_code=False).get_text_config()
-
-
-@pytest.mark.parametrize(
-    ("rope_field", "type_field"),
-    [("rope_parameters", "rope_type"), ("rope_scaling", "type")],
-)
-def test_bailing_yarn_loads_standard_and_legacy_config(
-    tmp_path: Path, rope_field: str, type_field: str
-):
-    """Use the shared config loader to normalize YaRN before model construction."""
-    config = _load_yarn_config(
-        tmp_path,
-        rope_field,
-        {type_field: "yarn", "factor": 2.0, "original_max_position_embeddings": 128},
-    )
-    assert config.rope_parameters["rope_type"] == "yarn"
-    assert config.rope_parameters["factor"] == 2.0
-    assert config.rope_parameters["original_max_position_embeddings"] == 128
-    with set_current_vllm_config(VllmConfig(device_config=DeviceConfig("cpu"))):
-        rope = _build_mla_rotary_embedding(config, head_size=64)
-    assert isinstance(rope, BailingMRotaryEmbedding)
-    assert rope.cos_sin_cache.shape == (256, 64)
-
-
-def test_bailing_yarn_config_requires_explicit_factor(tmp_path: Path):
-    with pytest.raises(KeyError, match="factor"):
-        _load_yarn_config(
-            tmp_path,
-            "rope_parameters",
-            {"rope_type": "yarn", "original_max_position_embeddings": 128},
-        )
 
 
 @pytest.mark.skipif(

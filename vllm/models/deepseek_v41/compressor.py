@@ -12,6 +12,7 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.models.deepseek_v4.compressor import DeepseekV4CompressorKVScoreLinear
 from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
     fused_save_compress_norm,
@@ -28,7 +29,8 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     max_decode_query_len,
 )
-from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheSpec
+from vllm.v1.core.single_type_kv_cache_manager import CircularBufferManager
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayerConfig, KVCacheSpec
 
 
 class CompressorBackend(AttentionBackend):
@@ -112,7 +114,7 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        assert isinstance(self.kv_cache_spec, CircularBufferSpec)
+        assert isinstance(self.kv_cache_spec, AttentionSpec)
         self.capacity = self.kv_cache_spec.block_size
         self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
         max_num_batched_tokens = (
@@ -255,9 +257,9 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_config(self, vllm_config: VllmConfig) -> KVCacheLayerConfig:
         del vllm_config
-        return CircularBufferSpec(
+        spec = AttentionSpec(
             block_size=self.block_size,
             num_kv_heads=1,
             max_tp_shards=1,
@@ -265,6 +267,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
             head_size_v=0,
             dtype=self.dtype,
         )
+        return CircularBufferManager.layer_config(spec)
 
     def forward(self): ...
 
@@ -355,6 +358,7 @@ class DeepseekCompressor(nn.Module):
         kv_score: torch.Tensor,
         # [num_tokens]
         positions: torch.Tensor,
+        rotary_emb: RotaryEmbedding | None = None,
     ) -> torch.Tensor | None:
         """Save states and return the BF16 latent for cache insertion and indexing.
 
@@ -388,6 +392,14 @@ class DeepseekCompressor(nn.Module):
                 prev_row_indices = state_metadata.prev_row_indices
                 ring_write_slots = state_metadata.ring_write_slots
 
+        kv_cache = kv_slot_mapping = cos_sin_cache = None
+        if rotary_emb is not None and self.pcp_size == 1:
+            main_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
+            main_slots = cast(Any, attn_metadata[self.k_cache_prefix]).slot_mapping
+            if main_cache.dtype == torch.uint8 and main_cache.shape[-1] == 584:
+                kv_cache, kv_slot_mapping = main_cache, main_slots
+                cos_sin_cache = rotary_emb.cos_sin_cache
+
         latent = torch.empty(
             kv_score.shape[0],
             self.head_dim,
@@ -407,10 +419,15 @@ class DeepseekCompressor(nn.Module):
             latent,
             prev_rows=prev_rows,
             prev_row_indices=prev_row_indices,
+            kv_cache=kv_cache,
+            kv_slot_mapping=kv_slot_mapping,
+            cos_sin_cache=cos_sin_cache,
         )
         if prev_rows is not None:
             assert state_cache is not None and ring_write_slots is not None
             save_ring_rows(prev_rows, ring_write_slots, state_cache)
+        if rotary_emb is not None and kv_cache is None:
+            self.insert_cache(latent, positions, rotary_emb)
         return latent
 
     def insert_cache(

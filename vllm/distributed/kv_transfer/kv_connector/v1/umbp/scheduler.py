@@ -15,7 +15,6 @@ from typing import Any, cast
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -31,23 +30,23 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
     get_block_hash,
     get_group_id,
+    is_mamba_group,
+    is_mamba_prefix_caching_group,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_dcp_kv_block_size,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-    SparseCacheRole,
-    UniformTypeKVCacheSpecs,
-    iter_layer_specs,
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    MambaSpec,
+    SparseCacheRole,
+)
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
@@ -113,13 +112,7 @@ def _free_to_cached_front(pool: BlockPool, block_ids: Sequence[int]) -> None:
     queue.prepend_n(front)
 
 
-def _unwrap_store_spec(spec: KVCacheSpec) -> KVCacheSpec:
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        return next(iter(spec.kv_cache_specs.values()))
-    return spec
-
-
-@dataclass
+@dataclass(slots=True)
 class _StoreEvent:
     plan_groups: tuple[Sequence[BlockTransferPlan], ...]
     result: StoreEventResult = field(default_factory=StoreEventResult)
@@ -148,7 +141,7 @@ class _StoreEvent:
                 yield from (plan.block_id for plan in plans)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _LookupContext:
     request: Request
     local_tokens: int
@@ -158,20 +151,20 @@ class _LookupContext:
     keys: list[str]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _PendingLookup:
     context: _LookupContext
     future: Future[Sequence[bool | None]]
 
 
-@dataclass
+@dataclass(slots=True)
 class _EventObject:
     serial: int
     plan: BlockTransferPlan | None
     published: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _EventLookup:
     objects: tuple[tuple[tuple[int, bytes], int], ...]
     future: Future[Sequence[bool | None]]
@@ -239,19 +232,18 @@ class UMBPStoreConnectorScheduler:
         self._dcp_size = dcp_size
         self._retention_interval = kv_cache_config.prefix_cache_retention_interval
         self.group_block_sizes = {
-            group_id: resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_size)
+            group_id: resolve_dcp_kv_block_size(group, dcp_size)
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
         }
-        # Mamba "align" block tables are not append-only: a position may hold
-        # the live state the next step writes, or a speculative block core will
+        # Mamba block tables are not append-only: a position may hold the live
+        # state the next step writes, or a speculative block core will
         # relocate, so positional stores would read or pin the wrong block.
         # Core hands off each committed boundary state instead
         # (_add_boundary_state_plans).
         self._boundary_handoff_groups = frozenset(
             group_id
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if isinstance(group.kv_cache_spec, MambaSpec)
-            and getattr(group.kv_cache_spec, "mamba_cache_mode", None) == "align"
+            if is_mamba_prefix_caching_group(group)
         )
         self.runtime = runtime
         self.enable_kv_cache_events = bool(
@@ -270,7 +262,7 @@ class UMBPStoreConnectorScheduler:
                 isinstance(spec, MambaSpec)
                 or getattr(spec, "cache_role", None) == SparseCacheRole.INDEXER
                 for group in kv_cache_config.kv_cache_groups
-                for spec in iter_layer_specs(group.kv_cache_spec)
+                for spec in group.kv_cache_specs.values()
             )
         ):
             # Core accepts only request-level load failures for several cache
@@ -302,24 +294,7 @@ class UMBPStoreConnectorScheduler:
             for group_id in kv_cache_config.prefix_cacheable_group_ids
         ]
         model_config = getattr(vllm_config, "model_config", None)
-        speculative_config = getattr(vllm_config, "speculative_config", None)
         self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
-        use_eagle = bool(
-            speculative_config is not None
-            and speculative_config.use_eagle_block_drop()
-            and not self.num_hash_lookahead_tokens
-        )
-        self.use_eagle = use_eagle
-        explicit_eagle_groups = {
-            group_id
-            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if group.is_eagle_group
-        }
-        self._eagle_store_groups = (
-            (explicit_eagle_groups or set(kv_cache_config.prefix_cacheable_group_ids))
-            if use_eagle
-            else set()
-        )
         max_model_len = getattr(
             model_config,
             "max_model_len",
@@ -335,28 +310,17 @@ class UMBPStoreConnectorScheduler:
                 kv_cache_config=lookup_config,
                 max_model_len=max_model_len,
                 max_in_flight_tokens=vllm_config.max_in_flight_tokens,
-                use_eagle=use_eagle,
                 enable_caching=True,
                 enable_kv_cache_events=False,
                 dcp_world_size=dcp_size,
-                pcp_world_size=getattr(
-                    vllm_config.parallel_config,
-                    "prefill_context_parallel_size",
-                    1,
-                ),
                 scheduler_block_size=self.block_size,
                 hash_block_size=self.hash_block_size,
-                # As core's scheduler builds its coordinator.
-                num_prefill_lookahead=vllm_config.num_prefill_lookahead_tokens,
                 allow_partial_hash_hits=self.enable_partial_hash_hits,
             )
             if lookup_groups
             and (
                 len(lookup_groups) > 1
-                or not isinstance(
-                    _unwrap_store_spec(lookup_groups[0].kv_cache_spec),
-                    FullAttentionSpec,
-                )
+                or not issubclass(lookup_groups[0].manager_cls, FullAttentionManager)
             )
             else None
         )
@@ -452,12 +416,13 @@ class UMBPStoreConnectorScheduler:
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
             if group_id not in prefix_group_ids:
                 continue
-            spec = group.kv_cache_spec
-            block_size = resolve_dcp_kv_block_size(spec, dcp_size)
-            if isinstance(spec, MambaSpec):
+            block_size = resolve_dcp_kv_block_size(group, dcp_size)
+            if is_mamba_group(group):
                 target += 2
-            elif isinstance(spec, SlidingWindowSpec):
-                target += cdiv(spec.sliding_window, block_size) + 1
+            elif isinstance(
+                p := group.manager_config.params, SlidingWindowManager.Params
+            ):
+                target += cdiv(p.sliding_window, block_size) + 1
             else:
                 target += cdiv(max_num_batched_tokens, block_size)
         return 2 * target
@@ -590,9 +555,6 @@ class UMBPStoreConnectorScheduler:
                 if group_hits[index]:
                     matched_units = index + 1
                     break
-            if self.use_eagle:
-                # As core's coordinator: the drafter recomputes the last block.
-                matched_units = max(0, matched_units - units_per_block)
             need_to_load = matched_units * self._lookup_units[group_id]
             block_hashes_by_group: tuple[tuple[bytes | None, ...], ...] = ()
         else:
@@ -638,8 +600,6 @@ class UMBPStoreConnectorScheduler:
         objects: dict[int, list[tuple[bytes, tuple[str, ...]]]] = {}
         keys: list[str] = []
         lookup_limit = min(request.num_tokens - 1, len(hashes) * self.hash_block_size)
-        if self.use_eagle and self._lookup_coordinator is not None:
-            lookup_limit = min(request.num_tokens, len(hashes) * self.hash_block_size)
         for group_id, unit in self._lookup_units.items():
             group_objects = []
             for token_end in range(local_tokens + unit, lookup_limit + 1, unit):
@@ -750,7 +710,7 @@ class UMBPStoreConnectorScheduler:
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
-    ) -> KVConnectorMetadata:
+    ) -> UMBPConnectorMetadata:
         meta = UMBPConnectorMetadata(async_load=self.load_async)
         reserved_store_keys = {
             key for event in self._store_events.values() for key in event.iter_keys()
@@ -875,6 +835,28 @@ class UMBPStoreConnectorScheduler:
             self._load_specs.pop(request_id, None)
             if load_plans:
                 meta.load_requests[request_id] = load_plans
+
+        if not self.load_async and scheduler_output.new_block_ids_to_zero:
+            # Zeroing is queued on the forward stream, which a transfer is not
+            # ordered behind, so it could wipe a synchronous load. The load
+            # overwrites its blocks whole, as core relies on for async loads.
+            # Blocks a load fails to fill need no zeroing either: core zeroes
+            # them when it reallocates them, and with one cache group (the only
+            # layout loaded synchronously) their bytes never change precision.
+            loaded = {
+                block_id
+                for plans in meta.load_requests.values()
+                for block_id in (
+                    plans.block_ids
+                    if isinstance(plans, BlockLoadBatch)
+                    else (plan.block_id for plan in plans)
+                )
+            }
+            scheduler_output.new_block_ids_to_zero = [
+                block_id
+                for block_id in scheduler_output.new_block_ids_to_zero
+                if block_id not in loaded
+            ]
 
         for request_id in scheduler_output.preempted_req_ids or set():
             meta.preempted_request_ids.add(request_id)
@@ -1561,27 +1543,21 @@ class UMBPStoreConnectorScheduler:
         if not indices:
             return []
         group = self.kv_cache_config.kv_cache_groups[group_id]
-        spec = _unwrap_store_spec(group.kv_cache_spec)
-        manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
-        if manager_cls is None:
-            return None
         num_prompt_tokens = getattr(request, "num_prompt_tokens", None)
         reachable_boundaries = (
             ()
             if num_prompt_tokens is None
             else replay_boundaries(
                 num_prompt_tokens,
-                self.block_size,
-                use_eagle=self.use_eagle,
                 num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             )
         )
-        mask = manager_cls.reachable_block_mask(
+        mask = group.manager_cls.reachable_block_mask(
             start_block=indices.start,
             end_block=indices.stop,
             alignment_tokens=self.block_size,
-            kv_cache_spec=spec,
-            use_eagle=group_id in self._eagle_store_groups,
+            block_size=group.block_size,
+            manager_config=group.manager_config,
             retention_interval=self._retention_interval,
             reachable_boundaries=reachable_boundaries,
             dcp_world_size=self._dcp_size,
@@ -1672,8 +1648,10 @@ class UMBPStoreConnectorScheduler:
             return
 
         for group_id in self.kv_cache_config.prefix_cacheable_group_ids:
-            spec = self.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
-            if not isinstance(spec, FullAttentionSpec) or group_id >= len(block_ids):
+            group = self.kv_cache_config.kv_cache_groups[group_id]
+            if not issubclass(
+                group.manager_cls, FullAttentionManager
+            ) or group_id >= len(block_ids):
                 continue
             group_block_size = self.group_block_sizes[group_id]
             num_blocks = min(save_to // group_block_size, len(block_ids[group_id]))
@@ -1739,9 +1717,11 @@ class UMBPStoreConnectorScheduler:
         # Core hands off Mamba state pages. Include the matching FA tail page
         # so every group can resolve the same fine-grained prefix boundary.
         for group_id in prefix_groups:
-            spec = self.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
             if (
-                isinstance(spec, FullAttentionSpec)
+                issubclass(
+                    self.kv_cache_config.kv_cache_groups[group_id].manager_cls,
+                    FullAttentionManager,
+                )
                 and boundary % self.group_block_sizes[group_id]
             ):
                 index = boundary // self.group_block_sizes[group_id]

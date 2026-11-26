@@ -28,6 +28,7 @@ from vllm.utils.torch_utils import current_stream
 from vllm.v1.worker.encoder_cudagraph_defs import (
     ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG,
     EncoderCudaGraphConfig,
+    EncoderCudaGraphPaddingLogic,
     EncoderItemSpec,
 )
 
@@ -43,8 +44,11 @@ _LINEAR_GRID_END = 2560
 # Warn when capture axes multiply the captured graph count past this point.
 _CAPTURE_GRAPH_COUNT_WARNING_THRESHOLD = 64
 
+# Padding repeats the last offset so padded sequences are empty.
+_CUMULATIVE_BUFFER_KEYS = frozenset({"cu_seqlens", "cu_window_seqlens"})
 
-@dataclass
+
+@dataclass(slots=True)
 class BudgetGraphMetadata:
     """Metadata for a single budget graph.
 
@@ -60,8 +64,9 @@ class BudgetGraphMetadata:
     graph: torch.cuda.CUDAGraph
     # Buffers recorded into the CUDA graph (e.g. embeddings, sequence metadata).
     # Before replay the manager updates these in-place. By default buffers are
-    # zeroed before slice-copying the actual values; model-specific padding
-    # behavior is provided by EncoderCudaGraphConfig.padding_logics.
+    # zeroed before slice-copying the actual values, and cumulative buffers
+    # repeat their last value; model-specific padding behavior is provided by
+    # EncoderCudaGraphConfig.padding_logics.
     input_buffers: dict[str, torch.Tensor]
     # Output written by graph, read after replay
     output_buffer: torch.Tensor
@@ -537,6 +542,44 @@ class EncoderCudaGraphManager:
         dst.zero_()
         dst[: src.shape[0]].copy_(src)
 
+    @staticmethod
+    def _replay_exceeds_capture(
+        input_buffers: dict[str, torch.Tensor],
+        replay_values: dict[str, torch.Tensor | None],
+    ) -> bool:
+        """Return True when any replay tensor does not fit its capture buffer.
+
+        Capture buffers have a fixed leading dimension. Copying a longer
+        replay tensor raises in the padded copy path; callers must fall
+        back to eager execution instead.
+        """
+        for key, buf in input_buffers.items():
+            src = replay_values.get(key)
+            if src is not None and src.ndim > 0 and src.shape[0] > buf.shape[0]:
+                return True
+        return False
+
+    @staticmethod
+    def _copy_cumulative_buffer(
+        dst: torch.Tensor,
+        src: torch.Tensor,
+    ) -> None:
+        n = src.shape[0]
+        dst[:n].copy_(src)
+        dst[n:] = src[-1]
+
+    @classmethod
+    def _get_padding_logic(
+        cls,
+        config: EncoderCudaGraphConfig,
+        key: str,
+    ) -> EncoderCudaGraphPaddingLogic:
+        if key in config.padding_logics:
+            return config.padding_logics[key]
+        if key in _CUMULATIVE_BUFFER_KEYS:
+            return cls._copy_cumulative_buffer
+        return cls._copy_padded_buffer
+
     def _run_budget_graph(
         self,
         mm_kwargs: dict[str, Any],
@@ -553,7 +596,8 @@ class EncoderCudaGraphManager:
             axis_keys: Resolved capture-axis keys for this batch.
 
         Returns:
-            Encoder outputs, or None if graph not captured.
+            Encoder outputs, or None if graph not captured or replay tensors
+            exceed the captured buffer capacity.
 
         """
         graph_set = self._get_graph_set(path)
@@ -575,6 +619,10 @@ class EncoderCudaGraphManager:
             path,
         )
 
+        if self._replay_exceeds_capture(graph_meta.input_buffers, replay.values):
+            self.graph_misses += num_items
+            return None
+
         # Copy replay values into the buffers recorded for this path.
         shared_keys = self._shared_input_keys.get((path, graph_meta.axis_keys), ())
         for key, buf in graph_meta.input_buffers.items():
@@ -590,10 +638,7 @@ class EncoderCudaGraphManager:
             if src.ndim == 0:
                 buf.copy_(src)
             else:
-                padding_logic = self.config.padding_logics.get(
-                    key, self._copy_padded_buffer
-                )
-                padding_logic(buf, src)
+                self._get_padding_logic(self.config, key)(buf, src)
 
         graph_meta.graph.replay()
 
@@ -619,37 +664,43 @@ class EncoderCudaGraphManager:
         # One replay per path: the smallest budget that holds the whole batch.
         # A batch beyond the captured range runs eagerly in one forward.
         fits = num_items <= self.max_batch_size
-        # Largest items first: varlen attention schedules long sequences first,
-        # which balances its tiles better on mixed batches.
-        batch_indices = sorted(
-            range(num_items), key=lambda i: per_item_out_tokens[i], reverse=True
-        )
-        batch_mm_kwargs, axis_keys = self._select_items(mm_kwargs, batch_indices)
+        path_budgets = {
+            path: self._path_fitting_budget(path, sum(tokens)) if fits else None
+            for path, tokens in per_item_path_tokens.items()
+            if sum(tokens) > 0
+        }
+        all_eager = all(budget is None for budget in path_budgets.values())
+        eager_fast_path = all_eager and self.config.eager_fallback_fast_path
+        batch_indices = list(range(num_items))
+        axis_keys: CaptureAxisKeys
+        if eager_fast_path:
+            batch_mm_kwargs, axis_keys = mm_kwargs, ()
+        else:
+            # Largest first balances varlen attention tiles on mixed batches.
+            batch_indices.sort(key=lambda i: per_item_out_tokens[i], reverse=True)
+            batch_mm_kwargs, axis_keys = self._select_items(mm_kwargs, batch_indices)
         graph_outputs: dict[str, torch.Tensor] = {}
-        all_eager = True
 
-        for path, tokens in per_item_path_tokens.items():
-            if sum(tokens) == 0:
-                continue
-
-            token_budget = (
-                self._path_fitting_budget(path, sum(tokens)) if fits else None
-            )
+        for path, token_budget in path_budgets.items():
             if token_budget is None:
                 with torch.inference_mode():
                     output = self.model.encoder_eager_forward(
                         batch_mm_kwargs, path=path
                     )
             else:
-                all_eager = False
                 graph_output = self._run_budget_graph(
                     batch_mm_kwargs,
                     token_budget,
                     path=path,
                     axis_keys=axis_keys,
                 )
-                assert graph_output is not None
-                output = graph_output
+                if graph_output is None:
+                    with torch.inference_mode():
+                        output = self.model.encoder_eager_forward(
+                            batch_mm_kwargs, path=path
+                        )
+                else:
+                    output = graph_output
             graph_outputs[path] = output
 
         if all_eager:
@@ -661,10 +712,22 @@ class EncoderCudaGraphManager:
             batch_indices,
             per_item_out_tokens,
             outputs_by_orig_idx,
-            clone=True,
+            clone=not eager_fast_path,
             batch_mm_kwargs=batch_mm_kwargs,
         )
-        return [outputs_by_orig_idx[i] for i in range(num_items)]
+        outputs = [outputs_by_orig_idx[i] for i in range(num_items)]
+        if eager_fast_path:
+            # Do not retain a whole batch for one cached item.
+            copy_indices = [
+                i
+                for i, output in enumerate(outputs)
+                if output.untyped_storage().nbytes() > output.nbytes
+            ]
+            if copy_indices:
+                copied = torch._foreach_clone([outputs[i] for i in copy_indices])
+                for i, output in zip(copy_indices, copied):
+                    outputs[i] = output
+        return outputs
 
     def _dp_shard(
         self,

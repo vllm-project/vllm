@@ -9,24 +9,23 @@ use axum::Json;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use serde_json::Value;
-use thiserror_ext::AsReport as _;
+use vllm_chat::ChatRequest;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::TextRequest;
 
 use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
-use crate::error::{ApiError, text_submit_error};
-use crate::lora::LoraModelResolution;
-use crate::render::RenderState;
+use crate::error::{ApiError, chat_submit_error, text_submit_error};
+use crate::render::{RenderContext, RenderState};
 use crate::routes::inference::generate::{
     GenerateRequest, GenerateSamplingParams, MmPayload, MultiModalFeatures,
-    validate_request_compat as validate_generate_request,
+    validate_request as validate_generate_request,
 };
 use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
-use crate::routes::openai::utils::validated_json::ValidatedJson;
-use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
+use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::{
     ChatCompletionRequest, CompletionRequest, lower_chat_request, lower_completion_request,
 };
@@ -37,8 +36,14 @@ pub(crate) fn build_router(state: Arc<RenderState>) -> Router {
         .route("/health", get(health))
         .route("/ping", get(health).post(health))
         .route("/v1/models", get(list_models))
-        .route("/v1/chat/completions/render", post(render_chat))
-        .route("/v1/completions/render", post(render_completion))
+        .route(
+            "/v1/chat/completions/render",
+            post(render_chat::<RenderState>),
+        )
+        .route(
+            "/v1/completions/render",
+            post(render_completion::<RenderState>),
+        )
         .with_state(state)
         .layer(DefaultBodyLimit::max(DEFAULT_REQUEST_BODY_LIMIT_BYTES))
 }
@@ -51,7 +56,7 @@ async fn health() -> StatusCode {
 /// `root` = adapter path and `parent` = base model.
 async fn list_models(State(state): State<Arc<RenderState>>) -> Json<ListModelsResponse> {
     let created = unix_timestamp() as i64;
-    let base_cards = state.served_model_names.names().iter().map(|model| ModelObject {
+    let base_cards = state.served_model_names.base_names().iter().map(|model| ModelObject {
         id: model.clone(),
         object: "model".to_string(),
         created,
@@ -76,25 +81,8 @@ async fn list_models(State(state): State<Arc<RenderState>>) -> Json<ListModelsRe
     })
 }
 
-/// Accept LoRA adapter names as the model, like Python. Rendering does not use
-/// the adapter, so no LoRA request is resolved; the adapter name is passed
-/// through as the generate request's model.
-fn model_resolution(state: &RenderState) -> LoraModelResolution {
-    LoraModelResolution {
-        model_names: state.model_names(),
-        lora_request: None,
-    }
-}
-
-fn response_model(state: &RenderState, requested_model: Option<&str>) -> String {
-    requested_model
-        .filter(|model| !model.is_empty())
-        .unwrap_or(state.served_model_names.primary())
-        .to_string()
-}
-
 fn lower_render_request(
-    state: &RenderState,
+    state: &impl RenderContext,
     text_request: TextRequest,
     model: String,
     n: Option<u32>,
@@ -104,7 +92,7 @@ fn lower_render_request(
     mm_payload: MmPayload,
 ) -> Result<GenerateRequest, ApiError> {
     let prepared = state
-        .text
+        .text_processor()
         .prepare(text_request)
         .map_err(|error| text_submit_error("failed to prepare render request", error))?;
     let token_ids = prepared.generate_request.prompt_token_ids;
@@ -125,6 +113,8 @@ fn lower_render_request(
             n,
             stop: None,
             include_stop_str_in_output: None,
+            detokenize: None,
+            skip_special_tokens: None,
             trace_decode_token_ids: None,
             inner: text_request.sampling_params,
         },
@@ -146,7 +136,7 @@ fn lower_render_request(
         .then_some(text_request.reasoning_parser_kwargs),
         other: Default::default(),
     };
-    validate_generate_request(&request, &state.model_names())?;
+    validate_generate_request(&request)?;
     Ok(request)
 }
 
@@ -174,12 +164,43 @@ fn hoist_transfer_params(
     Some(params)
 }
 
-async fn render_chat(
-    State(state): State<Arc<RenderState>>,
+pub(crate) struct LoweredChatRender {
+    pub(crate) chat_request: ChatRequest,
+    pub(crate) model: String,
+}
+
+pub(crate) async fn lower_chat_render_request<S: RenderContext>(
+    state: &S,
+    body: ChatCompletionRequest,
+    headers: &HeaderMap,
+) -> Result<LoweredChatRender, ApiError> {
+    let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
+    let lora_resolution = state.resolve_model(requested_model).await;
+    let model = requested_model.unwrap_or(lora_resolution.model_names.primary()).to_string();
+
+    let request_context = resolve_request_context(headers, body.request_id.as_deref())?;
+
+    let chat_request = lower_chat_request(body, &lora_resolution, request_context)?;
+    validate_max_output_tokens(
+        "max_completion_tokens",
+        chat_request.sampling_params.max_tokens,
+        state.text_processor().max_model_len(),
+    )?;
+
+    Ok(LoweredChatRender {
+        chat_request,
+        model,
+    })
+}
+
+/// `/v1/chat/completions/render` on both the render-only server and, with
+/// `--enable-scale-out`, the engine-backed server.
+pub(crate) async fn render_chat<S: RenderContext>(
+    State(state): State<Arc<S>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
+    body: Result<Json<ChatCompletionRequest>, JsonRejection>,
 ) -> Result<Json<GenerateRequest>, ApiError> {
-    let model = response_model(&state, body.model.as_deref());
+    let Json(body) = body?;
     let n = body.n;
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
@@ -188,25 +209,20 @@ async fn render_chat(
         Some(false) => MmPayload::None,
         _ => MmPayload::Tensors,
     });
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
-    let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
-    // Lowering has checked that `n` is at least 1.
-    validate_n_limit(n.unwrap_or(1), state.max_n_sequences)?;
-    validate_max_output_tokens(
-        "max_completion_tokens",
-        chat_request.sampling_params.max_tokens,
-        state.text.max_model_len(),
-    )?;
+    let LoweredChatRender {
+        chat_request,
+        model,
+    } = lower_chat_render_request(state.as_ref(), body, &headers).await?;
     let text_request = state
-        .chat
+        .chat_processor()
         // The parallel samples of `n` are the generate request's to fan out;
         // its output grammar is the same for every sample.
-        .prepare(chat_request, NonZeroU32::MIN, &state.text)
+        .prepare(chat_request, NonZeroU32::MIN, state.text_processor())
         .await
-        .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?
+        .map_err(|error| chat_submit_error("failed to prepare render chat request", error))?
         .text_request;
     Ok(Json(lower_render_request(
-        &state,
+        state.as_ref(),
         text_request,
         model,
         n,
@@ -217,38 +233,46 @@ async fn render_chat(
     )?))
 }
 
-async fn render_completion(
-    State(state): State<Arc<RenderState>>,
+/// `/v1/completions/render` on both the render-only server and, with
+/// `--enable-scale-out`, the engine-backed server.
+pub(crate) async fn render_completion<S: RenderContext>(
+    State(state): State<Arc<S>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<CompletionRequest>,
+    body: Result<Json<CompletionRequest>, JsonRejection>,
 ) -> Result<Json<Vec<GenerateRequest>>, ApiError> {
-    let model = response_model(&state, body.model.as_deref());
+    let Json(body) = body?;
+    let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
+    let lora_resolution = state.resolve_model(requested_model).await;
+    let model = requested_model.unwrap_or(lora_resolution.model_names.primary()).to_string();
     let n = body.n;
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
-    let text_request = lower_completion_request(
-        body,
-        &model_resolution(&state),
-        request_context,
-        &state.text,
-    )?;
-    // Lowering has checked that `n` is at least 1.
-    validate_n_limit(n.unwrap_or(1), state.max_n_sequences)?;
-    validate_max_output_tokens(
-        "max_tokens",
-        text_request.sampling_params.max_tokens,
-        state.text.max_model_len(),
-    )?;
-    Ok(Json(vec![lower_render_request(
-        &state,
-        text_request,
-        model,
-        n,
-        stream,
-        stream_options,
-        return_token_ids,
-        MmPayload::Tensors,
-    )?]))
+    let request_context = resolve_request_context(&headers, body.request_id.as_deref())?;
+    let text_requests =
+        lower_completion_request(body, &lora_resolution, request_context, state.as_ref())?;
+    for text_request in &text_requests {
+        validate_max_output_tokens(
+            "max_tokens",
+            text_request.sampling_params.max_tokens,
+            state.text_processor().max_model_len(),
+        )?;
+    }
+    // Like Python, one generate request per prompt.
+    let generate_requests = text_requests
+        .into_iter()
+        .map(|text_request| {
+            lower_render_request(
+                state.as_ref(),
+                text_request,
+                model.clone(),
+                n,
+                stream,
+                stream_options.clone(),
+                return_token_ids,
+                MmPayload::Tensors,
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(Json(generate_requests))
 }

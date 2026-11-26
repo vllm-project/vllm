@@ -67,6 +67,7 @@ def test_varlen_builders_pass_adaptive_gate(builder):
         layer_names=["layer"],
         kv_cache_spec=None,
         backend=SimpleNamespace(__name__=builder.__name__),
+        metadata_builders=[builder],
         get_metadata_builder=lambda _: builder,
     )
     assert (

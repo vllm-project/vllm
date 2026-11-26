@@ -641,6 +641,23 @@ def test_extensible_kv_cache_off_for_rocm_registering_connector(
     assert config.cache_config.enable_extensible_kv_cache is not rocm
 
 
+@pytest.mark.parametrize("requested", [None, True])
+def test_extensible_kv_cache_on_for_rocm_fd_exporting_connector(monkeypatch, requested):
+    """Exporting the KV cache to another process through POSIX file descriptors
+    involves no UCX or RDMA registration, so ROCm keeps the extensible cache."""
+    from vllm.config.vllm import VllmConfig
+
+    config = _nixl_config_for_extensible_kv_cache(
+        monkeypatch,
+        rocm=True,
+        requested=requested,
+        imex_channel=False,
+        transfer=KVTransferConfig(**_EXPORTS_FD_CONNECTOR),
+    )
+    VllmConfig._resolve_extensible_kv_cache(config)
+    assert config.cache_config.enable_extensible_kv_cache
+
+
 @pytest.mark.parametrize(
     "requested, imex_channel, enabled",
     [(None, False, False), (True, False, True), (None, True, True)],

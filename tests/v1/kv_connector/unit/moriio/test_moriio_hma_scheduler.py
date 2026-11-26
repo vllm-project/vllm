@@ -10,6 +10,7 @@ wiring.
 """
 
 import importlib
+import mmap
 import threading
 from collections import defaultdict
 from dataclasses import asdict
@@ -21,27 +22,41 @@ import torch
 
 from vllm import SamplingParams
 from vllm.utils.hashing import sha256
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 from vllm.v1.core.kv_cache_utils import (
     BlockHashWithGroupId,
     KVCacheBlock,
+    KVCacheBlockCopy,
     get_request_block_hasher,
     init_none_hash,
 )
 from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
-from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    FullAttentionManager,
+    MambaManager,
+)
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    FullAttentionSpec,
+    AttentionSpec,
     KVCacheConfig,
+    KVCacheGroup,
+    KVCacheLayerConfig,
     KVCacheSpec,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
+
+from ..utils import (
+    create_model_runner_output,
+    create_request,
+    create_scheduler,
+    create_vllm_config,
+)
 
 moriio_connector = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector"
@@ -75,10 +90,14 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
 
     def __init__(self, **attrs):
         self.mode = MoRIIOMode.READ
+        self.is_producer = False
+        self.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
         self._mamba_group_ids: list[int] = []
         self._attn_group_ids: list[int] = [0]
-        self._attn_group_is_state: list[bool] = [False]
         self._num_ssm_scratch_blocks = 0
+        self._mamba_align_block_size = None
+        self._failed_read_block_ids_to_zero: set[int] = set()
+        self._mamba_block_size = 16
         self._is_hma_required = False
         self.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[None, None],
@@ -137,14 +156,58 @@ def _gdn_split_info(conv_rows=3, key_dim=4, value_dim=8, dtype_size=2):
     )
 
 
-def _mamba_spec(num_states: int = 2, *, num_speculative_blocks: int = 0):
+def _mamba_spec(num_states: int = 2):
     shapes = tuple((1, 1) for _ in range(num_states))
     return moriio_connector.MambaSpec(
         block_size=16,
         shapes=shapes,
         dtypes=(torch.float32,) * num_states,
-        mamba_cache_mode="align",
-        num_speculative_blocks=num_speculative_blocks,
+    )
+
+
+def _tail_spec(block_size: int) -> AttentionSpec:
+    return AttentionSpec(
+        block_size=block_size,
+        num_kv_heads=2,
+        head_size=128,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+        dcp_sharded=False,
+    )
+
+
+def _attn_group(
+    name: str = "attn",
+    *,
+    enable_kv_transfer: bool = True,
+    specs: dict[str, KVCacheSpec] | None = None,
+) -> KVCacheGroup:
+    if specs is None:
+        specs = {
+            name: AttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+            )
+        }
+    config = FullAttentionManager.config()
+    return KVCacheGroup.from_layers(
+        {n: KVCacheLayerConfig(config, s) for n, s in specs.items()},
+        enable_kv_transfer=enable_kv_transfer,
+    )
+
+
+def _mamba_group(
+    spec=None,
+    *,
+    name: str = "mamba",
+    num_speculative_blocks: int = 0,
+    enable_kv_transfer: bool = True,
+) -> KVCacheGroup:
+    config = MambaManager.config(
+        enable_prefix_caching=True, num_speculative_blocks=num_speculative_blocks
+    )
+    layer = KVCacheLayerConfig(config, spec or _mamba_spec())
+    return KVCacheGroup.from_layers(
+        {name: layer}, enable_kv_transfer=enable_kv_transfer
     )
 
 
@@ -159,7 +222,6 @@ def _gate_vllm_config(
     block_size: int = 16,
     num_lookahead_tokens: int = 0,
     num_speculative_tokens: int = 0,
-    mamba_cache_mode: str = "align",
     dcp_size: int = 1,
 ):
     return SimpleNamespace(
@@ -173,10 +235,7 @@ def _gate_vllm_config(
             kv_role="kv_consumer",
         ),
         speculative_config=speculative_config,
-        cache_config=SimpleNamespace(
-            block_size=block_size,
-            mamba_cache_mode=mamba_cache_mode,
-        ),
+        cache_config=SimpleNamespace(block_size=block_size),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         num_lookahead_tokens=num_lookahead_tokens,
         num_speculative_tokens=num_speculative_tokens,
@@ -207,13 +266,12 @@ def test_split_block_groups_ignores_transfer_disabled_group():
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
     config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
-            SimpleNamespace(enable_kv_transfer=False, kv_cache_spec=object()),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=mamba_spec),
+            _attn_group("attn0"),
+            _attn_group("attn1", enable_kv_transfer=False),
+            _mamba_group(mamba_spec),
         ],
     )
     config.transfer_groups = tuple(
@@ -283,7 +341,7 @@ def test_exchange_clipped_blocks_match_select_for_single_full_attention():
 def test_scheduler_rejects_hybrid_without_attention_group():
     config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=_mamba_spec()),
+            _mamba_group(),
         ],
     )
     config.transfer_groups = tuple(config.kv_cache_groups)
@@ -292,33 +350,64 @@ def test_scheduler_rejects_hybrid_without_attention_group():
         moriio_connector.MoRIIOConnectorScheduler(_gate_vllm_config(), "engine", config)
 
 
-def _glm5_next_mtp_kv_cache_config() -> KVCacheConfig:
+def _glm5_next_mtp_kv_cache_config(
+    enable_prefix_caching: bool = True,
+) -> KVCacheConfig:
     """GLM-5.3-Flash-shaped groups from the real grouping, with an MTP layer."""
     kpool, num_spec = 4, 1
-    mamba = _mamba_spec(num_speculative_blocks=num_spec)
-    specs: dict[str, KVCacheSpec] = {}
+    mamba = MambaManager.layer_config(
+        _mamba_spec(),
+        enable_prefix_caching=enable_prefix_caching,
+        num_speculative_blocks=num_spec,
+    )
+    layers: dict[str, KVCacheLayerConfig] = {}
     for i in range(7):
         if i % 3 != 2 and i != 6:
-            specs[f"layers.{i}.linear_attn"] = mamba
+            layers[f"layers.{i}.linear_attn"] = mamba
             continue
-        specs[f"layers.{i}.attn"] = MLAAttentionSpec(
-            block_size=1024, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+        layers[f"layers.{i}.attn"] = FullAttentionManager.layer_config(
+            MLAAttentionSpec(
+                block_size=1024, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+            )
         )
-        specs[f"layers.{i}.indexer"] = MLAAttentionSpec(
-            block_size=1024,
-            num_kv_heads=1,
-            head_size=132,
-            dtype=torch.uint8,
-            tokens_per_state=kpool,
+        layers[f"layers.{i}.indexer"] = FullAttentionManager.layer_config(
+            MLAAttentionSpec(
+                block_size=1024,
+                num_kv_heads=1,
+                head_size=132,
+                dtype=torch.uint8,
+                tokens_per_state=kpool,
+            )
         )
-        specs[f"layers.{i}.tail"] = CircularBufferSpec(
-            block_size=2 * kpool,
-            num_kv_heads=2,
-            head_size=128,
-            head_size_v=0,
-            dtype=torch.bfloat16,
-            dcp_sharded=False,
+        layers[f"layers.{i}.tail"] = CircularBufferManager.layer_config(
+            _tail_spec(block_size=2 * kpool)
         )
+    return _group_kv_cache_layers(layers)
+
+
+def _mixed_precision_mla_kv_cache_config(block_size: int) -> KVCacheConfig:
+    layers: dict[str, KVCacheLayerConfig] = {}
+    for i in range(2):
+        layers[f"layers.{i}.attn"] = FullAttentionManager.layer_config(
+            MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+            )
+        )
+        layers[f"layers.{i}.indexer"] = FullAttentionManager.layer_config(
+            MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=132,
+                dtype=torch.uint8,
+            )
+        )
+    return _group_kv_cache_layers(layers)
+
+
+def _group_kv_cache_layers(layers: dict[str, KVCacheLayerConfig]) -> KVCacheConfig:
     vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         parallel_config=SimpleNamespace(pipeline_parallel_size=1),
@@ -327,11 +416,13 @@ def _glm5_next_mtp_kv_cache_config() -> KVCacheConfig:
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
         ),
     )
-    groups = get_kv_cache_groups(vllm_config, specs)
+    groups = get_kv_cache_groups(vllm_config, layers)
     return KVCacheConfig(num_blocks=64, kv_cache_tensors=[], kv_cache_groups=groups)
 
 
-def _glm5_next_mtp_scheduler(kv_role: str = "kv_consumer"):
+def _glm5_next_mtp_scheduler(
+    kv_role: str = "kv_consumer", enable_prefix_caching: bool = True
+):
     vllm_config = _gate_vllm_config(
         speculative_config=_spec_config("mtp"),
         block_size=1024,
@@ -339,7 +430,7 @@ def _glm5_next_mtp_scheduler(kv_role: str = "kv_consumer"):
         num_speculative_tokens=1,
     )
     vllm_config.kv_transfer_config.kv_role = kv_role
-    config = _glm5_next_mtp_kv_cache_config()
+    config = _glm5_next_mtp_kv_cache_config(enable_prefix_caching)
     return moriio_connector.MoRIIOConnectorScheduler(vllm_config, "engine", config)
 
 
@@ -349,13 +440,11 @@ def test_scheduler_accepts_glm5_next_groups_with_mtp():
     scheduler = _glm5_next_mtp_scheduler()
     groups = scheduler.kv_cache_config.transfer_groups
 
-    assert all(isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs) for g in groups)
     # The MTP layer shares the target's MLA and tail groups.
     assert {"layers.6.attn", "layers.6.indexer"} <= set(groups[1].layer_names)
     assert "layers.6.tail" in groups[2].layer_names
     assert scheduler._attn_group_ids == [1, 2]
     assert scheduler._mamba_group_ids == [0]
-    assert scheduler._attn_group_is_state == [False, True]
     assert scheduler.blocks_per_sw == [0, 0, 0]
     assert scheduler._num_ssm_scratch_blocks == 1
     # 1 recomputed token + 1 padded spec row + 1 drafter lookahead slot.
@@ -397,13 +486,12 @@ def test_glm5_next_mtp_read_pairs_every_group(external_tokens):
             [90],
         ]
     else:
-        # A full local MLA hit still reads the kpool tail ring and KDA state.
-        assert local == [[], [300], [200]]
+        assert local == [[], [], []]
 
     output = SchedulerOutput.make_empty()
     output.new_block_ids_to_zero = [100, 101, 102, 300]
     consumer.build_connector_meta(output)
-    expected_zero = [102] if external_tokens else [100, 101, 102]
+    expected_zero = [102] if external_tokens else [100, 101, 102, 300]
     assert output.new_block_ids_to_zero == expected_zero
 
 
@@ -463,6 +551,35 @@ def test_read_blocks_routes_each_hybrid_layer_to_its_group():
     assert worker._recving_local_blocks["req"] == [100, 101, 300]
 
 
+def test_read_blocks_without_destination_only_releases_the_producer():
+    worker = _FakeWorker(
+        mode=MoRIIOMode.READ,
+        world_size=2,
+        tp_rank=1,
+        _has_mamba=True,
+        moriio_wrapper=Mock(),
+    )
+
+    worker._read_blocks(
+        [[], []],
+        [[10], [90]],
+        dst_engine_id="prefill",
+        request_id="req",
+        transfer_id="tx",
+        remote_host="127.0.0.1",
+        remote_notify_port=6001,
+        remote_tp_size=2,
+    )
+
+    worker.moriio_wrapper.send_notify.assert_called_once_with(
+        "tx",
+        "127.0.0.1",
+        "6002",
+        message_type="release",
+        message_fields={"consumer_tp_size": 2},
+    )
+
+
 def test_split_block_groups_preserves_multiple_mamba_groups():
     sched = _FakeScheduler(
         _has_mamba=True,
@@ -481,9 +598,9 @@ def test_scheduler_rejects_incompatible_mamba_groups():
     object.__setattr__(incompatible, "page_size_padded", 4096)
     config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=_mamba_spec()),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=incompatible),
+            _attn_group(),
+            _mamba_group(name="mamba0"),
+            _mamba_group(incompatible, name="mamba1"),
         ]
     )
     config.transfer_groups = tuple(config.kv_cache_groups)
@@ -495,8 +612,8 @@ def test_scheduler_rejects_incompatible_mamba_groups():
 def test_scheduler_rejects_mamba_group_without_two_states():
     config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=_mamba_spec(1)),
+            _attn_group(),
+            _mamba_group(_mamba_spec(1)),
         ],
     )
     config.transfer_groups = tuple(config.kv_cache_groups)
@@ -508,8 +625,8 @@ def test_scheduler_rejects_mamba_group_without_two_states():
 def test_scheduler_rejects_non_dspark_speculative_hybrid_write():
     config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=object()),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=_mamba_spec()),
+            _attn_group(),
+            _mamba_group(),
         ],
     )
     config.transfer_groups = tuple(config.kv_cache_groups)
@@ -524,13 +641,12 @@ def test_scheduler_rejects_non_dspark_speculative_hybrid_write():
         )
 
 
-def _dspark_wrapped_attention_config(*, dcp_sharded: bool = True):
-    """Mamba first, so a wrapped full-attention group at index 1 has to be found.
-
-    A bare `isinstance(FullAttentionSpec)` misses the wrapper and leaves
-    `_full_attn_group_idx` at its initial 0, which is the Mamba group.
+def _dspark_multi_layer_attention_config(*, dcp_sharded: bool = True):
+    """Mamba first, so a multi-layer full-attention group at index 1 has to be
+    found; otherwise `_full_attn_group_idx` stays at its initial 0, which is
+    the Mamba group.
     """
-    full = FullAttentionSpec(
+    full = AttentionSpec(
         block_size=4,
         num_kv_heads=1,
         head_size=1,
@@ -539,16 +655,8 @@ def _dspark_wrapped_attention_config(*, dcp_sharded: bool = True):
     )
     config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(
-                enable_kv_transfer=True,
-                kv_cache_spec=_mamba_spec(num_speculative_blocks=2),
-            ),
-            SimpleNamespace(
-                enable_kv_transfer=True,
-                kv_cache_spec=UniformTypeKVCacheSpecs(
-                    block_size=4, kv_cache_specs={"target": full, "draft": full}
-                ),
-            ),
+            _mamba_group(num_speculative_blocks=2),
+            _attn_group(specs={"target": full, "draft": full}),
         ],
     )
     config.transfer_groups = tuple(config.kv_cache_groups)
@@ -560,10 +668,10 @@ def _dspark_wrapped_attention_config(*, dcp_sharded: bool = True):
 @pytest.mark.parametrize(
     "dcp_size,dcp_sharded,expected_tail", [(1, True, 4), (4, True, 1), (4, False, 4)]
 )
-def test_scheduler_accepts_dspark_with_wrapped_full_attention(
+def test_scheduler_accepts_dspark_with_multi_layer_full_attention(
     dcp_size, dcp_sharded, expected_tail, read_mode
 ):
-    config = _dspark_wrapped_attention_config(dcp_sharded=dcp_sharded)
+    config = _dspark_multi_layer_attention_config(dcp_sharded=dcp_sharded)
     vllm_config = _gate_vllm_config(
         read_mode=read_mode,
         speculative_config=_spec_config("dspark"),
@@ -579,9 +687,8 @@ def test_scheduler_accepts_dspark_with_wrapped_full_attention(
     assert scheduler._max_decode_tail_blocks == expected_tail
 
     # A first decode step reserves padded target rows AND drafter lookahead.
-    spec = config.transfer_groups[1].kv_cache_spec
     manager = FullAttentionManager(
-        spec,
+        config.transfer_groups[1],
         block_pool=BlockPool(32, enable_caching=False, hash_block_size=4),
         enable_caching=False,
         kv_cache_group_id=1,
@@ -608,7 +715,7 @@ def test_scheduler_accepts_dspark_with_wrapped_full_attention(
 
 @pytest.mark.usefixtures("restore_moriio_role")
 def test_hybrid_write_clamps_attention_and_excludes_scratch_slots():
-    config = _dspark_wrapped_attention_config()
+    config = _dspark_multi_layer_attention_config()
     config.select_transfer_block_ids = lambda blocks: tuple(blocks)
     sched = moriio_connector.MoRIIOConnectorScheduler(
         _gate_vllm_config(read_mode=False, dcp_size=2), "engine", config
@@ -620,7 +727,7 @@ def test_hybrid_write_clamps_attention_and_excludes_scratch_slots():
 
 @pytest.mark.usefixtures("restore_moriio_role")
 def test_hybrid_write_resolves_current_state_instead_of_cached_block_ids():
-    config = _dspark_wrapped_attention_config()
+    config = _dspark_multi_layer_attention_config()
     config.select_transfer_block_ids = lambda blocks: tuple(blocks)
     sched = moriio_connector.MoRIIOConnectorScheduler(
         _gate_vllm_config(read_mode=False, dcp_size=2), "engine", config
@@ -642,7 +749,7 @@ def test_hybrid_write_resolves_current_state_instead_of_cached_block_ids():
 def test_hybrid_write_notifies_grouped_slots_or_releases_a_complete_local_hit(
     external_tokens,
 ):
-    config = _dspark_wrapped_attention_config()
+    config = _dspark_multi_layer_attention_config()
     config.select_transfer_block_ids = lambda blocks: tuple(blocks)
     sched = moriio_connector.MoRIIOConnectorScheduler(
         _gate_vllm_config(read_mode=False), "engine", config
@@ -692,6 +799,8 @@ def test_plain_write_notify_skips_blocks_of_the_local_prefix_hit(
 ):
     sched = _FakeScheduler(
         mode=MoRIIOMode.WRITE,
+        is_producer=False,
+        _write_recvs_in_flight={},
         _has_mamba=False,
         block_size=16,
         tp_size=1,
@@ -728,20 +837,22 @@ def test_plain_write_notify_skips_blocks_of_the_local_prefix_hit(
 
 @pytest.mark.usefixtures("restore_moriio_role")
 def test_hybrid_write_keeps_separate_draft_groups_and_their_block_spans():
-    config = _dspark_wrapped_attention_config()
+    config = _dspark_multi_layer_attention_config()
     # A disabled cache is absent from the wire. Target and draft may have
     # different token spans, and neither can borrow the other's block IDs.
-    draft = SimpleNamespace(
-        enable_kv_transfer=True,
-        kv_cache_spec=FullAttentionSpec(
-            block_size=4,
-            num_kv_heads=1,
-            head_size=2,
-            dtype=torch.float32,
-            dcp_sharded=False,
-        ),
+    draft = _attn_group(
+        "draft_only",
+        specs={
+            "draft_only": AttentionSpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=2,
+                dtype=torch.float32,
+                dcp_sharded=False,
+            )
+        },
     )
-    disabled = SimpleNamespace(enable_kv_transfer=False, kv_cache_spec=object())
+    disabled = _attn_group("disabled", enable_kv_transfer=False)
     config.kv_cache_groups.insert(1, disabled)
     config.kv_cache_groups.append(draft)
     config.transfer_groups = tuple(
@@ -782,7 +893,7 @@ def test_hybrid_write_keeps_separate_draft_groups_and_their_block_spans():
 def test_hybrid_write_request_finished_defers_free_only_with_blocks_to_send(
     blocks, delay_free
 ):
-    config = _dspark_wrapped_attention_config()
+    config = _dspark_multi_layer_attention_config()
     config.select_transfer_block_ids = lambda blocks: tuple(blocks)
     sched = moriio_connector.MoRIIOConnectorScheduler(
         _gate_vllm_config(read_mode=False, dcp_size=2), "engine", config
@@ -806,7 +917,7 @@ def test_hybrid_write_request_finished_defers_free_only_with_blocks_to_send(
 def test_hybrid_write_build_meta_saves_current_state_on_the_final_chunk():
     """Chunked prefill must not ship block ids cached at admission: align-mode
     state slots move between chunks without appending a block."""
-    config = _dspark_wrapped_attention_config()
+    config = _dspark_multi_layer_attention_config()
     config.select_transfer_block_ids = lambda blocks: tuple(blocks)
     sched = moriio_connector.MoRIIOConnectorScheduler(
         _gate_vllm_config(read_mode=False, dcp_size=2), "engine", config
@@ -887,52 +998,36 @@ def test_loaded_kv_cache_groups_are_every_transfer_group():
 
 @pytest.mark.usefixtures("restore_moriio_role")
 def test_scheduler_rejects_circular_buffer_without_mamba():
-    full = FullAttentionSpec(
-        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
-    )
-    tail = CircularBufferSpec(
-        block_size=8,
-        num_kv_heads=2,
-        head_size=128,
-        head_size_v=0,
-        dtype=torch.bfloat16,
-        dcp_sharded=False,
+    tail = KVCacheGroup.from_layers(
+        {"tail": CircularBufferManager.layer_config(_tail_spec(block_size=8))}
     )
     config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=full),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=tail),
+            _attn_group(),
+            tail,
         ],
     )
     config.transfer_groups = tuple(config.kv_cache_groups)
 
-    with pytest.raises(NotImplementedError, match="CircularBufferSpec"):
+    with pytest.raises(NotImplementedError, match="CircularBufferManager"):
         moriio_connector.MoRIIOConnectorScheduler(_gate_vllm_config(), "engine", config)
 
 
 @pytest.mark.usefixtures("restore_moriio_role")
 def test_scheduler_rejects_circular_buffer_in_hybrid_write():
-    full = FullAttentionSpec(
-        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
-    )
-    tail = CircularBufferSpec(
-        block_size=8,
-        num_kv_heads=2,
-        head_size=128,
-        head_size_v=0,
-        dtype=torch.bfloat16,
-        dcp_sharded=False,
+    tail = KVCacheGroup.from_layers(
+        {"tail": CircularBufferManager.layer_config(_tail_spec(block_size=8))}
     )
     config = SimpleNamespace(
         kv_cache_groups=[
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=full),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=tail),
-            SimpleNamespace(enable_kv_transfer=True, kv_cache_spec=_mamba_spec()),
+            _attn_group(),
+            tail,
+            _mamba_group(),
         ],
     )
     config.transfer_groups = tuple(config.kv_cache_groups)
 
-    with pytest.raises(NotImplementedError, match="CircularBufferSpec"):
+    with pytest.raises(NotImplementedError, match="CircularBufferManager"):
         moriio_connector.MoRIIOConnectorScheduler(
             _gate_vllm_config(read_mode=False), "engine", config
         )
@@ -1054,14 +1149,16 @@ def _make_read_scheduler():
         _reqs_need_recv={},
         _reqs_need_save={},
         _reqs_need_send={},
+        _reqs_need_abort={},
         _req_kv_params={},
         _max_decode_tail_blocks=1,
     )
 
 
-def _make_read_request(remote_block_ids):
+def _make_read_request(remote_block_ids, num_prompt_tokens=2):
     return SimpleNamespace(
         request_id="req",
+        num_prompt_tokens=num_prompt_tokens,
         kv_transfer_params={
             "do_remote_prefill": True,
             "transfer_id": "tx",
@@ -1080,7 +1177,7 @@ def _make_read_request(remote_block_ids):
 def test_update_state_drops_decode_recompute_tail_block(
     external_tokens, has_mamba, zero_ids
 ):
-    """Only full hybrid READ destinations skip zeroing; local tails still zero."""
+    """Paired READ destinations skip zeroing but the recomputed local tail does not."""
     sched = _make_read_scheduler()
     sched._has_mamba = has_mamba
     remote_blocks = [[10, 11], [91]] if has_mamba else [[10, 11]]
@@ -1095,7 +1192,7 @@ def test_update_state_drops_decode_recompute_tail_block(
 
     expected_blocks = [[100, 101] if external_tokens else []]
     if has_mamba:
-        expected_blocks.append([202])
+        expected_blocks.append([202] if external_tokens else [])
     assert sched._reqs_need_recv["req"][1] == expected_blocks
     assert sched._req_kv_params["req"]["remote_block_ids"] == remote_blocks
 
@@ -1104,8 +1201,10 @@ def test_update_state_drops_decode_recompute_tail_block(
     before = asdict(output)
     meta = sched.build_connector_meta(output)
     assert meta.reqs_to_recv["req"].local_block_ids == expected_blocks
-    if zero_ids and has_mamba and external_tokens:
-        before["new_block_ids_to_zero"] = zero_ids[1:]
+    if external_tokens and zero_ids:
+        before["new_block_ids_to_zero"] = [
+            b for b in zero_ids if b not in expected_blocks[0]
+        ]
     assert asdict(output) == before
 
     # A later local allocation of the same pages must still be zeroed.
@@ -1113,6 +1212,156 @@ def test_update_state_drops_decode_recompute_tail_block(
     meta = sched.build_connector_meta(output)
     assert not meta.reqs_to_recv
     assert output.new_block_ids_to_zero == [100, 101, 102]
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize(
+    ("hybrid", "num_external_tokens", "zero_ids", "copies", "expected"),
+    [
+        pytest.param(False, 127, [100, 101, 102], None, False, id="zeroing-skipped"),
+        pytest.param(
+            False, 127, None, [KVCacheBlockCopy(7, 101)], True, id="copied-dst"
+        ),
+        pytest.param(True, 0, None, None, False, id="hybrid-full-local-hit"),
+        pytest.param(False, 127, [102], None, False, id="zeroed-elsewhere"),
+        pytest.param(False, 127, None, None, False, id="no-stream-work"),
+        pytest.param(False, 0, [100, 101, 102], None, False, id="release-only"),
+    ],
+)
+def test_read_meta_orders_reads_after_stream_work(
+    hybrid, num_external_tokens, zero_ids, copies, expected
+):
+    if hybrid:
+        scheduler = _glm5_next_mtp_scheduler()
+        remote_blocks = [[10, 11], [50], [90]]
+        local_blocks = ([200, 201], [100, 101, 102], [300])
+    else:
+        scheduler = moriio_connector.MoRIIOConnectorScheduler(
+            _gate_vllm_config(block_size=64),
+            "engine",
+            _mixed_precision_mla_kv_cache_config(block_size=64),
+        )
+        remote_blocks = [[10, 11]]
+        local_blocks = ([100, 101, 102],)
+    scheduler.update_state_after_alloc(
+        _make_read_request(remote_blocks),
+        _FakeBlocks(local_blocks),
+        num_external_tokens=num_external_tokens,
+    )
+    output = SchedulerOutput.make_empty()
+    output.has_sync_kv_loads = num_external_tokens > 0
+    output.new_block_ids_to_zero = zero_ids
+    output.kv_cache_block_copies = copies
+
+    meta = scheduler.build_connector_meta(output)
+
+    assert meta.order_reads_after_compute_stream is expected
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize(
+    ("prefix_caching", "num_computed_tokens", "num_scheduled_tokens", "expected"),
+    [
+        pytest.param(True, 1504, 1, True, id="crosses-block"),
+        pytest.param(True, 1500, 1, False, id="within-block"),
+        pytest.param(True, 1503, 1, False, id="fills-block"),
+        pytest.param(True, 1500, 5, True, id="chunk-crosses-block"),
+        pytest.param(True, 1500, 4, False, id="chunk-fills-block"),
+        pytest.param(False, 1504, 1, False, id="no-prefix-caching"),
+    ],
+)
+def test_hybrid_read_waits_only_when_state_is_copied_into_its_destination(
+    prefix_caching, num_computed_tokens, num_scheduled_tokens, expected
+):
+    assert _mamba_spec().block_size == 16
+    scheduler = _glm5_next_mtp_scheduler(enable_prefix_caching=prefix_caching)
+    request = _make_read_request([[10, 11], [50], [90]])
+    request.num_computed_tokens = num_computed_tokens
+    scheduler.update_state_after_alloc(
+        request,
+        _FakeBlocks(([200, 201], [100, 101, 102], [300])),
+        num_external_tokens=num_computed_tokens,
+    )
+    output = SchedulerOutput.make_empty()
+    output.has_sync_kv_loads = True
+    output.num_scheduled_tokens = {"req": num_scheduled_tokens}
+    output.new_block_ids_to_zero = [100, 101, 102]
+
+    meta = scheduler.build_connector_meta(output)
+
+    assert meta.order_reads_after_compute_stream is expected
+
+
+def _mixed_precision_read_step(scheduler, local_block_ids):
+    scheduler.update_state_after_alloc(
+        _make_read_request([[10, 11]]),
+        _FakeBlocks((local_block_ids,)),
+        num_external_tokens=127,
+    )
+    step = SchedulerOutput.make_empty()
+    step.has_sync_kv_loads = True
+    step.new_block_ids_to_zero = list(local_block_ids)
+    return step, scheduler.build_connector_meta(step)
+
+
+def _report_read_result(scheduler, meta, dst_block_ids, read_failed):
+    worker = _FakeWorker(
+        _has_mamba=False,
+        _recving_local_blocks={"req": dst_block_ids},
+        _invalid_block_ids=set(),
+        _unzeroed_read_block_ids=meta.unzeroed_read_block_ids,
+        _failed_read_block_ids_to_zero=set(),
+    )
+    if read_failed:
+        worker._record_failed_recv("req")
+    connector = _FakeConnector(scheduler)
+    connector.connector_worker = worker
+    scheduler.update_connector_output(
+        KVConnectorOutput(
+            invalid_block_ids=connector.get_block_ids_with_load_errors(),
+            kv_connector_worker_meta=connector.build_connector_worker_meta(),
+        )
+    )
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+@pytest.mark.parametrize(
+    ("read_failed", "expected_zero_ids"),
+    [(True, [300, 100, 101]), (False, [300])],
+)
+def test_failed_read_destinations_are_zeroed_in_the_next_step(
+    read_failed, expected_zero_ids
+):
+    scheduler = moriio_connector.MoRIIOConnectorScheduler(
+        _gate_vllm_config(block_size=64),
+        "engine",
+        _mixed_precision_mla_kv_cache_config(block_size=64),
+    )
+    read_step, meta = _mixed_precision_read_step(scheduler, [100, 101, 102])
+    assert read_step.new_block_ids_to_zero == [102]
+    _report_read_result(scheduler, meta, [100, 101], read_failed)
+    next_step = SchedulerOutput.make_empty()
+    next_step.new_block_ids_to_zero = [300]
+
+    scheduler.build_connector_meta(next_step)
+
+    assert next_step.new_block_ids_to_zero == expected_zero_ids
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+def test_failed_read_destination_reused_by_a_read_is_not_zeroed():
+    scheduler = moriio_connector.MoRIIOConnectorScheduler(
+        _gate_vllm_config(block_size=64),
+        "engine",
+        _mixed_precision_mla_kv_cache_config(block_size=64),
+    )
+    _, meta = _mixed_precision_read_step(scheduler, [100, 101, 102])
+    _report_read_result(scheduler, meta, [100, 101], read_failed=True)
+
+    next_step, next_meta = _mixed_precision_read_step(scheduler, [100, 300, 301])
+
+    assert next_step.new_block_ids_to_zero == [301, 101]
+    assert next_meta.unzeroed_read_block_ids == {100, 300}
 
 
 def test_update_state_pairs_shorter_local_blocks_with_remote_suffix():
@@ -1144,7 +1393,7 @@ def test_update_state_pairs_trimmed_mamba_state_with_remote_state():
     assert sched._req_kv_params["req"]["remote_block_ids"] == [[10, 11], [90]]
 
 
-def test_update_state_full_attention_hit_still_carries_mamba_state():
+def test_update_state_full_local_hit_queues_no_hybrid_reads():
     sched = _make_read_scheduler()
     request = _make_read_request([[10], [90]])
 
@@ -1154,7 +1403,95 @@ def test_update_state_full_attention_hit_still_carries_mamba_state():
         num_external_tokens=0,
     )
 
-    assert sched._reqs_need_recv["req"][1] == [[], [200]]
+    assert sched._reqs_need_recv["req"][1] == [[], []]
+
+
+def _make_hybrid_read_consumer(block_size: int = 16):
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        kv_connector="MoRIIOConnector",
+        kv_connector_extra_config={"read_mode": "true", "host_ip": "127.0.0.1"},
+    )
+    attn_spec = AttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    return create_scheduler(
+        vllm_config,
+        num_blocks=64,
+        kv_cache_config=KVCacheConfig(
+            num_blocks=64,
+            kv_cache_tensors=[],
+            kv_cache_groups=[_attn_group(specs={"attn": attn_spec}), _mamba_group()],
+        ),
+    )
+
+
+def _schedule_remote_prefill(scheduler, request_id: int, num_tokens: int):
+    request = create_request(
+        request_id=request_id,
+        num_tokens=num_tokens,
+        common_prefix_len=num_tokens,
+        max_tokens=1,
+        block_size=16,
+    )
+    request.kv_transfer_params = {
+        # The producer sends the attention blocks for its N-1 prompt tokens.
+        **_make_read_request(
+            [list(range(10, 10 + cdiv(num_tokens - 1, 16))), [90]]
+        ).kv_transfer_params,
+        "transfer_id": f"tx-{request_id}",
+    }
+    scheduler.add_request(request)
+    return request, scheduler.schedule()
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+def test_hybrid_read_full_local_prefix_hit_schedules_no_read():
+    scheduler = _make_hybrid_read_consumer()
+    num_tokens = 2 * 16 + 1
+
+    first, output = _schedule_remote_prefill(scheduler, 1, num_tokens)
+    scheduler.update_from_output(output, create_model_runner_output([first]))
+    second, output = _schedule_remote_prefill(scheduler, 2, num_tokens)
+
+    [new_req] = output.scheduled_new_reqs
+    assert new_req.num_computed_tokens == num_tokens - 1
+    assert not output.has_sync_kv_loads
+    recv = output.kv_connector_metadata.reqs_to_recv[second.request_id]
+    assert recv.local_block_ids == [[], []]
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+def test_hybrid_read_writes_the_state_block_a_full_local_hit_resumes_from():
+    scheduler = _make_hybrid_read_consumer()
+    num_tokens = 2 * 16 + 1
+
+    first, output = _schedule_remote_prefill(scheduler, 1, num_tokens)
+    first_attn_blocks, first_state_blocks = output.scheduled_new_reqs[0].block_ids
+    recv = output.kv_connector_metadata.reqs_to_recv[first.request_id]
+    # The block of the locally recomputed last token has no remote source.
+    assert len(first_attn_blocks) == 3
+    assert recv.local_block_ids[0] == first_attn_blocks[:2]
+    assert recv.remote_block_ids[0] == [10, 11]
+    scheduler.update_from_output(output, create_model_runner_output([first]))
+    _, output = _schedule_remote_prefill(scheduler, 2, num_tokens)
+
+    [resend] = output.scheduled_new_reqs
+    resumed_state = resend.block_ids[1][(resend.num_computed_tokens - 1) // 16]
+    assert recv.local_block_ids[1] == [resumed_state, first_state_blocks[-1]]
+    assert recv.remote_block_ids[1] == [90, 90]
+
+
+@pytest.mark.usefixtures("restore_moriio_role")
+def test_hybrid_read_of_a_prompt_not_ending_a_block_reads_only_the_running_slot():
+    scheduler = _make_hybrid_read_consumer()
+
+    request, output = _schedule_remote_prefill(scheduler, 1, 2 * 16 + 2)
+
+    state_blocks = output.scheduled_new_reqs[0].block_ids[1]
+    recv = output.kv_connector_metadata.reqs_to_recv[request.request_id]
+    assert recv.local_block_ids[1] == [state_blocks[-1]]
+    assert recv.remote_block_ids[1] == [90]
 
 
 def test_update_state_preserves_each_mamba_group():
@@ -1783,3 +2120,84 @@ def test_worker_rejects_missing_mamba_block_group():
 
     with pytest.raises(moriio_common.MoRIIOError, match="no block group"):
         worker._mamba_blocks_for_layer("kda.0", ([10], [40]))
+
+
+@pytest.mark.parametrize("nbytes", [8192, 8175])
+def test_shared_mr_includes_packed_kda_regions(nbytes):
+    backing = torch.frombuffer(mmap.mmap(-1, nbytes), dtype=torch.uint8)
+    attn = backing[128:256]
+    conv = backing[512:640]
+    ssm = backing[1024:1280]
+    regions = {"attn": [(attn, 128)], "kda": [(conv, 128), (ssm, 256)]}
+    worker = _FakeWorker(_iter_layer_registration_regions=regions.__getitem__)
+
+    registered, offsets = worker._build_shared_kv_mr({"attn": attn, "kda": (conv, ssm)})
+
+    assert registered.data_ptr() == backing.data_ptr()
+    assert registered.numel() == nbytes
+    assert offsets == {"attn": 128, "kda": 512}
+    assert worker.kv_region_mr_offsets == {"attn": [128], "kda": [512, 1024]}
+    assert registered.data_ptr() + 1024 == ssm.data_ptr()
+
+
+@pytest.mark.parametrize("mode", ["read", "write"])
+def test_packed_kda_rdma_uses_each_peers_region_offsets(mode):
+    engine = importlib.import_module(
+        "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine"
+    )
+    worker = _FakeWorker(
+        kv_layer_mr_offset={"kda": 512},
+        kv_region_mr_offsets={"kda": [512, 1024]},
+        layer_base_addr_index={"kda": 1},
+        layer_name_to_remote_kv_cache_metadata={"peer": {"kda": [b"mr", b"mr"]}},
+        moriio_wrapper=SimpleNamespace(
+            get_unpack_memory_metadata=lambda _: SimpleNamespace(data=10000)
+        ),
+        _compute_mamba_transfer_offsets=lambda *a, **kw: (
+            [16, 32],
+            [48, 64],
+            [8, 16],
+            1,
+        ),
+        _region_session_indices=lambda _: [0, 1],
+        _mamba_blocks_for_layer=lambda name, groups: groups[1],
+    )
+    metadata = SimpleNamespace(
+        kv_caches_base_addr=[10000, 12048, 14096], layer_base_addr_index={"kda": 1}
+    )
+    if mode == "read":
+        worker._post_read_with_backoff = Mock(return_value="done")
+        worker._post_mamba_reads(
+            "kda",
+            ["conv", "ssm"],
+            [0, 1],
+            [1],
+            [3],
+            8,
+            "request",
+            99,
+            metadata,
+            "peer",
+        )
+        offsets = [
+            (call.args[2], call.args[3])
+            for call in worker._post_read_with_backoff.call_args_list
+        ]
+    else:
+        writer = object.__new__(engine.MoRIIOWriter)
+        writer._worker_ref = lambda: worker
+        task = SimpleNamespace(
+            layer_name="kda",
+            local_block_ids=[[], [1]],
+            remote_tp_size=8,
+            request_id="request",
+            transfer_id="transfer",
+        )
+        plans = writer._prepare_mamba_transfer_plans(
+            task, SimpleNamespace(block_ids=[[], [3]]), None, metadata, "peer"
+        )
+        offsets = [
+            (plan.transfer_local_offsets, plan.transfer_remote_offsets)
+            for plan in plans
+        ]
+    assert offsets == [([528], [2096]), ([1056], [4160])]

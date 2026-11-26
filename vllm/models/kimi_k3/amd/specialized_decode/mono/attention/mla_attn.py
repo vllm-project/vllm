@@ -140,7 +140,7 @@ _STREAM = fx.Stream(None)
 _SOURCES = source_digest(".")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MlaAttnBuild:
     tokens: int  # S = requests x qlen
     qlen: int  # 4 or 8

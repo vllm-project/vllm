@@ -6,7 +6,8 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec
+from tests.v1.core.utils import uniform_spec
+from vllm.v1.kv_cache_interface import KVCacheGroup
 from vllm.v1.metrics.stats import KV_FETCH_STAGES
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -25,6 +26,18 @@ from .utils import (
 )
 
 pytestmark = pytest.mark.cpu_test
+
+
+def _replace_group_specs(group: KVCacheGroup, **changes) -> KVCacheGroup:
+    """Copy of `group` with `changes` applied to every layer's spec."""
+    specs = {
+        name: replace(spec, **changes) for name, spec in group.kv_cache_specs.items()
+    }
+    return replace(
+        group,
+        kv_cache_specs=specs,
+        block_size=changes.get("block_size", group.block_size),
+    )
 
 
 def _num_waiting_requests(scheduler) -> int:
@@ -838,7 +851,7 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
         block_size=BLOCK_SIZE,
     )
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
-    # mamba_cache_mode "none" only runs without prefix caching.
+    # Mamba keeps a single running state per request without prefix caching.
     vllm_config.cache_config.enable_prefix_caching = False
 
     kv_cache_config = make_kv_cache_config(
@@ -993,15 +1006,11 @@ def test_async_load_reserves_blocks_for_promotion_margin(
     kv_cache_config = make_kv_cache_config(
         hash_block_size, swa_enabled=swa_enabled, sw_size=4096, num_blocks=num_blocks
     )
-    full_group = kv_cache_config.kv_cache_groups[0]
-    full_group.kv_cache_spec = replace(full_group.kv_cache_spec, block_size=block_size)
+    groups = kv_cache_config.kv_cache_groups
+    groups[0] = _replace_group_specs(groups[0], block_size=block_size)
     if swa_enabled:
-        sliding_group = kv_cache_config.kv_cache_groups[-1]
-        sliding_spec = sliding_group.kv_cache_spec
-        assert isinstance(sliding_spec, SlidingWindowSpec)
-        sliding_group.kv_cache_spec = replace(
-            sliding_spec,
-            page_size_padded=full_group.kv_cache_spec.page_size_bytes,
+        groups[-1] = _replace_group_specs(
+            groups[-1], page_size_padded=uniform_spec(groups[0]).page_size_bytes
         )
     scheduler = create_scheduler(
         vllm_config,
@@ -1050,11 +1059,12 @@ def test_async_load_reserves_blocks_for_promotion_margin(
 
 
 @pytest.mark.parametrize(
-    ("mamba_cache_mode", "mamba_block_size", "num_blocks"),
-    [("none", 128, 18), ("align", 16, 18)],
+    ("enable_prefix_caching", "mamba_block_size", "num_blocks"),
+    [(False, 128, 18), (True, 16, 18)],
+    ids=["no_prefix_caching", "prefix_caching"],
 )
 def test_async_load_does_not_double_reserve_mamba_spec_blocks(
-    mamba_cache_mode, mamba_block_size, num_blocks
+    enable_prefix_caching, mamba_block_size, num_blocks
 ):
     """Two hybrid loads fit when Mamba's speculative states are counted once."""
     block_size = 16
@@ -1065,21 +1075,19 @@ def test_async_load_does_not_double_reserve_mamba_spec_blocks(
         num_speculative_tokens=num_spec_tokens,
         disable_hybrid_kv_cache_manager=False,
     )
-    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
-    vllm_config.cache_config.enable_prefix_caching = mamba_cache_mode == "align"
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     kv_cache_config = make_kv_cache_config(
         block_size,
         mamba_enabled=True,
-        mamba_cache_mode=mamba_cache_mode,
         num_blocks=num_blocks,
+        enable_prefix_caching=enable_prefix_caching,
     )
-    mamba_group = kv_cache_config.kv_cache_groups[-1]
-    mamba_spec = mamba_group.kv_cache_spec
-    assert isinstance(mamba_spec, MambaSpec)
-    mamba_group.kv_cache_spec = replace(
-        mamba_spec,
-        block_size=mamba_block_size,
-        num_speculative_blocks=num_spec_tokens,
+    groups = kv_cache_config.kv_cache_groups
+    groups[-1] = replace(
+        _replace_group_specs(groups[-1], block_size=mamba_block_size),
+        manager_config=groups[-1].manager_config.replace_params(
+            num_speculative_blocks=num_spec_tokens
+        ),
     )
     scheduler = create_scheduler(
         vllm_config,

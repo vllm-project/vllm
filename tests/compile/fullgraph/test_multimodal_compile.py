@@ -156,10 +156,10 @@ def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
 @pytest.mark.parametrize(
     ("compile_mm_encoder", "expected_models"),
     [
-        # The Ernie-4.5 language model always registers two compiled modules.
+        # The Transformers backend language model registers one compiled module.
         # Enabling encoder compilation adds one per SigLIP encoder layer (27).
-        pytest.param(False, 2, id="disabled"),
-        pytest.param(True, 29, id="enabled"),
+        pytest.param(False, 1, id="disabled"),
+        pytest.param(True, 28, id="enabled"),
     ],
 )
 @create_new_process_for_each_test("spawn")
@@ -174,7 +174,6 @@ def test_paddleocr_vl_compilation(
         compilation_counter.expect(num_models_seen=expected_models),
         vllm_runner(
             "PaddlePaddle/PaddleOCR-VL",
-            trust_remote_code=True,
             max_model_len=2048,
             limit_mm_per_prompt={"image": 1},
             gpu_memory_utilization=0.5,

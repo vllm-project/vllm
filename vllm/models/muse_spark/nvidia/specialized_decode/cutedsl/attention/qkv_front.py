@@ -4,8 +4,10 @@
 launch: the QKV + o-gate projection (split-K BF16 GEMM, mma.sync, FP32
 accumulate), then the per-head weightless RMS norm, interleaved RoPE, the y
 store and the paged K/V insert. It writes what the projection GEMM followed by
-`fused_muse_spark_qknorm_rope_kv_insert` writes for a BF16 KV cache, up to the
-GEMM's summation order.
+`fused_muse_spark_qknorm_rope_kv_insert` writes for a BF16 or FP8 (E4M3) KV
+cache, up to the GEMM's summation order. The cache format (`kv_format`) is
+compile-time: FP8 stores the BF16-rounded k and v times 1 / k_scale and
+1 / v_scale, saturated.
 
 Structure: a thread-block cluster computes one head (64 output columns), its S
 CTAs splitting K into KSTRIPE-tile cyclic stripes. In each CTA a producer thread
@@ -22,6 +24,7 @@ graph; every thread waits before it reads x, positions, slots or cos|sin and
 before any global store.
 """
 
+import math
 from collections.abc import Iterable
 from functools import cache
 
@@ -39,7 +42,7 @@ from cutlass.experimental.cuda import (
     create_tensor_map_tiled,
 )
 
-from ..common.host import assert_not_capturing, on_device
+from ..common.host import assert_not_capturing, fp32, on_device
 from ..common.primitives import (
     WARP_SIZE,
     add_rn,
@@ -60,12 +63,15 @@ from ..common.primitives import (
     mul_rn,
     pack_bf16x2_rn,
     prefetch_global_l2,
+    quant_e4m3x2,
     rsqrt_approx_f32,
     store_async_cluster_f32x2,
+    store_global_u16_bits,
     store_global_u32_address,
     tma_load_2d,
     tma_prefetch_2d_l2,
 )
+from . import kv_format as kvf
 
 HEAD_DIM = 64
 HIDDEN = 8192  # the reduction length K
@@ -139,10 +145,17 @@ def _swizzled(row, chunk: int):
 
 class QkvFrontKernel:
     """One variant: `tiles` 8-token column tiles, a `stages`-deep ring, K
-    split `splits` (the cluster size) and `fixed_m` (8: M == 8, 0: any M of
-    the tile count)."""
+    split `splits` (the cluster size), `fixed_m` (8: M == 8, 0: any M of
+    the tile count) and the cache layout `fmt` (`kv_format`)."""
 
-    def __init__(self, tiles: int, stages: int, splits: int, fixed_m: int) -> None:
+    def __init__(
+        self,
+        tiles: int,
+        stages: int,
+        splits: int,
+        fixed_m: int,
+        fmt: kvf.KvLayout = kvf.BF16,
+    ) -> None:
         if tiles not in (1, 2) or splits not in SPLITS or fixed_m not in (0, 8):
             raise ValueError(f"no variant {tiles=} {splits=} {fixed_m=}")
         if stages not in (STAGES, DEEP_STAGES) or (fixed_m and tiles != 1):
@@ -153,6 +166,9 @@ class QkvFrontKernel:
             splits,
             fixed_m,
         )
+        assert fmt.kind in kvf.KINDS and fmt.slots in kvf.PAGE_SLOTS, fmt
+        self.kind, self.slots = fmt.kind, fmt.slots
+        self.elem_bytes = kvf.elem_bytes(fmt.kind)
         self.x_box_bytes = tiles * 8 * BOXK * 2
         self.w_bytes = NBOX * W_BOX_BYTES
         self.stage_bytes = self.w_bytes + NBOX * self.x_box_bytes
@@ -173,6 +189,7 @@ class QkvFrontKernel:
         cos_sin: Int64,
         slots: Int64,
         kv_cache: Int64,
+        kv_page_stride: Int64,
         y: Int64,
         m: Int32,
         n: Int32,
@@ -180,6 +197,8 @@ class QkvFrontKernel:
         hkv: Int32,
         rope: Int32,
         eps: Float32,
+        inv_k_scale: Float32,
+        inv_v_scale: Float32,
         stream: cuda.CUstream,
     ) -> None:
         row_units = HIDDEN * 2 // 16
@@ -204,7 +223,22 @@ class QkvFrontKernel:
             oob_fill=TensorMapFloatOOBFill.none,
         )
         self.kernel(
-            tm_w, tm_x, positions, cos_sin, slots, kv_cache, y, m, n, hq, hkv, rope, eps
+            tm_w,
+            tm_x,
+            positions,
+            cos_sin,
+            slots,
+            kv_cache,
+            kv_page_stride,
+            y,
+            m,
+            n,
+            hq,
+            hkv,
+            rope,
+            eps,
+            inv_k_scale,
+            inv_v_scale,
         ).launch(
             grid=((n // HEAD_DIM) * self.splits, 1, 1),
             block=(THREADS, 1, 1),
@@ -225,6 +259,7 @@ class QkvFrontKernel:
         cos_sin: Int64,
         slots: Int64,
         kv_cache: Int64,
+        kv_page_stride: Int64,
         y: Int64,
         m: Int32,
         n: Int32,
@@ -232,6 +267,8 @@ class QkvFrontKernel:
         hkv: Int32,
         rope: Int32,
         eps: Float32,
+        inv_k_scale: Float32,
+        inv_v_scale: Float32,
     ) -> None:
         splits, stages = self.splits, self.stages
         tidx, _, _ = cute.arch.thread_idx()
@@ -306,6 +343,7 @@ class QkvFrontKernel:
                 cos_sin,
                 slots,
                 kv_cache,
+                kv_page_stride,
                 y,
                 n,
                 hq,
@@ -358,8 +396,11 @@ class QkvFrontKernel:
                 hq,
                 hkv,
                 eps,
+                inv_k_scale,
+                inv_v_scale,
                 y + (Int64(token) * Int64(n) + Int64(row0)) * 2,
                 kv_cache,
+                kv_page_stride,
                 lane,
             )
         cute.arch.cluster_wait()
@@ -371,6 +412,7 @@ class QkvFrontKernel:
         cos_sin,
         slots,
         kv_cache,
+        kv_page_stride,
         y,
         n,
         hq,
@@ -398,11 +440,31 @@ class QkvFrontKernel:
                 y + (Int64(token) * Int64(n) + Int64(head * HEAD_DIM)) * 2
             )
             if slot >= 0 and head >= group_k and head < group_g:
+                eb = self.elem_bytes
                 if head < group_v:
-                    prefetch_global_l2(_cache_row(kv_cache, slot, hkv, head - group_k))
+                    prefetch_global_l2(
+                        _cache_row(
+                            kv_cache,
+                            kv_page_stride,
+                            slot,
+                            hkv,
+                            head - group_k,
+                            eb,
+                            self.slots,
+                        )
+                    )
                 else:
                     prefetch_global_l2(
-                        _cache_row(kv_cache, slot, hkv, head - group_v) + HEAD_DIM * 2
+                        _cache_row(
+                            kv_cache,
+                            kv_page_stride,
+                            slot,
+                            hkv,
+                            head - group_v,
+                            eb,
+                            self.slots,
+                        )
+                        + HEAD_DIM * eb
                     )
         if rope != 0 and head < group_v:
             position = Int64(0)
@@ -597,14 +659,19 @@ class QkvFrontKernel:
         hq,
         hkv,
         eps,
+        inv_k_scale,
+        inv_v_scale,
         y_row,
         kv_cache,
+        kv_page_stride,
         lane,
     ) -> None:
         """Epilogue of local token `u` (head columns 2 lane, 2 lane + 1): the
         splits partials summed in rank order and rounded to BF16, then for q and
         k heads the RMS norm and RoPE (`cv`, `sn`: this lane's cos and
-        sin), the y store and, for k and v heads, the cache row of `slot`."""
+        sin), the y store and, for k and v heads, the cache row of `slot`
+        (FP8: the BF16 values times the inverse scale, saturated E4M3)."""
+        eb = self.elem_bytes
         group_k, group_v, group_g = hq, hq + hkv, hq + 2 * hkv
         vx = Float32(0.0)
         vy = Float32(0.0)
@@ -637,16 +704,27 @@ class QkvFrontKernel:
                 o1 = r1
             out = pack_bf16x2_rn(o0, o1)
             if head >= group_k and slot >= 0:
-                store_global_u32_address(
-                    _cache_row(kv_cache, slot, hkv, head - group_k) + Int64(lane) * 4,
-                    out,
+                row = _cache_row(
+                    kv_cache, kv_page_stride, slot, hkv, head - group_k, eb, self.slots
                 )
+                if cutlass.const_expr(self.kind == "fp8"):
+                    k0, k1 = bf16x2_to_f32x2(out)
+                    store_global_u16_bits(
+                        row + Int64(lane) * 2, quant_e4m3x2(k0, k1, inv_k_scale)
+                    )
+                else:
+                    store_global_u32_address(row + Int64(lane) * 4, out)
         elif head < group_g and slot >= 0:
-            store_global_u32_address(
-                _cache_row(kv_cache, slot, hkv, head - group_v)
-                + Int64(HEAD_DIM * 2 + lane * 4),
-                raw,
+            row = _cache_row(
+                kv_cache, kv_page_stride, slot, hkv, head - group_v, eb, self.slots
             )
+            if cutlass.const_expr(self.kind == "fp8"):
+                v0, v1 = bf16x2_to_f32x2(raw)
+                store_global_u16_bits(
+                    row + Int64(HEAD_DIM + lane * 2), quant_e4m3x2(v0, v1, inv_v_scale)
+                )
+            else:
+                store_global_u32_address(row + Int64(HEAD_DIM * 2 + lane * 4), raw)
         store_global_u32_address(y_row + Int64(lane) * 4, out)
 
 
@@ -655,12 +733,21 @@ def _k_tile_dynamic(i: Int32, rank: Int32, splits: int) -> Int32:
     return ((i // KSTRIPE) * (splits * KSTRIPE) + rank * KSTRIPE + i % KSTRIPE) * KT
 
 
-def _cache_row(kv_cache: Int64, slot: Int64, hkv: Int32, kv_head: Int32) -> Int64:
-    """Byte address of the [pages, hkv, 16, 128] BF16 cache row of `slot`
-    for KV head `kv_head` (64-bit: cache offsets exceed 2^31)."""
-    page = slot >> 4
-    row = (page * Int64(hkv) + Int64(kv_head)) * BLOCK_SIZE + (slot & 15)
-    return kv_cache + row * (2 * HEAD_DIM * 2)
+def _cache_row(
+    kv_cache: Int64,
+    page_stride: Int64,
+    slot: Int64,
+    hkv: Int32,
+    kv_head: Int32,
+    elem_bytes: int,
+    slots: int = BLOCK_SIZE,
+) -> Int64:
+    """Byte address of the [pages, hkv, slots, 128] cache row (`elem_bytes`
+    per element, pages `page_stride` bytes apart) of `slot` for KV head
+    `kv_head` (64-bit: cache offsets exceed 2^31)."""
+    page = slot >> (slots.bit_length() - 1)
+    row = Int64(kv_head) * slots + (slot & (slots - 1))
+    return kv_cache + page * page_stride + row * (2 * HEAD_DIM * elem_bytes)
 
 
 def variant(n: int, m: int) -> tuple[int, int, int, int]:
@@ -680,33 +767,47 @@ def supports_shape(n: int, num_kv_heads: int) -> bool:
 
 @cache
 def compile_qkv_front(
-    tiles: int, stages: int, splits: int, fixed_m: int, options: str = ""
+    tiles: int,
+    stages: int,
+    splits: int,
+    fixed_m: int,
+    fmt: kvf.KvLayout = kvf.BF16,
+    options: str = "",
 ):
     """The compiled variant, shared by every layer and shape it serves, with
     these extra compile `options`; called (TVM FFI) as fn(w, x, positions,
-    cos_sin, slots, kv_cache, y, m, n, hq, hkv, rope, eps, stream) with byte
-    addresses and the stream handle as ints."""
+    cos_sin, slots, kv_cache, kv_page_stride, y, m, n, hq, hkv, rope, eps,
+    inv_k_scale, inv_v_scale, stream) with byte addresses and the stream handle as ints
+    (the inverse scales are read by the FP8 variant only)."""
     assert_not_capturing("the QKV front")
     address = Int64(0)
     return cute.compile(
-        QkvFrontKernel(tiles, stages, splits, fixed_m),
-        *(address,) * 7,
+        QkvFrontKernel(tiles, stages, splits, fixed_m, fmt),
+        *(address,) * 6,
+        Int64(16),
+        address,
         Int32(1),
         Int32(HEAD_DIM * 4),
         Int32(1),
         Int32(1),
         Int32(1),
         Float32(1e-5),
+        Float32(1.0),
+        Float32(1.0),
         make_fake_stream(),
         options=f"--enable-tvm-ffi {options}".strip(),
     )
 
 
-def prepare(n: int, rows: Iterable[int] = range(1, MAX_TOKENS + 1)) -> None:
-    """Compile the variants that N columns and these row counts take (before
-    CUDA graph capture)."""
+def prepare(
+    n: int,
+    rows: Iterable[int] = range(1, MAX_TOKENS + 1),
+    fmt: kvf.KvLayout = kvf.BF16,
+) -> None:
+    """Compile the variants that N columns and these row counts take, for a
+    cache of layout `fmt` (before CUDA graph capture)."""
     for m in rows:
-        compile_qkv_front(*variant(n, m))
+        compile_qkv_front(*variant(n, m), fmt)
 
 
 def hidden_rows_ok(t: torch.Tensor) -> bool:
@@ -718,27 +819,6 @@ def hidden_rows_ok(t: torch.Tensor) -> bool:
         and t.shape[1] == HIDDEN
         and t.is_contiguous()
         and t.data_ptr() % 16 == 0
-    )
-
-
-def kv_cache_layout_ok(kv_cache: torch.Tensor, num_kv_heads: int) -> bool:
-    """Whether a KV cache has the layout the QKV front and attn2 read: bf16
-    `[pages, num_kv_heads, 16, 128]` (K | V per slot), dense pages of dense
-    heads, 16-byte aligned."""
-    row = 2 * HEAD_DIM
-    if (
-        kv_cache.dtype != torch.bfloat16
-        or kv_cache.dim() != 4
-        or tuple(kv_cache.shape[1:]) != (num_kv_heads, BLOCK_SIZE, row)
-    ):
-        return False
-    stride = kv_cache.stride()
-    return (
-        stride[0] == num_kv_heads * BLOCK_SIZE * row
-        and (num_kv_heads == 1 or stride[1] == BLOCK_SIZE * row)
-        and stride[2] == row
-        and stride[3] == 1
-        and kv_cache.data_ptr() % 16 == 0
     )
 
 
@@ -756,9 +836,13 @@ def unsupported(
     slot_mapping: torch.Tensor,
     kv_cache: torch.Tensor,
     out: torch.Tensor | None = None,
+    kv_quant: kvf.KvQuant | None = None,
 ) -> str | None:
     """Why the kernel cannot take this call (with `out`, also its output),
-    or None."""
+    or None. `kv_quant` marks an FP8 cache (None: BF16)."""
+    fmt = kvf.kind_of(kv_quant)
+    if fmt not in kvf.KINDS:
+        return f"KV cache format {fmt}"
     if not x.is_cuda:
         return "x must be a CUDA tensor"
     if not hidden_rows_ok(x):
@@ -790,11 +874,15 @@ def unsupported(
             f"cos_sin_cache must be a contiguous fp32 [P, {HEAD_DIM}] tensor on "
             "x's device"
         )
-    if not kv_cache_layout_ok(kv_cache, hkv):
+    if not kvf.layout_ok(kv_cache, hkv, fmt):
         return (
-            f"kv_cache must be a 16-byte aligned bf16 [pages, HKV, {BLOCK_SIZE}, "
-            f"{2 * HEAD_DIM}] tensor with rows at (page * HKV + head) * 16 + offset"
+            f"kv_cache must be a 16-byte aligned {fmt} cache of {hkv} KV heads "
+            "with dense pages (kv_format)"
         )
+    if kv_quant is not None and not all(
+        math.isfinite(x) and x > 0 for x in (kv_quant.k_scale, kv_quant.v_scale)
+    ):
+        return f"{kv_quant} must have finite, positive scales"
     tensors = [weight, positions, slot_mapping, kv_cache]
     if out is not None:
         # The y stores are 4-byte words.
@@ -821,10 +909,13 @@ def launch(
     kv_cache: torch.Tensor,
     out: torch.Tensor,
     eps: float,
+    kv_quant: kvf.KvQuant | None = None,
 ) -> None:
     """`qkv_front` without its checks: for a call `unsupported` took with
-    this `out`."""
+    this `out` and this `kv_quant`."""
     m, n = x.shape[0], weight.shape[0]
+    fmt = kvf.kind_of(kv_quant)
+    inv_k, inv_v = inverse_scales(kv_quant)
     hkv = kv_cache.shape[1]
     device = x.get_device()
     on_device(
@@ -833,12 +924,14 @@ def launch(
         device,
         n,
         m,
+        kvf.layout_of(kv_cache, fmt),
         weight.data_ptr(),
         x.data_ptr(),
         positions.data_ptr(),
         0 if cos_sin_cache is None else cos_sin_cache.data_ptr(),
         slot_mapping.data_ptr(),
         kv_cache.data_ptr(),
+        kv_cache.stride(0) * kv_cache.element_size(),
         out.data_ptr(),
         m,
         n,
@@ -846,13 +939,26 @@ def launch(
         hkv,
         int(cos_sin_cache is not None),
         eps,
+        inv_k,
+        inv_v,
     )
 
 
-def _compile_and_call(device: int, n: int, m: int, *args) -> None:
+def inverse_scales(kv_quant: kvf.KvQuant | None) -> tuple[float, float]:
+    """(1 / k_scale, 1 / v_scale) as the stock inserts compute them (FP32
+    division); (1, 1) for a BF16 cache."""
+    if kv_quant is None:
+        return 1.0, 1.0
+    one = fp32(1.0)
+    return fp32(one / fp32(kv_quant.k_scale)), fp32(one / fp32(kv_quant.v_scale))
+
+
+def _compile_and_call(device: int, n: int, m: int, fmt: kvf.KvLayout, *args) -> None:
     """The (N, M) variant called on the current stream of `device`, which is
     current: a first compile targets the inputs' device too."""
-    compile_qkv_front(*variant(n, m))(*args, torch._C._cuda_getCurrentRawStream(device))
+    compile_qkv_front(*variant(n, m), fmt)(
+        *args, torch._C._cuda_getCurrentRawStream(device)
+    )
 
 
 def qkv_front(
@@ -864,17 +970,21 @@ def qkv_front(
     kv_cache: torch.Tensor,
     out: torch.Tensor,
     eps: float,
+    kv_quant: kvf.KvQuant | None = None,
 ) -> None:
     """Out [M, N] = x [M, 8192] @ weight [N, 8192]^T with the q and k heads
     RMS-normalized (and rotated when `cos_sin_cache` is given), and the
     normalized k and raw v heads written to the kv_cache rows of
-    `slot_mapping` (-1: none). N = (2 HQ + 2 HKV) * 64, HKV =
-    kv_cache.size(1). Launched with PDL on the current stream of x's device;
+    `slot_mapping` (-1: none): BF16, or FP8 with `kv_quant`'s
+    scales (`kv_format`). N = (2 HQ + 2 HKV) * 64, HKV the cache's KV
+    heads. Launched with PDL on the current stream of x's device;
     raises ValueError for a call outside the kernel (`unsupported`).
     Graph-capturable once `prepare` has compiled the variant."""
     reason = unsupported(
-        x, weight, positions, cos_sin_cache, slot_mapping, kv_cache, out
+        x, weight, positions, cos_sin_cache, slot_mapping, kv_cache, out, kv_quant
     )
     if reason is not None:
         raise ValueError(reason)
-    launch(x, weight, positions, cos_sin_cache, slot_mapping, kv_cache, out, eps)
+    launch(
+        x, weight, positions, cos_sin_cache, slot_mapping, kv_cache, out, eps, kv_quant
+    )

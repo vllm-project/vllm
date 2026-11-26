@@ -80,13 +80,13 @@ HF_HUB_AMD_ORG_ACCESS = all(
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class ModelCase:
     model_id: str
     tp: int
 
 
-@dataclass
+@dataclass(slots=True)
 class EvaluationConfig:
     model_name: str
 
