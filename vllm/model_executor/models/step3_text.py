@@ -318,7 +318,6 @@ class Step3TextModel(nn.Module):
         quant_config = vllm_config.quant_config
         self.vocab_size = config.vocab_size
         self.config = config
-        # Lets AutoWeightsLoader map checkpoint KV-cache scale names.
         self.quant_config = quant_config
 
         if get_pp_group().is_first_rank or (

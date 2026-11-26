@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import partial
+
 import pytest
 import regex as re
 import torch
 
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -379,3 +382,100 @@ def test_cache_scale_rules_run_before_stacked_rules(quant_config, name, expected
     assert mapper.map_name("h.0.self_attn.k_proj.weight") == (
         "h.0.self_attn.qkv_proj.weight"
     )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("scale_name", ["{kind}_scale", "{kind}_proj.{kind}_scale"])
+def test_zamba2_loads_scales_into_shared_attention_slots(scale_name):
+    from vllm.model_executor.models.zamba2 import _broadcast_kv_cache_scales
+
+    attention_indices = {
+        "blocks.0.self_attn": [0, 2],
+        "blocks.1.self_attn": [1],
+    }
+    model = torch.nn.Module()
+    model.blocks = torch.nn.ModuleList()
+    model.ordinary = torch.nn.Parameter(torch.zeros(2))
+    for indices in attention_indices.values():
+        block = torch.nn.Module()
+        block.self_attn = torch.nn.Module()
+        block.self_attn.dpa_list = torch.nn.ModuleList(
+            torch.nn.ParameterDict(
+                {
+                    kind + "_scale": torch.nn.Parameter(torch.tensor(-1.0))
+                    for kind in ("k", "v")
+                }
+            )
+            if i in indices
+            else torch.nn.Identity()
+            for i in range(3)
+        )
+        model.blocks.append(block)
+    alias = torch.nn.Module()
+    alias.self_attn = model.blocks[0].self_attn
+    model.blocks.append(alias)
+    attention_indices["blocks.2.self_attn"] = [0, 2]
+
+    scale_mapper = QuantizationConfig.get_cache_scale_mapper()
+    mapper = (
+        WeightsMapper(
+            weights_transforms=[
+                partial(
+                    _broadcast_kv_cache_scales,
+                    attention_indices=attention_indices,
+                    scale_mapper=scale_mapper,
+                )
+            ],
+            orig_to_new_substr={
+                f".dpa_list.{i}.attn.": f".dpa_list.{i}." for i in range(3)
+            },
+        )
+        | scale_mapper
+    )
+    ordinary = torch.tensor([2.0, 3.0])
+    weights = [("ordinary", ordinary)]
+    expected = {"ordinary": ordinary}
+    for block_index, (prefix, indices) in enumerate(attention_indices.items()):
+        for kind, value in (("k", 0.5), ("v", 0.25)):
+            scale = torch.tensor(value / (block_index % 2 + 1))
+            weights.append((f"{prefix}.{scale_name.format(kind=kind)}", scale))
+            expected.update(
+                {f"{prefix}.dpa_list.{i}.{kind}_scale": scale for i in indices}
+            )
+
+    mapped = list(mapper.apply(iter(weights)))
+    assert mapped[0][0] == "ordinary" and mapped[0][1] is ordinary
+    loaded = AutoWeightsLoader(model).load_weights(iter(weights), mapper=mapper)
+
+    assert loaded == expected.keys()
+    for name, value in expected.items():
+        torch.testing.assert_close(model.get_parameter(name), value, rtol=0, atol=0)
+
+
+@pytest.mark.cpu_test
+def test_zamba2_scale_broadcast_keeps_independent_slot_mappings():
+    from vllm.model_executor.models.zamba2 import _broadcast_kv_cache_scales
+
+    scale_mapper = QuantizationConfig.get_cache_scale_mapper()
+    scale = torch.tensor(0.5)
+    first = partial(
+        _broadcast_kv_cache_scales,
+        attention_indices={"block.self_attn": [0, 2]},
+        scale_mapper=scale_mapper,
+    )
+    second = partial(
+        _broadcast_kv_cache_scales,
+        attention_indices={"block.self_attn": [1]},
+        scale_mapper=scale_mapper,
+    )
+    for transform, indices in ((first, [0, 2]), (second, [1]), (first, [0, 2])):
+        mapped = list(
+            transform(
+                iter([("block.self_attn.k_scale", scale), ("other.k_scale", scale)])
+            )
+        )
+        assert [name for name, _ in mapped] == [
+            *(f"block.self_attn.dpa_list.{i}.attn.k_scale" for i in indices),
+            "other.k_scale",
+        ]
+        assert all(tensor is scale for _, tensor in mapped)
