@@ -32,11 +32,9 @@ class KimiLinearDSAConfig:
     # Norm on the indexer shared key: "rmsnorm" or "layernorm" (bias-full
     # fp32 LayerNorm; the converter detects it from k_index_norm.bias).
     index_k_norm_type: str = "rmsnorm"
-    indexer_use_fp8: bool = False
-    # Checkpoint schema parity fields; Kimi-K3.1 supports only
+    # Checkpoint schema parity field; Kimi-K3.1 supports only
     # index_topk_freq == 1 (no index share), other values fail loudly.
     index_topk_freq: int = 1
-    index_skip_topk_offset: int = 1
 
     @classmethod
     def from_dict(cls, config_dict: dict[str, Any]) -> "KimiLinearDSAConfig":

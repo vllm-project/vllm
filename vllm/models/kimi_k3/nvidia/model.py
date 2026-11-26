@@ -99,8 +99,8 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm.models.kimi_k3.common.dsa_cache import packed_dsa_block_size
+from vllm.models.kimi_k3.common.gqa_draft import GQADraftKVCacheGrouping
 from vllm.models.kimi_k3.nvidia.dsa import KimiK3DSAAttention
-from vllm.models.kimi_k3.nvidia.gqa_draft import GQADraftKVCacheGrouping
 from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
     LatentMoERunner,

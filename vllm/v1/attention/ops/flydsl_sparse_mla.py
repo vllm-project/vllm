@@ -22,14 +22,14 @@ import functools
 
 import torch
 
-from vllm.models.kimi_k3.amd.ops.flydsl_sparse_mla_gfx950 import (
+from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
+from vllm.v1.attention.ops.flydsl_sparse_mla_gfx950 import (
     KV_LORA_RANK,
     MAX_HEADS,
     QK_ROPE_HEAD_DIM,
     RECORD_BYTES,
     build_sparse_mla_fp8ds_module,
 )
-from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 
 # Softmax runs in exp2.
 LOG2E = 1.4426950408889634
@@ -37,7 +37,6 @@ LOG2E = 1.4426950408889634
 __all__ = [
     "flydsl_sparse_mla_fp8ds_fwd",
     "flydsl_sparse_mla_fp8ds_supported",
-    "flydsl_sparse_mla_fp8ds_warmup",
 ]
 
 # KV rows are addressed in 64 bits, so the cache has no size cap. The index
@@ -231,8 +230,7 @@ def flydsl_sparse_mla_fp8ds_fwd(
     returns NaN out for such a row).
 
     The first call for a new (H, has_invalid, return_lse) JIT-compiles the
-    kernel: call `flydsl_sparse_mla_fp8ds_warmup` before CUDA-graph capture.
-    The launch itself does no host sync.
+    kernel; the launch itself does no host sync.
 
     Returns:
         (out, lse), lse is None unless return_lse.
@@ -293,35 +291,3 @@ def flydsl_sparse_mla_fp8ds_fwd(
         torch.cuda.current_stream(q.device),
     )
     return out, lse
-
-
-def flydsl_sparse_mla_fp8ds_warmup(
-    device: torch.device | str | int | None = None,
-    heads: tuple[int, ...] = (1, 2, 4, 6, 8, 12, 16),
-    has_invalid: tuple[bool, ...] = (False, True),
-    return_lse: tuple[bool, ...] = (False, True),
-) -> None:
-    """Compile (and run once on a one-token problem) every listed configuration,
-    so no JIT compile lands inside a CUDA-graph capture."""
-    dev = (
-        torch.device("cuda", torch.accelerator.current_device_index())
-        if device is None
-        else torch.device(device)
-    )
-    kv = torch.zeros(1, RECORD_BYTES, dtype=torch.uint8, device=dev)
-    indptr = torch.tensor([0, 1], dtype=torch.int32, device=dev)
-    indices = torch.zeros(1, dtype=torch.int32, device=dev)
-    for num_heads in heads:
-        q = torch.zeros(
-            1,
-            num_heads,
-            KV_LORA_RANK + QK_ROPE_HEAD_DIM,
-            dtype=torch.bfloat16,
-            device=dev,
-        )
-        for hi in has_invalid:
-            for rl in return_lse:
-                flydsl_sparse_mla_fp8ds_fwd(
-                    q, kv, indptr, indices, 1.0, has_invalid=hi, return_lse=rl
-                )
-    torch.accelerator.synchronize(dev)

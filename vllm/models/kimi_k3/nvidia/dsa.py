@@ -11,7 +11,6 @@ sparse MLA layers go through `MultiHeadLatentAttentionWrapper` with
 and `weights_proj` into the merged `wkv_index`.
 """
 
-import math
 from typing import Any, cast
 
 import torch
@@ -35,7 +34,7 @@ from vllm.model_executor.layers.mla import (
     MultiHeadLatentAttentionWrapper,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.common import yarn_get_mscale
 from vllm.model_executor.layers.sparse_attn_indexer import dcp_shardq_context
 from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.models.kimi_k3.common.dsa_cache import (
@@ -43,7 +42,6 @@ from vllm.models.kimi_k3.common.dsa_cache import (
     indexer_cache_entry_bytes,
     kimi_k3_indexer_uses_fp4,
 )
-from vllm.models.kimi_k3.nvidia.index_rope import index_rope
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import (
     low_latency_linear,
     request_low_latency_warmup,
@@ -74,12 +72,6 @@ from vllm.v1.attention.backends.mla.index_group import (
 )
 
 logger = init_logger(__name__)
-
-
-def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
-    if scale <= 1:
-        return 1.0
-    return 0.1 * mscale * math.log(scale) + 1.0
 
 
 class KimiK3DSAIndexerKNorm(nn.Module):
@@ -137,21 +129,11 @@ class KimiK3DSAIndexer(nn.Module):
         # MLAModules contract: MultiHeadLatentAttention asserts the indexer
         # exposes topk_tokens.
         self.topk_tokens = index_topk
-        # Leading dims of every indexer head that receive RoPE. Weights are
-        # pair-permuted at checkpoint conversion (interleaved -> half-split),
-        # so serving applies neox-style rope with the main-attention
-        # cos_sin_cache (YaRN scaling therefore carries over automatically).
-        # 0 = pre-rope checkpoints; the forward path is then unchanged.
-        if index_rope_dim < 0 or index_rope_dim % 2 != 0:
+        if index_rope_dim != 0:
             raise ValueError(
-                f"dsa_config.index_rope_dim must be even and >= 0, got {index_rope_dim}"
+                f"Kimi-K3.1 DSA requires index_rope_dim == 0, got {index_rope_dim}"
             )
-        if index_rope_dim > index_head_dim:
-            raise ValueError(
-                f"dsa_config.index_rope_dim ({index_rope_dim}) must not "
-                f"exceed index_head_dim ({index_head_dim})"
-            )
-        self.index_rope_dim = index_rope_dim
+        self.index_rope_dim = 0
         self.wq_index = ReplicatedLinear(
             index_q_input_size,
             self.index_num_heads * self.index_head_dim,
@@ -229,13 +211,29 @@ class KimiK3DSAIndexer(nn.Module):
         # DCP wiring, same as the upstream SparseAttnIndexer: the op merges
         # each rank's local top-K into the global top-K only when these are
         # passed through (sparse_attn_indexer.py:_merge_dcp_topk_global).
+        self._vllm_config = vllm_config
         self._parallel_config = vllm_config.parallel_config
         self.dcp_world_size = self._parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self._cp_kv_cache_interleave_size: int | None = None
         # The specialized decode merges each rank's packed local top-N in one
-        # exchange (0 keeps the generic merge).
-        self.dcp_local_topk = init_dcp_topk_merge(vllm_config, index_topk)
+        # exchange (0 keeps the generic merge). Only initialize eagerly when
+        # specialized decode is requested so stock DCP avoids unused symm_mem
+        # and JIT warmup; IndexerStage initializes lazily if constructed later.
+        self.dcp_local_topk = 0
+        extra = getattr(vllm_config, "additional_config", None)
+        if (
+            isinstance(extra, dict)
+            and extra.get("decode_backend", "auto") == "latency_specialized"
+        ):
+            self.init_dcp_topk_merge()
+
+    def init_dcp_topk_merge(self) -> int:
+        if not self.dcp_local_topk and self.dcp_world_size > 1:
+            self.dcp_local_topk = init_dcp_topk_merge(
+                self._vllm_config, self.topk_tokens
+            )
+        return self.dcp_local_topk
 
     @property
     def cp_kv_cache_interleave_size(self) -> int:
@@ -247,34 +245,6 @@ class KimiK3DSAIndexer(nn.Module):
                 self._cp_kv_cache_interleave_size = value
             return value
         return self._cp_kv_cache_interleave_size
-
-    def _apply_index_rope(
-        self,
-        index_q: torch.Tensor,
-        index_k: torch.Tensor,
-        positions: torch.Tensor,
-        rotary_emb: nn.Module,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """RoPE on the leading index_rope_dim dims of each head.
-
-        Slices the leading index_rope_dim//2 frequencies from the main
-        attention's cos_sin_cache (matching training, which reuses the
-        leading freqs of the main freqs_cis for the indexer), computes in
-        fp32 and casts back. index_q: [T, H, D]; index_k: [T, D] (already
-        k_index_norm-ed, matching the training order norm -> rope).
-
-        Uses the neox/half-split pairing (dim i pairs with dim i+half),
-        matching the pair-permuted checkpoint conversion.
-        """
-        index_rope(
-            index_q,
-            index_k,
-            positions.view(-1),
-            rotary_emb.cos_sin_cache,
-            self.index_rope_dim,
-            False,  # interleave: neox/half-split
-        )
-        return index_q, index_k
 
     def _shardq_indexer_rows(self) -> torch.Tensor | None:
         """The rows a ShardQ step scores on this rank (decode rows, then this
@@ -355,15 +325,6 @@ class KimiK3DSAIndexer(nn.Module):
             index_k = None
         else:
             index_k = self.k_index_norm(index_k)
-            if self.index_rope_dim > 0:
-                assert positions is not None and rotary_emb is not None, (
-                    "index_rope_dim > 0 requires positions and the main "
-                    "attention rotary_emb (mla_use_nope models cannot enable "
-                    "indexer rope)"
-                )
-                index_q, index_k = self._apply_index_rope(
-                    index_q, index_k, positions, rotary_emb
-                )
         return self.score(hidden_states, index_q, index_weights, index_k)
 
     def score(
@@ -448,8 +409,8 @@ class KimiK3DSAAttention(nn.Module):
             raise ValueError("dsa_config is required for KimiK3DSAAttention")
         if current_platform.is_rocm():
             raise NotImplementedError(
-                "Kimi-K3.1 DSA requires the CUDA FlashMLA sparse / DeepGEMM "
-                "indexer kernels; ROCm is not supported."
+                "vllm.models.kimi_k3.nvidia.dsa requires CUDA; "
+                "ROCm uses vllm.models.kimi_k3.amd.dsa."
             )
         self.hidden_size = hidden_size
         self.qk_nope_head_dim = qk_nope_head_dim
@@ -523,26 +484,12 @@ class KimiK3DSAAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        # Full-attention layers are NoPE; the rope path below only runs for
-        # checkpoints whose MLA uses positional encoding (GPT-J interleaved
-        # rope dims; freqs are identical, only the dim pairing differs).
+        if not config.mla_use_nope:
+            raise ValueError("Kimi-K3.1 DSA is NoPE-only (requires mla_use_nope).")
+        self.use_nope = True
+        self.rotary_emb = None
         rope_parameters: dict = dict(getattr(config, "rope_parameters", None) or {})
-        if "rope_theta" not in rope_parameters:
-            rope_parameters["rope_theta"] = 10000.0
-        is_scaled_rope = rope_parameters.get("rope_type") not in (None, "default")
-        self.use_nope = bool(config.mla_use_nope)
-        if self.use_nope:
-            self.rotary_emb = None
-        else:
-            if is_scaled_rope:
-                rope_parameters["rope_type"] = "deepseek_yarn"
-            self.rotary_emb = get_rope(
-                qk_rope_head_dim,
-                max_position=self.max_position_embeddings,
-                is_neox_style=False,
-                rope_parameters=rope_parameters,
-            )
-        if is_scaled_rope:
+        if rope_parameters.get("rope_type") not in (None, "default"):
             mscale_all_dim = rope_parameters.get("mscale_all_dim", False)
             scaling_factor = rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
@@ -563,18 +510,12 @@ class KimiK3DSAAttention(nn.Module):
         self.index_topk = dsa_config.index_topk
         self.index_head_dim = dsa_config.index_head_dim
         self.index_num_heads = dsa_config.index_num_heads
-        self.index_rope_dim = dsa_config.index_rope_dim
-        if self.index_rope_dim > 0 and self.use_nope:
+        if dsa_config.index_rope_dim != 0:
             raise ValueError(
-                "dsa_config.index_rope_dim > 0 is incompatible with "
-                "mla_use_nope (there is no rotary cache to share)"
+                "Kimi-K3.1 DSA requires index_rope_dim == 0 "
+                f"(got {dsa_config.index_rope_dim})."
             )
-        if self.index_rope_dim > min(self.qk_rope_head_dim, self.index_head_dim):
-            raise ValueError(
-                f"dsa_config.index_rope_dim ({self.index_rope_dim}) must "
-                f"not exceed min(qk_rope_head_dim={self.qk_rope_head_dim}, "
-                f"index_head_dim={self.index_head_dim})"
-            )
+        self.index_rope_dim = 0
 
         vllm_config = get_current_vllm_config()
         if topk_indices_buffer is None:

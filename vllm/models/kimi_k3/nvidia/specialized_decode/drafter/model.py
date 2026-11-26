@@ -17,7 +17,7 @@ What changes against the stock `K3DSparkForCausalLM` (all exact):
   query gather and LSE combine + W_UV on the specialized decode's DCP mailboxes
   (`attention.DraftDcp`). `forward` replaces `K3DSparkModel.forward` for the
   batches these serve (the stock forward otherwise). The draft layers' all-reduce
-  + RMSNorm sites stay on flashinfer's fused one-shot (`LAYER_AR_ROWS`).
+  + RMSNorm sites stay on flashinfer's fused one-shot.
 
 All of it lives here: `register` makes vLLM build `SpecializedK3DSparkForCausalLM`
 (a subclass of the stock drafter) for the DSpark draft architecture, and the stock
@@ -144,12 +144,6 @@ def install_draft_fold(attn) -> None:
     token; the stock `forward_mqa` for a batch it does not fold)."""
     from .attention import draft_forward_mqa
 
-    if not attn.non_causal_multi_token_decode:
-        # A causal draft block: the TP decode folds its shared context
-        # (attention.causal_folded_decode), and DraftDcp serves it under DCP.
-        attn.impl.__class__ = _folded_impl(type(attn.impl))  # type: ignore[arg-type]
-        attn.draft_fold = draft_forward_mqa  # read by DraftDcp.eligible
-        return
     attn.draft_fold = draft_forward_mqa  # read by DraftDcp.eligible
     attn.impl.__class__ = _folded_impl(type(attn.impl))  # type: ignore[arg-type]
 
@@ -324,11 +318,6 @@ def _prepared_embedding(backbone, tp):
 # ~8.4 us at 16 rows) instead of the stock lookup + all-reduce + RMSNorm (~14 us);
 # above it the fused one-shot trails (13.7 us at 48 rows).
 EMBED_ROWS = 16
-# Rows up to which the draft layers' all-reduce + RMSNorm sites run ArNorm instead
-# of flashinfer's fused one-shot. Per call in isolation (8 GB300 ranks, us, ArNorm /
-# flashinfer): 6.7 / 6.6 at 4 rows, 8.4 / 7.2 at 16, 13.7 /
-# 8.2 at 48.
-LAYER_AR_ROWS = 0
 
 
 def forward(backbone, comm, dcp, embed, input_ids, positions, inputs_embeds):
@@ -345,16 +334,6 @@ def forward(backbone, comm, dcp, embed, input_ids, positions, inputs_embeds):
     if not 1 <= rows <= ROWS_CAP:
         return None
     layers = backbone.layers
-
-    site = [1]  # the embedding's ArNorm takes parity 0
-
-    def reduce(x, residual, norm):
-        if rows <= LAYER_AR_ROWS:
-            out = comm.ar_norm(x, residual, norm, site[0] % 2)
-            site[0] += 1
-            if out is not None:
-                return out
-        return fused_allreduce_rms_norm(x, residual, norm)
 
     first_norm = layers[0].input_layernorm
     if (
@@ -381,13 +360,17 @@ def forward(backbone, comm, dcp, embed, input_ids, positions, inputs_embeds):
         hidden = first_norm(inputs_embeds)
     for index, layer in enumerate(layers):
         if index > 0:
-            hidden, residual = reduce(hidden, residual, layer.input_layernorm)
+            hidden, residual = fused_allreduce_rms_norm(
+                hidden, residual, layer.input_layernorm
+            )
         out = None
         if dcp is not None:
             out = dcp.forward(layer.self_attn, positions, hidden, index % 2)
         if out is None:
             out = layer.self_attn(positions=positions, hidden_states=hidden)
-        hidden, residual = reduce(out, residual, layer.post_attention_layernorm)
+        hidden, residual = fused_allreduce_rms_norm(
+            out, residual, layer.post_attention_layernorm
+        )
         hidden = layer.mlp(hidden)
-    hidden, _ = reduce(hidden, residual, backbone.final_norm)
+    hidden, _ = fused_allreduce_rms_norm(hidden, residual, backbone.final_norm)
     return hidden

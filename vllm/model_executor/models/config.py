@@ -1057,7 +1057,7 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
         ):
             cache_config.cache_dtype = "fp8_ds_mla"
         if vllm_config.speculative_config is not None:
-            from vllm.models.kimi_k3.nvidia.dense_draft import configure_dense_draft
+            from vllm.models.kimi_k3.common.dense_draft import configure_dense_draft
 
             configure_dense_draft(vllm_config.speculative_config, hf_text_config)
 

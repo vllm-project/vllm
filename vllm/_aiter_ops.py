@@ -4204,7 +4204,7 @@ class rocm_aiter_ops:
         """
         error: Exception | None = None
         for module in (
-            "vllm.models.kimi_k3.amd.ops.flydsl_sparse_mla",
+            "vllm.v1.attention.ops.flydsl_sparse_mla",
             "aiter.ops.flydsl.sparse_mla",
         ):
             try:

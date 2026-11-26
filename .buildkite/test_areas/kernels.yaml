@@ -593,8 +593,8 @@ steps:
       - tests/kernels/attention/test_dcp_indexer_rocm.py
       - tests/kernels/attention/test_kimi_mxfp4_indexer.py
       - tests/kernels/attention/test_rocm_aiter_flydsl_sparse_mla.py
-      - vllm/models/kimi_k3/amd/ops/flydsl_sparse_mla.py
-      - vllm/models/kimi_k3/amd/ops/flydsl_sparse_mla_gfx950.py
+      - vllm/v1/attention/ops/flydsl_sparse_mla.py
+      - vllm/v1/attention/ops/flydsl_sparse_mla_gfx950.py
       - tests/kernels/attention/test_rocm_aiter_mla_sparse_index_remap.py
       - vllm/models/kimi_k3/amd/ops/fp4_indexer.py
       - vllm/models/kimi_k3/amd/dsa.py

@@ -87,17 +87,23 @@ class _Workspace:
     peer_ptrs: torch.Tensor
 
 
-# Shared by every layer; sizes come from the configuration.
+# Shared by every layer of a TP group; sizes come from the configuration.
 _workspace_buffer: _Workspace | None = None
+_workspace_group_name: str | None = None
 
 
 def _workspace(nbytes: int, device: torch.device) -> _Workspace:
     """The symmetric-memory workspace; every rank allocates it together."""
-    global _workspace_buffer
-    if _workspace_buffer is None:
-        group = get_tp_group().device_group
+    global _workspace_buffer, _workspace_group_name
+    group = get_tp_group().device_group
+    group_name = group.group_name
+    if (
+        _workspace_buffer is None
+        or _workspace_group_name != group_name
+        or _workspace_buffer.storage.numel() < nbytes
+    ):
         storage = symm_mem.empty(nbytes, dtype=torch.uint8, device=device)
-        handle = symm_mem.rendezvous(storage, group.group_name)
+        handle = symm_mem.rendezvous(storage, group_name)
         peer_ptrs = torch.tensor(
             [
                 handle.get_buffer(peer, [nbytes], torch.uint8, 0).data_ptr()
@@ -107,11 +113,11 @@ def _workspace(nbytes: int, device: torch.device) -> _Workspace:
             device=storage.device,
         )
         _workspace_buffer = _Workspace(storage, handle, peer_ptrs)
-    assert _workspace_buffer.storage.numel() >= nbytes
+        _workspace_group_name = group_name
     return _workspace_buffer
 
 
-_dcp_path_warmed_up = False
+_warmed_up_groups: set[str] = set()
 
 
 def reserve_dcp_shardq(mla_layer: "MLAAttention", device: torch.device) -> None:
@@ -120,7 +126,6 @@ def reserve_dcp_shardq(mla_layer: "MLAAttention", device: torch.device) -> None:
     and combine. DCP ShardQ takes most prefill steps off that path, so its
     first step may come late, after the KV cache took the memory its NCCL
     collectives allocate on first use."""
-    global _dcp_path_warmed_up
     vllm_config = mla_layer._vllm_config
     mla_bytes, index_bytes = _token_bytes(
         mla_layer.get_kv_cache_config(vllm_config).spec, mla_layer
@@ -132,9 +137,10 @@ def reserve_dcp_shardq(mla_layer: "MLAAttention", device: torch.device) -> None:
     )
     dcp = mla_layer.dcp_manager
     assert dcp is not None
-    if _dcp_path_warmed_up:
+    group_name = get_tp_group().device_group.group_name
+    if group_name in _warmed_up_groups:
         return
-    _dcp_path_warmed_up = True
+    _warmed_up_groups.add(group_name)
     num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     # The gathered query stays alive through the combine, as in a real step.
     query = None

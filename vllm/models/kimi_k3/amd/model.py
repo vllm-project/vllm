@@ -42,6 +42,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 
 from ..common.dsa_cache import packed_dsa_block_size
+from ..common.gqa_draft import GQADraftKVCacheGrouping
 from ..common.mm_preprocess import (
     KimiK3DummyInputsBuilder,
     KimiK3MultiModalProcessor,
@@ -65,6 +66,7 @@ class KimiK3ForConditionalGeneration(
     SupportsEagle3,
     HasInnerState,
     IsHybrid,
+    GQADraftKVCacheGrouping,
 ):
     """Kimi-K3 model with Kimi-K2.5 vision and KimiLinear text."""
 

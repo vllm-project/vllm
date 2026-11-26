@@ -1593,14 +1593,6 @@ def rocm_aiter_sparse_attn_indexer(
             if dcp_world_size > 1:
                 local_length = chunk.local_total_seq_lens
                 cu_lens = chunk.local_cu_seq_lens
-                token_to_seq = (
-                    torch.searchsorted(
-                        cu_lens,
-                        torch.arange(local_length, device=q_fp8.device),
-                        right=True,
-                    ).to(torch.int32)
-                    - 1
-                )
                 if local_length == 0:
                     selected = topk_indices_buffer[
                         chunk.token_start : chunk.token_end, :topk_tokens
@@ -1619,6 +1611,15 @@ def rocm_aiter_sparse_attn_indexer(
                         cp_interleave,
                     )
                     continue
+                if not chunk.skip_kv_gather:
+                    token_to_seq = (
+                        torch.searchsorted(
+                            cu_lens,
+                            torch.arange(local_length, device=q_fp8.device),
+                            right=True,
+                        ).to(torch.int32)
+                        - 1
+                    )
             k_fp8 = k_fp8_full[:local_length]
             k_scale = k_scale_full[:local_length]
             # Query-split sub-chunks of one request share the K workspace
