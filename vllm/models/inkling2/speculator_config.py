@@ -24,7 +24,9 @@ class Inkling2DSparkSpeculatorConfig(DSparkSpeculatorConfig):
             # A callable can distinguish the target from the converted draft.
             source = spec.draft_model_config
             overrides = vars(draft)
-            if target.model == source.model and target.revision == source.revision:
+            if target.model == source.model and (
+                spec.revision is None or target.revision == source.revision
+            ):
                 overrides = vars(target.hf_config)
         draft.set_quantization(
             overrides.get(
