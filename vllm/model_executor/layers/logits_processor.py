@@ -111,9 +111,13 @@ class LogitsProcessor(PluggableLayer):
             )
         if logits is not None:
             if self.soft_cap is not None:
-                logits = logits / self.soft_cap
-                logits = torch.tanh(logits)
-                logits = logits * self.soft_cap
+                # In place unless the caller owns the logits, so that no second
+                # logits-sized tensor is live.
+                if self.logits_as_input:
+                    logits = logits / self.soft_cap
+                else:
+                    logits.div_(self.soft_cap)
+                logits.tanh_().mul_(self.soft_cap)
 
             if self.scale != 1.0:
                 logits *= self.scale
@@ -157,15 +161,15 @@ class LogitsProcessor(PluggableLayer):
             )
         if (
             self.head_dtype == torch.float32
-            and (current_platform.is_cuda() or current_platform.is_rocm())
-            and hidden_states.is_cuda
+            and (current_platform.is_cuda_alike() or current_platform.is_xpu())
+            and hidden_states.device.type == current_platform.device_type
         ):
             # Accumulate the projection directly into fp32. This avoids
             # materializing an fp32 copy of the lm_head weight on every step,
             # unlike casting both operands. `torch.mm(out_dtype=...)` only
             # supports fp32 output for fp16/bf16 inputs, and is only
-            # implemented for CUDA and ROCm (the latter via the non-Lt GEMM
-            # path); other platforms fall back to the cast path below.
+            # implemented for CUDA, ROCm (via the non-Lt GEMM path) and XPU;
+            # other platforms fall back to the cast path below.
             flat = hidden_states.reshape(-1, hidden_states.shape[-1])
             logits = torch.mm(flat, lm_head.weight.t(), out_dtype=self.head_dtype)
             if embedding_bias is not None:

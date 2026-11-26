@@ -25,7 +25,9 @@ use crate::error::Error;
 /// Request-neutral options for incremental text decoding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextDecodeOptions {
-    pub skip_special_tokens: bool,
+    /// `None` takes the model's generation-config default when the request is
+    /// lowered, and `true` without one.
+    pub skip_special_tokens: Option<bool>,
     pub include_stop_str_in_output: bool,
     pub stop_strings: Option<Vec<String>>,
     /// Minimum number of tokens to generate before stop-string checking kicks
@@ -41,7 +43,7 @@ pub struct TextDecodeOptions {
 impl Default for TextDecodeOptions {
     fn default() -> Self {
         Self {
-            skip_special_tokens: true,
+            skip_special_tokens: None,
             include_stop_str_in_output: false,
             stop_strings: None,
             min_tokens: 0,
@@ -97,6 +99,8 @@ pub struct Finished {
 /// updates.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SampledDelta {
+    /// Engine output-batch timestamp, on the same clock as `RequestTimestamps`.
+    pub timestamp: f64,
     /// Token IDs produced by this engine update, after stop-string truncation.
     pub token_ids: Vec<u32>,
     /// Per-position logprobs aligned with `token_ids`, when requested.
@@ -212,7 +216,7 @@ pub async fn decoded_text_event_stream(
             let dec = match text_tokenizer {
                 Some(tokenizer) => tokenizer.create_decode_stream(
                     prompt_token_ids,
-                    decode_options.skip_special_tokens,
+                    decode_options.skip_special_tokens.unwrap_or(true),
                     decode_options.min_bytes_to_buffer(),
                 ),
                 None => Box::new(TokenOnlyDecoder),
@@ -373,6 +377,7 @@ pub async fn decoded_text_event_stream(
             y.yield_ok(DecodedTextEvent::TextDelta {
                 decoded,
                 sampled: SampledDelta {
+                    timestamp: output.timestamps.last_token_ts,
                     token_ids: sampled_token_ids,
                     logprobs: sampled_logprobs,
                     sampling_mask: sampled_sampling_mask,
@@ -400,6 +405,7 @@ pub async fn decoded_text_event_stream(
             y.yield_ok(DecodedTextEvent::TextDelta {
                 decoded,
                 sampled: SampledDelta {
+                    timestamp: output.timestamps.last_token_ts,
                     token_ids: new_token_ids,
                     logprobs: decoded_logprobs,
                     sampling_mask: new_sampling_mask,
@@ -578,6 +584,7 @@ mod tests {
                 attributions: attributions.into_iter().collect(),
             },
             sampled: SampledDelta {
+                timestamp: finished.as_ref().map_or(0.0, |value| value.timestamps.last_token_ts),
                 token_ids: sampled_token_ids,
                 logprobs: None,
                 sampling_mask: None,
@@ -855,7 +862,7 @@ mod tests {
                 tokenizer,
                 stream::iter([Ok(output)]),
                 TextDecodeOptions {
-                    skip_special_tokens,
+                    skip_special_tokens: Some(skip_special_tokens),
                     ..Default::default()
                 },
                 false,
