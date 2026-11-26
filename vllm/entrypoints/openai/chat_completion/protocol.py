@@ -1229,6 +1229,17 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
                 "Please set `use_beam_search` to False.",
                 parameter="use_beam_search",
             )
+        if data.get("stream"):
+            raise VLLMValidationError(
+                "Batch chat completions do not support streaming. "
+                "Please set `stream` to False.",
+                parameter="stream",
+            )
+        if data.get("tools"):
+            raise VLLMValidationError(
+                "Batch chat completions do not support tools. Please omit `tools`.",
+                parameter="tools",
+            )
         if data.get("logprob_token_ids") and not data.get("logprobs"):
             raise VLLMValidationError(
                 "when using `logprob_token_ids`, `logprobs` must be set to true.",

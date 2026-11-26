@@ -595,6 +595,29 @@ def test_batch_rejects_kv_transfer_prompt_token_ids():
         )
 
 
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("stream", True),
+        (
+            "tools",
+            [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+        ),
+    ],
+)
+def test_batch_rejects_stream_and_tools(field, value):
+    with pytest.raises(VLLMValidationError, match=rf"parameter={field}"):
+        BatchChatCompletionRequest(
+            model="test-model",
+            messages=[
+                [{"role": "user", "content": "first"}],
+                [{"role": "user", "content": "second"}],
+            ],
+            **{field: value},
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
 async def test_batched_parser_receives_each_prompt_prefix() -> None:
