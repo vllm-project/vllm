@@ -735,11 +735,16 @@ def _decode_c_str(raw: bytes | str) -> str:
     return raw.strip()
 
 
+_ZES_DEVICE_PROPERTY_FLAG_INTEGRATED = 1 << 0
+_PCI_ADDR_SORT_SENTINEL = (0xFFFFFFFF, 0xFF, 0xFF, 0xFF)
+
+
 # Level Zero Sysman (pyzes) utils.
 # Note that Sysman enumerates all physical devices regardless of
-# `ZE_AFFINITY_MASK`. The major benefit of using pyzes is that it queries
-# device properties, memory, and topology without initializing a SYCL/XPU
-# runtime context.
+# `ZE_AFFINITY_MASK` and does not apply core Level Zero's PCI bus sort.
+# We sort by PCI BDF (and discrete-before-integrated unless
+# `ZE_ENABLE_PCI_ID_DEVICE_ORDER` is set) to match SYCL / `torch.xpu`
+# ordering without initializing a SYCL/XPU runtime context.
 class ZesXPUPlatform(XPUPlatformBase):
     @classmethod
     def _get_zes_drivers(cls) -> list[Any]:
@@ -771,8 +776,32 @@ class ZesXPUPlatform(XPUPlatformBase):
         return props
 
     @classmethod
-    def _get_zes_gpu_handles(cls) -> list[Any]:
-        handles: list[Any] = []
+    def _get_zes_pci_address(cls, handle: Any) -> tuple[int, int, int, int] | None:
+        pci_props = pyzes.zes_pci_properties_t()
+        pci_props.stype = pyzes.ZES_STRUCTURE_TYPE_PCI_PROPERTIES
+        pci_props.pNext = None
+        if (
+            pyzes.zesDevicePciGetProperties(handle, ctypes.byref(pci_props))
+            != pyzes.ZE_RESULT_SUCCESS
+        ):
+            return None
+        addr = pci_props.address
+        return (int(addr.domain), int(addr.bus), int(addr.device), int(addr.function))
+
+    @classmethod
+    def _get_zes_pci_bdf(cls, handle: Any) -> str | None:
+        addr = cls._get_zes_pci_address(handle)
+        if addr is None:
+            return None
+        domain, bus, device, function = addr
+        return f"{domain:04x}:{bus:02x}:{device:02x}.{function:x}"
+
+    @classmethod
+    def _get_zes_gpu_entries(
+        cls,
+    ) -> list[tuple[Any, bool, int, tuple[int, int, int, int]]]:
+        """Return (handle, is_integrated, num_subdevices, pci_addr) in core L0 order."""
+        entries: list[tuple[Any, bool, int, tuple[int, int, int, int]]] = []
         for driver in cls._get_zes_drivers():
             dev_count = ctypes.c_uint32(0)
             if (
@@ -788,79 +817,113 @@ class ZesXPUPlatform(XPUPlatformBase):
             ):
                 continue
             for dev in devs:
-                try:
-                    props = cls._get_zes_device_properties(dev)
-                except RuntimeError:
+                props = pyzes.zes_device_properties_t()
+                props.stype = pyzes.ZES_STRUCTURE_TYPE_DEVICE_PROPERTIES
+                ext_props = pyzes.zes_device_ext_properties_t()
+                ext_props.stype = pyzes.ZES_STRUCTURE_TYPE_DEVICE_EXT_PROPERTIES
+                ext_props.pNext = None
+                props.pNext = ctypes.cast(ctypes.pointer(ext_props), ctypes.c_void_p)
+                if (
+                    pyzes.zesDeviceGetProperties(dev, ctypes.byref(props))
+                    != pyzes.ZE_RESULT_SUCCESS
+                ):
                     continue
-                if props.core.type == pyzes.ZE_DEVICE_TYPE_GPU:
-                    handles.append(dev)
-        return handles
+                if props.core.type != pyzes.ZE_DEVICE_TYPE_GPU:
+                    continue
+                is_integrated = bool(
+                    (ext_props.flags | props.core.flags)
+                    & _ZES_DEVICE_PROPERTY_FLAG_INTEGRATED
+                )
+                pci_addr = cls._get_zes_pci_address(dev) or _PCI_ADDR_SORT_SENTINEL
+                entries.append((dev, is_integrated, int(props.numSubdevices), pci_addr))
+
+        # Match NEO::ExecutionEnvironment::comparePciIdBusNumber:
+        # discrete GPUs before integrated GPUs unless ZE_ENABLE_PCI_ID_DEVICE_ORDER
+        # is enabled, then ascending PCI (domain, bus, device, function).
+        pci_order_env = os.environ.get("ZE_ENABLE_PCI_ID_DEVICE_ORDER", "").strip()
+        if pci_order_env not in ("", "0", "false", "False", "FALSE"):
+            entries.sort(key=lambda e: e[3])
+        else:
+            entries.sort(key=lambda e: (e[1], e[3]))
+        return entries
 
     @classmethod
-    def _get_zes_pci_bdf(cls, handle: Any) -> str | None:
-        pci_props = pyzes.zes_pci_properties_t()
-        pci_props.stype = pyzes.ZES_STRUCTURE_TYPE_PCI_PROPERTIES
-        pci_props.pNext = None
-        if (
-            pyzes.zesDevicePciGetProperties(handle, ctypes.byref(pci_props))
-            != pyzes.ZE_RESULT_SUCCESS
-        ):
-            return None
-        addr = pci_props.address
-        return f"{addr.domain:04x}:{addr.bus:02x}:{addr.device:02x}.{addr.function:x}"
+    def _get_zes_gpu_handles(cls) -> list[Any]:
+        return [entry[0] for entry in cls._get_zes_gpu_entries()]
 
     @classmethod
-    def _get_physical_zes_devices(cls) -> list[tuple[Any, int | None]]:
-        """Enumerate physical (handle, subdevice_id) entries for current hierarchy."""
-        root_handles = cls._get_zes_gpu_handles()
+    def _get_physical_zes_device_entries(
+        cls,
+    ) -> list[tuple[Any, int | None, bool]]:
+        """Enumerate physical (handle, subdevice_id, is_integrated) entries."""
+        root_entries = cls._get_zes_gpu_entries()
         hierarchy = os.environ.get("ZE_FLAT_DEVICE_HIERARCHY", "").upper()
         if hierarchy == "COMPOSITE":
-            return [(h, None) for h in root_handles]
+            return [(h, None, is_igpu) for h, is_igpu, _, _ in root_entries]
 
-        devices: list[tuple[Any, int | None]] = []
-        for handle in root_handles:
-            try:
-                props = cls._get_zes_device_properties(handle)
-                num_subdevices = int(props.numSubdevices)
-            except RuntimeError:
-                num_subdevices = 0
-            if num_subdevices > 0:
-                for sub_id in range(num_subdevices):
-                    devices.append((handle, sub_id))
+        devices: list[tuple[Any, int | None, bool]] = []
+        for handle, is_igpu, num_subdevices, _ in root_entries:
+            if not is_igpu and num_subdevices > 0:
+                sub_props = (pyzes.zes_subdevice_exp_properties_t * num_subdevices)()
+                for p in sub_props:
+                    p.stype = pyzes.ZES_STRUCTURE_TYPE_SUBDEVICE_EXP_PROPERTIES
+                    p.pNext = None
+                count = ctypes.c_uint32(num_subdevices)
+                if (
+                    pyzes.zesDeviceGetSubDevicePropertiesExp(
+                        handle, ctypes.byref(count), sub_props
+                    )
+                    == pyzes.ZE_RESULT_SUCCESS
+                    and count.value > 0
+                ):
+                    for i in range(count.value):
+                        devices.append((handle, int(sub_props[i].subdeviceId), is_igpu))
+                else:
+                    for sub_id in range(num_subdevices):
+                        devices.append((handle, sub_id, is_igpu))
             else:
-                devices.append((handle, None))
+                devices.append((handle, None, is_igpu))
         return devices
 
     @classmethod
     def _get_visible_zes_devices(cls) -> list[tuple[Any, int | None]]:
         """Return visible (handle, subdevice_id) entries honoring ZE_AFFINITY_MASK."""
-        root_handles = cls._get_zes_gpu_handles()
-        physical_devices = cls._get_physical_zes_devices()
+        root_entries = cls._get_zes_gpu_entries()
+        physical_entries = cls._get_physical_zes_device_entries()
         mask = os.environ.get(cls.device_control_env_var, "").strip()
         if not mask:
-            return physical_devices
+            visible_entries = physical_entries
+        else:
+            visible_entries = []
+            for token in (t.strip() for t in mask.split(",") if t.strip()):
+                if "." in token:
+                    root_str, sub_str = token.split(".", 1)
+                    root_idx = int(root_str)
+                    sub_idx = int(sub_str)
+                    handle, is_igpu, _, _ = root_entries[root_idx]
+                    visible_entries.append((handle, sub_idx, is_igpu))
+                elif "-" in token:
+                    start_str, end_str = token.split("-", 1)
+                    for idx in range(int(start_str), int(end_str) + 1):
+                        visible_entries.append(physical_entries[idx])
+                else:
+                    idx = cls.device_control_id_to_physical_device_id(token)
+                    visible_entries.append(physical_entries[idx])
 
-        visible: list[tuple[Any, int | None]] = []
-        for token in (t.strip() for t in mask.split(",") if t.strip()):
-            if "." in token:
-                root_str, sub_str = token.split(".", 1)
-                root_idx = int(root_str)
-                sub_idx = int(sub_str)
-                visible.append((root_handles[root_idx], sub_idx))
-            elif "-" in token:
-                start_str, end_str = token.split("-", 1)
-                for idx in range(int(start_str), int(end_str) + 1):
-                    visible.append(physical_devices[idx])
-            else:
-                idx = cls.device_control_id_to_physical_device_id(token)
-                visible.append(physical_devices[idx])
-        return visible
+        # Match PyTorch/SYCL: discrete GPUs take priority when any are visible.
+        dgpu_devices = [(h, sub) for h, sub, is_igpu in visible_entries if not is_igpu]
+        if dgpu_devices:
+            return dgpu_devices
+        return [(h, sub) for h, sub, _ in visible_entries]
 
     @classmethod
     def _resolve_zes_device(cls, device_id: int) -> tuple[Any, int | None]:
         if platform_interface._assigned_physical_gpu_ids is not None:
             physical_id = cls.device_id_to_physical_device_id(device_id)
-            return cls._get_physical_zes_devices()[physical_id]
+            handle, subdevice_id, _ = cls._get_physical_zes_device_entries()[
+                physical_id
+            ]
+            return handle, subdevice_id
         return cls._get_visible_zes_devices()[device_id]
 
     @classmethod
