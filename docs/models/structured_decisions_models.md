@@ -394,9 +394,10 @@ vllm serve nace-ai/drex-v1.5
 - The pointer head scores each option from the hidden states at its closing
   delimiter and at `<decide>`, so picks and probabilities match the reference
   `model.probs()`.
-- A state is read to 384 tokens, a question to the row limit, and the packed
-  record to 2,048 tokens. A request over those limits, or over `max_model_len`,
-  returns 400. A question can have up to 255 options.
+- A request is read within the model's context window (up to 16,384
+  tokens): the state and the question's row are read in full, and a request
+  that does not fit returns 400. The checkpoint was trained on 384-token
+  states and 1,024-token question rows. A question can have up to 255 options.
 - `instructions` returns 400, since the prompt is fixed. `chat_template_kwargs`
   has no effect.
 - There are no labels, so `label_mass` is 1 and `confidence` is the chosen
