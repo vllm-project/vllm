@@ -19,6 +19,7 @@ import torch
 from tests.v1.core.utils import full_layer, new_kv_cache_group, sliding_window_layer
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
@@ -172,7 +173,7 @@ def test_replayssm_low_head_packed_alignment(layout):
         block_stride_alignment=16,
     )
     # Hybrid models pad the Mamba page to a multiple of the attention page.
-    padded_page_size = -(-spec.state_content_size_bytes // 16) * 16 + 16
+    padded_page_size = round_up(spec.state_content_size_bytes, 16) + 16
     spec = replace(spec, page_size_padded=padded_page_size)
     assert spec.page_size_bytes == padded_page_size
     # Block-outer packing must also align an overlay with a larger, odd page.

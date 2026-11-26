@@ -4,7 +4,7 @@
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
 import torch
 
@@ -19,9 +19,6 @@ from vllm.utils.torch_utils import (
     get_kv_cache_torch_dtype,
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-
-if TYPE_CHECKING:
-    pass
 
 logger = init_logger(__name__)
 

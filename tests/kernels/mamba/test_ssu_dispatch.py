@@ -48,6 +48,8 @@ except ImportError:
     HAS_FLASHINFER = False
 
 DEVICE = current_platform.device_type
+# The ring trackers' state in a ReplaySSM page: (conv, ssm, x, B, dt, trackers).
+TRACKERS_IDX = 5
 requires_gpu = pytest.mark.skipif(
     not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="requires CUDA or XPU",
@@ -88,10 +90,10 @@ def _device_ints(values):
 
 
 def _replayssm_mixer(kv_cache, A, ring_start=None, committed=None):
-    # Page state 5 holds each slot's (ring_start, num_committed).
+    # The trackers page state holds each slot's (ring_start, num_committed).
     if ring_start is not None:
-        kv_cache[5][:, 0].copy_(ring_start)
-        kv_cache[5][:, 1].copy_(committed)
+        kv_cache[TRACKERS_IDX][:, 0].copy_(ring_start)
+        kv_cache[TRACKERS_IDX][:, 1].copy_(committed)
     return SimpleNamespace(
         kv_cache=kv_cache,
         prefix="mixer",
@@ -184,7 +186,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         )
         MambaBase.bind_kv_cache(layer, page)
         caches[name] = layer.kv_cache
-    rings = {name: states[2:5] for name, states in caches.items()}
+    rings = {name: states[2:TRACKERS_IDX] for name, states in caches.items()}
     for name, states in caches.items():
         states[1].normal_(std=0.1)
         x, B, dt = rings[name]
@@ -225,13 +227,14 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
     # Groups alias pages but own disjoint slots (the null slot agrees), so each
     # group's history goes into every one of its layers' in-page trackers.
     for states in caches.values():
-        states[5].zero_()
+        states[TRACKERS_IDX].zero_()
     grouped = []
     for names, table, history in zip(layer_names, block_tables, histories, strict=True):
         mixers = [_replayssm_mixer(caches[name], A) for name in names]
         for mixer in mixers:
+            trackers = mixer.kv_cache[TRACKERS_IDX]
             for slot, (start, count) in history.items():
-                mixer.kv_cache[5][slot] = torch.tensor([start, count])
+                trackers[slot] = torch.tensor([start, count])
         grouped.append((mixers, spec, _device_ints(table)))
     context = ReplaySSMModelContext.create(
         grouped, max_num_reqs=6, materialize_prefixes=True
@@ -250,7 +253,8 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
             dst = table[batch_idx][dst_cols[req_idx]]
             if null not in (src, dst) and src != dst:
                 for mixer in mixers:
-                    mixer.kv_cache[5][dst] = mixer.kv_cache[5][src]
+                    trackers = mixer.kv_cache[TRACKERS_IDX]
+                    trackers[dst] = trackers[src]
     # Groups use different slots but preserve equal logical replay histories.
     context.reset_new_slots(
         idx_mapping=mapping,
@@ -269,7 +273,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         group_slots = {slot for row in table for slot in row} | set(expected)
         for mixer in mixers:
             for slot in group_slots:
-                assert mixer.kv_cache[5][slot].tolist() == list(
+                assert mixer.kv_cache[TRACKERS_IDX][slot].tolist() == list(
                     expected.get(slot, (0, 0))
                 ), (slot, mixer)
     metadata = dict(
@@ -302,8 +306,8 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
     for names, (mixers, _, _), table in zip(
         layer_names, grouped, block_tables, strict=True
     ):
-        starts = mixers[0].kv_cache[5][:, 0]
-        committed = mixers[0].kv_cache[5][:, 1]
+        starts = mixers[0].kv_cache[TRACKERS_IDX][:, 0]
+        committed = mixers[0].kv_cache[TRACKERS_IDX][:, 1]
         for row, (start, flush) in plans.items():
             dst, src = table[row]
             if dst == null:
@@ -428,8 +432,8 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_st
     assert context.active_request_indices.tolist() == [1, -1, -1, -1]
     assert context.src_slots[0, 1].item() == 4
     assert context.dst_slots[0, 1].item() == 4
-    assert mixer.kv_cache[5][:, 0].tolist() == [3, 0, 0, 3, 0, 3]
-    assert mixer.kv_cache[5][:, 1].tolist() == [2, 0, 0, 2, 0, 2]
+    assert mixer.kv_cache[TRACKERS_IDX][:, 0].tolist() == [3, 0, 0, 3, 0, 3]
+    assert mixer.kv_cache[TRACKERS_IDX][:, 1].tolist() == [2, 0, 0, 2, 0, 2]
 
 
 def test_default_backend_is_triton():

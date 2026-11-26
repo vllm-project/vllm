@@ -52,6 +52,9 @@ from vllm.v1.worker.utils import (
     bind_kv_cache_to_layers,
 )
 
+# The ring trackers' state in a ReplaySSM page: (conv, ssm, x, B, dt, trackers).
+TRACKERS_IDX = 5
+
 # Conv + temporal copy specs, in the order the tests' MambaSpec shapes expect.
 _DEFAULT_COPY_FUNCS: tuple[MambaStateCopyFunc, ...] = (
     get_conv_copy_spec,
@@ -727,13 +730,16 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
     for name, mixer in forward_context.items():
         source = original[name]
         if not moved:
-            for actual, before in zip(mixer.kv_cache[:5], source[:5]):
+            idx = TRACKERS_IDX
+            for actual, before in zip(mixer.kv_cache[:idx], source[:idx]):
                 torch.testing.assert_close(actual, before, rtol=0, atol=0)
             # A fresh slot restarts with an empty ring; the same column keeps it.
             expected_trackers = (
-                [0, 0] if previous_column < 0 else source[5][destination_slot].tolist()
+                [0, 0]
+                if previous_column < 0
+                else source[idx][destination_slot].tolist()
             )
-            assert mixer.kv_cache[5][destination_slot].tolist() == expected_trackers
+            assert mixer.kv_cache[idx][destination_slot].tolist() == expected_trackers
             continue
         conv = mixer.kv_cache[0][destination_slot]
         if is_conv_state_dim_first():
