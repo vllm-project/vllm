@@ -62,9 +62,9 @@ class FlashInferNosyncMoe:
         self._max_tokens_per_rank = (
             envs.VLLM_FLASHINFER_MOE_EP_NOSYNC_MAX_TOKENS_PER_RANK
         )
-        if not 1 <= self._max_tokens_per_rank <= 128:
+        if not 1 <= self._max_tokens_per_rank <= 192:
             raise ValueError(
-                "VLLM_FLASHINFER_MOE_EP_NOSYNC_MAX_TOKENS_PER_RANK must be in [1, 128]"
+                "VLLM_FLASHINFER_MOE_EP_NOSYNC_MAX_TOKENS_PER_RANK must be in [1, 192]"
             )
         self._dedup_uniform = envs.VLLM_FLASHINFER_MOE_EP_NOSYNC_TP_DEDUP
         if self._dedup_uniform:

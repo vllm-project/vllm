@@ -1426,6 +1426,7 @@ def _nosync_sm120_layer_checks(
     geometry: Geometry,
     dp_size: int | None = None,
     fallback_tokens: int = 129,
+    execution_tokens: int = 64,
     max_tokens_per_rank: int = 128,
     dedup_uniform: bool = False,
     require_custom_ar: bool = False,
@@ -1511,11 +1512,23 @@ def _nosync_sm120_layer_checks(
                 router=router,
                 routed_experts=layer,
             )
+            if dedup_uniform:
+                torch.manual_seed(20261122)
             hidden_states = torch.randn(
-                64, geometry.hidden_size, dtype=torch.bfloat16, device=device
+                execution_tokens,
+                geometry.hidden_size,
+                dtype=torch.bfloat16,
+                device=device,
             )
+            if dedup_uniform:
+                replicas = [torch.empty_like(hidden_states) for _ in range(world_size)]
+                torch.distributed.all_gather(replicas, hidden_states)
+                assert all(torch.equal(hidden_states, t) for t in replicas)
             router_logits = torch.zeros(
-                64, geometry.num_experts, dtype=torch.float32, device=device
+                execution_tokens,
+                geometry.num_experts,
+                dtype=torch.float32,
+                device=device,
             )
 
             def forward() -> torch.Tensor:
@@ -1525,7 +1538,10 @@ def _nosync_sm120_layer_checks(
             with (
                 torch.inference_mode(),
                 set_forward_context(
-                    None, vllm_config, num_tokens=64, num_tokens_across_dp=None
+                    None,
+                    vllm_config,
+                    num_tokens=execution_tokens,
+                    num_tokens_across_dp=None,
                 ),
             ):
                 torch.manual_seed(20261122)
@@ -1536,21 +1552,48 @@ def _nosync_sm120_layer_checks(
                     hidden_states, topk_weights, topk_ids
                 ).clone()
                 if dedup_uniform:
+                    from dataclasses import replace
+
+                    from flashinfer.moe_ep import (
+                        MoEEpLayer,
+                        PrequantizedMoEWeights,
+                    )
+
                     leader_output = expected
                     adapter = layer.quant_method._nosync
-                    nosync_config = adapter._mega_layer._megakernel_config
+                    mega_layer = adapter._mega_layer
+                    nosync_config = mega_layer._megakernel_config
                     assert nosync_config.dedup_replicated_inputs
-                    expected = adapter._mega_layer.forward(
-                        adapter._tensors(hidden_states, topk_ids, topk_weights),
-                        return_workspace_view=True,
+                    reference = MoEEpLayer(
+                        bootstrap=mega_layer._bootstrap,
+                        fleet_params=mega_layer._fleet_params,
+                        weights=PrequantizedMoEWeights(
+                            w13=layer.w13_weight.view(torch.float4_e2m1fn_x2),
+                            w2=layer.w2_weight.view(torch.float4_e2m1fn_x2),
+                            w13_scale=layer.w13_weight_scale,
+                            w2_scale=layer.w2_weight_scale,
+                        ),
+                        backend=replace(
+                            mega_layer._mega_config,
+                            megakernel=replace(
+                                nosync_config, dedup_replicated_inputs=False
+                            ),
+                            transformed_weights=mega_layer._get_transformed_weights(),
+                        ),
+                    )
+                    reference.warmup()
+                    expected = reference.forward(
+                        adapter._tensors(hidden_states, topk_ids, topk_weights)
                     ).clone()
+                    reference.destroy()
                     leader = (
-                        torch.arange(64, device=device).remainder(world_size).eq(rank)
+                        torch.arange(execution_tokens, device=device)
+                        .remainder(world_size)
+                        .eq(rank)
                     )
                     assert not leader_output[~leader].any()
-                    torch.testing.assert_close(
-                        leader_output[leader], expected[leader], atol=0, rtol=0
-                    )
+                    reduced = tensor_model_parallel_all_reduce(leader_output)
+                    torch.testing.assert_close(reduced, expected, atol=0, rtol=0)
                 actual = forward()
                 torch.accelerator.synchronize()
                 torch.testing.assert_close(actual, expected, atol=0, rtol=0)
@@ -1763,6 +1806,28 @@ def test_nosync_sm120_tp_dedup():
     not current_platform.is_device_capability_family(120),
     reason="SM120 nosync MoE requires SM120 GPUs",
 )
+def test_nosync_sm120_tp_capacity_192():
+    """Run fused dedup at 192 tokens and retain DeepGEMM at 193 tokens."""
+    pytest.importorskip("flashinfer.moe_ep")
+    if not has_deep_gemm():
+        pytest.skip("DeepGEMM is not available")
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("Need at least two GPUs")
+    geometry = Geometry("sm120-nosync", 512, 256, 16, 2)
+    distributed_run(
+        partial(
+            _nosync_sm120_layer_checks,
+            dp_size=1,
+            dedup_uniform=True,
+            execution_tokens=192,
+            fallback_tokens=193,
+            max_tokens_per_rank=192,
+        ),
+        2,
+        geometry,
+    )
+
+
 @pytest.mark.parametrize(
     "dp_size, require_custom_ar",
     [(1, True), (None, False)],

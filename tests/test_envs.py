@@ -103,6 +103,9 @@ def test_nosync_moe_ep_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     assert envs.VLLM_FLASHINFER_MOE_EP_NOSYNC_MAX_TOKENS_PER_RANK == 96
     assert envs.VLLM_FLASHINFER_MOE_EP_NOSYNC_TP_DEDUP
 
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_EP_NOSYNC_MAX_TOKENS_PER_RANK", "192")
+    assert envs.VLLM_FLASHINFER_MOE_EP_NOSYNC_MAX_TOKENS_PER_RANK == 192
+
 
 def test_p2p_resource_limit_defaults_and_override(
     monkeypatch: pytest.MonkeyPatch,

@@ -152,13 +152,14 @@ Behavior:
 - For DeepSeek-V4 routing (DeepSeek-V4 and V4.1 checkpoints), vLLM sets `FLASHINFER_SM107_MEGA_CHECK_ROUTES=0` unless it is already set, because that router can return non-finite scores on valid routes and a failed check stops the worker. This disables all of FlashInfer's SM107 route checks in the process (non-finite scores, expert ids out of range, duplicate ids), so a router bug is not caught on the device. Export `FLASHINFER_SM107_MEGA_CHECK_ROUTES=1` to enable them. Other models keep FlashInfer's default.
 - Draft and MTP expert layers use the target's `--moe-backend` unless `--speculative-config` sets `moe_backend` and the speculative method applies it; DSpark does not, so its drafts always use the target's. For example, with DeepSeek-V4.1-Flash-NVFP4 and `--speculative-config '{"method": "dspark", ...}'`, both the target's NVFP4 experts and the draft's MXFP4 experts run on this backend.
 - Not supported on SM107 with this backend: EPLB, and reloading weights (`reload_weights`). The `flashinfer_moe_ep_mega_deep_gemm` backend does not support SM107.
+
 ### FlashInfer nosync on SM120
 
 Set `--kernel-config '{"moe_backend":"flashinfer_moe_ep_nosync"}'` to opt into FlashInfer's SM120 MXFP4 nosync megakernel for supported routed experts. It is never selected automatically.
 
 By default, at most 128 tokens per rank across the full DP group run on the nosync kernel. Larger global batches use the DeepGEMM FP4 experts instead. The DP maximum, rather than each rank's local token count, keeps kernel selection uniform across EP ranks. A capture without that global token metadata fails explicitly instead of risking divergent execution.
 
-`VLLM_FLASHINFER_MOE_EP_NOSYNC_MAX_TOKENS_PER_RANK` can select a smaller limit in `[1, 128]`. It bounds the nosync workspace and selects the DeepGEMM fallback above the limit, so low-concurrency nosync and larger-batch DeepGEMM can share one deployment. The default remains 128.
+`VLLM_FLASHINFER_MOE_EP_NOSYNC_MAX_TOKENS_PER_RANK` can select a limit in `[1, 192]`. It bounds the nosync workspace and selects the DeepGEMM fallback above the limit, so low-concurrency nosync and larger-batch DeepGEMM can share one deployment. The default remains 128; use a larger explicit limit only after validating its shape and memory cost.
 
 For TP-only EP where hidden states and router outputs are identical on every rank, `VLLM_FLASHINFER_MOE_EP_NOSYNC_TP_DEDUP=1` dispatches each token from one leader rank and masks duplicate routes on the others. The partial outputs then use the existing TP all-reduce, avoiding redundant dispatch and expert computation while retaining the full-model result. The default is off; DP, SP, and per-rank-different router outputs must not use it. CustomAllreduce must be disabled when it is enabled on the deployment (`--disable-custom-all-reduce`). PCIe IPC remains an independent compatible option.
 
