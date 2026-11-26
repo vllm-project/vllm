@@ -63,10 +63,10 @@ use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
-use super::client::GrpcLlm;
 use super::control::kv_event_source;
 use super::convert::json_to_proto_struct;
 use super::health::{EngineHealth, HealthMonitor};
+use super::llm::GrpcLlm;
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
 use super::pb::render_server::Render as _;

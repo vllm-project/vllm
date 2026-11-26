@@ -3,11 +3,11 @@
 
 //! gRPC services backed by the shared application state.
 
-pub(crate) mod client;
 mod control;
 mod convert;
 mod health;
 mod inference;
+pub(crate) mod llm;
 mod media;
 mod render;
 

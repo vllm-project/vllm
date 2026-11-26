@@ -40,7 +40,7 @@ pub use config::{
     OutputLogging, ServerConfig, TlsConfig,
 };
 pub use fingerprint::FingerprintMode;
-pub use grpc::client::GrpcLlm;
+pub use grpc::llm::GrpcLlm;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
