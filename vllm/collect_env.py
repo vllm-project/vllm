@@ -301,6 +301,9 @@ def get_xpu_runtime_version():
 
 
 def get_pkg_version(run_lambda, pkg):
+    # The packages queried below only exist on Linux (XPU/oneCCL via pip,
+    # Intel GPU stack via dpkg). On other platforms return None instead
+    # of crashing collect_env.
     if get_platform() != "linux":
         return None
 
