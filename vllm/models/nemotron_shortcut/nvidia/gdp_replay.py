@@ -63,9 +63,10 @@ class GdpReplayStep:
 # One compile for every batch size: Triton would otherwise specialize the row
 # counts on == 1 and on divisibility by 16, and an eager step whose counts fall
 # in a class warmup's captured sizes missed would compile mid-serving.
-@triton.jit(do_not_specialize=["batch", "padded"])
+@triton.jit(do_not_specialize=["slot_stride", "batch", "padded"])
 def _commit_step_kernel(
     slots_ptr,
+    slot_stride,
     loc_ptr,
     accepted_ptr,
     base_ptr,
@@ -77,6 +78,8 @@ def _commit_step_kernel(
     out_base_ptr,
     out_hist_ptr,
     out_bank_ptr,
+    rng_ptr,
+    seed_ptr,
     batch,
     padded,
     modulus,
@@ -84,12 +87,21 @@ def _commit_step_kernel(
     NULL_BLOCK_ID: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    """`GdpReplayTrackers.commit` for live rows, and the op inputs for every
-    row, in one launch."""
+    """`GdpReplayTrackers.commit` for live rows, the op inputs for every row,
+    and the step's rounding seed, in one launch. `slots` may be a strided
+    block-table column."""
+    if tl.program_id(0) == 0:
+        # A fresh seed each step: Philox of a per-process key and a step count
+        # the kernel advances (rng = [key, count]), also under graph replay.
+        key = tl.load(rng_ptr)
+        count = tl.load(rng_ptr + 1)
+        tl.store(rng_ptr + 1, count + 1)
+        tl.store(seed_ptr, tl.randint(key, count).to(tl.int64) & 0xFFFFFFFF)
     rows = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     live = rows < batch
     inside = rows < padded
-    slot = tl.load(slots_ptr + rows, mask=live, other=NULL_BLOCK_ID).to(tl.int64)
+    slot = tl.load(slots_ptr + rows * slot_stride, mask=live, other=NULL_BLOCK_ID)
+    slot = slot.to(tl.int64)
     start = tl.load(loc_ptr + rows, mask=live, other=0)
     valid = tl.load(loc_ptr + rows + 1, mask=live, other=0) - start
     accepted = tl.load(accepted_ptr + rows, mask=live, other=0)
@@ -123,6 +135,9 @@ class GdpReplayTrackers:
         self.seed = torch.zeros(1, dtype=torch.int64)
         """The stochastic-rounding seed of the checkpoint fold, drawn fresh
         every step (also under CUDA graph replay)."""
+        self.rng = torch.zeros(2, dtype=torch.int64)
+        """The plan kernel's seed source: a per-process Philox key and the
+        number of seeds drawn."""
         self.base_modulus = 0
         """The banked layout wraps `base` at the conv ring's row count."""
 
@@ -152,6 +167,8 @@ class GdpReplayTrackers:
         )
         self.base, self.hist_len, self.ring_bank, self.prev_query_len = self.trackers
         self.seed = torch.zeros(1, dtype=torch.int64, device=conv_state.device)
+        key = int(torch.randint(0, 2**31, (1,)))
+        self.rng = torch.tensor([key, 0], dtype=torch.int64, device=conv_state.device)
         self.base_modulus = rows
 
     @staticmethod
@@ -225,18 +242,19 @@ class GdpReplayTrackers:
         scheduled tokens. Called by the group's first GDP layer
         (`claim`); the plan is kept on `metadata` for the other layers."""
         batch = slots.size(0)
-        # The kernel reads them by row index; a block-table column is strided.
-        slots = slots.contiguous()
         loc = query_start_loc[: batch + 1].contiguous()
         num_accepted = num_accepted.contiguous()
         device = slots.device
-        # slots, valid_len, base, hist_len, ring_bank: separate allocations,
-        # since gdp_conv_replay needs each to start 16-B aligned.
-        out = [torch.empty(padded, dtype=torch.int32, device=device) for _ in range(5)]
+        # slots, valid_len, base, hist_len, ring_bank: rows of one allocation,
+        # each starting 16-B aligned as gdp_conv_replay needs.
+        row = -(-padded // 4) * 4
+        out = list(torch.empty(5, row, dtype=torch.int32, device=device)[:, :padded])
         if device.type == "cuda":
             block = 128
+            # The kernel reads `slots` with its stride: a block-table column.
             _commit_step_kernel[(triton.cdiv(padded, block),)](
                 slots,
+                slots.stride(0),
                 loc,
                 num_accepted,
                 self.base,
@@ -244,6 +262,8 @@ class GdpReplayTrackers:
                 self.ring_bank,
                 self.prev_query_len,
                 *out,
+                self.rng,
+                self.seed,
                 batch,
                 padded,
                 self.base_modulus,
@@ -251,8 +271,8 @@ class GdpReplayTrackers:
                 NULL_BLOCK_ID=NULL_BLOCK_ID,
                 BLOCK=block,
             )
-            torch.randint(0, 2**62, (1,), out=self.seed)
         else:
+            slots = slots.contiguous()
             valid = (loc[1:] - loc[:-1]).to(torch.int32)
             committed = self.commit(slots, num_accepted, valid)
             for tensor, live in zip(out, (slots, valid, *committed), strict=True):

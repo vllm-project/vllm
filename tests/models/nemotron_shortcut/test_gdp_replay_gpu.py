@@ -429,14 +429,18 @@ def test_replay_decodes_a_prefill_from_a_different_tp(forward_context, naive_cut
 @pytest.mark.parametrize("tokens,padded", [(4, 5), (8, 3), (1, 7)])
 def test_commit_step_kernel_matches_the_reference(tokens, padded):
     """The fused commit-and-plan kernel against `GdpReplayTrackers.commit`
-    over many steps with flushes, ragged windows and padding rows."""
+    over many steps with flushes, ragged windows and padding rows, reading the
+    slots as a block-table column, and drawing a fresh seed every step."""
     generator = torch.Generator().manual_seed(tokens)
     num_blocks, conv_rows, batch = 40, 12, min(padded, 3)
     kernel, reference = GdpReplayTrackers(), GdpReplayTrackers()
     kernel.bind(torch.zeros(num_blocks, conv_rows, 1, device="cuda"))
     reference.bind(torch.zeros(num_blocks, conv_rows, 1))
     slots = torch.tensor([3, 17, 39][:batch], dtype=torch.int32)
+    # The spec block table's first column, as the layer passes it: strided.
+    column = slots.unsqueeze(1).repeat(1, tokens + 1).cuda()[:, 0]
     prev = torch.zeros(batch, dtype=torch.int64)
+    seeds = []
     for _ in range(64):
         valid = torch.randint(1, tokens + 1, (batch,), generator=generator)
         accepted = torch.minimum(
@@ -448,7 +452,7 @@ def test_commit_step_kernel_matches_the_reference(tokens, padded):
         num_rows = int(loc[-1])
         step = kernel.commit_step(
             SimpleNamespace(),
-            slots.cuda(),
+            column,
             loc.cuda(),
             accepted.cuda(),
             tokens,
@@ -469,6 +473,8 @@ def test_commit_step_kernel_matches_the_reference(tokens, padded):
                 getattr(kernel, name).cpu(), getattr(reference, name)
             )
         prev = valid.to(torch.int64)
+        seeds.append(int(kernel.seed))
+    assert len(set(seeds)) == len(seeds) and all(0 <= s < 2**32 for s in seeds)
 
 
 def _mixed_metadata(batch: int, prompt: int, accepted: torch.Tensor):
