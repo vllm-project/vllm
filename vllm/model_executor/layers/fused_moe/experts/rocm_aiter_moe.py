@@ -19,8 +19,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.quantization.input_hadamard import (
-    block_hadamard_rotate,
-    hadamard_matrix,
+    block_hadamard_rotate_activation,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -775,9 +774,7 @@ class AiterMxfp4Experts(AiterExperts):
         super().__init__(moe_config, quant_config)
         # Set for Quark checkpoints whose experts were quantized after a block
         # Hadamard rotation of both GEMM inputs (w13 and w2 are pre-rotated).
-        self.rotation_size: int | None = getattr(
-            quant_config, "input_rotation_size", None
-        )
+        self.rotation_size = quant_config.input_rotation_size
         if self.rotation_size is not None:
             if not rocm_aiter_ops.fused_moe_supports_inter_hadamard():
                 raise NotImplementedError(
@@ -832,9 +829,18 @@ class AiterMxfp4Experts(AiterExperts):
         apply_router_weight_on_input: bool,
     ):
         if self.rotation_size is not None:
-            hidden_states = block_hadamard_rotate(
-                hidden_states, hadamard_matrix(self.rotation_size, hidden_states.device)
-            ).contiguous()
+            if a1q_scale is not None or hidden_states.dtype not in (
+                torch.bfloat16,
+                torch.float16,
+            ):
+                raise ValueError(
+                    "Rotated MXFP4 experts need unquantized bf16/fp16 hidden "
+                    f"states, got {hidden_states.dtype} with "
+                    f"a1q_scale={'set' if a1q_scale is not None else 'None'}."
+                )
+            hidden_states = block_hadamard_rotate_activation(
+                hidden_states, self.rotation_size
+            )
         super().apply(
             output=output,
             hidden_states=hidden_states,

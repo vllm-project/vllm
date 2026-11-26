@@ -45,6 +45,25 @@ def block_hadamard_rotate(x: torch.Tensor, hadamard: torch.Tensor) -> torch.Tens
     return rotated.flatten(-2).to(x.dtype)
 
 
+@functools.cache
+def _hadamard_matrix_as(
+    size: int, device: torch.device, dtype: torch.dtype
+) -> torch.Tensor:
+    return hadamard_matrix(size, device).to(dtype)
+
+
+def block_hadamard_rotate_activation(x: torch.Tensor, size: int) -> torch.Tensor:
+    """`block_hadamard_rotate` by the `size`-wide orthonormal Sylvester matrix,
+    as a single GEMM in `x.dtype` (fp32 accumulation) for bf16/fp16 `x`.
+
+    Every entry of the matrix is `+-1/sqrt(size)`, so rounding it to `x.dtype`
+    only scales the rotation by a factor within `2**-8` of 1."""
+    if x.dtype not in (torch.bfloat16, torch.float16):
+        return block_hadamard_rotate(x, hadamard_matrix(size, x.device))
+    hadamard = _hadamard_matrix_as(size, x.device, x.dtype)
+    return (x.unflatten(-1, (-1, size)) @ hadamard).flatten(-2)
+
+
 class InputHadamardFusable:
     """Mixin for a linear method that can take over the input rotation of
     `InputHadamardLinearMethod`, for example inside its activation quant."""

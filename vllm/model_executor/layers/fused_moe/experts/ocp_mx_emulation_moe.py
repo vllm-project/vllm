@@ -26,8 +26,7 @@ from vllm.model_executor.layers.fused_moe.experts.ocp_mx_routed_dequant import (
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.quantization.input_hadamard import (
-    block_hadamard_rotate,
-    hadamard_matrix,
+    block_hadamard_rotate_activation,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
@@ -315,8 +314,8 @@ class InputHadamardOCPMXEmulationExperts(OCP_MXQuantizationEmulationTritonExpert
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
-        size = getattr(quant_config, "input_rotation_size", None)
-        if not isinstance(size, int) or size <= 0:
+        size = quant_config.input_rotation_size
+        if size is None or size <= 0:
             raise ValueError("input_rotation_size must be set for a rotated MoE")
         self.rotation_size = size
 
@@ -326,8 +325,7 @@ class InputHadamardOCPMXEmulationExperts(OCP_MXQuantizationEmulationTritonExpert
                 f"Dimension {x.shape[-1]} is not divisible by the Hadamard "
                 f"size {self.rotation_size}."
             )
-        hadamard = hadamard_matrix(self.rotation_size, x.device)
-        return block_hadamard_rotate(x, hadamard).contiguous()
+        return block_hadamard_rotate_activation(x, self.rotation_size)
 
     def activation(
         self,
@@ -358,6 +356,15 @@ class InputHadamardOCPMXEmulationExperts(OCP_MXQuantizationEmulationTritonExpert
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        if a1q_scale is not None or hidden_states.dtype not in (
+            torch.bfloat16,
+            torch.float16,
+        ):
+            raise ValueError(
+                "Rotated MXFP4 experts need unquantized bf16/fp16 hidden "
+                f"states, got {hidden_states.dtype} with "
+                f"a1q_scale={'set' if a1q_scale is not None else 'None'}."
+            )
         hidden_states = self._rotate(hidden_states)
         super().apply(
             output=output,

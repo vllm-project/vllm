@@ -1963,8 +1963,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         # Build quant config and kernel
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.rotation_size is not None and self.moe_quant_config is not None:
-            self.moe_quant_config.input_rotation_size = self.rotation_size
         if self.moe_quant_config is not None and self.experts_cls is not None:
             self.moe_kernel = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
@@ -1977,6 +1975,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
+        self, layer: RoutedExperts
+    ) -> FusedMoEQuantConfig | None:
+        config = self._get_fused_moe_quant_config(layer)
+        if config is not None:
+            config.input_rotation_size = self.rotation_size
+        return config
+
+    def _get_fused_moe_quant_config(
         self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         # For oracle-based backends (W4A16, W4A8), use make_mxfp4_moe_quant_config

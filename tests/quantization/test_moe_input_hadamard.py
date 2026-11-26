@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Online block Hadamard rotation of Quark MXFP4 MoE experts."""
 
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 )
 from vllm.model_executor.layers.quantization.input_hadamard import (
     block_hadamard_rotate,
+    block_hadamard_rotate_activation,
     hadamard_matrix,
 )
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
@@ -32,6 +34,12 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkOCP_MX_MoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mxfp4_quantize
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
+    kMxfp4Static,
+)
+from vllm.platforms import current_platform
+from vllm.v1.worker.workspace import init_workspace_manager
 
 
 def _quantize_like_quark(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -69,12 +77,7 @@ def _quantize_like_quark(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tens
         packed.view(*weight.shape[:-1], weight.shape[-1] // 2),
         quantizer.scale.view(*weight.shape[:-1], weight.shape[-1] // 32),
     )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kMxfp4Dynamic,
-    kMxfp4Static,
-)
-from vllm.platforms import current_platform
-from vllm.v1.worker.workspace import init_workspace_manager
+
 
 _PREFIX = "language_model.model.layers.3.block_sparse_moe.experts"
 _SHARED = "language_model.model.layers.3.block_sparse_moe.shared_experts"
@@ -93,11 +96,7 @@ def _config() -> QuarkConfig:
 
 
 def _expert_keys(experts: range, projs: tuple[str, ...] = ("w1", "w2", "w3")) -> dict:
-    return {
-        f"{_PREFIX}.{idx}.{proj}": 128
-        for idx in experts
-        for proj in projs
-    }
+    return {f"{_PREFIX}.{idx}.{proj}": 128 for idx in experts for proj in projs}
 
 
 def _moe_config(intermediate: int = 256, hidden: int = 256) -> FusedMoEConfig:
@@ -170,8 +169,87 @@ def test_moe_rotation_rejects_indivisible_shard_and_fused_shared(default_vllm_co
     layer = torch.nn.Module()
     layer.expert_map_manager = SimpleNamespace(num_fused_shared_experts=1)
     with pytest.raises(NotImplementedError, match="fused shared"):
-        method.create_weights(
-            layer, 4, 256, 256, torch.bfloat16, weight_loader=None
+        method.create_weights(layer, 4, 256, 256, torch.bfloat16, weight_loader=None)
+
+
+def test_moe_rotation_survives_quant_config_rebuild(default_vllm_config):
+    """`RoutedExperts` rebuilds the config from `get_fused_moe_quant_config`, so
+    the rotation must come from there, and survive `dataclasses.replace`."""
+    default_vllm_config.model_config = ModelConfig()
+    method = QuarkOCP_MX_MoEMethod(
+        _moe_config(), kMxfp4Static, kMxfp4Dynamic, rotation_size=128
+    )
+    method.mxfp4_backend = Mxfp4MoeBackend.EMULATION
+    layer = SimpleNamespace(
+        w13_weight_scale=torch.zeros(4, 512, 8, dtype=torch.uint8),
+        w2_weight_scale=torch.zeros(4, 256, 8, dtype=torch.uint8),
+        w13_bias=None,
+        w2_bias=None,
+    )
+    config = method.get_fused_moe_quant_config(layer)
+    assert config is not None
+    assert config.input_rotation_size == 128
+    assert dataclasses.replace(config).input_rotation_size == 128
+
+    method.rotation_size = None
+    assert method.get_fused_moe_quant_config(layer).input_rotation_size is None
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_block_hadamard_rotate_activation_matches_fp32(dtype: torch.dtype):
+    torch.manual_seed(0)
+    device = current_platform.device_type
+    x = torch.randn(64, 768, dtype=dtype, device=device)
+    ref = block_hadamard_rotate(x, hadamard_matrix(128, torch.device(device)))
+    got = block_hadamard_rotate_activation(x, 128)
+    assert got.dtype == dtype and got.shape == x.shape and got.is_contiguous()
+    if dtype == torch.float32:
+        torch.testing.assert_close(got, ref, rtol=0, atol=0)
+    else:
+        # One rounding of the GEMM output, plus the +-1/sqrt(128) entries
+        # rounded to `dtype`, which scales the rotation by about 1 - 1e-4.
+        torch.testing.assert_close(got, ref, rtol=2**-7, atol=1e-3)
+
+
+def test_rotated_experts_reject_prequantized_input(default_vllm_config):
+    """A prepare step that already quantized the hidden states would be rotated
+    as if it were bf16, which gives a different product."""
+    device = current_platform.device_type
+    quant = ocp_mx_moe_quant_config(
+        quant_dtype="mxfp4",
+        weight_dtype="mxfp4",
+        w1_scale=torch.zeros(4, 512, 8, dtype=torch.uint8),
+        w2_scale=torch.zeros(4, 256, 8, dtype=torch.uint8),
+    )
+    quant.input_rotation_size = 128
+    experts = InputHadamardOCPMXEmulationExperts(_moe_config(), quant)
+    hidden = torch.zeros(2, 256, dtype=torch.bfloat16, device=device)
+    kwargs = dict(
+        output=torch.empty_like(hidden),
+        w1=None,
+        w2=None,
+        topk_weights=torch.ones(2, 1, device=device),
+        topk_ids=torch.zeros(2, 1, dtype=torch.int32, device=device),
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        global_num_experts=4,
+        expert_map=None,
+        a2_scale=None,
+        workspace13=None,
+        workspace2=None,
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+    with pytest.raises(ValueError, match="unquantized"):
+        experts.apply(
+            hidden_states=hidden,
+            a1q_scale=torch.ones(2, 8, device=device),
+            **kwargs,
+        )
+    with pytest.raises(ValueError, match="unquantized"):
+        experts.apply(
+            hidden_states=hidden.to(current_platform.fp8_dtype()),
+            a1q_scale=None,
+            **kwargs,
         )
 
 
