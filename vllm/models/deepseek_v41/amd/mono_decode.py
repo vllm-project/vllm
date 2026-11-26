@@ -19,7 +19,7 @@ the layer as before; the paths share every tensor at the layer boundary, so they
 interleave freely.
 
 On CDNA3 (gfx942) the kernels compute the same layer on their own copies of
-the weights (`mono/weights942.py`), at TP 4 and on steps of up to
+the weights (`mono/weights942.py`), at TP 4 or 8 and on steps of up to
 `MAX_ROWS_GFX942` rows. An index source's keys are written by
 `mono/keylist.py` between vLLM's indexer and K2 there, and the DSpark draft
 layers also take the FFN launch, built for the draft's routing.
@@ -44,7 +44,6 @@ from vllm.distributed import (
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.models.deepseek_v41.amd.mono.stages.dims import Dims
-from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
@@ -296,16 +295,6 @@ def _keep_row_major_at_load(layer: "DeepseekV4DecoderLayer", ffn_only: bool) -> 
         linear.keep_row_major_weight = True
 
 
-def _compute_units() -> int:
-    return current_platform.num_compute_units(torch.accelerator.current_device_index())
-
-
-def _gpu_arch() -> str:
-    """The GPU's architecture without its feature flags, for example gfx942."""
-    props = torch.cuda.get_device_properties(torch.accelerator.current_device_index())
-    return props.gcnArchName.split(":")[0].lower()
-
-
 def _unsupported_moe(layer: "DeepseekV4DecoderLayer", vllm_config) -> str | None:
     """Why the kernels cannot run this deployment's MoE, or None. They read every
     one of the 384 experts on each rank, TP-sharded, in AITER's A8W4 MXFP4
@@ -418,19 +407,22 @@ class MonoDecodeLayer:
         else:
             why = _unsupported_moe(layer, vllm_config)
         if why is None:
+            from vllm.models.deepseek_v41.amd.mono.common.plan import device_grid
+
+            gpu, blocks = device_grid()
+            # K2 places one wo_a task a CTA: TP2's 128 do not fit 80 CTAs
+            if blocks == 80 and get_tensor_model_parallel_world_size() == 2:
+                why = "on 80 CUs needs tensor parallel size 4 or 8"
+        if why is None:
             try:
-                from vllm.models.deepseek_v41.amd.mono.runner import BLOCKS
+                import vllm.models.deepseek_v41.amd.mono.runner  # noqa: F401
             except ImportError as err:
                 why = f"needs FlyDSL and AITER's FlyDSL helpers ({err})"
             else:
                 from vllm.models.deepseek_v41.amd.mono.common.arch import target_arch
 
-                # every CTA of a launch stays resident: a partitioned GPU deadlocks
-                cus = _compute_units()
-                target, gpu = target_arch(), _gpu_arch()
-                if cus < BLOCKS:
-                    why = f"needs {BLOCKS} compute units, the GPU has {cus}"
-                elif target != gpu:
+                target = target_arch()
+                if target != gpu:
                     # FlyDSL compiles the kernels for the ARCH environment
                     # variable when it is set, while the choice of the gfx942
                     # weight copies follows the GPU. A stray ARCH would make

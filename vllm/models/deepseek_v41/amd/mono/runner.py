@@ -28,7 +28,7 @@ from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 from .attention.front import FRONT_POINTS
 from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Q_RANK, WINDOW, Dims
 from .common.arch import GFX942
-from .common.plan import BLOCKS
+from .common.grid import BLOCKS
 from .layer import (
     EPOCH_WORDS,
     K2_POINTS,

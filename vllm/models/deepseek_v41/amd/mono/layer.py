@@ -29,6 +29,7 @@ from .attention.device import (
     BLOCKS,
     CM_DEV,
     THREADS,
+    first_task,
     gstore,
     kernel_symbol,
     memrealtime,
@@ -44,9 +45,10 @@ from .attention.plan import (
     front_scratch,
 )
 from .common.arch import GFX942
+from .common.grid import GRID_MAX
 from .common.mx import clamp_fp8
 from .common.ops import bf16_pair, butterfly, fp8_pack4, fresh, peer_bases, traced
-from .common.plan import first_task, key_tuple
+from .common.plan import key_tuple
 from .common.sync import Mailbox, preg, publish, sreg
 from .sources import SOURCES
 from .stages import moe, seam
@@ -116,10 +118,14 @@ class MonoBuild:
             == (EXPERTS, TOPK, 2, WINDOW)
             # the shared offload needs that many CTAs (``moe.DSH_RANKS``)
             and moe.DSH_RANKS <= BLOCKS
+            # the 256-CTA layout's (a smaller grid places its stages in passes)
+            and BLOCKS == GRID_MAX
         )
 
     @property
     def tuned_front(self) -> bool:
+        if BLOCKS != GRID_MAX:
+            return False
         from vllm.platforms.rocm import get_cdna_version
 
         return self.tuned or (
@@ -312,7 +318,9 @@ def _k1_tasks(key: MonoBuild):
         # the gates on CTAs without a wqkv part (past the front's key-table /
         # qkv CTAs) while they fit: on a wqkv CTA a gate holds up its partials
         GATE0 = n_wqkv + s
-    assert GATE0 + s <= BLOCKS
+    # A smaller grid wraps the norm and gate tasks round after the slices: both
+    # wait on the slices only (LIN, PMIX), never on later work.
+    assert GATE0 + s <= BLOCKS or BLOCKS < GRID_MAX
     return NORM0, GATE0
 
 
@@ -1021,7 +1029,7 @@ def build_mono_k2(key: MonoBuild):
     BackM = mb_back.back_lds_members(s, Dims(tp))
     SplitLds, GemvLds = BackM["split"], BackM["gemv"]
     MoeLds = moe.moe_smem(s, rs, False)
-    assert SLICES + 2 * s <= BLOCKS
+    assert BLOCKS < GRID_MAX or SLICES + 2 * s <= BLOCKS
     SeamLds = _seam_lds(s, key.tuned_seam)
 
     @fx.union
@@ -1291,7 +1299,7 @@ def build_mono_ffn(key: MonoBuild):
     assert rs.experts // 64 in SORT_NETS
     MoeLds = moe.moe_smem(s, rs, False)
     half = peer_half_bytes(tp)
-    assert SLICES + 2 * s <= BLOCKS
+    assert BLOCKS < GRID_MAX or SLICES + 2 * s <= BLOCKS
     SeamLds = _seam_lds(s, key.tuned_seam)
 
     @fx.union
@@ -1512,7 +1520,7 @@ def build_mono_k2k1(key: MonoBuild, nkey: MonoBuild):
     assert 1 <= s <= MAX_TOKENS and not GFX942
     assert (nkey.tokens, nkey.tp) == (s, tp) and nkey.fold
     assert (key.tuned, key.tuned_front) == (nkey.tuned, nkey.tuned_front)
-    assert key.tuned_front and key.tuned_seam
+    assert key.tuned_front and key.tuned_seam and BLOCKS == GRID_MAX
     assert (key.experts, key.topk, key.ug_groups, key.swa_width) == (
         nkey.experts,
         nkey.topk,

@@ -21,9 +21,9 @@ from flydsl.expr.typing import T, as_ir_value
 
 from ..common.arch import GFX942
 from ..common.gfx942 import bf16_hi_pair, fp8x2_f32, mfma_bf16_k32
+from ..common.grid import BLOCKS, first_task  # noqa: F401 (re-exported to the stages)
 
-# The execution model: one CTA a CU of an MI355X, all resident.
-BLOCKS = 256
+# The execution model: one CTA a CU, all resident.
 THREADS = 512
 WAVES = THREADS // 64
 
@@ -51,12 +51,6 @@ def kernel_symbol(stem, **params):
     """Kernel symbol that profilers demangle to `aiter::<stem>_<params>`."""
     name = f"{stem}_{kernel_signature(**params)}"
     return f"_ZN5aiter{len(name)}{name}E"
-
-
-def first_task(bid, base):
-    """CTA `bid`'s first task of a stage placed from CTA `base`, then every
-    BLOCKS-th."""
-    return (bid - base % BLOCKS + BLOCKS) % BLOCKS
 
 
 # ----------------------------------------------------------------------------- memory

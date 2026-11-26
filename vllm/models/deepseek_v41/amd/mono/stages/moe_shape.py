@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 
 import flydsl.expr as fx
 
-from vllm.models.deepseek_v41.amd.mono.common.plan import BLOCKS, WAVES
+from vllm.models.deepseek_v41.amd.mono.common.grid import BLOCKS
+from vllm.models.deepseek_v41.amd.mono.common.plan import WAVES
 from vllm.models.deepseek_v41.amd.mono.stages import moe_plan as mplan
 from vllm.models.deepseek_v41.amd.mono.stages.dims import UG_PART, Dims
 from vllm.models.deepseek_v41.amd.mono.stages.gemv import ROWS, TILE, token_tiles

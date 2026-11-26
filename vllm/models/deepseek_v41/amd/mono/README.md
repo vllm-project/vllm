@@ -66,11 +66,13 @@ new, reading vLLM's KV records and weights as loaded.
 
 ## Execution model and hand-offs
 
-- Grid = 256 CTAs (one a CU, all resident), 512 threads a CTA, LDS a per-stage
-  union. A stage is a task table: CTA `b` runs tasks `b, b + 256, ...`, stages
-  in order; a consumer only waits on earlier stages, so no deadlock while the
-  grid is resident. A GEMV task issues its weight loads before it polls its
-  activations.
+- Grid = 256 CTAs (one a CU, all resident), or 80 on the 80-CU MI308X (each
+  worker picks it from its bound GPU; it is in every build's cache key), 512
+  threads a CTA, LDS a per-stage union. A stage is a task table: CTA `b` runs
+  tasks `b, b + BLOCKS, ...` (on 80 CTAs some stages in further passes),
+  stages in order; a consumer only waits on earlier stages, so no deadlock
+  while the grid is resident. A GEMV task issues its weight loads before it
+  polls its activations.
 - In a launch: tagged pairs (value + tag in one 8 B store) or plain data +
   flags, at device scope. The tag is the launch pair's epoch (K1 `2e + 1`,
   K2 or the FFN launch `2e + 2`), a device word their CTA 0 moves on once every

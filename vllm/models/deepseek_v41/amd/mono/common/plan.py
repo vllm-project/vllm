@@ -24,11 +24,21 @@ THREADS = 512
 WAVES = THREADS // 64
 
 
-def first_task(bid, base):
-    """CTA `bid`'s first task of a stage placed from CTA `base` (any count of
-    CTAs past 0: placements that add task counts run past the grid), then every
-    BLOCKS-th."""
-    return (bid - base % BLOCKS + BLOCKS) % BLOCKS
+def device_grid() -> tuple[str, int]:
+    """Get the V4.1 worker's architecture and resident grid after device binding."""
+    import torch
+
+    props = torch.cuda.get_device_properties(torch.accelerator.current_device_index())
+    arch = props.gcnArchName.split(":")[0].lower()
+    cus = props.multi_processor_count
+    if cus >= BLOCKS:
+        return arch, BLOCKS
+    if arch == "gfx942" and cus == 80:
+        return arch, 80
+    raise ValueError(
+        f"--monokernel needs {BLOCKS} compute units or an 80-CU gfx942, "
+        f"but the GPU is {arch} with {cus} compute units."
+    )
 
 
 # ---------------------------------------------------------------- mailbox layouts

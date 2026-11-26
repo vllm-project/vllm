@@ -56,6 +56,7 @@ from vllm.models.deepseek_v41.amd.mono.common.gfx942 import (
     pair_i64,
     pin_acc,
 )
+from vllm.models.deepseek_v41.amd.mono.common.grid import BLOCKS, first_task
 from vllm.models.deepseek_v41.amd.mono.common.mx import (
     FP4,
     FP8,
@@ -98,10 +99,8 @@ from vllm.models.deepseek_v41.amd.mono.common.ops import (
 )
 from vllm.models.deepseek_v41.amd.mono.common.ops import stamp as stamp_lds
 from vllm.models.deepseek_v41.amd.mono.common.plan import (
-    BLOCKS,
     THREADS,
     WAVES,
-    first_task,
     pair_layout,
 )
 from vllm.models.deepseek_v41.amd.mono.common.sync import preg, publish, sreg
@@ -2546,11 +2545,23 @@ def run_moe(c, key, bid, tls, tl0):
     # whose tile loads LLVM does not hoist into one live set as it would out of
     # a task loop (spills). A task's tiles in series on one CTA put three tiles'
     # latency on the path down waits on (the weights read again a tile: L2 hits)
-    assert c["rs"].shared_units <= BLOCKS
     unit = first_task(bid, shared0)
-    if unit < c["rs"].shared_units:
+    a = c["args"]  # assigned before the dynamic `elif` (FlyDSL's rewriter)
+    if const_expr(c["rs"].shared_units > BLOCKS):
+        # more units than CTAs (a smaller grid, several token tiles): a CTA's
+        # units BLOCKS apart in turn, each its own weights and token tile. An
+        # odd task polls the even one a unit lower, on this or an earlier CTA
+        assert multi
+        for u in range(unit, c["rs"].shared_units, BLOCKS):
+            gops = gemv_fp8_loads(
+                c, a["sgu"], a["sgu_s"], HIDDEN, u % shared_tasks, row_major=True
+            )
+            t0 = u // shared_tasks * TILE
+            n = fx.min(fx.Int32(TILE), s - t0)
+            load_x8_rows(c, "x8", "x8s", c["x8l"], c["x8sl"], lambda j, t=t0: t + j, n)
+            stage_shared(c, u % shared_tasks, gops, t0, n)
+    elif unit < c["rs"].shared_units:
         # the gate weights in flight before x's wait
-        a = c["args"]
         gops = gemv_fp8_loads(
             c, a["sgu"], a["sgu_s"], HIDDEN, unit % shared_tasks, row_major=True
         )
@@ -2595,7 +2606,6 @@ def run_moe(c, key, bid, tls, tl0):
             loaded = fx.Int32(1)
             stage_ug(c, task)
     stamp(timeline, tls, tid, tl0 + 5)
-    assert BLOCKS < DOWN_TASKS <= 2 * BLOCKS
     # the route table is in LDS already past one token tile (every CTA loads it
     # for the ug queue) or when every CTA ran an ug iteration (more ug task
     # slots than CTAs), whose first loads it; else load it
@@ -2605,15 +2615,25 @@ def run_moe(c, key, bid, tls, tl0):
     # one too: the CTAs whose ug ended first (by bid, those ending last held
     # two tiles and ended the stage)
     down_task = first_task(bid, DOWN0)
-    rank = take_down_rank(c)
-    dsh = rank if key.tuned else None
-    if const_expr(key.tuned):
-        # the two-task CTAs' shared rows offloaded (``dsh_offload``)
-        dsh_offload(c, down_task, rank)
-    if rank < DOWN_TASKS - BLOCKS:
-        stage_down(c, [down_task, BLOCKS + rank], dsh)
+    if const_expr(BLOCKS < DOWN_TASKS <= 2 * BLOCKS):
+        rank = take_down_rank(c)
+        dsh = rank if key.tuned else None
+        if const_expr(key.tuned):
+            # the two-task CTAs' shared rows offloaded (``dsh_offload``)
+            dsh_offload(c, down_task, rank)
+        if rank < DOWN_TASKS - BLOCKS:
+            stage_down(c, [down_task, BLOCKS + rank], dsh)
+        else:
+            stage_down(c, [down_task], dsh)
     else:
-        stage_down(c, [down_task], dsh)
+        # a grid of fewer than 160 CTAs: every CTA its tiles BLOCKS apart, two
+        # run together a pass (the 256-CTA grid's most), the passes in turn.
+        # Never tuned: the shared offload needs DSH_RANKS <= BLOCKS
+        assert not key.tuned and DOWN_TASKS % (2 * BLOCKS) == 0
+        for p in range_constexpr(DOWN_TASKS // (2 * BLOCKS)):
+            ta = down_task + 2 * BLOCKS * p
+            stage_down(c, [ta, ta + BLOCKS])
+            gpu.barrier()
     stamp(timeline, tls, tid, tl0 + 6)
     if const_expr(not c.get("skip_reduce", False)):
         for task in range(first_task(bid, RED0), RED_TASKS, BLOCKS):

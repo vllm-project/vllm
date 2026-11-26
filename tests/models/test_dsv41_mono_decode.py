@@ -622,9 +622,16 @@ def _deployment(monkeypatch, cdna=4, cus=256, tp=2, target=None):
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
     monkeypatch.setattr(rocm, "get_cdna_version", lambda: cdna)
     monkeypatch.setattr(md, "get_tensor_model_parallel_world_size", lambda: tp)
-    monkeypatch.setattr(md, "_compute_units", lambda: cus)
     gpu = "gfx942" if cdna == 3 else "gfx950"
-    monkeypatch.setattr(md, "_gpu_arch", lambda: gpu)
+    # The worker selects its device before the mono runner imports the kernels.
+    # A different rank's (or the parent's) default device can have a different grid.
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 3)
+
+    def properties(device):
+        assert device == 3
+        return SimpleNamespace(gcnArchName=f"{gpu}:sramecc+", multi_processor_count=cus)
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", properties)
     arch = ModuleType("vllm.models.deepseek_v41.amd.mono.common.arch")
     arch.target_arch = lambda: target or gpu  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, arch.__name__, arch)
@@ -638,9 +645,27 @@ def _deployment(monkeypatch, cdna=4, cus=256, tp=2, target=None):
     # recorded value back afterwards, so that no later test sees this one's.
     monkeypatch.setattr(ops, "_monokernel", ops._monokernel)
     name = "vllm.models.deepseek_v41.amd.mono.runner"
-    runner = ModuleType(name)
-    runner.BLOCKS = 256  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, name, runner)
+    monkeypatch.setitem(sys.modules, name, ModuleType(name))
+
+
+@pytest.mark.parametrize("cdna,cus", [(3, 80), (3, 304), (4, 256)])
+def test_monokernel_accepts_resident_grid(monkeypatch, cdna, cus):
+    _deployment(monkeypatch, cdna=cdna, cus=cus, tp=4)
+    assert md.MonoDecodeLayer.create(_decoder_layer(), _config()) is not None
+
+
+@pytest.mark.parametrize(
+    "cdna,cus,tp,match",
+    [
+        (3, 96, 4, "256 compute units or an 80-CU gfx942"),
+        (4, 80, 4, "256 compute units or an 80-CU gfx942"),
+        (3, 80, 2, "80 CUs needs tensor parallel size 4 or 8"),
+    ],
+)
+def test_monokernel_rejects_unsupported_grid(monkeypatch, cdna, cus, tp, match):
+    _deployment(monkeypatch, cdna=cdna, cus=cus, tp=tp)
+    with pytest.raises(ValueError, match=match):
+        md.MonoDecodeLayer.create(_decoder_layer(), _config())
 
 
 def test_off_without_the_flag(monkeypatch):
@@ -776,7 +801,7 @@ def test_gfx942_layers(monkeypatch, layer, kind):
 
 
 def test_gfx942_tp2_runs_vllm_path(monkeypatch):
-    """The gfx942 kernels are built for TP4 only. At TP2 every layer runs
+    """On the 256-CTA gfx942 grid, TP2 falls back. Every layer runs
     vLLM's path, and that is not an error."""
     _deployment(monkeypatch, cdna=3, tp=2)
     assert md.MonoDecodeLayer.create(_decoder_layer(), _config()) is None
