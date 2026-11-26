@@ -6,8 +6,8 @@ The MTP draft model reuses the Qwen4Exp backbone (PLE/HC/MoE) but:
   - drops all multi-modal handling (text-only),
   - forces PLE off while keeping the main model's HC stream count,
   - fuses the backbone hidden and the new-token embedding via
-    ``residual_linear_shared`` (fc_embedding + shared fc_hidden) instead of
-    the ``Linear(2H, H)`` + repeat used by other MTP variants,
+    `residual_linear_shared` (fc_embedding + shared fc_hidden) instead of
+    the `Linear(2H, H)` + repeat used by other MTP variants,
   - emits TWO hidden streams per step (scheme A): a single stream [T, H]
     (final-mixer collapsed, fed to the LM head) and a pre-final-mixer
     multi stream [T, hc_count*H] (fed to the next draft step).
@@ -22,10 +22,6 @@ from transformers import Qwen4ExpTextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, replace, set_current_vllm_config
-from vllm.distributed import get_pp_group
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
-)
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -34,19 +30,21 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.utils import configure_quant_config
-from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.interfaces import SupportsHCSP, SupportsPP
 from vllm.model_executor.models.qwen3_5 import Qwen3_5Model
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
-    PPMissingLayer,
     WeightsMapper,
     get_draft_quant_config,
+    get_fused_shared_expert_layers,
     make_empty_intermediate_tensors_factory,
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
+from vllm.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 from vllm.sequence import IntermediateTensors
 
+from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .model import (
@@ -119,6 +117,7 @@ def _remap_mtp_weight_name(name: str) -> str | None:
 def _make_draft_vllm_config(
     vllm_config: VllmConfig,
     mtp_start_layer_idx: int,
+    num_mtp_layers: int,
 ) -> VllmConfig:
     """Ensure that the draft model config is set in the vLLM config."""
     speculative_config = vllm_config.speculative_config
@@ -151,6 +150,15 @@ def _make_draft_vllm_config(
                 "quantized_layers",
                 _remap_quantized_layers(quantized_layers, mtp_start_layer_idx),
             )
+        if draft_quant_config.get_name() == "quark":
+            draft_quant_config.apply_vllm_mapper(
+                WeightsMapper(
+                    orig_to_new_prefix={
+                        f"mtp.layers.{i}.": f"mtp.layers.{mtp_start_layer_idx + i}."
+                        for i in range(num_mtp_layers)
+                    }
+                )
+            )
 
     draft_vllm_config = replace(
         vllm_config,
@@ -181,6 +189,8 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         config: Qwen4ExpTextConfig = model_config.hf_text_config
 
         self.config = config
+        # MoE SP also enables HC SP, while HC SP can be enabled independently.
+        self.use_hc_sequence_parallel = is_hc_sequence_parallel_enabled(vllm_config)
         self.vocab_size = config.vocab_size
 
         self.mtp_start_layer_idx = config.num_hidden_layers
@@ -193,6 +203,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         draft_vllm_config = _make_draft_vllm_config(
             vllm_config,
             self.mtp_start_layer_idx,
+            self.num_mtp_layers,
         )
         with set_current_vllm_config(draft_vllm_config, prefix=prefix):
             # residual_linear_shared fusion: fc_embedding projects the token
@@ -225,10 +236,10 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
                 )
                 for idx in range(self.num_mtp_layers)
             )
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             Qwen4ExpSparseMoeBlock,
-            "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
         self.pre_fc_norm_embedding = GemmaRMSNorm(
@@ -293,34 +304,33 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         hc_count = self.hc_count
         hidden_size = self.hidden_size
 
-        if get_pp_group().is_first_rank:
-            assert hidden_states is not None
-            if inputs_embeds is None:
-                assert input_ids is not None
-                inputs_embeds = self.embed_input_ids(input_ids)
-            # Embedding branch: pre-norm -> fc_embedding -> [T, H].
-            inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
-            inputs_embeds = self.fc_embedding(inputs_embeds)
+        assert hidden_states is not None
+        if inputs_embeds is None:
+            assert input_ids is not None
+            inputs_embeds = self.embed_input_ids(input_ids)
+        # Embedding branch: pre-norm -> fc_embedding -> [T, H].
+        inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
+        inputs_embeds = self.fc_embedding(inputs_embeds)
 
-            # Backbone hidden is multi-stream [T, hc_count*H] (scheme A:
-            # the main model truly emits the pre-final-mixer multi stream
-            # on the first step; subsequent steps reuse the prior draft
-            # step's multi stream).
-            num_tokens = hidden_states.shape[0]
-            hidden_states = hidden_states.view(num_tokens, hc_count, hidden_size)
-            hidden_states = self.pre_fc_norm_hidden(hidden_states.flatten(-2)).view(
-                num_tokens, hc_count, hidden_size
-            )
-            hidden_states = self.fc_hidden(hidden_states)
-            # Add the embedding residual to every branch, then fold back
-            # to [T, hc_count*H] (HC outer, HS inner) for the HC decoder.
-            hidden_states = inputs_embeds.unsqueeze(-2) + hidden_states
-            hidden_states = hidden_states.flatten(-2)
-        else:
-            assert intermediate_tensors is not None
-            hidden_states = intermediate_tensors["hidden_states"]
+        # Backbone hidden is multi-stream [T, hc_count*H] (scheme A:
+        # the main model truly emits the pre-final-mixer multi stream
+        # on the first step; subsequent steps reuse the prior draft
+        # step's multi stream).
+        num_tokens = hidden_states.shape[0]
+        hidden_states = hidden_states.view(num_tokens, hc_count, hidden_size)
+        hidden_states = self.pre_fc_norm_hidden(hidden_states.flatten(-2)).view(
+            num_tokens, hc_count, hidden_size
+        )
+        hidden_states = self.fc_hidden(hidden_states)
+        # Add the embedding residual to every branch, then fold back
+        # to [T, hc_count*H] (HC outer, HS inner) for the HC decoder.
+        hidden_states = inputs_embeds.unsqueeze(-2) + hidden_states
+        hidden_states = hidden_states.flatten(-2)
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
+        full_num_tokens = positions.shape[-1]
+        if self.use_hc_sequence_parallel:
+            hidden_states = sp_shard(hidden_states)
         layer = self.layers[current_step_idx]
         hidden_states, block_output, injection = layer(
             hidden_states=hidden_states,
@@ -331,15 +341,8 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             query_start_loc=None,
             ngram_context=None,
         )
-        if not get_pp_group().is_last_rank:
-            # As in the target model, PP carries a materialized tensor rather
-            # than the delayed hidden/output/injection tuple.
-            hidden_states = layer.mlp_hyper_connection.combine(
-                hidden_states, block_output, injection
-            )
-            return IntermediateTensors({"hidden_states": hidden_states})
 
-        # Last PP rank finalize. Keep both:
+        # Finalize. Keep both:
         #   (A) sample_hidden_states [T, H]  -> single stream for the LM head
         #   (B) multi_hidden [T, hc_count*H] -> pre-final-mixer multi stream
         #       for the next draft step (zero extra compute, just kept).
@@ -348,12 +351,23 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
                 hidden_states, block_output, injection
             )
         )
+        if self.use_hc_sequence_parallel:
+            # Gather both outputs together, then restore their contiguous layouts.
+            packed_hidden_states = torch.cat(
+                [sample_hidden_states, multi_hidden], dim=-1
+            )
+            packed_hidden_states = sp_all_gather(packed_hidden_states)[:full_num_tokens]
+            sample_hidden_states, multi_hidden = packed_hidden_states.split(
+                [hidden_size, hc_count * hidden_size], dim=-1
+            )
+            sample_hidden_states = sample_hidden_states.contiguous()
+            multi_hidden = multi_hidden.contiguous()
         return sample_hidden_states, multi_hidden
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = maybe_fuse_shared_experts(
             weights,
-            enabled=self.is_fused_shared_expert_enabled,
+            fused_shared_expert_layers=self.fused_shared_expert_layers,
             n_routed_experts=getattr(self.config, "num_experts", 0) or 0,
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",
@@ -377,7 +391,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         "hidden_states": 0,
     }
 )
-class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts):
+class Qwen4ExpMTP(nn.Module, SupportsHCSP, SupportsPP, Qwen4ExpMixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -402,17 +416,14 @@ class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts):
             prefix=maybe_prefix(prefix, "mtp"),
         )
 
-        if get_pp_group().is_last_rank:
-            if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+        if config.tie_word_embeddings:
+            self.lm_head = self.model.embed_tokens
         else:
-            self.lm_head = PPMissingLayer()
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (

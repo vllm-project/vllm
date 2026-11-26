@@ -237,9 +237,6 @@ benchmarks/**/*.json
 actionlint
 shellcheck*/
 
-# Ignore moe/marlin_moe gen code
-csrc/libtorch_stable/moe/marlin_moe_wna16/kernel_*
-
 # Ignore ep_kernels_workspace folder
 ep_kernels_workspace/
 
@@ -254,3 +251,9 @@ vllm/grpc/vllm_engine_pb2.pyi
 
 # Ignore generated cpu headers 
 csrc/cpu/cpu_attn_dispatch_generated.h
+
+# Written by .buildkite/scripts/rocm/build.sh
+/.rocm-src/
+/.rocm-version/
+/.rocm-wheel/
+/.rocm-kernel-map/

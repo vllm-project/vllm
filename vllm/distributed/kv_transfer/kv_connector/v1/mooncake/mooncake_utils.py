@@ -25,7 +25,7 @@ class RegisterWorkerPayload(BaseModel):
     addr: WorkerAddr
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineEntry:
     engine_id: EngineId
     # {tp_rank: {pp_rank: worker_addr}}

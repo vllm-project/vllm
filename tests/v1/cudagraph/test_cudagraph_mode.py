@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
+import os
 from contextlib import ExitStack
 
 import pytest
 
 from tests.utils import create_new_process_for_each_test
 from tests.v1.attention.utils import full_cg_backend_configs as backend_configs
-from vllm import LLM
+from vllm import LLM, SamplingParams, envs
 from vllm.config import CompilationConfig, CompilationMode
 from vllm.platforms import current_platform
 
@@ -16,6 +18,13 @@ if current_platform.is_rocm():
     combo_cases_1 = [
         ("RocmAttn", "FULL", True),
         ("RocmAttn", "FULL_AND_PIECEWISE", True),
+        ("TritonAttn", "FULL", True),
+        ("TritonAttn", "FULL_AND_PIECEWISE", True),
+    ]
+elif current_platform.is_xpu():
+    combo_cases_1 = [
+        ("FA2", "FULL", True),
+        ("FA2", "FULL_AND_PIECEWISE", True),
         ("TritonAttn", "FULL", True),
         ("TritonAttn", "FULL_AND_PIECEWISE", True),
     ]
@@ -56,7 +65,6 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supporte
             model="Qwen/Qwen2-1.5B-Instruct",
             max_num_seqs=16,
             max_num_batched_tokens=128,
-            trust_remote_code=True,
             gpu_memory_utilization=0.45,
             max_model_len=1024,
             attention_config=attention_config,
@@ -103,7 +111,6 @@ def test_cudagraph_compilation_combo(
             model="Qwen/Qwen2-1.5B-Instruct",
             max_num_seqs=16,
             max_num_batched_tokens=128,
-            trust_remote_code=True,
             gpu_memory_utilization=0.45,
             max_model_len=1024,
             attention_config=attention_config,
@@ -114,3 +121,32 @@ def test_cudagraph_compilation_combo(
             ),
         )
         llm.generate(["Hello, my name is"] * 10)
+
+
+@create_new_process_for_each_test("spawn")
+def test_breakable_cudagraph_inputs_embeds_debug_replay():
+    """Breakable PIECEWISE replay under DEBUG logging must match capture args
+    when inputs_embeds replaces input_ids."""
+    os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+    os.environ["VLLM_LOGGING_LEVEL"] = "DEBUG"
+    envs.disable_envs_cache()
+    logging.getLogger("vllm").setLevel(logging.DEBUG)
+
+    llm = LLM(
+        model="Qwen/Qwen2-1.5B-Instruct",
+        enable_prompt_embeds=True,
+        max_num_seqs=8,
+        max_num_batched_tokens=128,
+        gpu_memory_utilization=0.45,
+        max_model_len=1024,
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.NONE,
+            cudagraph_mode="PIECEWISE",
+            prefill_cudagraph_capture_token_sizes=[1, 2, 4, 8, 16, 32],
+        ),
+    )
+    outputs = llm.generate(
+        ["The capital of France is"],
+        SamplingParams(max_tokens=8, temperature=0.0),
+    )
+    assert "Paris" in outputs[0].outputs[0].text

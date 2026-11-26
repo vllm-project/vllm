@@ -1,0 +1,139 @@
+meta:
+  title: "Laguna M.1"
+  slug: "laguna-m.1"
+  provider: "Poolside"
+  description: "Poolside's 225B total / 23B activated MoE coding model with global attention, native interleaved reasoning, and 256K context — designed for agentic coding and long-horizon work."
+  date_added: 2026-06-18
+  date_updated: 2026-06-18
+  tasks:
+    - text
+  performance_headline: "225B/23B-A MoE for agentic coding — 74.6% SWE-bench Verified"
+  related_recipes:
+    - "poolside/Laguna-XS.2"
+
+model:
+  model_id: "poolside/Laguna-M.1"
+  min_vllm_version: "0.21.0"
+  architecture: moe
+  parameter_count: "225B"
+  active_parameters: "23B"
+  context_length: 262144
+  base_args: []
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with Poolside's tool-call parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "poolside_v1"
+  reasoning:
+    description: "Enable interleaved thinking (on by default) with Poolside's reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "poolside_v1"
+      - "--default-chat-template-kwargs"
+      - '{"enable_thinking": true}'
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 540
+    description: "BF16 weights (225B) — fits on a single 8×H200/B200 node"
+  fp8:
+    model_id: "poolside/Laguna-M.1-FP8"
+    precision: fp8
+    vram_minimum_gb: 270
+    description: "Block-FP8 weights + FP8 KV cache — halves VRAM, runs on a single 4×H200/B200 node"
+  nvfp4:
+    model_id: "poolside/Laguna-M.1-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 135
+    description: "NVFP4 weights (Blackwell only) — fits within ~135GB; pairs with FP8 KV cache"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_dep
+  - multi_node_tep
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Laguna M.1](https://huggingface.co/poolside/Laguna-M.1) is Poolside's 225B-total / 23B-activated Mixture-of-Experts model purpose-built for agentic coding and long-horizon work. It is competitive with state-of-the-art open-weight and frontier models on SWE-bench Verified (74.6%), SWE-bench Multilingual, SWE-Bench Pro, and Terminal-Bench 2.0.
+
+  ### Key features
+  - **Large sparse MoE**: 70-layer transformer — the first 3 layers are dense SwiGLU, the remaining 67 are sparse MoE with **256 experts + 1 shared expert** and top-k=16 routing with auxiliary-loss-free load balancing.
+  - **Global attention**: global attention across all layers with 64 Q-heads, 8 KV-heads, head dim 128, and softplus attention output gating.
+  - **256K context**: RoPE with YaRN extends the context window to 262,144 tokens.
+  - **Native interleaved reasoning**: thinking blocks emitted before and between tool calls, with *preserved thinking* (returning prior `reasoning` in history) recommended for best agentic performance. Toggled per-request via `enable_thinking`.
+  - **Tool calling**: Poolside-specific tool-call protocol, parsed via `poolside_v1`.
+
+  ## Prerequisites
+
+  Laguna M.1 support landed in vLLM via [PR #41129](https://github.com/vllm-project/vllm/pull/41129) (shared implementation with [Laguna XS.2](https://huggingface.co/poolside/Laguna-XS.2)) and ships in **vLLM 0.21.0 and later**.
+
+  ```bash
+  uv pip install -U 'vllm>=0.21.0'
+  ```
+
+  FP8 and NVFP4 quantized checkpoints are available at [Laguna-M.1-FP8](https://huggingface.co/poolside/Laguna-M.1-FP8) and [Laguna-M.1-NVFP4](https://huggingface.co/poolside/Laguna-M.1-NVFP4). Quantization is detected automatically from the checkpoint's `quantization_config`, so the launch command is identical — just swap the model ID (select the variant above).
+
+  ## Launch command
+
+  ### Single node (8×H200, BF16)
+  ```bash
+  vllm serve poolside/Laguna-M.1 \
+    --tensor-parallel-size 8 \
+    --served-model-name laguna \
+    --enable-auto-tool-choice \
+    --tool-call-parser poolside_v1 \
+    --reasoning-parser poolside_v1 \
+    --default-chat-template-kwargs '{"enable_thinking": true}'
+  ```
+
+  The BF16 checkpoint (~450 GB of weights) fits on a single 8×H200 node. Use the **FP8** variant to run on 4 GPUs, or the **NVFP4** variant (Blackwell only) to fit within ~135 GB.
+
+  ## Controlling reasoning
+
+  Reasoning is enabled at the server when you pass `--default-chat-template-kwargs '{"enable_thinking": true}'` (included above). Poolside recommends **preserved thinking** for agentic coding — return the previous assistant turn's `reasoning` in the message history.
+
+  ```python
+  from openai import OpenAI
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+  resp = client.chat.completions.create(
+      model="laguna",
+      messages=[{"role": "user", "content": "Write a Python retry wrapper with exponential backoff."}],
+      temperature=1.0,
+      extra_query={"top_k": 20},
+      stream=True,
+  )
+  for chunk in resp:
+      delta = chunk.choices[0].delta
+      rc = delta.reasoning
+      if rc:
+          print(rc, end="")
+      if delta.content:
+          print(delta.content, end="")
+  ```
+
+  Recommended sampling (matching Poolside's benchmark runs): **temperature=1.0, top_k=20**, thinking enabled.
+
+  To disable thinking, omit `--default-chat-template-kwargs` at launch, or pass `extra_body={"chat_template_kwargs": {"enable_thinking": False}}` per request.
+
+  ## References
+
+  - [Model card](https://huggingface.co/poolside/Laguna-M.1)
+  - [Release blog post](https://poolside.ai/blog/laguna-a-deeper-dive)
+  - [Technical report](https://poolside.ai/assets/laguna/laguna-m1-xs2-technical-report.pdf)
+  - [vLLM support PR #41129](https://github.com/vllm-project/vllm/pull/41129)

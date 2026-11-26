@@ -94,15 +94,58 @@ denial of service:
 | Environment Variable | Default | Description |
 | --- | --- | --- |
 | `VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB` | `256` | Maximum size in MB for a single remote media response. Oversized responses are rejected while streaming before the full body is materialized in memory. |
+| `VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB` | `256` | Maximum total HTTP media bytes downloaded for one request, including concurrent downloads and retried attempts. Enforced while streaming. |
 | `VLLM_MAX_IMAGE_PIXELS` | `178956970` (~179M pixels) | Maximum decoded image size in pixels. Images exceeding this are rejected before raster memory is allocated. Default matches PIL's built-in 2x decompression-bomb threshold (~680 MB for RGB). |
+| `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` | `715827880` (~683 MiB) | Maximum aggregate decoded image, video-frame, and audio bytes in one request. Images are charged at four bytes per pixel before decoding; audio is limited before decoding; video frames are charged at three bytes per pixel after frame sampling and before decoding. |
+| `VLLM_MAX_MEDIA_PREPROCESSING_BYTES` | `715827880` (~683 MiB) | Maximum estimated preprocessing bytes per prompt in the supported Python processors below. This setting is independent of the request decode budget. |
 | `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` | `25` | Maximum compressed filesize in MB for a single audio file. Enforced on all audio inputs (multimodal chat URLs, speech-to-text uploads, data: URLs, and local file paths) before decoding begins. |
 | `VLLM_MAX_AUDIO_DECODE_DURATION_S` | `600` | Maximum decoded audio duration in seconds. Prevents compressed audio from expanding into gigabytes of float32 PCM. |
 | `VLLM_MAX_AUDIO_DECODE_BYTES` | `268435456` (256 MiB) | Maximum float32 PCM bytes that audio decoding may allocate. Guards against sample-rate forgery where an inflated header sample rate bypasses the duration guard while the actual frame count causes a multi-GiB allocation. |
-| `VLLM_MAX_EMBED_DECODE_BYTES` | `2147483648` (2 GiB) | Maximum bytes a client-supplied embedding payload (`prompt_embeds`, `image_embeds`, `audio_embeds`, `video_embeds`) may allocate once densified. A sparse tensor carries its own declared shape, so a payload of a few hundred bytes can expand into hundreds of GiB. Checked before `to_dense()`, so the memory is never allocated. Set to `0` to disable. |
+| `VLLM_MAX_EMBED_DECODE_BYTES` | `2147483648` (2 GiB) | Maximum bytes a client-supplied embedding payload (`prompt_embeds`, `image_embeds`, `audio_embeds`, `video_embeds`) may allocate once densified. A sparse tensor carries its own declared shape, so a payload of a few hundred bytes can expand into hundreds of GiB, and a `torch.save` archive can deflate-compress its storages. The uncompressed archive size is checked before `torch.load` and the dense size before `to_dense()`, so the memory is never allocated. Set to `0` to disable. |
+
+The request-wide media download and decode limits cover the entire batch in
+online pooling, scoring, reranking, embedding, and batched chat requests.
 
 Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
 protection against resource-exhaustion attacks.
+
+### 6. Media preprocessing limit
+
+The supported Python processors account for their allocations as follows.
+The image and video tensor checks count items processed on the current
+request. Cached items skip preprocessing, so a warm cache can admit a prompt
+that a cold cache rejects. FunAudioChat's waveform item cap runs before cache
+lookup.
+
+- FunAudioChat derives a waveform item cap from peak buffers for padding, FFT,
+  and log-Mel feature extraction. After decoding, it also counts waveform
+  copies using each clip's sample count. The configured multimodal item limit
+  applies to waveforms and `audio_embeds`.
+- Nano Nemotron VL estimates host-side image preprocessing. The CPU resize
+  path accounts for resized tiles, resize temporaries, and concatenation. It
+  includes the largest full-resolution float32 source buffer when CPU
+  normalization is enabled. The dynamic tiler charges the full-resolution
+  `uint8` images staged for upload when resizing on the device.
+- DeepSeek-VL2 and Molmo2 account for image tiles and temporary tensors before
+  materializing them.
+- DeepSeek-OCR and Unlimited-OCR account for all global views and local tiles
+  in the document plus temporary buffers for one view. Size the limit for the
+  page count and crop settings when serving long multi-page scans.
+- Qwen3-VL and LLaVA-OneVision reserve video pixel tensor bytes before each
+  clip is processed, then check the actual output bytes. Qwen3-VL also counts
+  the concatenated output while the individual tensors are live. In the Python
+  frontend, both processors accept up to 32 videos per prompt by default.
+  The Qwen3-VL default also applies to processors that
+  inherit from it: Qwen3.5, Qwen3-VL-MoE, Cosmos3, Cosmos3-Edge,
+  InternS1-Pro, InternS2-Preview, InternS2-Mobius, LFM3-VL, LFM3-Omni,
+  ColQwen3, ColQwen3.5, Alpamayo2-Super, and D3. Configure the count with
+  `--limit-mm-per-prompt.video`. Frame, size, and embedding options alone do
+  not change the default count.
+- Gemma 4 and EmbeddingGemma2 reserve video patch tensor bytes before each
+  clip is processed and account for the concatenated output while the
+  individual tensors are live. EmbeddingGemma2 counts the frames the processor
+  will keep when processor-side sampling is enabled.
 
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 
@@ -173,6 +216,7 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 - `/v1/responses/render` - Render a self-contained response request (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render` unless explicitly disabled)
 - `/v1/responses/{response_id}` - Retrieve a response
 - `/v1/responses/{response_id}/cancel` - Cancel a response
+- `/v1/decisions` - Text decisions API
 - `/v1/score` - Scoring API
 - `/v1/rerank` - Reranking API
 - `/v1/systemone` - Structured decisions API
@@ -204,13 +248,20 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/abort_requests` - Abort in-flight requests (causes loss of in-flight work)
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
+- `/checkpoint/prepare` - Prepare for a process checkpoint (stops serving, needs `--enable-sleep-mode`)
+- `/checkpoint/restore` - Restore after a process checkpoint (needs `--enable-sleep-mode`)
+- `/checkpoint/status` - Check if the server is prepared for a checkpoint (needs `--enable-sleep-mode`)
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
 - `/update_weights` - Update model weights (can alter model behavior)
 - `/get_world_size` - Get distributed world size
 - `/abort_requests` - Abort in-flight requests (available with `--tokens-only`. Use the authenticated `/inference/v1/abort_requests` otherwise)
+- `/fault_tolerance/apply` - Trigger fault-recovery operations across ranks (available when fault tolerance is enabled)
+- `/fault_tolerance/status` - Query fault-recovery status (available when fault tolerance is enabled)
 
 **Utility endpoints:**
 
+- `/metrics` - Prometheus metrics, including model, throughput, queue, and KV-cache statistics
+- `/kv_event_sources` - KV-event publisher configuration for each data-parallel rank, which may reveal internal transport endpoints (when KV events are configured)
 - `/tokenize` - Tokenize text (not gated by `--enable-scale-out`)
 - `/detokenize` - Detokenize tokens
 - `/health` - Health check
@@ -284,6 +335,15 @@ Certain API request parameters can have a large impact on resource consumption a
 
 To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter via the `VLLM_MAX_N_SEQUENCES` environment variable (default: **16384**). Requests exceeding this limit are rejected before reaching the engine.
 
+On the Python frontend, `/v1/responses` and `/v1/responses/render` stop validating
+the `input` list at the first invalid item and return HTTP 400. The error may
+include several details for that item.
+
+Generation requests also enforce `VLLM_MAX_STOP_STRINGS` (4),
+`VLLM_MAX_STOP_TOKEN_IDS` (128), and `VLLM_MAX_NUM_BAD_WORDS` (128).
+`VLLM_MAX_BAD_WORDS_TOTAL_TOKENS` (1024) bounds the combined length of the
+tokenized bad-word sequences.
+
 ### Recommendations
 
 - **Public-facing deployments:** Consider setting `VLLM_MAX_N_SEQUENCES` to a value appropriate for your workload (e.g., `64` or `128`) to limit the blast radius of a single request.
@@ -302,6 +362,30 @@ configuration.
 Only deployments whose API clients are trusted should start the server with
 `--trust-request-mm-kwargs` to restore per-request overrides. Do not enable
 this option on an endpoint exposed to untrusted clients.
+
+The Rust frontend's gRPC `GenerateRequest` accepts `media_io_kwargs` without
+this option, because the [gRPC interface](#grpc-interface) serves only trusted
+callers. It supports only `video.fps`, and the per-video frame cap still applies.
+
+### P2P KV-Offload Peer Session Limits
+
+Deployments that enable the P2P secondary tier (`OffloadingConnector` with `TieringOffloadingSpec` and a `p2p` secondary tier) accept peer addresses from `kv_transfer_params` in API requests. Without limits, an attacker with API access could submit many unique non-listening peer addresses, each consuming ZeroMQ sockets until the context quota is exhausted, crashing the EngineCore.
+
+vLLM enforces several configurable limits to prevent this:
+
+| Environment Variable | Default | Description |
+| --- | --- | --- |
+| `VLLM_P2P_MAX_PEERS` | `128` | Maximum concurrent P2P peer sessions. New peers (both outbound and inbound) are rejected when this limit is reached. |
+| `VLLM_P2P_HANDSHAKE_TIMEOUT_S` | `30` | Seconds to wait for a newly connected peer to complete the P2P handshake. Sessions that remain connected but not ready after this deadline are torn down. |
+| `VLLM_P2P_IDLE_TIMEOUT_S` | `300` | Seconds a P2P session may remain idle (no pending work, no messages) before it is eligible for eviction. Idle eviction runs only when remaining peer slots are within 8 of `VLLM_P2P_MAX_PEERS`. Set to `0` to disable idle eviction. |
+| `VLLM_P2P_TRANSFER_STALL_TIMEOUT_S` | `20` | Seconds a P2P WRITE may stay in progress before its peer is treated as faulted: no new WRITEs to it, and the session is torn down. The stalled transfer's memory stays held until it stops. Set to `0` to disable. |
+
+Connections that fail (ZMQ socket errors, handshake failures) are handled gracefully — the request falls back to local prefill instead of crashing the engine.
+
+**Recommendations:**
+
+- **Public-facing deployments with P2P enabled:** Lower `VLLM_P2P_MAX_PEERS` to the expected number of legitimate peers (e.g., `16` or `32`).
+- **Sensitive deployments:** Consider deploying behind a reverse proxy that strips or validates `kv_transfer_params` from API requests to prevent client-supplied peer addresses entirely.
 
 ## Tool Server and MCP Security
 
@@ -365,7 +449,7 @@ vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` en
 
 ## gRPC Interface
 
-vLLM provides optional gRPC `Inference` and `Control` services on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
+vLLM provides optional gRPC `Inference`, `Control`, and `Render` services on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
 
 **Warning:** The gRPC interface is **insecure by default** — it does not implement authentication, authorization, or encryption. It should be considered a private, internal interface intended for use only between co-located services within a trusted network. Do not expose the gRPC port to the public internet or untrusted clients. If you enable the gRPC interface, protect it via network-level access controls such as firewall rules, network segmentation, or deployment on an isolated private network.
 
@@ -397,9 +481,9 @@ Most cache paths default to subdirectories under a single root. Changing `VLLM_C
 
 | Environment Variable | Default | Description |
 | --- | --- | --- |
-| `VLLM_CACHE_ROOT` | `~/.cache/vllm` | Base cache directory. Respects `XDG_CACHE_HOME` if set. All paths below inherit from this unless explicitly overridden. |
+| `VLLM_CACHE_ROOT` | `~/.cache/vllm` | Base directory for vLLM-owned caches. Respects `XDG_CACHE_HOME` if set. |
 | *(torch.compile)* | `$VLLM_CACHE_ROOT/torch_compile_cache/` | Compilation cache for AOT-compiled models, Inductor graphs, and Triton kernels. Controlled by `VLLM_DISABLE_COMPILE_CACHE` (set to `1` to disable). |
-| `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` | `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer-version>/<arch>/<cache-hash>/` | FlashInfer autotune config cache. |
+| `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` | Managed: `~/.cache/flashinfer/autotune/`; legacy: `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer-version>/<arch>/<cache-hash>/` | Overrides cache placement for both FlashInfer autotune cache APIs. |
 | `VLLM_ASSETS_CACHE` | `$VLLM_CACHE_ROOT/assets/` | Downloaded assets (e.g., tokenizer files). |
 | `VLLM_XLA_CACHE_PATH` | `$VLLM_CACHE_ROOT/xla_cache/` | XLA/TPU compilation cache. |
 | `VLLM_MEDIA_CACHE` | *(disabled)* | Optional cache for downloaded media (images, video, audio). Not enabled unless explicitly set. |
@@ -465,7 +549,7 @@ driver-side credentials from worker-side processes within the same Ray
 cluster.
 
 This assumption is consistent with
-[Ray's own security model](https://docs.ray.io/en/latest/ray-core/security.html),
+[Ray's own security model](https://docs.ray.io/en/latest/ray-security/index.html),
 which states that any user who can connect to a Ray cluster can run arbitrary
 code on any node in that cluster. In other words, Ray cluster access already
 implies full code execution on worker nodes, so restricting environment

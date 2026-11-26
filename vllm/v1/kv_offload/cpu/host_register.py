@@ -9,6 +9,8 @@ pure bandwidth optimization: when registration is unavailable the transfers
 still run correctly, just as pageable (slower) copies.
 """
 
+import functools
+
 import torch
 
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
@@ -18,9 +20,14 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
+@functools.cache
+def _get_cudart() -> CudaRTLibrary:
+    return CudaRTLibrary()
+
+
 def _load_cudart() -> CudaRTLibrary | None:
     try:
-        return CudaRTLibrary()
+        return _get_cudart()
     except (AssertionError, AttributeError, OSError):
         logger.warning(
             "Could not load the CUDA runtime for host registration; "

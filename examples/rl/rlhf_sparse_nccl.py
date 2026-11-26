@@ -5,13 +5,13 @@
 The trainer and vLLM start from the same Qwen3 MoE checkpoint. The trainer
 modifies rows from two global experts, converts its fused expert storage back to
 per-expert checkpoint coordinates, and sends both patches through one
-``send_weights()`` lifecycle. Every vLLM rank receives both patches; the native
+`send_weights()` lifecycle. Every vLLM rank receives both patches; the native
 loader applies its local expert and skips the foreign expert.
 
 This example uses three GPUs on one node: one for the full BF16 Hugging Face
 trainer model and two for a TP2/EP2 vLLM inference engine. Unspecified checkpoint
 elements keep their initialized values, so sparse updates require a known shared
-baseline. ``SPARSE_NCCL_MODEL`` may point to a compatible local Qwen3 MoE
+baseline. `SPARSE_NCCL_MODEL` may point to a compatible local Qwen3 MoE
 checkpoint.
 """
 
@@ -170,6 +170,7 @@ def launch_llm(scheduling_strategy: PlacementGroupSchedulingStrategy):
         expert_placement_strategy="linear",
         moe_backend="triton",
         distributed_executor_backend="ray",
+        # Leave headroom for the weight transfer's buffers, which vLLM doesn't reserve.
         gpu_memory_utilization=0.7,
         enable_prefix_caching=False,
         weight_transfer_config=WeightTransferConfig(backend="sparse_nccl"),

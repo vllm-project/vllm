@@ -13,20 +13,17 @@ from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import MultipleOf
-from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-    FlashInferMLASparseTRTLLMBackend,
-)
-from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.sparse_utils import (
     _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL,
     flat_kv_row_view,
 )
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
-from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
+from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
+from vllm.v1.kv_cache_interface import KVCacheGroup
 from vllm.v1.kv_cache_layout import KVCacheLayout
-from vllm.v1.worker.utils import allocate_kv_cache, customize_attention_spec
+from vllm.v1.worker.utils import allocate_kv_cache, customize_layer_config
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -38,7 +35,7 @@ pytestmark = pytest.mark.skip_global_cleanup
         pytest.param(
             "cuda",
             marks=pytest.mark.skipif(
-                not current_platform.is_cuda(), reason="CUDA only"
+                not current_platform.is_cuda_alike(), reason="CUDA/ROCm only"
             ),
         ),
     ],
@@ -49,17 +46,27 @@ pytestmark = pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "backend,cache_dtype,sm100,stride_alignment",
     [
-        (FlashInferMLASparseTRTLLMBackend, "auto", True, 32 * 1152),
-        (FlashInferMLASparseTRTLLMBackend, "fp8", True, 32 * 576),
-        (FlashMLASparseBackend, "auto", True, 1152),
-        (FlashMLASparseBackend, "fp8_ds_mla", False, MultipleOf(64)),
-        (FlashMLASparseBackend, "fp8_ds_mla", True, 656),
-        (FlashMLASparseBackend, "nvfp4_ds_mla", True, 352),
+        (AttentionBackendEnum.FLASHINFER_MLA_SPARSE, "auto", True, 32 * 1152),
+        (AttentionBackendEnum.FLASHINFER_MLA_SPARSE, "fp8", True, 32 * 576),
+        pytest.param(
+            AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE_FA4,
+            "auto",
+            True,
+            64 * 1152,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="CUDA only"
+            ),
+        ),
+        (AttentionBackendEnum.FLASHMLA_SPARSE, "auto", True, 1152),
+        (AttentionBackendEnum.FLASHMLA_SPARSE, "fp8_ds_mla", False, MultipleOf(64)),
+        (AttentionBackendEnum.FLASHMLA_SPARSE, "fp8_ds_mla", True, 656),
+        (AttentionBackendEnum.FLASHMLA_SPARSE, "nvfp4_ds_mla", True, 352),
     ],
 )
 def test_allocation_and_warmup_follow_addressing_mode(
     monkeypatch, layout, backend, cache_dtype, sm100, stride_alignment, device
 ):
+    backend = backend.get_class()
     monkeypatch.setattr(
         current_platform, "is_device_capability_family", lambda family: sm100
     )
@@ -73,30 +80,32 @@ def test_allocation_and_warmup_follow_addressing_mode(
     layer = SimpleNamespace(
         _vllm_config=config,
         attn_backend=backend,
+        impl=object.__new__(backend.get_impl_cls()),
         kv_cache_dtype=cache_dtype,
         head_size=576,
+        topk_buffer_width=None,
         sliding_window=None,
         indexer=None,
-        non_causal_multi_token_decode=False,
     )
     layer._uses_flat_kv_cache = MethodType(MLAAttention._uses_flat_kv_cache, layer)
-    spec = customize_attention_spec(
-        backend, MLAAttention.get_kv_cache_spec(layer, config)
+    layer_config = customize_layer_config(
+        backend, MLAAttention.get_kv_cache_config(layer, config), "layer.0"
     )
+    spec = layer_config.spec
     indexer = SimpleNamespace(
         cache_config=config.cache_config, head_dim=132, dtype=torch.uint8
     )
-    index_spec = DeepseekV32IndexerCache.get_kv_cache_spec(indexer, config)
+    index_config = DeepseekV32IndexerCache.get_kv_cache_config(indexer, config)
+    index_spec = index_config.spec
     assert spec.block_stride_alignment == stride_alignment
     assert index_spec.block_stride_alignment is None
     assert layout in get_supported_kv_cache_layouts(
-        [backend, DeepseekV32IndexerBackend]
+        # indexer backend has no impl class
+        [backend, DeepseekV32IndexerBackend]  # type: ignore[type-abstract]
     )
     specs = {"mla": spec, "indexer": index_spec}
-    group = KVCacheGroupSpec(
-        list(specs), UniformTypeKVCacheSpecs(block_size=64, kv_cache_specs=specs)
-    )
-    cache = get_kv_cache_config_from_groups(config, [group], 2**20)
+    group = KVCacheGroup.from_layers({"mla": layer_config, "indexer": index_config})
+    cache = get_kv_cache_config_from_groups(config, [group], num_blocks=16)
     views = allocate_kv_cache(cache, torch.device(device), layout)
     register = MagicMock()
     monkeypatch.setattr(

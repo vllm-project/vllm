@@ -21,11 +21,26 @@ use crate::transport::ConnectedEngine;
 pub type UtilitySender = oneshot::Sender<Result<UtilityOutput>>;
 pub type UtilityReceiver = oneshot::Receiver<Result<UtilityOutput>>;
 
+/// Request-scoped state that follows one request through the client.
+///
+/// The output dispatcher shows it each output as it arrives from the engine,
+/// before the output reaches the request's stream, so it does not depend on
+/// how fast the stream is read. It runs under the request registry's lock and
+/// must not block. It is dropped when the request leaves the client: on
+/// finish, on abort (including a dropped stream), when sending the request
+/// fails, or when the client closes.
+pub trait RequestObserver: Send + std::fmt::Debug {
+    /// Observe one output of the request.
+    fn observe_output(&mut self, output: &EngineCoreOutput);
+}
+
 #[derive(Debug)]
 struct TrackedRequest {
     sender: OutputSender,
     engine_id: EngineId,
     lora: Option<LoraRequestState>,
+    admission_stats_generation: Option<u64>,
+    observer: Option<Box<dyn RequestObserver>>,
 }
 
 /// Frontend-side view of one LoRA request's scheduling phase.
@@ -73,6 +88,8 @@ struct EngineRoutingState {
     /// Added to the snapshot so each admission raises the routing score before
     /// the next snapshot arrives. Only tracked once a snapshot exists.
     admitted_since_stats: usize,
+    /// Identifies admissions made after the latest scheduler snapshot.
+    stats_generation: u64,
 }
 
 impl EngineRoutingState {
@@ -90,10 +107,21 @@ impl EngineRoutingState {
     }
 
     /// Record one request admitted to this engine.
-    fn record_admission(&mut self) {
+    fn record_admission(&mut self) -> Option<u64> {
         self.inflight += 1;
         if self.last_scheduler_stats.is_some() {
             self.admitted_since_stats += 1;
+            return Some(self.stats_generation);
+        }
+        None
+    }
+
+    /// Record one request removed from this engine. Its admission is dropped
+    /// from `admitted_since_stats` only if no newer snapshot has reset that count.
+    fn record_removal(&mut self, admission_stats_generation: Option<u64>) {
+        self.inflight -= 1;
+        if admission_stats_generation == Some(self.stats_generation) {
+            self.admitted_since_stats -= 1;
         }
     }
 
@@ -102,6 +130,10 @@ impl EngineRoutingState {
     fn apply_scheduler_counts(&mut self, next: EngineLoadSnapshot) {
         self.last_scheduler_stats = Some(next);
         self.admitted_since_stats = 0;
+        self.stats_generation = self
+            .stats_generation
+            .checked_add(1)
+            .expect("scheduler stats generation overflow");
     }
 }
 
@@ -161,22 +193,31 @@ impl RequestRegistry {
         if lora.is_some() {
             self.active_lora_requests += 1;
         }
+        let state = self
+            .routing_per_engine
+            .get_mut(&engine_id)
+            .expect("request registry must track all known engines");
+        let admission_stats_generation = state.record_admission();
+
         self.requests.insert(
             request_id,
             TrackedRequest {
                 sender: tx,
                 engine_id: engine_id.clone(),
                 lora,
+                admission_stats_generation,
+                observer: None,
             },
         );
 
-        let state = self
-            .routing_per_engine
-            .get_mut(&engine_id)
-            .expect("request registry must track all known engines");
-        state.record_admission();
-
         Ok((engine_id, rx))
+    }
+
+    /// Attach an observer to a request just registered. It sees the request's
+    /// outputs and is dropped when the request leaves the registry.
+    pub fn observe(&mut self, request_id: &str, observer: Box<dyn RequestObserver>) {
+        let tracked = (self.requests.get_mut(request_id)).expect("the request was just registered");
+        tracked.observer = Some(observer);
     }
 
     fn choose_engine_for_request(&mut self, data_parallel_rank: Option<u32>) -> Result<EngineId> {
@@ -230,6 +271,11 @@ impl RequestRegistry {
         output: EngineCoreStreamOutput,
     ) -> Option<EngineCoreStreamOutput> {
         self.apply_lora_events(&output.output);
+        if let Some(observer) = (self.requests.get_mut(output.request_id.as_str()))
+            .and_then(|tracked| tracked.observer.as_mut())
+        {
+            observer.observe_output(&output.output);
+        }
         if output.finished() {
             match self.remove(output.request_id.as_str()) {
                 Some((mut sender, _)) => sender.send(output),
@@ -344,6 +390,7 @@ impl RequestRegistry {
             let output = EngineCoreStreamOutput {
                 engine_index: engine_id.engine_index().unwrap_or(0),
                 timestamp,
+                weight_version: None,
                 output: EngineCoreOutput {
                     request_id: request_id.clone(),
                     finish_reason: Some(EngineCoreFinishReason::Abort),
@@ -367,7 +414,7 @@ impl RequestRegistry {
         self.routing_per_engine
             .get_mut(&tracked.engine_id)
             .expect("request registry must track all known engines")
-            .inflight -= 1;
+            .record_removal(tracked.admission_stats_generation);
         Some((tracked.sender, tracked.engine_id))
     }
 
@@ -486,7 +533,8 @@ mod tests {
 
     use crate::EngineId;
     use crate::client::state::{
-        EngineLoadSnapshot, EngineRoutingState, OutputReceiver, RequestRegistry, UtilityRegistry,
+        EngineLoadSnapshot, EngineRoutingState, OutputReceiver, RequestObserver, RequestRegistry,
+        UtilityRegistry,
     };
     use crate::client::stream::EngineCoreStreamOutput;
     use crate::mock_engine::default_ready_response;
@@ -527,6 +575,7 @@ mod tests {
         EngineCoreStreamOutput {
             engine_index: 0,
             timestamp: 0.0,
+            weight_version: None,
             output,
         }
     }
@@ -560,6 +609,54 @@ mod tests {
 
         assert!(unrouted.is_none());
         assert!(!registry.contains("req-1"));
+    }
+
+    /// Records the outputs it observes and when it is dropped.
+    #[derive(Debug)]
+    struct RecordingObserver(std::sync::Arc<parking_lot::Mutex<Vec<String>>>);
+
+    impl RequestObserver for RecordingObserver {
+        fn observe_output(&mut self, output: &EngineCoreOutput) {
+            self.0.lock().push(format!("output {:?}", output.finish_reason));
+        }
+    }
+
+    impl Drop for RecordingObserver {
+        fn drop(&mut self) {
+            self.0.lock().push("dropped".to_string());
+        }
+    }
+
+    /// An observer sees each routed output and is dropped once its request
+    /// leaves the registry, whether it finishes, is aborted or the registry
+    /// closes.
+    #[test]
+    fn observer_follows_outputs_until_the_request_leaves() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        let events = std::sync::Arc::default();
+        for request_id in ["finished", "aborted", "open"] {
+            registry.register(request_id.to_string(), None, None, NonZeroU32::MIN).unwrap();
+            let observer = RecordingObserver(std::sync::Arc::clone(&events));
+            registry.observe(request_id, Box::new(observer));
+        }
+        let take = || std::mem::take(&mut *events.lock()).join(", ");
+
+        registry.send_output(stream_output(EngineCoreOutput {
+            request_id: "finished".to_string(),
+            ..Default::default()
+        }));
+        registry.send_output(stream_output(EngineCoreOutput {
+            request_id: "finished".to_string(),
+            finish_reason: Some(EngineCoreFinishReason::Length),
+            ..Default::default()
+        }));
+        assert_eq!(take(), "output None, output Some(Length), dropped");
+
+        registry.abort_many([&"aborted".to_string()], 0.0);
+        assert_eq!(take(), "dropped");
+
+        drop(registry.close());
+        assert_eq!(take(), "dropped");
     }
 
     /// Drain the outputs that are ready on `receiver` without waiting,
@@ -1075,6 +1172,80 @@ mod tests {
             chosen.push(engine.engine_index().unwrap());
         }
         expect_test::expect!["[2, 5, 2]"].assert_eq(&format!("{chosen:?}"));
+    }
+
+    #[test]
+    fn registry_finished_requests_do_not_route_live_work_to_a_busier_engine() {
+        let mut registry = RequestRegistry::new(
+            &[0, 1].map(|rank| connected_engine(EngineId::from_engine_index(rank))),
+        );
+        registry.apply_scheduler_counts(
+            0,
+            EngineLoadSnapshot {
+                waiting: 0,
+                running: 0,
+            },
+        );
+        registry.apply_scheduler_counts(
+            1,
+            EngineLoadSnapshot {
+                waiting: 0,
+                running: 1,
+            },
+        );
+
+        let mut finished_routes = Vec::new();
+        for request_id in ["finished-1", "finished-2"].map(String::from) {
+            let (engine_id, _) =
+                registry.register(request_id.clone(), None, None, NonZeroU32::MIN).unwrap();
+
+            finished_routes.push(engine_id.engine_index());
+            drop(registry.finish_many([&request_id]));
+        }
+
+        let (live_engine, _) =
+            registry.register("live-request".into(), None, None, NonZeroU32::MIN).unwrap();
+        expect_test::expect!["([Some(0), Some(0)], Some(0))"].assert_eq(&format!(
+            "{:?}",
+            (finished_routes, live_engine.engine_index())
+        ));
+    }
+
+    #[test]
+    fn registry_removal_keeps_admissions_counted_after_a_newer_snapshot() {
+        let engine = EngineId::from_engine_index(0);
+        let mut registry = RequestRegistry::new(&[connected_engine(engine.clone())]);
+        registry.apply_scheduler_counts(
+            0,
+            EngineLoadSnapshot {
+                waiting: 0,
+                running: 0,
+            },
+        );
+
+        // `old` is admitted before the next snapshot, which already counts it.
+        registry.register("old".into(), None, None, NonZeroU32::MIN).unwrap();
+        registry.apply_scheduler_counts(
+            0,
+            EngineLoadSnapshot {
+                waiting: 0,
+                running: 1,
+            },
+        );
+        // `new` is admitted after that snapshot, so only it is counted on top.
+        registry.register("new".into(), None, None, NonZeroU32::MIN).unwrap();
+
+        // Removing `old` must not take back the admission counted for `new`.
+        drop(registry.remove("old"));
+        let state = &registry.routing_per_engine[&engine];
+        expect_test::expect!["(1, 1, 2)"].assert_eq(&format!(
+            "{:?}",
+            (
+                state.inflight,
+                state.admitted_since_stats,
+                state.routing_score()
+            )
+        ));
     }
 
     #[test]

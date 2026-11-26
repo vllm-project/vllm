@@ -13,6 +13,7 @@ from transformers import (
     ProcessorMixin,
     TensorType,
 )
+from transformers.image_transforms import to_pil_image
 from transformers.processing_utils import ProcessingKwargs
 from typing_extensions import Unpack
 
@@ -361,7 +362,7 @@ class IsaacImageProcessor(ImageProcessingMixin):
         all_image_grids: list[torch.Tensor] = []
 
         for image in images:
-            image_tensor = extract_image_pil(image)
+            image_tensor = extract_image_pil(to_pil_image(image))
 
             patches, dims_virtual = process_vision_for_patches(
                 image_tensor,

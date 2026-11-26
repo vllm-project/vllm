@@ -7,7 +7,7 @@ chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
 assert chatml_jinja_path.exists()
 
 
-def run_and_test_dummy_opt_api_server(model, tp=1):
+def run_and_test_dummy_opt_api_server(model, tp=1, extra_args=(), env_dict=None):
     # the model is registered through the plugin
     server_args = [
         "--gpu-memory-utilization",
@@ -20,8 +20,9 @@ def run_and_test_dummy_opt_api_server(model, tp=1):
         "dummy",
         "-tp",
         f"{tp}",
+        *extra_args,
     ]
-    with RemoteOpenAIServer(model, server_args) as server:
+    with RemoteOpenAIServer(model, server_args, env_dict=env_dict) as server:
         client = server.get_client()
         completion = client.chat.completions.create(
             model=model,

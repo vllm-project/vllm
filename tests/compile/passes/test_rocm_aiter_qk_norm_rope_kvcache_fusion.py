@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import os
-from importlib.metadata import version
 
 import pytest
 import torch
-from packaging.version import Version
 
 import vllm.compilation.passes.fusion.qk_norm_rope_kvcache_fusion as fusion_module
 import vllm.config
@@ -21,7 +20,10 @@ from vllm._aiter_ops import (
     is_aiter_found_and_supported,
     rocm_aiter_ops,
 )
-from vllm.compilation.passes.fusion.matcher_utils import MROPE_OP, ROTARY_OP
+from vllm.compilation.passes.fusion.matcher_utils import MROPE_OP
+from vllm.compilation.passes.fusion.muse_glimmer_qk_rope_cache_fusion import (
+    MuseGlimmerQkRopeCacheFusionPass,
+)
 from vllm.compilation.passes.fusion.qk_norm_rope_kvcache_fusion import (
     QkNormRopeKvCacheFusionPass,
 )
@@ -64,7 +66,6 @@ if not is_aiter_found_and_supported():
         allow_module_level=True,
     )
 
-INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 FP8_DTYPE = current_platform.fp8_dtype()
 
 
@@ -131,8 +132,6 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
             dtype=self.dtype,
         )
 
-        self.enable_rope_custom_op = self.rotary_emb.enabled()
-
         self.attn = Attention(
             num_heads=num_heads,
             head_size=head_size,
@@ -157,10 +156,21 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         )
 
         if self.kv_cache_dtype != self.dtype:
-            self.attn._k_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
-            self.attn._v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
-            self.attn._k_scale_float = 1.0
-            self.attn._v_scale_float = 1.0
+            # Non-unit scales so the fused and unfused writers must agree on them.
+            self.attn._k_scale = torch.tensor(0.5, dtype=torch.float32, device=device)
+            self.attn._v_scale = torch.tensor(0.25, dtype=torch.float32, device=device)
+            self.attn._k_scale_cpu = torch.tensor(
+                0.5, dtype=torch.float32, device="cpu"
+            )
+            self.attn._v_scale_cpu = torch.tensor(
+                0.25, dtype=torch.float32, device="cpu"
+            )
+            self.attn._k_scale_float = 0.5
+            self.attn._v_scale_float = 0.25
+            if self.attn.query_quant is not None:
+                self.attn._q_scale = torch.tensor(
+                    0.5, dtype=torch.float32, device=device
+                )
         else:
             self.attn._k_scale = self.attn._k_scale.to(device)
             self.attn._v_scale = self.attn._v_scale.to(device)
@@ -254,16 +264,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         return q, k, v, kv_cache_dummy_dep
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
-        ops: list[torch._ops.OpOverload] = []
-        # RoPE is not yet IR-migrated, so its custom op still surfaces
-        # directly in the graph based on `enable_rope_custom_op`.
-        if self.enable_rope_custom_op:
-            if rocm_aiter_ops.is_triton_rotary_embed_enabled():
-                ops.append(torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default)
-            else:
-                ops.append(ROTARY_OP)
-        else:
-            ops.append(INDEX_SELECT_OP)
+        ops = [torch.ops.vllm_ir.rotary_embedding.default]
         ops.append(torch.ops.vllm.unified_kv_cache_update.default)
         return ops
 
@@ -290,7 +291,6 @@ class QKNormMRoPEKVCacheTestModel(QKNormRoPEKVCacheTestModel):
             mrope_section=list(mrope_section),
             mrope_interleaved=mrope_interleaved,
         )
-        self.enable_rope_custom_op = self.rotary_emb.enabled()
 
     def forward(
         self, qkv: torch.Tensor, positions: torch.Tensor
@@ -327,6 +327,117 @@ class QKNormMRoPEObservableKTestModel(QKNormMRoPEKVCacheTestModel):
         self, qkv: torch.Tensor, positions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return QKNormRoPEKVCacheTestModel.forward(self, qkv, positions)
+
+
+class MuseQKNormRoPEKVCacheTestModel(QKNormRoPEKVCacheTestModel):
+    q_scale = 3.875
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.qk_norm = RMSNorm(
+            self.head_size, eps=self.q_norm.variance_epsilon, has_weight=False
+        )
+
+    def forward(
+        self, qkv: torch.Tensor, positions: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q = q.reshape(-1, self.head_size)
+        q = self.qk_norm(q).reshape(-1, self.q_size) * self.q_scale
+        k = k.reshape(-1, self.head_size)
+        k = self.qk_norm(k).reshape(-1, self.kv_size)
+        q = q.to(v.dtype)
+        k = k.to(v.dtype)
+        q, k = self.rotary_emb(positions, q, k)
+        q = q.view(-1, self.num_heads, self.head_size)
+        k = k.view(-1, self.num_kv_heads, self.head_size)
+        v = v.view(-1, self.num_kv_heads, self.head_size)
+        dummy = torch.ops.vllm.unified_kv_cache_update(
+            k, v, _encode_layer_name(self.layer_name)
+        )
+        return q, k, v, dummy
+
+
+@pytest.mark.parametrize("num_tokens", [5, 512])
+def test_muse_qk_norm_rope_cache_fuses_all_token_counts(
+    num_tokens: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    torch.manual_seed(0)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "0")
+    monkeypatch.setenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "0")
+    rocm_aiter_ops.refresh_env_variables()
+
+    device = torch.device(os.environ.get("VLLM_TEST_CUDA_DEVICE", "cuda"))
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model=os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B"),
+            dtype=torch.bfloat16,
+        ),
+        cache_config=CacheConfig(block_size=16, cache_dtype="auto"),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+rotary_embedding"],
+            use_inductor_graph_partition=True,
+        ),
+    )
+    text_config = vllm_config.model_config.hf_text_config
+    text_config.head_dim = 128
+    text_config.layer_rope_theta = [10000.0]
+    text_config.rms_norm_eps = 1e-6
+    text_config.qk_scale_factor = MuseQKNormRoPEKVCacheTestModel.q_scale
+    with vllm.config.set_current_vllm_config(vllm_config):
+        model = MuseQKNormRoPEKVCacheTestModel(
+            vllm_config=vllm_config,
+            attn_backend=AttentionBackendEnum.ROCM_AITER_FA,
+            num_heads=32,
+            num_kv_heads=8,
+            head_size=128,
+            is_neox=True,
+            rms_norm_eps=1e-6,
+            dtype=torch.bfloat16,
+            device=device,
+        ).to(device)
+        fusion_pass = MuseGlimmerQkRopeCacheFusionPass(vllm_config)
+        backend = TestBackend(
+            NoOpEliminationPass(vllm_config),
+            SplitCoalescingPass(vllm_config),
+            ScatterSplitReplacementPass(vllm_config),
+            fusion_pass,
+            PostCleanupPass(vllm_config),
+        )
+        qkv = torch.randn(
+            num_tokens,
+            model.q_size + 2 * model.kv_size,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        positions = torch.arange(num_tokens, device=device)
+
+        with set_forward_context(None, vllm_config):
+            context = get_forward_context()
+            metadata = model.build_attn_metadata(num_tokens, KVCacheLayout.LBHNC)
+            context.slot_mapping = {model.layer_name: metadata.slot_mapping}
+            expected = model(qkv, positions)
+            expected_cache = model.attn.kv_cache.clone()
+
+        torch._dynamo.mark_dynamic(qkv, 0)
+        torch._dynamo.mark_dynamic(positions, 0)
+        with set_forward_context(None, vllm_config):
+            context = get_forward_context()
+            metadata = model.build_attn_metadata(num_tokens, KVCacheLayout.LBHNC)
+            context.slot_mapping = {model.layer_name: metadata.slot_mapping}
+            actual = torch.compile(model, backend=backend)(qkv, positions)
+            actual_cache = model.attn.kv_cache.clone()
+
+        assert fusion_pass.matched_count == 1
+        backend.check_before_ops([torch.ops.vllm.unified_kv_cache_update.default])
+        backend.check_after_ops([torch.ops.vllm.fused_muse_qk_rope_cache.default])
+        for expected_tensor, actual_tensor in zip(expected[:3], actual[:3]):
+            torch.testing.assert_close(
+                expected_tensor, actual_tensor, atol=4e-2, rtol=2e-2
+            )
+        torch.testing.assert_close(expected_cache, actual_cache, atol=4e-2, rtol=2e-2)
 
 
 def _run_qk_norm_rope_kvcache_fusion_test(
@@ -384,7 +495,11 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         ),
     )
 
-    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+    with (
+        vllm.config.set_current_vllm_config(vllm_config),
+        monkeypatch.context() as m,
+        contextlib.ExitStack() as stack,
+    ):
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         m.setenv("VLLM_ROCM_USE_AITER_LINEAR", "1")
         m.setenv(
@@ -393,6 +508,10 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         )
         m.setenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", use_shuffle_kv_layout)
         rocm_aiter_ops.refresh_env_variables()
+        # Unfused reference uses the same RoPE kernel as a real run.
+        stack.enter_context(
+            current_platform.get_default_ir_op_priority(vllm_config).set_priority()
+        )
 
         expected_query_quant_group_shape = None
         if use_quark_scalar_query_scale:
@@ -500,15 +619,20 @@ def _run_qk_norm_rope_kvcache_fusion_test(
                 assert backend.op_count(op, before=True) > 0
                 assert backend.op_count(op) > 0
 
-        if use_quark_scalar_query_scale:
+        if q_fused.dtype == FP8_DTYPE:
+            # Only the one-local-KV-head quark scale takes the static quant op.
             expected_quant_op = (
-                torch.ops.vllm.rocm_aiter_per_tensor_quant.default
-                if num_kv_heads != 1
-                else torch.ops._C.static_scaled_fp8_quant.default
+                torch.ops._C.static_scaled_fp8_quant.default
+                if use_quark_scalar_query_scale and num_kv_heads == 1
+                else torch.ops.vllm.rocm_aiter_per_tensor_quant.default
             )
             assert backend.op_count(expected_quant_op, before=True) > 0
-            # Query quantization remains separate after the prologue fusion.
-            assert backend.op_count(expected_quant_op) > 0
+            # The plain-RoPE kernel writes the fp8 query itself (q_out_fp8);
+            # MRoPE keeps the separate quant op.
+            if mrope_section is None:
+                assert backend.op_count(expected_quant_op) == 0
+            else:
+                assert backend.op_count(expected_quant_op) > 0
 
         # Sweep-backed (18.2k pts, PR #42749): native-rope ref worst 7.7e-3 -> 1e-2;
         # AITER-triton-rope ref is itself approximate (plateau 1.28e-2) -> 2e-2.
@@ -527,16 +651,6 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         else:
             torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
 
-        if not expect_fusion or (not is_fp8_cache and mrope_section is None):
-            # The AITER PTS kernel populates k_out only for non-FP8 caches.
-            # With FP8, the kernel writes quantized K directly to the cache
-            # and may leave k_out uninitialised.  In production this is fine
-            # because downstream attention reads K from the cache.
-            torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
-
-        # Should be bit exact since no processing had been done on v for both paths
-        torch.testing.assert_close(v_unfused, v_fused, atol=0.0, rtol=0.0)
-
         # Fused and unfused arithmetic can straddle an FP8 rounding boundary.
         # Allow one E4M3 quantization step while still comparing every block.
         if is_fp8_cache:
@@ -544,6 +658,16 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         else:
             cache_atol, cache_rtol = ATOL, RTOL
 
+        # FA and ROCM_ATTN prefill consume the fused k_out directly; it is the
+        # pre-quant K, like the unfused path. Unified reads K from the cache and
+        # asks the kernel not to write k_out.
+        if attn_backend != AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
+            torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
+
+        # Should be bit exact since no processing had been done on v for both paths
+        torch.testing.assert_close(v_unfused, v_fused, atol=0.0, rtol=0.0)
+
+        # Whole cache, so the interleaved V write (ROCM_ATTN kv_cache[1]) is checked.
         torch.testing.assert_close(
             kv_cache_unfused.float(),
             kv_cache_fused.float(),
@@ -564,41 +688,68 @@ _FUSION_CONFIGS = [
     pytest.param(16, 2, 64, 32, True, id="partial_small_head"),
 ]
 
+_BACKEND_LAYOUTS = [
+    # ROCM_ATTN always writes the shuffled, interleaved-V layout and needs each
+    # K/V side contiguous per block, so head-major only.
+    pytest.param(
+        AttentionBackendEnum.ROCM_ATTN,
+        "0",
+        KVCacheLayout.LBHNC,
+        id="rocm_attn",
+    ),
+    # Unified never reads the shuffle env; its strided views take any layout.
+    pytest.param(
+        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        "0",
+        KVCacheLayout.LBHNC,
+        id="unified-head_major",
+    ),
+    pytest.param(
+        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        "0",
+        KVCacheLayout.LBNHC,
+        id="unified-token_major",
+    ),
+    # FA takes any layout unshuffled; its shuffle writer needs each K/V side
+    # contiguous per block, so head-major only.
+    pytest.param(
+        AttentionBackendEnum.ROCM_AITER_FA,
+        "0",
+        KVCacheLayout.LBHNC,
+        id="fa-head_major",
+    ),
+    pytest.param(
+        AttentionBackendEnum.ROCM_AITER_FA,
+        "0",
+        KVCacheLayout.LBNHC,
+        id="fa-token_major",
+    ),
+    pytest.param(
+        AttentionBackendEnum.ROCM_AITER_FA,
+        "1",
+        KVCacheLayout.LBHNC,
+        id="fa-shuffle",
+    ),
+]
+
 
 @pytest.mark.parametrize(
     "num_heads, num_kv_heads, head_size, rotary_dim, is_neox",
     _FUSION_CONFIGS,
 )
 @pytest.mark.parametrize(
-    "attn_backend",
-    [
-        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
-        AttentionBackendEnum.ROCM_AITER_FA,
-    ],
+    "attn_backend, use_shuffle_kv_layout, kv_layout", _BACKEND_LAYOUTS
 )
 @pytest.mark.parametrize("num_tokens", [5, 2048])
-@pytest.mark.parametrize(
-    "kv_layout",
-    [
-        pytest.param(KVCacheLayout.LBHNC, id="head_major"),
-        pytest.param(KVCacheLayout.LBNHC, id="token_major"),
-    ],
-)
 @pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
 @pytest.mark.parametrize("block_size", [16, 32, 64])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("rms_norm_eps", [1e-6])
 @pytest.mark.parametrize("custom_op", ["+rotary_embedding", "+rms_norm"])
-# The fused_qk_norm_rope_cache kernel used by this test aborts on AITER < 0.1.20
-# (fused_qk_norm_rope_cache_quant.cu: "k_cache/v_cache must be contiguous within
-# a block")
 @pytest.mark.skipif(
-    not Version(version("amd_aiter")) >= Version("0.1.20"),
-    reason=(
-        "Requires AITER >= 0.1.20; older kernels abort on "
-        "fused_qk_norm_rope_cache (k_cache/v_cache contiguity)"
-    ),
+    not IS_AITER_FOUND,
+    reason="Requires AITER",
 )
 def test_qk_norm_rope_kvcache_fusion(
     num_tokens: int,
@@ -615,6 +766,7 @@ def test_qk_norm_rope_kvcache_fusion(
     kv_cache_dtype: CacheDType,
     rms_norm_eps: float,
     custom_op: str,
+    use_shuffle_kv_layout: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
     _run_qk_norm_rope_kvcache_fusion_test(
@@ -627,13 +779,78 @@ def test_qk_norm_rope_kvcache_fusion(
         rotary_dim=rotary_dim,
         block_size=block_size,
         is_neox=is_neox,
-        use_shuffle_kv_layout="0",
+        use_shuffle_kv_layout=use_shuffle_kv_layout,
         kv_layout=kv_layout,
         dtype=dtype,
         kv_cache_dtype=kv_cache_dtype,
         rms_norm_eps=rms_norm_eps,
         custom_op=custom_op,
         monkeypatch=monkeypatch,
+    )
+
+
+# Per-TP-rank heads from the HF configs, one per Q-scale fold: Qwen3-30B-A3B TP1
+# is per-tensor; GLM-4.7 TP8 (partial rotary) has one local KV head.
+_MODEL_CONFIGS = [
+    pytest.param(32, 4, 128, 128, 1e-6, id="qwen3_30b_a3b-tp1"),
+    pytest.param(12, 1, 128, 64, 1e-5, id="glm_4.7-tp8"),
+]
+
+# test_qk_norm_rope_kvcache_fusion sweeps layouts and block sizes on an fp8 cache.
+_ONE_LAYOUT_PER_BACKEND = [
+    p
+    for p in _BACKEND_LAYOUTS
+    if p.id in ("rocm_attn", "unified-head_major", "fa-head_major")
+]
+
+
+# With an fp8 KV cache, FA and ROCM_ATTN consume the kernel's k_out
+# (k_out_unquantized); unified consumes its fp8 query (q_out_fp8).
+@pytest.mark.parametrize(
+    "num_heads, num_kv_heads, head_size, rotary_dim, rms_norm_eps", _MODEL_CONFIGS
+)
+@pytest.mark.parametrize(
+    "attn_backend, use_shuffle_kv_layout, kv_layout", _ONE_LAYOUT_PER_BACKEND
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.skipif(
+    not IS_AITER_FOUND,
+    reason="Requires AITER",
+)
+def test_qk_norm_rope_kvcache_fusion_k_out_unquantized_and_q_out_fp8(
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    rotary_dim: int,
+    rms_norm_eps: float,
+    attn_backend: AttentionBackendEnum,
+    use_shuffle_kv_layout: str,
+    kv_layout: KVCacheLayout,
+    dtype: torch.dtype,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _run_qk_norm_rope_kvcache_fusion_test(
+        attn_backend=attn_backend,
+        enable_aiter_triton_rope=False,
+        num_tokens=5,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        rotary_dim=rotary_dim,
+        block_size=16,
+        is_neox=True,
+        use_shuffle_kv_layout=use_shuffle_kv_layout,
+        kv_layout=kv_layout,
+        dtype=dtype,
+        kv_cache_dtype="fp8",
+        rms_norm_eps=rms_norm_eps,
+        custom_op="+rotary_embedding",
+        monkeypatch=monkeypatch,
+        # Only unified quantizes Q; the quark scale covers both the per-tensor
+        # and the one-local-KV-head q_out_fp8 folds.
+        use_quark_scalar_query_scale=(
+            attn_backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
+        ),
     )
 
 
@@ -654,6 +871,14 @@ def test_qk_norm_rope_kvcache_fusion(
         pytest.param(KVCacheLayout.LHBNC, id="block_major"),
     ],
 )
+@pytest.mark.parametrize(
+    "custom_op",
+    [
+        "+rotary_embedding",
+        # MRoPE fusion must not depend on the user enabling the RoPE custom op.
+        "+rms_norm",
+    ],
+)
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.skipif(
     not IS_AITER_FOUND,
@@ -665,6 +890,7 @@ def test_qk_norm_mrope_kvcache_fusion(
     is_neox: bool,
     kv_layout: KVCacheLayout,
     kv_cache_dtype: CacheDType,
+    custom_op: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
     _run_qk_norm_rope_kvcache_fusion_test(
@@ -682,7 +908,7 @@ def test_qk_norm_mrope_kvcache_fusion(
         dtype=torch.bfloat16,
         kv_cache_dtype=kv_cache_dtype,
         rms_norm_eps=1e-6,
-        custom_op="+rotary_embedding",
+        custom_op=custom_op,
         monkeypatch=monkeypatch,
         mrope_section=mrope_section,
         mrope_interleaved=mrope_interleaved,
@@ -857,3 +1083,54 @@ def test_mrope_attention_context_failure_propagates(
 
     with pytest.raises(RuntimeError, match="missing attention context"):
         _call_fused_mrope_impl(torch.empty(2, 8, device="cpu"))
+
+
+@pytest.mark.skipif(
+    not IS_AITER_FOUND,
+    reason="Requires AITER",
+)
+def test_qk_norm_rope_kvcache_fusion_interleaves_every_layer(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The fused writer stores V interleaved in every layer it serves, so every
+    eligible ROCM_ATTN layer must read V interleaved. With layer_name hoisted,
+    only one layer registers the patterns, but all of them must switch."""
+    torch.set_default_device(os.environ.get("VLLM_TEST_CUDA_DEVICE", "cuda"))
+    torch.set_default_dtype(torch.bfloat16)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=torch.bfloat16),
+        cache_config=CacheConfig(block_size=16),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+rotary_embedding"],
+            pass_config=PassConfig(fuse_qk_norm_rope_kvcache=True),
+        ),
+    )
+    with vllm.config.set_current_vllm_config(vllm_config):
+        models = [
+            QKNormRoPEKVCacheTestModel(
+                vllm_config=vllm_config,
+                attn_backend=AttentionBackendEnum.ROCM_ATTN,
+                num_heads=8,
+                num_kv_heads=2,
+                head_size=128,
+                is_neox=True,
+                rms_norm_eps=1e-6,
+                dtype=torch.bfloat16,
+                device=torch.get_default_device(),
+                prefix=f"model.layers.{i}.self_attn.attn",
+            )
+            for i in range(3)
+        ]
+        QkNormRopeKvCacheFusionPass(vllm_config)
+
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionImpl
+
+    impls = [model.attn.impl for model in models]
+    assert all(
+        isinstance(impl, RocmAttentionImpl) and impl._use_interleaved_v_cache
+        for impl in impls
+    )

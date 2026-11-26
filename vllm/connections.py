@@ -3,6 +3,8 @@
 
 import asyncio
 import functools
+import socket
+import threading
 import time
 from collections.abc import Callable, Coroutine, Mapping, MutableMapping
 from pathlib import Path
@@ -11,6 +13,7 @@ from typing import Any, ParamSpec, TypeVar
 import aiohttp
 import requests
 from urllib3.util import parse_url
+from urllib3.util.ssltransport import SSLTransport
 
 import vllm.envs as envs
 from vllm.exceptions import VLLMValidationError
@@ -60,6 +63,37 @@ class MediaDownloadSizeExceededError(ValueError):
         super().__init__(message)
 
 
+class MediaFetchDeadlineExceededError(ValueError):
+    """Raised when a synchronous media download exceeds its total time limit."""
+
+
+class MediaRequestDownloadSizeExceededError(ValueError):
+    """Raised when all HTTP media downloads in one request exceed the limit."""
+
+
+class MediaRequestDownloadBudget:
+    """Thread-safe total of HTTP media bytes received for one request."""
+
+    def __init__(self) -> None:
+        self.used = 0
+        self._lock = threading.Lock()
+
+    def charge(self, size: int) -> None:
+        limit_mb = envs.VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB
+        if limit_mb <= 0:
+            return
+        limit = limit_mb * MiB_bytes
+        with self._lock:
+            received = self.used + size
+            if received > limit:
+                raise MediaRequestDownloadSizeExceededError(
+                    "Request media downloads exceed "
+                    f"VLLM_MAX_MEDIA_REQUEST_DOWNLOAD_SIZE_MB={limit_mb:g} "
+                    f"({received} bytes received, including retried attempts)."
+                )
+            self.used = received
+
+
 def _get_media_download_limit_bytes() -> int | None:
     max_size_mb = envs.VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB
     if max_size_mb <= 0:
@@ -105,19 +139,92 @@ def _append_chunk(
     received_bytes: int,
     max_bytes: int | None,
     media_download_limit: bool,
+    request_budget: MediaRequestDownloadBudget | None = None,
 ) -> int:
     if not chunk:
         return received_bytes
     received_bytes += len(chunk)
     if max_bytes is not None and received_bytes > max_bytes:
         _raise_size_exceeded(max_bytes, received_bytes, media_download_limit)
+    if request_budget is not None:
+        request_budget.charge(len(chunk))
     chunks.append(chunk)
     return received_bytes
 
 
-def _read_response_bytes(response: requests.Response, max_bytes: int | None) -> bytes:
+def _remaining_media_timeout(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise MediaFetchDeadlineExceededError("Media fetch exceeded its time limit")
+    return remaining
+
+
+class _BodyReadSocket:
+    """Apply the deadline to I/O below HTTP buffering and content decoding."""
+
+    def __init__(self, sock: socket.socket | SSLTransport, deadline: float) -> None:
+        self._sock = sock
+        self._deadline = deadline
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._sock, name)
+
+    def _call(self, operation: Callable[..., _T], *args: Any) -> _T:
+        remaining = _remaining_media_timeout(self._deadline)
+        timeout = self._sock.gettimeout()
+        if timeout is not None and timeout <= remaining:
+            return operation(*args)
+        self._sock.settimeout(remaining)
+        try:
+            return operation(*args)
+        finally:
+            self._sock.settimeout(timeout)
+
+    def recv_into(self, buffer: memoryview) -> int | bytes | None:
+        sock = self._sock
+        if isinstance(sock, SSLTransport):
+            # HTTPS proxies can do several socket reads within one TLS read.
+            transport = sock.socket
+            sock.socket = _BodyReadSocket(transport, self._deadline)  # type: ignore[assignment]
+            try:
+                return sock.recv_into(buffer)
+            finally:
+                sock.socket = transport
+        return self._call(sock.recv_into, buffer)
+
+    def recv(self, size: int) -> int | bytes:
+        return self._call(self._sock.recv, size)
+
+    def sendall(self, data: bytes) -> None:
+        self._call(self._sock.sendall, data)
+
+
+def _set_body_read_deadline(
+    response: requests.Response, *, deadline: float, **_: Any
+) -> None:
+    try:
+        _remaining_media_timeout(deadline)
+        # urllib3 1.x can otherwise return partial data after a premature EOF.
+        response.raw.enforce_content_length = True
+        # The stock Requests adapter uses http.client for urllib3 1.x and
+        # 2.x. Each response owns its SocketIO, even on a reused connection.
+        original = response.raw._original_response
+        if original is not None and original.fp is not None:
+            raw: Any = original.fp.raw
+            raw._sock = _BodyReadSocket(raw._sock, deadline)
+    except Exception:
+        response.close()
+        raise
+
+
+def _read_response_bytes(
+    response: requests.Response,
+    max_bytes: int | None,
+    request_budget: MediaRequestDownloadBudget | None = None,
+    deadline: float | None = None,
+) -> bytes:
     max_bytes, media_download_limit = _get_response_size_limit(max_bytes)
-    if max_bytes is None:
+    if max_bytes is None and request_budget is None and deadline is None:
         return response.content
 
     _check_content_length(
@@ -127,18 +234,31 @@ def _read_response_bytes(response: requests.Response, max_bytes: int | None) -> 
     )
     chunks: list[bytes] = []
     received_bytes = 0
+    if deadline is not None:
+        _remaining_media_timeout(deadline)
     for chunk in response.iter_content(_RESPONSE_READ_CHUNK_SIZE):
+        if deadline is not None:
+            _remaining_media_timeout(deadline)
         received_bytes = _append_chunk(
-            chunks, chunk, received_bytes, max_bytes, media_download_limit
+            chunks,
+            chunk,
+            received_bytes,
+            max_bytes,
+            media_download_limit,
+            request_budget,
         )
+    if deadline is not None:
+        _remaining_media_timeout(deadline)
     return b"".join(chunks)
 
 
 async def _async_read_response_bytes(
-    response: aiohttp.ClientResponse, max_bytes: int | None
+    response: aiohttp.ClientResponse,
+    max_bytes: int | None,
+    request_budget: MediaRequestDownloadBudget | None = None,
 ) -> bytes:
     max_bytes, media_download_limit = _get_response_size_limit(max_bytes)
-    if max_bytes is None:
+    if max_bytes is None and request_budget is None:
         return await response.read()
 
     _check_content_length(response.content_length, max_bytes, media_download_limit)
@@ -146,7 +266,12 @@ async def _async_read_response_bytes(
     received_bytes = 0
     async for chunk in response.content.iter_chunked(_RESPONSE_READ_CHUNK_SIZE):
         received_bytes = _append_chunk(
-            chunks, chunk, received_bytes, max_bytes, media_download_limit
+            chunks,
+            chunk,
+            received_bytes,
+            max_bytes,
+            media_download_limit,
+            request_budget,
         )
     return b"".join(chunks)
 
@@ -157,6 +282,7 @@ def _is_retryable(exc: Exception) -> bool:
     Retryable:
       - Timeouts (aiohttp, requests, stdlib)
       - Connection-level failures (refused, reset, DNS)
+      - Response-body transfer failures (incomplete or malformed payloads)
       - Server errors (5xx) -- includes S3 503 SlowDown
     Not retryable:
       - Client errors (4xx) -- bad URL, auth, not-found
@@ -181,6 +307,12 @@ def _is_retryable(exc: Exception) -> bool:
             aiohttp.ClientConnectionError,
             requests.exceptions.ConnectionError,
         ),
+    ):
+        return True
+    # A connection closed during a body read can raise a payload error.
+    if isinstance(
+        exc,
+        (aiohttp.ClientPayloadError, requests.exceptions.ChunkedEncodingError),
     ):
         return True
     # aiohttp server-side disconnects
@@ -234,15 +366,16 @@ def _sync_retry(
 ) -> Callable[_P, _T]:
     """Add retry logic with exponential backoff to a sync method.
 
-    The decorated method must accept ``timeout`` as a keyword argument.
+    The decorated method must accept `timeout` as a keyword argument.
     The decorator replaces it with a per-attempt timeout that grows by
-    ``_RETRY_BACKOFF_FACTOR`` on each retry so transient slowness on busy
+    `_RETRY_BACKOFF_FACTOR` on each retry so transient slowness on busy
     hosts is absorbed.
     """
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> _T:
         base_timeout: float | None = kwargs.get("timeout")
+        deadline: float | None = kwargs.get("deadline")
         max_retries = max(envs.VLLM_MEDIA_FETCH_MAX_RETRIES, 1)
 
         for attempt in range(max_retries):
@@ -251,10 +384,17 @@ def _sync_retry(
                 if base_timeout is not None
                 else None
             )
+            if deadline is not None:
+                remaining = _remaining_media_timeout(deadline)
+                attempt_timeout = min(attempt_timeout or remaining, remaining)
             kwargs["timeout"] = attempt_timeout
             try:
                 return fn(*args, **kwargs)
             except Exception as e:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise MediaFetchDeadlineExceededError(
+                        "Media fetch exceeded its time limit"
+                    ) from e
                 if not _is_retryable(e) or attempt + 1 >= max_retries:
                     raise
                 backoff = _RETRY_BACKOFF_FACTOR**attempt
@@ -268,7 +408,11 @@ def _sync_retry(
                     backoff,
                     base_timeout,
                 )
-                time.sleep(backoff)
+                time.sleep(
+                    max(0, min(backoff, deadline - time.monotonic()))
+                    if deadline is not None
+                    else backoff
+                )
 
         raise AssertionError("unreachable")
 
@@ -280,9 +424,9 @@ def _async_retry(
 ) -> Callable[_P, Coroutine[Any, Any, _T]]:
     """Add retry logic with exponential backoff to an async method.
 
-    The decorated method must accept ``timeout`` as a keyword argument.
+    The decorated method must accept `timeout` as a keyword argument.
     The decorator replaces it with a per-attempt timeout that grows by
-    ``_RETRY_BACKOFF_FACTOR`` on each retry so transient slowness on busy
+    `_RETRY_BACKOFF_FACTOR` on each retry so transient slowness on busy
     hosts is absorbed.
     """
 
@@ -365,11 +509,21 @@ class HTTPConnection:
         timeout: float | None = None,
         extra_headers: Mapping[str, str] | None = None,
         allow_redirects: bool = True,
+        deadline: float | None = None,
     ):
         self._validate_http_url(url)
 
         client = self.get_sync_client()
         extra_headers = extra_headers or {}
+        # Requests can consume redirect bodies before returning the response.
+        hooks = None
+        if deadline is not None:
+            hooks = {
+                "response": [
+                    functools.partial(_set_body_read_deadline, deadline=deadline),
+                    *client.hooks.get("response", ()),
+                ]
+            }
 
         return client.get(
             url,
@@ -377,6 +531,7 @@ class HTTPConnection:
             stream=stream,
             timeout=timeout,
             allow_redirects=allow_redirects,
+            hooks=hooks,
         )
 
     async def get_async_response(
@@ -407,16 +562,19 @@ class HTTPConnection:
         timeout: float | None = None,
         allow_redirects: bool = True,
         max_bytes: int | None = None,
+        request_budget: MediaRequestDownloadBudget | None = None,
+        deadline: float | None = None,
     ) -> bytes:
         with self.get_response(
             url,
             stream=True,
             timeout=timeout,
             allow_redirects=allow_redirects,
+            deadline=deadline,
         ) as r:
             r.raise_for_status()
 
-            return _read_response_bytes(r, max_bytes)
+            return _read_response_bytes(r, max_bytes, request_budget, deadline)
 
     @_async_retry
     async def async_get_bytes(
@@ -426,6 +584,7 @@ class HTTPConnection:
         timeout: float | None = None,
         allow_redirects: bool = True,
         max_bytes: int | None = None,
+        request_budget: MediaRequestDownloadBudget | None = None,
     ) -> bytes:
         async with await self.get_async_response(
             url,
@@ -434,7 +593,7 @@ class HTTPConnection:
         ) as r:
             r.raise_for_status()
 
-            return await _async_read_response_bytes(r, max_bytes)
+            return await _async_read_response_bytes(r, max_bytes, request_budget)
 
     def get_text(self, url: str, *, timeout: float | None = None) -> str:
         with self.get_response(url, timeout=timeout) as r:

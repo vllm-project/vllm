@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import multiprocessing
 import os
 import socket
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -12,6 +14,7 @@ from unittest.mock import patch
 import pytest
 import zmq
 
+import vllm.envs as envs
 from vllm.utils.network_utils import make_zmq_listener, make_zmq_socket
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.utils import (
@@ -417,7 +420,7 @@ def test_rust_frontend_launch_log_redacts_credentials(monkeypatch):
     Credentials must not reach the log line."""
     import subprocess as subprocess_mod
 
-    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.entrypoints.common.cli_args import make_arg_parser
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.utils import RustFrontendProcessManager
 
@@ -469,7 +472,7 @@ def test_rust_frontend_uses_config_model_as_model_tag(monkeypatch, caplog, tmp_p
     """Config-only model selection must be forwarded to the Rust frontend."""
     import subprocess as subprocess_mod
 
-    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.entrypoints.common.cli_args import make_arg_parser
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.utils import RustFrontendProcessManager
 
@@ -513,11 +516,80 @@ def test_rust_frontend_uses_config_model_as_model_tag(monkeypatch, caplog, tmp_p
     assert '"model_tag": "org/model"' in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("extra_args", "expected_served_model_name"),
+    [
+        ([], ["s3://bucket/model"]),
+        (["--served-model-name", "my-model"], ["my-model"]),
+    ],
+)
+def test_rust_frontend_uses_pulled_object_storage_model(
+    monkeypatch, tmp_path, extra_args, expected_served_model_name
+):
+    """The Rust frontend can't read object storage, so it gets the local
+    directory the config and tokenizer were pulled into."""
+    import json
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.common.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "s3://bucket/model", *extra_args]
+    )
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        model_weights="s3://bucket/model",
+        served_model_name=expected_served_model_name[0],
+    )
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    popen_calls = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        return _FakeProc()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
+        RustFrontendProcessManager(
+            binary_path="/nonexistent/vllm-rs",
+            sock=sock,
+            args=args,
+            input_listener=input_listener,
+            output_listener=output_listener,
+            engine_start_index=0,
+            engine_count=1,
+            data_parallel_size=1,
+            model_config=model_config,
+        )
+    finally:
+        sock.close()
+
+    [cmd] = popen_calls
+    args_json = json.loads(cmd[cmd.index("--args-json") + 1])
+    assert args_json["model_tag"] == str(tmp_path)
+    assert args_json["served_model_name"] == expected_served_model_name
+
+
 def test_rust_frontend_inherits_grpc_listener(monkeypatch):
     """The Python-bound gRPC socket is passed to Rust like the HTTP one."""
     import subprocess as subprocess_mod
 
-    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.entrypoints.common.cli_args import make_arg_parser
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.utils import RustFrontendProcessManager
 
@@ -547,6 +619,8 @@ def test_rust_frontend_inherits_grpc_listener(monkeypatch):
     output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
     input_fd = input_listener.socket.fileno()
     output_fd = output_listener.socket.fileno()
+    http_fd = sock.fileno()
+    grpc_fd = grpc_sock.fileno()
     try:
         monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
         RustFrontendProcessManager(
@@ -561,23 +635,262 @@ def test_rust_frontend_inherits_grpc_listener(monkeypatch):
             grpc_sock=grpc_sock,
         )
         [(cmd, kwargs)] = popen_calls
-        grpc_fd = grpc_sock.fileno()
         flag_index = cmd.index("--grpc-listen-fd")
         assert cmd[flag_index + 1] == str(grpc_fd)
-        assert list(kwargs["pass_fds"]) == [
-            sock.fileno(),
-            input_fd,
-            output_fd,
-            grpc_fd,
-        ]
+        assert list(kwargs["pass_fds"]) == [http_fd, input_fd, output_fd, grpc_fd]
     finally:
         sock.close()
         grpc_sock.close()
 
 
+@pytest.mark.parametrize(
+    ("cli_args", "level", "formatter", "warns"),
+    [
+        ([], envs.VLLM_LOGGING_LEVEL, "text", False),
+        (["--log-level", "DEBUG"], "DEBUG", "text", False),
+        (["--logging-config.log_level", "WARNING"], "WARNING", "text", False),
+        (
+            ["--log-level", "DEBUG", "--logging-config.formatter", "json"],
+            "DEBUG",
+            "json",
+            False,
+        ),
+        (
+            ["--logging-config.pylogging_config_file", "/tmp/logging.json"],
+            envs.VLLM_LOGGING_LEVEL,
+            "text",
+            True,
+        ),
+        (
+            ["--logging-config.configure_logging=false"],
+            envs.VLLM_LOGGING_LEVEL,
+            "text",
+            True,
+        ),
+    ],
+)
+def test_rust_frontend_receives_resolved_logging_config(
+    monkeypatch, cli_args, level, formatter, warns
+):
+    """Logging arguments are not among the non-default args. The resolved
+    level and formatter reach --args-json as logging_config; the fields that
+    configure Python logging only are warned about."""
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.common.cli_args import make_arg_parser
+    from vllm.logger import configure_logging_from_args
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "org/model", *cli_args]
+    )
+    with patch("vllm.logger.configure_logging_if_needed"):
+        configure_logging_from_args(args)
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    popen_calls = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append((cmd, kwargs))
+        return _FakeProc()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
+        warning = patch("vllm.v1.utils.logger.warning").start()
+        RustFrontendProcessManager(
+            binary_path="/nonexistent/vllm-rs",
+            sock=sock,
+            args=args,
+            input_listener=input_listener,
+            output_listener=output_listener,
+            engine_start_index=0,
+            engine_count=1,
+            data_parallel_size=1,
+        )
+    finally:
+        patch.stopall()
+        sock.close()
+
+    [(cmd, _)] = popen_calls
+    args_json = json.loads(cmd[cmd.index("--args-json") + 1])
+    assert args_json["logging_config"] == {"log_level": level, "formatter": formatter}
+    assert warning.called == warns
+
+
+@pytest.mark.parametrize(
+    ("cli_args", "env", "expected"),
+    [
+        ([], {}, {}),
+        (
+            [],
+            {
+                "VLLM_SERVER_DEV_MODE": "1",
+                "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true",
+                "VLLM_HTTP_MAX_REQUEST_BODY_SIZE": "0",
+                "VLLM_LOG_STATS_INTERVAL": "inf",
+                "VLLM_ENABLE_COHERE_API": "1",
+                "VLLM_MAX_TOKENIZE_TOKENS": "4096",
+                "VLLM_API_KEY": "env-key",
+            },
+            {
+                "server_dev_mode": True,
+                "allow_runtime_lora_updating": True,
+                "http_max_request_body_size": 0,
+                "log_stats_interval": sys.float_info.max,
+                "enable_cohere_api": True,
+                "max_tokenize_tokens": 4096,
+                "api_key": "env-key",
+            },
+        ),
+        # Off values leave a feature the Rust frontend refuses disabled.
+        (
+            [],
+            {
+                "VLLM_SERVER_DEV_MODE": "0",
+                "VLLM_ENABLE_COHERE_API": "0",
+                "VLLM_ENABLE_RESPONSES_API_STORE": "0",
+                "VLLM_MAX_TOKENIZE_TOKENS": " ",
+                "VLLM_API_KEY": "",
+            },
+            {},
+        ),
+        # The CLI flag takes precedence over the environment variable.
+        (
+            ["--api-key", "cli-key", "--max-tokenize-tokens", "10"],
+            {"VLLM_API_KEY": "env-key", "VLLM_MAX_TOKENIZE_TOKENS": "4096"},
+            {"api_key": ["cli-key"], "max_tokenize_tokens": 10},
+        ),
+    ],
+)
+def test_rust_frontend_receives_resolved_env_settings(
+    monkeypatch, cli_args, env, expected
+):
+    """Settings Python reads from environment variables reach --args-json as
+    `vllm.envs` resolves them."""
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.common.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import _RUST_FRONTEND_ENV_ARGS, RustFrontendProcessManager
+
+    for name in _RUST_FRONTEND_ENV_ARGS.values():
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "org/model", *cli_args]
+    )
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    popen_calls = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        return _FakeProc()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
+        RustFrontendProcessManager(
+            binary_path="/nonexistent/vllm-rs",
+            sock=sock,
+            args=args,
+            input_listener=input_listener,
+            output_listener=output_listener,
+            engine_start_index=0,
+            engine_count=1,
+            data_parallel_size=1,
+        )
+    finally:
+        sock.close()
+
+    [cmd] = popen_calls
+    args_json = json.loads(cmd[cmd.index("--args-json") + 1])
+    forwarded = {
+        key: args_json[key] for key in _RUST_FRONTEND_ENV_ARGS if key in args_json
+    }
+    assert forwarded == expected
+
+
+def test_rust_frontend_parent_releases_listening_sockets(monkeypatch):
+    """The parent's copies must not keep the ports listening once Rust has them."""
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.common.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "org/model", "--grpc-port", "50051"]
+    )
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    listeners = []
+    for _ in range(2):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        s.listen()
+        listeners.append(s)
+    addresses = [s.getsockname() for s in listeners]
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", lambda *a, **kw: _FakeProc())
+        RustFrontendProcessManager(
+            binary_path="/nonexistent/vllm-rs",
+            sock=listeners[0],
+            args=args,
+            input_listener=input_listener,
+            output_listener=output_listener,
+            engine_start_index=0,
+            engine_count=1,
+            data_parallel_size=1,
+            grpc_sock=listeners[1],
+        )
+        for address in addresses:
+            with pytest.raises(ConnectionRefusedError):
+                socket.create_connection(address, timeout=1).close()
+    finally:
+        for s in listeners:
+            s.close()
+
+
 def test_rust_frontend_spawn_failure_cleans_up_listeners(tmp_path):
     """No child owns the listeners when Popen fails, so the parent removes them."""
-    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.entrypoints.common.cli_args import make_arg_parser
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.utils import RustFrontendProcessManager
 

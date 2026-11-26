@@ -109,6 +109,7 @@ def create_alibi_causal_mask(
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("sliding_window", SLIDING_WINDOW)
 @pytest.mark.parametrize("op", OPS)
+@pytest.mark.parametrize("interleave_v", [False, True])
 @torch.inference_mode()
 def test_contexted_kv_attention(
     num_heads: int,
@@ -119,7 +120,15 @@ def test_contexted_kv_attention(
     kv_cache_dtype: str,
     device: str,
     op: Callable,
+    interleave_v: bool,
     block_size: int = 32,
+    max_query_len: int = 1024,
+    min_ctx_len: int = 16,
+    max_ctx_len: int = 1024,
+    num_seqs: int = 10,
+    cache_fill: float = 0.0,
+    kv_range: float = 1e-3,
+    min_cache_blocks: int = 0,
 ) -> None:
     if "fp8" in kv_cache_dtype and not current_platform.has_device_capability(89):
         pytest.skip(
@@ -142,37 +151,41 @@ def test_contexted_kv_attention(
     # see also similar issue: https://github.com/Dao-AILab/flash-attention/issues/523
     torch.accelerator.set_device_index(device)
 
-    MAX_SEQ_LEN = 1024
-    MAX_CTX_LEN = 1024
-    BS = 10
-    cache_size = 640
-    max_block_per_request = 64
+    MAX_SEQ_LEN = max_query_len
+    MAX_CTX_LEN = max_ctx_len
+    BS = num_seqs
+    max_block_per_request = (MAX_SEQ_LEN + MAX_CTX_LEN) // block_size
+    # 640 keeps block size 544's KV cache over 2 GB (64-bit addressing).
+    cache_size = max(640, BS * max_block_per_request, min_cache_blocks)
     query_lens = [random.randint(16, MAX_SEQ_LEN) for _ in range(BS)]
-    # ensure one sequence in batch is a decode
-    query_lens[-1] = 1
+    # Exercise both a decode row and a trailing zero-length FULL-graph row.
+    query_lens[-2] = 1
+    query_lens[-1] = 0
 
-    ctx_lens = [random.randint(16, MAX_CTX_LEN) for _ in range(BS)]
+    ctx_lens = [random.randint(min_ctx_len, MAX_CTX_LEN) for _ in range(BS)]
     seq_lens = [a + b for a, b in zip(query_lens, ctx_lens)]
     num_kv_heads = num_heads // num_queries_per_kv
 
     num_tokens = sum(query_lens)
     query = torch.empty(num_tokens, num_heads, head_size, dtype=dtype)
     query.uniform_(-1e-3, 1e-3)
-    output = torch.empty(num_tokens, num_heads, head_size, dtype=dtype)
+    # NaN, so a row the kernel leaves unwritten fails instead of passing on
+    # leftover memory.
+    output = torch.full((num_tokens, num_heads, head_size), float("nan"), dtype=dtype)
 
     kv = torch.empty(sum(seq_lens), 2, num_kv_heads, head_size, dtype=dtype)
-    kv.uniform_(-1e-3, 1e-3)
+    kv.uniform_(-kv_range, kv_range)
     key, value = kv.unbind(dim=1)
 
     if kv_cache_dtype == "auto":
         cache_dtype = dtype
     else:
         cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
-    k_cache = torch.zeros(
-        cache_size, block_size, num_kv_heads, head_size, dtype=cache_dtype
+    k_cache = torch.full(
+        (cache_size, block_size, num_kv_heads, head_size), cache_fill, dtype=cache_dtype
     )
-    v_cache = torch.zeros(
-        cache_size, block_size, num_kv_heads, head_size, dtype=cache_dtype
+    v_cache = torch.full(
+        (cache_size, block_size, num_kv_heads, head_size), cache_fill, dtype=cache_dtype
     )
     k = torch.zeros(sum(query_lens), num_kv_heads, head_size, dtype=dtype)
     v = torch.zeros(sum(query_lens), num_kv_heads, head_size, dtype=dtype)
@@ -225,6 +238,23 @@ def test_contexted_kv_attention(
     )
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
+    extra_op_kwargs = {}
+    if interleave_v:
+        # Rewrite the V cache into the interleaved layout (same 4D shape). Both
+        # context_attention_fwd (prefill) and kernel_paged_attention_2d (decode)
+        # read it back interleaved.
+        x_v = 16 // v_cache.element_size()
+        v_cache = (
+            v_cache.view(cache_size, num_kv_heads, head_size, block_size // x_v, x_v)
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+            .view(cache_size, num_kv_heads, head_size, block_size)
+        )
+        if op is context_attention_fwd:
+            extra_op_kwargs["interleaved_v_pack_factor"] = x_v
+        else:
+            extra_op_kwargs["use_interleaved_v_cache"] = True
+
     # Warm up the Triton kernel by calling it once before actually measuring
     # generation time
     op(
@@ -243,6 +273,7 @@ def test_contexted_kv_attention(
         k_scale,
         v_scale,
         sliding_window=sliding_window,
+        **extra_op_kwargs,
     )
     torch.accelerator.synchronize()
     start_time = time.time()
@@ -262,6 +293,7 @@ def test_contexted_kv_attention(
         k_scale,
         v_scale,
         sliding_window=sliding_window,
+        **extra_op_kwargs,
     )
     torch.accelerator.synchronize()
     end_time = time.time()
@@ -324,6 +356,80 @@ def test_contexted_kv_attention(
     torch.testing.assert_close(output, output_ref, atol=atol, rtol=0)
 
 
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("interleave_v", [False, True])
+@pytest.mark.parametrize("block_size", [16, 32, 48])
+@pytest.mark.parametrize("head_size", [128, 256])
+@pytest.mark.parametrize(
+    "sliding_window,max_query_len,min_ctx_len,max_ctx_len,num_seqs",
+    [
+        (256, 256, 16, 4096, 4),
+        (40, 1024, 16, 64, 10),
+        pytest.param(256, 256, 1214, 1214, 4, id="window-starts-at-last-key-of-tile"),
+    ],
+)
+@torch.inference_mode()
+def test_contexted_kv_attention_window_shorter_than_context(
+    device: str,
+    interleave_v: bool,
+    block_size: int,
+    head_size: int,
+    sliding_window: int,
+    max_query_len: int,
+    min_ctx_len: int,
+    max_ctx_len: int,
+    num_seqs: int,
+) -> None:
+    if head_size > 128 and not current_platform.is_rocm():
+        pytest.skip("Head sizes above 128 are only exercised on ROCm CI.")
+    test_contexted_kv_attention(
+        num_heads=8,
+        num_queries_per_kv=1,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        device=device,
+        op=context_attention_fwd,
+        interleave_v=interleave_v,
+        block_size=block_size,
+        max_query_len=max_query_len,
+        min_ctx_len=min_ctx_len,
+        max_ctx_len=max_ctx_len,
+        num_seqs=num_seqs,
+        cache_fill=float("nan"),
+        kv_range=0.1,
+    )
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_contexted_kv_attention_window_v_cache_over_2gb(device: str) -> None:
+    if not current_platform.is_rocm():
+        pytest.skip("Head sizes above 128 are only exercised on ROCm CI.")
+    block_size, num_heads, head_size = 16, 8, 256
+    block_bytes = block_size * num_heads * head_size * 2
+    test_contexted_kv_attention(
+        num_heads=num_heads,
+        num_queries_per_kv=1,
+        head_size=head_size,
+        sliding_window=256,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        device=device,
+        op=context_attention_fwd,
+        interleave_v=False,
+        block_size=block_size,
+        max_query_len=256,
+        min_ctx_len=16,
+        max_ctx_len=4096,
+        num_seqs=4,
+        cache_fill=float("nan"),
+        kv_range=0.1,
+        min_cache_blocks=2**31 // block_bytes + 1,
+    )
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend")
 @pytest.mark.parametrize("sliding_window", [None, 1, 4])
 @pytest.mark.parametrize("query_len", [1, 3])
@@ -346,7 +452,6 @@ def test_rocm_backend_sliding_window_includes_boundary_token(
     value_cache[..., :seq_len] = value.permute(1, 2, 0)
     scale = torch.tensor(1.0, device=device)
     metadata = SimpleNamespace(
-        use_cascade=False,
         num_actual_tokens=query_len,
         query_start_loc=torch.tensor([0, query_len], dtype=torch.int32, device=device),
         seq_lens=torch.tensor([seq_len], dtype=torch.int32, device=device),
@@ -387,6 +492,7 @@ def test_rocm_backend_sliding_window_includes_boundary_token(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPES)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("interleave_v", [False, True])
 @torch.inference_mode()
 def test_contexted_kv_attention_cached_kv(
     num_heads: int,
@@ -395,6 +501,7 @@ def test_contexted_kv_attention_cached_kv(
     dtype: torch.dtype,
     kv_cache_dtype: str,
     device: str,
+    interleave_v: bool,
     block_size: int = 32,
 ) -> None:
     # Exercises the KV_FROM_CACHE path of context_attention_fwd: the current
@@ -488,6 +595,18 @@ def test_contexted_kv_attention_cached_kv(
     )
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
+    interleaved_v_pack_factor = 0
+    if interleave_v:
+        # Rewrite the V cache into the interleaved layout (same 4D shape).
+        interleaved_v_pack_factor = 16 // v_cache.element_size()
+        x_v = interleaved_v_pack_factor
+        v_cache = (
+            v_cache.view(cache_size, num_kv_heads, head_size, block_size // x_v, x_v)
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+            .view(cache_size, num_kv_heads, head_size, block_size)
+        )
+
     # Cached-K/V path: current-chunk k and v are None.
     context_attention_fwd(
         query,
@@ -505,6 +624,7 @@ def test_contexted_kv_attention_cached_kv(
         k_scale,
         v_scale,
         sliding_window=0,
+        interleaved_v_pack_factor=interleaved_v_pack_factor,
     )
     torch.accelerator.synchronize()
 
@@ -545,8 +665,11 @@ def test_contexted_kv_attention_cached_kv(
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("interleave_v", [False, True])
 @torch.inference_mode()
-def test_contexted_kv_attention_cached_kv_block_table_boundary(device: str) -> None:
+def test_contexted_kv_attention_cached_kv_block_table_boundary(
+    device: str, interleave_v: bool
+) -> None:
     # Boundary guard for the KV_FROM_CACHE block-table load. With an
     # exact-sized block table (row length == number of blocks for the
     # sequence) and a query that ends the sequence, the last K/V tile has
@@ -612,6 +735,18 @@ def test_contexted_kv_attention_cached_kv_block_table_boundary(device: str) -> N
     )
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
+    interleaved_v_pack_factor = 0
+    if interleave_v:
+        # Rewrite the V cache into the interleaved layout (same 4D shape).
+        interleaved_v_pack_factor = 16 // v_cache.element_size()
+        x_v = interleaved_v_pack_factor
+        v_cache = (
+            v_cache.view(num_blocks, num_kv_heads, head_size, block_size // x_v, x_v)
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+            .view(num_blocks, num_kv_heads, head_size, block_size)
+        )
+
     # Cached-K/V path: current-chunk k and v are None.
     context_attention_fwd(
         query,
@@ -629,6 +764,7 @@ def test_contexted_kv_attention_cached_kv_block_table_boundary(device: str) -> N
         k_scale,
         v_scale,
         sliding_window=0,
+        interleaved_v_pack_factor=interleaved_v_pack_factor,
     )
     torch.accelerator.synchronize()
 
@@ -724,6 +860,7 @@ def test_contexted_kv_attention_cached_kv_alibi_unsupported(device: str) -> None
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPES)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("op", OPS)
+@pytest.mark.parametrize("interleave_v", [False, True])
 @torch.inference_mode()
 def test_contexted_kv_attention_alibi(
     num_heads: int,
@@ -733,6 +870,7 @@ def test_contexted_kv_attention_alibi(
     kv_cache_dtype: str,
     device: str,
     op: Callable,
+    interleave_v: bool,
     block_size: int = 32,
 ) -> None:
     if "fp8" in kv_cache_dtype and not current_platform.has_device_capability(89):
@@ -861,6 +999,23 @@ def test_contexted_kv_attention_alibi(
     )
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
+    extra_op_kwargs = {}
+    if interleave_v:
+        # Rewrite the V cache into the interleaved layout (same 4D shape). Both
+        # context_attention_fwd (prefill) and kernel_paged_attention_2d (decode)
+        # read it back interleaved.
+        x_v = 16 // v_cache.element_size()
+        v_cache = (
+            v_cache.view(cache_size, num_kv_heads, head_size, block_size // x_v, x_v)
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+            .view(cache_size, num_kv_heads, head_size, block_size)
+        )
+        if op is context_attention_fwd:
+            extra_op_kwargs["interleaved_v_pack_factor"] = x_v
+        else:
+            extra_op_kwargs["use_interleaved_v_cache"] = True
+
     # Warm up the Triton kernel by calling it once before actually measuring
     # generation time
     op(
@@ -879,6 +1034,7 @@ def test_contexted_kv_attention_alibi(
         k_scale,
         v_scale,
         alibi_slopes=alibi_slopes,
+        **extra_op_kwargs,
     )
     torch.accelerator.synchronize()
     start_time = time.time()
@@ -898,6 +1054,7 @@ def test_contexted_kv_attention_alibi(
         k_scale,
         v_scale,
         alibi_slopes=alibi_slopes,
+        **extra_op_kwargs,
     )
     torch.accelerator.synchronize()
     end_time = time.time()
@@ -920,7 +1077,7 @@ def test_contexted_kv_attention_alibi(
 
     query_start = 0
     key_start = 0
-    for i, (query_len, seq_len) in enumerate(zip(query_lens, seq_lens)):
+    for query_len, seq_len in zip(query_lens, seq_lens):
         query_end = query_start + query_len
         key_end = key_start + seq_len
 
@@ -993,6 +1150,7 @@ def test_contexted_kv_attention_alibi(
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("sliding_window", SLIDING_WINDOW)
 @pytest.mark.parametrize("op", OPS)
+@pytest.mark.parametrize("interleave_v", [False, True])
 @torch.inference_mode()
 def test_contexted_kv_attention_f32(
     num_heads: int,
@@ -1003,6 +1161,7 @@ def test_contexted_kv_attention_f32(
     kv_cache_dtype: str,
     device: str,
     op: Callable,
+    interleave_v: bool,
 ) -> None:
     test_contexted_kv_attention(
         num_heads,
@@ -1013,6 +1172,7 @@ def test_contexted_kv_attention_f32(
         kv_cache_dtype,
         device,
         op,
+        interleave_v=interleave_v,
     )
 
 
@@ -1024,6 +1184,7 @@ def test_contexted_kv_attention_f32(
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPES)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("op", OPS)
+@pytest.mark.parametrize("interleave_v", [False, True])
 @torch.inference_mode()
 def test_contexted_kv_attention_alibi_f32(
     num_heads: int,
@@ -1033,9 +1194,17 @@ def test_contexted_kv_attention_alibi_f32(
     kv_cache_dtype: str,
     device: str,
     op: Callable,
+    interleave_v: bool,
 ) -> None:
     test_contexted_kv_attention_alibi(
-        num_heads, num_queries_per_kv, head_size, dtype, kv_cache_dtype, device, op
+        num_heads,
+        num_queries_per_kv,
+        head_size,
+        dtype,
+        kv_cache_dtype,
+        device,
+        op,
+        interleave_v=interleave_v,
     )
 
 
@@ -1044,6 +1213,9 @@ NONSTANDARD_BLOCK_SIZE_SHAPES = [
     (64, 1, 128, 544),
     (8, 4, 256, 1040),
     (8, 4, 256, 1056),
+    # gfx12, KV cache < 2 GiB: GPU memory fault with the default
+    # 4-warp / 2-stage decode launch (#62697).
+    (32, 4, 128, 528),
 ]
 
 
@@ -1053,6 +1225,7 @@ NONSTANDARD_BLOCK_SIZE_SHAPES = [
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("op", OPS)
+@pytest.mark.parametrize("interleave_v", [False, True])
 @torch.inference_mode()
 def test_qwen3_nonstandard_block_size(
     num_heads: int,
@@ -1062,6 +1235,7 @@ def test_qwen3_nonstandard_block_size(
     dtype: torch.dtype,
     device: str,
     op: Callable,
+    interleave_v: bool,
 ) -> None:
     """Non-power-of-2 pages must match, even when a tile straddles a page."""
     if not current_platform.is_rocm():
@@ -1077,4 +1251,5 @@ def test_qwen3_nonstandard_block_size(
         kv_cache_dtype="auto",
         device=device,
         op=op,
+        interleave_v=interleave_v,
     )

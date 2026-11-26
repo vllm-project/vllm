@@ -27,9 +27,12 @@ from vllm.entrypoints.serve.exception_handling.error_response import (
     create_error_response,
 )
 from vllm.exceptions import VLLMValidationError
-from vllm.renderers.embed_utils import (
+from vllm.multimodal.media import AudioEmbeddingMediaIO, ImageEmbeddingMediaIO
+from vllm.multimodal.media.video import VideoEmbeddingMediaIO
+from vllm.renderers.embed_utils import safe_load_prompt_embeds
+from vllm.utils.sparse_utils import (
     _MAX_EMBED_ERROR_REASON_CHARS,
-    safe_load_prompt_embeds,
+    load_torch_payload,
 )
 
 
@@ -65,6 +68,40 @@ def _saved_tensor(tensor: torch.Tensor) -> bytes:
     return buffer.getvalue()
 
 
+@pytest.mark.parametrize(
+    "model, hidden_size, input_size, buffer_size",
+    [
+        ("facebook/opt-350m", 1024, 512, 512),
+        ("facebook/opt-125m", 768, 768, 768),
+        ("openai/clip-vit-base-patch32", 512, 512, 1024),
+        ("google/siglip-base-patch16-224", 768, 768, 1024),
+    ],
+)
+def test_prompt_embeds_input_width(model, hidden_size, input_size, buffer_size):
+    """OPT uses its token width; dual encoders retain their text input width."""
+    from vllm.config import ModelConfig
+
+    config = ModelConfig(
+        model=model,
+        dtype="float32",
+        enable_prompt_embeds=True,
+    )
+    if "opt-" not in model:
+        config.hf_text_config.projection_dim = buffer_size
+    assert config.get_hidden_size() == hidden_size
+    assert config.get_inputs_embeds_size() == buffer_size
+
+    tensor = torch.randn(4, input_size)
+    loaded = safe_load_prompt_embeds(config, _encode(_saved_tensor(tensor)))
+    torch.testing.assert_close(loaded, tensor)
+
+    wrong_size = hidden_size if hidden_size != input_size else input_size + 1
+    with pytest.raises(VLLMValidationError, match="does not match"):
+        safe_load_prompt_embeds(
+            config, _encode(_saved_tensor(torch.randn(4, wrong_size)))
+        )
+
+
 UNPARSABLE_PAYLOADS = [
     pytest.param(b"", id="empty"),
     pytest.param(b"\x80", id="single-byte"),
@@ -84,6 +121,25 @@ def test_unreadable_prompt_embeds_payload_is_a_client_error(model_config, payloa
         safe_load_prompt_embeds(model_config, _encode(payload))
 
     assert excinfo.value.parameter == "prompt_embeds"
+    assert int(create_error_response(excinfo.value).error.code) == 400
+
+
+@pytest.mark.parametrize(
+    ("media_io_cls", "parameter"),
+    [
+        (ImageEmbeddingMediaIO, "image_embeds"),
+        (AudioEmbeddingMediaIO, "audio_embeds"),
+        (VideoEmbeddingMediaIO, "video_embeds"),
+    ],
+)
+@pytest.mark.parametrize("payload", UNPARSABLE_PAYLOADS)
+def test_unreadable_mm_embeds_payload_is_a_client_error(
+    media_io_cls, parameter, payload
+):
+    with pytest.raises(VLLMValidationError) as excinfo:
+        media_io_cls().load_bytes(payload)
+
+    assert excinfo.value.parameter == parameter
     assert int(create_error_response(excinfo.value).error.code) == 400
 
 
@@ -112,9 +168,7 @@ def test_a_long_reason_is_truncated_and_says_how_much_was_left_out(model_config)
     reason = "E" * (_MAX_EMBED_ERROR_REASON_CHARS + 37)
 
     with (
-        patch(
-            "vllm.renderers.embed_utils.torch.load", side_effect=RuntimeError(reason)
-        ),
+        patch("vllm.utils.sparse_utils.torch.load", side_effect=RuntimeError(reason)),
         pytest.raises(VLLMValidationError) as excinfo,
     ):
         safe_load_prompt_embeds(model_config, _encode(b"ignored"))
@@ -132,9 +186,7 @@ def test_a_short_reason_is_passed_through_whole(model_config):
     assert len(reason) <= _MAX_EMBED_ERROR_REASON_CHARS
 
     with (
-        patch(
-            "vllm.renderers.embed_utils.torch.load", side_effect=RuntimeError(reason)
-        ),
+        patch("vllm.utils.sparse_utils.torch.load", side_effect=RuntimeError(reason)),
         pytest.raises(VLLMValidationError) as excinfo,
     ):
         safe_load_prompt_embeds(model_config, _encode(b"ignored"))
@@ -142,6 +194,34 @@ def test_a_short_reason_is_passed_through_whole(model_config):
     message = str(excinfo.value)
     assert reason in message
     assert "truncated" not in message
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(torch.OutOfMemoryError("device OOM"), id="device-oom"),
+        pytest.param(MemoryError("host OOM"), id="host-oom"),
+    ],
+)
+def test_memory_exhaustion_remains_a_server_error(error):
+    with (
+        patch("vllm.utils.sparse_utils.torch.load", side_effect=error),
+        pytest.raises(type(error)) as excinfo,
+    ):
+        load_torch_payload(b"not a torch payload", parameter="image_embeds")
+
+    assert excinfo.value is error
+    assert int(create_error_response(excinfo.value).error.code) == 500
+
+
+def test_client_payloads_are_always_loaded_on_cpu():
+    payload = _saved_tensor(torch.ones(2, 3))
+
+    with patch("vllm.utils.sparse_utils.torch.load", wraps=torch.load) as load:
+        loaded = load_torch_payload(payload, parameter="image_embeds")
+
+    torch.testing.assert_close(loaded, torch.ones(2, 3))
+    assert load.call_args.kwargs["map_location"] == torch.device("cpu")
 
 
 def test_a_well_formed_payload_still_loads(model_config):
@@ -159,5 +239,27 @@ def test_a_payload_that_is_not_base64_is_still_a_client_error(model_config):
     """Positive control: the base64 stage already answered 400 and still does."""
     with pytest.raises(ValueError) as excinfo:
         safe_load_prompt_embeds(model_config, b"!!!!not base64!!!!")
+
+    assert int(create_error_response(excinfo.value).error.code) == 400
+
+
+def test_a_str_payload_loads_like_bytes(model_config):
+    """Chat parsers pass the base64 `str` from the request without encoding it,
+    so a `str` payload must load to the same tensor as its bytes."""
+    tensor = torch.randn(3, model_config.get_hidden_size(), dtype=torch.float32)
+    encoded = _encode(_saved_tensor(tensor))
+
+    from_str = safe_load_prompt_embeds(model_config, encoded.decode())
+
+    torch.testing.assert_close(
+        from_str, safe_load_prompt_embeds(model_config, encoded), rtol=0, atol=0
+    )
+
+
+def test_a_non_ascii_str_payload_is_a_client_error(model_config):
+    """Without the `str.encode` copy, base64 decoding must still reject
+    non-ASCII input with an error that answers 400."""
+    with pytest.raises(ValueError) as excinfo:
+        safe_load_prompt_embeds(model_config, "QUJDé")
 
     assert int(create_error_response(excinfo.value).error.code) == 400

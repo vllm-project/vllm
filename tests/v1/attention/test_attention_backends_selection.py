@@ -11,7 +11,6 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
     MiniMaxText01LinearAttention,
 )
-from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.layers.mamba.short_conv import ShortConv
@@ -19,10 +18,10 @@ from vllm.model_executor.models.falcon_h1 import FalconH1ForCausalLM
 from vllm.model_executor.models.granitemoehybrid import GraniteMoeHybridForCausalLM
 from vllm.model_executor.models.zamba2 import Zamba2ForCausalLM
 from vllm.v1.attention.backends.linear_attn import LinearAttentionBackend
-from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionBackend
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionBackend
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
 
 @pytest.mark.parametrize(("use_replayssm", "expected_blocks"), [(False, 3), (True, 0)])
@@ -34,21 +33,26 @@ def test_replayssm_does_not_reserve_speculative_state_blocks(
         get_state_dtype=lambda: (torch.float32,),
         mamba_type=MambaAttentionBackendEnum.MAMBA2,
         is_kv_cache_tp_replicated=False,
+        use_flashinfer_replayssm=False,
+        state_alignment=1,
+        get_kv_cache_checkpoint_alignment=lambda vllm_config: None,
     )
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
             mamba_block_size=1,
             mamba_page_size_padded=None,
-            mamba_cache_mode="none",
+            enable_prefix_caching=False,
             use_replayssm=use_replayssm,
         ),
         num_speculative_tokens=3,
     )
 
-    spec = MambaBase.get_kv_cache_spec(layer, vllm_config)
+    layer_config = MambaBase.get_kv_cache_config(layer, vllm_config)
 
-    assert spec is not None
-    assert spec.num_speculative_blocks == expected_blocks
+    assert layer_config is not None
+    manager_config = layer_config.manager_config
+    assert isinstance(manager_config.params, MambaManager.Params)
+    assert manager_config.params.num_speculative_blocks == expected_blocks
 
 
 @pytest.mark.parametrize(
@@ -93,21 +97,6 @@ def test_mamba2_config_state_shape_includes_speculative_tokens(model_cls):
 @pytest.mark.parametrize(
     "layer_class, init_kwargs, expected_backend, expected_mamba_type",
     [
-        (
-            MambaMixer,
-            dict(
-                hidden_size=128,
-                ssm_state_size=16,
-                conv_kernel_size=4,
-                intermediate_size=256,
-                time_step_rank=8,
-                use_conv_bias=True,
-                use_bias=False,
-                use_rms_norm=True,
-            ),
-            Mamba1AttentionBackend,
-            MambaAttentionBackendEnum.MAMBA1,
-        ),
         (
             MambaMixer2,
             dict(
@@ -172,7 +161,6 @@ def test_mamba_layers_get_attn_backend(
 @pytest.mark.parametrize(
     "layer_class,expected_backend,expected_mamba_type",
     [
-        (MambaMixer, Mamba1AttentionBackend, MambaAttentionBackendEnum.MAMBA1),
         (MambaMixer2, Mamba2AttentionBackend, MambaAttentionBackendEnum.MAMBA2),
         (
             MiniMaxText01LinearAttention,

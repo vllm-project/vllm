@@ -70,14 +70,14 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     5. Computes merged Akk_inv
     6. Writes Akk_inv to Akk
     """
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
 
     if IS_VARLEN:
         i_n, i_t = (
             tl.load(chunk_indices + i_t * 2).to(tl.int32),
-            tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+            tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64),
         )
         bos, eos = (
             tl.load(cu_seqlens + i_n).to(tl.int32),
@@ -106,6 +106,15 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     m_tc1 = (i_tc1 + o_i) < T
     m_tc2 = (i_tc2 + o_i) < T
     m_tc3 = (i_tc3 + o_i) < T
+    o_c0 = i_tc0 + o_i
+    o_c1 = i_tc1 + o_i
+    o_c2 = i_tc2 + o_i
+    o_c3 = i_tc3 + o_i
+    m_tc0 = o_c0 < T
+    m_A0 = m_tc0[:, None] & (o_i[None, :] < BT)
+    m_A1 = m_tc1[:, None] & (o_i[None, :] < BT)
+    m_A2 = m_tc2[:, None] & (o_i[None, :] < BT)
+    m_A3 = m_tc3[:, None] & (o_i[None, :] < BT)
 
     b_Aqk10 = tl.zeros([BC, BC], dtype=tl.float32)
     b_Akk10 = tl.zeros([BC, BC], dtype=tl.float32)
@@ -129,29 +138,21 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
 
-        p_k0 = tl.make_block_ptr(
-            k, (T, K), (H * K, 1), (i_tc0, i_k * BK), (BC, BK), (1, 0)
-        )
-        p_g0 = tl.make_block_ptr(
-            g, (T, K), (HV * K, 1), (i_tc0, i_k * BK), (BC, BK), (1, 0)
-        )
-        b_k0 = tl.load(p_k0, boundary_check=(0, 1)).to(tl.float32)
-        b_g0 = tl.load(p_g0, boundary_check=(0, 1)).to(tl.float32)
+        m_ck0 = m_tc0[:, None] & m_k[None, :]
+        p_k0 = k + o_c0[:, None] * (H * K) + o_k[None, :]
+        p_g0 = g + o_c0[:, None] * (HV * K) + o_k[None, :]
+        b_k0 = tl.load(p_k0, mask=m_ck0, other=0.0).to(tl.float32)
+        b_g0 = tl.load(p_g0, mask=m_ck0, other=0.0).to(tl.float32)
 
         if i_tc1 < T:
-            p_q1 = tl.make_block_ptr(
-                q, (T, K), (H * K, 1), (i_tc1, i_k * BK), (BC, BK), (1, 0)
-            )
-            p_k1 = tl.make_block_ptr(
-                k, (T, K), (H * K, 1), (i_tc1, i_k * BK), (BC, BK), (1, 0)
-            )
-            p_g1 = tl.make_block_ptr(
-                g, (T, K), (HV * K, 1), (i_tc1, i_k * BK), (BC, BK), (1, 0)
-            )
+            m_ck1 = m_tc1[:, None] & m_k[None, :]
+            p_q1 = q + o_c1[:, None] * (H * K) + o_k[None, :]
+            p_k1 = k + o_c1[:, None] * (H * K) + o_k[None, :]
+            p_g1 = g + o_c1[:, None] * (HV * K) + o_k[None, :]
             # [BC, BK]
-            b_q1 = tl.load(p_q1, boundary_check=(0, 1)).to(tl.float32)
-            b_k1 = tl.load(p_k1, boundary_check=(0, 1)).to(tl.float32)
-            b_g1 = tl.load(p_g1, boundary_check=(0, 1)).to(tl.float32)
+            b_q1 = tl.load(p_q1, mask=m_ck1, other=0.0).to(tl.float32)
+            b_k1 = tl.load(p_k1, mask=m_ck1, other=0.0).to(tl.float32)
+            b_g1 = tl.load(p_g1, mask=m_ck1, other=0.0).to(tl.float32)
             # [BK]
             b_gn1 = tl.load(g + i_tc1 * HV * K + o_k, mask=m_k, other=0).to(tl.float32)
             # [BC, BK]
@@ -163,19 +164,14 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
             b_Akk10 += tl.dot(b_k1 * b_gqn, b_kgt)
 
             if i_tc2 < T:
-                p_q2 = tl.make_block_ptr(
-                    q, (T, K), (H * K, 1), (i_tc2, i_k * BK), (BC, BK), (1, 0)
-                )
-                p_k2 = tl.make_block_ptr(
-                    k, (T, K), (H * K, 1), (i_tc2, i_k * BK), (BC, BK), (1, 0)
-                )
-                p_g2 = tl.make_block_ptr(
-                    g, (T, K), (HV * K, 1), (i_tc2, i_k * BK), (BC, BK), (1, 0)
-                )
+                m_ck2 = m_tc2[:, None] & m_k[None, :]
+                p_q2 = q + o_c2[:, None] * (H * K) + o_k[None, :]
+                p_k2 = k + o_c2[:, None] * (H * K) + o_k[None, :]
+                p_g2 = g + o_c2[:, None] * (HV * K) + o_k[None, :]
                 # [BC, BK]
-                b_q2 = tl.load(p_q2, boundary_check=(0, 1)).to(tl.float32)
-                b_k2 = tl.load(p_k2, boundary_check=(0, 1)).to(tl.float32)
-                b_g2 = tl.load(p_g2, boundary_check=(0, 1)).to(tl.float32)
+                b_q2 = tl.load(p_q2, mask=m_ck2, other=0.0).to(tl.float32)
+                b_k2 = tl.load(p_k2, mask=m_ck2, other=0.0).to(tl.float32)
+                b_g2 = tl.load(p_g2, mask=m_ck2, other=0.0).to(tl.float32)
                 # [BK]
                 b_gn2 = tl.load(g + i_tc2 * HV * K + o_k, mask=m_k, other=0).to(
                     tl.float32
@@ -195,19 +191,14 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
                 b_Akk21 += tl.dot(b_kg2, b_kgt)
 
                 if i_tc3 < T:
-                    p_q3 = tl.make_block_ptr(
-                        q, (T, K), (H * K, 1), (i_tc3, i_k * BK), (BC, BK), (1, 0)
-                    )
-                    p_k3 = tl.make_block_ptr(
-                        k, (T, K), (H * K, 1), (i_tc3, i_k * BK), (BC, BK), (1, 0)
-                    )
-                    p_g3 = tl.make_block_ptr(
-                        g, (T, K), (HV * K, 1), (i_tc3, i_k * BK), (BC, BK), (1, 0)
-                    )
+                    m_ck3 = m_tc3[:, None] & m_k[None, :]
+                    p_q3 = q + o_c3[:, None] * (H * K) + o_k[None, :]
+                    p_k3 = k + o_c3[:, None] * (H * K) + o_k[None, :]
+                    p_g3 = g + o_c3[:, None] * (HV * K) + o_k[None, :]
                     # [BC, BK]
-                    b_q3 = tl.load(p_q3, boundary_check=(0, 1)).to(tl.float32)
-                    b_k3 = tl.load(p_k3, boundary_check=(0, 1)).to(tl.float32)
-                    b_g3 = tl.load(p_g3, boundary_check=(0, 1)).to(tl.float32)
+                    b_q3 = tl.load(p_q3, mask=m_ck3, other=0.0).to(tl.float32)
+                    b_k3 = tl.load(p_k3, mask=m_ck3, other=0.0).to(tl.float32)
+                    b_g3 = tl.load(p_g3, mask=m_ck3, other=0.0).to(tl.float32)
                     # [BK]
                     b_gn3 = tl.load(g + i_tc3 * HV * K + o_k, mask=m_k, other=0).to(
                         tl.float32
@@ -236,82 +227,44 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     # save off-diagonal Aqk blocks and prepare Akk
     ################################################################################
     if i_tc1 < T:
-        p_Aqk10 = tl.make_block_ptr(
-            Aqk, (T, BT), (HV * BT, 1), (i_tc1, 0), (BC, BC), (1, 0)
-        )
-        tl.store(
-            p_Aqk10, (b_Aqk10 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1)
-        )
+        p_Aqk10 = Aqk + o_c1[:, None] * (HV * BT) + o_i[None, :]
+        tl.store(p_Aqk10, (b_Aqk10 * scale).to(Aqk.dtype.element_ty), mask=m_A1)
 
-        p_b1 = tl.make_block_ptr(
-            beta + bos * HV + i_hv, (T,), (HV,), (i_tc1,), (BC,), (0,)
-        )
-        b_b1 = tl.load(p_b1, boundary_check=(0,)).to(tl.float32)
+        p_b1 = beta + bos * HV + i_hv + o_c1 * HV
+        b_b1 = tl.load(p_b1, mask=m_tc1, other=0.0).to(tl.float32)
         b_Akk10 = b_Akk10 * b_b1[:, None]
     if i_tc2 < T:
-        p_Aqk20 = tl.make_block_ptr(
-            Aqk, (T, BT), (HV * BT, 1), (i_tc2, 0), (BC, BC), (1, 0)
-        )
-        p_Aqk21 = tl.make_block_ptr(
-            Aqk, (T, BT), (HV * BT, 1), (i_tc2, BC), (BC, BC), (1, 0)
-        )
-        tl.store(
-            p_Aqk20, (b_Aqk20 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1)
-        )
-        tl.store(
-            p_Aqk21, (b_Aqk21 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1)
-        )
+        p_Aqk20 = Aqk + o_c2[:, None] * (HV * BT) + o_i[None, :]
+        p_Aqk21 = Aqk + o_c2[:, None] * (HV * BT) + (o_i + BC)[None, :]
+        tl.store(p_Aqk20, (b_Aqk20 * scale).to(Aqk.dtype.element_ty), mask=m_A2)
+        tl.store(p_Aqk21, (b_Aqk21 * scale).to(Aqk.dtype.element_ty), mask=m_A2)
 
-        p_b2 = tl.make_block_ptr(
-            beta + bos * HV + i_hv, (T,), (HV,), (i_tc2,), (BC,), (0,)
-        )
-        b_b2 = tl.load(p_b2, boundary_check=(0,)).to(tl.float32)
+        p_b2 = beta + bos * HV + i_hv + o_c2 * HV
+        b_b2 = tl.load(p_b2, mask=m_tc2, other=0.0).to(tl.float32)
         b_Akk20 = b_Akk20 * b_b2[:, None]
         b_Akk21 = b_Akk21 * b_b2[:, None]
     if i_tc3 < T:
-        p_Aqk30 = tl.make_block_ptr(
-            Aqk, (T, BT), (HV * BT, 1), (i_tc3, 0), (BC, BC), (1, 0)
-        )
-        p_Aqk31 = tl.make_block_ptr(
-            Aqk, (T, BT), (HV * BT, 1), (i_tc3, BC), (BC, BC), (1, 0)
-        )
-        p_Aqk32 = tl.make_block_ptr(
-            Aqk, (T, BT), (HV * BT, 1), (i_tc3, 2 * BC), (BC, BC), (1, 0)
-        )
-        tl.store(
-            p_Aqk30, (b_Aqk30 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1)
-        )
-        tl.store(
-            p_Aqk31, (b_Aqk31 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1)
-        )
-        tl.store(
-            p_Aqk32, (b_Aqk32 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1)
-        )
+        p_Aqk30 = Aqk + o_c3[:, None] * (HV * BT) + o_i[None, :]
+        p_Aqk31 = Aqk + o_c3[:, None] * (HV * BT) + (o_i + BC)[None, :]
+        p_Aqk32 = Aqk + o_c3[:, None] * (HV * BT) + (o_i + 2 * BC)[None, :]
+        tl.store(p_Aqk30, (b_Aqk30 * scale).to(Aqk.dtype.element_ty), mask=m_A3)
+        tl.store(p_Aqk31, (b_Aqk31 * scale).to(Aqk.dtype.element_ty), mask=m_A3)
+        tl.store(p_Aqk32, (b_Aqk32 * scale).to(Aqk.dtype.element_ty), mask=m_A3)
 
-        p_b3 = tl.make_block_ptr(
-            beta + bos * HV + i_hv, (T,), (HV,), (i_tc3,), (BC,), (0,)
-        )
-        b_b3 = tl.load(p_b3, boundary_check=(0,)).to(tl.float32)
+        p_b3 = beta + bos * HV + i_hv + o_c3 * HV
+        b_b3 = tl.load(p_b3, mask=m_tc3, other=0.0).to(tl.float32)
         b_Akk30 = b_Akk30 * b_b3[:, None]
         b_Akk31 = b_Akk31 * b_b3[:, None]
         b_Akk32 = b_Akk32 * b_b3[:, None]
 
-    p_Akk00 = tl.make_block_ptr(
-        Akkd, (T, BC), (HV * BC, 1), (i_tc0, 0), (BC, BC), (1, 0)
-    )
-    p_Akk11 = tl.make_block_ptr(
-        Akkd, (T, BC), (HV * BC, 1), (i_tc1, 0), (BC, BC), (1, 0)
-    )
-    p_Akk22 = tl.make_block_ptr(
-        Akkd, (T, BC), (HV * BC, 1), (i_tc2, 0), (BC, BC), (1, 0)
-    )
-    p_Akk33 = tl.make_block_ptr(
-        Akkd, (T, BC), (HV * BC, 1), (i_tc3, 0), (BC, BC), (1, 0)
-    )
-    b_Ai00 = tl.load(p_Akk00, boundary_check=(0, 1)).to(tl.float32)
-    b_Ai11 = tl.load(p_Akk11, boundary_check=(0, 1)).to(tl.float32)
-    b_Ai22 = tl.load(p_Akk22, boundary_check=(0, 1)).to(tl.float32)
-    b_Ai33 = tl.load(p_Akk33, boundary_check=(0, 1)).to(tl.float32)
+    p_Akk00 = Akkd + o_c0[:, None] * (HV * BC) + o_i[None, :]
+    p_Akk11 = Akkd + o_c1[:, None] * (HV * BC) + o_i[None, :]
+    p_Akk22 = Akkd + o_c2[:, None] * (HV * BC) + o_i[None, :]
+    p_Akk33 = Akkd + o_c3[:, None] * (HV * BC) + o_i[None, :]
+    b_Ai00 = tl.load(p_Akk00, mask=m_A0, other=0.0).to(tl.float32)
+    b_Ai11 = tl.load(p_Akk11, mask=m_A1, other=0.0).to(tl.float32)
+    b_Ai22 = tl.load(p_Akk22, mask=m_A2, other=0.0).to(tl.float32)
+    b_Ai33 = tl.load(p_Akk33, mask=m_A3, other=0.0).to(tl.float32)
 
     ################################################################################
     # forward substitution on diagonals
@@ -397,47 +350,27 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     # store full Akk_inv to Akk
     ################################################################################
 
-    p_Akk00 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc0, 0), (BC, BC), (1, 0)
-    )
-    p_Akk10 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc1, 0), (BC, BC), (1, 0)
-    )
-    p_Akk11 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc1, BC), (BC, BC), (1, 0)
-    )
-    p_Akk20 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc2, 0), (BC, BC), (1, 0)
-    )
-    p_Akk21 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc2, BC), (BC, BC), (1, 0)
-    )
-    p_Akk22 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc2, 2 * BC), (BC, BC), (1, 0)
-    )
-    p_Akk30 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc3, 0), (BC, BC), (1, 0)
-    )
-    p_Akk31 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc3, BC), (BC, BC), (1, 0)
-    )
-    p_Akk32 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc3, 2 * BC), (BC, BC), (1, 0)
-    )
-    p_Akk33 = tl.make_block_ptr(
-        Akk, (T, BT), (HV * BT, 1), (i_tc3, 3 * BC), (BC, BC), (1, 0)
-    )
+    p_Akk00 = Akk + o_c0[:, None] * (HV * BT) + o_i[None, :]
+    p_Akk10 = Akk + o_c1[:, None] * (HV * BT) + o_i[None, :]
+    p_Akk11 = Akk + o_c1[:, None] * (HV * BT) + (o_i + BC)[None, :]
+    p_Akk20 = Akk + o_c2[:, None] * (HV * BT) + o_i[None, :]
+    p_Akk21 = Akk + o_c2[:, None] * (HV * BT) + (o_i + BC)[None, :]
+    p_Akk22 = Akk + o_c2[:, None] * (HV * BT) + (o_i + 2 * BC)[None, :]
+    p_Akk30 = Akk + o_c3[:, None] * (HV * BT) + o_i[None, :]
+    p_Akk31 = Akk + o_c3[:, None] * (HV * BT) + (o_i + BC)[None, :]
+    p_Akk32 = Akk + o_c3[:, None] * (HV * BT) + (o_i + 2 * BC)[None, :]
+    p_Akk33 = Akk + o_c3[:, None] * (HV * BT) + (o_i + 3 * BC)[None, :]
 
-    tl.store(p_Akk00, b_Ai00.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk10, b_Ai10.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk11, b_Ai11.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk20, b_Ai20.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk21, b_Ai21.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk22, b_Ai22.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk30, b_Ai30.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk31, b_Ai31.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk32, b_Ai32.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk33, b_Ai33.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Akk00, b_Ai00.to(Akk.dtype.element_ty), mask=m_A0)
+    tl.store(p_Akk10, b_Ai10.to(Akk.dtype.element_ty), mask=m_A1)
+    tl.store(p_Akk11, b_Ai11.to(Akk.dtype.element_ty), mask=m_A1)
+    tl.store(p_Akk20, b_Ai20.to(Akk.dtype.element_ty), mask=m_A2)
+    tl.store(p_Akk21, b_Ai21.to(Akk.dtype.element_ty), mask=m_A2)
+    tl.store(p_Akk22, b_Ai22.to(Akk.dtype.element_ty), mask=m_A2)
+    tl.store(p_Akk30, b_Ai30.to(Akk.dtype.element_ty), mask=m_A3)
+    tl.store(p_Akk31, b_Ai31.to(Akk.dtype.element_ty), mask=m_A3)
+    tl.store(p_Akk32, b_Ai32.to(Akk.dtype.element_ty), mask=m_A3)
+    tl.store(p_Akk33, b_Ai33.to(Akk.dtype.element_ty), mask=m_A3)
 
 
 @triton.heuristics(
@@ -474,14 +407,14 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     IS_VARLEN: tl.constexpr,
     USE_GATHER: tl.constexpr,
 ):
-    i_t, i_i, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_t, i_i, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1), tl.program_id(2)
     i_b, i_hv = i_bh // HV, i_bh % HV
     i_h = i_hv // (HV // H)
 
     if IS_VARLEN:
         i_n, i_t = (
             tl.load(chunk_indices + i_t * 2).to(tl.int32),
-            tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32),
+            tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64),
         )
         bos, eos = (
             tl.load(cu_seqlens + i_n).to(tl.int32),
@@ -505,16 +438,19 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     Aqk = Aqk + (bos * HV + i_hv) * BT
     Akk = Akk + (bos * HV + i_hv) * BC
 
-    p_q = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_ti, 0), (BC, BK), (1, 0))
-    p_k = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_ti, 0), (BC, BK), (1, 0))
-    p_g = tl.make_block_ptr(g, (T, K), (HV * K, 1), (i_ti, 0), (BC, BK), (1, 0))
+    o_k = tl.arange(0, BK)
+    m_k = o_k < K
+    m_ck = m_c[:, None] & m_k[None, :]
+    p_q = q + o_c[:, None] * (H * K) + o_k[None, :]
+    p_k = k + o_c[:, None] * (H * K) + o_k[None, :]
+    p_g = g + o_c[:, None] * (HV * K) + o_k[None, :]
 
-    p_beta = tl.make_block_ptr(beta, (T,), (HV,), (i_ti,), (BC,), (0,))
+    p_beta = beta + o_c * HV
 
-    b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_k = tl.load(p_k, boundary_check=(0, 1))
-    b_g = tl.load(p_g, boundary_check=(0, 1))
-    b_beta = tl.load(p_beta, boundary_check=(0,)).to(tl.float32)
+    b_q = tl.load(p_q, mask=m_ck, other=0.0)
+    b_k = tl.load(p_k, mask=m_ck, other=0.0)
+    b_g = tl.load(p_g, mask=m_ck, other=0.0)
+    b_beta = tl.load(p_beta, mask=m_c, other=0.0).to(tl.float32)
 
     if USE_GATHER:
         b_gn = gather(
@@ -546,12 +482,12 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     b_Aqk = tl.where(m_Aqk, b_Aqk, 0.0)
     b_Akk = tl.where(m_Akk, b_Akk, 0.0)
 
-    p_Aqk = tl.make_block_ptr(
-        Aqk, (T, BT), (HV * BT, 1), (i_ti, i_i * BC), (BC, BC), (1, 0)
-    )
-    p_Akk = tl.make_block_ptr(Akk, (T, BC), (HV * BC, 1), (i_ti, 0), (BC, BC), (1, 0))
-    tl.store(p_Aqk, b_Aqk.to(Aqk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk, b_Akk.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    m_Aqk_st = m_c[:, None] & (o_i[None, :] < BT)
+    m_Akk_st = m_c[:, None] & (o_i[None, :] < BC)
+    p_Aqk = Aqk + o_c[:, None] * (HV * BT) + (i_i * BC + o_i)[None, :]
+    p_Akk = Akk + o_c[:, None] * (HV * BC) + o_i[None, :]
+    tl.store(p_Aqk, b_Aqk.to(Aqk.dtype.element_ty), mask=m_Aqk_st)
+    tl.store(p_Akk, b_Akk.to(Akk.dtype.element_ty), mask=m_Akk_st)
 
     tl.debug_barrier()
 
@@ -566,7 +502,7 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
         b_a += tl.sum(b_a[:, None] * b_Ai, 0)
         b_Ai = tl.where((o_i == i)[:, None], b_a, b_Ai)
     b_Ai += m_I
-    tl.store(p_Akk, b_Ai.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Akk, b_Ai.to(Akk.dtype.element_ty), mask=m_Akk_st)
 
 
 def chunk_kda_fwd_intra(

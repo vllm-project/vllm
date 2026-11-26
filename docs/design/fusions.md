@@ -169,10 +169,11 @@ Other attention backends do not support fused output quantization yet.
 **What it fuses.** Fuses the rotary positional embedding kernel with the KV-cache scatter/write into
 a single kernel, avoiding separate reads and writes of the key and value tensors.
 
-Requires: AMD ROCm with AITER enabled, the `rotary_embedding` custom op active (automatic),
-and the `kv_cache` update op visible in the graph: either by using Inductor graph partition
-or removed from `splitting_ops`.
-If these conditions are set, the fusion is enabled automatically for optimization level O1 and above.
+Requires: AMD ROCm with AITER enabled and the `kv_cache` update op visible in the graph: either
+by using Inductor graph partition or removed from `splitting_ops`. The pass matches RoPE as a vLLM IR
+op, so it does not need the `rotary_embedding` custom op when enabled explicitly. It is enabled
+automatically for optimization level O1 and above when these conditions hold and the
+`rotary_embedding` custom op is active. Only full-rotary layers are fused.
 
 **Code locations.**
 
@@ -232,7 +233,7 @@ Supported quantization scheme/hardware combinations:
 
 - Pass: [`vllm/compilation/passes/fusion/rms_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rms_quant_fusion.py)
 - ROCm AITER pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py)
-- CUDA/HIP kernels: [`csrc/libtorch_stable/layernorm_quant_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/libtorch_stable/layernorm_quant_kernels.cu)
+- CUDA/HIP kernels: [`csrc/layernorm_quant_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_quant_kernels.cu)
 
 ### SiLU+Mul + Quantization (`fuse_act_quant`)
 
@@ -258,7 +259,7 @@ Supported quantization scheme/hardware combinations:
 - Pass: [`vllm/compilation/passes/fusion/act_quant_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/act_quant_fusion.py)
 - ROCm AITER pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py)
 - CUDA/HIP kernels: [`csrc/quantization/`](https://github.com/vllm-project/vllm/blob/main/csrc/quantization/)
-- Fused SiLU+Mul+BlockQuant kernel: [`csrc/libtorch_stable/quantization/fused_kernels/fused_silu_mul_block_quant.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/libtorch_stable/quantization/fused_kernels/fused_silu_mul_block_quant.cu)
+- Fused SiLU+Mul+BlockQuant kernel: [`csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu)
 
 ### RMSNorm + Padding (`fuse_act_padding`)
 

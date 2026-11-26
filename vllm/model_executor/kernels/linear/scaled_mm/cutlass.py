@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -19,7 +20,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
     cutlass_fp8_supported,
 )
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
@@ -80,7 +80,6 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
                     i_s_name,
                     torch.nn.Parameter(input_scale.max(), requires_grad=False),
                 )
-                setattr(layer, i_zp_name, None)
             else:
                 input_zero_point = getattr(layer, i_zp_name)
 
@@ -104,7 +103,8 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # azp_adj is the AZP adjustment term, used to account for weights.
         # It does not depend on scales or azp, so it is the same for
         # static and dynamic quantization.
-        # For more details, see csrc/quantization/w8a8/cutlass/Epilogues.md
+        # For more details, see
+        # csrc/quantization/w8a8/cutlass/Epilogues.md
         # https://github.com/vllm-project/vllm/blob/main/csrc/quantization/w8a8/cutlass/Epilogues.md
         if not config.input_symmetric:
             weight = getattr(layer, w_q_name)
@@ -113,11 +113,7 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
                 # cutlass_w8a8 requires azp to be folded into azp_adj
                 # in the per-tensor case
                 azp_adj = getattr(layer, i_zp_name) * azp_adj
-            setattr(
-                layer,
-                azp_adj_name,
-                torch.nn.Parameter(azp_adj, requires_grad=False),
-            )
+            replace_parameter(layer, azp_adj_name, azp_adj)
 
     def apply_weights(
         self,
@@ -158,7 +154,7 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def __init__(
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
-        self.logical_output_size: int | None = None
+        self.logical_output_size = c.weight_shape[0]
         super().__init__(c, layer_param_names)
 
     @classmethod
@@ -174,18 +170,20 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def input_quant_key(self) -> QuantKey | None:
-        """Only static per-tensor activation quantization is supported for external
-        quantization."""
-        if self.config.activation_quant_key == kFp8StaticTensorSym:
-            return kFp8StaticTensorSym
+        """Static per-tensor and dynamic per-token activations can be quantized
+        outside the kernel: neither is padded, and cutlass_scaled_mm takes the
+        `(M, 1)` token scales as is."""
+        key = self.config.activation_quant_key
+        if key in (kFp8StaticTensorSym, kFp8DynamicTokenSym):
+            return key
         return None
 
     @staticmethod
     def _pad_to_alignment(
         x: torch.Tensor, dim: int, alignment: int, value: float = 0.0
     ) -> torch.Tensor:
-        """Pad tensor ``x`` along ``dim`` to the next multiple of
-        ``alignment``."""
+        """Pad tensor `x` along `dim` to the next multiple of
+        `alignment`."""
         remainder = x.shape[dim] % alignment
         if remainder == 0:
             return x
@@ -220,12 +218,8 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             (0, pad_k, 0, pad_n),
         ).t()
         replace_parameter(layer, weight_name, padded_weight.data)
-        set_weight_attrs(
-            getattr(layer, weight_name),
-            {
-                "weight_loader": self.padded_weight_loader,
-            },
-        )
+        # The kept param already has a loader; reloads must use the padded one.
+        getattr(layer, weight_name).weight_loader = self.padded_weight_loader
 
         weight_scale = getattr(layer, weight_scale_name, None)
         if weight_scale is not None and pad_n > 0 and weight_scale.numel() > 1:
@@ -234,12 +228,7 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 flat_scale, dim=0, alignment=16, value=1.0
             ).view(-1, *weight_scale.shape[1:])
             replace_parameter(layer, weight_scale_name, padded_scale.data)
-            set_weight_attrs(
-                getattr(layer, weight_name),
-                {
-                    "weight_loader": self.padded_weight_loader,
-                },
-            )
+            getattr(layer, weight_name).weight_loader = self.padded_weight_loader
 
     def apply_scaled_mm(
         self,
@@ -290,8 +279,10 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if not CUTLASS_BLOCK_FP8_SUPPORTED:
             return (
                 False,
-                "The device compute capability of"
-                f"{compute_capability} is not supported.",
+                (
+                    "The device compute capability of "
+                    f"{compute_capability} is not supported."
+                ),
             )
         return True, None
 
@@ -305,8 +296,10 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if act_quant_desc.group_shape != GroupShape(1, 128):
             return (
                 False,
-                "Supports only dynamic per token group activation "
-                "quantization with group_shape=(1,128).",
+                (
+                    "Supports only dynamic per token group activation "
+                    "quantization with group_shape=(1,128)."
+                ),
             )
         return True, None
 

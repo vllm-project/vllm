@@ -2,6 +2,8 @@
 
 NixlConnector is a high-performance KV cache transfer connector for vLLM's disaggregated prefilling feature. It provides fully asynchronous send/receive operations using the NIXL library for efficient cross-process KV cache transfer.
 
+`NixlPullConnector` is the canonical name for the pull connector; `NixlConnector` remains an alias, including inside `MultiConnector`. Both names use the same configuration checks and defaults.
+
 For feature compatibility details (supported model architectures, TP configurations, and feature interactions), see the [NixlConnector Compatibility Matrix](nixl_connector_compatibility.md).
 
 ## Prerequisites
@@ -63,6 +65,33 @@ vllm serve <MODEL> \
 !!! note
     Backend availability depends on how NIXL was built and what plugins are present in your environment. Refer to the [NIXL repository](https://github.com/ai-dynamo/nixl) for available backends and build instructions.
 
+#### UCX backend parameters
+
+`kv_connector_extra_config.ucx_backend_params` passes extra init parameters to NIXL's UCX backend. Values are strings. For example, NIXL creates UCX with `ucx_error_handling_mode=peer` by default; UCX then uses only transports that can detect peer failure, which can exclude intra-node GPU transports such as `rocm_ipc`. To trade that error handling for those transports:
+
+```bash
+vllm serve <MODEL> \
+  --kv-transfer-config '{
+    "kv_connector":"NixlConnector",
+    "kv_role":"kv_both",
+    "kv_connector_extra_config":{"ucx_backend_params":{"ucx_error_handling_mode":"none"}}
+  }'
+```
+
+#### Extensible KV cache
+
+The extensible KV cache (`--enable-extensible-kv-cache`) maps the KV cache with the driver's virtual memory API. Within a host, UCX can only reach that memory over NVLink through a CUDA fabric handle, which takes an IMEX channel; without one it falls back to TCP. So with NIXL on device memory and no channel, vLLM leaves the extensible KV cache off.
+
+To use both within a host, make a channel available to every prefill and decode process, for example:
+
+```bash
+major=$(awk '$2 == "nvidia-caps-imex-channels" {print $1}' /proc/devices)
+mkdir -p /dev/nvidia-caps-imex-channels
+mknod /dev/nvidia-caps-imex-channels/channel0 c "$major" 0
+```
+
+Check the transport with `UCX_PROTO_INFO=y`: KV reads should show `cuda_ipc`, not `tcp`. Transfers across hosts use RDMA and need no channel: pass `--enable-extensible-kv-cache` to keep the feature on.
+
 ## Basic Usage (on the same host)
 
 ### Producer (Prefiller) Configuration
@@ -107,6 +136,10 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
   --decoder-hosts localhost \
   --decoder-ports 8200
 ```
+
+### Decode context parallelism
+
+NIXL pull transfers with `--decode-context-parallel-size` greater than 1 require an MLA model. When `--cp-kv-cache-interleave-size` is omitted, vLLM resolves it from the global KV cache groups before profiling. Explicit values are preserved and must divide the cache block size without exceeding it. For a block size of 16, explicit values of 1 and 8 are valid; 3 and 32 are rejected under either connector name.
 
 ## Environment Variables
 
@@ -204,6 +237,8 @@ sequenceDiagram
 5. D reads the new KV blocks from P, generates the response, and returns updated `kv_transfer_params` which the proxy caches for the next turn.
 
 ### Configuration
+
+Bidirectional transfer requires `PP=1` on both P and D. A pipeline-parallel producer cannot receive KV from D on later turns, even with `kv_role="kv_producer"`. Keep `bidirectional_kv_xfer` disabled when P uses PP.
 
 Enable bidirectional KV transfer by setting `bidirectional_kv_xfer` in `kv_connector_extra_config` on **both** P and D instances:
 
@@ -383,6 +418,11 @@ For multi-host DP deployment, only need to provide the host/port of the head ins
 - **kv_consumer**: For decoder instances that consume KV caches from prefiller
 - **kv_both** (deprecated): Previously used as a catch-all when the role was not predetermined. This value is now deprecated for NixlConnector and will be removed in a future release.
 
+With `pipeline_parallel_size > 1`, both NIXL connectors require
+`kv_role="kv_producer"` and reject `kv_consumer` and `kv_both`.
+See the [pipeline-parallel support restrictions](nixl_connector_compatibility.md#pipeline-parallelism)
+before selecting the cache layout and transfer mode.
+
 !!! warning
     `kv_role="kv_both"` is deprecated for NixlConnector. Please set `kv_role="kv_producer"` for prefill instances and `kv_role="kv_consumer"` for decode instances. See [#33702](https://github.com/vllm-project/vllm/issues/33702) for details.
 
@@ -398,7 +438,7 @@ The `kv_load_failure_policy` setting controls how the system handles failures wh
 
 ### For NVIDIA GB-series GPUs
 
-GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVCache must be registered as VMM during KVCache registration. To enable this feature, you need to set `--enable-cumem-allocator` or `--enable-sleep-mode` flags, and set `UCX_CUDA_IPC_ENABLE_MNNVL: 'y'` env. Otherwise, NIXL can only use RDMA/TCP for cross-node KVCache transfers.
+GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVCache must be registered as VMM during KVCache registration. To enable this feature, you need to set the `--enable-cumem-allocator` flag, and set `UCX_CUDA_IPC_ENABLE_MNNVL: 'y'` env. Otherwise, NIXL can only use RDMA/TCP for cross-node KVCache transfers.
 
 ## Experimental Feature
 
@@ -455,6 +495,7 @@ exported when NixlConnector is active:
 | `vllm:nixl_num_failed_notifications` | Counter | Cumulative count of failed notifications (`send_notif`), retained for compatibility. These failures are also included in `vllm:nixl_num_failed_transfers`; do not sum the two counters. |
 | `vllm:nixl_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). Kept separate from the failure counters above: KV expiry is an autoscaler/lease-tuning signal, not a transport issue. |
 | `vllm:nixl_num_notifications_after_expiry` | Counter | Completion notifications that arrive for a request that is no longer tracked, usually because its KV lease expired first. Pull connector: counted on P, where it means the decoder may have read blocks that were already reused; each matches a "Potentially invalid KV blocks" error log. Push connector: counted on whichever instance tracks the request as neither a send nor a receive (P after the lease expired, or D after the receive completed or was abandoned); each matches an "Unrecognized request" error log. Counted per notification, not per request: each remote rank notifies separately, so with TP > 1 or heterogeneous TP one late request counts several times, and the value is not comparable to `vllm:nixl_num_kv_expired_reqs`. |
+| `vllm:nixl_num_declined_expired_reads` | Counter | Remote reads the consumer declined because the producer's lease had run out before the read reached it (the blocks may have been recycled); each one is a request that follows `kv_load_failure_policy`. Tracked on the reading instance; the producer-side view is `vllm:nixl_num_kv_expired_reqs`. |
 
 !!! tip
     High `vllm:nixl_num_kv_expired_reqs` indicates that the prefiller's lease

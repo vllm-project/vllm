@@ -17,8 +17,12 @@ from vllm.sampling_params import (
 )
 from vllm.tokenizers import mistral as mistral_tokenizers
 from vllm.v1.structured_output import backend_guidance
+from vllm.v1.structured_output.backend_outlines import (
+    validate_structured_output_request_outlines,
+)
+from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
 
-pytestmark = pytest.mark.cpu_test
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 JSON_SCHEMA = {
     "type": "object",
@@ -28,6 +32,14 @@ JSON_SCHEMA = {
     },
     "required": ["invoice_id", "customer"],
     "additionalProperties": False,
+}
+
+GUIDANCE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "count": {"type": "integer", "multipleOf": 2},
+    },
+    "required": ["count"],
 }
 
 
@@ -163,9 +175,7 @@ def _structural_tag(schema: str) -> str:
         ),
     ],
 )
-@pytest.mark.parametrize(
-    "backend", ["auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"]
-)
+@pytest.mark.parametrize("backend", ["auto", "xgrammar", "guidance", "outlines"])
 def test_deeply_nested_schema_rejected(structured_outputs, backend):
     """Converting a schema to a grammar gets steeply more expensive with nesting
     and runs on the API server; past the recursion limit it used to escape as a
@@ -213,6 +223,9 @@ def test_schema_at_nesting_limit_accepted(field):
 
 
 INVALID_JSON_SCHEMA = {"type": "object", "properties": {"name": {"type": "str"}}}
+STRUCTURAL_TAG = (
+    '{"type": "structural_tag", "format": {"type": "const_string", "value": "hi"}}'
+)
 
 
 @pytest.mark.parametrize(
@@ -224,9 +237,10 @@ INVALID_JSON_SCHEMA = {"type": "object", "properties": {"name": {"type": "str"}}
         ("auto", StructuredOutputsParams(json='{"type": ')),
         ("xgrammar", StructuredOutputsParams(grammar="not a grammar")),
         ("guidance", StructuredOutputsParams(grammar="not a grammar")),
-        ("lm-format-enforcer", StructuredOutputsParams(grammar="not a grammar")),
         ("outlines", StructuredOutputsParams(regex="(")),
         ("guidance", StructuredOutputsParams(structural_tag='{"nope": 1}')),
+        ("outlines", StructuredOutputsParams(structural_tag=STRUCTURAL_TAG)),
+        ("outlines", StructuredOutputsParams(json_object=True)),
     ],
 )
 def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
@@ -239,6 +253,46 @@ def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
             StructuredOutputsConfig(backend=backend),
             tokenizer=object(),
         )
+
+
+@pytest.mark.parametrize(
+    "backend, structured_outputs",
+    [
+        ("xgrammar", StructuredOutputsParams(json_object=True)),
+        ("xgrammar", StructuredOutputsParams(regex="[0-9]+")),
+        ("xgrammar", StructuredOutputsParams(regex="")),
+        ("xgrammar", StructuredOutputsParams(json={})),
+        ("outlines", StructuredOutputsParams(regex="")),
+        ("outlines", StructuredOutputsParams(json={})),
+    ],
+)
+def test_supported_spec_is_not_rejected(backend, structured_outputs):
+    """Supported specs, including the falsy but valid regex="" and json={}, must
+    not reach the validators' final rejection."""
+    params = SamplingParams(structured_outputs=structured_outputs)
+    params._validate_structured_outputs(
+        _StubModelConfig(is_diffusion=False),
+        StructuredOutputsConfig(backend=backend),
+        tokenizer=object(),
+    )
+
+
+@pytest.mark.parametrize(
+    "validate",
+    [
+        validate_structured_output_request_outlines,
+        validate_xgrammar_grammar,
+    ],
+    ids=["outlines", "xgrammar"],
+)
+def test_unhandled_spec_is_a_validation_error(validate):
+    """json_object=False is rejected before backend selection, so only a direct
+    validator call reaches the final branch; it must still be a 400."""
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(json_object=False)
+    )
+    with pytest.raises(VLLMValidationError, match="does not support this"):
+        validate(params)
 
 
 @pytest.mark.parametrize(

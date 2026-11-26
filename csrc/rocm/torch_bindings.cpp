@@ -14,9 +14,10 @@
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // vLLM custom ops for rocm
 
-// skinny_gemms.cu (LLMM1/wvSplitK/wvSplitKrc/wvSplitKQ) is excluded on gfx1250
-// (gfx9/gfx11 ISA, unsupported there); skip these registrations to avoid
-// undefined symbols. vLLM uses default/Triton GEMM for these ops on gfx1250.
+// The skinny GEMM sources (LLMM1/wvSplitK/wvSplitKrc/wvSplitKQ,
+// csrc/rocm/skinny_gemms*.cu) are excluded on gfx1250 (gfx9/gfx11 ISA,
+// unsupported there); skip these registrations to avoid undefined symbols. vLLM
+// uses default/Triton GEMM for these ops on gfx1250.
 #ifndef VLLM_SKIP_SKINNY_GEMMS
   // Custom gemm op for matrix-vector multiplication
   rocm_ops.def(
@@ -51,9 +52,20 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor scale_a, "
       "          Tensor scale_b, int CuCount) -> ()");
   rocm_ops.impl("wvSplitKQ", torch::kCUDA, &wvSplitKQ);
+
+  rocm_ops.def(
+      "swmmacGEMM(Tensor in_a, Tensor in_b, "
+      "Tensor? in_bias, int logical_M, int CuCount) -> Tensor");
+  rocm_ops.impl("swmmacGEMM", torch::kCUDA, &swmmacGEMM);
 #endif  // VLLM_SKIP_SKINNY_GEMMS
 
 #ifdef VLLM_ROCM_GFX1100
+  // MXFP4 weights x int8 activations GEMV for RDNA3/RDNA3.5 (gfx11) decode,
+  // 1 <= M <= 8. Weights [N, K/2] uint8 E2M1, scales [N, K/32] uint8 E8M0.
+  rocm_ops.def(
+      "mxfp4_w4a8_gemv_rdna3(Tensor a, Tensor b_q, Tensor b_scale) -> Tensor");
+  rocm_ops.impl("mxfp4_w4a8_gemv_rdna3", torch::kCUDA, &mxfp4_w4a8_gemv_rdna3);
+
   // W4A16 GPTQ kernels for AMD RDNA3 (gfx1100).
   rocm_ops.def(
       "gptq_gemm_rdna3(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
@@ -75,6 +87,41 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
 #endif
 
+#ifdef VLLM_ROCM_GFX11
+  // Fused int4 x int8 (W4A8) MoE decode for RDNA3/RDNA3.5 (gfx11).
+  rocm_ops.def(
+      "moe_w4a8_decode_rdna3(Tensor! out, Tensor x, Tensor topk_ids, "
+      "Tensor topk_weights, Tensor? expert_map, Tensor! workspace, "
+      "Tensor w13, Tensor w13_scale, Tensor? w13_zp, Tensor w2, "
+      "Tensor w2_scale, Tensor? w2_zp) -> ()");
+  rocm_ops.impl("moe_w4a8_decode_rdna3", torch::kCUDA, &moe_w4a8_decode_rdna3);
+#endif
+
+#ifdef VLLM_ROCM_RDNA_ATTN
+  // RDNA3.5 decode attention (gfx1151).
+  rocm_ops.def("rdna_decode_configs() -> int[]", &rdna_decode_configs);
+  rocm_ops.def("rdna_decode_batch_configs() -> int[]",
+               &rdna_decode_batch_configs);
+  rocm_ops.def(
+      "rdna_decode_attn(int config, Tensor q, Tensor kv_cache, "
+      "Tensor block_table, Tensor! out, Tensor! acc, Tensor! m, Tensor! l, "
+      "Tensor! cnt, Tensor seq_lens, float scale, Tensor? mm_ranges=None, "
+      "bool batched=False) -> ()");
+  rocm_ops.impl("rdna_decode_attn", torch::kCUDA, &rdna_decode_attn);
+  // RDNA3.5 prefill attention (gfx1151).
+  rocm_ops.def("rdna_prefill_configs() -> int[]", &rdna_prefill_configs);
+  rocm_ops.def("rdna_prefill_batch_configs() -> int[]",
+               &rdna_prefill_batch_configs);
+  rocm_ops.def(
+      "rdna_prefill_attn(int config, Tensor q, Tensor kv_cache, "
+      "Tensor block_table, Tensor! out, Tensor! partial_o, "
+      "Tensor! partial_ml, Tensor! counters, Tensor seq_lens, "
+      "int max_seq_len, float scale, Tensor? mm_ranges=None, "
+      "Tensor? plan=None, Tensor? query_start_loc=None, int head_group=0) -> "
+      "()");
+  rocm_ops.impl("rdna_prefill_attn", torch::kCUDA, &rdna_prefill_attn);
+#endif
+
   // Custom attention op
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.
@@ -92,8 +139,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                str kv_cache_dtype,"
       "                Tensor k_scale, Tensor v_scale,"
       "                Tensor? fp8_out_scale,"
-      "                str mfma_type) -> ()");
+      "                str mfma_type,"
+      "                bool use_interleaved_v_cache=False) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
+
+#ifdef VLLM_ROCM_GFX115X
+  rocm_ops.def(
+      "rdna35_gdn_chunked(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, "
+      "Tensor? initial_state, Tensor cu_seqlens, Tensor! out, "
+      "Tensor! final_state, float scale) -> ()");
+  rocm_ops.impl("rdna35_gdn_chunked", torch::kCUDA, &rdna35_gdn_chunked);
+#endif
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

@@ -9,9 +9,9 @@ pub use vllm_parser::reasoning::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
     DeepSeekV4ReasoningParser, DeepSeekV41ReasoningParser, Glm45ReasoningParser,
     Glm47ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser, MiMoReasoningParser,
-    MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser, NemotronV3ReasoningParser,
-    Qwen3ReasoningParser, ReasoningDelta, ReasoningError, ReasoningParser, SeedOssReasoningParser,
-    Step3ReasoningParser, Step3p5ReasoningParser,
+    MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser, MistralReasoningParser,
+    NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningError,
+    ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser, Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -31,11 +31,13 @@ pub mod names {
     pub const MIMO: &str = "mimo";
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
+    pub const MISTRAL: &str = "mistral";
     pub const NEMOTRON_V3: &str = "nemotron_v3";
     pub const QWEN3: &str = "qwen3";
     pub const SEED_OSS: &str = "seed_oss";
     pub const STEP3: &str = "step3";
     pub const STEP3P5: &str = "step3p5";
+    pub const STEP5: &str = "step5";
 }
 
 /// Constructor signature for one registered reasoning parser implementation.
@@ -73,11 +75,13 @@ impl ReasoningParserFactory {
             .register_parser::<MiMoReasoningParser>(names::MIMO)
             .register_parser::<MiniMaxM2ReasoningParser>(names::MINIMAX_M2)
             .register_parser::<MiniMaxM3ReasoningParser>(names::MINIMAX_M3)
+            .register_parser::<MistralReasoningParser>(names::MISTRAL)
             .register_parser::<NemotronV3ReasoningParser>(names::NEMOTRON_V3)
             .register_parser::<Qwen3ReasoningParser>(names::QWEN3)
             .register_parser::<SeedOssReasoningParser>(names::SEED_OSS)
             .register_parser::<Step3ReasoningParser>(names::STEP3)
-            .register_parser::<Step3p5ReasoningParser>(names::STEP3P5);
+            .register_parser::<Step3p5ReasoningParser>(names::STEP3P5)
+            .register_parser::<DeepSeekV3ReasoningParser>(names::STEP5);
 
         factory
             .register_pattern("deepseek-r1", names::DEEPSEEK_R1)
@@ -100,6 +104,8 @@ impl ReasoningParserFactory {
             .register_pattern("step3p5", names::STEP3P5)
             .register_pattern("step-3.5", names::STEP3P5)
             .register_pattern("step3", names::STEP3)
+            .register_pattern("step-5", names::STEP5)
+            .register_pattern("step5", names::STEP5)
             .register_pattern("seed-oss", names::SEED_OSS)
             .register_pattern("seedoss", names::SEED_OSS)
             .register_pattern("minimax-m3", names::MINIMAX_M3)

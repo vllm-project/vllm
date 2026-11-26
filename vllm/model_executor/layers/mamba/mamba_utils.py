@@ -4,7 +4,7 @@
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import torch
 
@@ -20,9 +20,17 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
 logger = init_logger(__name__)
 
 ConvStateLayoutType = Literal["SD", "DS"]
+
+
+def mamba_state_alignment(vllm_config: "VllmConfig") -> int:
+    # FlashInfer loads state and ring caches with 16-byte cp.async instructions.
+    return 16 if vllm_config.use_flashinfer_replayssm else 1
 
 
 @functools.lru_cache
@@ -61,17 +69,6 @@ class MambaStateDtypeCalculator:
         return (state_dtype,)
 
     @classmethod
-    def mamba1_state_dtype(
-        cls,
-        model_dtype: ModelDType | torch.dtype,
-        mamba_cache_dtype: MambaDType,
-        mamba_ssm_cache_dtype: MambaDType,
-    ) -> tuple[torch.dtype, ...]:
-        return cls._mamba_state_dtype(
-            model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
-        )
-
-    @classmethod
     def mamba2_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
@@ -88,8 +85,8 @@ class MambaStateDtypeCalculator:
         base_dtypes: tuple[torch.dtype, ...],
         model_dtype: ModelDType | torch.dtype,
     ) -> tuple[torch.dtype, ...]:
-        """Append the ReplaySSM ring dtypes to a base ``(conv, ssm)`` tuple:
-        ``(x_cache, dt_cache, B_cache)`` = ``(activation, fp32, activation)``.
+        """Append the ReplaySSM ring dtypes to a base `(conv, ssm)` tuple:
+        `(x_cache, dt_cache, B_cache)` = `(activation, fp32, activation)`.
         """
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
         return (*base_dtypes, activation_dtype, torch.float32, activation_dtype)
@@ -124,10 +121,22 @@ class MambaStateDtypeCalculator:
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType = "auto",
-    ) -> tuple[torch.dtype, torch.dtype]:
-        return cls._mamba_state_dtype(
+        use_replayssm: bool = False,
+    ) -> tuple[torch.dtype, ...]:
+        """`(conv, ssm)`, plus the ReplaySSM `(d, k, g)` rings when enabled.
+
+        The `d`/`k` rings use fp16 for bf16 activations; `g` is float32.
+        """
+        base_dtypes = cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
         )
+        if not use_replayssm:
+            return base_dtypes
+        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
+        ring_dtype = (
+            torch.float16 if activation_dtype == torch.bfloat16 else activation_dtype
+        )
+        return (*base_dtypes, ring_dtype, ring_dtype, torch.float32)
 
     @classmethod
     def kda_state_dtype(
@@ -148,15 +157,6 @@ class MambaStateDtypeCalculator:
             )
         return (conv_state_dtype, recurrent_state_dtype)
 
-    @classmethod
-    def append_kda_recoverssm_record(
-        cls,
-        base_dtypes: tuple[torch.dtype, ...],
-        model_dtype: ModelDType | torch.dtype,
-    ) -> tuple[torch.dtype, ...]:
-        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
-        return (*base_dtypes, torch.float32, activation_dtype)
-
 
 class MambaStateShapeCalculator:
     @classmethod
@@ -175,21 +175,6 @@ class MambaStateShapeCalculator:
         if is_conv_state_dim_first():
             return (dim, state_len)
         return (state_len, dim)
-
-    @classmethod
-    def mamba1_state_shape(
-        cls,
-        tp_world_size: int,
-        intermediate_size: int,
-        state_size: int,
-        conv_kernel: int,
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
-        conv_dim = divide(intermediate_size, tp_world_size)
-        conv_state_shape = cls._orient_conv_shape(conv_dim, conv_kernel - 1)
-
-        temporal_state_shape = (divide(intermediate_size, tp_world_size), state_size)
-
-        return conv_state_shape, temporal_state_shape
 
     @classmethod
     def mamba2_state_shape(
@@ -237,14 +222,15 @@ class MambaStateShapeCalculator:
     ]:
         """Append the physical ReplaySSM ring shapes.
 
-        ``base_shapes[1]`` is ``(nheads // tp, head_dim, state_size)``;
-        B_cache uses the un-extended ``n_groups``.
+        `base_shapes[1]` is `(nheads // tp, head_dim, state_size)`;
+        B_cache extends `n_groups` for head shards as in `mamba2_state_shape`.
         """
         ring_buffer_len = logical_window
-        if backend == MambaBackendEnum.FLASHINFER:
-            # FlashInfer keeps the live window and current verify window together.
+        if backend == MambaBackendEnum.FLASHINFER or num_speculative_tokens > 0:
+            # The tracker contract keeps the live and current verify windows.
             ring_buffer_len += 1 + num_speculative_tokens
         local_nheads, head_dim, state_size = base_shapes[1]
+        n_groups = n_groups + cls.extra_groups_for_head_shards(n_groups, tp_world_size)
         local_ngroups = divide(n_groups, tp_world_size)
         return (
             *base_shapes,
@@ -286,19 +272,27 @@ class MambaStateShapeCalculator:
         head_v_dim: int,
         conv_kernel_size: int,
         num_spec: int = 0,
+        replayssm_buffer_len: int | None = None,
     ):
+        """Append the ReplaySSM rings of length `replayssm_buffer_len` when
+        it is set."""
         conv_dim = head_k_dim * num_k_heads * 2 + head_v_dim * num_v_heads
         conv_state_shape = cls._orient_conv_shape(
             divide(conv_dim, tp_world_size),
             conv_kernel_size - 1 + num_spec,
         )
 
-        temporal_state_shape = (
-            divide(num_v_heads, tp_world_size),
-            head_v_dim,
-            head_k_dim,
+        local_v_heads = divide(num_v_heads, tp_world_size)
+        temporal_state_shape = (local_v_heads, head_v_dim, head_k_dim)
+        if replayssm_buffer_len is None:
+            return conv_state_shape, temporal_state_shape
+        return (
+            conv_state_shape,
+            temporal_state_shape,
+            (local_v_heads, replayssm_buffer_len, head_v_dim),
+            (divide(num_k_heads, tp_world_size), replayssm_buffer_len, head_k_dim),
+            (local_v_heads, replayssm_buffer_len),
         )
-        return conv_state_shape, temporal_state_shape
 
     @classmethod
     def kda_state_shape(
@@ -326,32 +320,11 @@ class MambaStateShapeCalculator:
         recurrent_state_shape = (divide(num_heads, tp_world_size), head_dim, head_dim)
         return (conv_state_shape, recurrent_state_shape)
 
-    @classmethod
-    def append_kda_recoverssm_record(
-        cls,
-        base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
-        num_heads: int,
-        head_dim: int,
-        tp_world_size: int,
-        spec_query_len: int,
-    ) -> tuple[
-        tuple[int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-    ]:
-        local_num_heads = divide(num_heads, tp_world_size)
-        return (
-            *base_shapes,
-            (local_num_heads, spec_query_len, head_dim),
-            (local_num_heads, spec_query_len, 2 * head_dim),
-        )
 
-
-@dataclass
+@dataclass(slots=True)
 class MambaCopySpec:
     """Data class specifying the memory-copy parameters for Mamba states used for
-    prefix caching in align mode.
+    prefix caching.
 
     Attributes:
         start_addr (int): Starting address for the memory copy operation.
@@ -389,8 +362,8 @@ def get_conv_copy_spec(
 ) -> MambaCopySpec:
     """Return a MambaCopySpec for copying a convolutional state slice.
 
-    Works for both SD layout ``(num_blocks, state_len, dim)`` and
-    DS layout ``(num_blocks, dim, state_len)``.
+    Works for both SD layout `(num_blocks, state_len, dim)` and
+    DS layout `(num_blocks, dim, state_len)`.
     """
     src_block_id = block_ids[cur_block_idx]
     offset = num_accepted_tokens - 1
@@ -427,10 +400,6 @@ class MambaStateCopyFuncCalculator:
     @classmethod
     def linear_attention_state_copy_func(cls):
         return (get_temporal_copy_spec,)
-
-    @classmethod
-    def mamba1_state_copy_func(cls):
-        return (get_conv_copy_spec, get_temporal_copy_spec)
 
     @classmethod
     def mamba2_state_copy_func(cls):

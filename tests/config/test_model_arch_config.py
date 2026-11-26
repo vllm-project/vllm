@@ -23,16 +23,13 @@ from vllm.transformers_utils.model_arch_config_convertor import (
 
 BASE_TRUST_REMOTE_CODE_MODELS = {
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "XiaomiMiMo/MiMo-7B-RL",
-    "stepfun-ai/Step-3.5-Flash",
     # Excluded: Not available online right now
     # "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
-    "meituan-longcat/LongCat-Flash-Chat",
 }
 
 BASE_MODELS_TO_TEST = [
-    "state-spaces/mamba-130m-hf",
+    "vllm-project/mamba2-130m-hf",
     "mistralai/Mamba-Codestral-7B-v0.1",
     # Excluded: terratorch/torchgeo version mismatch in CPU CI environment
     # (NonGeoDataset import error). Tested in model initialization tests.
@@ -42,7 +39,7 @@ BASE_MODELS_TO_TEST = [
     # "databricks/dbrx-instruct",
     "tiiuae/falcon-7b",
     "tiiuae/falcon-40b",
-    "luccafong/deepseek_mtp_main_random",
+    "vllm-project/deepseek_mtp_main_random",
     "Qwen/Qwen3-Next-80B-A3B-Instruct",
     "tiny-random/qwen3-next-moe",
     "zai-org/GLM-4.5",
@@ -51,15 +48,17 @@ BASE_MODELS_TO_TEST = [
     "lmsys/gpt-oss-20b-bf16",
     "deepseek-ai/DeepSeek-V3.2-Exp",
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "stepfun-ai/Step-3.5-Flash",
+    "meituan-longcat/LongCat-Flash-Chat",
 ] + list(BASE_TRUST_REMOTE_CODE_MODELS)
 
-# (target_model, draft_model, trust_remote_code)
+# (target_model, draft_model)
 SPECULATIVE_MODELS = [
-    ("JackFram/llama-68m", "abhigoyal/vllm-medusa-llama-68m-random", False),
-    ("luccafong/deepseek_mtp_main_random", "luccafong/deepseek_mtp_draft_random", True),
-    ("eagle618/deepseek-v3-random", "eagle618/eagle-deepseek-v3-random", True),
-    ("meta-llama/Meta-Llama-3-8B-Instruct", "yuhuili/EAGLE-LLaMA3-Instruct-8B", True),
-    ("meta-llama/Llama-3.1-8B-Instruct", "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", True),
+    ("vllm-project/deepseek_mtp_main_random", "vllm-project/deepseek_mtp_draft_random"),
+    ("vllm-project/deepseek-v3-random", "vllm-project/eagle-deepseek-v3-random"),
+    ("meta-llama/Meta-Llama-3-8B-Instruct", "vllm-project/EAGLE-LLaMA3-Instruct-8B"),
+    ("meta-llama/Llama-3.1-8B-Instruct", "vllm-project/EAGLE3-LLaMA3.1-Instruct-8B"),
 ]
 
 
@@ -70,9 +69,73 @@ def _load_groundtruth(filename: str) -> dict:
         return json.load(f)
 
 
-def _assert_model_arch_config(
-    model_config, expected: dict, check_head_size: bool = True
-):
+@pytest.mark.parametrize("has_joint_head", [False, True])
+@pytest.mark.parametrize(
+    "architecture", ["Qwen3_5ForConditionalGeneration", "ColQwen3_5"]
+)
+def test_qwen35_joint_head_selects_clef_flash(tmp_path, has_joint_head, architecture):
+    """Only a Qwen3.5 generation checkpoint with a joint head selects Clef."""
+    from transformers import Qwen3_5Config
+
+    head_config = {
+        "hidden_size": 4096,
+        "width": 1024,
+        "routing_layers": 2,
+        "layers": 4,
+        "heads": 16,
+        "feedforward": 4096,
+    }
+    if has_joint_head:
+        (tmp_path / "joint_head_config.json").write_text(json.dumps(head_config))
+    config = Qwen3_5Config(architectures=[architecture])
+    config.name_or_path = str(tmp_path)
+    model_config = SimpleNamespace(
+        hf_config=config,
+        hf_text_config=config.text_config,
+        _supports_multimodal_for_mm_prefix=lambda: True,
+    )
+    converted = ModelConfig.get_model_arch_config(model_config)
+    if has_joint_head and architecture == "Qwen3_5ForConditionalGeneration":
+        assert converted.architectures == ["ClefFlashForJointSchema"]
+        assert config.joint_head_config == head_config
+    else:
+        assert converted.architectures == [architecture]
+        assert not hasattr(config, "joint_head_config")
+
+
+@pytest.mark.parametrize("has_decision_config", [False, True])
+@pytest.mark.parametrize(
+    "architecture", ["Qwen3_5Model", "Qwen3_5ForConditionalGeneration"]
+)
+def test_qwen35_decision_config_selects_d3(tmp_path, has_decision_config, architecture):
+    """Only a bare Qwen3.5 backbone with a decision_config.json selects d3."""
+    from transformers import Qwen3_5Config
+
+    decision_config = {
+        "format_version": 1,
+        "codes": ["A", "B"],
+        "token_ids": [32, 33],
+        "attention_mode": "noncausal_full_attention",
+    }
+    if has_decision_config:
+        (tmp_path / "decision_config.json").write_text(json.dumps(decision_config))
+    config = Qwen3_5Config(architectures=[architecture])
+    config.name_or_path = str(tmp_path)
+    model_config = SimpleNamespace(
+        hf_config=config,
+        hf_text_config=config.text_config,
+        _supports_multimodal_for_mm_prefix=lambda: True,
+    )
+    converted = ModelConfig.get_model_arch_config(model_config)
+    if has_decision_config and architecture == "Qwen3_5Model":
+        assert converted.architectures == ["D3ForSequenceClassification"]
+        assert config.decision_config == decision_config
+    else:
+        assert converted.architectures == [architecture]
+        assert not hasattr(config, "decision_config")
+
+
+def _assert_model_arch_config(model_config, expected: dict):
     """Assert model_arch_config matches expected values."""
     model_arch_config = model_config.model_arch_config
     assert model_arch_config.architectures == expected["architectures"]
@@ -98,14 +161,10 @@ def _assert_model_arch_config(
         config_format="hf",
     )
     assert str(torch_dtype) == expected["dtype"]
-
-    if check_head_size:
-        assert model_arch_config.head_size == expected["head_size"]
+    assert model_arch_config.head_size == expected["head_size"]
 
 
-def _assert_model_config_methods(
-    model_config, expected: dict, check_head_size: bool = True
-):
+def _assert_model_config_methods(model_config, expected: dict):
     """Assert model_config methods return expected values."""
     assert model_config.architectures == expected["architectures"]
     assert model_config.get_vocab_size() == expected["vocab_size"]
@@ -116,9 +175,7 @@ def _assert_model_config_methods(
         model_config.get_total_num_hidden_layers()
         == expected["total_num_hidden_layers"]
     )
-
-    if check_head_size:
-        assert model_config.get_head_size() == expected["head_size"]
+    assert model_config.get_head_size() == expected["head_size"]
 
 
 def test_head_size_falls_back_when_head_dim_is_zero():
@@ -135,6 +192,27 @@ def test_head_size_falls_back_when_head_dim_is_zero():
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
 
     assert convertor.get_head_size() == 128
+
+
+@pytest.mark.parametrize(
+    ("kv_lora_rank", "qk_rope_head_dim", "is_mla", "head_size"),
+    [(512, 64, True, 576), (256, 32, False, 64)],
+)
+def test_transformers_backend_mla_from_kv_lora_rank(
+    kv_lora_rank, qk_rope_head_dim, is_mla, head_size
+):
+    """On the Transformers backend, any model type with a `kv_lora_rank` uses MLA,
+    unless no MLA kernel supports its latent size (e.g. MiniCPM3's 288)."""
+    hf_config = PreTrainedConfig(
+        model_type="unlisted_mla",
+        head_dim=64,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+    )
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+    convertor.transformers_backend = True
+    assert convertor.is_deepseek_mla() == is_mla
+    assert convertor.get_head_size() == head_size
 
 
 def test_qk_rope_head_dim_recovery_uses_model_revision(monkeypatch: pytest.MonkeyPatch):
@@ -210,6 +288,30 @@ def test_legacy_modelopt_config_without_producer_is_normalized():
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
 
     assert convertor.get_quantization_config()["quant_method"] == "modelopt_fp4"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("quant_algo", ["MIXED_PRECISION", "mixed_precision"])
+def test_modelopt_mixed_precision_config_is_normalized(legacy, quant_algo):
+    quantized_layers = {"model.layers.0.mlp.down_proj": {"quant_algo": "FP8"}}
+    quantization = {
+        "quant_algo": quant_algo,
+        "quantized_layers": quantized_layers,
+    }
+    quantization_config = {"quantization": quantization}
+    if legacy:
+        quantization["modelopt_quant_config"] = {"quant_cfg": {}}
+    else:
+        quantization_config["producer"] = {"name": "modelopt"}
+    hf_config = PreTrainedConfig(quantization_config=quantization_config)
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+
+    normalized = convertor.get_quantization_config()
+
+    assert normalized["quant_method"] == "modelopt_mixed"
+    assert normalized["quantization"]["quantized_layers"] == {
+        "model.layers.0.mlp.down_proj": {"quant_algo": "FP8"}
+    }
 
 
 def _layer(**overrides) -> ModelArchitectureConfig:
@@ -434,17 +536,13 @@ def test_base_model_arch_config(model: str):
     _assert_model_config_methods(model_config, expected)
 
 
-@pytest.mark.parametrize(
-    "target_model,draft_model,trust_remote_code", SPECULATIVE_MODELS
-)
-def test_draft_model_arch_config(
-    target_model: str, draft_model: str, trust_remote_code: bool
-):
+@pytest.mark.parametrize("target_model,draft_model", SPECULATIVE_MODELS)
+def test_draft_model_arch_config(target_model: str, draft_model: str):
     """Test model architecture config for draft/speculative models."""
     groundtruth = _load_groundtruth("draft_model_arch_groundtruth.json")
     expected = groundtruth[draft_model]
 
-    target_model_config = ModelConfig(target_model, trust_remote_code=trust_remote_code)
+    target_model_config = ModelConfig(target_model)
     speculative_config = SpeculativeConfig(
         model=draft_model,
         num_speculative_tokens=1,
@@ -453,14 +551,8 @@ def test_draft_model_arch_config(
     )
     model_config = speculative_config.draft_model_config
 
-    # For medusa models, head_size may cause division by zero before
-    # model_arch_config was introduced, so we conditionally check it
-    check_head_size = isinstance(expected["head_size"], int)
-
-    _assert_model_arch_config(model_config, expected, check_head_size=check_head_size)
-    _assert_model_config_methods(
-        model_config, expected, check_head_size=check_head_size
-    )
+    _assert_model_arch_config(model_config, expected)
+    _assert_model_config_methods(model_config, expected)
 
 
 def test_deepseek_v4_convertor_splits_vision_architecture():
@@ -468,7 +560,8 @@ def test_deepseek_v4_convertor_splits_vision_architecture():
     text-only DeepSeek-V4; the convertor routes it to the VL wrapper class
     by rewriting hf_config.architectures (model-class resolution reads the
     raw attribute)."""
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+    from transformers import DeepseekV4Config
+
     from vllm.transformers_utils.model_arch_config_convertor import (
         DeepseekV4ModelArchConfigConvertor,
     )

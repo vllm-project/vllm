@@ -5,7 +5,7 @@
 import functools
 import json
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 import torch
@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     amax_for_moe_activation_quant,
     get_fp8_min_max,
 )
@@ -269,11 +270,11 @@ def silu_mul_quant_fp8_packed_triton(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fuse activation and FP8 quantization, optionally skipping expert padding.
 
-    ``expert_ends`` uses DeepGEMM's prefix-sum layout: each entry is the
+    `expert_ends` uses DeepGEMM's prefix-sum layout: each entry is the
     exclusive end of an expert's live rows, including earlier alignment gaps.
-    An expert starts at the preceding end rounded up to ``expert_alignment``.
+    An expert starts at the preceding end rounded up to `expert_alignment`.
     Padding outputs are left unwritten and must not be consumed as live rows.
-    Without ``expert_ends``, the original dense launch configuration is used
+    Without `expert_ends`, the original dense launch configuration is used
     and the metadata loads are compiled out.
     """
     assert input.dim() == 2
@@ -482,7 +483,7 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     expert_ends: torch.Tensor | None = None,
     expert_alignment: int = 0,
 ):
-    """Gated activation + block-fp8 quant. ``alpha``/``beta`` select the gate
+    """Gated activation + block-fp8 quant. `alpha`/`beta` select the gate
     (silu: alpha=1, beta=0; swigluoai: alpha, beta from config).
 
     Optional expert endpoints follow DeepGEMM's prefix-sum layout. Padding
@@ -1041,7 +1042,10 @@ def w8a8_triton_block_scaled_mm(
     C_shape = A.shape[:-1] + (N,)
     C = A.new_empty(C_shape, dtype=output_dtype)
 
-    configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
+    if envs.VLLM_BATCH_INVARIANT:
+        configs = None  # use the default config
+    else:
+        configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
     if configs:
         # Get the optimal config if there is one
         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
@@ -1134,13 +1138,7 @@ def requant_weight_ue8m0_inplace(
         s_old = s_view[idx]
 
         # De-quantise with the *old* scaling factors (float32).
-        m_cur, k_cur = w_q.shape
-        s_float = s_old.to(torch.float32)
-        # Expand scales along rows and cols by block size, then crop.
-        s_exp_r = torch.repeat_interleave(s_float, block_m, dim=0)
-        s_exp = torch.repeat_interleave(s_exp_r, block_k, dim=1)
-        s_exp = s_exp[:m_cur, :k_cur]
-        w_dq = w_q.to(torch.float32) * s_exp
+        w_dq = dequant_block_fp8(w_q, s_old, [block_m, block_k], torch.float32)
         # Re-quantise using power-of-two scaling (UE8M0).
         w_requant, s_requant = per_block_cast_to_fp8(
             w_dq, [block_m, block_k], use_ue8m0=True
@@ -1454,7 +1452,7 @@ def process_fp8_weight_tensor_strategy(
     logical_widths: list[int],
     input_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Requantize fused shards to one scale and return ``(K, N)`` weight."""
+    """Requantize fused shards to one scale and return `(K, N)` weight."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
         requantize_with_max_scale,
@@ -1481,7 +1479,7 @@ def process_fp8_weight_channel_strategy(
     weight_scale: torch.Tensor,
     input_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Normalize FNUZ if needed and return ``(K, N)`` weight."""
+    """Normalize FNUZ if needed and return `(K, N)` weight."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
     )
@@ -1498,7 +1496,7 @@ def process_fp8_weight_block_strategy(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Normalize FNUZ if needed and return ``(N, K)`` weight (no transpose)."""
+    """Normalize FNUZ if needed and return `(N, K)` weight (no transpose)."""
     from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
         normalize_e4m3fn_to_e4m3fnuz,
     )
@@ -1581,3 +1579,120 @@ def process_fp8_input_tensor_strategy_moe(
         amax_for_moe_activation_quant(w13_input_scale, enable_eplb),
         amax_for_moe_activation_quant(w2_input_scale, enable_eplb),
     )
+
+
+def dequant_block_fp8(
+    weight: torch.Tensor,
+    scale_inv: torch.Tensor,
+    block_size: Sequence[int],
+    out_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """`[..., N, K]` fp8 x `[..., ceil(N/bn), ceil(K/bk)]` block scales -> `out_dtype`.
+
+    Leading dimensions (e.g. the expert dimension) are batched. The product is
+    computed in fp32, `out_dtype` only controls the final cast.
+    """
+    n, k = weight.shape[-2:]
+    bn, bk = block_size
+    scale = scale_inv.to(torch.float32)
+    scale = scale.repeat_interleave(bn, dim=-2)[..., :n, :]
+    scale = scale.repeat_interleave(bk, dim=-1)[..., :k]
+    return (weight.to(torch.float32) * scale).to(out_dtype)
+
+
+# Bounds the fp32 staging memory of `dequantize_fp8_moe_weights`.
+_DEQUANT_CHUNK_BYTES = 1 << 30
+
+
+def dequantize_fp8_moe_weights(
+    w13_weight: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w2_scale: torch.Tensor,
+    *,
+    weight_key: QuantKey,
+    num_w13_shards: int,
+    weight_block_size: Sequence[int] | None,
+    static_input_scales: bool,
+    out_dtype: torch.dtype,
+) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+    """Dequantize FP8 MoE weights for online requantization.
+
+    Args:
+        w13_weight: `[E, num_w13_shards * I, K]` fp8 weights.
+        w13_scale: Per `weight_key`, `[E, num_w13_shards * ceil(I / bn), ceil(K / bk)]`
+            (block), `[E, num_w13_shards]` (tensor, per expert and shard) or
+            `[E, num_w13_shards * I]` / `[E, num_w13_shards * I, 1]` (channel).
+        w2_weight: `[E, K, I]` fp8 weights.
+        w2_scale: Per `weight_key`, `[E, ceil(K / bn), ceil(I / bk)]` (block), `[E]`
+            (tensor) or `[E, K]` / `[E, K, 1]` (channel).
+        weight_key: The weight quantization key, per-tensor, per-channel or block.
+        num_w13_shards: 2 for gated (w1, w3), else 1. Shards of a fused w13 with a
+            single tensor scale are handled through the scale shape.
+        weight_block_size: The `[bn, bk]` block shape, required for block scales.
+        static_input_scales: Whether the checkpoint has static activation scales,
+            which are not supported: w1 and w3 share one input-scale slot, which
+            the layerwise loader counts twice.
+        out_dtype: The dequantized dtype.
+
+    Returns:
+        An iterator of `(experts, w13, w2)` over groups of experts, bounding the
+        staging memory.
+
+    """
+    if static_input_scales:
+        raise NotImplementedError(
+            "MoE requantization from FP8 checkpoints with static activation scales "
+            "is not supported. Please open an issue."
+        )
+    group_shape = weight_key.scale.group_shape
+    if group_shape.is_per_tensor():
+        strategy = "tensor"
+    elif group_shape.is_per_channel():
+        strategy = "channel"
+    else:
+        strategy = "block"
+        if weight_block_size is None:
+            raise ValueError("Block-scaled FP8 weights need a weight block size.")
+    num_experts = w13_weight.shape[0]
+    # fp32 staging of the scaled weights and of the expanded scales, plus the
+    # `out_dtype` result.
+    expert_bytes = (w13_weight[0].numel() + w2_weight[0].numel()) * (
+        4 + 4 + out_dtype.itemsize
+    )
+    experts_per_chunk = max(1, _DEQUANT_CHUNK_BYTES // expert_bytes)
+
+    def dequant(w: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """`w` is `[B, N, K]`, `scale` is `[B, ...]` broadcastable to it, or the
+        block grid of it."""
+        if strategy != "block":
+            return (w.to(torch.float32) * scale.to(torch.float32)).to(out_dtype)
+        assert weight_block_size is not None
+        n, k = w.shape[-2:]
+        if (-(-n // weight_block_size[0]), -(-k // weight_block_size[1])) != tuple(
+            scale.shape[-2:]
+        ):
+            raise ValueError(
+                f"FP8 scale grid {tuple(scale.shape[-2:])} does not match block "
+                f"shape {list(weight_block_size)} for a {(n, k)} weight."
+            )
+        return dequant_block_fp8(w, scale, weight_block_size, out_dtype)
+
+    for start in range(0, num_experts, experts_per_chunk):
+        experts = slice(start, min(start + experts_per_chunk, num_experts))
+        n_exp = experts.stop - experts.start
+        w13, w13_s = w13_weight[experts], w13_scale[experts]
+        w2, w2_s = w2_weight[experts], w2_scale[experts]
+        # Each w13 shard (w1, w3) has its own scales: dequantize them as separate
+        # batch entries.
+        shards = w13_s.shape[1] if strategy == "tensor" else num_w13_shards
+        w13_b = w13.reshape(n_exp * shards, w13.shape[1] // shards, -1)
+        if strategy == "block":
+            w13_s = w13_s.reshape(n_exp * shards, w13_s.shape[1] // shards, -1)
+        elif strategy == "tensor":
+            w13_s = w13_s.reshape(n_exp * shards, 1, 1)
+            w2_s = w2_s.reshape(n_exp, 1, 1)
+        else:
+            w13_s = w13_s.reshape(n_exp * shards, w13_b.shape[1], 1)
+            w2_s = w2_s.reshape(n_exp, w2.shape[1], 1)
+        yield experts, dequant(w13_b, w13_s).reshape(w13.shape), dequant(w2, w2_s)

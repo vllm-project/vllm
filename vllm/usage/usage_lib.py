@@ -7,7 +7,7 @@ import logging
 import os
 import platform
 import time
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from threading import Thread
 from typing import Any
@@ -108,7 +108,7 @@ def _detect_cloud_provider() -> str:
     return "UNKNOWN"
 
 
-class UsageContext(str, Enum):
+class UsageContext(StrEnum):
     UNKNOWN_CONTEXT = "UNKNOWN_CONTEXT"
     LLM_CLASS = "LLM_CLASS"
     API_SERVER = "API_SERVER"

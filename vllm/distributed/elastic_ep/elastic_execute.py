@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import weakref
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Generator, Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
@@ -12,9 +12,11 @@ import torch
 import torch.nn as nn
 from torch.distributed import P2POp
 
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import ParallelConfig, set_current_vllm_config
+from vllm.config.utils import hash_config_cached
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -56,7 +58,6 @@ from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
 from vllm.v1.worker.gpu.eplb_utils import preserve_serving_state
-from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
 
 logger = init_logger(__name__)
@@ -174,7 +175,7 @@ class ElasticEPScalingExecutor:
         )
 
     @contextmanager
-    def _suppress_eplb(self) -> Iterator[None]:
+    def _suppress_eplb(self) -> Generator[None]:
         # A rank warming up alone must not advance the EPLB step counter.
         runner = self.worker.model_runner
         was_suppressed = runner.eep_eplb_suppressed
@@ -185,7 +186,7 @@ class ElasticEPScalingExecutor:
             runner.eep_eplb_suppressed = was_suppressed
 
     @contextmanager
-    def _disable_flashinfer_autotune(self) -> Iterator[None]:
+    def _disable_flashinfer_autotune(self) -> Generator[None]:
         kernel_config = self.worker.vllm_config.kernel_config
         enabled = kernel_config.enable_flashinfer_autotune
         kernel_config.enable_flashinfer_autotune = False
@@ -376,7 +377,7 @@ class ElasticEPScalingExecutor:
         eplb_state = self.worker.model_runner.eplb_state
         assert eplb_state is not None
         eplb_state.drain_async()
-        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+        eplb_model_state = eplb_state.model_states[hash_config_cached(model_config)]
         physical_to_logical = eplb_model_state.physical_to_logical_map_buffer
         broadcast_expert_mapping(
             physical_to_logical=physical_to_logical,
@@ -434,22 +435,13 @@ class ElasticEPScalingExecutor:
         self._staged_moe_quant_methods.clear()
 
     def _release_cuda_graphs(self) -> None:
-        manager = getattr(self.worker.model_runner, "cudagraph_manager", None)
-        speculator = getattr(self.worker.model_runner, "speculator", None)
-        if manager is not None:
-            # MRV2 captures through CudaGraphManager instead of wrapping the
-            # model, so neither wrapper branch below ever fires.
-            manager.release_graphs()
-            for attr in vars(speculator).values() if speculator else ():
-                if isinstance(attr, CudaGraphManager):
-                    attr.release_graphs()
-
-        elif isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
-            wrapper = self.worker.model_runner.model
-            wrapper.concrete_cudagraph_entries = {}
-
-        elif isinstance(self.worker.model_runner.model, UBatchWrapper):
-            self.worker.model_runner.model.clear_graphs()
+        runner = self.worker.model_runner
+        if runner.cudagraph_manager is not None:
+            runner.cudagraph_manager.release_graphs()
+        speculator = runner.speculator
+        for attr in vars(speculator).values() if speculator else ():
+            if isinstance(attr, CudaGraphManager):
+                attr.release_graphs()
 
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):
@@ -460,6 +452,37 @@ class ElasticEPScalingExecutor:
         gc.collect()
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
+        self._switch_to_fresh_graph_pool()
+
+    def _switch_to_fresh_graph_pool(self) -> None:
+        # Libraries may keep capture-time tensors alive after their graphs are
+        # released (e.g. FlyDSL retains the last launch's DLPack arguments), so
+        # the old pool cannot be erased. Re-capturing into that pool trips the
+        # allocator's "use_count > 0" assert; capture into a fresh one instead.
+        platform_cls = type(current_platform)
+        if platform_cls._global_graph_pool is None:
+            return
+        new_pool = current_platform.graph_pool_handle()
+        platform_cls._global_graph_pool = new_pool
+
+        model_runner = self.worker.model_runner
+        manager = model_runner.cudagraph_manager
+        speculator = model_runner.speculator
+        managers = [manager] + [
+            attr
+            for attr in (vars(speculator).values() if speculator else ())
+            if isinstance(attr, CudaGraphManager)
+        ]
+        for m in managers:
+            if m is not None and m.pool is not None:
+                m.pool = new_pool
+
+        wrappers: list[CUDAGraphWrapper | BreakableCUDAGraphWrapper] = [
+            *CUDAGraphWrapper._all_instances,
+            *BreakableCUDAGraphWrapper._all_instances,
+        ]
+        for wrapper in wrappers:
+            wrapper.graph_pool = new_pool
 
     def switch_and_remove(self) -> None:
         # Removing ranks skipped preparation, so wait for prior cleanup here.
@@ -524,7 +547,7 @@ class ElasticEPScalingExecutor:
         eplb_state = self.worker.model_runner.eplb_state
         assert eplb_state is not None
         model_config = self.worker.model_runner.model_config
-        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+        eplb_model_state = eplb_state.model_states[hash_config_cached(model_config)]
 
         num_physical_experts = num_local_experts * new_ep_size
         num_logical_experts = eplb_model_state.logical_replica_count.shape[1]
@@ -709,17 +732,12 @@ class ElasticEPScalingExecutor:
         runner = self.worker.model_runner
         all2all_manager = get_ep_all2all_manager()
         reuse_kernel = self._can_reuse_fused_moe_kernel()
-        serving_state = (
-            preserve_serving_state(runner)
-            if self.worker.use_v2_model_runner
-            else runner.preserve_serving_state()
-        )
         with (
             skip_dp_coordination() if reuse_kernel else nullcontext(),
             all2all_manager.mask_remote_ranks() if reuse_kernel else nullcontext(),
             self._disable_flashinfer_autotune() if reuse_kernel else nullcontext(),
             self._suppress_eplb(),
-            serving_state,
+            preserve_serving_state(runner),
         ):
             runner._dummy_run(
                 runner.max_num_tokens,

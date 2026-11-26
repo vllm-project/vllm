@@ -6,8 +6,9 @@ use std::collections::BTreeSet;
 use bytes::Bytes;
 use rmpv::Value;
 
-use super::{Logprobs, PositionLogprobs, TokenLogprob};
-use crate::protocol::output::{EngineCoreFinishReason, decode_engine_core_outputs};
+use super::{Logprobs, PositionLogprobs, TokenLogprob, WireLogprobs};
+use crate::protocol::output::{EngineCoreFinishReason, EngineCoreOutputs};
+use crate::protocol::tensor::WireNdArray;
 
 fn encode_value(value: &Value) -> Vec<u8> {
     let mut out = Vec::new();
@@ -187,7 +188,7 @@ fn decodes_inline_new_logprobs() {
         Some(inline_logprobs_value()),
         None,
     )))];
-    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
+    let decoded = EngineCoreOutputs::from_frames(&frames).unwrap().into_request_batch().unwrap();
 
     let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
     assert_eq!(logprobs, expected_sample_logprobs());
@@ -218,7 +219,7 @@ fn decodes_multipart_new_logprobs() {
         ]),
         Bytes::from_static(&[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]),
     ];
-    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
+    let decoded = EngineCoreOutputs::from_frames(&frames).unwrap().into_request_batch().unwrap();
 
     let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
     assert_eq!(logprobs, expected_sample_logprobs());
@@ -230,7 +231,7 @@ fn decodes_inline_prompt_logprobs() {
         None,
         Some(inline_prompt_logprobs_value()),
     )))];
-    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
+    let decoded = EngineCoreOutputs::from_frames(&frames).unwrap().into_request_batch().unwrap();
 
     let logprobs = decoded.outputs[0]
         .new_prompt_logprobs_tensors
@@ -253,7 +254,7 @@ fn rejects_non_none_cu_num_generated_tokens_tensor() {
         Some(Value::Array(fields)),
     )))];
 
-    let error = decode_engine_core_outputs(&frames).unwrap_err();
+    let error = EngineCoreOutputs::from_frames(&frames).unwrap_err();
     let crate::error::Error::ExtValueDecode { message } = &error else {
         panic!("expected ValueDecodeExt");
     };
@@ -279,7 +280,7 @@ fn decodes_big_endian_payloads() {
         ])),
         None,
     )))];
-    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
+    let decoded = EngineCoreOutputs::from_frames(&frames).unwrap().into_request_batch().unwrap();
     let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
     assert_eq!(
         logprobs,
@@ -317,7 +318,7 @@ fn rejects_supported_array_dtypes_in_incompatible_logprobs_fields() {
             ])),
             None,
         )))];
-        let error = decode_engine_core_outputs(&frames).unwrap_err();
+        let error = EngineCoreOutputs::from_frames(&frames).unwrap_err();
         let crate::error::Error::ExtValueDecode { message } = error else {
             panic!("expected ExtValueDecode");
         };
@@ -337,7 +338,7 @@ fn rejects_non_none_cu_num_generated_tokens() {
         None,
     )))];
 
-    let error = decode_engine_core_outputs(&frames).unwrap_err();
+    let error = EngineCoreOutputs::from_frames(&frames).unwrap_err();
     let crate::error::Error::ExtValueDecode { message } = &error else {
         panic!("expected ValueDecodeExt");
     };
@@ -363,7 +364,8 @@ fn decodes_zero_row_logprobs_as_empty() {
                 Value::Nil,
             ])),
         )))];
-        let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
+        let decoded =
+            EngineCoreOutputs::from_frames(&frames).unwrap().into_request_batch().unwrap();
         let logprobs = decoded.outputs[0]
             .new_prompt_logprobs_tensors
             .clone()
@@ -387,7 +389,7 @@ fn rejects_zero_column_logprobs_with_rows() {
         None,
     )))];
 
-    let error = decode_engine_core_outputs(&frames).unwrap_err();
+    let error = EngineCoreOutputs::from_frames(&frames).unwrap_err();
     let crate::error::Error::ExtValueDecode { message } = &error else {
         panic!("expected ExtValueDecode");
     };
@@ -449,7 +451,7 @@ fn zero_sampled_rank_does_not_fail_frame_mates() {
         Value::Nil,
         Value::Nil,
     ])))];
-    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
+    let decoded = EngineCoreOutputs::from_frames(&frames).unwrap().into_request_batch().unwrap();
 
     let bad = decoded.outputs[0].new_logprobs.as_ref().unwrap();
     let prompt = decoded.outputs[0].new_prompt_logprobs_tensors.as_ref().unwrap();
@@ -513,4 +515,29 @@ fn zero_sampled_rank_does_not_fail_frame_mates() {
         )
     "#]]
     .assert_debug_eq(&(&**bad, &**prompt, &**good));
+}
+
+#[test]
+fn wire_logprobs_encode_fits_both_python_tuples() {
+    // `LogprobsLists` takes at most four elements; only a set
+    // `cu_num_generated_tokens_tensor` makes a fifth.
+    let mut wire = WireLogprobs {
+        logprob_token_ids: WireNdArray::from_i64(vec![1, 1], vec![7]).unwrap(),
+        logprobs: WireNdArray::from_f32(vec![1, 1], vec![-0.5]).unwrap(),
+        token_ranks: WireNdArray::from_i64(vec![1], vec![1]).unwrap(),
+        cu_num_generated_tokens: None,
+        cu_num_generated_tokens_tensor: None,
+    };
+    let len = |wire: &WireLogprobs| {
+        let bytes = rmp_serde::to_vec(wire).unwrap();
+        match rmpv::decode::read_value(&mut bytes.as_slice()).unwrap() {
+            Value::Array(items) => items.len(),
+            other => panic!("expected an array, got {other:?}"),
+        }
+    };
+    assert_eq!(len(&wire), 4);
+    wire.cu_num_generated_tokens = Some(vec![0, 1]);
+    assert_eq!(len(&wire), 4);
+    wire.cu_num_generated_tokens_tensor = Some(Value::Nil);
+    assert_eq!(len(&wire), 5);
 }
