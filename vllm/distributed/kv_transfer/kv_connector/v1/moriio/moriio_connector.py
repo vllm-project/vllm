@@ -52,13 +52,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     TransferId,
     WriteTask,
     WriteTransferState,
+    coerce_kv_int_param,
     fill_remote_pod_from_config,
     fold_local_rank,
     get_moriio_mode,
-    get_peer_zmq_from_request_id,
+    get_moriio_write_notify_address,
     get_port_offset,
+    get_remote_tp_size,
     get_role,
-    parse_moriio_zmq_address,
     pod_index,
     resolve_host_ip,
     set_role,
@@ -96,6 +97,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping impor
     MoRIIOWriteTPMapping,
     WriteTarget,
     compute_write_tp_mapping,
+    validate_remote_topology,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     MambaConvSplitInfo,
@@ -106,6 +108,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     get_world_group,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
@@ -239,8 +242,9 @@ def validate_moriio_heterogeneous_tp_kv_heads(
 
 def get_moriio_peer_tp_size(params: dict[str, Any] | None, local_tp_size: int) -> int:
     """TP size of the peer named in `kv_transfer_params`; unknown means equal."""
-    params = params or {}
-    return int(params.get("remote_tp_size") or params.get("tp_size") or local_tp_size)
+    tp_size = get_remote_tp_size(params or {}, local_tp_size)
+    validate_remote_topology(1, tp_size or local_tp_size)
+    return tp_size
 
 
 def get_moriio_expected_ack_count(producer_tp_size: int, consumer_tp_size: int) -> int:
@@ -380,6 +384,10 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
 
         if "notify_port" not in extra_config or not extra_config["notify_port"]:
             extra_config["notify_port"] = MoRIIOConstants.DEFAULT_NOTIFY_PORT
+
+    def validate_request(self, request: "Request") -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.validate_request(request)
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -874,6 +882,42 @@ class MoRIIOConnectorScheduler:
             len(self.request_id_to_transfer_id),
         )
 
+    def validate_request(self, request: "Request") -> None:
+        params = request.kv_transfer_params
+        if params is None:
+            return
+        if not isinstance(params, dict):
+            raise VLLMValidationError(
+                "MoRIIO kv_transfer_params must be a dictionary",
+                parameter="kv_transfer_params",
+            )
+        try:
+            remote_dp_size = coerce_kv_int_param(params, "remote_dp_size", 1) or 1
+            for key, default in (
+                ("remote_dp_size_local", 0),
+                ("remote_dp_rank", 0),
+            ):
+                coerce_kv_int_param(params, key, default)
+            if params.get("do_remote_prefill") or (
+                self.mode == MoRIIOMode.WRITE and params.get("do_remote_decode")
+            ):
+                remote_tp_size = (
+                    get_remote_tp_size(params)
+                    or self.vllm_config.parallel_config.tensor_parallel_size
+                )
+                validate_remote_topology(remote_dp_size, remote_tp_size)
+            if (
+                self.mode == MoRIIOMode.WRITE
+                and not self.is_producer
+                and params.get("do_remote_prefill")
+            ):
+                get_moriio_write_notify_address(request.request_id, params)
+                get_moriio_write_notify_address(
+                    request.request_id, params, prefer_explicit=True
+                )
+        except ValueError as exc:
+            raise VLLMValidationError(str(exc), parameter="kv_transfer_params") from exc
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -1035,25 +1079,20 @@ class MoRIIOConnectorScheduler:
             )
             return
 
-        remote_dp_rank = params.get("remote_dp_rank", 0)
-        remote_host = params.get("remote_host")
-        remote_notify_port = params.get("remote_notify_port")
-        if remote_host is None or remote_notify_port is None:
-            try:
-                peer_zmq = get_peer_zmq_from_request_id(request_id, is_producer=False)
-                if peer_zmq is None:
-                    raise ValueError("no peer zmq address for request")
-                remote_host, _, remote_notify_port = parse_moriio_zmq_address(peer_zmq)
-            except ValueError:
-                logger.warning(
-                    "Cannot release WRITE prefill blocks for request %s: "
-                    "missing remote notify address",
-                    request_id,
-                )
-                return
+        remote_dp_rank = coerce_kv_int_param(params, "remote_dp_rank", 0)
+        try:
+            remote_host, remote_notify_port = get_moriio_write_notify_address(
+                request_id, params, prefer_explicit=True
+            )
+        except ValueError:
+            logger.warning(
+                "Cannot release WRITE prefill blocks for request %s: "
+                "missing remote notify address",
+                request_id,
+            )
+            return
 
-        remote_notify_port = int(remote_notify_port)
-        dp_local = int(params.get("remote_dp_size_local") or 0)
+        dp_local = coerce_kv_int_param(params, "remote_dp_size_local", 0)
         hosts = params.get("remote_hosts") or []
         pod_idx = pod_index(remote_dp_rank, dp_local)
         if dp_local > 0 and pod_idx < len(hosts):
@@ -1273,22 +1312,21 @@ class MoRIIOConnectorScheduler:
                 assert request.kv_transfer_params is not None, (
                     "kv_transfer_params should not be None"
                 )
-
-                remote_dp_rank = request.kv_transfer_params.get("remote_dp_rank", 0)
-
                 # Effective DP fan-out for the per-pod port/host math below
                 # (see _remote_dp_rank_for_port / _pod_idx). Capped to the
                 # per-pod local size when the router advertises it (Wide-EP).
-                _dp_size = int(request.kv_transfer_params.get("remote_dp_size", 1) or 1)
-                try:
-                    _dp_local = int(
-                        request.kv_transfer_params.get("remote_dp_size_local", 0) or 0
-                    )
-                    if _dp_local > 0:
-                        _dp_size = min(_dp_size, _dp_local)
-                except (TypeError, ValueError):
-                    _dp_local = 0
-
+                remote_dp_rank = coerce_kv_int_param(
+                    request.kv_transfer_params, "remote_dp_rank", 0
+                )
+                _dp_size = (
+                    coerce_kv_int_param(request.kv_transfer_params, "remote_dp_size", 1)
+                    or 1
+                )
+                _dp_local = coerce_kv_int_param(
+                    request.kv_transfer_params, "remote_dp_size_local", 0
+                )
+                if _dp_local > 0:
+                    _dp_size = min(_dp_size, _dp_local)
                 # Rank routing is ROUTER-AUTHORITATIVE: honor the router-pinned
                 # remote_dp_rank (matched to the X-data-parallel-rank dispatch
                 # pin). Self-deriving a rank could disagree and notify a rank
@@ -1326,32 +1364,9 @@ class MoRIIOConnectorScheduler:
                         request.request_id, request.kv_transfer_params
                     )
                 elif _should_notify:
-                    peer_zmq = get_peer_zmq_from_request_id(
-                        request.request_id, is_producer=False
+                    remote_host, remote_notify_port = get_moriio_write_notify_address(
+                        request.request_id, request.kv_transfer_params
                     )
-                    if peer_zmq is not None:
-                        remote_host, _, remote_notify_port = parse_moriio_zmq_address(
-                            peer_zmq
-                        )
-                    else:
-                        # Sidecar fallback: use explicit params fields.
-                        params = request.kv_transfer_params or {}
-                        remote_host = params.get("remote_host") or ""
-                        try:
-                            remote_notify_port = int(
-                                params.get("remote_notify_port") or 0
-                            )
-                        except (TypeError, ValueError):
-                            remote_notify_port = 0
-                        if not remote_host or not remote_notify_port:
-                            raise ValueError(
-                                f"request {request.request_id!r}: "
-                                f"request_id has no embedded peer "
-                                f"zmq_address and kv_transfer_params is "
-                                f"missing remote_host / remote_notify_port "
-                                f"(got remote_host={remote_host!r}, "
-                                f"remote_notify_port={remote_notify_port!r})"
-                            )
 
                     block_notify_list: list[int] | list[list[int]]
                     num_skip_blocks = 0
@@ -2607,6 +2622,7 @@ class MoRIIOConnectorWorker:
             port = int(meta.remote_handshake_port)
             tp_size = int(meta.tp_size)
             remote_dp_size = int(meta.remote_dp_size)
+            validate_remote_topology(remote_dp_size, tp_size or self.world_size)
             # Wide-EP multi-pod: remote DP ranks span pods at different IPs
             # (ranks per pod = dp_local), so resolve the host per cur_dp_rank
             # below instead of using a single host for all ranks.
@@ -3410,12 +3426,18 @@ class MoRIIOConnectorWorker:
         remote_engine_id = None
 
         for req_id, meta in metadata.reqs_to_save.items():
-            if meta.transfer_state is not None:
-                if meta.transfer_state.cancelled:
-                    continue
-            elif supports_zero_submit_abort(
-                self.world_size, meta.tp_size, self.pp_size
-            ) and not self._writer.bind_transfer(meta):
+            if meta.transfer_state is not None and meta.transfer_state.cancelled:
+                continue
+            validate_remote_topology(
+                int(meta.remote_dp_size), int(meta.tp_size) or self.world_size
+            )
+            if (
+                meta.transfer_state is None
+                and supports_zero_submit_abort(
+                    self.world_size, meta.tp_size, self.pp_size
+                )
+                and not self._writer.bind_transfer(meta)
+            ):
                 continue
             # we only need to check if dp0 in rank
             remote_engine_id = (
@@ -3537,6 +3559,7 @@ class MoRIIOConnectorWorker:
             remote_dp_size = int(meta.remote_dp_size)
             port = int(meta.remote_handshake_port)
             tp_size = int(meta.tp_size)
+            validate_remote_topology(remote_dp_size, tp_size or self.world_size)
 
             # Flexible mirror (TP prefill + MLA, world_size==1 decode): the read
             # round-robins over prefill TP ranks, so pre-warm a session to EVERY
