@@ -168,8 +168,8 @@ async fn async_main(cli: Cli) -> Result<()> {
         Command::Serve(args) => {
             let server_config = args.to_server_config();
             if let Some(url) = &args.remote_generation_url {
-                let remote = args.to_remote_grpc_config(url)?;
-                return Server::new(server_config, LlmSource::RemoteGrpc(remote))
+                let remote_grpc_config = args.to_remote_grpc_config(url)?;
+                return Server::new(server_config, LlmSource::RemoteGrpc(remote_grpc_config))
                     .serve(shutdown_signal())
                     .await;
             }

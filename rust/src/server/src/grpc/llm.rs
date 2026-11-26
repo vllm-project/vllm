@@ -167,7 +167,7 @@ impl RemoteGrpcConfig {
         })
     }
 
-    pub(crate) fn connect(
+    pub(crate) fn into_llm(
         self,
         model: String,
         text_backend: &dyn TextBackend,
