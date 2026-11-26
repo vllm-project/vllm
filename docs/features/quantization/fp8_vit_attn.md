@@ -62,7 +62,8 @@ faster kernel saves. At 16,416 patches the attention call alone is about 1.7x
 faster (2.43 to 1.42 ms). End-to-end serving gains are smaller and depend on
 the workload. It has only been validated on MI355X/MI350X (gfx950) with
 head_dim 80, and padding a smaller head_dim such as 64 or 72 nearly doubles
-the work.
+the work. vLLM logs the head_dim, pad target and architecture when the
+option is active, and warns outside gfx950 with head_dim 80.
 
 This option is a workaround for AITER lacking a native head_dim-80 asm FP8
 kernel. It should be removed once AITER provides one.

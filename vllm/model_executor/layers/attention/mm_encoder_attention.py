@@ -461,7 +461,7 @@ class MMEncoderAttention(CustomOp):
             if not current_platform.is_rocm():
                 raise ValueError("AITER FP8 ViT attention requires ROCm.")
 
-            from vllm.platforms.rocm import on_mi3xx
+            from vllm.platforms.rocm import on_gfx950, on_mi3xx
 
             if not on_mi3xx():
                 raise ValueError(
@@ -490,6 +490,22 @@ class MMEncoderAttention(CustomOp):
                 if self.head_size <= 128:
                     self._fp8_pad_to = 128
                     self._fp8_aiter_asm = True
+                    arch = "gfx950" if on_gfx950() else "gfx942"
+                    logger.info_once(
+                        "FP8 ViT attention: head_dim %d padded to %d for the "
+                        "AITER asm kernel on %s.",
+                        self.head_size,
+                        self._fp8_pad_to,
+                        arch,
+                    )
+                    if arch != "gfx950" or self.head_size != 80:
+                        logger.warning_once(
+                            "VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM=128 is validated "
+                            "only on gfx950 with head_dim 80; head_dim %d on "
+                            "%s is not validated for accuracy or speed.",
+                            self.head_size,
+                            arch,
+                        )
                 else:
                     logger.warning_once(
                         "VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM=128 applies to "
