@@ -250,18 +250,22 @@ def _cudagraph_bytes(worker) -> int:
 
 
 def _custom_ar_active(worker) -> bool:
+    from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
     from vllm.distributed.parallel_state import get_tp_group
 
     comm = get_tp_group().device_communicator
+    assert isinstance(comm, CudaCommunicator)
     return any(
         c is not None and not c.disabled for c in (comm.ca_comm, comm.aiter_ar_comm)
     )
 
 
 def _capture_registers_buffers(worker) -> bool:
+    from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
     from vllm.distributed.parallel_state import get_tp_group
 
     comm = get_tp_group().device_communicator
+    assert isinstance(comm, CudaCommunicator)
     ca, aiter = comm.ca_comm, comm.aiter_ar_comm
     return (ca is not None and ca._capture_registered) or (
         aiter is not None and aiter.aiter_ca.enable_register_for_capturing
@@ -443,10 +447,14 @@ def test_deep_sleep_compressed_tensors_kv_scales(
     assert llm.apply_model(_attn_kv_scales)[0] == scales
     actual = llm.generate("How are you?", sampling_params)[0].outputs[0]
     assert actual.token_ids == expected.token_ids
-    logprobs = [
-        [lp[t].logprob for lp, t in zip(o.logprobs, o.token_ids)]
-        for o in (expected, actual)
-    ]
+    logprobs = []
+    for output in (expected, actual):
+        assert output.logprobs is not None
+        selected = []
+        for entries, token in zip(output.logprobs, output.token_ids):
+            assert entries is not None
+            selected.append(entries[token].logprob)
+        logprobs.append(selected)
     assert all(math.isfinite(x) for x in logprobs[1])
     assert logprobs[0] == logprobs[1]
 

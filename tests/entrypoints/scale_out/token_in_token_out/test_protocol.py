@@ -314,7 +314,7 @@ def test_tokens_mode_allows_detokenize_false():
 
 def test_response_without_output_mode_parses_as_tokens():
     """Existing clients and older servers never send output_mode."""
-    parsed = TypeAdapter(GenerateResponse).validate_python(
+    parsed = TypeAdapter[GenerateResponse](GenerateResponse).validate_python(
         {"choices": [{"index": 0, "token_ids": [1]}]}
     )
     assert isinstance(parsed, GenerateTokensResponse)
@@ -322,17 +322,17 @@ def test_response_without_output_mode_parses_as_tokens():
 
 
 def test_stream_chunk_without_output_mode_parses_as_tokens():
-    parsed = TypeAdapter(GenerateStreamResponse).validate_python(
-        {"choices": [{"index": 0, "token_ids": [1]}]}
-    )
+    parsed = TypeAdapter[GenerateStreamResponse](
+        GenerateStreamResponse
+    ).validate_python({"choices": [{"index": 0, "token_ids": [1]}]})
     assert isinstance(parsed, GenerateTokensStreamResponse)
 
 
 def test_text_response_and_chunk_dispatch_on_output_mode():
-    response = TypeAdapter(GenerateResponse).validate_python(
+    response = TypeAdapter[GenerateResponse](GenerateResponse).validate_python(
         {"output_mode": "text", "choices": [{"index": 0, "text": "hi"}]}
     )
-    chunk = TypeAdapter(GenerateStreamResponse).validate_python(
+    chunk = TypeAdapter[GenerateStreamResponse](GenerateStreamResponse).validate_python(
         {"output_mode": "text", "choices": [{"index": 0, "text": "hi"}]}
     )
     assert isinstance(response, GenerateTextResponse)
@@ -344,7 +344,9 @@ def test_derender_chunk_dispatches_and_derender_stream_request_rejects_it():
         "output_mode": "derender",
         "choices": [{"index": 0, "delta": {"content": "hi"}}],
     }
-    parsed = TypeAdapter(GenerateStreamResponse).validate_python(chunk)
+    parsed = TypeAdapter[GenerateStreamResponse](
+        GenerateStreamResponse
+    ).validate_python(chunk)
     assert isinstance(parsed, GenerateDerenderStreamResponse)
     with pytest.raises(ValidationError, match="output_mode"):
         DerenderChatStreamRequest.model_validate(
@@ -360,7 +362,7 @@ def test_text_response_requires_text_on_every_choice():
 
 
 def test_derender_response_dispatches_on_output_mode():
-    parsed = TypeAdapter(GenerateResponse).validate_python(
+    parsed = TypeAdapter[GenerateResponse](GenerateResponse).validate_python(
         {
             "output_mode": "derender",
             "choices": [

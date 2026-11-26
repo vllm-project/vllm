@@ -175,7 +175,7 @@ def test_watermark_with_prefix_cache_and_chunked_prefill(watermarked_llm: LLM):
     cold = watermarked_llm.generate(prompt, params)[0]
     cached = watermarked_llm.generate(prompt, params)[0]
 
-    assert cached.num_cached_tokens > 0
+    assert cached.num_cached_tokens is not None and cached.num_cached_tokens > 0
     assert cold.outputs[0].token_ids == cached.outputs[0].token_ids
 
 

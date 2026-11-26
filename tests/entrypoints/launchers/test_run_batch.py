@@ -603,12 +603,16 @@ def test_completions_endpoint():
         assert len(outputs) == 3
         for output in outputs.values():
             assert output.error is None
-        assert isinstance(outputs["request-1"].response.body, CompletionResponse)
+        first = outputs["request-1"].response
+        assert first is not None and isinstance(first.body, CompletionResponse)
         # A list prompt returns one choice per prompt.
-        completion = outputs["request-2"].response.body
+        second = outputs["request-2"].response
+        assert second is not None
+        completion = second.body
         assert isinstance(completion, CompletionResponse)
         assert len(completion.choices) == 2
-        assert isinstance(outputs["chat-1"].response.body, ChatCompletionResponse)
+        chat = outputs["chat-1"].response
+        assert chat is not None and isinstance(chat.body, ChatCompletionResponse)
 
 
 def test_completions_invalid_input():
@@ -1484,6 +1488,7 @@ async def test_requests_and_responses_reuse_type_adapters(monkeypatch):
         "EmbeddingCompletionRequest",
     ]
     assert output.error == "Unexpected response status code: 400"
+    assert output.response is not None
     assert output.response.status_code == 400
     type_adapter.assert_not_called()
 
@@ -1992,6 +1997,7 @@ async def test_unsupported_url_error_lists_registry_endpoints(tmp_path):
     error = BatchRequestOutput.model_validate_json(
         output_path.read_text().strip()
     ).error
+    assert error is not None
     assert "/v1/unsupported" in error
     assert "/v1/widgets" in error
 
