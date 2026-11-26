@@ -16,9 +16,9 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Generator, Iterable
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any
 
 import filelock
 import huggingface_hub.constants
@@ -27,7 +27,7 @@ import regex as re
 import torch
 from safetensors.torch import load, load_file, safe_open
 from tqdm.auto import tqdm
-from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
 
 from vllm import envs
 from vllm.config import ModelConfig
@@ -37,6 +37,7 @@ from vllm.config.load import (
     LoadConfig,
 )
 from vllm.distributed import (
+    get_node_count,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_world_group,
@@ -55,6 +56,7 @@ from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import hf_api, hf_fs
 from vllm.utils.cpu_resource_utils import get_available_memory
+from vllm.utils.file_utils import atomic_writer as atomic_writer
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -109,49 +111,6 @@ def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
     # mode 0o666 is required for the filelock to be shared across users
     lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name), mode=0o666)
     return lock
-
-
-@contextmanager
-def atomic_writer(
-    filepath: str | Path, mode: str = "w", encoding: str | None = None
-) -> Generator[IO]:
-    """Context manager that provides an atomic file writing routine.
-
-    The context manager writes to a temporary file and, if successful,
-    atomically replaces the original file.
-
-    Args:
-        filepath (str or Path): The path to the file to write.
-        mode (str): The file mode for the temporary file (e.g., 'w', 'wb').
-        encoding (str): The encoding for text mode.
-
-    Yields:
-        file object: A handle to the temporary file.
-
-    """
-    # Create a temporary file in the same directory as the target file
-    # to ensure it's on the same filesystem for an atomic replace.
-    temp_dir = os.path.dirname(filepath)
-    temp_fd, temp_path = tempfile.mkstemp(dir=temp_dir)
-
-    try:
-        # Open the temporary file for writing
-        with os.fdopen(temp_fd, mode=mode, encoding=encoding) as temp_file:
-            yield temp_file
-
-        # If the 'with' block completes successfully,
-        # perform the atomic replace.
-        os.replace(temp_path, filepath)
-
-    except Exception:
-        logger.exception(
-            "Error during atomic write. Original file '%s' not modified", filepath
-        )
-        raise
-    finally:
-        # Clean up the temporary file if it still exists.
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
 
 
 def _natural_sort_key(filepath: str) -> list:
@@ -290,6 +249,9 @@ def get_quant_config(
         if (
             model_config.quantization == "modelopt_mixed"
             and "quantized_layers" not in hf_quant_config
+        ) or (
+            # Inkling2's per-tensor precisions are only in hf_quant_config.json.
+            model_config.quantization == "inkling2" and "model" not in hf_quant_config
         ):
             pass  # fall through to file-based loading below
         else:
@@ -632,6 +594,14 @@ def filter_duplicate_safetensors_files(
     if missing_files:
         raise FileNotFoundError(
             f"Weight files referenced in index but missing: {missing_files}"
+        )
+    dropped = set(hf_weights_files) - set(weight_files_in_index)
+    if any(os.path.basename(f) == SAFE_WEIGHTS_NAME for f in dropped):
+        logger.warning_once(
+            "Ignoring %s because it is not listed in %s. Other tools may load "
+            "it instead of the indexed shards.",
+            SAFE_WEIGHTS_NAME,
+            index_file,
         )
     # Take the files from the index, which may list some in a subdirectory.
     return weight_files_in_index
@@ -1022,12 +992,14 @@ def _prefetch_all_checkpoints(
         raise ValueError("safetensors prefetch block size must be >= 1")
 
     if torch.distributed.is_initialized():
-        rank = torch.distributed.get_rank()
-        world_size = torch.distributed.get_world_size()
+        # The page cache is per node and every rank reads every file, so split
+        # the files among the ranks of each node rather than across all ranks.
+        world = get_world_group()
+        local_world_size = max(world.world_size // get_node_count(), 1)
+        local_rank = world.local_rank % local_world_size
     else:
-        rank = 0
-        world_size = 1
-    paths_to_prefetch = sorted_files[rank::world_size]
+        local_rank, local_world_size = 0, 1
+    paths_to_prefetch = sorted_files[local_rank::local_world_size]
     total_for_rank = len(paths_to_prefetch)
 
     async def _prefetch_all() -> None:
@@ -1373,8 +1345,10 @@ def fastsafetensors_weights_iterator(
 
 
 _ENGRAM_WEIGHT_RE = re.compile(
-    r"(?:^|\.)(?:engram\.embed\.(?:weight|scale)|"
-    r"ple\.ple_embedding\.ngram_embedding\.shard_[0-9]+\.weight)$"
+    r"(?:^|\.)(?:engram\.embed\.(?:weight|scale)|"  # DeepSeek-V4.1
+    r"engram(?:_layer)?\.multi_head_embedding\."  # HY4 Flash
+    r"embedding\.weight(?:_scale_inv)?|"  # HY4 Flash
+    r"ple\.ple_embedding\.ngram_embedding\.shard_[0-9]+\.weight)$"  # Qwen4 Exp
 )
 
 

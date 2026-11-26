@@ -141,6 +141,24 @@ async def test_generate_rejects_min_tokens_above_filled_max_tokens(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [["--override-generation-config", '{"max_new_tokens": 8}']],
+    indirect=True,
+)
+async def test_generate_rejects_min_tokens_above_server_cap(client):
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"min_tokens": 10},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400
+    assert "min_tokens" in resp.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
     reason="sampling mask output is not supported by the Rust frontend",
@@ -219,6 +237,29 @@ async def test_generate_defaults_max_tokens_when_omitted(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server",
+    [["--override-generation-config", '{"max_new_tokens": 8}']],
+    indirect=True,
+)
+async def test_generate_explicit_null_max_tokens_respects_server_cap(client):
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {
+            "max_tokens": None,
+            "temperature": 0.0,
+            "ignore_eos": True,
+        },
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    data = resp.json()
+    assert len(data["choices"][0]["token_ids"]) == 8
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(
     envs.VLLM_USE_RUST_FRONTEND,
     reason="parallel sampling (n > 1) is not supported by the Rust frontend",
@@ -291,6 +332,33 @@ async def test_generate_stream(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("server", [["--enable-force-include-usage"]], indirect=True)
+async def test_generate_stream_force_include_usage(client):
+    """`--enable-force-include-usage` adds usage without `stream_options`."""
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 5, "temperature": 0.0},
+        "stream": True,
+    }
+    async with client.stream("POST", GEN_ENDPOINT, json=payload) as resp:
+        resp.raise_for_status()
+        chunks = [
+            json.loads(line[len("data: ") :])
+            async for line in resp.aiter_lines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+
+    assert all(chunk.get("usage") is not None for chunk in chunks)
+    usage_chunk = chunks[-1]
+    assert usage_chunk["choices"] == []
+    num_tokens = sum(len(chunk["choices"][0]["token_ids"]) for chunk in chunks[:-1])
+    assert usage_chunk["usage"]["prompt_tokens"] == 3
+    assert usage_chunk["usage"]["completion_tokens"] == num_tokens
+    assert usage_chunk["usage"]["total_tokens"] == 3 + num_tokens
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("logprobs_value", [0, 1, 5])
 async def test_generate_logprobs(client, logprobs_value):
     payload = {
@@ -305,6 +373,10 @@ async def test_generate_logprobs(client, logprobs_value):
     }
     resp = await client.post(GEN_ENDPOINT, json=payload)
     resp.raise_for_status()
+    # Rendered from the engine rows and sent in parts, with a length.
+    assert resp.headers["content-type"] == "application/json"
+    assert resp.headers["content-length"] == str(len(resp.content))
+    assert "transfer-encoding" not in resp.headers
     data = resp.json()
     choice = data["choices"][0]
     assert choice["logprobs"] is not None
@@ -486,10 +558,12 @@ async def test_stop_string_workflow(client, tokenizer, messages):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("server", [["--tokens-only"]], indirect=True)
-async def test_stop_strings_rejected_when_tokens_only(client):
-    """--tokens-only forces detokenize=False after request validation, so
-    stop strings must be rejected explicitly rather than silently ignored."""
+@pytest.mark.parametrize(
+    "server", [["--tokens-only"], ["--skip-tokenizer-init"]], indirect=True
+)
+async def test_stop_strings_rejected_without_tokenizer(client):
+    """A server without a tokenizer (or with detokenization forced off) must
+    reject stop strings explicitly rather than silently ignore them."""
     sampling_params = {"max_tokens": 5, "stop": ["never"]}
     payload = {
         "model": MODEL_NAME,

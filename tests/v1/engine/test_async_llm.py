@@ -9,6 +9,7 @@ from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import replace
 from http import HTTPStatus
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
@@ -33,7 +34,10 @@ from vllm.exceptions import (
 from vllm.inputs import PromptType
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.platforms import current_platform
-from vllm.profiler.wrapper import WorkerProfiler
+from vllm.profiler.wrapper import (
+    _DEFAULT_TORCH_PROFILER_ACTIVITIES,
+    WorkerProfiler,
+)
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -44,8 +48,12 @@ from vllm.v1.metrics.loggers import (
     PrometheusStatLogger,
 )
 
-if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
+if not (current_platform.is_cuda() or current_platform.is_xpu()):
+    pytest.skip(
+        reason="V1 currently only supported on CUDA/XPU.", allow_module_level=True
+    )
+
+DEVICE_ACTIVITY = _DEFAULT_TORCH_PROFILER_ACTIVITIES[current_platform.device_type][-1]
 
 TEXT_ENGINE_ARGS = AsyncEngineArgs(
     model="meta-llama/Llama-3.2-1B-Instruct",
@@ -118,6 +126,26 @@ def _mock_vllm_config() -> MagicMock:
     return vllm_config
 
 
+def test_tracing_collects_stats_without_stat_loggers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Tracing needs request stats, but disabled stat logging keeps the console
+    and Prometheus stat loggers off."""
+    vllm_config = _mock_vllm_config()
+    vllm_config.observability_config.otlp_traces_endpoint = "localhost:4317"
+    vllm_config.profiler_config.should_profile_frontend = False
+    _mock_async_llm_dependencies(monkeypatch)
+    monkeypatch.setattr(async_llm_module, "init_tracer", MagicMock())
+
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+
+    assert engine.logger_manager is None
+    output_processor = cast(MagicMock, async_llm_module.OutputProcessor)
+    assert output_processor.call_args.kwargs["collect_stats"]
+    make_client = async_llm_module.EngineCoreClient.make_async_mp_client
+    assert make_client.call_args.kwargs["collect_stats"]
+
+
 @pytest.mark.parametrize("method", ["generate", "encode"])
 def test_retryable_request_error_reaches_caller(
     monkeypatch: pytest.MonkeyPatch, method: str
@@ -170,7 +198,7 @@ def test_cuda_only_torch_profiler_skips_frontend_cpu_trace(
     vllm_config = _mock_vllm_config()
     vllm_config.profiler_config.profiler = "torch"
     vllm_config.profiler_config.ignore_frontend = False
-    vllm_config.profiler_config.torch_profiler_activities = ["CUDA"]
+    vllm_config.profiler_config.torch_profiler_activities = [DEVICE_ACTIVITY]
     vllm_config.profiler_config.should_profile_frontend = False
     _mock_async_llm_dependencies(monkeypatch)
     profiler = MagicMock()
@@ -434,7 +462,7 @@ def test_frontend_profiler_ignores_worker_iteration_bounds(
     vllm_config.profiler_config = ProfilerConfig(
         profiler="torch",
         torch_profiler_dir=str(tmp_path),
-        torch_profiler_activities=["CPU", "CUDA"],
+        torch_profiler_activities=["CPU", DEVICE_ACTIVITY],
         delay_iterations=5,
         max_iterations=2,
         wait_iterations=3,
@@ -879,13 +907,13 @@ async def test_mid_stream_cancellation(
 class MockLoggingStatLogger(LoggingStatLogger):
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         super().__init__(vllm_config, engine_index)
-        self.log = MagicMock()
+        self.log: MagicMock = MagicMock()
 
 
 class MockAggregatedStatLogger(AggregatedLoggingStatLogger):
     def __init__(self, vllm_config: VllmConfig, engine_indexes: list[int]):
         super().__init__(vllm_config, engine_indexes)
-        self.log = MagicMock()
+        self.log: MagicMock = MagicMock()
 
 
 @pytest.mark.asyncio
@@ -904,7 +932,9 @@ async def test_customize_loggers(monkeypatch):
 
         await engine.do_log_stats()
 
-        stat_loggers = engine.logger_manager.stat_loggers
+        logger_manager = engine.logger_manager
+        assert logger_manager is not None
+        stat_loggers: Any = logger_manager.stat_loggers
         assert (
             len(stat_loggers) == 3
         )  # MockLoggingStatLogger + LoggingStatLogger +  Promethus Logger
@@ -931,7 +961,9 @@ async def test_customize_aggregated_loggers():
 
         await engine.do_log_stats()
 
-        stat_loggers = engine.logger_manager.stat_loggers
+        logger_manager = engine.logger_manager
+        assert logger_manager is not None
+        stat_loggers: Any = logger_manager.stat_loggers
         assert len(stat_loggers) == 4
         #  MockLoggingStatLogger + MockAggregatedStatLogger
         # + LoggingStatLogger + PrometheusStatLogger
@@ -1083,6 +1115,10 @@ async def test_abort_final_output(output_kind: RequestOutputKind):
             engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
 
+        # Warm up so cold-start latency doesn't make the abort land before
+        # any token is generated.
+        await _generate(engine, "test-abort-final-output-warmup")
+
         request_id = "test-abort-final-output"
 
         # Start a long-running request
@@ -1118,6 +1154,7 @@ async def test_abort_final_output(output_kind: RequestOutputKind):
 
         # Verify num_cached_tokens is set correctly
         assert hasattr(final_output, "num_cached_tokens")
+        assert final_output.num_cached_tokens is not None
         assert final_output.num_cached_tokens >= 0
 
         # If we got intermediate outputs, verify they are consistent

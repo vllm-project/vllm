@@ -26,12 +26,16 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.linear import (
+    LinearBase,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
@@ -73,6 +77,7 @@ from vllm.transformers_utils.configs.muse_spark import (
     MuseSparkTextConfig,
 )
 
+from .decode_moe import MuseSparkDecodeMoE
 from .mono import MuseSparkMono, maybe_attach_mono
 from .muse_moe_runner import (
     MuseMoERunner,
@@ -103,6 +108,25 @@ def _supports_router_bf16x3_device() -> bool:
 
     # Tile tables exist for CDNA3 (gfx942) and CDNA4 (gfx950).
     return get_cdna_version() in (3, 4)
+
+
+def _pooling_uses_default_gemm() -> bool:
+    # Importing a foreign platform can reload torch extension libraries.
+    from vllm.platforms.rocm import get_cdna_version
+
+    # FYI: AITER's gfx950 split-K rows are less exact than F.linear, within tolerance.
+    return get_cdna_version() in (3, 4)
+
+
+def _pooling_projection(
+    input_size: int, output_size: int, prefix: str
+) -> ReplicatedLinear:
+    layer = ReplicatedLinear(
+        input_size, output_size, bias=False, quant_config=None, prefix=prefix
+    )
+    if not _pooling_uses_default_gemm():
+        layer.quant_method = MuseSparkTorchLinearMethod()
+    return layer
 
 
 def token_sharded_stream_supported(vllm_config: VllmConfig) -> bool:
@@ -271,24 +295,12 @@ class MuseSparkMoE(nn.Module):
         )
 
         hidden_size = config.moe_hidden_size
-        # Plain F.linear: AITER's gfx950 tuned-GEMM table picks lossy split-K
-        # BF16-accumulating kernels for these shapes.
-        self.pooler: ReplicatedLinear | None = ReplicatedLinear(
-            config.hidden_size,
-            hidden_size,
-            bias=False,
-            quant_config=None,
-            prefix=f"{prefix}.pooler",
+        self.pooler: ReplicatedLinear | None = _pooling_projection(
+            config.hidden_size, hidden_size, f"{prefix}.pooler"
         )
-        self.pooler.quant_method = MuseSparkTorchLinearMethod()
-        self.unpooler: ReplicatedLinear | None = ReplicatedLinear(
-            hidden_size,
-            config.hidden_size,
-            bias=False,
-            quant_config=None,
-            prefix=f"{prefix}.unpooler",
+        self.unpooler: ReplicatedLinear | None = _pooling_projection(
+            hidden_size, config.hidden_size, f"{prefix}.unpooler"
         )
-        self.unpooler.quant_method = MuseSparkTorchLinearMethod()
 
         if self.pooler is not None:
             self.pre_expert_norm: MuseSparkRMSNorm | None = MuseSparkRMSNorm(
@@ -336,6 +348,7 @@ class MuseSparkMoE(nn.Module):
             moe_config_cls=MuseSparkMoEConfig,
             reduce_results=not self.defer_reduce,
         )
+        self.decode_moe = MuseSparkDecodeMoE.create(self)
 
     def _load_router_weight(
         self, param: nn.Parameter, loaded_weight: torch.Tensor
@@ -365,7 +378,9 @@ class MuseSparkMoE(nn.Module):
             else:
                 self._router_planes.copy_(planes)
 
-    def _router_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _router_logits(
+        self, hidden_states: torch.Tensor, reduce_splits: bool = True
+    ) -> torch.Tensor:
         planes = getattr(self, "_router_planes", None)
         if (
             planes is not None
@@ -373,7 +388,7 @@ class MuseSparkMoE(nn.Module):
             and hidden_states.dtype == torch.bfloat16
             and hidden_states.is_contiguous()
         ):
-            return router_bf16x3_gemm(hidden_states, planes)
+            return router_bf16x3_gemm(hidden_states, planes, reduce_splits)
         router_logits, _ = self.router(hidden_states)
         return router_logits
 
@@ -414,6 +429,12 @@ class MuseSparkMoE(nn.Module):
         self, hidden_states: torch.Tensor, shard: TokenShard | None = None
     ) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
+        if self.decode_moe is not None:
+            kernels = self.decode_moe.kernels(
+                self, num_tokens if shard is None else shard.num_tokens
+            )
+            if kernels is not None:
+                return self.decode_moe(self, hidden_states, kernels, shard)
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
@@ -977,6 +998,23 @@ class MuseSparkDecoderLayer(nn.Module):
         )
 
 
+def _reject_online_quantized_linears(model: nn.Module) -> None:
+    """Online quantization of a BF16 checkpoint may only target the routed
+    experts."""
+    linears = [
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, LinearBase)
+        and not isinstance(module.quant_method, UnquantizedLinearMethod)
+    ]
+    if linears:
+        raise NotImplementedError(
+            "Muse Spark on ROCm supports online quantization of BF16 "
+            "checkpoints only on the routed experts; it also matched "
+            f"{len(linears)} linear layers, e.g. {linears[0]}."
+        )
+
+
 def _drop_gate_up_stacking(base: WeightsMapper) -> WeightsMapper:
     """Keep Quark's per-expert gate/up names unstacked for `RoutedExperts`."""
     return WeightsMapper(
@@ -1145,8 +1183,12 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
     decoder_layer_cls = MuseSparkDecoderLayer
     supported_quantization_configs: tuple[type[QuantizationConfig], ...] = (
         QuarkConfig,
+        OnlineQuantizationConfig,
     )
-    supported_quantization_description = "Quark W8A8 FP8 or OCP-MXFP4 W4A4"
+    supported_quantization_description = (
+        "Quark W8A8 FP8 or OCP-MXFP4 W4A4, or online quantization (routed "
+        "experts: W4A4 'mxfp4')"
+    )
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -1182,6 +1224,8 @@ class MuseSparkForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             layer_type = self.decoder_layer_cls
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
+        if isinstance(vllm_config.quant_config, OnlineQuantizationConfig):
+            _reject_online_quantized_linears(self)
         self.vllm_config = vllm_config
 
         # qkv_proj fuses Q+K+V+OG, so LoRA must treat it as one module.
