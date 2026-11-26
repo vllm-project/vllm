@@ -10,7 +10,6 @@ committed state. See ops/kda_replayssm.cu.
 
 import functools
 import math
-import os
 from pathlib import Path
 from typing import NamedTuple
 
@@ -104,24 +103,16 @@ def check_supported(
 
 @functools.cache
 def _module():
-    import tvm_ffi.cpp
+    from flashinfer.jit.core import gen_jit_spec
 
-    arch_list = os.environ.get("TVM_FFI_CUDA_ARCH_LIST")
-    os.environ["TVM_FFI_CUDA_ARCH_LIST"] = "9.0a 10.0a 10.3a"
-    try:
-        return tvm_ffi.cpp.load(
-            "glm5next_kda_replayssm",
-            cuda_files=[
-                str(_OPS / "kda_replayssm.cu"),
-                str(_OPS / "kda_replayssm_binding.cu"),
-            ],
-            extra_cuda_cflags=["-O3", "-lineinfo", "--expt-relaxed-constexpr"],
-        )
-    finally:
-        if arch_list is None:
-            del os.environ["TVM_FFI_CUDA_ARCH_LIST"]
-        else:
-            os.environ["TVM_FFI_CUDA_ARCH_LIST"] = arch_list
+    spec = gen_jit_spec(
+        "glm5next_kda_replayssm",
+        [_OPS / "kda_replayssm.cu", _OPS / "kda_replayssm_binding.cu"],
+        extra_cuda_cflags=["-lineinfo"]
+        + [f"-gencode=arch=compute_{a},code=sm_{a}" for a in ("90a", "100a", "103a")],
+        use_fast_math=False,
+    )
+    return spec.build_and_load()
 
 
 def kda_replayssm_step(
