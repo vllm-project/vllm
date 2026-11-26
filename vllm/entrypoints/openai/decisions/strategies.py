@@ -7,28 +7,41 @@ Only models in READ_STRATEGIES are currently supported.
 
 import asyncio
 import hashlib
+import itertools
 import json
 import math
 import random
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property, partial
-from typing import Any, ClassVar, TypeVar
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 import numpy as np
+import regex as re
 import torch
 from PIL import Image
+from transformers.utils import cached_file
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.label_reads import next_token_label_reads
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
+from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, tokens_input
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.models.nemotron_packed_layout import (
+    MAX_KEY_ROWS,
+    SEGMENT_LENGTHS,
+    STATE_END_TOKEN_ID,
+    key_rows,
+    packed_read,
+    state_end_token_id,
+)
 from vllm.multimodal.media import (
     MEDIA_CONNECTOR_REGISTRY,
     ImageMediaIO,
@@ -45,6 +58,7 @@ from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
+from vllm.utils.async_utils import make_async
 from vllm.utils.math_utils import round_up
 from vllm.v1.core.sched.prefix_lm_scheduler import PREFIX_LM_LEN, prefix_lm_salt
 
@@ -58,6 +72,9 @@ from .question_types import (
 )
 
 _M = TypeVar("_M")
+
+if TYPE_CHECKING:
+    from transformers.decision import Question as CheckpointQuestion
 
 logger = init_logger(__name__)
 
@@ -1461,6 +1478,559 @@ class D3Strategy(ReadStrategy):
         return reads
 
 
+def _nemotron_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False)
+
+
+class NemotronDecisionPrompt:
+    """One prompt per question: `decision_template.jinja` around a JSON object
+    holding the state, the question and its coded options, ending in the mask
+    token whose position is read. `decision.json` names the codes of each
+    question type.
+
+    A checkpoint whose `config.json` has `state_end_token_id` closes the state
+    with that token, written right after the state value, as the checkpoint's
+    reference prompt builder writes it. A packed read shares the tokens
+    through that token, and only such a prompt can be read packed. Without the
+    key the prompt is the plain JSON object."""
+
+    NOUL_OPTIONS = ["false", "true"]
+    NOUL_MEANINGS = {
+        "false": "No, the condition does not hold.",
+        "true": "Yes, the condition holds.",
+    }
+    #: A tokenizer call holds the encodings of all its prompts at once, so it
+    #: takes this much text or one prompt.
+    BATCH_CHARS = 1 << 20
+    #: A JSON string, and an escape inside one.
+    _STRING = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"', re.S)
+    _ESCAPE = re.compile(r"\\(?:u[0-9a-fA-F]{4}|.)", re.S)
+
+    def __init__(self, model_config: ModelConfig, tokenizer: TokenizerLike):
+        hf_config = model_config.hf_config
+        location = {
+            "revision": getattr(hf_config, "_commit_hash", None)
+            or model_config.revision,
+            "token": model_config.hf_token,
+        }
+
+        def read(name: str) -> str:
+            path = cached_file(model_config.model, name, **location)
+            return Path(path).read_text()
+
+        # Transformers has the decision helpers from 5.23.0. They are imported
+        # here, so that this module loads with an older Transformers too.
+        from transformers.decision import Question as CheckpointQuestion
+        from transformers.decision import label_token_ids
+
+        self._checkpoint_question = CheckpointQuestion
+        config = json.loads(read("decision.json"))
+        if config["noul_options"] != self.NOUL_OPTIONS:
+            raise ValueError("NemotronForDecision codes false before true")
+        self.template = read("decision_template.jinja")
+        self.tokenizer = tokenizer
+        self.mask_token_id: int = hf_config.mask_token_id
+        #: Whether the questions of a request share one read.
+        self.packed = packed_read(hf_config)
+        #: The token that closes the state, and its id; None without one.
+        self.state_end = self._state_end_token(hf_config)
+        self.max_questions: int = config["max_questions"]
+        self.max_input_tokens: int = config["max_input_tokens"]
+        self.temperature: dict[str, float] = config.get("temperature", {})
+        # A read returns the logprobs of at most MAX_LOGPROB_TOKEN_IDS codes.
+        self.labels: dict[str, list[str]] = {
+            kind: labels[:MAX_LOGPROB_TOKEN_IDS]
+            for kind, labels in config["labels"].items()
+        }
+        self.codes = {
+            kind: label_token_ids(tokenizer, tuple(labels))
+            for kind, labels in self.labels.items()
+        }
+        # `sanitize_control_tokens` reads an added token of the user's text as
+        # text and drops the private-use markers it wraps such a token in.
+        added = sorted(tokenizer.get_added_vocab(), key=len, reverse=True)
+        self.controls = re.compile("|".join(map(re.escape, added)) or "(?!)")
+        self.markers = re.compile("[\U000f0000-\U000ffffd]")
+        # As much of a text as an added token that ends in the next text takes.
+        self.overlap = max(map(len, added), default=1) - 1
+        if self.state_end:
+            # The template must leave the state-end token to the prompt built
+            # here: a prompt holds it once, where the state ends.
+            probe = self._checkpoint_question(
+                "",
+                "noul",
+                "",
+                self.NOUL_OPTIONS,
+                self.labels["noul"][:2],
+                list(self.NOUL_MEANINGS.values()),
+            )
+            self._closed_state_token_ids("null", [probe])
+
+    def _state_end_token(self, hf_config: Any) -> tuple[str, int] | None:
+        """The token the prompt writes right after the state value, and its
+        id: the checkpoint's `state_end_token_id`. None without the key."""
+        token_id = state_end_token_id(hf_config)
+        if token_id is None:
+            return None
+        tokens = {i: token for token, i in self.tokenizer.get_added_vocab().items()}
+        if token_id not in tokens or token_id == self.mask_token_id:
+            raise ValueError(
+                f"{STATE_END_TOKEN_ID} {token_id} has to be an added token of the "
+                "checkpoint's tokenizer, and not its mask token"
+            )
+        return tokens[token_id], token_id
+
+    def _plain(self, text: str) -> str:
+        """JSON text of the same value in which no string holds an added
+        token: the first character of each is written as a \\uXXXX escape,
+        as the checkpoint's reference prompt builder writes it. The tokenizer then
+        reads the user's text as text."""
+        if self.controls.search(text) is None:
+            return text
+        return self._STRING.sub(lambda m: f'"{self._plain_string(m.group(1))}"', text)
+
+    def _plain_string(self, text: str) -> str:
+        while True:
+            # An added token that starts inside an escape stays as it is.
+            escapes = self._ESCAPE.finditer(text)
+            escape = next(escapes, None)
+            out: list[str] = []
+            last = pos = 0
+            while (m := self.controls.search(text, pos)) is not None:
+                start = m.start()
+                while escape is not None and escape.end() <= start:
+                    escape = next(escapes, None)
+                if escape is not None and escape.start() <= start:
+                    pos = start + 1
+                    continue
+                out += [
+                    text[last:start],
+                    f"\\u{ord(text[start]):04x}",
+                    text[start + 1 : m.end()],
+                ]
+                last = pos = m.end()
+            if not out:
+                return text
+            text = "".join(out) + text[last:]
+
+    @staticmethod
+    def from_decisions(question: Question) -> tuple[str, Any]:
+        """The type and criteria of a /v1/decisions choice or score, which
+        arrives as the labelled choice `adapters.make_read_question` builds: a
+        choice with JSON-encoded values, a score with its level labels. The
+        model then reads what it reads for the same question on /v1/systemone.
+        A predicate arrives as the noul question it is there.
+
+        A score whose level labels are distinct and each `true`, `false` or a
+        double-quoted JSON string arrives as the choice between those values
+        does, and is read as that choice."""
+        options = question.options
+        encoded = [o.name for o in options]
+        try:
+            values = [json.loads(name) for name in encoded]
+        except (ValueError, RecursionError):
+            values = []
+        # A choice has distinct values, each a string or a boolean.
+        if (
+            values
+            and len(set(encoded)) == len(encoded)
+            and all(
+                isinstance(value, (str, bool)) and _nemotron_dumps(value) == name
+                for value, name in zip(values, encoded)
+            )
+        ):
+            names = [
+                value if isinstance(value, str) else name
+                for value, name in zip(values, encoded)
+            ]
+            if len(set(names)) != len(names):
+                # Keep true and "true" apart.
+                names = encoded
+            return "choice", {
+                name: o.description or None for name, o in zip(names, options)
+            }
+        return "score", [
+            f"{o.name}: {o.description}" if o.description else o.name for o in options
+        ]
+
+    def checkpoint_question(self, question: Question) -> "CheckpointQuestion":
+        """The question with the options, codes and meanings the model reads."""
+        if question.raw is None:
+            instructions = question.instructions
+            kind, criteria = self.from_decisions(question)
+        else:
+            kind = question.type.name
+            instructions, criteria = question.raw
+        if kind == "noul":
+            options = self.NOUL_OPTIONS
+            meanings = [
+                (criteria or {}).get(option, self.NOUL_MEANINGS[option])
+                for option in options
+            ]
+        elif kind == "choice":
+            options, meanings = list(criteria), list(criteria.values())
+        else:
+            options, meanings = [str(i) for i in range(len(criteria))], list(criteria)
+        labels = self.labels[kind]
+        if len(options) > len(labels):
+            raise StructuredDecisionError(
+                f"question {question.id!r}: at most {len(labels)} options for "
+                "this model"
+            )
+        return self._checkpoint_question(
+            question.id, kind, instructions, options, labels[: len(options)], meanings
+        )
+
+    @staticmethod
+    def _contents(state: str, questions: list["CheckpointQuestion"]) -> list[str]:
+        """What every question's content starts with, then the rest of each."""
+        rests = []
+        for question in questions:
+            options = [
+                {"code": code, "label": option, "meaning": meaning}
+                for code, option, meaning in zip(
+                    question.labels, question.options, question.descriptions
+                )
+            ]
+            rests.append(
+                f', "question": {_nemotron_dumps(question.instructions)}, '
+                f'"options": {_nemotron_dumps(options)}}}'
+            )
+        return [f'{{"state": {state}', *rests]
+
+    def _has_control(self, text: str) -> bool:
+        return bool(self.controls.search(text) or self.markers.search(text))
+
+    def _checked(self, ids: list[int]) -> list[int]:
+        if ids[-1:] != [self.mask_token_id] or ids.count(self.mask_token_id) != 1:
+            raise ValueError("decision_template.jinja must end in its only mask token")
+        return ids
+
+    def _render(self, content: str) -> str:
+        text = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": ""}],
+            chat_template=self.template,
+            decision_content=content,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        assert isinstance(text, str)
+        return text
+
+    def token_ids(self, state: str, question: "CheckpointQuestion") -> list[int]:
+        """The prompt of one question. `state` is the state as JSON text."""
+        if self.state_end:
+            return self._closed_state_token_ids(state, [question])[0][0]
+        ids = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": ""}],
+            chat_template=self.template,
+            decision_content="".join(self._contents(state, [question])),
+            sanitize_control_tokens=True,
+            tokenize=True,
+            return_dict=False,
+            add_generation_prompt=False,
+        )
+        assert isinstance(ids, list)
+        return self._checked(ids)
+
+    def batch_token_ids(
+        self, state: str, questions: list["CheckpointQuestion"]
+    ) -> tuple[list[list[int]], int]:
+        """The prompt of each question, and the number of tokens a packed read
+        shares: those through the state-end token, or 0 when each question is
+        read on its own."""
+        if self.state_end:
+            return self._closed_state_token_ids(state, questions)
+        # The plain JSON prompt has no state-end token and is never packed.
+        shared, *rests = self._contents(state, questions)
+        # The state is searched once, and each question with the end of the
+        # state, where a token it ends could start.
+        seam = shared[len(shared) - self.overlap :]
+        if (
+            len(rests) < 2
+            or self._has_control(shared)
+            or any(self._has_control(seam + rest) for rest in rests)
+        ):
+            return [self.token_ids(state, q) for q in questions], 0
+        texts = [self._render(shared + rest) for rest in rests]
+        prompts: list[list[int]] = []
+        for batch in self._batches(texts):
+            prompts += [self._checked(list(ids)) for ids in batch["input_ids"]]
+        return prompts, 0
+
+    def _batches(self, texts: list[str]) -> Iterator[Any]:
+        """The tokenizer's encodings of `texts`, `BATCH_CHARS` or one prompt a
+        call."""
+        start = size = 0
+        for end, text in enumerate(texts, 1):
+            size += len(text)
+            if size >= self.BATCH_CHARS or end == len(texts):
+                yield self.tokenizer(texts[start:end], add_special_tokens=False)
+                start, size = end, 0
+
+    def _closed_state_token_ids(
+        self, state: str, questions: list["CheckpointQuestion"]
+    ) -> tuple[list[list[int]], int]:
+        """The prompts whose state a token closes, and the number of tokens
+        through that token, which a packed read shares: the state attends to
+        nothing after it. 0 when each question is read on its own."""
+        assert self.state_end is not None
+        token, token_id = self.state_end
+        shared, *rests = self._contents(state, questions)
+        # The user's text holds no added token, so the only state-end token of
+        # a prompt is the one written here.
+        shared = self._plain(shared) + token
+        texts = [self._render(shared + self._plain(rest)) for rest in rests]
+        prompts: list[list[int]] = []
+        for batch in self._batches(texts):
+            prompts += [self._checked(list(ids)) for ids in batch["input_ids"]]
+        first = prompts[0]
+        cut = first.index(token_id) + 1 if token_id in first else 0
+        if not cut or any(
+            ids.count(token_id) != 1 or ids[:cut] != first[:cut] for ids in prompts
+        ):
+            raise ValueError(
+                "The state-end token has to close the state once in every prompt, "
+                "so decision_template.jinja must not write it"
+            )
+        return prompts, cut if self.packed else 0
+
+
+class _SerializedState(str):
+    """A state `NemotronDecisionStrategy.render_state` has serialized."""
+
+    __slots__ = ()
+
+
+class NemotronDecisionStrategy(ReadStrategy):
+    """NemotronForDecision. Each question is one bidirectional forward over its
+    own prompt, read at the trailing mask token (the layout
+    `state_sees_own_question`). With packed reads (`state_sees_no_questions`,
+    see `nemotron_packed_layout`), the questions of a request share one
+    forward: the tokens through the state-end token are read once, without the
+    questions, then what is left of each question's prompt, read at its mask.
+    A request with one question has the same layout, so the state never
+    attends to a question. The checkpoint owns the prompt, the option codes
+    and the default layout."""
+
+    def __init__(self, context: ReadContext):
+        super().__init__(context)
+        engine_client = context.engine_client
+        model_config = engine_client.model_config
+        if getattr(model_config.hf_config, "is_causal", True):
+            raise ValueError("NemotronForDecision requires bidirectional reads")
+        renderer = context.online_renderer.renderer
+        # The prompt gives shared tokens only for a packed read, so only then
+        # does a request pack its questions.
+        self.prompt = NemotronDecisionPrompt(model_config, renderer.get_tokenizer())
+        # The renderer's pool has a tokenizer copy for each of its threads.
+        self._token_ids = make_async(self._prompts, executor=renderer._executor)
+        # A prompt runs in one step, because a chunk could not attend to the
+        # chunks after it. A longer prompt would wait in the queue forever.
+        scheduler = engine_client.vllm_config.scheduler_config
+        limits = [
+            (self.prompt.max_input_tokens, "the checkpoint's max_input_tokens"),
+            (scheduler.max_num_batched_tokens, "max_num_batched_tokens"),
+        ]
+        if scheduler.max_num_scheduled_tokens is not None:
+            limits.append(
+                (scheduler.max_num_scheduled_tokens, "max_num_scheduled_tokens")
+            )
+        self.max_prompt_tokens, self.max_prompt_tokens_name = min(limits)
+        # The engine takes prompts shorter than the context.
+        self.max_pack_tokens = min(
+            self.max_prompt_tokens, model_config.max_model_len - 1
+        )
+        # A packed read scores the codes of all but its last question at
+        # prompt rows, which take at most max_logprobs token ids.
+        self.max_row_codes = (
+            model_config.get_vocab_size()
+            if model_config.max_logprobs == -1
+            else model_config.max_logprobs
+        )
+
+    def limits(self) -> DecisionLimits:
+        return DecisionLimits(
+            max_questions=self.prompt.max_questions,
+            max_options=max(map(len, self.prompt.labels.values())),
+            labeled=False,
+        )
+
+    def render_state(self, state: Any) -> str:
+        try:
+            return _SerializedState(
+                json.dumps(state, ensure_ascii=False, allow_nan=False)
+            )
+        except ValueError as e:
+            raise StructuredDecisionError(f"state: {e}") from e
+
+    def _prompts(self, state: str, asked: list[Any]) -> tuple[list[list[int]], int]:
+        return self.prompt.batch_token_ids(state, asked)
+
+    def _packs(
+        self, prompts: list[list[int]], codes: Sequence[Sequence[int]], shared: int
+    ) -> list[list[int]]:
+        """The questions each engine request reads, in order: as many as fit
+        a step and `MAX_KEY_ROWS`, or one each when nothing is `shared`. Only
+        a read's last question can have more than `max_row_codes` options."""
+        if not shared:
+            return [[i] for i in range(len(prompts))]
+        packs: list[list[int]] = []
+        lengths: list[int] = []
+        for i, ids in enumerate(prompts):
+            rest = len(ids) - shared
+            if (
+                not packs
+                or sum(lengths) + rest > self.max_pack_tokens
+                or key_rows([*lengths, rest]) > MAX_KEY_ROWS
+                or len(codes[packs[-1][-1]]) > self.max_row_codes
+            ):
+                packs.append([])
+                lengths = [shared]
+            packs[-1].append(i)
+            lengths.append(rest)
+        return packs
+
+    def _packed_read(
+        self,
+        pack: list[int],
+        prompts: list[list[int]],
+        codes: Sequence[Sequence[int]],
+        shared: int,
+    ) -> tuple[list[int], SamplingParams, list[int]]:
+        """One prompt for the questions of `pack`: the `shared` tokens their
+        prompts start with, then the rest of each, which ends in its mask.
+
+        Returns the token ids, the params of the read and the mask position of
+        every question but the last. The last question's mask is the prompt's
+        last token, read as the next token; the codes of the others are scored
+        at the prompt row of their mask."""
+        rests = [prompts[i][shared:] for i in pack]
+        ids = prompts[pack[0]][:shared] + list(itertools.chain.from_iterable(rests))
+        masks = list(itertools.accumulate(map(len, rests), initial=shared - 1))[1:]
+        start = masks[0]
+        scored = np.full(
+            (masks[-1] - start, max(len(codes[i]) for i in pack[:-1])),
+            -1,
+            dtype=np.int64,
+        )
+        for mask, i in zip(masks, pack[:-1]):
+            scored[mask - start, : len(codes[i])] = codes[i]
+        params = SamplingParams(
+            max_tokens=1,
+            temperature=0.0,
+            logprob_token_ids=list(codes[pack[-1]]),
+            prompt_logprob_token_ids=scored,
+            prompt_logprob_start=start,
+            extra_args={SEGMENT_LENGTHS: [shared, *map(len, rests)]},
+        )
+        return ids, params, masks[:-1]
+
+    async def read(
+        self,
+        questions: list[Question],
+        instructions: str | None,
+        state: str,
+        *,
+        request_id: str,
+        chat_template_kwargs: dict[str, Any] | None,
+        lora_request: LoRARequest | None,
+        priority: int,
+        cache_salt: str | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        media: Mapping[str, Sequence[str]] | None = None,
+    ) -> list[QuestionRead]:
+        if instructions or chat_template_kwargs:
+            raise StructuredDecisionError(
+                "this model reads the checkpoint's own prompt, so it takes no "
+                "instructions or chat_template_kwargs"
+            )
+        # /v1/systemone renders the state with render_state. /v1/decisions
+        # passes its input text as it is. A copy of a rendered state (str(),
+        # a slice, an f-string) is a plain str and would be rendered again.
+        if not isinstance(state, _SerializedState):
+            state = self.render_state(state)
+        asked = [self.prompt.checkpoint_question(q) for q in questions]
+        try:
+            prompts, shared = await self._token_ids(state, asked)
+        except ValueError as e:
+            raise StructuredDecisionError(str(e)) from e
+        for q, ids in zip(asked, prompts):
+            if len(ids) > self.max_prompt_tokens:
+                raise StructuredDecisionError(
+                    f"question {q.name!r}: {len(ids)} prompt tokens exceed "
+                    f"{self.max_prompt_tokens_name}={self.max_prompt_tokens}; "
+                    "a prompt is read in one step and is not truncated"
+                )
+        codes = [self.prompt.codes[q.type][: len(q.options)] for q in asked]
+        packs = self._packs(prompts, codes, shared)
+        inputs: list[list[int]] = []
+        params: list[SamplingParams] = []
+        row_masks: list[list[int]] = []
+        for pack in packs:
+            if len(pack) > 1:
+                ids, sampling, masks = self._packed_read(pack, prompts, codes, shared)
+            else:
+                # Alone in its read, a question of a packed request keeps the
+                # layout: its answer does not depend on how questions group.
+                ids, masks = prompts[pack[0]], []
+                sampling = SamplingParams(
+                    max_tokens=1,
+                    temperature=0.0,
+                    logprob_token_ids=list(codes[pack[0]]),
+                    extra_args=(
+                        {SEGMENT_LENGTHS: [shared, len(ids) - shared]}
+                        if shared
+                        else None
+                    ),
+                )
+            inputs.append(ids)
+            params.append(sampling)
+            row_masks.append(masks)
+        label_reads = await next_token_label_reads(
+            self.context.engine_client,
+            [tokens_input(ids) for ids in inputs],
+            params,
+            request_id,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            priority=priority,
+        )
+        reads = []
+        for pack, ids, sampling, masks, read in zip(
+            packs, inputs, params, row_masks, label_reads
+        ):
+            output_tokens = len(read.result.outputs[0].token_ids)
+            scores = read.result.prompt_token_id_logprobs
+            if masks and scores is None:
+                raise GenerationError("A packed read returned no prompt row scores")
+            for k, i in enumerate(pack):
+                if k < len(masks):
+                    assert scores is not None and sampling.prompt_logprob_start
+                    row = masks[k] - sampling.prompt_logprob_start
+                    logprobs = scores[row, : len(codes[i])].tolist()
+                else:
+                    logprobs = read.logprobs
+                temperature = self.prompt.temperature.get(asked[i].type, 1.0)
+                probs = label_softmax([lp / temperature for lp in logprobs])
+                if questions[i].type.name == "noul":
+                    # The prompt lists false before true; a noul answers yes, no.
+                    probs.reverse()
+                reads.append(
+                    QuestionRead(
+                        probs=probs,
+                        # The codes are the question's whole answer space, as for
+                        # D3, so confidence is the chosen option's probability.
+                        label_mass=1.0,
+                        argmax_is_label=True,
+                        # Usage sits on the first question of a read.
+                        input_tokens=len(ids) if k == 0 else 0,
+                        output_tokens=output_tokens if k == 0 else 0,
+                    )
+                )
+        return reads
+
+
 class SlotLMStrategy(NextTokenStrategy):
     """Slot-readout models: one PrefixLM request per question on `slot_prompt`."""
 
@@ -1649,6 +2219,7 @@ READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
     "Qwen3_5ForSlotDecision": SlotLMStrategy,
     "Qwen3_5MoeForConditionalGeneration": NextTokenStrategy,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaCanvasStrategy,
+    "NemotronForDecision": NemotronDecisionStrategy,
 }
 
 

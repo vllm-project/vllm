@@ -55,7 +55,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backend import AttentionBackend, AttentionType
 
 from .adapters import as_embedding_model, as_seq_cls_model
 from .interfaces import (
@@ -136,6 +136,7 @@ class LlamaAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        attn_backend: type[AttentionBackend] | None = None,
     ) -> None:
         super().__init__()
         layer_idx = extract_layer_index(prefix)
@@ -219,6 +220,7 @@ class LlamaAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
+            attn_backend=attn_backend,
         )
 
     def forward(

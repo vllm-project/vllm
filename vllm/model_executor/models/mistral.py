@@ -24,7 +24,7 @@ from vllm.model_executor.models.llama import (
     LlamaModel,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backend import AttentionBackend, AttentionType
 
 from .utils import AutoWeightsLoader
 
@@ -88,6 +88,7 @@ class MistralAttention(LlamaAttention):
         cache_config: CacheConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        attn_backend: type[AttentionBackend] | None = None,
     ) -> None:
         super().__init__(
             config=config,
@@ -101,6 +102,7 @@ class MistralAttention(LlamaAttention):
             cache_config=cache_config,
             prefix=prefix,
             attn_type=attn_type,
+            attn_backend=attn_backend,
         )
 
         llama_4_scaling_config: dict[str, int | float | str] | None = getattr(
