@@ -34,7 +34,7 @@ _OPS = Path(__file__).parent / "ops"
 
 
 def ring_shapes(num_heads: int, head_dim: int) -> tuple[tuple[int, int, int], ...]:
-    """The u, k and g rings appended to the KDA state: `[H, R, D]` each."""
+    """The u, k and g rings in their own block: `[H, R, D]` each."""
     return ((num_heads, RING_LEN, head_dim),) * 3
 
 
@@ -69,7 +69,7 @@ def check_supported(
     num_heads: int,
     head_dim: int,
     conv_size: int,
-    state_dtypes: tuple[torch.dtype, ...],
+    state_dtypes: tuple[torch.dtype, torch.dtype],
     lower_bound: float | None,
     gate_projs: tuple[LinearBase, ...],
 ) -> None:
@@ -94,7 +94,7 @@ def check_supported(
         "the DS conv-state layout": is_conv_state_dim_first(),
         "a model dtype or cache dtypes other than bf16 / bf16 conv / fp32 state": (
             vllm_config.model_config.dtype,
-            *state_dtypes[:2],
+            *state_dtypes,
         )
         != (torch.bfloat16, torch.bfloat16, torch.float32),
         "GPUs other than SM90 / SM100 / SM103": current_platform.get_device_capability()
