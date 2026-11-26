@@ -329,7 +329,10 @@ def test_all_padding_batch_without_mrope():
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="NVIDIA DFly2 KV layout")
 @pytest.mark.parametrize("record", [528, 584])
 @pytest.mark.parametrize("large_offset", [False, True])
-def test_dsv41_context_excludes_rejected_and_inactive_tokens(record, large_offset):
+@pytest.mark.parametrize("replay", [False, True])
+def test_dsv41_context_excludes_rejected_and_inactive_tokens(
+    record, large_offset, replay
+):
     """Read accepted KV across pages, including byte offsets beyond int32.
 
     Scratch previously belonged to other requests. Invalid top-k, rejected
@@ -382,6 +385,10 @@ def test_dsv41_context_excludes_rejected_and_inactive_tokens(record, large_offse
         dtype=torch.int32,
     )
     rows = torch.tensor([99, 1, 2, 100], device=device)[1:]
+    replay_rows = None
+    if replay:
+        rows = torch.tensor([37, 108, 100], device=device)
+        replay_rows = torch.tensor([30, 37, 108], device=device)
     anchors = torch.tensor([18, 3, 16], device=device)
     active = torch.tensor([True, True, False], device=device)
     output = torch.full((3, 10, 512), 17, device=device, dtype=torch.bfloat16)
@@ -400,6 +407,7 @@ def test_dsv41_context_excludes_rejected_and_inactive_tokens(record, large_offse
             offset=offset,
             width=4,
             window=window,
+            replay_rows=replay_rows,
         )
     expected_positions = [
         [16, 31, 0, -1, 30, 31, 0, 1],

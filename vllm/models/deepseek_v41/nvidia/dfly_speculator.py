@@ -31,6 +31,7 @@ class DFlyTargetContext:
     def __init__(self, target, draft, config):
         self.draft = draft
         self.target_metadata = None
+        self.replay_layers = target.model.decoder_replay_layers
         self.sources = []
         self.indexers = []
         for kv_layer, index_layer in zip(
@@ -79,6 +80,12 @@ class DFlyTargetContext:
 
     def update_indices(self, active, source_rows, anchors, padded_batch):
         metadata = self.target_metadata
+        replay = self.replay_layers
+        replay_rows = (
+            replay.replay_batch.rows
+            if replay is not None and replay.replay_batch is not None
+            else None
+        )
         for layer, source, indexer in zip(
             self.draft.model.layers, self.sources, self.indexers
         ):
@@ -125,6 +132,7 @@ class DFlyTargetContext:
                     offset=offset,
                     width=width,
                     window=window,
+                    replay_rows=replay_rows,
                 )
             if batch < padded_batch:
                 kv[batch:].zero_()

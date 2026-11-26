@@ -49,6 +49,8 @@ def checkpoint_configs(tmp_path):
         hc_sinkhorn_iters=20,
         hc_eps=1e-6,
         sliding_window=128,
+        index_n_heads=32,
+        index_head_dim=128,
         index_topk=512,
         max_position_embeddings=1048576,
         rope_theta=10000,
@@ -137,6 +139,30 @@ def test_standalone_checkpoint_uses_draft_experts_and_normalized_target_hidden(
     assert spec.draft_model_config.get_num_layers(spec.draft_parallel_config) == 3
     assert not needs_mtp_hidden_buffer(spec)
     assert config.model_config.hf_config.n_routed_experts == 384
+
+
+@torch.inference_mode()
+def test_draft_decoder_replacement_leaves_no_target_attention_caches(
+    checkpoint_configs, dist_init
+):
+    from vllm.models.deepseek_v41.nvidia.dfly import DFlyModel
+
+    config = _engine_config(checkpoint_configs)
+    config = copy(config)
+    config.model_config = config.speculative_config.draft_model_config
+    with (
+        set_current_vllm_config(config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cuda"),
+    ):
+        model = DFlyModel(config, "dfly.model")
+    context = config.compilation_config.static_forward_context
+    for i, layer in enumerate(model.layers):
+        prefix = f"dfly.model.layers.{i}.attn"
+        assert not any(
+            name == prefix or name.startswith(f"{prefix}.") for name in context
+        )
+        assert layer.attn.context.kv.shape == (4, 646, 512)
 
 
 @pytest.mark.parametrize(

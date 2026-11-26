@@ -149,12 +149,7 @@ class DeepseekV41DFlySpeculatorConfig(DFlySpeculatorConfig):
 
     @classmethod
     def adapt_draft_model_config(cls, spec):
-        config = derive_dfly_config(
-            spec.draft_model_config.hf_config,
-            target_config=spec.target_model_config.hf_config,
-        )
-        spec.draft_model_config.hf_config = config
-        spec.update_arch_()
+        config = spec.draft_model_config.hf_config
         parallel = spec.target_parallel_config
         for field in (
             "pipeline_parallel_size",

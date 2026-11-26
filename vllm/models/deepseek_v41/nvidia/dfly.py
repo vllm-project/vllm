@@ -203,6 +203,28 @@ class DFlyAttention(DFlyMLA):
         )
 
 
+class DFlyDecoderLayer(DeepseekV4DecoderLayer):
+    def __init__(self, vllm_config: VllmConfig, prefix: str):
+        hf = vllm_config.model_config.hf_config
+        super().__init__(
+            vllm_config,
+            prefix,
+            topk_indices_buffer=torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                hf.index_topk,
+                dtype=torch.int32,
+            ),
+        )
+        attn_prefix = f"{prefix}.attn"
+        # The replacement reads target KV and owns no paged cache. Remove the
+        # parent attention's registrations before the runner discovers caches.
+        context = vllm_config.compilation_config.static_forward_context
+        for name in tuple(context):
+            if name == attn_prefix or name.startswith(f"{attn_prefix}."):
+                del context[name]
+        self.attn = DFlyAttention(vllm_config, attn_prefix)
+
+
 class DFlyAttentiveCorrection(DFlyMLA):
     def __init__(self, config: VllmConfig, prefix: str):
         super().__init__(config, prefix, correction=True)
@@ -314,7 +336,7 @@ class DFlyModel(nn.Module):
         self.embed_tokens = None
         self.layers = nn.ModuleList(
             [
-                DeepseekV4DecoderLayer(config, prefix=f"{prefix}.layers.{i}")
+                DFlyDecoderLayer(config, prefix=f"{prefix}.layers.{i}")
                 for i in range(hf.num_hidden_layers)
             ]
         )

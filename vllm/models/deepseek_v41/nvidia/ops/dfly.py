@@ -109,6 +109,7 @@ def gather_dfly_context(
     offset: int,
     width: int,
     window: bool,
+    replay_rows: torch.Tensor | None = None,
 ) -> None:
     """Gather top-k or the preceding SWA window into a request-local BF16 buffer.
 
@@ -125,6 +126,16 @@ def gather_dfly_context(
     assert offset + width <= indices.shape[1]
     batch = output.shape[0]
     assert batch <= block_table.shape[0]
+    if not window and replay_rows is not None:
+        # Decoder replay snapshots use compact rows; proposal inputs use the
+        # original target batch rows. Replay keeps rows in ascending order.
+        if replay_rows.numel():
+            rows = torch.searchsorted(replay_rows, source_rows).clamp_max(
+                replay_rows.numel() - 1
+            )
+            source_rows = torch.where(replay_rows[rows] == source_rows, rows, -1)
+        else:
+            source_rows = torch.full_like(source_rows, -1)
     _gather_context[(batch * width,)](
         cache,
         block_table,
