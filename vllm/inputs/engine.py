@@ -177,6 +177,7 @@ def mm_input(
         inputs["prompt"] = prompt
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
+
     return inputs
 
 
