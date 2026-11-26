@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3.1 DSpark drafter kernels (``vllm/models/minimax_m3/amd/mono/drafter``).
+"""MiniMax-M3.1 DSpark drafter kernels (`vllm/models/minimax_m3/amd/mono/drafter`).
 
 - Deployment checks that need no GPU: the kernels are built for 7 query rows a
   request at TP4 on gfx950, and any other deployment, or a ROCm install without
   FlyDSL, keeps the stock draft layers.
-- TP4 numerics on four gfx950 GPUs: ``DrafterRunner`` against the ops of the
+- TP4 numerics on four gfx950 GPUs: `DrafterRunner` against the ops of the
   stock draft layers (vLLM's MXFP8 linear, the Gemma norms,
   fused_minimax_m3_qknorm_rope_kv_insert, Triton unified attention non-causal
   within the query block over a 4096-key window, NCCL all-reduces) on random
@@ -48,7 +48,7 @@ def _gfx950(monkeypatch):
 
 
 def test_supported_deployment():
-    assert dispatch._config_refusal(_vllm_config()) is None
+    assert dispatch.config_refusal(_vllm_config()) is None
 
 
 @pytest.mark.parametrize(
@@ -62,23 +62,23 @@ def test_supported_deployment():
     ],
 )
 def test_other_deployments_keep_the_stock_layers(overrides):
-    assert dispatch._config_refusal(_vllm_config(**overrides)) is not None
+    assert dispatch.config_refusal(_vllm_config(**overrides)) is not None
 
 
 def test_no_speculative_config():
     config = _vllm_config()
     config.speculative_config = None
-    assert dispatch._config_refusal(config) is not None
+    assert dispatch.config_refusal(config) is not None
 
 
 def test_not_gfx950(monkeypatch):
     monkeypatch.setattr(dispatch, "on_gfx950", lambda: False)
-    assert dispatch._config_refusal(_vllm_config()) is not None
+    assert dispatch.config_refusal(_vllm_config()) is not None
 
 
 def test_no_flydsl(monkeypatch):
     monkeypatch.setattr(dispatch, "_flydsl_available", lambda: False)
-    assert dispatch._config_refusal(_vllm_config()) is not None
+    assert dispatch.config_refusal(_vllm_config()) is not None
 
 
 # ---------------------------------------------------------------- TP4 numerics

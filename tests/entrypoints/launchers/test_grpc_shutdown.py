@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shutdown sequencing of the gRPC launcher (``_drain_and_stop``)."""
+"""Shutdown sequencing of the gRPC launcher (`_drain_and_stop`)."""
 
 import asyncio
 import contextlib
@@ -16,7 +16,7 @@ from vllm.entrypoints.launchers import grpc_server  # noqa: E402
 
 
 class FakeAsyncLLM:
-    """``shutdown(timeout)`` blocks like EngineCore's drain mode: it returns
+    """`shutdown(timeout)` blocks like EngineCore's drain mode: it returns
     once no request is in flight, or counts as killed when the timeout passes
     first. Like EngineCore, it rejects a request it reads after shutdown has
     started, even one that was added before. Like AsyncLLM, it only counts a
@@ -101,7 +101,7 @@ async def call(port, method, arg=b""):
 
 
 async def shut_down(rpcs, shutdown_timeout):
-    """Start the RPCs, then time ``_drain_and_stop`` as SIGTERM would run it."""
+    """Start the RPCs, then time `_drain_and_stop` as SIGTERM would run it."""
     llm = FakeAsyncLLM()
     server, port, inflight = make_server(llm)
     await server.start()

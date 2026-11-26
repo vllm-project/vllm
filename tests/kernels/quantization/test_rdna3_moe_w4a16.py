@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for the ROCm RDNA3 fused MoE W4A16 HIP kernel (gfx1100).
 
-Tests ``moe_gptq_gemm_rdna3`` against the dense ``gptq_gemm_rdna3`` as
+Tests `moe_gptq_gemm_rdna3` against the dense `gptq_gemm_rdna3` as
 reference: builds RDNA3-format weights (shuffled int32, synthesized qzeros),
 runs the fused MoE kernel, and compares per-expert results.
 
@@ -100,8 +100,8 @@ def _make_qzeros(E, groups, N):
 
 
 def _make_ct_weights(E, N, K, group_size, dtype):
-    """Compressed-tensors canonical N-first layout: packed ``[E, N, K // 8]``
-    and scales ``[E, N, K // group_size]``, plus the dequantized weights."""
+    """Compressed-tensors canonical N-first layout: packed `[E, N, K // 8]`
+    and scales `[E, N, K // group_size]`, plus the dequantized weights."""
     q = torch.randint(0, 16, (E, N, K), dtype=torch.int32, device=device)
     s = torch.rand(E, N, K // group_size, dtype=dtype, device=device) * 0.1 + 0.01
     packed = pack_quantized_values_into_int32(q, scalar_types.uint4b8, packed_dim=2)

@@ -18,14 +18,31 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsW4A8Fp8,
 )
 from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+    HummingGroupedExperts,
+)
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
-from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
+    Nvfp4QuantizationEmulationTritonExperts,
+)
+from vllm.model_executor.layers.fused_moe.experts.rdna3_int4_int8_moe import (
+    Rdna3Int4Int8Experts,
+)
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+    TritonExperts,
+    TritonWNA16Experts,
+)
+from vllm.model_executor.layers.fused_moe.oracle import int_wna16 as int_wna16_oracle
+from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
+from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.oracle.base import make_moe_kernel
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
@@ -79,7 +96,17 @@ from vllm.model_executor.layers.fused_moe.oracle.w4a8_int8 import (
     map_w4a8_int8_backend,
     select_w4a8_int8_moe_backend,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kInt4Static
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kInt4Static,
+    kInt8Dynamic32Sym,
+    kInt8DynamicTokenSym,
+    kMxfp4Dynamic,
+    kNvfp4Dynamic,
+    kNvfp4Static,
+)
 from vllm.platforms import current_platform
 
 # oracle -> (select call, backend mapper, explicit runner backend, name used in
@@ -298,7 +325,10 @@ def test_return_or_raise(
             oracle.return_or_raise(
                 Int8MoeBackend.TRITON, available_backends, kernel_classes
             )
-        assert logger.info_once.call_args_list == []
+        assert not any(
+            logged.args[0].startswith("Using")
+            for logged in logger.debug_once.call_args_list
+        )
         return
 
     backend, kernel_class = oracle.return_or_raise(
@@ -306,7 +336,7 @@ def test_return_or_raise(
     )
     assert backend is Int8MoeBackend.TRITON
     assert kernel_class is kernel_classes[supported]
-    assert logger.info_once.call_args_list == [call(expected_log)]
+    assert logger.debug_once.call_args_list[-1] == call(expected_log)
 
 
 # oracle class -> a backend it maps to kernel classes for.
@@ -404,6 +434,57 @@ def test_explicit_moe_backend(oracle, unknown, monkeypatch):
     else:
         assert selected_backend is expected_backend
         assert selected_experts_class is not None
+
+
+@pytest.mark.parametrize(
+    ("use_aiter", "use_aiter_moe", "aiter_supported", "expected"),
+    [
+        pytest.param("1", None, False, Fp8MoeBackend.TRITON, id="global-falls-back"),
+        pytest.param("1", None, True, Fp8MoeBackend.AITER, id="global-prefers-aiter"),
+        pytest.param("1", "1", False, None, id="explicit-moe-raises"),
+        pytest.param("1", "0", True, Fp8MoeBackend.TRITON, id="moe-disabled"),
+        pytest.param("0", None, True, Fp8MoeBackend.TRITON, id="global-disabled"),
+    ],
+)
+@pytest.mark.usefixtures("default_vllm_config")
+def test_fp8_aiter_env_selection(
+    use_aiter, use_aiter_moe, aiter_supported, expected, monkeypatch
+):
+    """`VLLM_ROCM_USE_AITER=1` alone only prefers AITER FP8 MoE and falls back
+    when it cannot serve the layer; an explicit `VLLM_ROCM_USE_AITER_MOE=1`
+    still raises, and either flag set to 0 removes AITER."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_aiter)
+    if use_aiter_moe is None:
+        monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", use_aiter_moe)
+    monkeypatch.setattr(rocm_aiter_ops, "is_rdna_aiter_enabled", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.oracle.fp8._get_priority_backends",
+        lambda *_: [Fp8MoeBackend.AITER, Fp8MoeBackend.TRITON],
+    )
+    oracle = Fp8MoEKernelOracle(make_dummy_moe_config())
+    for backend, supported in [
+        (Fp8MoeBackend.AITER, aiter_supported),
+        (Fp8MoeBackend.TRITON, True),
+    ]:
+        for kernel_class in oracle.backend_to_kernel_cls(backend):
+            monkeypatch.setattr(
+                kernel_class,
+                "is_supported_config",
+                staticmethod(lambda *_, ok=supported: (ok, None if ok else "no")),
+            )
+
+    def select():
+        return select_fp8_moe_backend(
+            make_dummy_moe_config(), None, None, allow_vllm_cutlass=True
+        )
+
+    if expected is None:
+        with pytest.raises(ValueError, match="AITER"):
+            select()
+        return
+    assert select()[0] is expected
 
 
 _FORMAT = mk.FusedMoEActivationFormat
@@ -565,10 +646,10 @@ def test_make_moe_kernel_assembly(oracle, mismatched, batched, monkeypatch):
     assert experts_kwargs.get("max_num_tokens") == (64 if batched else None)
     assert experts_kwargs.get("num_dispatchers") == (3 if batched else None)
 
-    expected_logs = [call("Using %s", "SimpleNamespace")]
-    if experts_log is not None:
-        expected_logs.append(call(experts_log, experts_cls.__name__))
-    assert logger.info_once.call_args_list == expected_logs
+    assert logger.info_once.call_args_list == [call("Using %s", "SimpleNamespace")]
+    assert logger.debug_once.call_args_list == (
+        [call(experts_log, experts_cls.__name__)] if experts_log is not None else []
+    )
 
 
 def test_make_kernel_delegates() -> None:
@@ -596,3 +677,208 @@ def test_make_kernel_delegates() -> None:
         None,  # routing_tables default
     )
     assert built_kernel is sentinel_kernel
+
+
+@pytest.mark.parametrize(
+    ("strict", "expected"),
+    [(False, NvFp4MoeBackend.MARLIN), (True, NvFp4MoeBackend.EMULATION)],
+)
+def test_strict_quant_scheme_skips_activation_fallbacks(monkeypatch, strict, expected):
+    """Marlin runs NVFP4 W4A4 layers as W4A16. VLLM_STRICT_QUANT_SCHEME keeps the
+    backend priority order but skips such fallbacks; emulation honors W4A4."""
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", str(int(strict)))
+    kernels = {
+        NvFp4MoeBackend.MARLIN: MarlinExperts,
+        NvFp4MoeBackend.EMULATION: Nvfp4QuantizationEmulationTritonExperts,
+    }
+    for k_cls in kernels.values():
+        monkeypatch.setattr(
+            k_cls, "_supports_current_device", staticmethod(lambda: True)
+        )
+    monkeypatch.setattr(
+        nvfp4_oracle,
+        "backend_to_kernel_cls",
+        lambda backend: [kernels[backend]] if backend in kernels else [],
+    )
+
+    backend, experts_cls = select_nvfp4_moe_backend(
+        make_dummy_moe_config(hidden_dim=256, intermediate_size=256),
+        weight_key=kNvfp4Static,
+        activation_key=kNvfp4Dynamic,
+    )
+    assert (backend, experts_cls) == (expected, kernels[expected])
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_fp8_marlin_moe_runs_w8a8_as_w8a16_unless_strict(monkeypatch, strict):
+    """Marlin only runs unquantized activations, so the FP8 oracle must resolve
+    W8A8 layers to W8A16 for it rather than lose the Marlin fallback."""
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", str(int(strict)))
+    monkeypatch.setattr(
+        MarlinExperts, "_supports_current_device", staticmethod(lambda: True)
+    )
+    config = make_dummy_moe_config(hidden_dim=256, intermediate_size=256)
+    config.moe_backend = "marlin"
+
+    if strict:
+        with pytest.raises(ValueError, match="VLLM_STRICT_QUANT_SCHEME"):
+            select_fp8_moe_backend(config, kFp8Static128BlockSym, kFp8Dynamic128Sym)
+    else:
+        assert select_fp8_moe_backend(
+            config, kFp8Static128BlockSym, kFp8Dynamic128Sym
+        ) == (Fp8MoeBackend.MARLIN, MarlinExperts)
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_mxfp4_marlin_moe_runs_w4a4_as_w4a16_unless_strict(monkeypatch, strict):
+    """The MXFP4 oracle probes each backend with its own activation key, so it
+    must drop its BF16 fallback candidates itself under strict mode."""
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", str(int(strict)))
+    monkeypatch.setattr(
+        MarlinExperts, "_supports_current_device", staticmethod(lambda: True)
+    )
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    monkeypatch.setattr(
+        mxfp4_oracle, "_user_moe_activation_override_is_set", lambda: False
+    )
+    config = make_dummy_moe_config(hidden_dim=256, intermediate_size=256)
+    config.moe_backend = "marlin"
+
+    if strict:
+        with pytest.raises(ValueError, match="VLLM_STRICT_QUANT_SCHEME"):
+            mxfp4_oracle.select_mxfp4_moe_backend(config, kMxfp4Dynamic)
+    else:
+        assert mxfp4_oracle.select_mxfp4_moe_backend(config, kMxfp4Dynamic) == (
+            Mxfp4MoeBackend.MARLIN,
+            MarlinExperts,
+        )
+
+
+def test_rdna3_int4_int8_experts_check_the_activation_key():
+    """The int8-activation experts serve only a kInt8Dynamic32Sym request,
+    unlike their weight-only Triton WNA16 parent."""
+    assert Rdna3Int4Int8Experts._supports_quant_scheme(kInt4Static, kInt8Dynamic32Sym)
+    for key in (None, kInt8DynamicTokenSym, kFp8DynamicTokenSym):
+        executed = Rdna3Int4Int8Experts.executed_activation_key(kInt4Static, key)
+        assert not Rdna3Int4Int8Experts._supports_quant_scheme(kInt4Static, executed)
+    assert TritonWNA16Experts.executed_activation_key(kInt4Static, None) is None
+
+
+@pytest.mark.parametrize(
+    ("activation", "moe_backend", "int8_kernel_built", "strict", "expected"),
+    [
+        pytest.param(None, "auto", True, False, "TRITON", id="default-stays-16-bit"),
+        pytest.param(
+            "int8_per_group_32", "auto", True, False, "RDNA3_INT4_INT8", id="int8"
+        ),
+        pytest.param(
+            "int8_per_group_32", "auto", False, False, "TRITON", id="int8-fallback"
+        ),
+        pytest.param(
+            "int8_per_group_32",
+            "auto",
+            False,
+            True,
+            NotImplementedError,
+            id="int8-fallback-strict",
+        ),
+        pytest.param("fp8_per_token", "auto", True, False, "TRITON", id="fp8"),
+        pytest.param(
+            None, "rdna3_int4_int8", True, False, "RDNA3_INT4_INT8", id="explicit"
+        ),
+        pytest.param(
+            "fp8_per_token",
+            "rdna3_int4_int8",
+            True,
+            False,
+            ValueError,
+            id="explicit-other-activation",
+        ),
+        pytest.param(
+            "int8_per_group_32", "triton", True, False, "TRITON", id="explicit-16-bit"
+        ),
+        pytest.param(
+            "int8_per_group_32",
+            "triton",
+            True,
+            True,
+            ValueError,
+            id="explicit-16-bit-strict",
+        ),
+    ],
+)
+def test_wna16_dispatches_on_moe_activation(
+    monkeypatch, activation, moe_backend, int8_kernel_built, strict, expected
+):
+    """`--quantization-config.moe.activation int8_per_group_32` selects the
+    RDNA3 int4 x int8 backend; without a request it is never auto-selected, and
+    a request no backend runs falls back to 16-bit activations unless
+    VLLM_STRICT_QUANT_SCHEME forbids it."""
+    monkeypatch.setenv("VLLM_STRICT_QUANT_SCHEME", str(int(strict)))
+    moe_args = None if activation is None else QuantSpec(activation=activation)
+    monkeypatch.setattr(
+        int_wna16_oracle,
+        "get_current_vllm_config_or_none",
+        lambda: SimpleNamespace(
+            model_config=SimpleNamespace(
+                quantization_config=QuantizationConfigArgs(moe=moe_args)
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        int_wna16_oracle,
+        "_get_priority_backends",
+        lambda: [WNA16MoEBackend.RDNA3_INT4_INT8, WNA16MoEBackend.TRITON],
+    )
+
+    def is_supported_config(cls, moe_config, weight_key, activation_key, fmt):
+        if cls is Rdna3Int4Int8Experts and not int8_kernel_built:
+            return False, "kernel not built"
+        executed = cls.executed_activation_key(weight_key, activation_key)
+        if not cls._supports_quant_scheme(weight_key, executed):
+            return False, f"quantization scheme {weight_key}x{executed}"
+        return True, None
+
+    for kernel_cls in (TritonWNA16Experts, Rdna3Int4Int8Experts):
+        monkeypatch.setattr(
+            kernel_cls, "is_supported_config", staticmethod(is_supported_config)
+        )
+    config = make_dummy_moe_config(hidden_dim=256, intermediate_size=256)
+    config.moe_backend = moe_backend
+
+    def select():
+        return select_wna16_moe_backend(config, kInt4Static, object(), False, False)
+
+    if not isinstance(expected, str):
+        with pytest.raises(expected):
+            select()
+        return
+    backend, experts_cls = select()
+    assert backend is WNA16MoEBackend[expected]
+    assert experts_cls is int_wna16_oracle.backend_to_kernel_cls(backend)[0]
+
+
+def test_humming_moe_executed_activation_follows_conversion(monkeypatch):
+    """Humming runs the input schema its weights are converted with: the W4A8
+    oracle converts for FP8 activations, the FP8 oracle for unquantized ones."""
+    monkeypatch.delenv("VLLM_HUMMING_INPUT_QUANT_CONFIG", raising=False)
+    executed = HummingGroupedExperts.executed_activation_key
+    assert executed(kInt4Static, kFp8DynamicTokenSym) == kFp8DynamicTokenSym
+    assert executed(kFp8Static128BlockSym, kFp8Dynamic128Sym) is None
+
+
+def test_hpc_clamp_rejected_during_backend_selection():
+    """Exclude HPC before selection so automatic mode can use another kernel."""
+    from vllm.model_executor.layers.fused_moe.hpc_moe import HPCExperts
+
+    config = make_dummy_moe_config(hidden_dim=128, intermediate_size=128)
+    config.swiglu_limit = 10.0
+    supported, reason = HPCExperts.is_supported_config(
+        HPCExperts,
+        config,
+        kFp8Static128BlockSym,
+        kFp8Dynamic128Sym,
+        HPCExperts.activation_format(),
+    )
+    assert not supported
+    assert reason is not None and "SwiGLU clamp" in reason

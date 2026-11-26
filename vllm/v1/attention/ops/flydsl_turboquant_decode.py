@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlyDSL TurboQuant decode launcher (vLLM-side).
 
-Drop-in replacement for ``triton_turboquant_decode_attention_soa`` for the
+Drop-in replacement for `triton_turboquant_decode_attention_soa` for the
 TQ decode profile HEAD_SIZE=128, MSE_BITS=4 K, VQB=4 V, N_CENTROIDS=16,
 BLOCK_SIZE in {16, 32}, GQA group in {6, 8, 16} (one kernel, kernels.tq_decode).
 
@@ -10,15 +10,15 @@ Auto-selected on gfx950 when FlyDSL is importable; falls back to the SoA Triton
 decode otherwise (wrong arch, missing build tree).
 
 Architecture:
-    1. Q rotation: ``q_rot = (query.float() @ PiT).bfloat16()`` — the same
+    1. Q rotation: `q_rot = (query.float() @ PiT).bfloat16()` — the same
        launcher-side rocBLAS GEMM the SoA Triton decode uses.
     2. FlyDSL kernel writes per-partition outputs into
-       ``[N, Hk, P, QG, D]`` bf16 + ``[N, Hk, P, QG]`` fp32 max/sum buffers.
+       `[N, Hk, P, QG, D]` bf16 + `[N, Hk, P, QG]` fp32 max/sum buffers.
     3. A small Triton reducer combines partitions in the kernel's native layout
-       (no permute/cast), writing the final ``[N, Hq, D]`` output.
+       (no permute/cast), writing the final `[N, Hq, D]` output.
 
-Kernel module is built once per ``(num_kv_heads, num_partitions,
-max_blocks_per_seq, scale)`` shape and cached.
+Kernel module is built once per `(num_kv_heads, num_partitions,
+max_blocks_per_seq, scale)` shape and cached.
 """
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ def _detect_max_capture_B() -> int:
 
     Returns max(cudagraph_capture_sizes) if available, else falls back to
     512 (vLLM's default cap). The segm-pool auto-grows if a larger batch is
-    seen (see ``_SegmBufPool.get``).
+    seen (see `_SegmBufPool.get`).
 
     Used to size the segm-pool bucket once, so that all distinct B's
     (whether captured in a graph, or hit eagerly in mixed batches) share
@@ -128,10 +128,10 @@ class _SegmBufPool:
     """Single-bucket buffer pool for segm_out/segm_max/segm_sum/output.
 
     Each unique shape signature (Hk, Hq, num_partitions, QG, D, device,
-    dtype) is backed by ONE allocation sized at ``max_B`` (= max captured
-    cudagraph batch size, or env override). Per-call ``get(B, ...)``
-    returns ``[:B]`` views — same data_ptr base, narrower N dim. The
-    kernel grid is ``(B, ...)`` so it only ever writes the first B rows
+    dtype) is backed by ONE allocation sized at `max_B` (= max captured
+    cudagraph batch size, or env override). Per-call `get(B, ...)`
+    returns `[:B]` views — same data_ptr base, narrower N dim. The
+    kernel grid is `(B, ...)` so it only ever writes the first B rows
     of segm_out / segm_max / segm_sum; downstream readers (Triton
     reducer + caller) only consume the first B rows of output.
 
@@ -143,11 +143,11 @@ class _SegmBufPool:
     calls. The data_ptr is stable from first allocation onward, so
     cudagraph capture is happy across all captured B's.
 
-    Eliminates per-decode-step ``cudaMalloc`` (× 4) plus the device-side
-    memset kernels behind ``torch.full(-inf)`` and ``torch.zeros``.
-    The kernel always writes the FULL ``[B, Hk, P, QG, D]`` slice and
+    Eliminates per-decode-step `cudaMalloc` (× 4) plus the device-side
+    memset kernels behind `torch.full(-inf)` and `torch.zeros`.
+    The kernel always writes the FULL `[B, Hk, P, QG, D]` slice and
     every (n, kv_h, p, qg) position of segm_max / segm_sum (it stores
-    ``-inf`` and ``0`` for empty partitions itself), so uninitialized
+    `-inf` and `0` for empty partitions itself), so uninitialized
     bytes from the pool are safe to reuse for any B ≤ B_bucket.
     """
 

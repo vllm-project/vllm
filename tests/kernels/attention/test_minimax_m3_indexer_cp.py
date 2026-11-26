@@ -131,8 +131,8 @@ def test_indexer_context_scores_matches_reference():
 def test_indexer_context_scores_independent_of_shape_bound():
     """A grid sized for max_model_len scores a short batch identically.
 
-    CUDA graphs bake the grid and ``CHUNK`` at capture, where the dummy batch
-    is one token long. Shapes must therefore come from ``max_model_len``, and
+    CUDA graphs bake the grid and `CHUNK` at capture, where the dummy batch
+    is one token long. Shapes must therefore come from `max_model_len`, and
     scoring must not depend on how far past the batch that bound reaches.
     """
     bound = 65536
@@ -176,7 +176,7 @@ def test_indexer_context_scores_independent_of_shape_bound():
 def test_indexer_context_scores_unpopulated_block_table_is_safe():
     """Profiling runs score a max_model_len context off an empty block table.
 
-    ``_dummy_run`` with ``force_attention`` leaves the block table unwritten
+    `_dummy_run` with `force_attention` leaves the block table unwritten
     while seq_lens claim the full context, so every page id the score loop
     reads is out of range for the cache it is handed.
     """
@@ -337,3 +337,21 @@ def test_indexer_cp_config_rejects_dtypes_with_no_cp_indexer(indexer_kv_dtype):
 
     with pytest.raises(ValueError, match="minimax_m3_indexer_cp requires a bf16"):
         AttentionConfig(minimax_m3_indexer_cp=True, indexer_kv_dtype=indexer_kv_dtype)
+
+
+def test_indexer_cp_rejects_adaptive_verification(monkeypatch):
+    """CP decode scores uniform rows; adaptive verification makes them ragged."""
+    from types import SimpleNamespace
+
+    from vllm.models.minimax_m3.common import indexer
+
+    vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(minimax_m3_indexer_cp=True),
+        speculative_config=SimpleNamespace(enable_adaptive_verification=True),
+    )
+    monkeypatch.setattr(indexer, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(indexer, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(indexer.current_platform, "is_rocm", lambda: True)
+
+    with pytest.raises(ValueError, match="does not support adaptive verification"):
+        indexer.select_indexer_impl_cls(topk_blocks=16, indexer_kv_dtype="bf16")

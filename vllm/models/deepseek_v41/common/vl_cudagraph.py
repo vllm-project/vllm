@@ -2,17 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Encoder CUDA graph support for the DeepSeek-V4.1 vision tower.
 
-Mixin implementing the ``SupportsEncoderCudaGraph`` protocol
-(``vllm/model_executor/models/interfaces.py``) on top of the shared
-``DeepseekV4ViT``/``DeepseekV4Aligner``. The captured graph packs a whole
+Mixin implementing the `SupportsEncoderCudaGraph` protocol
+(`vllm/model_executor/models/interfaces.py`) on top of the shared
+`DeepseekV4ViT`/`DeepseekV4Aligner`. The captured graph packs a whole
 batch of images into one varlen run: ViT blocks attend per image via
-``cu_seqlens``, and the aligner's spatial merge becomes a gather+mask
+`cu_seqlens`, and the aligner's spatial merge becomes a gather+mask
 against precomputed indices. Span assembly (IMAGE_START/IMAGE_NEW_LINE/
-IMAGE_END delimiters) stays eager in ``postprocess_encoder_output`` but is
+IMAGE_END delimiters) stays eager in `postprocess_encoder_output` but is
 batched over all items of the packed batch.
 
-Enabled via ``--compilation-config '{"cudagraph_mm_encoder": true}'``; the
-manager (``vllm/v1/worker/encoder_cudagraph.py``) handles budget packing, DP
+Enabled via `--compilation-config '{"cudagraph_mm_encoder": true}'`; the
+manager (`vllm/v1/worker/encoder_cudagraph.py`) handles budget packing, DP
 sharding and eager fallback.
 """
 
@@ -21,10 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.models.deepseek_v4.common.vision import (
-    build_packed_merge_metadata,
-    build_packed_vit_metadata,
-)
+from vllm.models.deepseek_v4.common.vision import build_packed_merge_metadata
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs,
@@ -36,7 +33,6 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
 from .mm_preprocess import IMAGE, IMAGE_END, IMAGE_NEW_LINE, IMAGE_START
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
     from vllm.config.multimodal import MultiModalConfig
     from vllm.models.deepseek_v4.common.vision import (
         DeepseekV4Aligner,
@@ -46,11 +42,11 @@ if TYPE_CHECKING:
 
 
 class DeepseekV4VLEncoderCudaGraphMixin:
-    """``SupportsEncoderCudaGraph`` for ``DeepseekV41ForCausalLM``.
+    """`SupportsEncoderCudaGraph` for `DeepseekV41ForCausalLM`.
 
-    Expects ``self.vision``/``self.aligner``/``self.config``/
-    ``self.multimodal_config`` and the ``image_start``/``image_newline``/
-    ``image_end`` parameters from the host model.
+    Expects `self.vision`/`self.aligner`/`self.config`/
+    `self.multimodal_config` and the `image_start`/`image_newline`/
+    `image_end` parameters from the host model.
     """
 
     # Provided by the host model; declared here so mixin methods type-check.
@@ -63,15 +59,6 @@ class DeepseekV4VLEncoderCudaGraphMixin:
     image_newline: torch.nn.Parameter
 
     # -- helpers shared with the eager multimodal path --
-
-    def _encode_image(
-        self,
-        patches: torch.Tensor,
-        n_vit_h: int,
-        n_vit_w: int,
-    ) -> torch.Tensor:
-        # Aligner rows in reading order, one per IMAGE slot.
-        return self.aligner(self.vision(patches, n_vit_h, n_vit_w), n_vit_h, n_vit_w)
 
     def _build_image_span(
         self, image_embeds: torch.Tensor, types: torch.Tensor
@@ -127,14 +114,6 @@ class DeepseekV4VLEncoderCudaGraphMixin:
                 "cudagraph_mm_encoder."
             )
 
-        def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
-            # Zero-length padding (same as Qwen): tail slots repeat the last
-            # real offset, so FlashAttn schedules no work for padding rows.
-            n = min(src.shape[0], dst.shape[0])
-            dst[:n].copy_(src[:n])
-            if n < dst.shape[0]:
-                dst[n:] = src[-1] if n else 0
-
         return EncoderCudaGraphConfig(
             modalities=["image"],
             buffer_keys=[
@@ -147,22 +126,7 @@ class DeepseekV4VLEncoderCudaGraphMixin:
                 "merge_mask",
             ],
             out_hidden_size=self.config.hidden_size,
-            padding_logics={"cu_seqlens": pad_cu_seqlens},
         )
-
-    def get_encoder_cudagraph_budget_range(
-        self,
-        vllm_config: "VllmConfig",
-    ) -> tuple[int, int]:
-        # Min: comfortably above the smallest possible image span (4 tokens
-        # for a 1x1 grid); also sets max_batch_size = 64 via the manager's
-        # auto-inference (max_batch_size <= min_budget invariant).
-        min_budget = 64
-        max_budget = min(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            vllm_config.model_config.max_model_len,
-        )
-        return (min_budget, max_budget)
 
     def get_encoder_cudagraph_item_specs(
         self,
@@ -245,12 +209,11 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         total_patches = r * r * per_item_out * max_batch_size
 
         p = config.vision_patch_size
-        patches = torch.zeros(total_patches, 3, p, p, device=device, dtype=dtype)
+        patch_dtype = self.vision.patch_embed.input_norm.input_dtype or dtype
+        patches = torch.zeros(total_patches, 3, p, p, device=device, dtype=patch_dtype)
 
-        metadata = build_packed_vit_metadata(
+        metadata = self.vision.build_packed_vit_metadata(
             grids,
-            rope_dim=self.vision.rope_dim,
-            rope_theta=self.vision.rope_theta,
             device=device,
             max_seqlen_override=total_patches,
             cached=False,
@@ -258,9 +221,7 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         # Spare cu_seqlens slots: replay pads smaller real batches with
         # zero-length sequences (tail slots repeat the last real offset).
         real_cu = metadata.pop("cu_seqlens")
-        cu_seqlens = torch.full(
-            (max_batch_size + 2,), total_patches, dtype=torch.int32, device=device
-        )
+        cu_seqlens = real_cu.new_full((max_batch_size + 2,), total_patches)
         cu_seqlens[: real_cu.numel()] = real_cu
 
         merge = build_packed_merge_metadata(grids, r, device=device, dtype=dtype)
@@ -284,16 +245,14 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         vit_grid = self._get_grid_list(mm_kwargs, "vit_grid")
         patches = mm_kwargs["patches"]
         dtype = self.aligner.w1.weight.dtype
-        if patches.dtype != dtype:
-            patches = patches.to(dtype)
+        patch_dtype = self.vision.patch_embed.input_norm.input_dtype or dtype
+        if patches.dtype != patch_dtype:
+            patches = patches.to(patch_dtype)
 
-        # Unpadded: the manager zero-pads patches/cos/sin/merge buffers, and
-        # pad_cu_seqlens pads the tail with zero-length sequences.
-        metadata = build_packed_vit_metadata(
-            vit_grid,
-            rope_dim=self.vision.rope_dim,
-            rope_theta=self.vision.rope_theta,
-            device=patches.device,
+        # Unpadded: the manager zero-pads patches/cos/sin/merge buffers and
+        # pads the cu_seqlens tail with zero-length sequences.
+        metadata = self.vision.build_packed_vit_metadata(
+            vit_grid, device=patches.device
         )
         merge = build_packed_merge_metadata(
             vit_grid,
@@ -307,18 +266,18 @@ class DeepseekV4VLEncoderCudaGraphMixin:
 
     def encoder_cudagraph_forward(
         self,
-        inputs: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
         vit_out = self.vision.forward_packed(
-            inputs["patches"],
-            inputs["vit_cos"],
-            inputs["vit_sin"],
-            inputs["cu_seqlens"],
-            inputs["max_seqlen"],
+            values["patches"],
+            values["vit_cos"],
+            values["vit_sin"],
+            values["cu_seqlens"],
+            values["max_seqlen"],
         )
         return self.aligner.forward_packed(
-            vit_out, inputs["merge_idx"], inputs["merge_mask"]
+            vit_out, values["merge_idx"], values["merge_mask"]
         )
 
     def encoder_eager_forward(
@@ -326,19 +285,19 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         mm_kwargs: dict[str, Any],
         path: str = "default",
     ) -> torch.Tensor:
-        patches = mm_kwargs["patches"].to(self.aligner.w1.weight.dtype)
+        """Run all images as one unpadded varlen batch."""
         vit_grid = self._get_grid_list(mm_kwargs, "vit_grid")
-        outs: list[torch.Tensor] = []
-        offset = 0
-        for n_vit_h, n_vit_w in vit_grid:
-            n_vit = n_vit_h * n_vit_w
-            outs.append(
-                self._encode_image(patches[offset : offset + n_vit], n_vit_h, n_vit_w)
+        if not vit_grid:
+            return mm_kwargs["patches"].new_zeros(
+                (0, self.config.hidden_size), dtype=self.aligner.w1.weight.dtype
             )
-            offset += n_vit
-        if not outs:
-            return patches.new_zeros((0, self.config.hidden_size))
-        return torch.cat(outs, dim=0)
+        inputs = self.prepare_encoder_cudagraph_replay_buffers(
+            mm_kwargs,
+            max_batch_size=len(vit_grid),
+            max_frames_per_batch=0,
+            path=path,
+        )
+        return self.encoder_cudagraph_forward(inputs.values, path=path)
 
     def postprocess_encoder_output(
         self,

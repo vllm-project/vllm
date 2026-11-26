@@ -104,7 +104,7 @@ def _check_against_reference(
     layout: InputLayout = "pcl",
     **close_kwargs,
 ):
-    """Run ``FusedMMInputNorm`` on ``pixel_values`` and compare against the
+    """Run `FusedMMInputNorm` on `pixel_values` and compare against the
     eager per-channel affine reference. Uses the RGB constants by default."""
     if image_mean is None:
         image_mean = list(_RGB_MEAN)
@@ -476,9 +476,9 @@ class TestFusedMMInputNormKernel:
         ],
     )
     def test_channel_boundary_crossing(self, P: int, C: int, L: int):
-        """The 1D kernel recovers ``c = (offs // L) % C`` per lane, so a tile
+        """The 1D kernel recovers `c = (offs // L) % C` per lane, so a tile
         can straddle a channel boundary and gather weight/bias per lane.
-        These shapes force that path by keeping ``L`` well below the block."""
+        These shapes force that path by keeping `L` well below the block."""
         set_random_seed(0)
         x = torch.randn(P, C, L, dtype=torch.float32, device=_DEVICE)
         w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
@@ -507,7 +507,7 @@ class TestFusedMMInputNormKernel:
         torch.testing.assert_close(out, expected)
 
     def test_rejects_mismatched_output_shape(self):
-        """``outputs`` must be shaped exactly like ``inputs``."""
+        """`outputs` must be shaped exactly like `inputs`."""
         P, C, L = 3, 3, 100
         x = torch.randn(P, C, L, dtype=torch.float32, device=_DEVICE)
         w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
@@ -549,7 +549,7 @@ class TestFusedMMInputNormConstruction:
 
     def test_identity_config_buffers(self):
         """Numerically identity parameters still build plain weight/bias
-        buffers; the identity shortcut lives in ``from_model_config``."""
+        buffers; the identity shortcut lives in `from_model_config`."""
         norm = FusedMMInputNorm(
             image_mean=[0.0, 0.0, 0.0],
             image_std=[1.0, 1.0, 1.0],
@@ -609,8 +609,8 @@ class TestFusedMMInputNormConstruction:
 # ===========================================================================
 @requires_vllm_config
 class TestBuildMMInputNorm:
-    """``build_mm_input_norm`` picks IdentityInputNorm vs FusedMMInputNorm
-    and forwards ``layout`` to the constructed module."""
+    """`build_mm_input_norm` picks IdentityInputNorm vs FusedMMInputNorm
+    and forwards `layout` to the constructed module."""
 
     @staticmethod
     def _patch_processor(monkeypatch, cfg: dict):

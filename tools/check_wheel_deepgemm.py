@@ -3,8 +3,8 @@
 
 """Assert the vendored DeepGEMM package has the TORCH_LIBRARY binding layout.
 
-Expects ``deep_gemm/_C.py`` plus a single ``_C_extension*.so`` (abi3) under
-``vllm.third_party.deep_gemm``, and that the package imports: vLLM treats an
+Expects `deep_gemm/_C.py` plus a single `_C_extension*.so` (abi3) under
+`vllm.third_party.deep_gemm`, and that the package imports: vLLM treats an
 import failure as DeepGEMM being absent. Run after vLLM is installed, e.g. the
 H100 deepgemm kernel tests in .buildkite/test_areas/kernels.yaml.
 """

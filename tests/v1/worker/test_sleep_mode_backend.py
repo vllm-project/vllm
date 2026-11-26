@@ -3,8 +3,8 @@
 """CPU-only unit tests for the sleep-mode backend abstraction (RFC #34303).
 
 These cover the registry/factory contract and capability flags. They do not
-touch CUDA - the ``cumem`` suspend/resume path is exercised end-to-end on GPU
-in ``tests/basic_correctness/memory/``.
+touch CUDA - the `cumem` suspend/resume path is exercised end-to-end on GPU
+in `tests/basic_correctness/memory/`.
 """
 
 import pytest
@@ -40,9 +40,13 @@ def test_new_backend_starts_in_running_state():
 
 @pytest.mark.parametrize("enable_nccl_comm_suspend", [True, False])
 def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_suspend):
-    """Comm walkers run around sleep/wake only when explicitly enabled."""
+    """Comm walkers run around sleep/wake only when explicitly enabled. The
+    model's loader is told before memory is freed and after it is restored."""
     from types import SimpleNamespace
 
+    from torch import nn
+
+    from vllm.model_executor.model_loader.base_loader import bind_model_loader
     from vllm.v1.worker.gpu_worker import Worker
 
     calls: list[tuple[str, object]] = []
@@ -56,7 +60,15 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
 
     worker = object.__new__(Worker)
     worker._sleep_mode_backend = Backend()
-    worker.model_runner = SimpleNamespace(extensible_kv_cache=None)
+    model = nn.Module()
+    bind_model_loader(
+        model,
+        SimpleNamespace(
+            on_sleep=lambda level: calls.append(("loader.on_sleep", level)),
+            on_wake_up=lambda tags: calls.append(("loader.on_wake_up", tuple(tags))),
+        ),
+    )
+    worker.model_runner = SimpleNamespace(extensible_kv_cache=None, model=model)
     worker.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(enable_nccl_comm_suspend=enable_nccl_comm_suspend)
     )
@@ -76,10 +88,12 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
     worker.wake_up(tags=["weights"])
 
     expected: list[tuple[str, object]] = [
+        ("loader.on_sleep", 1),
         ("backend.suspend", set()),
         ("comms.suspend", None),
         ("backend.resume", ("weights",)),
         ("comms.resume", None),
+        ("loader.on_wake_up", ("weights",)),
     ]
     if not enable_nccl_comm_suspend:
         expected = [c for c in expected if not c[0].startswith("comms.")]

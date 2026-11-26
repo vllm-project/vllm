@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
@@ -19,12 +20,6 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
-from vllm.model_executor.model_loader.reload import (
-    support_quantized_model_reload_from_hp_weights,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
@@ -50,54 +45,55 @@ ShardIds: TypeAlias = ShardId | list[ShardId]
 WeightsTransformFn: TypeAlias = Callable[
     [Iterable[tuple[str, torch.Tensor]]], Iterable[tuple[str, torch.Tensor]]
 ]
-"""A lazy transform over a raw checkpoint ``(name, tensor)`` stream, passing
+"""A lazy transform over a raw checkpoint `(name, tensor)` stream, passing
 unrecognized tensors through unchanged."""
 
 
-@dataclass
+@dataclass(slots=True)
 class WeightsMapper:
     """Maps the name of each weight if they match the following patterns.
 
     If a key maps to a value of `None`, the corresponding weight is ignored.
 
-    ``weights_transforms`` rewrite the raw weight stream in list order before
-    any name mapping."""
+    Fields are applied in declaration order. `weights_transforms` rewrite the raw
+    weight stream in list order before any name mapping, and stacked rules run
+    last so that they see the final vLLM names."""
 
+    weights_transforms: list[WeightsTransformFn] = field(default_factory=list)
     orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
     orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_stacked: Mapping[str, tuple[str, ShardIds]] = field(
         default_factory=dict
     )
-    orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
-    orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
-    weights_transforms: list[WeightsTransformFn] = field(default_factory=list)
 
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
         return WeightsMapper(
+            weights_transforms=[*self.weights_transforms, *other.weights_transforms],
             orig_to_new_renaming=[
                 *self.orig_to_new_renaming,
                 *other.orig_to_new_renaming,
             ],
             orig_to_new_regex={**self.orig_to_new_regex, **other.orig_to_new_regex},
             orig_to_new_substr={**self.orig_to_new_substr, **other.orig_to_new_substr},
+            orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
+            orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
             orig_to_new_stacked={
                 **self.orig_to_new_stacked,
                 **other.orig_to_new_stacked,
             },
-            orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
-            orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
-            weights_transforms=[*self.weights_transforms, *other.weights_transforms],
         )
 
     def map_name(self, key: str) -> str | None:
-        """Map a weight name; returns ``None`` if the weight should be ignored."""
+        """Map a weight name; returns `None` if the weight should be ignored."""
         result = self._map_name_with_shard(key)
         return result[0] if result is not None else None
 
     def _map_name(self, key: str) -> str | None:
-        """Backward-compatible alias for :meth:`map_name`."""
+        """Backward-compatible alias for `map_name`."""
         return self.map_name(key)
 
     def _map_name_with_shard(self, key: str) -> tuple[str, ShardIds | None] | None:
@@ -136,12 +132,6 @@ class WeightsMapper:
 
                 key = key.replace(substr, new_key, 1)
 
-        shard_id: ShardIds | None = None
-        for substr, (new_key, new_shard_id) in self.orig_to_new_stacked.items():
-            if substr in key:
-                key = key.replace(substr, new_key, 1)
-                shard_id = new_shard_id
-
         for prefix, new_key in self.orig_to_new_prefix.items():
             if key.startswith(prefix):
                 if new_key is None:
@@ -155,6 +145,12 @@ class WeightsMapper:
                     return None
 
                 key = new_key.join(key.rsplit(suffix, 1))
+
+        shard_id: ShardIds | None = None
+        for substr, (new_key, new_shard_id) in self.orig_to_new_stacked.items():
+            if substr in key:
+                key = key.replace(substr, new_key, 1)
+                shard_id = new_shard_id
 
         return key, shard_id
 
@@ -207,12 +203,12 @@ class WeightsMapper:
         remove_none = lambda d: {k: v for k, v in d.items() if v is not None}
         return replace(
             self,
+            weights_transforms=[],
             orig_to_new_regex=remove_none(self.orig_to_new_regex),
             orig_to_new_substr=remove_none(self.orig_to_new_substr),
-            orig_to_new_stacked={},
             orig_to_new_prefix=remove_none(self.orig_to_new_prefix),
             orig_to_new_suffix=remove_none(self.orig_to_new_suffix),
-            weights_transforms=[],
+            orig_to_new_stacked={},
         )
 
 
@@ -274,8 +270,6 @@ class AutoWeightsLoader:
         # would write the same storage twice, so only the first name reached by
         # module traversal is loaded and the rest are skipped.
         self.aliased_params = _get_tied_embedding_params(module)
-        self._skipped_aliases = dict[str, str]()
-        self._loaded_params_are_complete = True
 
     def _groupby_prefix(
         self,
@@ -409,7 +403,6 @@ class AutoWeightsLoader:
                     logger.warning(
                         "Unable to collect loaded parameters for module %s", module
                     )
-                    self._loaded_params_are_complete = False
                 else:
                     yield from map(
                         lambda x: self._get_qualname(base_prefix, x),
@@ -464,7 +457,6 @@ class AutoWeightsLoader:
                 )
                 raise ValueError(msg)
 
-    @support_quantized_model_reload_from_hp_weights
     def load_weights(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
@@ -490,51 +482,31 @@ class AutoWeightsLoader:
         weights = mapper.apply(weights)
         weights = self._filter_skipped(weights)
 
-        autoloaded_weights = set(self._load_module("", self.module, weights))
-        self._check_skipped_aliases(autoloaded_weights)
-        return autoloaded_weights
+        return set(self._load_module("", self.module, weights))
 
     def _filter_skipped(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
         for name, weight in weights:
-            if (canonical := self.aliased_params.get(name)) is not None:
-                self._skipped_aliases[name] = canonical
             if self._can_skip(name):
                 continue
 
             yield name, weight
 
-    def _check_skipped_aliases(self, autoloaded_weights: set[str]) -> None:
-        """Guard against skipping an alias whose canonical name never loads."""
-        if (
-            not self._loaded_params_are_complete
-            or not is_mtp_completeness_check_enabled()
-        ):
-            return
-        for alias, canonical in self._skipped_aliases.items():
-            if canonical not in autoloaded_weights:
-                raise ValueError(
-                    f"{alias!r} was skipped because it is tied to {canonical!r} "
-                    f"in {self.module._get_name()}, but {canonical!r} was not "
-                    "found in the checkpoint, so the tied weight is "
-                    "uninitialized."
-                )
-
 
 def get_fused_shared_expert_layers(
     module: nn.Module,
-    moe_cls: type[nn.Module],
+    moe_cls: type[nn.Module] | tuple[type[nn.Module], ...],
     enable_eplb: bool = False,
 ) -> frozenset[int]:
     """Resolve fused-shared-expert layer indices from the live module tree.
 
     The index is taken from each MoE module's qualified name, so it follows the
     same index space as the caller's weight names: 0-based for modules stored in
-    an ``nn.ModuleList``, and absolute for ``nn.ModuleDict`` MTP layers keyed by
+    an `nn.ModuleList`, and absolute for `nn.ModuleDict` MTP layers keyed by
     layer index. No loader needs to hard-code an offset.
 
-    Also rejects mixed fusion when EPLB is enabled or the ``nixl_ep`` all2all
+    Also rejects mixed fusion when EPLB is enabled or the `nixl_ep` all2all
     backend is selected, and logs the resolved policy.
     """
     fused_layers: set[int] = set()
@@ -604,13 +576,14 @@ def maybe_fuse_shared_experts(
     n_shared_experts: int,
     fused_shared_expert_layers: frozenset[int],
     ckpt_prefix: str = "mlp.shared_experts",
+    experts_prefix: str = "mlp.experts",
 ) -> Iterable[tuple[str, torch.Tensor]]:
     """Route AITER fused-shared-expert checkpoint weights into fused slots.
 
     When AITER fused-shared-experts is active, shared experts are packed into
     the routed expert tensor. The checkpoint stores them under `ckpt_prefix`
     as a single (possibly widened) tensor; this splits it into
-    `n_shared_experts` chunks named `mlp.experts.{n_routed_experts + j}` so
+    `n_shared_experts` chunks named `{experts_prefix}.{n_routed_experts + j}` so
     the `RoutedExperts` loader treats them as extra experts. Yields the input
     unchanged when the fusion is inactive, so callers can wrap unconditionally.
 
@@ -619,6 +592,7 @@ def maybe_fuse_shared_experts(
         n_routed_experts: Number of routed experts; offsets the fused slots.
         n_shared_experts: Number of shared experts packed into the tensor.
         ckpt_prefix: Checkpoint module name of the shared experts.
+        experts_prefix: Checkpoint module name of the routed experts.
         fused_shared_expert_layers: Layer indices whose shared expert was fused
             at construction time, as returned by
             `get_fused_shared_expert_layers`. Only weights belonging to these
@@ -660,7 +634,7 @@ def maybe_fuse_shared_experts(
             else:
                 chunk_weight = loaded_weight[:, sl]
             yield (
-                name.replace(prefix, f"mlp.experts.{n_routed_experts + j}."),
+                name.replace(prefix, f"{experts_prefix}.{n_routed_experts + j}."),
                 chunk_weight,
             )
 
@@ -724,16 +698,41 @@ def init_vllm_registered_model(
     """Helper function to initialize an inner model registered to vLLM,
     based on the arguments passed to the outer vLLM model.
     """
-    from vllm.model_executor.model_loader.utils import initialize_model
+    from vllm.model_executor.model_loader.utils import (
+        convert_model_cls,
+        initialize_model,
+    )
 
     if hf_config is None and architectures is not None:
         # So that the architectures field is overridden
         hf_config = vllm_config.model_config.hf_config
 
+    model_class = None
     if hf_config is not None:
-        vllm_config = vllm_config.with_hf_config(hf_config, architectures=architectures)
+        # Top-level Qwen2 and Llama use the Transformers backend, but inner Qwen2 and
+        # Llama models stay native so that composite models can keep using their
+        # submodules. `with_hf_config` infers missing architectures from `model_type`
+        if (archs := architectures or hf_config.architectures) is not None:
+            is_qwen2 = "Qwen2ForCausalLM" in archs
+            is_llama = "LlamaForCausalLM" in archs
+        else:
+            is_qwen2 = hf_config.model_type == "qwen2"
+            is_llama = hf_config.model_type == "llama"
+        if is_qwen2:
+            from vllm.model_executor.models.qwen3 import use_qwen2_attention
 
-    return initialize_model(vllm_config=vllm_config, prefix=prefix)
+            hf_config = copy.deepcopy(hf_config)
+            use_qwen2_attention(hf_config.get_text_config())
+            architectures = ["Qwen3ForCausalLM"]
+        vllm_config = vllm_config.with_hf_config(hf_config, architectures=architectures)
+        if is_llama:
+            from vllm.model_executor.models.llama import LlamaForCausalLM
+
+            model_class = convert_model_cls(LlamaForCausalLM, vllm_config.model_config)
+
+    return initialize_model(
+        vllm_config=vllm_config, prefix=prefix, model_class=model_class
+    )
 
 
 @overload
@@ -1085,7 +1084,7 @@ def compute_skip_topk_layers(config: "PreTrainedConfig") -> set[int]:
 def pp_splits_layer_sharing(
     num_hidden_layers: int, users: Iterable[int], consumers: set[int]
 ) -> bool:
-    """Whether a later PP stage's first ``users`` layer is one of ``consumers``,
+    """Whether a later PP stage's first `users` layer is one of `consumers`,
     which read state an earlier layer wrote in the same forward pass."""
     from vllm.distributed.parallel_state import get_pp_group
     from vllm.distributed.utils import get_pp_indices
@@ -1126,7 +1125,7 @@ def make_empty_intermediate_tensors_factory(
     hidden_size: int,
     buffers: Mapping[str, torch.Tensor] | None = None,
 ):
-    """``buffers`` are token-major cross-layer state sent along with ``keys``."""
+    """`buffers` are token-major cross-layer state sent along with `keys`."""
     buffers = buffers or {}
 
     def make_empty_intermediate_tensors(

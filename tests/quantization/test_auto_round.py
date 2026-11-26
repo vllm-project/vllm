@@ -47,6 +47,7 @@ from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear import
     INCXPULinearMethod,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 
 MODELS = [
@@ -378,7 +379,7 @@ def test_inc_get_quant_method_unquantized_unknown_layer_returns_none() -> None:
 def test_inc_get_quant_method_unquantized_layer_with_model_prefix(
     layer_factory,
 ) -> None:
-    """``model.``-prefixed extra_config entries trigger early exit for both
+    """`model.`-prefixed extra_config entries trigger early exit for both
     LinearBase and ParallelLMHead layers."""
     config = make_config(extra_config={"model.layer": {"bits": 16}})
     layer = layer_factory()
@@ -391,7 +392,7 @@ def test_inc_get_quant_method_unquantized_layer_with_model_prefix(
 def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
     monkeypatch,
 ) -> None:
-    """``model.``-prefixed extra_config entries trigger early exit for
+    """`model.`-prefixed extra_config entries trigger early exit for
     RoutedExperts layers, returning UnquantizedFusedMoEMethod."""
 
     class DummyUnquantizedFusedMoEMethod:
@@ -414,13 +415,80 @@ def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
 
 
 def test_inc_get_quant_method_unknown_layer_with_model_prefix_returns_none() -> None:
-    """``model.``-prefixed extra_config entries return None for unhandled
+    """`model.`-prefixed extra_config entries return None for unhandled
     layer types (non-Linear, non-MoE)."""
     config = make_config(extra_config={"model.unknown": {"bits": 16}})
 
     method = config.get_quant_method(DummyLayer(), "unknown")
 
     assert method is None
+
+
+def _patch_safetensors_metadata(monkeypatch, metadata) -> None:
+    def fake_metadata(model_name, revision=None):
+        if isinstance(metadata, Exception):
+            raise metadata
+        return metadata
+
+    monkeypatch.setattr(
+        "vllm.transformers_utils.config.get_safetensors_params_metadata",
+        fake_metadata,
+    )
+
+
+def test_inc_maybe_update_config_detects_unquantized_checkpoint_modules(
+    monkeypatch,
+) -> None:
+    """A linear module stored as a float `weight` resolves to
+    UnquantizedLinearMethod even inside a quantized block, while a module
+    stored as `qweight` keeps the INC path."""
+    _patch_safetensors_metadata(
+        monkeypatch,
+        {
+            "model.layers.0.mlp.gate.weight": {"dtype": "BF16"},
+            "model.layers.1.mlp.gate.qweight": {"dtype": "I32"},
+            "model.layers.1.mlp.gate.qzeros": {"dtype": "I32"},
+            "model.layers.1.mlp.gate.scales": {"dtype": "F16"},
+            "model.norm.weight": {"dtype": "BF16"},
+        },
+    )
+    config = make_config(block_name_to_quantize="model.layers")
+    config.maybe_update_config("dummy-model")
+
+    assert config.checkpoint_unquantized_modules == {
+        "model.layers.0.mlp.gate",
+        "model.norm",
+    }
+    layer = object.__new__(LinearBase)
+    method = config.get_quant_method(layer, "model.layers.0.mlp.gate")
+    assert isinstance(method, UnquantizedLinearMethod)
+    assert not config._is_checkpoint_unquantized("model.layers.1.mlp.gate")
+
+
+def test_inc_checkpoint_unquantized_modules_follow_vllm_mapper(monkeypatch) -> None:
+    _patch_safetensors_metadata(
+        monkeypatch,
+        {"model.language_model.layers.0.mlp.gate.weight": {"dtype": "BF16"}},
+    )
+    config = make_config()
+    config.maybe_update_config("dummy-model")
+    config.apply_vllm_mapper(
+        WeightsMapper(
+            orig_to_new_prefix={"model.language_model.": "language_model.model."}
+        )
+    )
+
+    layer = object.__new__(LinearBase)
+    method = config.get_quant_method(layer, "language_model.model.layers.0.mlp.gate")
+    assert isinstance(method, UnquantizedLinearMethod)
+
+
+def test_inc_maybe_update_config_ignores_unreadable_metadata(monkeypatch) -> None:
+    _patch_safetensors_metadata(monkeypatch, OSError("no safetensors"))
+    config = make_config()
+    config.maybe_update_config("dummy-model")
+
+    assert config.checkpoint_unquantized_modules == set()
 
 
 def test_inc_config_parser_regex_match() -> None:
@@ -679,8 +747,9 @@ def test_wna16_cuda_low_bit_linear_routes_to_humming(
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes."
         "inc_wna16_scheme._build_humming_linear_method",
-        lambda layer_config: captured.update({"layer_config": layer_config})
-        or expected_method,
+        lambda layer_config: (
+            captured.update({"layer_config": layer_config}) or expected_method
+        ),
     )
 
     layer_config = make_layer_config(bits=bits, packing_format=packing_format)
@@ -705,10 +774,10 @@ def test_wna16_cuda_low_bit_moe_routes_to_humming(monkeypatch, bits) -> None:
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes."
         "inc_wna16_scheme._build_humming_moe_method",
-        lambda layer, layer_config: captured.update(
-            {"layer": layer, "layer_config": layer_config}
-        )
-        or expected_method,
+        lambda layer, layer_config: (
+            captured.update({"layer": layer, "layer_config": layer_config})
+            or expected_method
+        ),
     )
 
     layer = object.__new__(RoutedExperts)
@@ -1000,6 +1069,57 @@ def test_inc_mxfp8_moe_method_registers_block_scaled_weights(monkeypatch) -> Non
         )
 
 
+def test_inc_mxfp8_moe_method_forwards_monolithic_kernel(monkeypatch) -> None:
+    """A monolithic MXFP8 MoE kernel (e.g. the AITER Triton one on gfx942) gets
+    the router logits and the layer's routing parameters."""
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_mxfp8_moe.select_mxfp8_moe_backend",
+        lambda *, config: (object(), object()),
+    )
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_moe import (
+        INCMxfp8MoEMethod,
+    )
+
+    method = INCMxfp8MoEMethod(cast(Any, SimpleNamespace(is_act_and_mul=True)))
+    method.moe_kernel = Mock(is_monolithic=True)
+    layer = SimpleNamespace(
+        w13_weight=object(),
+        w2_weight=object(),
+        activation=object(),
+        global_num_experts=8,
+        expert_map=None,
+        apply_router_weight_on_input=False,
+        num_expert_group=4,
+        topk_group=2,
+        e_score_correction_bias=object(),
+        routed_scaling_factor=2.5,
+        routing_sink=object(),
+    )
+    x, router_logits = object(), object()
+
+    out = method.apply_monolithic(cast(Any, layer), x, router_logits)
+
+    assert out is method.moe_kernel.apply_monolithic.return_value
+    method.moe_kernel.apply_monolithic.assert_called_once_with(
+        x,
+        layer.w13_weight,
+        layer.w2_weight,
+        router_logits,
+        activation=layer.activation,
+        global_num_experts=layer.global_num_experts,
+        expert_map=layer.expert_map,
+        apply_router_weight_on_input=layer.apply_router_weight_on_input,
+        num_expert_group=layer.num_expert_group,
+        topk_group=layer.topk_group,
+        e_score_correction_bias=layer.e_score_correction_bias,
+        routed_scaling_factor=layer.routed_scaling_factor,
+        routing_sink=layer.routing_sink,
+    )
+
+
 def test_inc_mxfp4_linear_method_registers_and_processes_weights(
     monkeypatch,
 ) -> None:
@@ -1101,8 +1221,9 @@ def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
         "make_mxfp4_moe_quant_config",
-        lambda **kwargs: captured.update({"quant_config_kwargs": kwargs})
-        or expected_quant_config,
+        lambda **kwargs: (
+            captured.update({"quant_config_kwargs": kwargs}) or expected_quant_config
+        ),
     )
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
@@ -2164,9 +2285,9 @@ E2E_MODELS = [
 
 
 def _has_xpu_ops() -> bool:
-    """True when ``vllm._xpu_ops`` is importable.
+    """True when `vllm._xpu_ops` is importable.
 
-    ``apply_weights`` imports it for the activation quantizer, and the stubs
+    `apply_weights` imports it for the activation quantizer, and the stubs
     below patch through it, so tests that exercise that path cannot even be set
     up on a build without vllm-xpu-kernels installed.
     """
@@ -2182,8 +2303,8 @@ def _has_xpu_ops() -> bool:
 def _has_w4a8_kernel() -> bool:
     """True when this build can actually run the w4a8 GEMM.
 
-    The op is registered as a side effect of importing ``vllm._xpu_ops``, so it
-    is not visible on ``torch.ops._xpu_C`` until that import happens.
+    The op is registered as a side effect of importing `vllm._xpu_ops`, so it
+    is not visible on `torch.ops._xpu_C` until that import happens.
     """
     return _has_xpu_ops() and hasattr(torch.ops._xpu_C, "int4_gemm_w4a8")
 
@@ -2483,7 +2604,7 @@ def test_keeps_fp16_scales(w4a8_layer) -> None:
     """The kernel reads scales as fp16 regardless of activation dtype.
 
     Passing bf16 scales does not raise — it silently returns wrong results — so
-    an fp16 copy must exist, while the bf16 ``scales`` survive for the
+    an fp16 copy must exist, while the bf16 `scales` survive for the
     small-batch w4a16 fallback.
     """
     method, layer = w4a8_layer

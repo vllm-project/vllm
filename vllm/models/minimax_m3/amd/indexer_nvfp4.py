@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiniMax M3 lightning indexer over NVFP4 index-K pages on ROCm (gfx950).
 
-Keys score as ``e4m3_rn_satfinite(e2m1 * scale)`` with AITER's init / local
+Keys score as `e4m3_rn_satfinite(e2m1 * scale)` with AITER's init / local
 sentinels; the top-k writes logical block ids for the NVFP4 attend, no page
-table. With ``indexer_decode_cp`` at TP4, decode steps 4/8 rows
+table. With `indexer_decode_cp` at TP4, decode steps 4/8 rows
 per request (DSpark 3/7) and at most 256 4-row requests score
-context-parallel (``ops/index_cp``).
+context-parallel (`ops/index_cp`).
 """
 
 import torch
@@ -45,9 +45,11 @@ CP_MIN_REQS = 3
 def _cp_requests(
     d: MiniMaxM3IndexerDecodeMetadata,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """The CP scorer's 4-row requests. DSpark 7's 8-row request scores as two on
-    its block table row, the first 4 tokens shorter, so every row keeps its
-    causal length."""
+    """DSpark 7's 8-row requests as 4-row CP requests: two on its block table
+    row, the first 4 tokens shorter, so every row keeps its causal length.
+
+    The scorer takes 8-row requests directly (one page read for both halves);
+    this split form is kept as the reference the tests compare against."""
     if d.decode_query_len == CP_QUERY_LEN:
         return d.block_table, d.seq_lens
     first = (d.seq_lens - CP_QUERY_LEN).clamp_(min=0)  # padding stays 0
@@ -201,18 +203,17 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
             assert d is not None
             cp = self._decode_cp(md.num_decodes, d.decode_query_len)
             if cp is not None:
-                if md.cp_requests is None:
-                    md.cp_requests = _cp_requests(d)
-                block_table, seq_lens = md.cp_requests
-                # A view of the receive buffer, valid until the next call.
+                # A view of the receive buffer, valid until the next call. An
+                # 8-row (DSpark 7) request scores both 4-row groups per page.
                 score = cp.score_push(
                     iq[:nd, 0],
                     kv,
-                    block_table,
-                    seq_lens,
+                    d.block_table,
+                    d.seq_lens,
                     self.init_blocks,
                     self.local_blocks,
                     _score_width(d.max_seq_len, self.block_size),
+                    query_len=d.decode_query_len,
                 )
             else:
                 score = self._new_score(nd, d.max_seq_len)

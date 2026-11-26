@@ -24,8 +24,8 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
     generated marker text may be tokenized into smaller pieces. The streaming
     parser therefore uses text markers for extraction instead of relying on the
     single vocabulary IDs. The chat template may also prefill the start marker
-    when ``thinking_mode="enabled"``, so generated text can begin directly
-    inside a reasoning block without emitting ``<mm:think>`` again.
+    when `thinking_mode="enabled"`, so generated text can begin directly
+    inside a reasoning block without emitting `<mm:think>` again.
     """
 
     @property

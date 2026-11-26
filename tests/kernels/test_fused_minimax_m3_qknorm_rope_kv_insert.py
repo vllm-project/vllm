@@ -919,14 +919,14 @@ def test_sparse_full_nvfp4(num_tokens, num_kv_heads, block_size, kv_scales):
 def test_nvfp4_kv_head_major_slots_match_insert(
     num_tokens, block_size, heads_per_rank, kv_scales
 ):
-    """The MSA NVFP4 spec's ``kv_head_major_slots`` claim holds for the bytes
+    """The MSA NVFP4 spec's `kv_head_major_slots` claim holds for the bytes
     the fused insert writes: slicing a TP1 page by KV head at the spec's byte
     offsets, as NIXL does for a hetero-TP transfer, gives exactly the page a
     decode rank holding those heads writes itself."""
     from vllm.models.minimax_m3.nvidia.sparse_attention_msa import (
         MiniMaxM3SparseMSANvfp4Backend,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
+    from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
 
     torch.manual_seed(7)
     device, dtype, eps = "cuda", torch.bfloat16, 1e-6
@@ -935,7 +935,7 @@ def test_nvfp4_kv_head_major_slots_match_insert(
     row_bytes = HEAD_DIM // 2 + HEAD_DIM // 16
 
     spec = MiniMaxM3SparseMSANvfp4Backend.customize_spec(
-        FullAttentionSpec(
+        AttentionSpec(
             block_size=block_size,
             num_kv_heads=num_kv_heads,
             head_size=HEAD_DIM,

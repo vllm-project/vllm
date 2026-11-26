@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi K3.1 specialized decode at DEP2 (TP1 attention per DP rank + EP2 MoE) on 2
 real ranks: admission (TP1 + EP, FP32 KDA conv and recurrent state, RecoverSSM),
-the DEP plan (``SpecializedDecode.build_dep`` / ``plan``: q = 5 verify steps take
-``run_wide``), and the step's output against the stock decode
+the DEP plan (`SpecializedDecode.build_dep` / `plan`: q = 5 verify steps take
+`run_wide`), and the step's output against the stock decode
 of the same step.
 
-Each rank runs ``vllm bench forward`` in-process on a layer-truncated K3.1
-(``KIMI_K31_DEP_MODEL``: a config-only K3.1 directory with a few layers, e.g. 3
+Each rank runs `vllm bench forward` in-process on a layer-truncated K3.1
+(`KIMI_K31_DEP_MODEL`: a config-only K3.1 directory with a few layers, e.g. 3
 KDA + 1 DSA + MegaMoE layers; dummy weights, balanced EP routing). The bench
 compares the step's CUDA graph replay (captured: the specialized decode) with the
 same step run eagerly (outside a capture the specialized decode never plans: the
@@ -55,9 +55,9 @@ pytestmark = [
 
 
 def admit(capture_sizes, plans):
-    """Admit the specialized decode under ``vllm bench forward`` (its graphs are
+    """Admit the specialized decode under `vllm bench forward` (its graphs are
     one-shot captures of each exact batch; the deployment's capture sizes are
-    ``capture_sizes``) and record every captured step's plan."""
+    `capture_sizes`) and record every captured step's plan."""
     import dataclasses
 
     import vllm.models.kimi_k3.nvidia.model as model

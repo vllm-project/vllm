@@ -2,12 +2,57 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Normalized configuration consumed by native offloading backends."""
 
+from __future__ import annotations
+
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 
-@dataclass(frozen=True)
+class OffloadAccessMode(Enum):
+    """Direction(s) in which an offloading connector may transfer data.
+
+    Configured through the optional `access_mode` key of a connector's
+    config: `read` serves loads but never accepts stores, `write` accepts
+    stores but never serves loads, and `readwrite` (the default) does both.
+    """
+
+    READ = "read"
+    WRITE = "write"
+    READWRITE = "readwrite"
+
+    @classmethod
+    def from_config(cls, value: str | OffloadAccessMode | None) -> OffloadAccessMode:
+        """Parse a configured `access_mode` value, defaulting to `readwrite`."""
+        if value is None:
+            return cls.READWRITE
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, str):
+            raise ValueError(
+                f"access_mode must be a string, got {type(value).__name__}: {value!r}"
+            )
+        try:
+            return cls(value.strip().lower())
+        except ValueError:
+            valid = ", ".join(repr(access_mode.value) for access_mode in cls)
+            raise ValueError(
+                f"Invalid access_mode {value!r}; expected one of {valid}"
+            ) from None
+
+    @property
+    def can_read(self) -> bool:
+        """Whether the connector may serve loads (read from the tier)."""
+        return self is not OffloadAccessMode.WRITE
+
+    @property
+    def can_write(self) -> bool:
+        """Whether the connector may accept stores (write to the tier)."""
+        return self is not OffloadAccessMode.READ
+
+
+@dataclass(frozen=True, slots=True)
 class OffloadingGroupConfig:
     # Total token span covered by one block across all workers
     # (accounts for context parallelism).
@@ -21,7 +66,7 @@ class OffloadingGroupConfig:
     sliding_window_size_in_chunks: int | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingModelConfig:
     # Model identifier (e.g. HuggingFace model path).
     name: str
@@ -31,7 +76,7 @@ class OffloadingModelConfig:
     max_model_len: int = 0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingCacheConfig:
     # Tokens per block hash.
     tokens_per_hash: int
@@ -39,12 +84,14 @@ class OffloadingCacheConfig:
     blocks_per_chunk: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingParallelConfig:
     # Worker index in [0, world_size). 0 on the scheduler side.
     rank: int
     # Total number of workers.
     world_size: int
+    # Number of workers on this node.
+    local_world_size: int
     # Tensor parallel size.
     tp_size: int
     # Pipeline parallel size.
@@ -67,7 +114,7 @@ class OffloadingParallelConfig:
     is_parallelism_agnostic: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OffloadingConfig:
     groups: tuple[OffloadingGroupConfig, ...]
     # KV bytes stored by one worker per block.

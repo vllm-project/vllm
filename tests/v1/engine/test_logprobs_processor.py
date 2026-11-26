@@ -16,17 +16,23 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.logprobs import create_sample_logprobs
+from vllm.logprobs import (
+    FlatLogprobs,
+    create_prompt_logprobs,
+    create_sample_logprobs,
+)
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
 
-def _make_processor(num_logprobs: int) -> LogprobsProcessor:
+def _make_processor(
+    num_logprobs: int, flat_logprobs: bool = False
+) -> LogprobsProcessor:
     return LogprobsProcessor(
         tokenizer=None,
-        logprobs=create_sample_logprobs(flat_logprobs=False),
+        logprobs=create_sample_logprobs(flat_logprobs=flat_logprobs),
         prompt_logprobs=None,
         cumulative_logprob=0.0,
         num_logprobs=num_logprobs,
@@ -48,6 +54,7 @@ def test_drops_trailing_sentinel_columns():
 
     processor._update_sample_logprobs(LogprobsLists(token_ids, logprobs, ranks))
 
+    assert processor.logprobs is not None
     assert len(processor.logprobs) == 1
     pos = processor.logprobs[0]
     # Exactly sampled + 3 requested tokens; trailing sentinels dropped.
@@ -68,6 +75,7 @@ def test_accepts_exactly_sized_row():
 
     processor._update_sample_logprobs(LogprobsLists(token_ids, logprobs, ranks))
 
+    assert processor.logprobs is not None
     pos = processor.logprobs[0]
     assert set(pos.keys()) == {7, 11, 13}
 
@@ -93,6 +101,88 @@ def test_prompt_token_id_logprobs_are_popped_once():
     assert processor.pop_prompt_token_id_logprobs() is None
 
 
+def _engine_steps(seed: int, width: int, num_steps: int) -> list[LogprobsLists]:
+    """Engine steps of 1-3 rows, some repeating the sampled id in the top-k."""
+    rng = np.random.default_rng(seed)
+    steps = []
+    for _ in range(num_steps):
+        rows = int(rng.integers(1, 4))
+        token_ids = rng.integers(0, 1000, (rows, width)).astype(np.int32)
+        dup = (rng.random(rows) < 0.3) & (width > 1)
+        token_ids[dup, -1] = token_ids[dup, 0]
+        logprobs = -rng.random((rows, width)).astype(np.float32) * 10
+        ranks = rng.integers(0, 50, rows).astype(np.int64)
+        steps.append(LogprobsLists(token_ids, logprobs, ranks))
+    return steps
+
+
+@pytest.mark.parametrize("num_logprobs,width", [(0, 1), (3, 4), (3, 6), (-1, 5)])
+def test_flat_rows_match_list_logprobs(num_logprobs, width):
+    """FlatLogprobs keeps the engine rows but reads like the list path:
+    same positions (first-occurrence keys, last-occurrence values, ranks),
+    same cumulative logprob."""
+    expected = _make_processor(num_logprobs)
+    actual = _make_processor(num_logprobs, flat_logprobs=True)
+    steps = _engine_steps(0, width, 40)
+    for step in steps:
+        expected._update_sample_logprobs(step)
+        actual._update_sample_logprobs(step)
+
+    assert isinstance(actual.logprobs, FlatLogprobs)
+    assert list(actual.logprobs) == expected.logprobs
+    assert [actual.logprobs[i] for i in range(len(expected.logprobs))] == (
+        expected.logprobs
+    )
+    assert list(actual.logprobs[-3:]) == expected.logprobs[-3:]
+    assert actual.cumulative_logprob == expected.cumulative_logprob
+
+    rows = actual.logprobs.rows()
+    assert rows is not None
+    token_ids, logprobs, ranks = rows
+    slots = width if num_logprobs == -1 else num_logprobs + 1
+    assert token_ids.dtype == np.dtype("<i4") and logprobs.dtype == np.dtype("<f4")
+    assert token_ids.flags.c_contiguous and logprobs.flags.c_contiguous
+    np.testing.assert_array_equal(
+        token_ids, np.concatenate([s.logprob_token_ids[:, :slots] for s in steps])
+    )
+    np.testing.assert_array_equal(
+        logprobs, np.concatenate([s.logprobs[:, :slots] for s in steps])
+    )
+    np.testing.assert_array_equal(
+        ranks, np.concatenate([s.sampled_token_ranks for s in steps])
+    )
+
+
+def test_flat_irregular_rows_have_no_engine_rows():
+    """A row narrower than the stored ones (a co-batched request replaced the
+    batch's logprob tensors) still reads like the list path, but rows() is
+    None."""
+    expected = _make_processor(3)
+    actual = _make_processor(3, flat_logprobs=True)
+    steps = _engine_steps(1, 4, 3) + _engine_steps(2, 2, 2) + _engine_steps(3, 4, 2)
+    for step in steps:
+        expected._update_sample_logprobs(step)
+        actual._update_sample_logprobs(step)
+
+    assert isinstance(actual.logprobs, FlatLogprobs)
+    assert list(actual.logprobs) == expected.logprobs
+    assert actual.logprobs.rows() is None
+
+
+def test_sample_logprobs_skip_detokenize():
+    """_detokenize_logprobs=False keeps no decoded tokens, even with a
+    tokenizer (which would fail here if used)."""
+    params = SamplingParams(logprobs=2, flat_logprobs=True)
+    params._detokenize_logprobs = False
+    processor = LogprobsProcessor.from_new_request(
+        tokenizer=object(), request=SimpleNamespace(sampling_params=params)
+    )
+    for step in _engine_steps(4, 3, 3):
+        processor._update_sample_logprobs(step)
+    assert isinstance(processor.logprobs, FlatLogprobs)
+    assert set(processor.logprobs.decoded_tokens) == {None}
+
+
 @pytest.mark.parametrize("flat_logprobs", [False, True])
 def test_prompt_logprob_start_pads_unscored_positions(flat_logprobs):
     """Positions up to prompt_logprob_start are None, so the rows the worker
@@ -115,5 +205,82 @@ def test_prompt_logprob_start_pads_unscored_positions(flat_logprobs):
     assert prompt_logprobs is not None
     assert len(prompt_logprobs) == 5
     assert not any(prompt_logprobs[i] for i in range(3))
+    assert prompt_logprobs[3] is not None
+    assert prompt_logprobs[4] is not None
     assert prompt_logprobs[3][7].logprob == -0.5
     assert prompt_logprobs[4][8].logprob == -1.5
+
+
+class _ByteFallbackTokenizer:
+    """Ids 11 then 12 are the two bytes of "é", each alone U+FFFD; any other
+    id is one letter."""
+
+    def decode(self, ids):
+        text, i = [], 0
+        while i < len(ids):
+            if ids[i : i + 2] == [11, 12]:
+                text.append("é")
+                i += 2
+            else:
+                text.append("\ufffd" if ids[i] in (11, 12) else chr(97 + ids[i] % 26))
+                i += 1
+        return "".join(text)
+
+
+@pytest.mark.parametrize("prompt", [False, True])
+@pytest.mark.parametrize("flat_logprobs", [False, True])
+@pytest.mark.parametrize("splits", [(6,), (1, 1, 1, 1, 1, 1), (2, 4), (3, 3)])
+def test_byte_fallback_context_spans_rows_and_batches(prompt, flat_logprobs, splits):
+    """A byte-fallback token is corrected from the tokens before it, whether
+    they came in the same batch of rows or an earlier one; the top-k
+    candidates use the same context."""
+    sampled = [10, 11, 13, 11, 12, 13]
+    token_ids = np.array([[t, 20, 12] for t in sampled], dtype=np.int32)
+    logprobs = -np.arange(18, dtype=np.float32).reshape(6, 3)
+    ranks = np.arange(1, 7)
+    processor = LogprobsProcessor(
+        tokenizer=_ByteFallbackTokenizer(),
+        logprobs=None if prompt else create_sample_logprobs(flat_logprobs),
+        prompt_logprobs=create_prompt_logprobs(flat_logprobs) if prompt else None,
+        cumulative_logprob=None if prompt else 0.0,
+        num_logprobs=None if prompt else 2,
+        num_prompt_logprobs=2 if prompt else None,
+    )
+    start = 0
+    for size in splits:
+        rows = slice(start, start + size)
+        if prompt:
+            processor._update_prompt_logprobs(
+                LogprobsTensors(
+                    torch.from_numpy(token_ids[rows]),
+                    torch.from_numpy(logprobs[rows]),
+                    torch.from_numpy(ranks[rows]),
+                )
+            )
+        else:
+            processor._update_sample_logprobs(
+                LogprobsLists(token_ids[rows], logprobs[rows], ranks[rows])
+            )
+        start += size
+
+    if prompt:
+        assert processor.prompt_logprobs is not None
+        stored = processor.prompt_logprobs[1:]
+    else:
+        assert processor.logprobs is not None
+        stored = processor.logprobs
+    decoded = [
+        [lp.decoded_token for lp in position.values()]
+        for position in stored
+        if position is not None
+    ]
+    # 12 completes "é" only right after a sampled 11 (a row's own sampled
+    # token is not its context); row 4 samples 12, also a candidate.
+    assert decoded == [
+        ["k", "u", ""],
+        ["", "u", ""],
+        ["n", "u", "é"],
+        ["", "u", ""],
+        ["é", "u"],
+        ["n", "u", ""],
+    ]

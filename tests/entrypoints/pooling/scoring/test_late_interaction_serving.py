@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import torch
 
+from vllm.entrypoints.pooling.scoring import serving as scoring_serving
 from vllm.entrypoints.pooling.scoring.serving import ServingScores
-from vllm.entrypoints.pooling.typing import PoolingEngineInput, PoolingServeContext
+from vllm.entrypoints.pooling.types import PoolingEngineInput, PoolingServeContext
+from vllm.exceptions import GenerationError
 from vllm.inputs import tokens_input
-from vllm.pooling_params import PoolingParams
+from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
+from vllm.pooling_params import LateInteractionParams, PoolingParams
+from vllm.utils.async_utils import merge_async_iterators
+from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 
 
 def _make_context() -> PoolingServeContext:
@@ -103,7 +110,7 @@ async def test_colliding_request_ids_use_distinct_late_interaction_keys(
 ):
     serving = object.__new__(ServingScores)
     serving.engine_client = Mock(abort=AsyncMock(), collective_rpc=AsyncMock())
-    prepare_generators = AsyncMock()
+    prepare_generators = AsyncMock(return_value=[])
     monkeypatch.setattr(serving, "_prepare_generators", prepare_generators)
     monkeypatch.setattr(serving, "_collect_batch", AsyncMock())
 
@@ -139,3 +146,191 @@ async def test_colliding_request_ids_use_distinct_late_interaction_keys(
     serving.engine_client.abort.assert_awaited_once_with(
         [*first.late_interaction_query_keys, *first_doc_request_ids]
     )
+
+
+@pytest.mark.asyncio
+async def test_late_interaction_output_error_stops_pending_producers(monkeypatch):
+    """An error output must stop the batch even while another request is pending."""
+    started, stopped = asyncio.Event(), asyncio.Event()
+
+    async def failing():
+        await started.wait()
+        output = PoolingOutput(torch.empty(0))
+        error = RequestError("failed", "scoring failed")
+        yield PoolingRequestOutput("failed", output, [1], 0, True, error=error)
+
+    async def pending():
+        try:
+            started.set()
+            await asyncio.Event().wait()
+            yield  # pragma: no cover
+        finally:
+            stopped.set()
+
+    async def prepare(ctx):
+        generators = [failing(), pending()]
+        ctx.result_generator = merge_async_iterators(*generators)
+        return generators
+
+    serving = object.__new__(ServingScores)
+    monkeypatch.setattr(serving, "_prepare_generators", prepare)
+    ctx = _make_context()
+    ctx.n_queries = 2
+    assert ctx.engine_inputs is not None
+    ctx.engine_inputs = list(ctx.engine_inputs) * 2
+    with pytest.raises(GenerationError, match="scoring failed"):
+        await asyncio.wait_for(
+            serving._flash_late_interaction_encode_queries(ctx), timeout=5
+        )
+    assert stopped.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_stage", ["abort", "rpc"])
+async def test_repeated_cancellation_releases_requests_and_queries(
+    cleanup_stage, monkeypatch
+):
+    runner = LateInteractionRunner(enable_flash=False)
+    pending = set()
+    started, cleanup_entered, release = (asyncio.Event() for _ in range(3))
+    ctx = _make_context()
+
+    async def encode_queries(ctx):
+        ctx.late_interaction_query_keys = ["query"]
+        params = PoolingParams(
+            late_interaction_params=LateInteractionParams("cache_query", "query", 1)
+        )
+        runner.postprocess_pooler_output([torch.eye(2)], [params], ["query"], [True])
+
+    async def encode_docs(ctx):
+        # The document is queued but has not reached the worker yet.
+        ctx.late_interaction_doc_keys = ["doc"]
+        pending.add("doc")
+        started.set()
+        await asyncio.Event().wait()
+
+    async def cleanup(request_ids, *, args=None):
+        is_abort = args is None
+        if is_abort == (cleanup_stage == "abort"):
+            cleanup_entered.set()
+            await release.wait()
+        if is_abort:
+            pending.difference_update(request_ids)
+        else:
+            runner.release_queries(args[0])
+
+    serving = object.__new__(ServingScores)
+    serving.io_processor = Mock()
+    serving.engine_client = Mock(abort=cleanup, collective_rpc=cleanup)
+    monkeypatch.setattr(serving, "_init_ctx", AsyncMock(return_value=ctx))
+    monkeypatch.setattr(serving, "_preprocessing", AsyncMock())
+    monkeypatch.setattr(
+        serving, "_flash_late_interaction_encode_queries", encode_queries
+    )
+    monkeypatch.setattr(serving, "_flash_late_interaction_encode_docs", encode_docs)
+    handler = asyncio.create_task(serving.flash_late_interaction())
+
+    try:
+        async with asyncio.timeout(5):
+            await started.wait()
+            handler.cancel()
+            await cleanup_entered.wait()
+            handler.cancel()
+            asyncio.get_running_loop().call_soon(release.set)
+            await asyncio.wait([handler])
+            with pytest.raises(asyncio.CancelledError):
+                handler.result()
+            assert not pending
+            assert not runner._query_cache
+            assert not runner._query_uses
+    finally:
+        # Always unblock cleanup, including when an assertion or timeout fails.
+        release.set()
+        handler.cancel()
+        await asyncio.gather(handler, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repeat_cancellation", [False, True])
+async def test_late_interaction_cleanup_wait_is_bounded(
+    repeat_cancellation: bool, monkeypatch: pytest.MonkeyPatch
+):
+    """A stalled cleanup has one deadline, even if cancellation keeps arriving."""
+    monkeypatch.setattr(
+        scoring_serving,
+        "_LATE_INTERACTION_CLEANUP_TIMEOUT_SECONDS",
+        0.01,
+        raising=False,
+    )
+    loop = asyncio.get_running_loop()
+    cleanup = loop.create_future()
+    handler = asyncio.create_task(
+        ServingScores._await_late_interaction_cleanup(cleanup)
+    )
+    stop_cancelling = False
+
+    def cancel_again():
+        if not stop_cancelling and not handler.done():
+            handler.cancel()
+            loop.call_soon(cancel_again)
+
+    if repeat_cancellation:
+        loop.call_soon(cancel_again)
+
+    try:
+        done, _ = await asyncio.wait({handler}, timeout=1)
+        assert handler in done, "Cleanup wait exceeded its deadline"
+        expected_error = asyncio.CancelledError if repeat_cancellation else TimeoutError
+        with pytest.raises(expected_error):
+            handler.result()
+        assert cleanup.cancelled()
+    finally:
+        # The old helper swallows cancellation, so release it before joining.
+        stop_cancelling = True
+        if not cleanup.done():
+            cleanup.set_result(None)
+        await asyncio.gather(handler, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cleanup_error",
+    [None, RuntimeError("query cache release failed")],
+    ids=["success", "failure"],
+)
+async def test_late_interaction_cleanup_preserves_cancellation_after_request_error(
+    cleanup_error: RuntimeError | None, caplog_vllm: pytest.LogCaptureFixture
+):
+    """The handler stays cancelled and any cleanup error is logged."""
+    loop = asyncio.get_running_loop()
+    cleanup = loop.create_future()
+    cleanup_entered = asyncio.Event()
+
+    async def fail_then_clean_up():
+        try:
+            raise ValueError("request failed")
+        except ValueError:
+            cleanup_entered.set()
+            await ServingScores._await_late_interaction_cleanup(cleanup)
+            raise
+
+    handler = asyncio.create_task(fail_then_clean_up())
+    try:
+        await cleanup_entered.wait()
+        handler.cancel()
+        if cleanup_error is None:
+            loop.call_soon(cleanup.set_result, None)
+        else:
+            loop.call_soon(cleanup.set_exception, cleanup_error)
+        done, _ = await asyncio.wait({handler}, timeout=1)
+        assert handler in done, "Handler did not finish after cleanup"
+        with pytest.raises(asyncio.CancelledError):
+            handler.result()
+        logged_errors = [
+            record.exc_info[1] for record in caplog_vllm.records if record.exc_info
+        ]
+        assert logged_errors == ([cleanup_error] if cleanup_error is not None else [])
+    finally:
+        if not cleanup.done():
+            cleanup.set_result(None)
+        await asyncio.gather(handler, return_exceptions=True)

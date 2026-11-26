@@ -64,7 +64,7 @@ def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
     # v2.11 release. In the meantime, the official workaround is to
     # consume the iterator so the tool_calls are correctly deserialized
     # in the OpenAI ChatCompletionAssistantMessageParam object
-    # https://github.com/pydantic/pydantic/issues/9467#issuecomment-2442097291 # noqa: E501
+    # https://github.com/pydantic/pydantic/issues/9467#issuecomment-2442097291
     # Official Pydantic Issues:
     #   - https://github.com/pydantic/pydantic/issues/9541
     # TODO: remove when pydantic v2.11 is released
@@ -178,29 +178,18 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
         return tokenizer.unk_id
 
 
-def tekken_convert_ids_to_tokens(
-    tokenizer: "Tekkenizer", ids: Sequence[int]
-) -> list[str | bytes]:
-    """Convert ids to pieces, using raw `bytes` for byte-fallback tokens."""
-    tokens: list[str | bytes] = [tokenizer.id_to_piece(i) for i in ids]
-    if any("�" in t for t in tokens):
-        tokens = [
-            tokenizer.id_to_byte_piece(i, SpecialTokenPolicy.KEEP)
-            if i >= tokenizer.num_special_tokens
-            else tokenizer.decode([i], SpecialTokenPolicy.KEEP)
-            for i in ids
-        ]
-    return tokens
-
-
 def tekken_convert_tokens_to_string(
     tokenizer: "Tekkenizer", tokens: Sequence[str | bytes]
 ) -> str:
-    """Reassemble pieces from `tekken_convert_ids_to_tokens` into text."""
     if any(isinstance(t, bytes) for t in tokens):
         ids = [_tekken_token_to_id(tokenizer, t) for t in tokens]
         return tokenizer.decode(ids, SpecialTokenPolicy.KEEP)
     return "".join(cast(Sequence[str], tokens))
+
+
+# Chat-template kwargs that vLLM injects for HF/Cohere templates. They are not
+# mistral-common request fields, so don't forward them to `from_openai`.
+_TEMPLATE_ONLY_KWARGS = ("cohere_format", "enable_thinking")
 
 
 class MistralTokenizer(TokenizerLike):
@@ -253,8 +242,7 @@ class MistralTokenizer(TokenizerLike):
 
         # Reverse order to ensure that the lowest token id is kept.
         self._vocab_dict = {
-            self.convert_ids_to_tokens([i], skip_special_tokens=False)[0]: i
-            for i in range(self.vocab_size - 1, -1, -1)
+            self.tokenizer.id_to_piece(i): i for i in range(self.vocab_size - 1, -1, -1)
         }
         # Sort the dict for convenience
         self._vocab_dict = dict(sorted(self._vocab_dict.items(), key=lambda x: x[1]))
@@ -340,6 +328,7 @@ class MistralTokenizer(TokenizerLike):
         add_special_tokens: bool = True,
         truncation: bool = False,
         max_length: int | None = None,
+        return_special_tokens_mask: bool = False,
     ) -> "BatchEncoding":
         if text_pair is not None:
             raise ValueError(
@@ -352,6 +341,7 @@ class MistralTokenizer(TokenizerLike):
             add_special_tokens=add_special_tokens,
             truncation=truncation,
             max_length=max_length,
+            return_special_tokens_mask=return_special_tokens_mask,
         )
 
     @property
@@ -397,6 +387,8 @@ class MistralTokenizer(TokenizerLike):
         max_length = kwargs.pop("max_length", None)
         kwargs.pop("return_tensors", None)
         kwargs.pop("return_dict", None)
+        for key in _TEMPLATE_ONLY_KWARGS:
+            kwargs.pop(key, None)
 
         _validate_apply_chat_template_args(
             messages, continue_final_message, add_generation_prompt
@@ -494,32 +486,32 @@ class MistralTokenizer(TokenizerLike):
         ids: Sequence[int],
         skip_special_tokens: bool = False,
     ) -> list[str]:
-        if not skip_special_tokens:
-            return [self.tokenizer.id_to_piece(token_id) for token_id in ids]
-
-        non_skip_special_tokens_ids = {
-            self.tokenizer.get_special_token(SpecialTokens.tool_calls),
-        }
-        # [ARGS] only exists in v11+ tool-call tokenizers; older tokenizers
-        # raise (Tekken) or return unk (SPM) for it.
-        if self.tokenizer.is_special(SpecialTokens.args):
-            non_skip_special_tokens_ids.add(
-                self.tokenizer.get_special_token(SpecialTokens.args)
-            )
-        # [THINK]/[/THINK] only exist in v13+ reasoning tokenizers; use the
-        # same is_special gate as [ARGS] above so newer versions are covered
-        # without an isinstance check on the instruct tokenizer.
-        for think_token in (SpecialTokens.begin_think, SpecialTokens.end_think):
-            if self.tokenizer.is_special(think_token):
+        if skip_special_tokens:
+            non_skip_special_tokens_ids = {
+                self.tokenizer.get_special_token(SpecialTokens.tool_calls),
+            }
+            # [ARGS] only exists in v11+ tool-call tokenizers; older tokenizers
+            # raise (Tekken) or return unk (SPM) for it.
+            if self.tokenizer.is_special(SpecialTokens.args):
                 non_skip_special_tokens_ids.add(
-                    self.tokenizer.get_special_token(think_token)
+                    self.tokenizer.get_special_token(SpecialTokens.args)
                 )
+            # [THINK]/[/THINK] only exist in v13+ reasoning tokenizers; use the
+            # same is_special gate as [ARGS] above so newer versions are covered
+            # without an isinstance check on the instruct tokenizer.
+            for think_token in (SpecialTokens.begin_think, SpecialTokens.end_think):
+                if self.tokenizer.is_special(think_token):
+                    non_skip_special_tokens_ids.add(
+                        self.tokenizer.get_special_token(think_token)
+                    )
 
-        ids_kept = [
-            i
-            for i in ids
-            if i in non_skip_special_tokens_ids or not self._is_special_token_id(i)
-        ]
+            ids_kept = [
+                i
+                for i in ids
+                if i in non_skip_special_tokens_ids or not self._is_special_token_id(i)
+            ]
+        else:
+            ids_kept = list(ids)
 
         # We filtered unwanted special tokens so we can decode the rest.
         tokens = [self.tokenizer.id_to_piece(token_id) for token_id in ids_kept]

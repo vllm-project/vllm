@@ -3,23 +3,23 @@
 """Expert-parallel dispatch and combine of the latent MoE over NVLink symmetric memory
 (DEP: data-parallel attention at TP1, the 896 routed experts split over N ranks).
 
-Every rank owns one symmetric buffer (``EpLayout``):
+Every rank owns one symmetric buffer (`EpLayout`):
 
 - receive rows, source-major (row = source x stride(T) + token): MXFP8 latent (3584
-  B), its E8M0 block scales (112 B, the linear layout of ``flashinfer.mxfp8_quantize``),
+  B), its E8M0 block scales (112 B, the linear layout of `flashinfer.mxfp8_quantize`),
   the token's 16 expert ids and FP32 routing weights, and a source word (one 128-byte
   line per row, -1 when empty);
 - combine slots [T, N, 3584] BF16: the per-destination-rank partial of every own token;
 - control words: arrival counters and the dispatch / combine flags (one line each).
 
-``EpDispatch`` (one CTA per token) quantizes the BF16 latent to MXFP8 bit-identically
-to ``mxfp8_quantize`` (two threads per 32-block, 16-byte stores) and writes it, with
+`EpDispatch` (one CTA per token) quantizes the BF16 latent to MXFP8 bit-identically
+to `mxfp8_quantize` (two threads per 32-block, 16-byte stores) and writes it, with
 ids, weights and source, into its static row on every rank holding one of its
 experts. Empty rows keep non-local ids (weight 0), so the expert GEMM over the N T
 rows skips them. The last CTA of the rank raises its dispatch flag on every rank and
 waits for all N; on completion the rank's receive rows are complete.
 
-``EpCombine`` (G CTAs) sends every received row's BF16 output (the routing-weighted
+`EpCombine` (G CTAs) sends every received row's BF16 output (the routing-weighted
 sum over this rank's experts) to its source's slot [token, rank] and re-arms the row;
 the last CTA raises the combine flag on every rank. The CTAs with own tokens then wait
 for all N flags and reduce: the FP32 sum of the destination partials in rank order,
@@ -79,8 +79,8 @@ def stride(tokens):
 
 
 class EpLayout:
-    """Byte offsets of one rank's symmetric EP buffer for ``ranks`` ranks and at most
-    ``tokens`` tokens per rank."""
+    """Byte offsets of one rank's symmetric EP buffer for `ranks` ranks and at most
+    `tokens` tokens per rank."""
 
     def __init__(self, ranks, tokens):
         # Rank masks are 32-bit, one flag line per rank (32 slots), the source word
@@ -171,7 +171,7 @@ def store_sys(address, value):
 
 @cute.jit
 def last_arrival(counter, total, lane):
-    """Warp-uniform: whether this CTA is the ``total``-th arrival on ``counter``
+    """Warp-uniform: whether this CTA is the `total`-th arrival on `counter`
     (lane 0's atomic after a system fence of the CTA's stores; the last arrival
     re-arms the counter). Every lane fences again so its later stores follow."""
     last = Int32(0)

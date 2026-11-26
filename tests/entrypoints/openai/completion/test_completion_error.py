@@ -51,12 +51,12 @@ BASE_MODEL_PATHS = [
 ]
 
 
-@dataclass
+@dataclass(slots=True)
 class MockHFConfig:
     model_type: str = "any"
 
 
-@dataclass
+@dataclass(slots=True)
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"
@@ -88,12 +88,12 @@ class MockModelConfig:
         return self.diff_sampling_param or {}
 
 
-@dataclass
+@dataclass(slots=True)
 class MockParallelConfig:
     _api_process_rank: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
@@ -196,6 +196,44 @@ async def test_beam_search_preserves_request_priority(header):
     assert priorities == [-9 if header is None else int(header)] * 3
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header,expected_rank", [(None, None), ("3", 3)])
+async def test_beam_search_preserves_data_parallel_rank(header, expected_rank):
+    """The X-data-parallel-rank header reaches every beam expansion."""
+    engine = MagicMock(spec=AsyncLLM)
+    engine.errored = False
+    engine.model_config = MockModelConfig()
+    engine.input_processor = MagicMock()
+    engine.renderer = _build_renderer(engine.model_config)
+    ranks = []
+
+    async def generate(*args, data_parallel_rank=None, **kwargs):
+        ranks.append(data_parallel_rank)
+        output = _make_metrics_request_output()
+        output.outputs[0].logprobs = [{100: Logprob(-0.1), 101: Logprob(-0.2)}]
+        yield output
+
+    engine.generate = generate
+    serving = _build_serving_completion(engine)
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test",
+        use_beam_search=True,
+        n=2,
+        max_tokens=2,
+        ignore_eos=True,
+        watermarking=False,
+    )
+    headers = [] if header is None else [(b"x-data-parallel-rank", header.encode())]
+    response = await serving.create_completion(
+        request, Request({"type": "http", "headers": headers})
+    )
+
+    assert isinstance(response, CompletionResponse)
+    assert len(response.choices) == 2
+    assert ranks == [expected_rank] * 3
+
+
 def _build_renderer(model_config: MockModelConfig):
     return HfRenderer(
         MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
@@ -235,6 +273,7 @@ def test_completion_per_request_metrics_follow_server_flag():
     )
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert enabled_response.metrics.time_to_first_content_token_ms is None
 
 
 def test_completion_per_request_metrics_suppressed_for_multiple_prompts():
@@ -258,8 +297,8 @@ def test_completion_per_request_metrics_suppressed_for_multiple_prompts():
 def _spec_decode_metrics() -> RequestSpecDecodeMetrics:
     # Two verify steps: accept 3 drafts, then 1 -> histogram [0, 1, 0, 1].
     m = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
-    m.observe(num_draft_tokens=3, num_accepted=3)
-    m.observe(num_draft_tokens=3, num_accepted=1)
+    m.observe(num_draft_tokens=3, num_accepted=3, num_verified_tokens=3)
+    m.observe(num_draft_tokens=3, num_accepted=1, num_verified_tokens=3)
     return m
 
 

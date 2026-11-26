@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DSpark drafter's 5 layers and final norm as one launch for 3..8 requests.
 
-A draft step of up to 64 query rows on one TP4 rank (layout ``layout.W_*``). The
-differences from ``layer``:
+A draft step of up to 64 query rows on one TP4 rank (layout `layout.W_*`). The
+differences from `layer`:
 
 - GEMVs: token tiles of 16 rows (a runtime loop; two tiles' activations loaded
   together) reuse each CTA's weights in the same wave split and order, so a row's
-  result matches ``layer``'s bitwise; o_proj / down partials go to the row's owner
+  result matches `layer`'s bitwise; o_proj / down partials go to the row's owner
   rank (row % 4) only.
 - Attention: request r gets 48 // n CTAs; CTA c takes a contiguous range of the
   window's blocks, newest first (the first two hold the new K / V rows), with an
@@ -17,7 +17,7 @@ differences from ``layer``:
   4 j + rank, adds the residual, norms and quantizes it, and writes the row as
   tagged words into its own symmetric buffer; every rank's N CTA j then pulls rows
   j, j + 16, .. from their owners into local scratch and flags them. The final
-  bf16 rows are gathered into ``h_out`` the same way.
+  bf16 rows are gathered into `h_out` the same way.
 """
 
 import flydsl.compiler as flyc
@@ -47,8 +47,8 @@ NEG_INF = float("-inf")
 
 
 def ag_put_x8(o, t, Y, tag, sym, tid):
-    """Publish row ``t`` (16 values a thread) as MXFP8 in this rank's gathered rows at
-    ``sym + Y``: e4m3 words at pairs 4 tid .., 4 e8m0 scales a word from pair 1536."""
+    """Publish row `t` (16 values a thread) as MXFP8 in this rank's gathered rows at
+    `sym + Y`: e4m3 words at pairs 4 tid .., 4 e8m0 scales a word from pair 1536."""
     am = fmath.absf(o[0])
     for e in range_constexpr(1, 16):
         am = fx.max(am, fmath.absf(o[e]))
@@ -83,7 +83,7 @@ ag_put_x8 = traced(ag_put_x8)
 
 
 def ag_copy_x8(t, src, Y, tag, x8, xs8, tid, dl, health, rank, site):
-    """Copy row ``t`` from its owner's gathered rows (``src``: the owner's peer base)
+    """Copy row `t` from its owner's gathered rows (`src`: the owner's peer base)
     into x8[t] / xs8[t], polling on the tagged words."""
     if tid < 384:
         w, fl = dev.poll_pairs(
@@ -109,7 +109,7 @@ ag_copy_x8 = traced(ag_copy_x8)
 
 
 def ag_put_bf(o, t, Y, tag, sym, tid):
-    """Publish final row ``t`` (16 values a thread) as bf16 pairs at ``sym + Y``."""
+    """Publish final row `t` (16 values a thread) as bf16 pairs at `sym + Y`."""
     if tid < 384:
         row = (Y + (t * layout.ROW_PAIRS + tid * 8) * 8) // 4
         for q in range_constexpr(4):
@@ -145,9 +145,9 @@ ag_copy_bf = traced(ag_copy_bf)
 
 
 def build_wide(yw, wait_ticks=1_000_000_000):
-    """The ``@flyc.jit`` launcher of the wide drafter kernel for one TP4 rank.
+    """The `@flyc.jit` launcher of the wide drafter kernel for one TP4 rank.
 
-    ``yw``: the byte offset of its symmetric regions in the peer buffer.
+    `yw`: the byte offset of its symmetric regions in the peer buffer.
     """
     WF = layout.W_F_OFF
     WL = layout.W_L_OFF
@@ -224,7 +224,7 @@ def build_wide(yw, wait_ticks=1_000_000_000):
                 return 16 * t + fx.min(l16, fx.max(n_rows - 16 * t, I32(1)) - 1)
 
             def rs_push(t, col0, Y, tag):
-                """Push token tile ``t``'s rows col0 .. col0 + 31, summed over the
+                """Push token tile `t`'s rows col0 .. col0 + 31, summed over the
                 waves, as bf16 pairs to each token row's owner rank (row % 4)."""
                 k = ii // 16
                 rp = ii % 16

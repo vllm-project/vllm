@@ -170,7 +170,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         ):
             num_speculative_tokens = speculative_config.num_speculative_tokens or 0
             query_len = 1 + num_speculative_tokens * (
-                2 if speculative_config.parallel_drafting else 1
+                2 if speculative_config.speculator_config.parallel_drafting else 1
             )
             max_query_len_3d = min(query_len, MAX_3D_QUERY_LEN)
         # Scratch is indexed by query token, including verification tokens.
@@ -415,15 +415,15 @@ class TritonAttentionImpl(AttentionImpl):
         """Extract per-head scale views from the padded content dimension.
 
         The KV cache is packed as logical shape
-        ``(num_blocks, nkv, block_size, 2 * (hs + pad))`` where
-        ``pad = sizeof(float32) / sizeof(cache_dtype)``.  The content dim holds
-        ``[K(hs) | K_scale(pad) | V(hs) | V_scale(pad)]`` per (head, slot); the
-        last ``pad`` elements of each half hold one float32 scale.  We create
-        strided float32 views over those bytes.  ``kv_cache`` must be the
+        `(num_blocks, nkv, block_size, 2 * (hs + pad))` where
+        `pad = sizeof(float32) / sizeof(cache_dtype)`.  The content dim holds
+        `[K(hs) | K_scale(pad) | V(hs) | V_scale(pad)]` per (head, slot); the
+        last `pad` elements of each half hold one float32 scale.  We create
+        strided float32 views over those bytes.  `kv_cache` must be the
         packed logical tensor (call before any transpose), but may have HND or
         NHD physical strides.
 
-        Scale shape: ``(num_blocks, block_size, num_kv_heads)``
+        Scale shape: `(num_blocks, block_size, num_kv_heads)`
         """
         if self._k_scale_cache is not None:
             return
@@ -562,21 +562,35 @@ class TritonAttentionImpl(AttentionImpl):
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
+        if self._kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            from vllm.v1.attention.ops.int4_per_token_head import init_rht_signs
+
+            init_rht_signs(
+                head_size,
+                torch.device(
+                    current_platform.device_type,
+                    torch.accelerator.current_device_index(),
+                ),
+            )
 
         # Enable tensor descriptors for Q/K/V load/store on platforms that
         # benefit from HW 2D block reads (Intel XPU).  The dead branch
         # is eliminated at Triton compile time, so other platforms see
         # zero cost when TD is off.
         #
-        # ``VLLM_TRITON_USE_TD`` is tri-state:
-        #   - unset (None): auto-select (TD on for XPU, off elsewhere),
-        #   - ``1``: force TD on regardless of platform,
+        # ``VLLM_TRITON_USE_TD``:
+        #   - unset or ``1``: on for XPU, off elsewhere,
         #   - ``0``: force TD off regardless of platform (useful for A/B).
         td_override = envs.VLLM_TRITON_USE_TD
         if td_override is None:
             self.use_td = current_platform.is_xpu()
         else:
-            self.use_td = td_override
+            self.use_td = td_override and current_platform.is_xpu()
+            if td_override and not self.use_td:
+                logger.warning_once(
+                    "VLLM_TRITON_USE_TD=1 is ignored by TRITON_ATTN: its "
+                    "tensor-descriptor path is XPU-only."
+                )
         self._set_kv_ptr_range = current_platform.is_rocm()
 
     def forward(
@@ -780,7 +794,8 @@ class TritonAttentionImpl(AttentionImpl):
 
         # Use encoder-specific metadata for sequence information
         query_start_loc = attn_metadata.query_start_loc
-        seq_lens = attn_metadata.seq_lens
+        # No KV cache: K/V length is the query length, not seq_lens.
+        seq_lens = query_start_loc[1:] - query_start_loc[:-1]
         max_query_len = attn_metadata.max_query_len
 
         # Call flash attention directly on Q, K, V tensors
@@ -863,6 +878,8 @@ class TritonAttentionImpl(AttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        query_out: torch.Tensor | None = None,
+        key_out: torch.Tensor | None = None,
     ):
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
@@ -887,4 +904,6 @@ class TritonAttentionImpl(AttentionImpl):
             layer._v_scale,
             flash_layout,
             is_fp8_kv_cache,
+            query_out=query_out,
+            key_out=key_out,
         )

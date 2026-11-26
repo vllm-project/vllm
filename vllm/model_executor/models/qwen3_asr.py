@@ -56,6 +56,7 @@ from vllm.model_executor.models.qwen2_5_omni_thinker import (
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.models.qwen3_omni_moe_thinker import (
     Qwen3OmniMoeAudioEncoder,
+    Qwen3OmniMoeAudioEncoderCudaGraphMixin,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -90,8 +91,6 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
 _ASR_TEXT_TAG = "<asr_text>"
@@ -149,13 +148,13 @@ class Qwen3ASRStreamingPostProcessor(StreamingTranscriptionPostProcessor):
 def _sanitize_transcription_user_text(text: str) -> str:
     """Strip ChatML-style special tokens from user-controlled transcription fields.
 
-    Applies the regex / ``<asr_text>`` substitutions to a fixpoint so nested
+    Applies the regex / `<asr_text>` substitutions to a fixpoint so nested
     payloads cannot reconstruct a valid token after a single pass:
 
-    - ``<|im<|x|>_end|>`` would, with a single ``re.sub``, leave ``<|im_end|>``
+    - `<|im<|x|>_end|>` would, with a single `re.sub`, leave `<|im_end|>`
       (a real ChatML control token).
-    - ``<asr_te<asr_text>xt>`` would, with a single ``str.replace``, leave
-      ``<asr_text>`` (the model-significant assistant-prefix delimiter).
+    - `<asr_te<asr_text>xt>` would, with a single `str.replace`, leave
+      `<asr_text>` (the model-significant assistant-prefix delimiter).
 
     Looping both substitutions until the string stabilises eliminates these
     reconstruction attacks.
@@ -307,8 +306,8 @@ class Qwen3ASRMultiModalProcessor(
 
     def _postprocess_hf_mm_data(
         self,
-        hf_data: Mapping[str, object],
-        hf_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
         if "input_features" not in processed_data:
@@ -395,6 +394,7 @@ class Qwen3ASRForConditionalGeneration(
     SupportsTranscription,
     SupportsLoRA,
     SupportsEagle3,
+    Qwen3OmniMoeAudioEncoderCudaGraphMixin,
 ):
     # LoRA support
     packed_modules_mapping = {
@@ -511,12 +511,8 @@ class Qwen3ASRForConditionalGeneration(
         audio_input: Qwen2_5OmniAudioFeatureInputs,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
-        # audio_feature_lengths is keep_on_cpu; the audio tower derives
-        # device placement from feature_lens, so move it explicitly.
-        audio_feature_lengths = async_tensor_h2d(
-            audio_input["audio_feature_lengths"], input_features.device
-        )
-
+        # keep_on_cpu, so the lengths below are host values.
+        audio_feature_lengths = audio_input["audio_feature_lengths"]
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
 
         audio_features = self.audio_tower(
@@ -524,9 +520,7 @@ class Qwen3ASRForConditionalGeneration(
             feature_lens=audio_feature_lengths,
             aftercnn_lens=audio_output_lengths,
         )
-        with gpu_sync_allowed():
-            split_sizes = audio_output_lengths.tolist()
-        return audio_features.split(split_sizes)
+        return audio_features.split(audio_output_lengths.tolist())
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
@@ -699,9 +693,9 @@ class Qwen3ASRForConditionalGeneration(
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         """Get the generation prompt to be used for transcription requests.
 
-        Matches the official Qwen3-ASR SDK prompt format. The ``system`` turn
-        is only emitted when the caller supplied a ``prompt``, mirroring the
-        SDK's ``_build_messages`` (which omits the system role when context is
+        Matches the official Qwen3-ASR SDK prompt format. The `system` turn
+        is only emitted when the caller supplied a `prompt`, mirroring the
+        SDK's `_build_messages` (which omits the system role when context is
         empty) and preserving the prior no-prompt behavior:
 
           [system: {context}]                         # only when prompt given
@@ -746,7 +740,7 @@ class Qwen3ASRForConditionalGeneration(
         )
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
+    def post_process_output(cls, text: str, model_config: ModelConfig) -> str:
         """Post-process Qwen3-ASR raw output to extract clean transcription.
 
         The model outputs in format: "language {lang}<asr_text>{transcription}"

@@ -149,6 +149,41 @@ def test_block_tables_apply_staged_writes_single_group():
     )
 
 
+@pytest.mark.parametrize("max_num_batched_tokens", [509, 1500])
+def test_slot_mapping_rows_are_aligned(max_num_batched_tokens: int):
+    """Each group's row is passed to attention as its own tensor; DeepSeek-V4's
+    CuTe DSL compressor rejects int64 inputs that are not 64-byte aligned."""
+    device = torch.device("cuda")
+    block_tables = BlockTables(
+        block_sizes=[16, 64, 8],
+        max_num_reqs=1,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_blocks_per_group=[4, 4, 4],
+        device=device,
+    )
+    block_tables.append_block_ids(
+        req_index=0,
+        new_block_ids=([1], [2], [3]),
+        overwrite=True,
+    )
+    block_tables.apply_staged_writes()
+
+    slot_mappings = block_tables.compute_slot_mappings(
+        torch.tensor([0], dtype=torch.int32, device=device),
+        torch.tensor([0, 3], dtype=torch.int32, device=device),
+        torch.tensor([0, 1, 2], dtype=torch.int64, device=device),
+        num_tokens_padded=4,
+    )
+    torch.accelerator.synchronize()
+
+    assert all(row.data_ptr() % 64 == 0 for row in slot_mappings)
+    assert slot_mappings.tolist() == [
+        [16, 17, 18, PAD_SLOT_ID],
+        [128, 129, 130, PAD_SLOT_ID],
+        [24, 25, 26, PAD_SLOT_ID],
+    ]
+
+
 def test_block_tables_skip_custom_slot_mapping_groups():
     device = torch.device("cuda")
     block_tables = BlockTables(
@@ -229,35 +264,6 @@ def test_dcp_slot_mapping_only_shards_sharded_groups(cp_rank: int):
     assert torch.equal(actual[1], positions + 10 * 128)
 
 
-def test_v1_block_table_move_row_clears_vacated_row():
-    """condense() moves the last row into a freed slot; the vacated row must
-    not keep stale block ids. Padded dummy-run batches dereference stale rows
-    as mamba state slots (bypassing the NULL_BLOCK_ID fill of real decode
-    padding) and write state in place there — corrupting the blocks' new
-    owner once they are reallocated, e.g. to an in-flight NIXL load."""
-    from vllm.v1.worker.block_table import BlockTable
-
-    block_table = BlockTable(
-        block_size=16,
-        max_num_reqs=4,
-        max_num_blocks_per_req=8,
-        max_num_batched_tokens=64,
-        pin_memory=False,
-        device=torch.device("cuda"),
-        cp_kv_cache_interleave_size=1,
-    )
-    block_table.add_row([7, 8, 9], row_idx=0)
-    block_table.add_row([4, 5], row_idx=1)
-
-    block_table.move_row(1, 0)
-
-    assert block_table.block_table.np[0, :2].tolist() == [4, 5]
-    assert block_table.num_blocks_per_row[0] == 2
-    # The vacated source row routes to the reserved null block.
-    assert block_table.num_blocks_per_row[1] == 0
-    assert (block_table.block_table.np[1] == 0).all()
-
-
 def test_get_dummy_block_tables_returns_zeroed_rows():
     """Dummy runs bypass the gather, so the persistent input_block_tables
     hold the previous real step's rows. Mamba/GDN metadata routes in-place
@@ -288,6 +294,42 @@ def test_get_dummy_block_tables_returns_zeroed_rows():
     assert (dummy[0] == 0).all()
     # CUDA graph invariant: same persistent tensor, not a fresh allocation.
     assert dummy[0].data_ptr() == block_tables.input_block_tables[0].data_ptr()
+
+
+def test_clear_input_block_tables_drops_stale_entries():
+    """gather_block_tables writes only a request's own blocks, so a row keeps
+    a longer earlier request's ids past them. Kernels that load whole KV tiles
+    read those ids, so after the KV cache releases blocks they must be nulled
+    while the persistent storage address stays the same for CUDA graphs."""
+    device = torch.device("cuda")
+    block_tables = BlockTables(
+        block_sizes=[16],
+        max_num_reqs=4,
+        max_num_batched_tokens=64,
+        max_num_blocks_per_group=[8],
+        device=device,
+    )
+    idx_mapping = torch.zeros(1, dtype=torch.int32, device=device)
+    block_tables.append_block_ids(
+        req_index=0, new_block_ids=([1, 2, 3],), overwrite=True
+    )
+    block_tables.apply_staged_writes()
+    block_tables.gather_block_tables(idx_mapping, num_reqs_padded=1)
+    block_tables.append_block_ids(req_index=0, new_block_ids=([4],), overwrite=True)
+    block_tables.apply_staged_writes()
+    table = block_tables.gather_block_tables(idx_mapping, num_reqs_padded=1)[0]
+    torch.accelerator.synchronize()
+    assert table[0, :3].tolist() == [4, 2, 3]
+
+    data_ptr = block_tables.input_block_tables[0].data_ptr()
+    block_tables.clear_input_block_tables()
+    torch.accelerator.synchronize()
+    assert (block_tables.input_block_tables[0] == 0).all()
+    assert block_tables.input_block_tables[0].data_ptr() == data_ptr
+
+    table = block_tables.gather_block_tables(idx_mapping, num_reqs_padded=1)[0]
+    torch.accelerator.synchronize()
+    assert table[0, :3].tolist() == [4, 0, 0]
 
 
 def test_dummy_request_slot_mapping_is_pad():

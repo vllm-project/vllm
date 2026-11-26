@@ -68,11 +68,11 @@ class SchedulerConfig:
     max_num_active_seqs: int | None = Field(default=None, ge=1)
     """Maximum number of requests the scheduler admits into RUNNING.
 
-    ``max_num_seqs`` sizes the model runner (per-request buffers and CUDA
+    `max_num_seqs` sizes the model runner (per-request buffers and CUDA
     graph capture) and is also the default admission limit. Setting this
     lowers only the number of requests that may occupy RUNNING, so decode
     batches stay smaller without shrinking runner or graph capacity. Must
-    be ``<= max_num_seqs``. ``None`` (default) keeps current behavior.
+    be `<= max_num_seqs`. `None` (default) keeps current behavior.
     """
 
     max_num_inflight_kv_loads: int | None = Field(default=None, ge=1)
@@ -81,10 +81,24 @@ class SchedulerConfig:
     and waiting for a running slot.
 
     Setting it also lets requests the connector may load asynchronously
-    (``KVConnectorBase_V1.may_load_async``, by default P/D remote-prefill
+    (`KVConnectorBase_V1.may_load_async`, by default P/D remote-prefill
     requests) start their loads while the running batch is full, so they are
-    ready when a slot frees. ``None`` (default) keeps current behavior: no cap,
+    ready when a slot frees. `None` (default) keeps current behavior: no cap,
     and loads start only when a running slot is free.
+    """
+
+    max_async_kv_loads_per_step: int | None = Field(default=None, ge=1)
+    """Maximum number of async KV connector loads (e.g. a P/D NIXL pull) that
+    start in one scheduling step. Each start allocates KV blocks for the whole
+    prompt on the main thread, and with data parallelism every rank waits for the
+    slowest step. `max_num_inflight_kv_loads` bounds how many loads are held;
+    this bounds how fast they start. `None` (default) means no limit.
+
+    Requests identified by the connector as async loads wait separately, so
+    this limit does not block ordinary waiting requests. Starting loads while
+    the running batch is full still requires `max_num_inflight_kv_loads`.
+
+    **Experimental**: this option may be changed or removed in a future release.
     """
 
     long_prefill_token_threshold: int = Field(default=0, ge=0)
@@ -101,6 +115,11 @@ class SchedulerConfig:
     queued and running requests. Only applies when
     long_prefill_token_threshold is nonzero."""
 
+    pp_microbatch_min_tokens: int = Field(default=4096, ge=0)
+    """Pipeline parallelism only. Size prefill chunks at the uncached prefill
+    backlog / pp_size, but not below this value, so they fill every stage.
+    0 disables."""
+
     max_num_queued_reqs: int | None = Field(default=None, ge=0)
     """Maximum number of requests that can be in-flight (waiting or running)
     at the same time, or None for no limit. When the limit is reached, new
@@ -108,10 +127,10 @@ class SchedulerConfig:
     instance. This bounds vLLM's otherwise unbounded request queue and is
     primarily a coarse capacity valve.
 
-    Unlike ``max_num_seqs``, which applies per data-parallel rank, this
+    Unlike `max_num_seqs`, which applies per data-parallel rank, this
     limit is enforced in the API server process and counts in-flight
     requests across all DP ranks it routes to. Size it as roughly
-    ``data_parallel_size * max_num_seqs`` plus the desired queue depth if
+    `data_parallel_size * max_num_seqs` plus the desired queue depth if
     it should not bind before per-rank admission does."""
 
     max_num_queued_tokens: int | None = Field(default=None, ge=0)
@@ -120,23 +139,23 @@ class SchedulerConfig:
     are rejected with HTTP 503.
 
     This is a TTFT QoS mechanism: by setting it to
-    ``target_TTFT * prefill_throughput`` you reject requests when the
+    `target_TTFT * prefill_throughput` you reject requests when the
     prefill backlog would exceed the latency target.  In a disaggregated
     prefill-decode setup this maps directly to the prefill pool's
     capacity.
 
-    Like ``max_num_queued_reqs``, this limit is enforced in the API
+    Like `max_num_queued_reqs`, this limit is enforced in the API
     server process and covers the prefill backlog across all DP ranks it
-    routes to, so ``prefill_throughput`` in the formula above is the
+    routes to, so `prefill_throughput` in the formula above is the
     aggregate throughput of the deployment.
 
     Note: the count is conservative.  A partially prefilled request
-    still contributes its full ``prompt_len`` until it transitions out
+    still contributes its full `prompt_len` until it transitions out
     of the prefill phase, because the scheduler's per-iteration
-    ``num_computed_tokens`` progress is not propagated to the API
-    server process during prefill (``EngineCoreOutput`` is only
+    `num_computed_tokens` progress is not propagated to the API
+    server process during prefill (`EngineCoreOutput` is only
     emitted once the request starts producing tokens).  Similarly,
-    prefix-cache hits (``num_cached_tokens``) are only known to the
+    prefix-cache hits (`num_cached_tokens`) are only known to the
     OutputProcessor after prefill completes.  This overestimates the
     real backlog, causing earlier rejection than strictly necessary
     — the safe direction for QoS.  The impact is limited to long
@@ -161,12 +180,22 @@ class SchedulerConfig:
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
-    # TODO (ywang96): Make this configurable.
-    encoder_cache_size: int = Field(init=False)
-    """Multimodal encoder cache size, only used in V1.
+    encoder_cache_size: int | None = Field(default=None, ge=1)
+    """Multimodal encoder cache size in tokens, only used in V1, or None to
+    derive it from `max_num_batched_tokens`.
 
-    NOTE: This is not currently configurable. It will be overridden by
-    max_num_batched_tokens in case max multimodal embedding size is larger."""
+    This is a *capacity*: how many tokens of encoder output may stay resident,
+    including across requests, so a later request reusing the same image can skip
+    the encoder. It is unrelated to how much encoder work one step may do
+    (`max_num_encoder_input_tokens`), and deriving it from a per-step batch budget
+    caps cross-request reuse at `max_num_batched_tokens / tokens_per_item` items.
+    Size it as `in_flight_items * tokens_per_item` when a workload sends several
+    requests against the same image.
+
+    Raised to the largest single item if that would not fit. Costs GPU memory at
+    the model's multimodal embedding width, which is taken from the KV cache.
+
+    Resolved in `__post_init__`; never None afterwards."""
 
     policy: SchedulerPolicy = "fcfs"
     """The scheduling policy to use:
@@ -248,6 +277,15 @@ class SchedulerConfig:
     avoid gaps in GPU utilization, leading to better latency and throughput.
     """
 
+    async_scheduling_depth: int = Field(default=2, ge=2)
+    """Steps in flight with async scheduling: the step on the GPU plus
+    `async_scheduling_depth - 1` steps scheduled ahead of it (per pipeline
+    stage beyond the first). The default 2 overlaps one step's host work
+    (output processing, scheduling, input preparation) with the next step's GPU
+    work. A deeper queue helps when the host round trip is longer than a GPU
+    step, as in low-batch decode across nodes with speculative decoding.
+    Ignored without async scheduling."""
+
     stream_interval: int = Field(default=1, ge=1)
     """The interval (or buffer size) for streaming in terms of token length.
     A smaller value (1) makes streaming smoother by sending each token immediately,
@@ -312,6 +350,7 @@ class SchedulerConfig:
             "max_num_inflight_kv_loads",
             "long_prefill_token_threshold",
             "long_prefill_token_threshold_adaptive",
+            "pp_microbatch_min_tokens",
             "max_num_queued_reqs",
             "max_num_queued_tokens",
             "enable_chunked_prefill",
@@ -348,7 +387,8 @@ class SchedulerConfig:
             )
 
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
-        self.encoder_cache_size = self.max_num_batched_tokens
+        if self.encoder_cache_size is None:
+            self.encoder_cache_size = self.max_num_batched_tokens
 
         if self.enable_chunked_prefill:
             logger.info_once(

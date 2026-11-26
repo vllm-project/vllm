@@ -3,7 +3,10 @@
 import asyncio
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from functools import cached_property
 from itertools import accumulate
 from typing import (
@@ -47,6 +50,30 @@ from .types import ModalityStr
 
 _T = TypeVar("_T")
 _AsyncMultiModalItem: TypeAlias = Callable[[], Awaitable[tuple[object, str | None]]]
+
+
+@dataclass(frozen=True, slots=True)
+class MediaRequestBudgets:
+    decoded: MediaDecodedBudget = field(default_factory=MediaDecodedBudget)
+    download: MediaRequestDownloadBudget = field(
+        default_factory=MediaRequestDownloadBudget
+    )
+
+
+_media_request_budgets: ContextVar[MediaRequestBudgets | None] = ContextVar(
+    "media_request_budgets", default=None
+)
+
+
+@contextmanager
+def use_media_request_budgets(budgets: MediaRequestBudgets) -> Iterator[None]:
+    """Share byte budgets among trackers created in one request."""
+    token = _media_request_budgets.set(budgets)
+    try:
+        yield
+    finally:
+        _media_request_budgets.reset(token)
+
 
 if TYPE_CHECKING:
     import torch
@@ -216,8 +243,9 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._items_by_modality = defaultdict[str, list[_T]](list)
         # Track original modality for each vision_chunk item (image or video)
         self._modality_order = defaultdict[str, list[str]](list)
-        self.decoded_budget = MediaDecodedBudget()
-        self.download_budget = MediaRequestDownloadBudget()
+        budgets = _media_request_budgets.get() or MediaRequestBudgets()
+        self.decoded_budget = budgets.decoded
+        self.download_budget = budgets.download
 
     @cached_property
     def use_unified_vision_chunk_modality(self) -> bool:
@@ -245,6 +273,14 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if self._model_config.multimodal_config
             else None
         )
+
+    @cached_property
+    def video_io_defaults(self) -> dict[str, Any]:
+        """The HF video processor's frame caps, applied unless `media_io_kwargs`
+        overrides them. Read only when a request carries a video."""
+        if not self._model_config.is_multimodal_model:
+            return {}
+        return self.mm_processor.info.get_video_frame_limits()
 
     @property
     def allowed_local_media_path(self):
@@ -320,16 +356,22 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             num_items = len(self._items_by_modality[original_modality]) + 1
 
         mm_config = self.model_config.multimodal_config
-        if (
-            mm_config is not None
-            and mm_config.enable_mm_embeds
-            and mm_config.get_limit_per_prompt(input_modality) == 0
-            and original_modality.endswith("_embeds")
-        ):
-            # Skip validation: embeddings bypass limit when enable_mm_embeds=True
-            pass
-        else:
-            self.mm_processor.info.validate_num_items(input_modality, num_items)
+        skip_validation = False
+        if mm_config is not None and original_modality.endswith("_embeds"):
+            if not mm_config.is_mm_embeds_enabled(input_modality):
+                raise VLLMValidationError(
+                    f"`{original_modality}` inputs are disabled via "
+                    "`--limit-mm-per-prompt`",
+                    parameter=original_modality,
+                )
+            # Embeddings bypass limit when enable_mm_embeds=True
+            skip_validation = mm_config.get_limit_per_prompt(input_modality) == 0
+        if not skip_validation:
+            self.mm_processor.info.validate_num_input_items(
+                input_modality,
+                num_items,
+                is_embedding=original_modality.endswith("_embeds"),
+            )
 
         return input_modality, original_modality, use_vision_chunk, num_items
 

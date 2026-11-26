@@ -731,7 +731,9 @@ class AttentionScheduler {
           if (head % item.group != 0) {
             continue;
           }
-          if (item.group > 1 && request_q_token_num(item.req_id) > 1) {
+          // Emit the final partition's unbounded remainder as shareable tasks.
+          if ((item.group > 1 && request_q_token_num(item.req_id) > 1) ||
+              thread == thread_num - 1) {
             if (start >= 0) {
               emit(start, idx);
               start = -1;

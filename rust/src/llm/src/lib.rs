@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::any::Any;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,25 +13,36 @@ use tokio::sync::watch;
 use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
+use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_metrics::METRICS;
 
+mod admission;
+mod aux_output;
 mod error;
+mod fingerprint;
 mod inflight;
 mod log_stats;
 mod output;
 mod request;
 mod request_metrics;
+mod weight_versions;
 
+pub use admission::AdmissionLimits;
+pub use aux_output::AuxOutputRows;
 pub use error::{Error, Result};
+pub use fingerprint::LlmFingerprint;
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
-    GenerateOutputStreamExt, GeneratePromptInfo, PromptCacheUsage, TokenUsage, WeightVersionSpan,
+    GenerateOutputStreamExt, GeneratePromptInfo, PromptCacheUsage, TokenUsage,
 };
 pub use request::GenerateRequest;
 pub use request_metrics::{RequestTimestamps, current_unix_timestamp_secs};
 pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
+pub use weight_versions::{WeightVersionSpan, WeightVersions};
 
+use crate::admission::{Admission, AdmissionGuard};
 use crate::inflight::InflightRequests;
 use crate::log_stats::StatsLogger;
 use crate::request_metrics::{
@@ -52,8 +63,13 @@ pub struct LlmInfo {
     pub model_dtype: Option<ModelDtype>,
     /// Whether the engine was started with LoRA support.
     pub supports_lora: bool,
+    /// Whether the engine accepts placeholder metadata without embedding tensors.
+    pub allow_missing_mm_embeddings: bool,
     /// vLLM version of the engine.
     pub vllm_version: String,
+    /// The engine configuration that the `system_fingerprint` of responses
+    /// describes.
+    pub fingerprint: LlmFingerprint,
 }
 
 /// Token-level generation: a [`GenerateRequest`] in, a [`GenerateOutput`]
@@ -127,6 +143,7 @@ pub struct EngineCoreLlm {
     stream_interval: NonZeroU32,
     stats_logger: Option<StatsLogger>,
     inflight: InflightRequests,
+    admission: Admission,
     /// Request metric handles per connected engine index, resolved at
     /// construction so the request families export zero-valued series before
     /// the first request.
@@ -154,7 +171,12 @@ impl EngineCoreLlm {
             max_model_len: client.max_model_len(),
             model_dtype: Some(client.model_dtype()),
             supports_lora: client.ready_response().supports_lora,
+            allow_missing_mm_embeddings: client.ready_response().allow_missing_mm_embeddings,
             vllm_version: client.vllm_version().to_string(),
+            fingerprint: LlmFingerprint::from_engines(
+                &client.ready_responses(),
+                client.data_parallel_size(),
+            ),
         };
         Self {
             client,
@@ -163,6 +185,7 @@ impl EngineCoreLlm {
             stream_interval: NonZeroU32::MIN,
             stats_logger: None,
             inflight: InflightRequests::new(),
+            admission: Admission::default(),
             request_metric_handles,
         }
     }
@@ -195,6 +218,12 @@ impl EngineCoreLlm {
         self
     }
 
+    /// Set the queue limits that reject new requests with a retryable error.
+    pub fn with_admission_limits(mut self, limits: AdmissionLimits) -> Self {
+        self.admission = Admission::new(limits);
+        self
+    }
+
     /// Expose the underlying engine-core client for low-level utility/admin
     /// calls.
     pub fn engine_core_client(&self) -> &EngineCoreClient {
@@ -206,6 +235,51 @@ impl EngineCoreLlm {
     pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateOutputStream> {
         let mut streams = self.generate_n(req, NonZeroU32::MIN).await?;
         Ok(streams.pop().expect("one output stream per sample"))
+    }
+
+    /// Reject a request for prompt logprobs when an engine does not compute
+    /// them (under `--kv-sharing-fast-prefill`).
+    fn check_prompt_logprobs_supported(&self, params: &EngineCoreSamplingParams) -> Result<()> {
+        if self.client.supports_prompt_logprobs() {
+            return Ok(());
+        }
+        // Python tests `prompt_logprobs` for truthiness, which lets `0`
+        // through although those logprobs are just as incorrect.
+        let parameter = if params.prompt_logprobs.is_some() {
+            "prompt_logprobs"
+        } else if params.prompt_logprob_token_ids.is_some() {
+            "prompt_logprob_token_ids"
+        } else {
+            return Ok(());
+        };
+        Err(Error::PromptLogprobsUnsupported { parameter })
+    }
+
+    /// Reject a request whose multimodal items can't fit the engine's encoder
+    /// cache together, when the engine must encode them all in one step.
+    fn check_mm_embeds_fit(&self, mm_features: Option<&MmFeatures>) -> Result<()> {
+        let (Some(max_embeds), Some(features)) =
+            (self.client.max_mm_embeds_per_request(), mm_features)
+        else {
+            return Ok(());
+        };
+        // A repeated item is encoded once.
+        let mut num_embeds_by_id = HashMap::new();
+        for feature in features {
+            let num_embeds = feature
+                .mm_position
+                .num_embeds()
+                .map_err(|message| Error::InvalidMultimodalInput { message })?;
+            num_embeds_by_id.insert(feature.identifier.as_str(), num_embeds as u64);
+        }
+        let num_embeds = num_embeds_by_id.values().sum();
+        if num_embeds > max_embeds {
+            return Err(Error::MmEmbedsExceedEncoderCache {
+                num_embeds,
+                max_embeds,
+            });
+        }
+        Ok(())
     }
 
     /// Submit one request as `n` parallel samples, returning one output stream
@@ -224,6 +298,9 @@ impl EngineCoreLlm {
         mut req: GenerateRequest,
         n: NonZeroU32,
     ) -> Result<Vec<GenerateOutputStream>> {
+        self.check_prompt_logprobs_supported(&req.sampling_params)?;
+        self.check_mm_embeds_fit(req.mm_features.as_ref())?;
+
         // Clamp the request's stream interval to the frontend-level one, like
         // Python. Engine-core ignores it; the client batches deliveries by it.
         let stream_interval = (req.sampling_params.stream_interval)
@@ -237,6 +314,9 @@ impl EngineCoreLlm {
         let remote_prefill_cached_tokens = prepared.remote_prefill_cached_tokens();
         let prompt_token_ids = prepared.prompt_token_ids;
         let engine_request = prepared.engine_request;
+        // An unsubmitted sample's guard drops with the error, freeing its slot.
+        let mut admissions =
+            (self.admission).admit(n.get(), prompt_token_ids.len() as u64)?.into_iter();
 
         if n == NonZeroU32::MIN {
             let stream = self
@@ -245,6 +325,7 @@ impl EngineCoreLlm {
                     &prompt_token_ids,
                     remote_prefill_cached_tokens,
                     None,
+                    admissions.next().expect("one admission per sample"),
                 )
                 .await?;
             return Ok(vec![stream]);
@@ -269,6 +350,7 @@ impl EngineCoreLlm {
                     &prompt_token_ids,
                     remote_prefill_cached_tokens,
                     Some(parallel_sampling.clone()),
+                    admissions.next().expect("one admission per sample"),
                 )
                 .await?,
             );
@@ -283,6 +365,7 @@ impl EngineCoreLlm {
         prompt_token_ids: &Arc<[u32]>,
         remote_prefill_cached_tokens: Option<usize>,
         parallel_sampling: Option<Arc<ParallelSamplingStats>>,
+        admission: AdmissionGuard,
     ) -> Result<GenerateOutputStream> {
         let external_request_id = engine_request
             .external_req_id
@@ -299,7 +382,7 @@ impl EngineCoreLlm {
         let watermark_requested =
             (engine_request.sampling_params.as_ref()).is_some_and(|p| p.watermarking);
 
-        let stream = self.client.call(engine_request).await?;
+        let stream = self.client.call_observed(engine_request, Box::new(admission)).await?;
 
         let handles = (self.request_metric_handles.get(&stream.engine_index()))
             .expect("requests are routed only to connected engines")

@@ -130,17 +130,21 @@ def _check_marlin_supported(
     if quant_type not in supported_types:
         return (
             False,
-            f"Marlin does not support weight_bits = {quant_type}. "
-            f"Only types = {supported_types} "
-            f"are supported (for group_size = {group_size}, "
-            f"device_capability = {device_capability}, zp = {has_zp}).",
+            (
+                f"Marlin does not support weight_bits = {quant_type}. "
+                f"Only types = {supported_types} "
+                f"are supported (for group_size = {group_size}, "
+                f"device_capability = {device_capability}, zp = {has_zp})."
+            ),
         )
     if group_size is None or group_size not in MARLIN_SUPPORTED_GROUP_SIZES:
         return (
             False,
-            f"Marlin does not support group_size = {group_size}. "
-            f"Only group_sizes = {MARLIN_SUPPORTED_GROUP_SIZES} "
-            "are supported.",
+            (
+                f"Marlin does not support group_size = {group_size}. "
+                f"Only group_sizes = {MARLIN_SUPPORTED_GROUP_SIZES} "
+                "are supported."
+            ),
         )
 
     return True, None
@@ -330,10 +334,10 @@ def check_marlin_supports_layer(
 def marlin_moe_padded_intermediate(intermediate_size: int, group_size: int = -1) -> int:
     """Smallest MoE intermediate size satisfying the Marlin MoE thread tiles.
 
-    The kernel needs gate-up ``2 * intermediate % 128 == 0`` and down
-    ``intermediate % 64 == 0``, i.e. ``intermediate % 64 == 0``. A misaligned
+    The kernel needs gate-up `2 * intermediate % 128 == 0` and down
+    `intermediate % 64 == 0`, i.e. `intermediate % 64 == 0`. A misaligned
     size is zero-padded to the next valid tile at weight prep, kept a multiple
-    of ``group_size`` so the group count stays integral. The padded region never
+    of `group_size` so the group count stays integral. The padded region never
     reaches the MoE output: w13's padded output channels are zeroed by the
     zero-padded scales, so the padded inputs to w2 are zero.
     """
@@ -353,9 +357,9 @@ def check_moe_marlin_supports_config(
     group_size: int,
     allow_tile_padding: bool = False,
 ) -> bool:
-    """Whether the fused MoE Marlin kernel supports ``config``.
+    """Whether the fused MoE Marlin kernel supports `config`.
 
-    With ``allow_tile_padding=True``, a tile-misaligned intermediate size is
+    With `allow_tile_padding=True`, a tile-misaligned intermediate size is
     zero-padded to a valid thread tile at weight prep (see
     marlin_moe_padded_intermediate), so only a group straddling the padded
     boundary stays unsupported. hidden_size is the MoE I/O extent and is never
@@ -561,7 +565,7 @@ def marlin_zero_points(
     elif num_bits == 8:
         interleave = numpy.array([0, 2, 1, 3])
     else:
-        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+        raise Exception(f"num_bits must be 4 or 8, got {num_bits}")
 
     zp = zp.reshape((-1, len(interleave)))[:, interleave].ravel()
     zp = zp.reshape((-1, size_n)).contiguous()
@@ -588,7 +592,7 @@ def awq_to_marlin_zero_points(
     elif num_bits == 8:
         undo_interleave = numpy.argsort(numpy.array([0, 2, 1, 3]))
     else:
-        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+        raise Exception(f"num_bits must be 4 or 8, got {num_bits}")
 
     q_zp = q_zp.reshape((-1, len(undo_interleave)))[:, undo_interleave].ravel()
     q_zp = q_zp.reshape((-1, size_n)).contiguous()

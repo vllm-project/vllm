@@ -9,7 +9,10 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
-from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.layers.sparse_attn_indexer import (
+    SparseAttnIndexer,
+    should_skip_indexer_scoring,
+)
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention, DeepseekV32Indexer
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
@@ -59,7 +62,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
                 self.indexer.max_model_len,
                 self.indexer.max_total_seq_len,
                 topk_indices_buffer,
-                skip_k_cache_insert=True,
+                skip_k_cache_insert=not self.use_pcp,
             )
         self._fp8_kv = is_quantized_kv_cache(self.kv_cache_dtype)
         self._fp8_kv_needs_view = self._fp8_kv and self.kv_cache_dtype != "fp8_ds_mla"
@@ -115,11 +118,12 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         self,
         q_c: torch.Tensor,
         index_q_fp8: torch.Tensor | None,
+        index_k: torch.Tensor | None,
         index_weights_out: torch.Tensor | None,
     ) -> None:
         """Run the ROCm sparse indexer (forward_hip) if this layer has an indexer."""
         if self.indexer_op is not None:
-            self.indexer_op.forward_hip(q_c, index_q_fp8, None, index_weights_out)
+            self.indexer_op.forward_hip(q_c, index_q_fp8, index_k, index_weights_out)
 
     def _build_q_for_attn(
         self,
@@ -196,6 +200,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_k_rope_cos_sin_cache = self.indexer_rope_emb.cos_sin_cache
             indexer_k_cache = self.indexer.k_cache.kv_cache
             indexer_cache_shuffled = self.indexer.k_cache.uses_shuffled_layout
+            index_k_out = torch.empty_like(index_k) if self.use_pcp else None
             indexer_softmax_scale = self.indexer.softmax_scale
             indexer_n_head_scale = self.indexer.n_head**-0.5
         else:
@@ -206,10 +211,12 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_k_rope_cos_sin_cache = None
             indexer_k_cache = None
             indexer_cache_shuffled = False
+            index_k_out = None
             indexer_softmax_scale = 0.0
             indexer_n_head_scale = 0.0
 
-        if attn_metadata is None:
+        # PCP writes the caches after all-gathering every rank's tokens.
+        if attn_metadata is None or self.use_pcp:
             mla_kv_cache = None
             mla_k_scale = None
             indexer_k_cache = None
@@ -219,8 +226,17 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             mla_k_scale = self._k_scale
 
         use_mha = attn_metadata is not None and self._use_sparse_mha(attn_metadata)
-        kv_c_out = torch.empty_like(kv_c) if use_mha else None
-        k_pe_out = torch.empty_like(k_pe) if use_mha else None
+        # The indexer K cache is still written by fused_norm_rope below.
+        skip_scoring = (
+            has_indexer
+            and use_mha
+            and bool(self._dense_mha_metadata_layer_name)
+            and should_skip_indexer_scoring(
+                attn_metadata, forward_context.cudagraph_runtime_mode
+            )
+        )
+        kv_c_out = torch.empty_like(kv_c) if use_mha or self.use_pcp else None
+        k_pe_out = torch.empty_like(k_pe) if use_mha or self.use_pcp else None
 
         q_c = fused_norm_rope(
             positions,
@@ -249,6 +265,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             index_rope_interleave=self._index_rope_interleave,
             kv_c_out=kv_c_out,
             k_pe_out=k_pe_out,
+            index_k_out=index_k_out,
         )
 
         if use_mha:
@@ -260,7 +277,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         else:
             ql_nope, q_pe = self._compute_ql_nope(q_c)
 
-        if self.indexer is not None and not self.skip_topk:
+        if self.indexer is not None and not self.skip_topk and not skip_scoring:
             index_q = self.indexer.wq_b(q_c)[0]
             index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
         else:
@@ -271,23 +288,38 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             q_pe,
             self.rotary_emb.cos_sin_cache,
             index_q,
-            self.indexer_rope_emb.cos_sin_cache if has_indexer else None,
+            self.indexer_rope_emb.cos_sin_cache if index_q is not None else None,
             ql_nope,
             self._q_scale,
             index_weights,
             indexer_softmax_scale,
             indexer_n_head_scale,
-            has_indexer=has_indexer,
+            has_indexer=index_q is not None,
             index_rope_interleave=self._index_rope_interleave,
             quantize_mqa=self._fp8_kv and not use_mha,
         )
 
-        if self.indexer is not None and not self.skip_topk:
-            self._run_indexer(q_c, index_q_fp8, index_weights_out)
+        if index_q is not None:
+            self._run_indexer(q_c, index_q_fp8, index_k_out, index_weights_out)
 
         if attn_metadata is None:
             output.zero_()
             return
+
+        if self.use_pcp:
+            assert kv_c_out is not None and k_pe_out is not None
+            self.update_kv_cache(
+                kv_c_out,
+                k_pe_out.unsqueeze(1),
+                self.kv_cache,
+                slot_mapping.get(self.layer_name),
+                attn_metadata,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
+            if attn_metadata.num_actual_tokens == 0:
+                output.zero_()
+                return
 
         if use_mha:
             assert kv_c_out is not None and k_pe_out is not None
@@ -313,3 +345,5 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         )
 
         self._compute_uv_out(attn_out, output, num_actual)
+        if self.use_pcp and num_actual < output.shape[0]:
+            output[num_actual:].zero_()

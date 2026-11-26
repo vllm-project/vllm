@@ -173,7 +173,7 @@ class ncclRedOpTypeEnum:
         raise ValueError(f"Unsupported op: {op}")
 
 
-@dataclass
+@dataclass(slots=True)
 class Function:
     name: str
     restype: Any

@@ -30,9 +30,12 @@ SCHEDULE = {12: "16-32:3.16.3.2.1,64:3.16.4.2.1", 6: "16:1.0.0,32-64:3.16.3.2"}
 # sweeps over q 4-8: no staging; eight-CTA clusters, then fewer as B grows (TP8:
 # from B10 two-CTA clusters at two CTAs per SM, one wave where four-CTA clusters
 # at three per SM take two: q5 B10-12 15.9-16.3 us instead of 18.9-20.7).
+# A sixth field ("early.lanes.occupancy.cluster.evict.lean") turns on KdaSplit's
+# lean prologue (bit-identical): set where an end-to-end A/B favored it (TP16, one
+# request); other shapes keep the plain prologue.
 SPEC_SCHEDULE = {
     12: "1:1.8.2.8,2-4:1.8.3.8,5-9:1.8.3.4,10-12:1.8.2.2,13-16:1.8.3.2",
-    6: "1:1.8.2.8,2:1.8.0.8,3-12:1.8.3.8,13-16:1.8.3.4",
+    6: "1:1.8.2.8.0.1,2:1.8.0.8,3-12:1.8.3.8,13-16:1.8.3.4",
 }
 
 
@@ -215,8 +218,8 @@ def deferred_supported(backend, state, lower_bound):
     """Whether the KDA metadata of the specialized decode defers a layer's RecoverSSM
     commit: the layer's RecoverSSM kernels are Triton (the stock FP32-state path) and
     the specialized FP32 commit can fold its checkpoints (FP32 [slot, H, 128, 128] on
-    SM10x, a bounded gate). ``recoverssm.context.KDADeferredCommitContext`` takes
-    the same decision (its commit backend ``fp32_deferred``)."""
+    SM10x, a bounded gate). `recoverssm.context.KDADeferredCommitContext` takes
+    the same decision (its commit backend `fp32_deferred`)."""
     from .commit import supported
 
     return backend == "triton" and supported(state, lower_bound)
@@ -305,9 +308,9 @@ class PreparedKda:
         return self
 
     def run(self, projected, out, *, caches, slots, accepted=None, q=1, deferred=None):
-        """``accepted`` [>= B] (verify steps of ``q`` tokens): ``slots`` is [>= B, q]
-        contiguous, or [>= B, 1] (the checkpoints) under RecoverSSM. ``deferred``
-        (the KDA metadata's ``recoverssm_deferred``): the record rows [>= B] and
+        """`accepted` [>= B] (verify steps of `q` tokens): `slots` is [>= B, q]
+        contiguous, or [>= B, 1] (the checkpoints) under RecoverSSM. `deferred`
+        (the KDA metadata's `recoverssm_deferred`): the record rows [>= B] and
         pending counts of a deferred RecoverSSM step."""
         batch = projected.shape[0]
         key, rows = batch, batch

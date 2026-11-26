@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GQA drafts (e.g. a Qwen3 sliding-window DSpark) on Kimi-K3: their KV cache grouping.
 
-Dense MLA drafts keep their own MLA cache (``dense_draft.py``)."""
+Dense MLA drafts keep their own MLA cache (`dense_draft.py`)."""
 
 from dataclasses import replace
 
@@ -10,7 +10,8 @@ from vllm.config import VllmConfig
 from vllm.model_executor.models.interfaces import SupportsKVCacheGrouping
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    KVCacheGroupSpec,
+    KVCacheGroup,
+    KVCacheLayerConfig,
     KVCacheSpec,
     MLAAttentionSpec,
 )
@@ -20,8 +21,8 @@ from vllm.v1.kv_cache_interface import (
 _DRAFT_BLOCK_ALIGN = 64
 
 
-def _fit_draft_page(spec: AttentionSpec, page_size: int) -> AttentionSpec:
-    """Shrink a draft's block until its page fits under ``page_size``."""
+def _fit_draft_page(spec: KVCacheSpec, page_size: int) -> KVCacheSpec:
+    """Shrink a draft's block until its page fits under `page_size`."""
     for block_size in range(spec.block_size, 0, -_DRAFT_BLOCK_ALIGN):
         fitted = replace(spec, block_size=block_size)
         if spec.block_size % block_size == 0 and fitted.page_size_bytes <= page_size:
@@ -48,26 +49,29 @@ class GQADraftKVCacheGrouping(SupportsKVCacheGrouping):
     def get_kv_cache_groups(
         cls,
         vllm_config: VllmConfig,
-        kv_cache_spec: dict[str, KVCacheSpec],
-    ) -> list[KVCacheGroupSpec]:
+        layer_configs: dict[str, KVCacheLayerConfig],
+    ) -> list[KVCacheGroup]:
         from vllm.v1.core.kv_cache_planning import (
             get_kv_cache_groups,
             unify_kv_cache_spec_page_size,
         )
 
         draft = {
-            name: spec
-            for name, spec in kv_cache_spec.items()
-            if isinstance(spec, AttentionSpec)
-            and not isinstance(spec, MLAAttentionSpec)
+            name: config
+            for name, config in layer_configs.items()
+            if isinstance(config.spec, AttentionSpec)
+            and not isinstance(config.spec, MLAAttentionSpec)
         }
-        target = {n: s for n, s in kv_cache_spec.items() if n not in draft}
+        target = {n: c for n, c in layer_configs.items() if n not in draft}
         layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
         if not draft or not target or layout.is_block_outermost:
-            return get_kv_cache_groups(vllm_config, kv_cache_spec)
-        page_size = max(spec.page_size_bytes for spec in target.values())
-        draft = {n: _fit_draft_page(s, page_size) for n, s in draft.items()}
-        specs = unify_kv_cache_spec_page_size(target | draft)
+            return get_kv_cache_groups(vllm_config, layer_configs)
+        page_size = max(c.spec.page_size_bytes for c in target.values())
+        draft = {
+            n: replace(c, spec=_fit_draft_page(c.spec, page_size))
+            for n, c in draft.items()
+        }
+        configs = unify_kv_cache_spec_page_size(target | draft)
         return get_kv_cache_groups(
-            vllm_config, {n: specs[n] for n in target}
-        ) + get_kv_cache_groups(vllm_config, {n: specs[n] for n in draft})
+            vllm_config, {n: configs[n] for n in target}
+        ) + get_kv_cache_groups(vllm_config, {n: configs[n] for n in draft})

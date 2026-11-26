@@ -113,7 +113,7 @@ class EngineCoreClient(ABC):
         asyncio_mode: bool,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         renderer: BaseRenderer | None = None,
     ) -> "EngineCoreClient":
         # renderer is passed through to the multiprocess clients, which start
@@ -134,7 +134,7 @@ class EngineCoreClient(ABC):
             return EngineCoreClient.make_async_mp_client(
                 vllm_config,
                 executor_class,
-                log_stats,
+                collect_stats,
                 renderer=renderer,
             )
 
@@ -142,18 +142,18 @@ class EngineCoreClient(ABC):
             return SyncMPClient(
                 vllm_config,
                 executor_class,
-                log_stats,
+                collect_stats,
                 renderer=renderer,
             )
 
-        return InprocClient(vllm_config, executor_class, log_stats)
+        return InprocClient(vllm_config, executor_class, collect_stats)
 
     @staticmethod
     @instrument(span_name="Overall Loading")
     def make_async_mp_client(
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
@@ -163,7 +163,7 @@ class EngineCoreClient(ABC):
         client_args = (
             vllm_config,
             executor_class,
-            log_stats,
+            collect_stats,
             client_addresses,
             client_count,
             client_index,
@@ -218,10 +218,12 @@ class EngineCoreClient(ABC):
     def reset_encoder_cache(self) -> None:
         raise NotImplementedError
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
         raise NotImplementedError
 
-    def release_kv_cache_memory(self) -> None:
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         raise NotImplementedError
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
@@ -326,10 +328,12 @@ class EngineCoreClient(ABC):
     async def reset_encoder_cache_async(self) -> None:
         raise NotImplementedError
 
-    async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
+    async def sleep_async(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
         raise NotImplementedError
 
-    async def release_kv_cache_memory_async(self) -> None:
+    async def release_kv_cache_memory_async(self, reset_connector: bool = True) -> None:
         raise NotImplementedError
 
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
@@ -401,14 +405,14 @@ class InprocClient(EngineCoreClient):
         self,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         *,
         executor_fail_callback: Callable | None = None,
     ):
         self.engine_core = EngineCore(
             vllm_config,
             executor_class,
-            log_stats,
+            collect_stats,
             executor_fail_callback=executor_fail_callback,
         )
         # Release the executor's workers when the client is collected, as
@@ -468,14 +472,16 @@ class InprocClient(EngineCoreClient):
     def reset_encoder_cache(self) -> None:
         self.engine_core.reset_encoder_cache()
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
         if mode == "wait":
             raise ValueError("'wait' pause mode is not supported in inproc-engine mode")
-        result = self.engine_core.sleep(level, mode)
+        result = self.engine_core.sleep(level, mode, reset_connector)
         assert result is None
 
-    def release_kv_cache_memory(self) -> None:
-        self.engine_core.release_kv_cache_memory()
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
+        self.engine_core.release_kv_cache_memory(reset_connector)
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
         return self.engine_core.wake_up(tags)
@@ -522,7 +528,7 @@ class InprocClient(EngineCoreClient):
         return False
 
 
-@dataclass
+@dataclass(slots=True)
 class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
     circular reference back to the client object."""
@@ -544,6 +550,8 @@ class BackgroundResources:
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
     engine_dead: bool = False
+    # Set when shutdown() was requested, rather than following an engine death.
+    stop_requested: bool = False
 
     def __call__(self):
         """Clean up background resources."""
@@ -612,7 +620,7 @@ class BackgroundResources:
             raise EngineDeadError()
 
 
-@dataclass
+@dataclass(slots=True)
 class ElasticScalingCache:
     existing_core_engines: list[EngineIdentity]
     num_new_core_engines: int
@@ -636,7 +644,7 @@ class MPClient(EngineCoreClient):
         asyncio_mode: bool,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_addresses: dict[str, Any] | None = None,
         renderer: BaseRenderer | None = None,
     ):
@@ -721,7 +729,7 @@ class MPClient(EngineCoreClient):
                 )
 
                 with launch_core_engines(
-                    vllm_config, executor_class, log_stats, addresses
+                    vllm_config, executor_class, collect_stats, addresses
                 ) as engine_launch:
                     self.resources.coordinator = engine_launch.coordinator
                     self.resources.engine_manager = engine_launch.engine_manager
@@ -812,6 +820,7 @@ class MPClient(EngineCoreClient):
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine manager under timeout and clean up resources."""
         if self._finalizer.detach() is not None:
+            self.resources.stop_requested = not self.resources.engine_dead
             timeout_str = "default" if timeout is None else f"{timeout}s"
             logger.info("[shutdown] MPClient: start timeout=%s", timeout_str)
             if self.resources.engine_manager is not None:
@@ -984,14 +993,14 @@ class SyncMPClient(MPClient):
         self,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         renderer: BaseRenderer | None = None,
     ):
         super().__init__(
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=log_stats,
+            collect_stats=collect_stats,
             renderer=renderer,
         )
 
@@ -1134,11 +1143,13 @@ class SyncMPClient(MPClient):
     def pin_lora(self, lora_id: int) -> bool:
         return self.call_utility("pin_lora", lora_id)
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
-        self.call_utility("sleep", level, mode)
+    def sleep(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
+        self.call_utility("sleep", level, mode, reset_connector)
 
-    def release_kv_cache_memory(self) -> None:
-        self.call_utility("release_kv_cache_memory")
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
+        self.call_utility("release_kv_cache_memory", reset_connector)
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
         return self.call_utility("wake_up", tags)
@@ -1178,7 +1189,7 @@ class AsyncMPClient(MPClient):
         self,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
@@ -1188,7 +1199,7 @@ class AsyncMPClient(MPClient):
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=log_stats,
+            collect_stats=collect_stats,
             client_addresses=client_addresses,
             renderer=renderer,
         )
@@ -1417,11 +1428,13 @@ class AsyncMPClient(MPClient):
     async def reset_encoder_cache_async(self) -> None:
         await self.call_utility_async("reset_encoder_cache")
 
-    async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
-        await self.call_utility_async("sleep", level, mode)
+    async def sleep_async(
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
+    ) -> None:
+        await self.call_utility_async("sleep", level, mode, reset_connector)
 
-    async def release_kv_cache_memory_async(self) -> None:
-        await self.call_utility_async("release_kv_cache_memory")
+    async def release_kv_cache_memory_async(self, reset_connector: bool = True) -> None:
+        await self.call_utility_async("release_kv_cache_memory", reset_connector)
 
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
         return all(await self.call_utility_all_async("wake_up", tags))
@@ -1533,7 +1546,7 @@ class DPAsyncMPClient(AsyncMPClient):
         self,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
@@ -1550,7 +1563,7 @@ class DPAsyncMPClient(AsyncMPClient):
         super().__init__(
             vllm_config,
             executor_class,
-            log_stats,
+            collect_stats,
             client_addresses,
             client_count,
             client_index,
@@ -1684,12 +1697,9 @@ class DPAsyncMPClient(AsyncMPClient):
             can_reuse_fused_moe_kernel,
         )
 
-        # MRV2 re-warms through the request pool, so running requests must
+        # The runner re-warms through the request pool, so running requests must
         # finish first while new ones stay queued in the scheduler.
-        parallel_config = self.vllm_config.parallel_config
-        if self.vllm_config.use_v2_model_runner and not can_reuse_fused_moe_kernel(
-            parallel_config
-        ):
+        if not can_reuse_fused_moe_kernel(self.vllm_config.parallel_config):
             return "wait"
         return "keep"
 
@@ -1775,7 +1785,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool,
+        collect_stats: bool,
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
@@ -1794,7 +1804,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         super().__init__(
             vllm_config,
             executor_class,
-            log_stats,
+            collect_stats,
             client_addresses,
             client_count,
             client_index,

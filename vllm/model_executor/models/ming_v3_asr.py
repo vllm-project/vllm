@@ -489,7 +489,7 @@ class MingV3ASRForConditionalGeneration(
         )
 
     @classmethod
-    def post_process_output(cls, text: str) -> str:
+    def post_process_output(cls, text: str, model_config: ModelConfig) -> str:
         return _transcript(text)
 
     @classmethod

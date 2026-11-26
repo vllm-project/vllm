@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Concrete adapter classes for each registered parser engine.
 
-These are created via :func:`make_adapters` and exposed as module-level
-names so that :class:`ReasoningParserManager` and
-:class:`ToolParserManager` can load them lazily.
+These are created via `make_adapters` and exposed as module-level
+names so that `ReasoningParserManager` and
+`ToolParserManager` can load them lazily.
 """
 
 from vllm.parser.deepseek_v4 import DeepSeekV4Parser
@@ -23,6 +23,7 @@ from vllm.parser.mimo import MiMoParser
 from vllm.parser.minimax_m2 import MinimaxM2Parser
 from vllm.parser.minimax_m3 import MinimaxM3Parser
 from vllm.parser.mistral import MistralParser
+from vllm.parser.muse import MuseParser
 from vllm.parser.nemotron_v3 import NemotronV3Parser
 from vllm.parser.plamo3 import Plamo3Parser
 from vllm.parser.qwen3 import Qwen3Parser
@@ -140,3 +141,8 @@ from vllm.parser.zaya import ZayaParser
     RippleParserReasoningAdapter,
     RippleParserToolAdapter,
 ) = make_adapters(RippleParser)
+
+(
+    MuseParserReasoningAdapter,
+    MuseParserToolAdapter,
+) = make_adapters(MuseParser)
