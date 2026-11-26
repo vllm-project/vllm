@@ -9,8 +9,8 @@ use llm_multimodal::{AudioClip, Modality, PreprocessedEncoderInputs};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 
 use super::timing::MM_STAGE_TARGET;
-use super::{AudioModalitySupport, MultimodalModelInfo, PreparedMedia, item};
-use crate::error::{Error, Result, bail_multimodal, multimodal};
+use super::{AudioModalitySupport, MmModality, MultimodalModelInfo, PreparedMedia, item};
+use crate::error::{Result, bail_multimodal, multimodal};
 
 /// Forward-kwargs name of the primary audio encoder input.
 pub(super) const AUDIO_PRIMARY_KEY: &str = "input_audio_features";
@@ -28,9 +28,10 @@ impl MultimodalModelInfo {
         clips: Vec<Arc<AudioClip>>,
         uuids: Vec<Option<String>>,
     ) -> Result<PreparedMedia> {
-        let support = self.audio.as_ref().ok_or_else(|| Error::UnsupportedModality {
-            modality: Modality::Audio.to_string(),
-        })?;
+        let support = self
+            .audio
+            .as_ref()
+            .ok_or_else(|| self.unsupported_modality(MmModality::Audio))?;
         let preprocessed = self.preprocess_audios(support, &clips).await?;
         let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
         if replacements.len() != clips.len() {
@@ -82,6 +83,7 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{MmField, MmKwargValue};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
+    use super::super::tests::from_context;
     use super::super::{MultimodalModelContext, TokenizerResolver};
     use super::*;
 
@@ -120,7 +122,7 @@ mod tests {
             tokenizer: TokenizerResolver(Arc::new(tokenizer)),
         };
 
-        MultimodalModelInfo::from_loaded(
+        from_context(
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
@@ -141,7 +143,7 @@ mod tests {
             )),
         };
 
-        MultimodalModelInfo::from_loaded(
+        from_context(
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
@@ -262,31 +264,44 @@ mod tests {
 
     #[tokio::test]
     async fn audio_pipeline_attributes_stage_timings_to_request() {
+        use std::sync::LazyLock;
+
         use tracing::Instrument as _;
-        use tracing::instrument::WithSubscriber as _;
         use tracing_subscriber::layer::SubscriberExt as _;
+        use vllm_tracing::timing::RequestTimingStats;
 
         use crate::{mm_request_span, mm_timing_layer};
 
+        // Installed globally, like `vllm-bench mm-processor` does: callsite
+        // interest is cached process-wide, so a scoped subscriber misses the
+        // stages whose callsites a concurrent test registers first without it.
+        static TIMINGS: LazyLock<RequestTimingStats> = LazyLock::new(|| {
+            let (layer, timings) = mm_timing_layer();
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer))
+                .expect("install global subscriber");
+            timings
+        });
+        // Multimodal requests of other tests also reach the global layer.
+        const REQUEST_ID: &str = "audio-stage-timings";
+
         let info = qwen3_asr_info();
-        let (layer, timings) = mm_timing_layer();
+        LazyLock::force(&TIMINGS);
         let parts = vec![MediaContentPart::AudioData {
             data: wav_i16_mono(16_000, &[0; 1_600]),
             mime_type: Some("audio/wav".to_string()),
             uuid: Some("audio-1".to_string()),
         }];
-        async {
-            info.prepare_multimodal(parts, &mut vec![AUDIO_PAD_ID], ModelDtype::Float32, None)
-                .instrument(mm_request_span("request-1"))
-                .await
-                .unwrap();
-        }
-        .with_subscriber(tracing_subscriber::registry().with(layer))
-        .await;
+        info.prepare_multimodal(parts, &mut vec![AUDIO_PAD_ID], ModelDtype::Float32, None)
+            .instrument(mm_request_span(REQUEST_ID))
+            .await
+            .unwrap();
 
-        let records = timings.stat();
-        assert_eq!(records.len(), 1);
-        let mut stages = records["request-1"].keys().collect::<Vec<_>>();
+        let mut stages = TIMINGS
+            .stat()
+            .remove(REQUEST_ID)
+            .expect("request timings")
+            .into_keys()
+            .collect::<Vec<_>>();
         stages.sort();
         expect_test::expect![[r#"
             [

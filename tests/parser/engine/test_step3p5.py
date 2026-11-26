@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the engine-based Step-3.5 parser.
 
-Step-3.5 reuses the Qwen3 grammar, which ``test_qwen3.py`` covers. These tests
+Step-3.5 reuses the Qwen3 grammar, which `test_qwen3.py` covers. These tests
 cover what differs: thinking is always on, the newline the model emits before
-``</think>`` is dropped, prior-turn reasoning does not end the current turn,
-and the ``step3p5`` names resolve to the engine adapters.
+`</think>` is dropped, prior-turn reasoning does not end the current turn,
+and the `step3p5` names resolve to the engine adapters.
 """
 
 import json
@@ -85,7 +85,7 @@ def test_newline_before_think_end_dropped_streaming(parser):
 
 class TestPriorTurnReasoning:
     """The template replays earlier assistant turns as
-    ``<think>\\n...\\n</think>\\n``, so a ``</think>`` from history must not end
+    `<think>\\n...\\n</think>\\n`, so a `</think>` from history must not end
     reasoning for the new turn (#34211)."""
 
     _HISTORY = [

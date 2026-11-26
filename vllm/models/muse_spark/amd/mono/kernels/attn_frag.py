@@ -30,8 +30,8 @@ work are one launch.
 
 Shapes (a TP8 rank): 16 q heads, 2 kv heads (QPK = 8), head dim 64, 8 query tokens a request,
 NR requests (K3 S8: 1, S16: 2; HA S32: 4). K / V bf16 in the layer's vLLM LBHNC cache
-[block][2][16][K 64 | V 64] (block 16); the page table is the layer group's block_table
-(int32 [NR][stride]); seq_used = vLLM's seq_lens (int32 [NR], keys incl. the 8 new ones).
+`[block][2][16][K 64 | V 64]` (block 16); the page table is the layer group's block_table
+(int32 `[NR][stride]`); seq_used = vLLM's seq_lens (int32 [NR], keys incl. the 8 new ones).
 q [8 NR, 16, 64] bf16 (row stride 1024, without the QK scale); out attn_o [8 NR, 1024] bf16.
 SWA: vLLM's window (2047, 0), keys qpos - key < 2048, and only keys in the window are read
 (vLLM frees the blocks before it: their block-table entries are stale).
@@ -123,11 +123,13 @@ def default_cpg(NR, swa):
     return BLOCKS // g
 
 
-def make(NR, swa, maxk=VLLM_MAX_KEYS):
+def make(NR, swa, maxk=VLLM_MAX_KEYS, nq=NQ, qcm=0, kvcm=None):
     """The fragment for NR requests; swa = SWA (window 2048) or full attention. It stages enough
-    page ids a CTA for maxk keys a request (PGN)."""
+    page ids a CTA for maxk keys a request (PGN). nq < NQ: nq query rows a request (q / out row
+    nq req + tok; query slots tok >= nq are padding, not stored); qcm / kvcm: the q / K / V load
+    cache policies (a launch that wrote q and the KV itself reads them at device scope)."""
     # K / V load cache policy: cached for SWA, nontemporal for full
-    KCM = 0 if swa else CM_NT
+    KCM = (0 if swa else CM_NT) if kvcm is None else kvcm
 
     G = NR * HKV
     CPG = default_cpg(NR, swa)
@@ -194,7 +196,7 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
     def geom(d, req):
         """Run-time key-tile range of request req (uniform)."""
         seq_len = uniform(ld_i32(d.used, req))
-        ctx = seq_len - NQ
+        ctx = seq_len - nq
         if const_expr(swa):
             lo = fx.max(ctx - WIN + 1, 0)
         else:
@@ -366,9 +368,10 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
                 qb = [
                     ld_vec(
                         d.q,
-                        ((NQ * req + tok) * (NH * HD) + head * HD + 32 * c + 8 * g)
+                        ((nq * req + tok) * (NH * HD) + head * HD + 32 * c + 8 * g)
                         // 2,
                         4,
+                        qcm,
                     ).bitcast(fx.BFloat16)
                     for c in range(2)
                 ]
@@ -487,6 +490,22 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
         a, b = permlane_swap(off, v.bitcast(fx.Int32), v.bitcast(fx.Int32))
         return a.bitcast(fx.Float32), b.bitcast(fx.Float32)
 
+    def store_row(d, tag, req, tok, head, dq, w2):
+        """Merged output row (req, tok), head `head`, d-quad dq: attn_o and the tagged pairs."""
+        bo.buffer_store(
+            w2,
+            rsrc(d.out),
+            ((nq * req + tok) * (NH * HD) + head * HD + 4 * dq) // 2,
+            cache_modifier=CM_DEV,
+        )
+        mb_put2(
+            tag,
+            d.part + fx.Int64(P_AO),
+            ((nq * req + tok) * (NH * HD) + head * HD + 4 * dq) // 2,
+            w2[0],
+            w2[1],
+        )
+
     @traced
     def merge(d, tag, health, tid, bid, lane, wave, L):
         if const_expr(STR > 1):
@@ -587,19 +606,11 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
                     [bf16_pair(A[0] * f, A[1] * f), bf16_pair(A[2] * f, A[3] * f)],
                     fx.Int32,
                 )
-                bo.buffer_store(
-                    w2,
-                    rsrc(d.out),
-                    ((NQ * req + tok) * (NH * HD) + head * HD + 4 * dq) // 2,
-                    cache_modifier=CM_DEV,
-                )
-                mb_put2(
-                    tag,
-                    d.part + fx.Int64(P_AO),
-                    ((NQ * req + tok) * (NH * HD) + head * HD + 4 * dq) // 2,
-                    w2[0],
-                    w2[1],
-                )
+                if const_expr(nq == NQ):
+                    store_row(d, tag, req, tok, head, dq, w2)
+                else:
+                    if tok < nq:  # query slot nq .. NQ - 1 of a request: padding
+                        store_row(d, tag, req, tok, head, dq, w2)
                 rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
                 if tt == 0:
                     mb_put(tag, d.part + fx.Int64(P_IF), item, fx.Int32(1))
@@ -614,7 +625,9 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
     return SimpleNamespace(
         Lds=Lds,
         run=run,
-        key=f"attnfrag_nr{NR}_{'swa' if swa else 'full'}_c{CPG}_p{PD}_k{KCM}_{_SRC_HASH}",
+        key=f"attnfrag_nr{NR}_{'swa' if swa else 'full'}_c{CPG}_p{PD}_k{KCM}"
+        + (f"_q{nq}_qc{qcm}" if (nq, qcm) != (NQ, 0) else "")
+        + f"_{_SRC_HASH}",
     )
 
 
@@ -633,8 +646,8 @@ def vllm_scale_word(scale):
 
 def vllm_desc(q, kv_cache, block_table, seq_lens, out, part, nreq, scale):
     """The 10 descriptor words of one layer: q [8 nreq.., 16 x 64] bf16 rows,
-    kv_cache the layer's [block][2][16][128] bf16 view (block stride = kv_cache.stride(0)), block_table int32
-    [>= nreq][stride] of the layer's group, seq_lens int32 [>= nreq], out attn_o [rows, 1024] bf16, part the scratch
+    kv_cache the layer's `[block][2][16][128]` bf16 view (block stride = kv_cache.stride(0)), block_table int32
+    `[>= nreq][stride]` of the layer's group, seq_lens int32 [>= nreq], out attn_o [rows, 1024] bf16, part the scratch
     (int32, part_bytes()), nreq the requests of the step (graph padding included: seq_len 0 = no keys, zero rows)."""
     import torch
 

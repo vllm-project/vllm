@@ -35,7 +35,6 @@ steps: []
   #     - "!vllm/v1/attention/backends/rocm_aiter_unified_attn.py"
   #     - "!vllm/v1/attention/backends/flex_attention.py"
   #     - "!vllm/v1/attention/backends/hpc_attn.py"
-  #     - "!vllm/v1/attention/backends/mamba1_attn.py"
   #     - "!vllm/v1/attention/backends/mamba2_attn.py"
   #     - "!vllm/v1/attention/backends/mamba_attn.py"
   #     - "!vllm/v1/attention/backends/short_conv_attn.py"
@@ -93,10 +92,8 @@ steps: []
   #     - "!vllm/model_executor/layers/quantization/awq_triton.py"
   #     - "!vllm/model_executor/layers/quantization/experts_int8.py"
   #     - "!vllm/model_executor/layers/quantization/fbgemm_fp8.py"
-  #     - "!vllm/model_executor/layers/quantization/fp_quant.py"
   #     - "!vllm/model_executor/layers/quantization/humming.py"
   #     - "!vllm/model_executor/layers/quantization/moe_wna16.py"
-  #     - "!vllm/model_executor/layers/quantization/qutlass_utils.py"
   #     - "!vllm/model_executor/layers/quantization/quark/"
   #     - "!vllm/model_executor/layers/quantization/turboquant/"
   #   commands:

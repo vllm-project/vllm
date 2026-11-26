@@ -24,14 +24,14 @@ pytestmark = pytest.mark.cpu_test
 
 
 def _make_fake_knobs(*, autotuning_print=False, jit_hook=None):
-    """Build a minimal fake ``triton.knobs`` namespace."""
+    """Build a minimal fake `triton.knobs` namespace."""
     autotuning = SimpleNamespace(print=autotuning_print)
     runtime = SimpleNamespace(jit_post_compile_hook=jit_hook)
     return SimpleNamespace(autotuning=autotuning, runtime=runtime)
 
 
 def _fake_cute_import_modules(compile_fn):
-    """Fake Python's parent package + submodule for ``import cutlass.cute``."""
+    """Fake Python's parent package + submodule for `import cutlass.cute`."""
     fake_cute = cast(Any, ModuleType("cutlass.cute"))
     fake_cute.compile = compile_fn
     fake_parent_package = cast(Any, ModuleType("cutlass"))
@@ -48,7 +48,7 @@ def _fake_cute_compile(*args, **kwargs):
 
 
 def _fake_tilelang_import_modules():
-    """Fake Python's TileLang modules touched by ``jit_monitor.activate``."""
+    """Fake Python's TileLang modules touched by `jit_monitor.activate`."""
 
     class FakeJITKernel:
         def __init__(self, *args, **kwargs):
@@ -90,7 +90,7 @@ def _fake_tilelang_import_modules():
 
 
 def _fake_flydsl_import_modules():
-    """Fake Python's FlyDSL modules touched by ``jit_monitor.activate``."""
+    """Fake Python's FlyDSL modules touched by `jit_monitor.activate`."""
 
     class FakeMlirCompiler:
         compiled: list[str] = []
@@ -128,7 +128,7 @@ def _fake_flydsl_import_modules():
 
 @contextmanager
 def _patch_jit_modules(fake_knobs, *, cute_compile=_fake_cute_compile):
-    """Patch the Triton and CuTeDSL imports touched by ``jit_monitor.activate``."""
+    """Patch the Triton and CuTeDSL imports touched by `jit_monitor.activate`."""
     fake_triton = cast(Any, ModuleType("triton"))
     fake_triton.knobs = fake_knobs
     with (
@@ -339,7 +339,7 @@ def test_cutedsl_error_mode_raises():
 
 
 def test_cutedsl_subscripted_compile_is_monitored():
-    """``cute.compile[options](...)`` (flashinfer >= 0.6.14) must work."""
+    """`cute.compile[options](...)` (flashinfer >= 0.6.14) must work."""
 
     class FakeCompileCallable:
         def __getitem__(self, options):
@@ -389,7 +389,7 @@ def test_flydsl_compile_logs_warning_and_passes_through():
 
 
 def test_flydsl_reports_each_width_sharing_a_launcher_name():
-    """Launchers often share the name ``launch``, so the width carries it."""
+    """Launchers often share the name `launch`, so the width carries it."""
     with _patch_jit_modules(_make_fake_knobs()):
         from flydsl.compiler.jit_function import MlirCompiler
 

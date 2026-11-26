@@ -388,6 +388,28 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 
       If the service is correctly deployed, you should receive a response from the vLLM model.
 
+## Generation readiness probe
+
+`/health` only checks that the server processes are alive. To also take a pod out of the Service when its engine cannot run the model (e.g. a hung collective or a GPU fault), point the readiness probe at [`/health_generate`](../serving/online_serving/README.md#generation-readiness-check) and keep `/health` for the liveness probe:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  initialDelaySeconds: 60
+  periodSeconds: 10
+readinessProbe:
+  httpGet:
+    path: /health_generate?timeout_s=20
+    port: 8000
+  initialDelaySeconds: 60
+  periodSeconds: 10
+  timeoutSeconds: 30
+```
+
+Set `timeoutSeconds` above the `timeout_s` query parameter (20 s by default); the Kubernetes default of 1 s can be shorter than an idle GPU probe. Don't use `/health_generate` for the liveness probe: it returns 503 while the engine sleeps, so the container would be restarted during a weight sync.
+
 ## Serving with gRPC
 
 vLLM can serve models over gRPC instead of HTTP by passing the `--grpc` flag. This requires the optional gRPC dependencies:
@@ -429,6 +451,43 @@ You can also verify the health service manually with `grpcurl`:
 
 ```bash
 grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check
+```
+
+### Rust frontend gRPC health checks
+
+The Rust frontend is a separate server from `--grpc` above. Start it with `VLLM_USE_RUST_FRONTEND=1 vllm serve <model> --grpc-port 50051` or `vllm-rs serve <model> --grpc-port 50051`. Its gRPC port serves `grpc.health.v1.Health` and reports engine liveness and inference readiness under separate service names, so a paused engine can leave the load balancer without being restarted:
+
+| Service | Reports `NOT_SERVING` when |
+| --- | --- |
+| `liveness` | The engine has failed. Pause, sleep, weight updates, and orderly shutdown do not affect it until the listener closes. |
+| `readiness` and `vllm.Inference` | The engine has failed, shutdown has started, the engine is paused (including for a process checkpoint), asleep, or partially awake, or a weight update has not finished successfully. |
+| `vllm.Control` and `""` | The engine has failed or shutdown has started. |
+
+Point the startup and liveness probes at `liveness` and the readiness probe at `readiness`. A liveness probe on `readiness` or `vllm.Inference` restarts an engine that stays paused longer than the probe's failure threshold. The listener stops accepting connections when shutdown starts, so probes see the endpoint as unavailable while `--shutdown-timeout` drains in-flight requests.
+
+```yaml
+startupProbe:
+  grpc:
+    port: 50051
+    service: liveness
+  periodSeconds: 10
+  failureThreshold: 120 # Allow for model loading.
+livenessProbe:
+  grpc:
+    port: 50051
+    service: liveness
+readinessProbe:
+  grpc:
+    port: 50051
+    service: readiness
+```
+
+A paused or sleeping pod leaves the endpoints of its Services, so send resume, wake-up, and weight-update calls to the pod directly, for example through a headless Service with `publishNotReadyAddresses: true`. After a process checkpoint fails, the engine stays paused and `liveness` stays `SERVING`, so whatever drives the checkpoint must restart the pod when `/checkpoint/status` reports the failure.
+
+This server does not enable gRPC reflection, so check a service manually with [`grpc_health_probe`](https://github.com/grpc-ecosystem/grpc-health-probe):
+
+```bash
+grpc_health_probe -addr=localhost:50051 -service=readiness
 ```
 
 ## Troubleshooting

@@ -30,8 +30,8 @@ from .utils import _run_eagle_correctness
         (
             (
                 "eagle",
-                "eagle618/deepseek-v3-random",
-                "eagle618/eagle-deepseek-v3-random",
+                "vllm-project/deepseek-v3-random",
+                "vllm-project/eagle-deepseek-v3-random",
                 1,
             ),
             False,
@@ -84,17 +84,12 @@ def test_eagle_correctness_light(
             "auto",
             0.8,
         ),
-        pytest.param(
+        (
             ("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1),
             False,
             False,
             "transformers",
             0.8,
-            # TODO(hmellor): figure out why memory usage is so high
-            marks=pytest.mark.skipif(
-                not current_platform.is_rocm(),
-                reason="Feature is experimental and uses too much memory in CUDA CI",
-            ),
         ),
         (
             (
@@ -112,7 +107,7 @@ def test_eagle_correctness_light(
             (
                 "eagle3",
                 "Qwen/Qwen2.5-VL-7B-Instruct",
-                "Rayzl/qwen2.5-vl-7b-eagle3-sgl",
+                "vllm-project/qwen2.5-vl-7b-eagle3-sgl",
                 1,
             ),
             False,
@@ -130,7 +125,7 @@ def test_eagle_correctness_light(
             (
                 "eagle3",
                 "meta-llama/Llama-3.1-8B-Instruct",
-                "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+                "vllm-project/EAGLE3-LLaMA3.1-Instruct-8B",
                 1,
             ),
             False,

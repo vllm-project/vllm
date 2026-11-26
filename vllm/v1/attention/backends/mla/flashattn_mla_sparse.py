@@ -46,6 +46,10 @@ class FlashAttnMLASparseBackend(AttentionBackend):
         "bfloat16",
     ]
 
+    @classmethod
+    def supports_hisparse(cls) -> bool:
+        return True
+
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(64)]
@@ -364,6 +368,7 @@ def _fa4_varlen_scalars(
 class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
     # FA4 emits a natural-log LSE; prefill converts trtllm-gen's log2 LSE.
     lse_base_on_e: bool = True
+    supports_dcp_shardq: ClassVar[bool] = False
 
     def _forward_mqa_kernel(
         self,

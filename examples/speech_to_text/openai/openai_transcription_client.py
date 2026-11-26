@@ -36,10 +36,10 @@ def sync_openai(
 ):
     """Perform synchronous transcription using OpenAI-compatible API.
 
-    The optional ``prompt`` is the OpenAI-API ``prompt`` field (style /
+    The optional `prompt` is the OpenAI-API `prompt` field (style /
     vocabulary hint). It is wired through model-by-model: Whisper uses it
-    as a ``<|prev|>`` continuation hint, Qwen3-ASR maps it into the
-    chat-template ``system`` turn. Models that do not consume it accept
+    as a `<|startofprev|>` continuation hint, Qwen3-ASR maps it into the
+    chat-template `system` turn. Models that do not consume it accept
     it without effect.
     """
     with open(audio_path, "rb") as f:
@@ -208,7 +208,7 @@ if __name__ == "__main__":
         default=None,
         help=(
             "Optional `prompt` (OpenAI transcription API: style/vocabulary "
-            "hint). Wired model-by-model: Whisper uses it as a `<|prev|>` "
+            "hint). Wired model-by-model: Whisper uses it as a `<|startofprev|>` "
             "continuation hint, Qwen3-ASR maps it into the chat-template "
             "system turn."
         ),

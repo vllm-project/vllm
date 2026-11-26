@@ -3,7 +3,7 @@
 
 use crate::config::BenchConfig;
 use crate::error::{BenchError, Result};
-use crate::output::json::{compute_result_filename, save_result};
+use crate::output::json::save_point_result;
 
 /// Reset the server's prefix cache by calling POST /reset_prefix_cache.
 /// Requires VLLM_SERVER_DEV_MODE=1 on the vLLM server.
@@ -71,20 +71,9 @@ pub async fn run_concurrency_sweep(
         if let Some(factor) = num_prompts_factor {
             config.num_prompts = mc * factor;
         }
-        // Suppress per-run save (we save with concurrency suffix below)
-        config.save_result = false;
-        config.append_result = false;
-
-        let result = crate::benchmark::run_benchmark(&config).await?;
-
-        if base_config.save_result {
-            let model_id = config.model.as_deref().unwrap_or("unknown");
-            let file_name = compute_result_filename(&config, model_id, &current_dt);
-            if let Some(ref dir) = config.result_dir {
-                std::fs::create_dir_all(dir)?;
-            }
-            save_result(&result, &file_name)?;
-        }
+        let result = crate::benchmark::run_benchmark(&config.without_save()).await?;
+        let point = config.result_filename.is_some().then(|| format!("concurrency{mc}"));
+        save_point_result(&config, &result, &current_dt, point.as_deref())?;
 
         points.push(SweepPoint {
             label: format!("concurrency={mc}"),
@@ -146,20 +135,9 @@ pub async fn run_multi_turn_concurrency_sweep(
         if let Some(factor) = num_prompts_factor {
             config.num_prompts = mc * factor;
         }
-        // Suppress per-run save (we save with concurrency suffix below)
-        config.save_result = false;
-        config.append_result = false;
-
-        let result = crate::multi_turn::run_multi_turn_benchmark(&config).await?;
-
-        if base_config.save_result {
-            let model_id = config.model.as_deref().unwrap_or("unknown");
-            let file_name = compute_result_filename(&config, model_id, &current_dt);
-            if let Some(ref dir) = config.result_dir {
-                std::fs::create_dir_all(dir)?;
-            }
-            save_result(&result, &file_name)?;
-        }
+        let result = crate::multi_turn::run_multi_turn_benchmark(&config.without_save()).await?;
+        let point = config.result_filename.is_some().then(|| format!("concurrency{mc}"));
+        save_point_result(&config, &result, &current_dt, point.as_deref())?;
 
         points.push(SweepPoint {
             label: format!("concurrency={mc}"),
@@ -215,19 +193,10 @@ pub async fn run_rate_sweep(base_config: &BenchConfig, values: &[f64]) -> Result
 
         let mut config = base_config.clone();
         config.request_rate = rate;
-        config.save_result = false;
-        config.append_result = false;
 
-        let result = crate::benchmark::run_benchmark(&config).await?;
-
-        if base_config.save_result {
-            let model_id = config.model.as_deref().unwrap_or("unknown");
-            let file_name = compute_result_filename(&config, model_id, &current_dt);
-            if let Some(ref dir) = config.result_dir {
-                std::fs::create_dir_all(dir)?;
-            }
-            save_result(&result, &file_name)?;
-        }
+        let result = crate::benchmark::run_benchmark(&config.without_save()).await?;
+        let point = config.result_filename.is_some().then(|| format!("{rate:?}qps"));
+        save_point_result(&config, &result, &current_dt, point.as_deref())?;
 
         points.push(SweepPoint {
             label: format!("rate={rate_str}"),

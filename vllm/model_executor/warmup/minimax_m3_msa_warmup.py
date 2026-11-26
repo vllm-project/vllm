@@ -35,7 +35,7 @@ _MSA_KV_CACHE_DTYPES = ("auto", "bfloat16", "fp8", "fp8_e4m3", "nvfp4")
 def _msa_prebuild_kwargs(
     vllm_config: "VllmConfig", module: MiniMaxM3SparseAttention
 ) -> dict[str, Any] | None:
-    """``fmha_sm100.warmup`` arguments for the kernels this rank can request."""
+    """`fmha_sm100.warmup` arguments for the kernels this rank can request."""
     impl = module.impl
     indexer = module.indexer.impl
     msa = (

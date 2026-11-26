@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 import jsonschema
@@ -133,7 +133,7 @@ NGRAM_SPEC_CONFIG = {
 
 EAGLE_SPEC_CONFIG = {
     "method": "eagle",
-    "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+    "model": "vllm-project/EAGLE-LLaMA3.1-Instruct-8B",
     "num_speculative_tokens": 5,
 }
 
@@ -142,36 +142,9 @@ PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     # FIXME: Since "auto" will use Mistral tokenizer and these backends do not support
     # it, we skip these tests for now.
     # ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
-    # ("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto", None),
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "hf", None),
-    pytest.param(
-        "mistralai/Ministral-8B-Instruct-2410",
-        "lm-format-enforcer",
-        "hf",
-        None,
-        marks=pytest.mark.skip(
-            reason=(
-                "Flaky: lm-format-enforcer intermittently returns"
-                "incomplete JSON."
-                "See https://github.com/noamgat/lm-format-enforcer/issues/169"
-            )
-        ),
-    ),
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "mistral", None),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
-    pytest.param(
-        "Qwen/Qwen2.5-1.5B-Instruct",
-        "lm-format-enforcer",
-        "auto",
-        None,
-        marks=pytest.mark.skip(
-            reason=(
-                "Flaky: lm-format-enforcer intermittently returns"
-                "incomplete JSON."
-                "See https://github.com/noamgat/lm-format-enforcer/issues/169"
-            )
-        ),
-    ),
     # FIXME: This tests are flaky on CI thus disabled. Tracking in Issue #24402
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", None),
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "mistral", None),
@@ -192,7 +165,7 @@ if current_platform.is_rocm():
     platform_args["async_scheduling"] = False
 
 
-class CarType(str, Enum):
+class CarType(StrEnum):
     sedan = "sedan"
     suv = "SUV"
     truck = "Truck"
@@ -270,8 +243,7 @@ def test_structured_output(
 
             generated_text = output.outputs[0].text
             assert generated_text is not None
-            if backend != "lm-format-enforcer":
-                assert "\n" not in generated_text
+            assert "\n" not in generated_text
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
             try:
                 output_json = json.loads(generated_text)
@@ -364,7 +336,7 @@ def test_structured_output(
                 parsed_json = json.loads(generated_text)
                 assert isinstance(parsed_json, dict)
 
-        if backend not in ["outlines", "lm-format-enforcer"]:
+        if backend != "outlines":
             #
             # Test 4: Generate SQL statement using EBNF grammar
             #
@@ -618,7 +590,7 @@ def test_structured_output(
                 )
             jsonschema.validate(instance=output_json, schema=json_schema)
 
-        if backend not in ["outlines", "lm-format-enforcer"]:
+        if backend != "outlines":
             #
             # Test 11: Generate structured output using structural_tag format
             #
@@ -857,6 +829,46 @@ def test_structured_output_auto_mode(
             # Parse to verify it is valid JSON
             parsed_json = json.loads(generated_text)
             assert isinstance(parsed_json, dict)
+
+
+def test_guidance_ignore_eos_with_speculative_decoding(vllm_runner):
+    with vllm_runner(
+        "facebook/opt-125m",
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=1,
+        disable_log_stats=False,
+        structured_outputs_config={"backend": "guidance"},
+        speculative_config={
+            "method": "ngram",
+            "num_speculative_tokens": 3,
+            "prompt_lookup_min": 1,
+            "prompt_lookup_max": 3,
+        },
+        **platform_args,
+    ) as runner:
+        llm = runner.get_llm()
+        tokenizer = llm.get_tokenizer()
+        a = tokenizer.encode("a", add_special_tokens=False)
+        assert len(a) == 1
+        eos = tokenizer.eos_token_id
+        output = llm.generate(
+            {"prompt_token_ids": (a + [eos]) * 8},
+            SamplingParams(
+                temperature=0,
+                max_tokens=8,
+                ignore_eos=True,
+                allowed_token_ids=a + [eos],
+                structured_outputs=StructuredOutputsParams(regex="a"),
+            ),
+        )[0].outputs[0]
+        assert list(output.token_ids[:2]) == a + [eos]
+        assert len(output.token_ids) == 8
+        assert output.finish_reason == "length"
+        assert any(
+            metric.name == "vllm:spec_decode_num_accepted_tokens" and metric.value > 0
+            for metric in llm.get_metrics()
+        )
 
 
 def test_guidance_no_additional_properties(vllm_runner):

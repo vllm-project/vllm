@@ -818,7 +818,7 @@ class _QkvIndexFusedEpilogueJit(
     """Compile keys, warmup (fake) inputs and the compiled executors of
     QkvIndexFusedEpilogueKernel."""
 
-    @dataclass(frozen=True)
+    @dataclass(frozen=True, slots=True)
     class CompileKey:
         has_q: bool
         has_qfp8: bool

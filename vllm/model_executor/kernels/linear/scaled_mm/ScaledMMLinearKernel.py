@@ -18,10 +18,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-from ..base import MMLinearLayerConfig
+from ..base import LinearKernel, MMLinearLayerConfig
 
 
-@dataclass
+@dataclass(slots=True)
 class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
     is_static_input_scheme: bool
@@ -33,7 +33,7 @@ class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     is_fused_module: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class FP8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     weight_quant_key: QuantKey
     activation_quant_key: QuantKey
@@ -60,48 +60,12 @@ _ParamsT = TypeVar("_ParamsT", _Int8ParamsT, _FP8ParamsT)
 _ConfigT = TypeVar("_ConfigT", bound=MMLinearLayerConfig)
 
 
-class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
-    @classmethod
-    @abstractmethod
-    def is_supported(
-        cls, compute_capability: int | None = None
-    ) -> tuple[bool, str | None]:
-        raise NotImplementedError
-
-    @classmethod
-    @abstractmethod
-    def can_implement(cls, c: _ConfigT) -> tuple[bool, str | None]:
-        raise NotImplementedError
-
+class ScaledMMLinearKernel(LinearKernel[_ConfigT], Generic[_ConfigT, _ParamsT]):
     def __init__(self, c: _ConfigT, layer_param_names: Sequence[str]) -> None:
         assert self.can_implement(c)[0]
         assert self.is_supported()[0]
         self.config = c
         self.layer_param_names = layer_param_names
-
-    def input_quant_key(self) -> QuantKey | None:
-        """The activation quant key this kernel can consume pre-quantized.
-
-        Manual fusion uses this to decide whether to hoist activation
-        quantization out of apply_weights into an upstream fused kernel.
-        Return None when the kernel needs in-kernel quantization (custom
-        padding or swizzling, dynamic scales, etc.). Kernels that return a
-        key must consume the activation via as_quantized_activation.
-        """
-        return None
-
-    @abstractmethod
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        raise NotImplementedError
 
     # return a covariant type in the subclass
     @abstractmethod

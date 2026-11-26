@@ -534,6 +534,16 @@ ModalityDataParser: TypeAlias = Callable[
 ]
 
 
+def _convert_pil_frames(frames: HfVideoItem) -> HfVideoItem:
+    """Convert PIL video frames to RGB, as is done for PIL images."""
+    if not isinstance(frames, list):
+        return frames
+    return [
+        convert_image_mode(frame, "RGB") if isinstance(frame, PILImage.Image) else frame
+        for frame in frames
+    ]
+
+
 class MultiModalDataParser:
     """Parses [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
     into [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems].
@@ -641,7 +651,7 @@ class MultiModalDataParser:
         if isinstance(audio, np.ndarray):
             return audio, None
         if isinstance(audio, torch.Tensor):
-            return audio.numpy(), None
+            return audio.detach().cpu().numpy(), None
 
         assert_never(audio)
 
@@ -653,9 +663,10 @@ class MultiModalDataParser:
             new_video, metadata = self._get_video_with_metadata(video.media)
             return MediaWithBytes(new_video, video.original_bytes), metadata
         if isinstance(video, tuple):
-            return video
+            frames, metadata = video
+            return _convert_pil_frames(frames), metadata
         if isinstance(video, list):
-            return np.array(video), None
+            return np.array(_convert_pil_frames(video)), None
         if isinstance(video, (np.ndarray, torch.Tensor)):
             # Tensors pass through untouched: HF video processors accept them
             # directly, and device tensors (e.g. NVDEC-decoded frames) must
@@ -776,6 +787,14 @@ class MultiModalDataParser:
             for item in data_items
         ]
 
+        data_items = [
+            np.ascontiguousarray(item)
+            if isinstance(item, np.ndarray)
+            and any(stride < 0 for stride in item.strides)
+            else item
+            for item in data_items
+        ]
+
         return ImageProcessorItems(data_items)
 
     def _parse_video_data(
@@ -821,6 +840,8 @@ class MultiModalDataParser:
                 metadata_lst.append(None)
                 continue
             video, metadata = self._get_video_with_metadata(data_item)
+            if isinstance(video, np.ndarray) and any(s < 0 for s in video.strides):
+                video = np.ascontiguousarray(video)
             if self.video_needs_metadata:
                 if metadata is None:
                     raise ValueError(

@@ -23,6 +23,19 @@ Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
 pip install vllm "lm-eval[api]>=0.4.12"
 ```
 
+## MXFP8 weight-only linear layers
+
+For Quark OCP-MX MXFP8 checkpoints without input activation quantization,
+vLLM keeps dense-layer activations unquantized. Kernel selection uses Marlin
+where supported, or BF16 weight emulation, instead of a W8A8 backend that
+quantizes activations internally. An explicitly selected incompatible
+`--linear-backend` fails during kernel selection.
+
+Checkpoints with dynamic MXFP8 activations retain their existing backend
+selection and weight-only fallback. An explicit
+`--quantization-config.linear.activation` override takes precedence over the
+checkpoint's activation format.
+
 ## Quantization Process
 
 After installing Quark, we will use an example to illustrate how to use Quark.
@@ -310,7 +323,7 @@ Models quantized with AMD Quark using mixed precision can natively be reload in 
 
 ```bash
 lm_eval --model vllm \
-    --model_args pretrained=amd/Llama-2-70b-chat-hf-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8,tensor_parallel_size=4,dtype=auto,gpu_memory_utilization=0.8,trust_remote_code=False \
+    --model_args pretrained=amd/Llama-2-70b-chat-hf-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8,tensor_parallel_size=4,dtype=auto,trust_remote_code=False \
     --tasks mmlu \
     --batch_size auto
 ```

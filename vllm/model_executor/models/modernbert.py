@@ -238,7 +238,7 @@ class ModernBertEncoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
     ) -> torch.Tensor:
-        for i, layer in enumerate(self.layers):
+        for layer in self.layers:
             hidden_states = layer(hidden_states, position_ids)
         return hidden_states
 

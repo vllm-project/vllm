@@ -16,6 +16,7 @@ import pytest
 from vllm.v1.simple_kv_offload import cuda_mem_ops
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     BatchMemcpyParams,
+    _copy_flags_for_hip_version,
     _CUmemcpyAttributes,
     _load_hip_runtime,
     _num_attrs_for_hip_version,
@@ -43,6 +44,21 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
 )
 def test_num_attrs_for_hip_version(version: int, expected: int):
     assert _num_attrs_for_hip_version(version) == expected
+
+
+# hipMemcpyFlagExtPreferCE (0x100) keeps the batch on SDMA from HIP 7.16 on.
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        (0, 0),  # unknown -> no flag
+        (70_253_211, 0),  # ROCm 7.2.2
+        (71_500_000, 0),  # HIP 7.15 -- just below the cutoff
+        (71_626_361, 0x100),  # HIP 7.16 (rocm-systems 25e14349f2)
+        (80_000_000, 0x100),
+    ],
+)
+def test_copy_flags_for_hip_version(version: int, expected: int):
+    assert _copy_flags_for_hip_version(version) == expected
 
 
 @pytest.mark.parametrize(

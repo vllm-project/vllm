@@ -19,13 +19,15 @@ class _TestExperts(GptOssRoutedExperts):
         shape: tuple[int, ...],
         *,
         tp_rank: int = 0,
+        intermediate_size: int = 4,
         quant_method_name: str = "TestQuantMethod",
         weight_dtype: str = "",
         dtype: torch.dtype = torch.float32,
     ) -> None:
         torch.nn.Module.__init__(self)
         self.moe_config = SimpleNamespace(
-            moe_parallel_config=SimpleNamespace(tp_size=2, tp_rank=tp_rank)
+            moe_parallel_config=SimpleNamespace(tp_size=2, tp_rank=tp_rank),
+            intermediate_size=intermediate_size,
         )
         self.quant_method = type(
             quant_method_name, (), {"weight_dtype": weight_dtype}
@@ -125,28 +127,69 @@ def test_streamed_gate_up_bias_tp_slice() -> None:
     assert torch.equal(experts.w13_bias[0], loaded_weight[4:])
 
 
-@pytest.mark.parametrize("case", ["mxfp4", "nvfp4"])
-def test_streamed_quantized_expert_layout(case: str) -> None:
-    if case == "mxfp4":
+def test_streamed_nvfp4_expert_layout() -> None:
+    experts = _TestExperts(
+        "w13_weight",
+        (2, 4, 2),
+        tp_rank=1,
+        quant_method_name="Nvfp4OnlineMoEMethod",
+        dtype=torch.uint8,
+    )
+    loaded_weight = torch.arange(16, dtype=torch.uint8).reshape(8, 2)
+
+    assert _load(experts, "w13_weight", loaded_weight, "gpt_oss_w13")
+    assert torch.equal(experts.w13_weight[0], loaded_weight[4:])
+
+
+@pytest.mark.parametrize("shard", ["w13", "w2"])
+def test_streamed_mxfp4_expert_splits_like_the_checkpoint_loader(shard: str) -> None:
+    """The per-expert loader splits in whole MXFP4 blocks, as the full-checkpoint
+    loader does, not by the padded parameter size, and leaves the padding alone.
+    w13: TP rank 0 of 2, 4 blocks, 2 per rank, padded to 3. w2: TP rank 1 of 2,
+    3 blocks split 2 + 1, padded to 3."""
+    if shard == "w13":
         experts = _TestExperts(
             "w13_weight",
-            (2, 4, 4),
-            tp_rank=1,
+            (2, 192, 4),
+            tp_rank=0,
+            intermediate_size=128,
             weight_dtype="gpt_oss_mxfp4",
             dtype=torch.uint8,
         )
-        loaded_weight = torch.arange(32, dtype=torch.uint8).reshape(8, 2, 2)
-        expected = loaded_weight.reshape(8, 4)[4:]
+        # one distinct value per row, so a wrong row offset is caught
+        loaded_weight = (torch.arange(1024) // 4).to(torch.uint8).reshape(256, 2, 2)
+        expected = loaded_weight.reshape(256, 4)[:128]
+        written, padding = experts.w13_weight[0, :128], experts.w13_weight[:, 128:]
     else:
         experts = _TestExperts(
-            "w13_weight",
-            (2, 4, 2),
+            "w2_weight",
+            (2, 4, 48),
             tp_rank=1,
-            quant_method_name="Nvfp4OnlineMoEMethod",
+            intermediate_size=96,
+            weight_dtype="gpt_oss_mxfp4",
             dtype=torch.uint8,
         )
-        loaded_weight = torch.arange(16, dtype=torch.uint8).reshape(8, 2)
-        expected = loaded_weight[4:]
+        loaded_weight = torch.arange(192).to(torch.uint8).reshape(4, 3, 16)
+        expected = loaded_weight.reshape(4, 48)[:, 32:]  # block 2
+        written, padding = experts.w2_weight[0, :, :16], experts.w2_weight[:, :, 16:]
 
-    assert _load(experts, "w13_weight", loaded_weight, "gpt_oss_w13")
-    assert torch.equal(experts.w13_weight[0], expected)
+    assert _load(experts, f"{shard}_weight", loaded_weight, f"gpt_oss_{shard}")
+    assert torch.equal(written, expected)
+    assert torch.count_nonzero(padding) == 0
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_streamed_channelwise_w2_scale_is_not_split(tp_rank: int) -> None:
+    """A per-output-channel w2 scale has no intermediate extent to split: every
+    rank loads it whole."""
+    experts = _TestExperts(
+        "w2_weight_scale",
+        (2, 4, 1),
+        tp_rank=tp_rank,
+        intermediate_size=128,
+        quant_method_name="CompressedTensorsWNA16MoEMethod",
+    )
+    loaded_weight = torch.arange(1.0, 5.0).reshape(4, 1)
+
+    assert _load(experts, "w2_weight_scale", loaded_weight, "gpt_oss_w2")
+    assert torch.equal(experts.w2_weight_scale[0], loaded_weight)

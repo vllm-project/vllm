@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 
 
-@dataclass
+@dataclass(slots=True)
 class BatchShardMetadata:
     """Collective layout for one sampling step.
 

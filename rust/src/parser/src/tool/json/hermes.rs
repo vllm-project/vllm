@@ -229,7 +229,6 @@ mod tests {
 
         let error = parser.finish().unwrap_err();
 
-        expect!["tool parser parsing failed: incomplete Hermes tool call"]
-            .assert_eq(&error.to_report_string());
+        expect!["incomplete Hermes tool call"].assert_eq(&error.to_report_string());
     }
 }
