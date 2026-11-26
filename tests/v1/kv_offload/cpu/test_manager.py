@@ -1679,6 +1679,25 @@ def test_store_threshold_counts_again_for_a_reused_request_id():
     assert output.keys_to_store == [key]
 
 
+@pytest.mark.parametrize("restarted", [False, True])
+def test_finished_request_id_used_again_warns_unless_restarted(
+    caplog_vllm, restarted: bool
+):
+    """A finished req_id used again without on_new_request is logged."""
+    manager = make_cpu_manager(num_chunks=4)
+    first = make_req_context("req")
+    manager.prepare_store([to_key(1)], first, trigger=StoreTrigger.ON_COMPUTE)
+    manager.on_request_finished(first)
+
+    second = make_req_context("req")
+    if restarted:
+        manager.on_new_request(second)
+    manager.prepare_store([to_key(2)], second, trigger=StoreTrigger.ON_COMPUTE)
+
+    warned = any("after it finished" in r.getMessage() for r in caplog_vllm.records)
+    assert warned is not restarted
+
+
 def test_evictable_cache_chunk_count(monkeypatch):
     """Verifies _num_evictable_cache_chunks is maintained correctly through the
     full store/load lifecycle, eviction, failed stores, concurrent loads,
