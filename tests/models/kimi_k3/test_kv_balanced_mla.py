@@ -593,16 +593,23 @@ def _stock_split(heads, q, requests, max_seq, device):
     ],
 )
 def test_specialized_balanced_core_bitwise_matches_tokenspeed(lengths, heads, q, cp):
-    """At tokenspeed_mla_decode's split points, the specialized decode's balanced core
-    (BalancedMla, as served) returns stock's BF16 latent and log2 LSE bit for bit:
-    the same FP32 split-KV partials, P scaling and reduction. Each request is given
-    stock's split count in the plan (the balanced core only moves the split points,
-    a summation order); stock's own call is the TOKENSPEED_MLA backend's."""
+    """At TokenSpeed's split points, the specialized balanced core returns stock's
+    BF16 latent and log2 LSE bit for bit, with the same FP32 partials and P scaling.
+    Allocate room for stock's hardware-dependent plan, which can exceed the served
+    core's capacity; the served planner is tested separately against the reference.
+    """
     from tokenspeed_mla import tokenspeed_mla_decode
 
-    from vllm.models.kimi_k3.nvidia.kv_balanced_mla.core import KV_TILE, supports
+    from vllm.models.kimi_k3.nvidia.kv_balanced_mla.core import (
+        KV_TILE,
+        TOKENSPEED_P_SCALE,
+        KvBalancedMla,
+        supports,
+    )
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.mla.balanced import (
+        MIN_SPLIT_TOKENS,
         BalancedMla,
+        reducer_d_tiles,
     )
 
     torch.manual_seed(0)
@@ -646,14 +653,30 @@ def test_specialized_balanced_core_bitwise_matches_tokenspeed(lengths, heads, q,
         cp_interleave_size=interleave,
     )
 
-    balanced = BalancedMla(heads, device, dcp)
-    balanced.require(q, requests)
-    key = balanced.key(q, requests)
-    core, (counts, work) = balanced.cores[key], balanced.plans[key]
     # Each request's nonempty splits at stock's chunk, ceil(tiles / split) tiles.
     tiles = [-(-n // KV_TILE) for n in local]
     planned = [-(-t // -(-t // split)) for t in tiles]
     assert min(planned) > 1, "a single-split request stores its output directly"
+    served_capacity = BalancedMla(heads, device, dcp).key(q, requests)[1]
+    # This test injects stock's plan rather than using the capacity-bounded planner.
+    # Keep the served core's precision settings, with room for every stock split.
+    core = KvBalancedMla(
+        heads,
+        q,
+        requests,
+        True,
+        device,
+        capacity=max(served_capacity, max(planned)),
+        min_split_tokens=MIN_SPLIT_TOKENS,
+        partial_fp16=False,
+        p_scale=TOKENSPEED_P_SCALE,
+        reducer_d_tiles=reducer_d_tiles(heads * q * requests, device),
+    )
+    counts = as_tensor(planned)
+    work = torch.full((core.list_len,), -1, dtype=torch.int32, device=device)
+    balanced_workspace = torch.empty(
+        core.workspace_bytes, dtype=torch.int8, device=device
+    )
     assert max(planned) <= core.capacity, (planned, core.capacity)
     entries = [
         ((tile * requests + b) << 8) | s
@@ -661,14 +684,25 @@ def test_specialized_balanced_core_bitwise_matches_tokenspeed(lengths, heads, q,
         for s in range(n)
         for tile in range(core.q_tiles)
     ]
-    counts[:requests] = as_tensor(planned)
-    work.fill_(-1)
+    assert len(entries) <= work.numel()
     work[: len(entries)] = as_tensor(entries)
     out = torch.empty(requests, q, heads, LATENT, dtype=torch.bfloat16, device=device)
     lse = torch.empty(requests, q, heads, dtype=torch.float32, device=device)
-    extra = dict(cp=cp, totals=totals) if dcp else {}
-    balanced.decode(
-        query, cache, block_table, local_t, (softmax, output_scale), out, lse, **extra
+    core.decode(
+        query.reshape(-1, heads, LATENT + ROPE),
+        cache,
+        block_table,
+        local_t,
+        softmax,
+        output_scale,
+        counts,
+        work,
+        balanced_workspace,
+        lse=lse,
+        causal_lens=totals if dcp else None,
+        cp=cp,
+        out=out,
+        pdl=True,
     )
     torch.accelerator.synchronize()
     assert torch.equal(out.view(torch.int16), stock_out.view(torch.int16))
