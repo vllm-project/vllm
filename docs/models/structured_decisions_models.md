@@ -398,6 +398,11 @@ vllm serve nace-ai/drex-v1.5
   tokens): the state and the question's row are read in full, and a request
   that does not fit returns 400. The checkpoint was trained on 384-token
   states and 1,024-token question rows. A question can have up to 255 options.
+- One request may read two windows' worth of tokens in total, since every
+  question reads the state again; a request that asks for more returns 400.
+- Chunked prefill and prefix caching are disabled for this model: the pointer
+  head reads the hidden state at absolute positions in the full row, which a
+  cached or chunked prefill does not provide.
 - `instructions` returns 400, since the prompt is fixed. `chat_template_kwargs`
   has no effect.
 - There are no labels, so `label_mass` is 1 and `confidence` is the chosen
