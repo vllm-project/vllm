@@ -221,6 +221,7 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
         self.manager.lookup.return_value = LookupResult.MISS
+        self.manager.prepare_store.return_value.keys_to_retry = []
         self.manager.get_load_source.return_value = CacheHitSource.EXTERNAL_UNSPECIFIED
         self.manager.get_stats.return_value = None
         self.manager.config_info.return_value = [{}]
@@ -384,7 +385,7 @@ class RequestRunner:
         self.scheduler = scheduler_cls(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
-            log_stats=True,
+            collect_stats=True,
             structured_output_manager=StructuredOutputManager(vllm_config),
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,

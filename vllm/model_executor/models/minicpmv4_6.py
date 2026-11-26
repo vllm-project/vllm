@@ -42,7 +42,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .idefics2_vision_model import Idefics2VisionTransformer
+from .idefics2_vision_model import Idefics2VarlenMetadata, Idefics2VisionTransformer
 from .interfaces import (
     HasInnerState,
     IsHybrid,
@@ -1293,6 +1293,23 @@ class MiniCPMV4_6ForConditionalGeneration(
 
     # ----- Vision forward -----
 
+    def _run_vpm_layers(
+        self,
+        layers: Iterable[nn.Module],
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        varlen: Idefics2VarlenMetadata | None,
+    ) -> torch.Tensor:
+        if varlen is not None:
+            hidden_states = varlen.pack(hidden_states)
+            for layer in layers:
+                hidden_states = layer(hidden_states, varlen=varlen)
+            hidden_states = varlen.unpack(hidden_states)
+        else:
+            for layer in layers:
+                hidden_states = layer(hidden_states, attention_mask=attention_mask)
+        return hidden_states
+
     def get_vision_hidden_states(
         self,
         data: MiniCPMVImagePixelInputs,
@@ -1335,13 +1352,15 @@ class MiniCPMV4_6ForConditionalGeneration(
             tgt_sizes=tgt_sizes,
         )
 
-        if torch.any(~patch_attn_mask):
+        varlen = None
+        attention_mask = None
+        if self.vpm.prefer_varlen_attention:
+            varlen = self.vpm.get_varlen_metadata(patch_attn_mask)
+        elif torch.any(~patch_attn_mask):
             mask_dtype = hidden_states.dtype
             min_val = torch.finfo(mask_dtype).min
             attention_mask = (~patch_attn_mask).to(dtype=mask_dtype) * min_val
             attention_mask = attention_mask[:, None, None, :]
-        else:
-            attention_mask = None
 
         # Encoder layers with mid-encoder merger injection
         insert_layer_id = getattr(self.config, "insert_layer_id", -1)
@@ -1349,8 +1368,12 @@ class MiniCPMV4_6ForConditionalGeneration(
             downsample_mode = getattr(self.config, "downsample_mode", "16x")
         use_vit_merger = downsample_mode != "4x" and insert_layer_id >= 0
 
-        for layer in self.vpm.encoder.layers[: insert_layer_id + 1]:
-            hidden_states = layer(hidden_states, attention_mask=attention_mask)
+        hidden_states = self._run_vpm_layers(
+            self.vpm.encoder.layers[: insert_layer_id + 1],
+            hidden_states,
+            attention_mask,
+            varlen,
+        )
 
         if use_vit_merger:
             hidden_states, tgt_sizes, attention_mask = self.vit_merger(
@@ -1358,9 +1381,20 @@ class MiniCPMV4_6ForConditionalGeneration(
                 tgt_sizes,
                 attention_mask,
             )
+            if varlen is not None:
+                merged_lens = tgt_sizes.prod(-1)
+                merged_mask = (
+                    torch.arange(hidden_states.size(1), device=device)
+                    < merged_lens[:, None]
+                )
+                varlen = self.vpm.get_varlen_metadata(merged_mask)
 
-        for layer in self.vpm.encoder.layers[insert_layer_id + 1 :]:
-            hidden_states = layer(hidden_states, attention_mask=attention_mask)
+        hidden_states = self._run_vpm_layers(
+            self.vpm.encoder.layers[insert_layer_id + 1 :],
+            hidden_states,
+            attention_mask,
+            varlen,
+        )
 
         # 4. Post layernorm
         hidden_states = self.vpm.post_layernorm(hidden_states)

@@ -51,11 +51,17 @@ class OffloadingConnectorWorker:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.worker: OffloadingWorker | None = None
-        # Non-writers still ack: pending_count waits for world_size per job.
+        # In the direct replicated layout the first mp rank on each host writes
+        # its shared copy. Other ranks still ack since pending_count is world_size.
+        parallel = self.spec.config.parallel
         self._is_store_writer = (
             not self.spec.replicated_layout
             or self.spec.config.canonical_layout
-            or self.spec.config.parallel.rank == 0
+            or parallel.rank == 0
+            or (
+                self.spec.config.replicated_layout
+                and parallel.rank % parallel.local_world_size == 0
+            )
         )
 
         # job_id -> req_id for in-flight loads (None for sync loads).

@@ -27,12 +27,17 @@ def tensor_descriptor_compatible(*tensors: "torch.Tensor | None") -> bool:
             continue
         elem = t.element_size()
         width = t.shape[-1] * elem
+        # JIT-warmup FakeTensors have no data pointer; they carry the alignment
+        # of the tensor they stand for.
+        aligned = getattr(t, "_vllm_warmup_aligned", None)
+        if aligned is None:
+            aligned = t.data_ptr() % 16 == 0
         # Intel 2D block IO: width/pitch >= 64 B, multiples of 16 B (covers TMA).
         # Size-1 dim strides are checked too: kernels may pass them as a pitch.
         min_pitch = max(64, width)
         if (
             t.stride(-1) != 1
-            or t.data_ptr() % 16 != 0
+            or not aligned
             or width < 64
             or width % 16 != 0
             or any(s * elem < min_pitch or s * elem % 16 for s in t.stride()[:-1])

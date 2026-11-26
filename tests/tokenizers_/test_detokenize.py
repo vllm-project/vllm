@@ -157,12 +157,17 @@ def test_incremental_decode_past_the_window_emits_no_text(tokenizer):
         "ပုံပြင်လေးပြောပြပါ",
         # Using "URGENCY" since "CY" has token id 130282
         "URGENCY🌶️",
+        # Characters encoded as raw bytes by Tekken (emoji, CJK)
+        # See https://github.com/vllm-project/vllm/issues/67755
+        "Hi 🤖 数学 ok",
     ],
 )
-def test_mistral_edge_case(tokenizer, truth):
+@pytest.mark.parametrize("skip_special_tokens", [True, False])
+def test_mistral_edge_case(tokenizer, truth, skip_special_tokens):
     """Test for a specific edge cases with V3-Tekken MistralTokenizer.
 
     See https://github.com/vllm-project/vllm/pull/9625
+        https://github.com/vllm-project/vllm/issues/67755
     """
     starting_index = 0
     all_input_ids = tokenizer(truth, add_special_tokens=False).input_ids
@@ -170,7 +175,7 @@ def test_mistral_edge_case(tokenizer, truth):
     decoded_text, out_ids = _run_incremental_decode(
         tokenizer,
         all_input_ids,
-        skip_special_tokens=True,
+        skip_special_tokens=skip_special_tokens,
         starting_index=starting_index,
     )
     assert decoded_text == truth
