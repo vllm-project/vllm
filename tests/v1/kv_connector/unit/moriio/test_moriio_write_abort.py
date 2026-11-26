@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
     LayerTransferPlan,
+    MoRIIOConnectorMetadata,
     MoRIIOMode,
     RemoteAllocInfo,
     ReqMeta,
@@ -41,8 +42,10 @@ def _setup(*, mamba=False, empty=False):
     wrapper = MoRIIOWrapper()
     wrapper.local_memory_registered = True
     wrapper.moriio_engine = SimpleNamespace(allocate_transfer_uid=lambda: 1)
-    wrapper.send_notify = lambda tid, host, port, message_type, **kw: (
-        notifications.append((tid, message_type))
+    vars(wrapper).update(
+        send_notify=lambda tid, host, port, message_type, **kw: notifications.append(
+            (tid, message_type)
+        )
     )
 
     def submit(*args):
@@ -68,9 +71,9 @@ def _setup(*, mamba=False, empty=False):
         _is_mamba_layer=lambda layer: mamba,
         _get_built_session=lambda engine: ([SimpleNamespace(batch_write=submit)], None),
     )
-    wrapper.async_wait_reqid = lambda: None
+    vars(wrapper).update(async_wait_reqid=lambda: None)
     writer = worker._writer = MoRIIOWriter(worker)
-    writer.ensure_worker_started = lambda: None
+    vars(writer).update(ensure_worker_started=lambda: None)
     meta = ReqMeta("transfer", [[1]], [], "127.0.0.2", 7000, 7000, 7000, "decode", 1, 1)
     task = WriteTask(
         "request",
@@ -96,8 +99,10 @@ def _setup(*, mamba=False, empty=False):
             [] if empty else [8],
         )
 
-    writer._prepare_transfer_plan = prepare
-    writer._prepare_mamba_transfer_plans = lambda *args: [prepare()]
+    vars(writer).update(
+        _prepare_transfer_plan=prepare,
+        _prepare_mamba_transfer_plans=lambda *args: [prepare()],
+    )
     allocation = RemoteAllocInfo([[2]])
     wrapper.done_remote_allocate_req_dict[meta.transfer_id] = allocation
     return SimpleNamespace(
@@ -251,12 +256,14 @@ def test_possible_submit_failure_releases_source_only(later_layer):
 def test_abort_before_alloc_uses_configured_peer_pods(allocated, missing_peer_fields):
     config = create_vllm_config(role="kv_producer")
     config.parallel_config.tensor_parallel_size = 2
+    assert config.kv_transfer_config is not None
     config.kv_transfer_config.kv_connector_extra_config.update(
         remote_hosts=["10.0.0.1", "10.0.0.2"], remote_dp_size_local=8
     )
     scheduler = create_scheduler(config)
     request = create_request(num_tokens=32, do_remote_decode=True)
     _setup_kv_transfer_request(request, fake_transfer_id="transfer", fake_port=7000)
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params.update(remote_dp_size=16, remote_tp_size=2)
     if missing_peer_fields:
         for key in ["remote_engine_id", "remote_block_ids"]:
@@ -294,4 +301,6 @@ def test_unallocated_abort_without_peer_can_finish_locally():
     scheduler.add_request(request)
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
     assert request.request_id not in scheduler.requests
-    assert not scheduler.schedule().kv_connector_metadata.reqs_to_abort
+    metadata = scheduler.schedule().kv_connector_metadata
+    assert isinstance(metadata, MoRIIOConnectorMetadata)
+    assert not metadata.reqs_to_abort
