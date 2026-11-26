@@ -62,6 +62,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.models.common.ops.sequence_parallel import (
+    is_sp_active,
+    mark_sp_region,
+    sp_all_gather,
+    sp_shard,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
@@ -1198,6 +1204,30 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
             )
 
         self.fast_prefill_enabled = cache_config.kv_sharing_fast_prefill
+        self.parallel_config = vllm_config.parallel_config
+        self.use_sequence_parallel = (
+            self.parallel_config.use_sequence_parallel
+            and current_platform.is_cuda()
+            and self.parallel_config.pipeline_parallel_size == 1
+            and quant_config is None
+            and vllm_config.model_config.dtype == torch.bfloat16
+            and getattr(config, "num_experts", None) is None
+            and not self.hidden_size_per_layer_input
+            and first_kv_shared_layer_idx == config.num_hidden_layers
+            and not self.fast_prefill_enabled
+        )
+        if self.use_sequence_parallel:
+            # Residual and post-projection norms stay on the local token shard.
+            prev_down_proj = None
+            for layer in self.layers[self.start_layer : self.end_layer]:
+                mark_sp_region(
+                    prev_down_proj, layer.self_attn.qkv_proj, self.parallel_config
+                )
+                mark_sp_region(
+                    layer.self_attn.o_proj, layer.mlp.gate_up_proj, self.parallel_config
+                )
+                prev_down_proj = layer.mlp.down_proj
+            mark_sp_region(prev_down_proj, None, self.parallel_config)
 
         if self.fast_prefill_enabled:
             # Allocate static buffers for CUDAGraph
@@ -1415,6 +1445,10 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
             hidden_states = intermediate_tensors["hidden_states"]
             if "per_layer_inputs" in intermediate_tensors.tensors:
                 per_layer_inputs = intermediate_tensors["per_layer_inputs"]
+        sp_active = self.use_sequence_parallel and is_sp_active(self.parallel_config)
+        num_tokens = hidden_states.shape[0]
+        if sp_active:
+            hidden_states = sp_shard(hidden_states)
         residual = None
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
@@ -1453,6 +1487,11 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
 
+        if sp_active:
+            hidden_states = sp_all_gather(hidden_states)[:num_tokens]
+            aux_hidden_states = [
+                sp_all_gather(state)[:num_tokens] for state in aux_hidden_states
+            ]
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
