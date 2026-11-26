@@ -111,8 +111,10 @@ the `stop_string` in `finished`. The worker never sent it, so cancel
 Not supported yet: `n > 1`, prompt logprobs, `return_prompt_text`,
 `return_weight_versions`, and APIs other than `API_CHAT`. `DerenderStream`
 rejects these at `start` with `UNIMPLEMENTED`, so a gateway can fall back to
-HTTP. Send `start` before submitting `GenerateStream` so that a rejected request
-generates nothing. `DerenderStream` reports no per-request metrics.
+HTTP. Send `start` before submitting `GenerateStream` and wait for the response
+headers, which the server sends once it accepts `start`, so that a rejected
+request generates nothing. A rejected `start` ends the stream with a status and
+no headers. `DerenderStream` reports no per-request metrics.
 
 A request the body itself makes invalid fails with `INVALID_ARGUMENT`, which a
 gateway can return to the client as HTTP 400. `GenerateStream` output that

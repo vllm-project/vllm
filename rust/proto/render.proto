@@ -31,7 +31,9 @@ service Render {
   // body sets `logprobs`, and `response.output_candidates` when it sets
   // `top_logprobs`.
   //
-  // Send `start` before submitting GenerateStream: DerenderStream rejects
+  // Send `start` before submitting GenerateStream, and wait for the response
+  // headers: the server sends them once it accepts `start`. A rejected `start`
+  // ends the stream with a status and no headers. DerenderStream rejects
   // `n > 1`, prompt logprobs, `return_prompt_text`, `return_weight_versions`
   // and APIs other than API_CHAT at `start` with UNIMPLEMENTED, so that a
   // gateway can fall back to HTTP before anything is generated. Errors in

@@ -4290,21 +4290,7 @@ async fn derender_stream_responses_with_request_id(
     requests: Vec<pb::DerenderStreamRequest>,
     request_id: Option<&str>,
 ) -> Result<Vec<pb::DerenderStreamResponse>, tonic::Status> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
-    let addr = listener.local_addr().expect("local addr");
-    let server = tokio::spawn(async move {
-        TonicServer::builder()
-            .add_service(super::RenderGrpcService::new(render_service()))
-            .serve_with_incoming(MaybeTlsListener::plain(Listener::Tcp(listener)))
-            .await
-            .expect("grpc server");
-    });
-    let channel = Endpoint::from_shared(format!("http://{addr}"))
-        .expect("grpc endpoint")
-        .connect()
-        .await
-        .expect("connect grpc channel");
-    let mut client = pb::render_client::RenderClient::new(channel);
+    let (mut client, server) = render_grpc_client().await;
     let mut request = tonic::Request::new(futures::stream::iter(requests));
     if let Some(request_id) = request_id {
         request
@@ -4321,6 +4307,28 @@ async fn derender_stream_responses_with_request_id(
     }
     server.abort();
     Ok(collected)
+}
+
+/// A Render gRPC client connected to a server on a local port.
+async fn render_grpc_client() -> (
+    pb::render_client::RenderClient<Channel>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        TonicServer::builder()
+            .add_service(super::RenderGrpcService::new(render_service()))
+            .serve_with_incoming(MaybeTlsListener::plain(Listener::Tcp(listener)))
+            .await
+            .expect("grpc server");
+    });
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .expect("grpc endpoint")
+        .connect()
+        .await
+        .expect("connect grpc channel");
+    (pb::render_client::RenderClient::new(channel), server)
 }
 
 /// The SSE `data:` payloads of `responses`, and the sequences they finished.
@@ -4433,6 +4441,21 @@ async fn derender_stream_returns_the_json_body_for_a_non_streaming_request() {
         serde_json::Value::Null
     );
     assert_eq!(responses[0].finished.len(), 1);
+}
+
+/// A gateway waits for the response headers before it submits `GenerateStream`,
+/// so the server must send them once it accepts `start`, before any output.
+#[tokio::test]
+async fn derender_stream_sends_headers_when_it_accepts_start() {
+    let (mut client, server) = render_grpc_client().await;
+    let start = derender_start_request(derender_body(serde_json::json!({}))).await;
+    let inbound = futures::stream::iter([start]).chain(futures::stream::pending());
+
+    let call = tokio::time::timeout(Duration::from_secs(5), client.derender_stream(inbound))
+        .await
+        .expect("timed out waiting for the response headers");
+    server.abort();
+    call.expect("start accepted");
 }
 
 /// A gateway matches the client response to its own request by `x-request-id`,
