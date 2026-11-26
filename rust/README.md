@@ -160,7 +160,8 @@ messages. Set
 placeholder ranges, for example for cache-aware routing; such a response cannot
 be sent to generate. Pass `--language-model-only` to skip multimodal
 processing, and set `--limit-mm-per-prompt` to the engine's limits so that
-render rejects the same requests.
+render enforces the same item counts. The `VLLM_MAX_MEDIA_PREPROCESSING_BYTES`
+setting applies to supported Python processors.
 
 Pass `--lora-modules name=path ...` to accept LoRA adapter names as the request
 `model`; rendering does not load the adapter weights, and the adapter name is
