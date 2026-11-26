@@ -177,6 +177,9 @@ Priority is **1 = highest** (tried first).
 >
 > **\*** Specify the FlashAttention version via `--attention-config.flash_attn_version=2`, `3`, or `4`. Default is FA4 on SM100+ (Blackwell), FA3 on SM90 (Hopper), FA2 otherwise.
 
+With `VLLM_BATCH_INVARIANT=1`, automatic attention selection for Gemma 4 models with
+mixed head dimensions uses Triton for the default KV cache dtype.
+
 ### b12x
 
 The b12x backend supports causal decoder attention on NVIDIA SM120 and SM121

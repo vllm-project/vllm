@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Literal, TypeVar
 
 from pydantic import Field
 
+from vllm import envs
 from vllm.config import utils as config_utils
 from vllm.config.diffusion import DiffusionConfig, DiffusionModelOptions
 from vllm.logger import init_logger
@@ -580,8 +581,8 @@ class Gemma4Config(VerifyAndUpdateConfig):
         requests to this per-layer FA3/FA4 selection. For other configurations,
         force FA4 for all layers to avoid the mixed
         FA3+FA4 penalty.
-        When FA4 is not available, fall back to Triton, or to FlashInfer for a
-        plain Gemma4 with an NVFP4 KV cache, which Triton cannot read.
+        When FA4 is unavailable or batch invariance disables it, fall back to
+        Triton, or to FlashInfer for a plain Gemma4 with an NVFP4 KV cache.
         """
         model_config = vllm_config.model_config
         arch_config = model_config.model_arch_config
@@ -600,7 +601,11 @@ class Gemma4Config(VerifyAndUpdateConfig):
 
         max_head_dim = max(head_dims.values())
 
-        if is_fa_version_supported(4) and max_head_dim <= 512:
+        if (
+            not envs.VLLM_BATCH_INVARIANT
+            and is_fa_version_supported(4)
+            and max_head_dim <= 512
+        ):
             if (
                 vllm_config.attention_config.flash_attn_version is None
                 and vllm_config.attention_config.backend
@@ -638,7 +643,7 @@ class Gemma4Config(VerifyAndUpdateConfig):
             vllm_config.attention_config.backend = backend
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
-                "%s. FA4 not available, forcing %s backend.",
+                "%s. FA4 is unavailable for this configuration, forcing %s backend.",
                 head_dims,
                 backend.name,
             )

@@ -14,7 +14,11 @@ from utils import _extract_step_logprobs, skip_if_not_cuda_alike
 from vllm import LLM, SamplingParams
 from vllm.inputs import TextPrompt
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+from vllm.v1.attention.backends.fa_utils import (
+    get_flash_attn_version,
+    is_fa_version_supported,
+)
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.vit_attn_wrappers import vit_flash_attn_wrapper
 
 VLM_TEST_MODEL = os.getenv("VLLM_VLM_TEST_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
@@ -164,6 +168,51 @@ def test_vlm_batch_invariance_default_execution(monkeypatch: pytest.MonkeyPatch)
     _run_vlm_batch_invariance(
         _make_inputs("image", num_reqs=4), "FLASH_ATTN", enforce_eager=False
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.is_device_capability_family(90)
+    or not is_fa_version_supported(4),
+    reason="Requires Hopper with FA4 installed",
+)
+def test_gemma4_batch_invariant_auto_backend():
+    """Gemma 4 must warm up and generate using an automatically selected backend."""
+    llm = LLM(
+        model="google/gemma-4-E4B-it",
+        dtype="bfloat16",
+        max_model_len=2048,
+        max_num_batched_tokens=2048,
+        max_num_seqs=4,
+        kv_cache_memory_bytes=1 << 30,
+        enable_prefix_caching=False,
+        mm_processor_cache_gb=0,
+        mm_processor_kwargs={"max_soft_tokens": 70},
+        limit_mm_per_prompt={"image": 1, "audio": 0},
+        compilation_config={"mode": 0, "cudagraph_mode": "NONE"},
+    )
+    try:
+        config = llm.llm_engine.vllm_config
+        assert config.attention_config.backend == AttentionBackendEnum.TRITON_ATTN
+        response = llm.chat(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_pil", "image_pil": _make_image(42, 224)},
+                        {"type": "text", "text": "Describe this image."},
+                    ],
+                }
+            ],
+            SamplingParams(temperature=0, max_tokens=1, logprobs=1),
+            use_tqdm=False,
+        )
+        logprobs, tokens = _extract_step_logprobs(response[0])
+        assert len(tokens) == 1
+        assert logprobs is not None and torch.isfinite(logprobs).all()
+    finally:
+        with contextlib.suppress(Exception):
+            llm.llm_engine.engine_core.shutdown()
 
 
 def _run_vlm_batch_invariance(
