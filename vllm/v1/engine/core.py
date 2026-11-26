@@ -96,6 +96,7 @@ from vllm.v1.engine import (
     ReconfigureRankType,
     UtilityOutput,
     UtilityResult,
+    WeightCheckerModel,
 )
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
@@ -1243,8 +1244,17 @@ class EngineCore:
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
 
-    def compute_weight_checksums(self) -> list[dict[str, str]]:
-        return self.collective_rpc("compute_weight_checksums")
+    def compute_weight_checksums(
+        self, model: WeightCheckerModel = "target"
+    ) -> list[dict[str, str] | str]:
+        return self.collective_rpc("compute_weight_checksums", args=(model,))
+
+    def reset_weights(self, model: WeightCheckerModel) -> str | None:
+        errors: list[str | None] = self.collective_rpc("reset_weights", args=(model,))
+        for error in errors:
+            if error is not None:
+                return f"{error} In distributed runs, other workers may have reset."
+        return None
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)

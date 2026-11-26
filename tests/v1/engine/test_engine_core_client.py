@@ -225,21 +225,42 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     return client
 
 
-def test_dplb_weight_checksums_gather_every_engine():
+@pytest.mark.parametrize("model", ["target", "draft", "both"])
+def test_dplb_weight_checksums_gather_every_engine(model):
     """call_utility_async on a DPLB client would keep only the first engine."""
     client = _make_dplb_client(num_engines=2)
 
     async def call_utility(method, *args, engine):
-        assert (method, args) == ("compute_weight_checksums", ())
+        assert (method, args) == ("compute_weight_checksums", (model,))
         return [{f"dp{engine[0]}:tp{tp}:w": "x"} for tp in (0, 1)]
 
     client._call_utility_async = call_utility  # type: ignore[method-assign]
-    workers = asyncio.run(client.compute_weight_checksums_async())
+    workers = asyncio.run(client.compute_weight_checksums_async(model))
     assert [key for worker in workers for key in worker] == [
         "dp0:tp0:w",
         "dp0:tp1:w",
         "dp1:tp0:w",
         "dp1:tp1:w",
+    ]
+
+
+def test_dplb_reset_sends_the_selection_to_every_engine():
+    """A reset without preflight must still reach every engine, not only the first."""
+    client = _make_dplb_client(num_engines=2)
+    calls = []
+
+    async def call_utility(method, *args, engine):
+        calls.append((method, args, engine))
+        if engine == client.core_engines[1]:
+            return "Missing resident draft model"
+
+    client._call_utility_async = call_utility  # type: ignore[method-assign]
+    assert (
+        asyncio.run(client.reset_weights_async("both"))
+        == "Missing resident draft model"
+    )
+    assert calls == [
+        ("reset_weights", ("both",), engine) for engine in client.core_engines
     ]
 
 

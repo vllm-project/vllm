@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
@@ -16,7 +17,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.rl.online.metrics import weight_operation_metrics
 from vllm.logger import init_logger
-from vllm.v1.engine import PauseMode
+from vllm.v1.engine import PauseMode, WeightCheckerModel
 
 logger = init_logger(__name__)
 
@@ -235,16 +236,23 @@ async def weight_info(raw_request: Request):
     return JSONResponse(content={"weight_version": weight_version})
 
 
+class WeightCheckerRequest(BaseModel):
+    action: Literal["checksum", "reset", "compare"]
+    baseline: dict[str, str] | None = None
+    model: WeightCheckerModel = "target"
+
+
 @router.post("/weight_checker")
 async def weight_checker(
     raw_request: Request,
-    action: Annotated[Literal["checksum", "reset", "compare"], Body(embed=True)],
-    baseline: Annotated[dict[str, str] | None, Body(embed=True)] = None,
+    body: WeightCheckerRequest,
 ) -> JSONResponse:
     """Checksum, reset, or compare model weights against a baseline."""
+    action, model, baseline = body.action, body.model, body.baseline
     client = engine_client(raw_request)
     if action == "reset":
-        await client.collective_rpc("reset_weights")
+        if error := await client.reset_weights(model):
+            raise HTTPException(status_code=HTTPStatus.CONFLICT.value, detail=error)
         return JSONResponse(content={"status": "reset"})
     if action == "compare" and baseline is None:
         raise HTTPException(
@@ -252,16 +260,22 @@ async def weight_checker(
             detail="action='compare' requires a 'baseline' object",
         )
 
-    checksums = await _weight_checksums(client)
+    checksums = await _weight_checksums(client, model)
     if action == "checksum":
         return JSONResponse(content={"checksums": checksums})
     assert baseline is not None
     return JSONResponse(content=_compare(checksums, baseline))
 
 
-async def _weight_checksums(client: EngineClient) -> dict[str, str]:
+async def _weight_checksums(
+    client: EngineClient, model: WeightCheckerModel = "target"
+) -> dict[str, str]:
     checksums: dict[str, str] = {}
-    for worker_checksums in await client.compute_weight_checksums():
+    for worker_checksums in await client.compute_weight_checksums(model):
+        if isinstance(worker_checksums, str):
+            raise HTTPException(
+                status_code=HTTPStatus.CONFLICT.value, detail=worker_checksums
+            )
         if duplicates := checksums.keys() & worker_checksums.keys():
             raise HTTPException(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,

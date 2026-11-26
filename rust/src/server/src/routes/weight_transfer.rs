@@ -12,7 +12,7 @@ use serde_json::Value as JsonValue;
 use vllm_metrics::METRICS;
 
 use crate::error::{ApiError, invalid_request};
-use crate::routes::weight_checker::{mismatches, weight_checksums};
+use crate::routes::weight_checker::{WeightCheckerModel, mismatches, weight_checksums};
 use crate::state::AppState;
 use crate::utils::utility_call_error;
 
@@ -187,7 +187,10 @@ pub async fn finish_weight_update(
             .map_err(|error| utility_call_error("set_weight_version", error))?;
     }
     let mismatches = match request.baseline {
-        Some(baseline) => Some(mismatches(&weight_checksums(client).await?, &baseline)),
+        Some(baseline) => Some(mismatches(
+            &weight_checksums(client, WeightCheckerModel::Target).await?,
+            &baseline,
+        )),
         None => None,
     };
 

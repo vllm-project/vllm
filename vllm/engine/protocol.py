@@ -25,7 +25,7 @@ from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceR
 from vllm.v1.kv_hints import KvHintsEnvelope
 
 if TYPE_CHECKING:
-    from vllm.v1.engine import PauseMode
+    from vllm.v1.engine import PauseMode, WeightCheckerModel
 
 
 @dataclass(slots=True)
@@ -301,8 +301,14 @@ class EngineClient(ABC):
         """Perform a collective RPC call to the given path."""
         raise NotImplementedError
 
-    async def compute_weight_checksums(self) -> list[dict[str, str]]:
+    async def compute_weight_checksums(
+        self, model: "WeightCheckerModel" = "target"
+    ) -> list[dict[str, str] | str]:
         """Return rank-qualified weight digests from every worker of every engine."""
+        raise NotImplementedError
+
+    async def reset_weights(self, model: "WeightCheckerModel" = "target") -> str | None:
+        """Reset weights on every engine, or return a validation error."""
         raise NotImplementedError
 
     async def handle_fault(

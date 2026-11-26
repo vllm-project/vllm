@@ -9,12 +9,13 @@ from torch.testing._internal.two_tensor import TwoTensor
 
 from vllm.config import ParallelConfig
 from vllm.model_executor import parameter
+from vllm.model_executor.model_loader import weight_checksum
 from vllm.model_executor.model_loader.weight_checksum import (
+    compute_model_weight_checksums,
     compute_tensor_digests,
+    has_weight_data,
     zero_weights,
 )
-from vllm.v1.worker import gpu_worker
-from vllm.v1.worker.gpu_worker import Worker
 
 pytestmark = pytest.mark.cpu_test
 
@@ -58,6 +59,7 @@ def test_shared_weight_partitions_are_hashed_and_reset(monkeypatch):
     model.transform.add_partition(0, object(), 2, 2)
     model.transform.partitions[0].data.fill_(3.0)
 
+    assert has_weight_data(model)
     before = compute_tensor_digests(model)
     zero_weights(model)
     assert set(before) == {"transform.0"}
@@ -78,16 +80,51 @@ def test_tensor_subclass_inner_tensors_are_hashed_and_reset():
     )
 
 
+def test_zero_weights_preserves_shared_parameters():
+    target, draft = nn.Linear(2, 2), nn.Linear(2, 2)
+    shared = target.weight
+    draft.weight = shared
+    nn.init.ones_(shared)
+    nn.init.ones_(target.bias)
+    nn.init.ones_(draft.bias)
+    address = shared.untyped_storage().data_ptr()
+
+    zero_weights(draft)
+    torch.testing.assert_close(target.weight, torch.zeros_like(shared))
+    torch.testing.assert_close(draft.bias, torch.zeros_like(draft.bias))
+    torch.testing.assert_close(target.bias, torch.ones_like(target.bias))
+    draft_digests = compute_tensor_digests(draft)
+
+    zero_weights(target)
+    assert draft.weight is target.weight is shared
+    assert shared.untyped_storage().data_ptr() == address
+    assert compute_tensor_digests(draft) == draft_digests
+    torch.testing.assert_close(target.bias, torch.zeros_like(target.bias))
+
+
+def test_empty_parameters_have_no_weight_data():
+    model = nn.Module()
+    assert not has_weight_data(model)
+    model.weight = nn.Parameter(torch.empty(0))
+    assert not has_weight_data(model)
+
+
 def test_dense_dp_replicas_get_distinct_key_prefixes(monkeypatch):
     for name in ("get_tp_group", "get_pp_group", "get_pcp_group"):
-        monkeypatch.setattr(gpu_worker, name, lambda: SimpleNamespace(rank_in_group=0))
-    prefixes = []
+        monkeypatch.setattr(
+            weight_checksum, name, lambda: SimpleNamespace(rank_in_group=0)
+        )
+    model = nn.Linear(1, 1, bias=False)
+    keys = []
     for dp_rank in (0, 1):
-        worker = object.__new__(Worker)
-        worker.parallel_config = ParallelConfig(
+        parallel_config = ParallelConfig(
             data_parallel_size=2, data_parallel_rank=dp_rank
         )
         # Dense DP resets data_parallel_rank to 0 in each engine.
-        worker.parallel_config.reconfigure_for_independent_dp_rank()
-        prefixes.append(worker._weight_checksum_prefix())
-    assert prefixes == ["dp0:pp0:pcp0:tp0:", "dp1:pp0:pcp0:tp0:"]
+        parallel_config.reconfigure_for_independent_dp_rank()
+        checksums = compute_model_weight_checksums(
+            "target", parallel_config, None, lambda: model, lambda: None
+        )
+        assert isinstance(checksums, dict)
+        keys.extend(checksums)
+    assert keys == ["dp0:pp0:pcp0:tp0:weight", "dp1:pp0:pcp0:tp0:weight"]

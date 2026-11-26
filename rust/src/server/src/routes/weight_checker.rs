@@ -8,26 +8,53 @@ use axum::Json;
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 
-use crate::error::{ApiError, invalid_request};
+use crate::error::ApiError;
 use crate::state::AppState;
 use crate::utils::utility_call_error;
 use vllm_engine_core_client::EngineCoreClient;
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum WeightCheckerAction {
+enum WeightCheckerAction {
     Checksum,
     Reset,
     Compare,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WeightCheckerModel {
+    #[default]
+    Target,
+    Draft,
+    Both,
+}
+
+impl WeightCheckerModel {
+    /// Name the Python worker expects; serde would encode the enum as a tuple.
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Target => "target",
+            Self::Draft => "draft",
+            Self::Both => "both",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WeightCheckerRequest {
     action: WeightCheckerAction,
     #[serde(default)]
+    model: WeightCheckerModel,
     baseline: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WorkerChecksums {
+    Checksums(BTreeMap<String, String>),
+    Conflict(String),
 }
 
 #[derive(Serialize)]
@@ -53,55 +80,49 @@ pub async fn weight_checker(
 ) -> Result<Json<WeightCheckerResponse>, ApiError> {
     let Json(body) = body?;
     let client = state.engine_core_client();
-    if body.action == WeightCheckerAction::Reset {
-        client
-            .collective_rpc(
-                "reset_weights",
-                None,
-                Vec::<JsonValue>::new(),
-                BTreeMap::<String, JsonValue>::new(),
-            )
-            .await
-            .map_err(|error| utility_call_error("reset_weights", error))?;
-        return Ok(Json(WeightCheckerResponse::Reset { status: "reset" }));
-    }
-    if body.action == WeightCheckerAction::Compare && body.baseline.is_none() {
-        return Err(invalid_request!(
-            param = Some("baseline"),
-            "action='compare' requires a 'baseline' object"
-        ));
-    }
-
-    let checksums = weight_checksums(client).await?;
-    let Some(baseline) = body.baseline.filter(|_| body.action == WeightCheckerAction::Compare)
-    else {
-        return Ok(Json(WeightCheckerResponse::Checksums { checksums }));
+    let response = match body.action {
+        WeightCheckerAction::Checksum => WeightCheckerResponse::Checksums {
+            checksums: weight_checksums(client, body.model).await?,
+        },
+        WeightCheckerAction::Compare => {
+            let baseline = body.baseline.ok_or_else(|| {
+                ApiError::invalid_body("action='compare' requires a 'baseline' object")
+            })?;
+            let mismatches = mismatches(&weight_checksums(client, body.model).await?, &baseline);
+            WeightCheckerResponse::Compare {
+                matched: mismatches.is_empty(),
+                mismatches,
+            }
+        }
+        WeightCheckerAction::Reset => {
+            let errors: Vec<Option<String>> = client
+                .call_utility("reset_weights", (body.model.as_str(),))
+                .await
+                .map_err(|error| utility_call_error("reset_weights", error))?;
+            if let Some(message) = errors.into_iter().flatten().next() {
+                return Err(ApiError::Conflict { message });
+            }
+            WeightCheckerResponse::Reset { status: "reset" }
+        }
     };
-    let mismatches = mismatches(&checksums, &baseline);
-    Ok(Json(WeightCheckerResponse::Compare {
-        matched: mismatches.is_empty(),
-        mismatches,
-    }))
+    Ok(Json(response))
 }
 
 /// Merge every worker's weight checksums, rejecting duplicate keys.
 pub(crate) async fn weight_checksums(
     client: &EngineCoreClient,
+    model: WeightCheckerModel,
 ) -> Result<BTreeMap<String, String>, ApiError> {
-    let workers = client
-        .collective_rpc(
-            "compute_weight_checksums",
-            None,
-            Vec::<JsonValue>::new(),
-            BTreeMap::<String, JsonValue>::new(),
-        )
+    let results: Vec<Vec<WorkerChecksums>> = client
+        .call_utility("compute_weight_checksums", (model.as_str(),))
         .await
         .map_err(|error| utility_call_error("compute_weight_checksums", error))?;
     let mut checksums = BTreeMap::new();
-    for worker in workers {
-        let worker: BTreeMap<String, String> = rmpv::ext::from_value(worker).map_err(|error| {
-            ApiError::server_error(format!("invalid weight checksums: {error}"))
-        })?;
+    for worker in results.into_iter().flatten() {
+        let worker = match worker {
+            WorkerChecksums::Checksums(checksums) => checksums,
+            WorkerChecksums::Conflict(message) => return Err(ApiError::Conflict { message }),
+        };
         for (key, digest) in worker {
             if checksums.contains_key(&key) {
                 return Err(ApiError::server_error(format!(

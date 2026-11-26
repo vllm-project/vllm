@@ -85,8 +85,8 @@ from vllm.model_executor.model_loader.base_loader import (
 )
 from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
-    compute_tensor_digests,
-    zero_weights,
+    compute_model_weight_checksums,
+    reset_model_weights,
 )
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
@@ -115,6 +115,7 @@ from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtim
 from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.engine import WeightCheckerModel
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -431,21 +432,32 @@ class Worker(WorkerBase):
     def checkpoint_restore(self) -> None:
         checkpoint_restore_distributed_state()
 
-    def _weight_checksum_prefix(self) -> str:
-        # data_parallel_rank is 0 in dense workers; only the index is unique.
-        dp = self.parallel_config.data_parallel_index
-        pp = get_pp_group().rank_in_group
-        pcp = get_pcp_group().rank_in_group
-        tp = get_tp_group().rank_in_group
-        return f"dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:"
+    def compute_weight_checksums(
+        self, model: WeightCheckerModel = "target"
+    ) -> dict[str, str] | str:
+        return compute_model_weight_checksums(
+            model,
+            self.parallel_config,
+            self.speculative_config,
+            self.get_model,
+            self.get_draft_model,
+        )
 
-    def compute_weight_checksums(self) -> dict[str, str]:
-        prefix = self._weight_checksum_prefix()
-        digests = compute_tensor_digests(self.model_runner.get_model())
-        return {prefix + name: digest for name, digest in digests.items()}
-
-    def reset_weights(self) -> None:
-        zero_weights(self.model_runner.get_model())
+    def reset_weights(self, model: WeightCheckerModel = "target") -> str | None:
+        if self._weight_update_active:
+            return "Cannot reset weights while a weight update is active."
+        error = reset_model_weights(
+            model,
+            self.parallel_config,
+            self.speculative_config,
+            self.get_model,
+            self.get_draft_model,
+            self.supports_draft_weight_updates,
+        )
+        if error is not None:
+            return error
+        self.synchronize_device()
+        return None
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (

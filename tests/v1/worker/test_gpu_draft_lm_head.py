@@ -18,6 +18,10 @@ from vllm.model_executor.model_loader.reload import (
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
+from vllm.model_executor.model_loader.weight_checksum import (
+    compute_tensor_digests,
+    zero_weights,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_worker import Worker
@@ -88,9 +92,14 @@ def test_refresh_follows_target_update(
     equals a fresh quantization of the new target, keeps its storage, and
     frees the temporary copy without waiting for the cycle collector."""
     head = _target_head(monkeypatch)
+    target = torch.nn.Module()
+    target.lm_head = head
     drafter = torch.nn.Module()
     drafter.lm_head = quantized_lm_head_copy(head, quantization)
     ptrs = {k: t.data_ptr() for k, t in _tensors(drafter.lm_head).items()}
+    draft_before = compute_tensor_digests(drafter)
+    zero_weights(target)
+    assert compute_tensor_digests(drafter) == draft_before
 
     new_weight = _target_head(monkeypatch, seed=1).weight.detach()
     head.weight.data.copy_(new_weight)
@@ -150,6 +159,55 @@ def test_draft_weight_update_refreshes_copy(
     expected = _tensors(quantized_lm_head_copy(head, "fp8"))
     for name, tensor in _tensors(drafter.lm_head).items():
         assert torch.equal(tensor, expected[name]), name
+
+
+@requires_cuda
+@pytest.mark.parametrize("quantization", ["fp8", NVFP4])
+def test_draft_reset_recovers_quantized_head_without_loading_source(
+    default_vllm_config, dist_init, monkeypatch, quantization
+):
+    target = torch.nn.Module()
+    target.lm_head = _target_head(monkeypatch)
+    record_metadata_for_reloading(target)
+    drafter = torch.nn.Module()
+    drafter.private = torch.nn.Linear(1, 1, bias=False, device="cuda")
+    torch.nn.init.ones_(drafter.private.weight)
+    record_metadata_for_reloading(drafter)
+    draft_head = quantized_lm_head_copy(target.lm_head, quantization)
+    drafter.lm_head = draft_head
+    ptrs = {name: tensor.data_ptr() for name, tensor in _tensors(draft_head).items()}
+    target_before = compute_tensor_digests(target)
+    draft_before = compute_tensor_digests(drafter)
+    private_weight = drafter.private.weight.detach().clone()
+
+    zero_weights(drafter)
+    assert (
+        compute_tensor_digests(drafter)["lm_head.weight"]
+        != draft_before["lm_head.weight"]
+    )
+    assert compute_tensor_digests(target) == target_before
+
+    def load(update_info):
+        weight = drafter.private.weight
+        weight.weight_loader(weight, private_weight)
+
+    worker = _draft_update_worker(
+        default_vllm_config,
+        drafter,
+        start_weight_update=lambda: initialize_layerwise_reload(drafter),
+        update_weights=load,
+        finish_weight_update=lambda: finalize_layerwise_reload(drafter, None),
+    )
+    worker.start_draft_weight_update()
+    worker.update_weights({})
+    worker.finish_weight_update()
+
+    assert drafter.lm_head is draft_head
+    assert compute_tensor_digests(target) == target_before
+    assert compute_tensor_digests(drafter) == draft_before
+    assert {
+        name: tensor.data_ptr() for name, tensor in _tensors(draft_head).items()
+    } == ptrs
 
 
 @requires_cuda

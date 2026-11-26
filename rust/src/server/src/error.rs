@@ -29,8 +29,8 @@ pub enum ApiError {
     },
     /// A resource other than the model, such as a LoRA adapter, does not exist.
     NotFound { message: String },
-    /// The request body could not be parsed as valid JSON.
-    JsonParseError { message: String },
+    /// The request body could not be parsed or is missing data required by the route.
+    InvalidBody { message: String },
     /// The query string could not be deserialized into the route's
     /// parameters; `param` names the offending field as `query.<name>`.
     InvalidQuery {
@@ -53,7 +53,7 @@ impl ApiError {
             Self::ModelNotFound { .. } | Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::JsonParseError { .. } | Self::InvalidQuery { .. } => StatusCode::BAD_REQUEST,
+            Self::InvalidBody { .. } | Self::InvalidQuery { .. } => StatusCode::BAD_REQUEST,
             Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
@@ -80,11 +80,8 @@ impl ApiError {
                 Some("model".to_string()),
             ),
             Self::NotFound { message } => ("NotFoundError", message.clone(), None),
-            // Python reports a body that fails to parse into the request
-            // model through FastAPI's validation handler, which names the
-            // HTTP status instead of an error class.
-            Self::JsonParseError { message } => ("Bad Request", message.clone(), None),
-            // A query value that fails validation takes the same handler.
+            // Python uses the HTTP status phrase for request body validation errors.
+            Self::InvalidBody { message } => ("Bad Request", message.clone(), None),
             Self::InvalidQuery { message, param } => {
                 ("Bad Request", message.clone(), param.clone())
             }
@@ -120,7 +117,7 @@ fn truncate_echoed_model(model: &str) -> Cow<'_, str> {
 
 impl From<JsonRejection> for ApiError {
     fn from(error: JsonRejection) -> Self {
-        Self::json_parse_error(error.body_text())
+        Self::invalid_body(error.body_text())
     }
 }
 
@@ -232,7 +229,7 @@ mod tests {
             ApiError::invalid_request("top_p must be in (0, 1].", Some("top_p")),
             ApiError::model_not_found("missing", vec!["base".to_string(), "alias".to_string()]),
             ApiError::not_found("No adapter found for /not/an/adapter"),
-            ApiError::json_parse_error("expected value at line 1 column 1"),
+            ApiError::invalid_body("expected value at line 1 column 1"),
             ApiError::conflict("A profiling session is already active."),
             ApiError::server_error("Internal server error"),
             ApiError::service_unavailable("Generation is paused."),
