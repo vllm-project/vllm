@@ -225,17 +225,6 @@ struct PrepackedLayoutBTemplate {
     // (BlocksN, BlocksK, L) -> (storage_idx)
     return make_layout(blocks_shape, compact_col_major(blocks_shape, stride));
   }
-
-  // ((athrid, val), (BlocksN, BlocksK, L)) -> (N, K, L)
-  template <class Shape_NKL>
-  CUTE_HOST_DEVICE static auto TVbNbK_to_NKL(Shape_NKL shape_mkl) {
-    auto tile = make_tile(make_layout(size<0>(PPBlockShape_NK{})),
-                          make_layout(size<1>(PPBlockShape_NK{})));
-
-    // ((BlockN, BlockK), (BlocksN, BlocksK, L)) -> (N, K, L)
-    auto tiled_A = zipped_divide(make_layout(shape_mkl), tile);
-    return tiled_A.compose(ppblock_TV_to_NK(), _);
-  }
 };
 
 };  // namespace machete

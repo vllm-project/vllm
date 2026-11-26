@@ -604,7 +604,9 @@ pull_request_rules:
     - label=ready
     - "#approved-reviews-by >= 1"
     - "#commits-behind >= 100"
-    - "#check-failure = 0"
+    # Per-step `ci/step: ...` statuses are informational, and a stale red one
+    # from an earlier build must not block the rebase; every other check counts.
+    - "-check-failure ~= ^(?!(@[^/]+/)?ci/step: )"
     - -closed
     - -draft
     - -conflict

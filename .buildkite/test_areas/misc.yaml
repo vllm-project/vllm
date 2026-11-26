@@ -152,9 +152,9 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) EC Filesystem Tiering"
+- label: ":nvidia: (H200 MIG 35GB) EC Filesystem Tiering"
   key: ec-filesystem-tiering
-  device: h200
+  device: h200_35gb
   num_devices: 1
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
@@ -612,9 +612,9 @@ steps:
   - bash standalone_tests/python_only_compile.sh
   mirror:
     amd:
-      label: ":amd: (MI300) Python-only Installation"
+      label: ":amd: (MI300 DPX) Python-only Installation"
       dind: false
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
@@ -983,16 +983,17 @@ steps:
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+    - pytest -v -s v1/determinism/test_batch_invariance_vlm.py -k vision_fa3
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
   mirror:
     amd:
       # Run on PRs even when the H100 step is optional (nightly only).
       optional: false
-      label: ":amd: (MI300) Batch Invariance"
+      label: ":amd: (MI300 DPX) Batch Invariance"
       dind: false
       automatic_shard: true
-      device: mi300_1
+      device: mi300_dpx
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -1082,11 +1083,13 @@ steps:
     - vllm/distributed/device_communicators/
     - vllm/model_executor/determinism
     - vllm/model_executor/layers
+    - vllm/models/common/ops/fused_allreduce_rms_norm.py
     - vllm/v1/attention
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+    - pytest -v -s v1/determinism/test_fused_allreduce_rms_norm_batch_invariant.py
     - VLLM_TEST_TP_SIZE=4 pytest -v -s v1/determinism/test_batch_invariance.py -k "bs1_vs_bsN or without_batch_invariance_should_fail"
     - VLLM_TEST_TP_SIZE=4 VLLM_TEST_DISABLE_CUSTOM_AR=1 pytest -v -s v1/determinism/test_batch_invariance.py -k bs1_vs_bsN
     - VLLM_TP_SIZE=4 VLLM_NEEDLE_TRIALS=2 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN

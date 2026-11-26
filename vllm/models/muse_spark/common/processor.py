@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from PIL import Image
 from transformers import BatchFeature
+from transformers.image_transforms import to_pil_image
 from transformers.models.auto.video_processing_auto import VIDEO_PROCESSOR_MAPPING_NAMES
 
 from vllm.config.multimodal import (
@@ -243,14 +244,14 @@ def find_resize_target(
 
 
 def preprocess_image(
-    image: Image.Image,
+    image: Image.Image | np.ndarray | torch.Tensor,
     config: PreprocessConfig,
     resize_to_max_canvas: bool = False,
 ) -> tuple[torch.Tensor, int]:
     """Preprocess one image into fp32 [C, H, W] and its output token count."""
     # Composite before resizing: LANCZOS would otherwise bleed the arbitrary
     # RGB of fully-transparent pixels into the visible edge.
-    image = _to_rgb(image)
+    image = _to_rgb(to_pil_image(image))
 
     w, h = image.size
 
@@ -407,6 +408,8 @@ def _preprocess_single_video(
     else:
         frames = video_item
         metadata = {}
+    if isinstance(frames, list) and frames and isinstance(frames[0], Image.Image):
+        frames = np.stack([np.asarray(_to_rgb(frame)) for frame in frames])
 
     fps = float(metadata.get("fps", 1.0))
     frames_indices = metadata.get("frames_indices", list(range(len(frames))))
