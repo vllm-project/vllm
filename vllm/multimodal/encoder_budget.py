@@ -254,6 +254,31 @@ class MultiModalBudget:
 
         return [(modality, single_item)]
 
+    def get_dummy_encoder_profile_modality_inputs(
+        self,
+        dummy_mm_inputs: list[tuple[str, MultiModalKwargsItem]],
+    ) -> list[list[tuple[str, MultiModalKwargsItem]]]:
+        if not dummy_mm_inputs:
+            return []
+
+        modalities = self.processor.info.get_extra_profiled_modalities(
+            tuple(self.mm_max_toks_per_item)
+        )
+        profiles = []
+        for modality in modalities:
+            if (
+                modality == dummy_mm_inputs[0][0]
+                or self.mm_max_items_per_batch.get(modality, 0) <= 0
+            ):
+                continue
+            split_inputs = self.get_dummy_encoder_profile_inputs(modality)
+            profiles.append(split_inputs)
+            if single_input := self.get_dummy_encoder_profile_single_input(
+                split_inputs
+            ):
+                profiles.append(single_input)
+        return profiles
+
     def reset_cache(self) -> None:
         if self.cache is not None:
             self.cache.clear_cache()

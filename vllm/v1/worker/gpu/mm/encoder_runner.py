@@ -149,6 +149,16 @@ class EncoderRunner:
             )
             self.execute_mm_encoder(single_input)
 
+        for modality_inputs in budget.get_dummy_encoder_profile_modality_inputs(
+            dummy_mm_inputs
+        ):
+            logger.info_once(
+                "Encoder profiling also runs %s %s items.",
+                len(modality_inputs),
+                modality_inputs[0][0],
+            )
+            self.execute_mm_encoder(modality_inputs)
+
         dummy_encoder_outputs = self.execute_mm_encoder(dummy_mm_inputs)
 
         sanity_check_mm_encoder_outputs(

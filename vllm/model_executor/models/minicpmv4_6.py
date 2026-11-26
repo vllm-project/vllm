@@ -3,7 +3,7 @@
 """Inference-only MiniCPM-V 4.6 model (MiniCPMV4_6ForConditionalGeneration)."""
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from functools import cached_property
 from typing import Any
 
@@ -802,6 +802,11 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             )
 
         return max(kept, hinted, key=profiled_cost)
+
+    def get_extra_profiled_modalities(
+        self, modalities: Collection[str]
+    ) -> Collection[str]:
+        return modalities
 
     def get_dummy_seq_len(
         self,
