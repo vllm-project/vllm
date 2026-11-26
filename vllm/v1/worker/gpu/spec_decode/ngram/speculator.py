@@ -231,7 +231,7 @@ class NgramGPUSpeculator(BaseSpeculator):
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
-        if dummy_run:
+        if dummy_run or num_speculative_tokens == 0:
             return self.drafts[:num_reqs]
 
         req_states = self.req_states
