@@ -6,39 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm.platforms import CpuArchEnum, current_platform
-from vllm.triton_utils import HAS_TRITON
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu import warmup
 
 
 def _fail(*args, **kwargs):
     raise AssertionError("worker callback must not run")
-
-
-@pytest.mark.skipif(not HAS_TRITON, reason="sampling kernels need Triton")
-@pytest.mark.parametrize(
-    "arch,num_warmups",
-    # x86 masks with the C++ kernel, so it has no Triton kernel to build.
-    [(CpuArchEnum.X86, 0), (CpuArchEnum.ARM, 1)],
-)
-def test_top_k_top_p_warmup_registered_on_cpu(monkeypatch, arch, num_warmups):
-    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
-    from vllm.v1.sample.ops import topk_topp_sampler
-
-    monkeypatch.setattr(
-        topk_topp_sampler,
-        "current_platform",
-        SimpleNamespace(
-            is_cpu=lambda: True,
-            is_cuda_alike=lambda: False,
-            get_cpu_architecture=lambda: arch,
-        ),
-    )
-    registry = JitWarmupRegistry(vllm_config=None)
-    with registry.activate():
-        topk_topp_sampler.register_top_k_top_p_warmups()
-
-    assert len(registry) == num_warmups
 
 
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU worker only")

@@ -24,16 +24,9 @@ if HAS_TRITON:
 logger = init_logger(__name__)
 
 
-def _is_x86_cpu() -> bool:
-    return (
-        current_platform.is_cpu()
-        and current_platform.get_cpu_architecture() == CpuArchEnum.X86
-    )
-
-
 def register_top_k_top_p_warmups() -> None:
     """Register every native accelerator sampling kernel used at runtime."""
-    if HAS_TRITON and not _is_x86_cpu():
+    if HAS_TRITON:
         _topk_topp.register_warmup()
         if current_platform.is_cuda_alike():
             _topp_split_stats.register_warmup()
@@ -216,20 +209,18 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
-    if _is_x86_cpu():
-        return apply_top_k_top_p_x86_cpu(logits, k, p)
-
-    if HAS_TRITON:
-        return apply_top_k_top_p_triton(
-            logits, k, p, has_topp_only_rows=has_topp_only_rows
-        )
-
     if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
+        CpuArchEnum.X86,
         CpuArchEnum.ARM,
         CpuArchEnum.POWERPC,
         CpuArchEnum.S390X,
     ):
         return apply_top_k_top_p_cpu(logits, k, p)
+
+    if HAS_TRITON:
+        return apply_top_k_top_p_triton(
+            logits, k, p, has_topp_only_rows=has_topp_only_rows
+        )
 
     is_cpu = current_platform.is_cpu()
     return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=is_cpu)
@@ -306,8 +297,12 @@ def apply_top_k_top_p_cpu(
     k: torch.Tensor | None,
     p: torch.Tensor | None,
 ) -> torch.Tensor:
-    """CPU-optimized top-k + top-p. Uses C++ ternary-search kernels."""
+    """CPU-optimized top-k + top-p. Uses the exact C++ kernel on x86 and C++
+    ternary-search kernels elsewhere."""
     from vllm._cpu_ops import cpu_topk_sampling as _cpu_topk_sampling_op
+    from vllm._cpu_ops import (
+        cpu_topk_topp_exact as _cpu_topk_topp_exact_op,
+    )
     from vllm._cpu_ops import (
         cpu_topk_topp_sampling as _cpu_topk_topp_sampling_op,
     )
@@ -326,6 +321,12 @@ def apply_top_k_top_p_cpu(
     if p is not None:
         p = p.float().contiguous()
 
+    if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
+        # Masks FP32 logits in place, rows at any stride.
+        logits = logits.float()
+        _cpu_topk_topp_exact_op(logits, k, p)
+        return logits
+
     if p is None:
         logits = logits.contiguous()
         _cpu_topk_sampling_op(logits, k)
@@ -339,27 +340,6 @@ def apply_top_k_top_p_cpu(
     # Joint k+p path.
     logits = logits.contiguous()
     _cpu_topk_topp_sampling_op(logits, k, p)
-    return logits
-
-
-def apply_top_k_top_p_x86_cpu(
-    logits: torch.Tensor,
-    k: torch.Tensor | None,
-    p: torch.Tensor | None,
-) -> torch.Tensor:
-    """Exact top-k/top-p masking with the x86 C++ kernel.
-
-    FP32 logits are masked in place; other dtypes are masked in an FP32 copy,
-    which is returned.
-    """
-    from vllm._cpu_ops import cpu_topk_topp_exact
-
-    logits = logits.float()
-    if k is not None:
-        k = k.to(torch.int32).contiguous()
-    if p is not None:
-        p = p.to(torch.float32).contiguous()
-    cpu_topk_topp_exact(logits, k, p)
     return logits
 
 

@@ -42,6 +42,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -1394,6 +1395,9 @@ void cpu_topk_topp_exact(torch::Tensor& logits,
   sh.groups = (sh.vocab + kGroup - 1) / kGroup;
   sh.supergroups = (sh.vocab + kSuper - 1) / kSuper;
 
+  // Calls share one workspace and the narrowing's failure flag.
+  static std::mutex call_mutex;
+  const std::lock_guard<std::mutex> lock(call_mutex);
   Work& wk = workspace();
   auto grow = [](auto& v, size_t n) {
     if (v.size() < n) v.resize(n);
