@@ -237,10 +237,11 @@ class LogitsProcessor(PluggableLayer):
         tp_size = lm_head.tp_size
 
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        # In place, so that no second logits-sized tensor is live.
         if self.soft_cap is not None:
-            logits = torch.tanh(logits / self.soft_cap) * self.soft_cap
+            logits.div_(self.soft_cap).tanh_().mul_(self.soft_cap)
         if self.scale != 1.0:
-            logits = logits * self.scale
+            logits *= self.scale
 
         self._mask_outside_vocab(logits, lm_head)
 
