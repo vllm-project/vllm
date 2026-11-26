@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -79,9 +82,7 @@ def _make_serving_for_build_input() -> ServingTokens:
     tracker = MagicMock()
     parser = MagicMock()
     tracker.create_parser.return_value = parser
-    tracker.resolve_items = AsyncMock(
-        return_value=({"image": ["resolved-img"]}, None)
-    )
+    tracker.resolve_items = AsyncMock(return_value=({"image": ["resolved-img"]}, None))
     serving._tracker = tracker
 
     renderer = MagicMock()
@@ -142,7 +143,9 @@ class TestBuildEngineInputSkipMmCache:
 
         serving._validate_mm_cache_handles.assert_called_once()
         assert rendered_elem.skip_mm_cache is True
-        assert engine_input["mm_kwargs"]["image"][0]["pixel_values"].skip_mm_cache is True
+        assert (
+            engine_input["mm_kwargs"]["image"][0]["pixel_values"].skip_mm_cache is True
+        )
 
     @pytest.mark.asyncio
     async def test_completion_returns_single_engine_input(self):
@@ -272,7 +275,12 @@ class TestBuildEngineInputSkipMmCache:
             engine_input = await serving.build_engine_input(request)
 
         # Tokens before start=10 preserved, followed by rendered content_parts tokens.
-        assert engine_input["prompt_token_ids"] == list(range(10)) + [901, 902, 903, 904]
+        assert engine_input["prompt_token_ids"] == list(range(10)) + [
+            901,
+            902,
+            903,
+            904,
+        ]
 
         # First item comes from rendered features (skip_mm_cache=True),
         # second item comes from content_parts (skip_mm_cache remains False).

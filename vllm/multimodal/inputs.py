@@ -419,17 +419,17 @@ class MultiModalFieldElem:
     """If True, this field carries its full tensor data for inference but must
     not be inserted into, or update, the receiver-side multimodal LRU cache.
 
-    The combination of ``data`` and this flag encodes three states:
+    The combination of `data` and this flag encodes three states:
 
-    * ``data`` is a full tensor, ``skip_mm_cache=False``: a normal item that
+    * `data` is a full tensor, `skip_mm_cache=False`: a normal item that
       participates in both the sender and receiver LRU (insertion and update).
-    * ``data=None``, ``skip_mm_cache=False``: the sender has already cached
+    * `data=None`, `skip_mm_cache=False`: the sender has already cached
       this item; the receiver resolves the data by hash from its cache.
-    * ``data`` is a full tensor, ``skip_mm_cache=True``: an item rebuilt from
-      the render endpoint's ``features``. It bypassed the sender cache, so it
+    * `data` is a full tensor, `skip_mm_cache=True`: an item rebuilt from
+      the render endpoint's `features`. It bypassed the sender cache, so it
       must bypass the receiver cache as well; inserting it would evict P1
       entries that the sender still believes are cached, causing a later
-      ``MultiModalCacheMissError``.
+      `MultiModalCacheMissError`.
     """
 
     def __eq__(self, other: object) -> bool:

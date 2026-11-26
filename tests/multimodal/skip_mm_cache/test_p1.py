@@ -17,7 +17,6 @@ from vllm.multimodal.inputs import (
 )
 from vllm.utils.mem_constants import GiB_bytes
 
-
 # =====================================================================
 # Helpers
 # =====================================================================
@@ -70,9 +69,7 @@ def _call_receiver(
 class TestReceiverSkipMmCache:
     """Contract: only True skips cache work; False-like flags cache normally."""
 
-    @pytest.mark.parametrize(
-        "skip_mm_cache", [None, False], ids=["none", "false"]
-    )
+    @pytest.mark.parametrize("skip_mm_cache", [None, False], ids=["none", "false"])
     def test_none_or_false_flag_caches_full_tensor(self, skip_mm_cache):
         cache = _make_receiver_cache()
         item = _make_item()
