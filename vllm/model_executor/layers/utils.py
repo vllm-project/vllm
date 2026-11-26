@@ -227,6 +227,22 @@ def cuda_flashinfer_bf16_gemm_impl(
     k = x.shape[-1]
     n = weight.shape[0]
     x_2d = x.view(-1, k)
+    # Where a measured skinny GEMM plan exists for this shape and M, it beats
+    # CuTe-DSL in the model.
+    if vllm_backend == "flashinfer_cutedsl" and bias is None:
+        from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
+            row_stride_ok,
+            shape_dynamic_skinny_gemm,
+        )
+        from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm_plans import (
+            get_skinny_gemm_plan,
+        )
+
+        plan = None if envs.VLLM_BATCH_INVARIANT else get_skinny_gemm_plan(n, k)
+        config = None if plan is None else plan.get(x_2d.shape[0])
+        if config is not None and row_stride_ok(x_2d, config):
+            out = shape_dynamic_skinny_gemm(x_2d, weight, config)
+            return out.view(*x.shape[:-1], n)
     out_2d = flashinfer_bf16_mm(
         x_2d,
         weight.t(),

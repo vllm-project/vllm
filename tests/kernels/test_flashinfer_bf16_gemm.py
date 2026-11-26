@@ -89,7 +89,7 @@ def test_flashinfer_cutedsl_bf16_dispatch_by_m(
     from vllm.platforms import current_platform
 
     torch.manual_seed(0)
-    n, k = 2048, 4096
+    n, k = 2560, 4096  # no skinny GEMM plan
     x, weight = _bf16(m, k), _bf16(n, k)
     bias = _bf16(n) if use_bias else None
 
@@ -103,6 +103,26 @@ def test_flashinfer_cutedsl_bf16_dispatch_by_m(
     else:
         assert flashinfer_mm_calls == []
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("m", [1, 2, 4, 8, 16, 32])
+def test_flashinfer_cutedsl_bf16_prefers_a_skinny_gemm_plan(
+    m: int, flashinfer_mm_calls
+) -> None:
+    from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm_plans import (
+        get_skinny_gemm_plan,
+    )
+
+    n, k = 2048, 4096
+    plan = get_skinny_gemm_plan(n, k)
+    if plan is None:
+        pytest.skip("No skinny GEMM plan for this shape on this GPU")
+    x, weight = _bf16(m, k), _bf16(n, k)
+
+    actual = _cutedsl_gemm()(None, x, weight)
+
+    assert [call[0] for call in flashinfer_mm_calls] == ([] if m in plan else [m])
+    torch.testing.assert_close(actual, F.linear(x, weight), rtol=2e-2, atol=2e-1)
 
 
 @pytest.mark.parametrize("leading,m", [((2, 16), 32), ((3, 11), 33), ((1, 1), 1)])
@@ -255,7 +275,7 @@ def test_flashinfer_cutedsl_bf16_autotune_covers_every_low_m(
 def test_flashinfer_cutedsl_bf16_cuda_graph_uses_tuned_tactics(
     flashinfer_mm_calls, bf16_cache_lookups
 ) -> None:
-    n, k = 2048, 4096
+    n, k = 2560, 4096  # no skinny GEMM plan
     weight = _bf16(n, k)
     gemm = _cutedsl_gemm()
     _tune_low_m(gemm, weight, None)
