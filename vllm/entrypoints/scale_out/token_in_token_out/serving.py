@@ -183,6 +183,7 @@ class ServingTokens(GenerateBaseServing):
         self.enable_log_outputs = enable_log_outputs
         self.enable_force_include_usage = enable_force_include_usage
         self.force_no_detokenize = force_no_detokenize
+        self.enable_force_include_usage = enable_force_include_usage
         self.has_tokenizer = (
             not force_no_detokenize and self.renderer.tokenizer is not None
         )
