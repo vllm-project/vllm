@@ -1167,6 +1167,8 @@ class TieringOffloadingManager(OffloadingManager):
                 if state.request_level_tiers is None:
                     state.request_level_tiers = set()
                 state.request_level_tiers.add(tier_idx)
+        if exclude_tier_idx is None:
+            self.primary_tier.on_new_request(req_context)
         self._req_state[req_context.req_id] = state
 
         policy = (
@@ -1240,6 +1242,7 @@ class TieringOffloadingManager(OffloadingManager):
         # safe: _maybe_finalize_request() holds off while pending_cascade_keys is
         # non-empty, so nothing finalizes early and the list still drains.
         self._flush_pending_cascades()
+        self.primary_tier.on_schedule_end(context)
         for tier in self.secondary_tiers:
             tier.on_schedule_end(context)
 
