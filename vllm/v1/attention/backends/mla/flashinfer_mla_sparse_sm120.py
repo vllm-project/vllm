@@ -88,10 +88,7 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             topk_indices_buffer=topk_indices_buffer,
             **mla_args,
         )
-        # Dense context gather requires the RoPE tail stored in 656-byte rows.
-        # The compact NoPE layout uses 528-byte rows.
-        if self.qk_rope_head_dim == 0:
-            self.supports_dense_mha_prefill = False
+        self.supports_dense_mha_prefill = self.qk_rope_head_dim > 0
         vllm_config = get_current_vllm_config()
         model_type = None
         if vllm_config.model_config is not None:
