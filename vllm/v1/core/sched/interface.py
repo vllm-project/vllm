@@ -46,7 +46,7 @@ class SchedulerInterface(ABC):
         hash_block_size: int,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
-        log_stats: bool = False,
+        collect_stats: bool = False,
     ) -> None:
         raise NotImplementedError
 
@@ -206,6 +206,11 @@ class SchedulerInterface(ABC):
         """Returns True if there are unfinished requests, or finished requests
         not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
+
+    def should_schedule(self) -> bool:
+        """Whether the engine should schedule another step now, rather than wait
+        for an in-flight one."""
+        return self.has_requests()
 
     @property
     @abstractmethod

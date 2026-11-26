@@ -159,7 +159,6 @@ def test_speculators_correctness(monkeypatch, config):
 
     spec_llm = LLM(
         model=config.model_path,
-        trust_remote_code=True,
         max_model_len=4096,
         max_num_seqs=128,
         enforce_eager=False,

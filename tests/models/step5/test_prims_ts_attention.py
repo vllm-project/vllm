@@ -9,6 +9,7 @@ import torch
 
 from vllm.models.step5.nvidia.prims_ts import (
     Step5PrimsTSSparse,
+    Step5PrimsTSSWA,
     uses_prims_ts_attention,
 )
 from vllm.platforms import current_platform
@@ -285,6 +286,77 @@ def test_prims_ts_long_decode_and_mtp_replay(dtype, batch, query_len):
     current.copy_(decode_positions // 8)
     topk_lengths.copy_(current)
     output.zero_()
+    graph.replay()
+    torch.accelerator.synchronize()
+    check()
+
+
+def _swa_reference(query, cache, table, seq_lens, query_len, window):
+    output = torch.zeros_like(query, dtype=torch.float32)
+    groups, page_size = cache.shape[1:3]
+    heads = query.shape[1] // groups
+    for request, length in enumerate(seq_lens.tolist()):
+        tokens = torch.arange(length, device=query.device)
+        content = cache[
+            table[request, tokens // page_size].long(), :, tokens % page_size
+        ]
+        for offset in range(query_len if length else 0):
+            position = length - query_len + offset
+            visible = (tokens <= position) & (tokens > position - window)
+            row = request * query_len + offset
+            for group in range(groups):
+                q = query[row, group * heads : (group + 1) * heads].float()
+                kv = content[:, group].float()
+                logits = q @ kv[:, :192].T * (1.25 / 192**0.5)
+                probabilities = torch.softmax(logits.masked_fill(~visible, -1e30), -1)
+                output[row, group * heads : (group + 1) * heads] = (
+                    probabilities @ kv[:, 192:] * 0.75
+                )
+    return output
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.usefixtures("full_precision_matmul")
+def test_prims_ts_swa_verify_beyond_four_tokens_uses_decode_plan(dtype):
+    """Verify batches with more than three drafts keep the fast decode plan."""
+    _require_cuda()
+    torch.manual_seed(31)
+    capacity, live, query_len, context, window = 8, 7, 5, 2048, 512
+    query, cache, table, *_ = _inputs(
+        dtype, context, [query_len] * capacity, [context] * capacity
+    )
+    metadata = _metadata(capacity, live, query_len, device="cuda")
+    metadata.block_table = table
+    metadata.seq_lens = torch.tensor(
+        [context - 37 * request for request in range(capacity)],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    metadata.seq_lens[live:] = 0
+    output = torch.empty_like(query, dtype=torch.bfloat16)
+    swa = Step5PrimsTSSWA(context, window, num_speculative_tokens=query_len - 1)
+
+    def run():
+        swa.run(query, cache, metadata, output, None, 1.25 / 192**0.5, 0.75)
+
+    def check():
+        # Padded requests stay unwritten; the headwise gate zeroes them.
+        rows = live * query_len
+        expected = _swa_reference(
+            query, cache, table, metadata.seq_lens, query_len, window
+        )
+        _assert_accuracy(output[:rows], expected[:rows], dtype)
+
+    run()
+    check()
+    from flashinfer.attention.prims_ts import BatchDecodePagedTSWrapper
+
+    assert [type(plan) for plan in swa.plans.values()] == [BatchDecodePagedTSWrapper]
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    metadata.seq_lens[:live] -= 11
+    output.fill_(float("nan"))
     graph.replay()
     torch.accelerator.synchronize()
     check()

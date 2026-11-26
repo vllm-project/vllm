@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
-from transformers import AutoImageProcessor
+from transformers import AutoImageProcessor, AutoProcessor, AutoTokenizer
 
 from vllm.config import (
     CacheConfig,
@@ -20,6 +20,7 @@ from vllm.distributed.ec_transfer.ec_connector.utils import (
     PlaceholderMetadataResolver,
     collect_ec_item_metadata,
 )
+from vllm.exceptions import PromptUpdateMismatchError
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -164,6 +165,172 @@ def test_image_metadata_only_chat():
     assert remote["mm_placeholders"] == raw["mm_placeholders"]
 
 
+_CHAT_IMAGES = [_noise_image(31, 47), _noise_image(73, 30)]
+
+
+def _image_part(index: int) -> dict:
+    return {"type": "image", "image": _CHAT_IMAGES[index]}
+
+
+def _two_image_config() -> VllmConfig:
+    return VllmConfig(
+        model_config=ModelConfig(
+            _MODEL_ID,
+            tokenizer_mode="kimi_k3",
+            trust_remote_code=True,
+            limit_mm_per_prompt={"image": 2},
+            mm_processor_cache_gb=0,
+        ),
+        cache_config=CacheConfig(enable_prefix_caching=False),
+        device_config=DeviceConfig(device="cpu"),
+    )
+
+
+def _render_chat(messages: list[dict]) -> tuple[dict, int]:
+    """Render HF-processor-style messages as a chat request with image URLs."""
+    config = _two_image_config()
+
+    def to_request(content):
+        if isinstance(content, str):
+            return content
+        return [
+            {"type": "image_url", "image_url": {"url": encode_image_url(p["image"])}}
+            if p["type"] == "image"
+            else p
+            for p in content
+        ]
+
+    renderer = renderer_from_config(config)
+    try:
+        _, prompts = renderer.render_chat(
+            [[{**m, "content": to_request(m["content"])} for m in messages]],
+            ChatParams(),
+        )
+    finally:
+        renderer.shutdown()
+    return prompts[0], config.model_config.hf_config.media_placeholder_token_id
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        pytest.param(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Compare "},
+                        _image_part(0),
+                        {"type": "text", "text": " with "},
+                        _image_part(1),
+                        {"type": "text", "text": " briefly."},
+                        {"type": "text", "text": " Thanks."},
+                    ],
+                }
+            ],
+            id="interleaved",
+        ),
+        pytest.param(
+            [
+                {"role": "user", "content": "What does <|sep|> mean in XTML?"},
+                {"role": "assistant", "content": "It ends a tag."},
+                {
+                    "role": "user",
+                    "content": [
+                        _image_part(0),
+                        {"type": "text", "text": "Is it in this image?"},
+                    ],
+                },
+            ],
+            id="markup_text_in_history",
+        ),
+        pytest.param(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe"},
+                        {"type": "text", "text": " nothing."},
+                    ],
+                },
+            ],
+            id="text_parts_without_images",
+        ),
+    ],
+)
+def test_chat_prompt_matches_hf_processor(messages: list[dict]):
+    """A chat request with images gives the model the checkpoint's own prompt:
+    parts in request order, no separators, message text tokenized as text."""
+    prompt, pad = _render_chat(messages)
+
+    hf = AutoProcessor.from_pretrained(_MODEL_ID, trust_remote_code=True)
+    reference_ids = hf(messages=messages, return_tensors="pt")["input_ids"]
+    # The HF processor leaves one pad per image for the model to expand.
+    num_pads = (
+        hf.image_processor.media_tokens_calculator(_image_part(i))
+        for i in range(len(_CHAT_IMAGES))
+    )
+    expected_ids: list[int] = []
+    for token_id in reference_ids.flatten().tolist():
+        expected_ids += [pad] * next(num_pads) if token_id == pad else [token_id]
+    assert prompt["prompt_token_ids"] == expected_ids
+
+
+def test_chat_placeholder_text_is_not_an_image_slot():
+    """Text that spells the image placeholder stays text next to an image."""
+    literal, _ = _render_chat(
+        [
+            {
+                "role": "user",
+                "content": [
+                    _image_part(0),
+                    {"type": "text", "text": "Is <|kimi_image_placeholder|> a word?"},
+                ],
+            }
+        ]
+    )
+    plain, _ = _render_chat(
+        [
+            {
+                "role": "user",
+                "content": [_image_part(0), {"type": "text", "text": "Is it a word?"}],
+            }
+        ]
+    )
+    assert literal["mm_placeholders"] == plain["mm_placeholders"]
+    assert len(literal["prompt_token_ids"]) > len(plain["prompt_token_ids"])
+
+
+_TEXT_PROMPT = "Compare <|kimi_image_placeholder|><|kimi_image_placeholder|>\nbriefly."
+
+
+def _render_cmpl(prompt: dict) -> dict:
+    """Render a completion-style prompt that carries both chat images."""
+    renderer = renderer_from_config(_two_image_config())
+    try:
+        return renderer.render_cmpl(
+            [{**prompt, "multi_modal_data": {"image": _CHAT_IMAGES}}]
+        )[0]
+    finally:
+        renderer.shutdown()
+
+
+def test_text_prompt_finds_adjacent_image_placeholders():
+    """Placeholders that touch each other or other text each get their image."""
+    prompt = _render_cmpl({"prompt": _TEXT_PROMPT})
+    assert len(prompt["mm_placeholders"]["image"]) == len(_CHAT_IMAGES)
+
+
+def test_token_prompt_is_not_retokenized_to_find_images():
+    """Token ids are used as given: when they hold no image placeholder, the
+    request is rejected instead of rebuilding the prompt from its text."""
+    tokenizer = AutoTokenizer.from_pretrained(_MODEL_ID, trust_remote_code=True)
+    # Encoded in one piece, the placeholders merge with the text around them.
+    token_ids = tokenizer.encode(_TEXT_PROMPT, add_special_tokens=False)
+    with pytest.raises(PromptUpdateMismatchError):
+        _render_cmpl({"prompt_token_ids": token_ids})
+
+
 @pytest.mark.parametrize(
     ("width", "height"),
     [(310, 470), (7300, 30), (13, 9)],
@@ -179,6 +346,36 @@ def test_fused_image_processor_matches_hf(image_processors, width: int, height: 
     assert fused.media_tokens_calculator(
         {"type": "image", "image": image}
     ) == hf.media_tokens_calculator({"type": "image", "image": image})
+
+
+def _transparent_image(mode: str, width: int, height: int) -> Image.Image:
+    rng = np.random.default_rng(1)
+    alpha = Image.fromarray(rng.integers(0, 256, (height, width), dtype=np.uint8))
+    image = _noise_image(width, height)
+    if mode == "P":
+        image = image.convert("P")
+        image.info["transparency"] = 0
+        return image
+    image = image.convert(mode)
+    image.putalpha(alpha)
+    return image
+
+
+@pytest.mark.parametrize(
+    ("mode", "width", "height"),
+    [("RGBA", 310, 470), ("RGBA", 7300, 30), ("LA", 310, 470), ("P", 310, 470)],
+)
+def test_fused_image_processor_composites_transparency_like_hf(
+    image_processors, mode: str, width: int, height: int
+):
+    """K3 blends transparent pixels over its chessboard, also after a resize."""
+    fused, hf = image_processors
+    image = _transparent_image(mode, width, height)
+    expected = hf.preprocess([{"type": "image", "image": image}], return_tensors="pt")
+    actual = fused.preprocess([{"type": "image", "image": image}], return_tensors="pt")
+
+    torch.testing.assert_close(actual["grid_thws"], expected["grid_thws"])
+    torch.testing.assert_close(actual["pixel_values"], expected["pixel_values"])
 
 
 @pytest.mark.usefixtures("default_vllm_config")

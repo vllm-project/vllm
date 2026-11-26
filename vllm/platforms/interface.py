@@ -9,7 +9,7 @@ import os
 import platform
 import sys
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, get_args
 
 import torch
 
@@ -19,7 +19,8 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.config import VllmConfig
+    from vllm.config import ParallelConfig, VllmConfig
+    from vllm.config.compilation import CUDAGraphCaptureDefaults
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
     from vllm.pooling_params import PoolingParams
@@ -433,10 +434,10 @@ class Platform:
                 f"Backend {backend} is not supported for vit attention"
                 f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
             )
-            logger.info_once(f"Using backend {backend} for vit attention")
+            logger.debug_once(f"Using backend {backend} for vit attention")
             return backend
 
-        logger.info_once(
+        logger.debug_once(
             f"Using default backend {AttentionBackendEnum.TORCH_SDPA} for vit attention"
         )
         return AttentionBackendEnum.TORCH_SDPA
@@ -713,7 +714,13 @@ class Platform:
         default_block_size: int,
         vllm_config: "VllmConfig",
     ) -> int:
-        """Smallest block size every backend accepts.
+        """Block size every backend accepts.
+
+        One backend keeps its preferred size. When every backend accepts the
+        default, several backends keep that preference only when they all ask
+        for the same size and all accept it. Differing preferences keep the
+        default. If any backend rejects the default, the LCM search is
+        unchanged.
 
         `supports_block_size` may be overridden to accept exact sizes only
         (CPU_MLA takes 16 and no multiple of it), so candidates are the LCMs of
@@ -731,6 +738,18 @@ class Platform:
             if len(backend_classes) == 1:
                 return backend_classes[0].get_preferred_block_size(default_block_size)
             if all(b.supports_block_size(default_block_size) for b in backend_classes):
+                # Take a preference only when every backend asks for that same
+                # size. The max of disagreeing preferences would move
+                # DeepSeek-V4.1 from 64 to the SWA preference of 256.
+                preferences = [
+                    b.get_preferred_block_size(default_block_size)
+                    for b in backend_classes
+                ]
+                chosen = preferences[0]
+                if all(p == chosen for p in preferences) and all(
+                    b.supports_block_size(chosen) for b in backend_classes
+                ):
+                    return chosen
                 return default_block_size
             # A backend declaring no sizes accepts any, so it contributes 1.
             per_backend_sizes = [
@@ -1139,7 +1158,7 @@ class Platform:
                 # multiple of 128 so split kernel blocks keep that invariant.
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
         checkpoint_alignment = 1
-        if cache_config.mamba_cache_mode == "align":
+        if cache_config.enable_prefix_caching:
             # Internal prefill checkpoints land on block boundaries.
             checkpoint_alignment = (
                 get_mamba_prefill_checkpoint_alignment(vllm_config) or 1
@@ -1179,7 +1198,7 @@ class Platform:
                 attn_block_size,
             )
 
-        if cache_config.mamba_cache_mode == "align":
+        if cache_config.enable_prefix_caching:
             cache_config.mamba_block_size = cache_config.block_size
 
         if packed_block_size is not None:
@@ -1299,11 +1318,63 @@ class Platform:
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
+    def supports_eplb(cls) -> bool:
+        """Whether this platform can run expert parallel load balancing."""
+        return cls._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.XPU)
+
+    @classmethod
+    def check_and_update_eplb_config(cls, parallel_config: "ParallelConfig") -> None:
+        """Choose and validate the platform's EPLB policy and communicator.
+
+        Out-of-tree overrides validate their own policy and communicator names.
+        """
+        eplb_config = parallel_config.eplb_config
+        from vllm.config.parallel import EPLBCommunicatorBackend, EPLBPolicyOption
+
+        if eplb_config.policy is None:
+            eplb_config.policy = "default"
+        if eplb_config.policy not in get_args(EPLBPolicyOption):
+            raise ValueError(f"Unknown EPLB policy: {eplb_config.policy}")
+        if eplb_config.communicator is None:
+            # Prefer NIXL when available: zero-copy RDMA reads, compatible
+            # with both async EPLB and elastic EP.
+            # Fallbacks: pynccl for elastic EP (stateless groups need it),
+            # torch_gloo for static EP.  torch_nccl is avoided because NCCL
+            # is incompatible with async EPLB (multi-stream conflicts) and
+            # batched isend/irecv hangs under high load.
+            # See https://github.com/pytorch/pytorch/issues/174288
+            from vllm.distributed.nixl_utils import is_nixl_available
+
+            if cls._enum == PlatformEnum.XPU:
+                # On XPU, use the device-native XCCL P2P backend.
+                eplb_config.communicator = "torch_xccl"
+            elif is_nixl_available():
+                eplb_config.communicator = "nixl"
+            elif parallel_config.enable_elastic_ep:
+                eplb_config.communicator = "pynccl"
+            else:
+                eplb_config.communicator = "torch_gloo"
+
+        if eplb_config.communicator not in get_args(EPLBCommunicatorBackend):
+            raise ValueError(f"Unknown EPLB communicator: {eplb_config.communicator}")
+
+        if eplb_config.use_async and eplb_config.communicator in (
+            "torch_nccl",
+            "pynccl",
+        ):
+            raise ValueError(
+                f"{eplb_config.communicator} communicator is incompatible with "
+                "async EPLB due to NCCL multi-stream conflicts. Use "
+                "'torch_gloo' or 'nixl' instead, or leave communicator "
+                "unset for automatic selection."
+            )
+
+    @classmethod
     def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
         """Returns whether the GPU is an integrated (UMA) device that shares
         system memory with the CPU. device_id None means the current device.
 
-        On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
+        On UMA systems (e.g. NVIDIA DGX Spark, Jetson Orin),
         cudaMemGetInfo may underreport free memory because it does not
         account for reclaimable OS memory (page cache, buffers).
         """
@@ -1422,6 +1493,43 @@ class Platform:
         keep the old pool allocated, and capturing into it would fail.
         """
         cls._global_graph_pool = None
+
+    def get_cudagraph_capture_defaults(
+        self, vllm_config: "VllmConfig"
+    ) -> "CUDAGraphCaptureDefaults":
+        """Return capture defaults without mutating user configuration.
+
+        The common resolver applies these only to unset settings; explicit
+        legacy settings retain their shared-grid semantics.
+        """
+        from vllm.config.compilation import CUDAGraphCaptureDefaults
+
+        return CUDAGraphCaptureDefaults()
+
+    @classmethod
+    def get_prefill_cudagraph_capture_grid(
+        cls, max_tokens: int, dense_head: bool = False
+    ) -> list[int]:
+        """Return prefill token sizes within `max_tokens`; zero returns `[]`."""
+        from vllm.config.compilation import prefill_cudagraph_capture_grid
+
+        return prefill_cudagraph_capture_grid(max_tokens, dense_head)
+
+    @classmethod
+    def get_decode_cudagraph_capture_grid(cls, max_requests: int) -> list[int]:
+        """Return uniform decode request counts, independent of query length."""
+        from vllm.config.compilation import decode_cudagraph_capture_grid
+
+        return decode_cudagraph_capture_grid(max_requests)
+
+    @classmethod
+    def get_varlen_decode_cudagraph_capture_grid(
+        cls, max_tokens: int, dense_head: bool = False
+    ) -> list[int]:
+        """Return adaptive verification token sizes within `max_tokens`."""
+        from vllm.config.compilation import varlen_decode_cudagraph_capture_grid
+
+        return varlen_decode_cudagraph_capture_grid(max_tokens, dense_head)
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:

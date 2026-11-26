@@ -10,7 +10,7 @@ from vllm.config import SpeculativeConfig
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
-from vllm.v1.worker.gpu.async_utils import async_copy_to_np, new_d2h_stream
+from vllm.v1.worker.gpu.async_utils import async_copy_to_np, new_d2h_stream, stream
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -43,7 +43,7 @@ def get_drafter_hidden_states(
 @dataclass(slots=True)
 class _PendingCopy:
     # Cleared once synchronized, to skip redundant driver calls.
-    event: torch.cuda.Event | None
+    event: torch.Event | None
 
     def wait(self) -> None:
         if self.event is not None:
@@ -86,11 +86,11 @@ class DraftTokensHandler:
 
         # For spec decoding + structured outputs, we must transfer the
         # draft tokens back to the scheduler for grammar validation.
-        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
-        copy_event = torch.cuda.Event(blocking=True)
-        current_stream = torch.cuda.current_stream(self.device)
+        # Blocking (sleep) event to avoid busy-polling the accelerator driver lock.
+        copy_event = torch.Event(blocking=True)
+        current_stream = torch.accelerator.current_stream(self.device)
         self.copy_stream.wait_stream(current_stream)
-        with torch.cuda.stream(self.copy_stream):
+        with stream(self.copy_stream, current_stream):
             draft_tokens_np = async_copy_to_np(draft_tokens)
             # draft_tokens is a temporary allocation on the main stream and read here on
             # copy_stream; without record_stream, the caching allocator may reuse its
