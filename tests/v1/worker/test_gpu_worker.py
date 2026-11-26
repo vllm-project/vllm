@@ -1110,6 +1110,34 @@ def test_discarding_the_kv_cache_releases_an_extensible_one(
     assert log == ["release", "pool", "pool"]
 
 
+def test_shutdown_frees_a_model_whose_loader_references_it():
+    """A loader such as ModelExpress keeps a reference to the model it loaded.
+    Shutdown must drop the model-to-loader binding, or that model and its
+    memory outlive an engine that ran in-process."""
+    import weakref
+
+    from torch import nn
+
+    from vllm.model_executor.model_loader.base_loader import bind_model_loader
+    from vllm.v1.worker.gpu_worker import Worker
+
+    model = nn.Module()
+    bind_model_loader(model, SimpleNamespace(model=model))
+    worker = object.__new__(Worker)
+    worker.profiler = None
+    worker.elastic_ep_executor = SimpleNamespace(shutdown=lambda: None)
+    worker.model_runner = SimpleNamespace(
+        model=model, eplb_state=None, shutdown=lambda: None
+    )
+
+    worker.shutdown()
+    model_ref = weakref.ref(model)
+    del model, worker
+    gc.collect()
+
+    assert model_ref() is None
+
+
 @create_new_process_for_each_test("spawn")
 def test_startup_heap_frozen_before_weight_loading(monkeypatch):
     """Ensure objects alive before startup are frozen by the time weights

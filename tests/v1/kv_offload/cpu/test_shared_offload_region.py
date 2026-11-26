@@ -250,6 +250,64 @@ def _mp_barrier_construct_and_hold(
         done_queue.put({"rank": rank, "error": repr(e)})
 
 
+def _mp_hisparse_allocate_and_hold(
+    instance_id: str, tp_rank: int, local_world_size: int, barrier, done_queue
+) -> None:
+    """Allocate a shared HiSparse host pool as one TP rank, let each node's
+    leader write it, then hold the mapping until the parent SIGKILLs us."""
+    try:
+        from vllm.v1.hisparse import runtime
+
+        populated: list[tuple[int, int]] = []
+        get_populate_write_fn = region_module._get_populate_write_fn
+
+        def track_population(mmap_obj):
+            populate = get_populate_write_fn(mmap_obj)
+
+            def tracked(mm, offset, length):
+                populated.append((offset, length))
+                populate(mm, offset, length)
+
+            return tracked
+
+        region_module._get_populate_write_fn = track_population
+        runtime.pin_tensor = lambda tensor: None
+        runtime.check_hisparse_host_memory = lambda size: None
+        tp_group = MagicMock(rank_in_group=tp_rank, world_size=4)
+        tp_group.barrier.side_effect = lambda: barrier.wait(30)
+        runtime.get_tp_group = lambda: tp_group
+        runtime.get_tensor_model_parallel_rank = lambda: tp_rank
+        config = SimpleNamespace(
+            instance_id=instance_id,
+            parallel_config=SimpleNamespace(
+                data_parallel_index=0, local_world_size=local_world_size
+            ),
+        )
+        _, region = runtime.allocate_hisparse_host_pools(
+            config, [PAGE_SIZE], 4, PAGE_SIZE
+        )
+        pool = region.base_tensor
+        leader = runtime.get_hisparse_host_leader_rank(config)
+        if tp_rank == leader:
+            pool.fill_(leader + 1)
+        barrier.wait(30)
+        done_queue.put(
+            {
+                "rank": tp_rank,
+                "error": None,
+                "leader": leader,
+                "inode": os.fstat(region.fd).st_ino,
+                "path_exists": os.path.exists(region.mmap_path),
+                "populated": populated,
+                "total_size": region.total_size_bytes,
+                "contents_match": bool((pool == leader + 1).all()),
+            }
+        )
+        time.sleep(60)  # hold the mapping until killed
+    except Exception as e:
+        done_queue.put({"rank": tp_rank, "error": repr(e)})
+
+
 @pytest.fixture
 def iid():
     """Fresh instance ID for each test."""
@@ -1582,6 +1640,53 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid, replicated):
     assert not os.path.exists(path), "SIGKILL must not leak the file"
     with _region(iid) as restarted:
         assert restarted._creator is True, "restart must be able to create anew"
+
+
+@pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="requires /dev/shm")
+@pytest.mark.parametrize("local_world_size", [4, 2])
+def test_mp_hisparse_host_pool_is_shared_per_node(iid, local_world_size):
+    """TP ranks map one HiSparse host pool per node, created, fully populated
+    by that node's ranks and written by its leader; SIGKILL leaks none."""
+    tp_size = 4
+    num_nodes = tp_size // local_world_size
+    ctx = get_mp_context()
+    barrier = ctx.Barrier(tp_size)
+    done_queue = ctx.Queue()
+    procs = [
+        ctx.Process(
+            target=_mp_hisparse_allocate_and_hold,
+            args=(iid, rank, local_world_size, barrier, done_queue),
+        )
+        for rank in range(tp_size)
+    ]
+
+    def leaked_files() -> list[str]:
+        return [f for f in os.listdir("/dev/shm") if f"hisparse_{iid}_" in f]
+
+    try:
+        for p in procs:
+            p.start()
+        results = [done_queue.get(timeout=30) for _ in range(tp_size)]
+        for r in results:
+            assert r["error"] is None, f"rank {r['rank']}: {r['error']}"
+        nodes: dict[int, list[dict]] = {}
+        for r in results:
+            nodes.setdefault(r["leader"], []).append(r)
+        assert sorted(nodes) == list(range(0, tp_size, local_world_size))
+        assert len({r["inode"] for r in results}) == num_nodes
+        for node in nodes.values():
+            assert len({r["inode"] for r in node}) == 1
+            covered = sorted(span for r in node for span in r["populated"])
+            assert sum(length for _, length in covered) == node[0]["total_size"]
+            assert covered[0][0] == 0
+        assert all(r["contents_match"] for r in results)
+        assert not any(r["path_exists"] for r in results)
+    finally:
+        for p in procs:
+            p.kill()  # SIGKILL: no cleanup() runs
+            p.join(timeout=10)
+
+    assert leaked_files() == [], "SIGKILL must not leak the files"
 
 
 @pytest.mark.parametrize(
