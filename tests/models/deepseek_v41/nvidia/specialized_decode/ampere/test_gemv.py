@@ -50,19 +50,65 @@ SHAPES = [
 
 
 @pytest.fixture(
-    params=[False, True] if IS_SM90 else [False],
-    ids=["ampere", "hopper"] if IS_SM90 else ["ampere"],
+    params=["default", "ampere"] if IS_SM90 else ["default"],
 )
-def gemv_backend(request, monkeypatch):
-    """Force `mxfp8_gemv` / `default_config` onto either `Mxfp8Gemv` or
-    `HopperMxfp8Gemv` so SM90 CI keeps full coverage of both kernels."""
+def gemv_backend(request) -> str:
+    """Exercise unpatched `mxfp8_gemv` (`default`, dispatching to
+    `HopperMxfp8Gemv` on SM90 and `Mxfp8Gemv` on SM80) and also cover the
+    SM80 `Mxfp8Gemv` kernel directly on SM90 CI."""
+    return request.param
+
+
+def _run_gemv(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    block_scales: torch.Tensor,
+    *,
+    backend: str,
+    out: torch.Tensor | None = None,
+    config=None,
+) -> torch.Tensor:
+    from cutlass import Int32, Int64
+
+    from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
     from vllm.models.deepseek_v41.nvidia.specialized_decode.ampere import gemv
 
-    use_hopper: bool = request.param
-    monkeypatch.setattr(gemv, "_use_hopper_kernel", lambda _device: use_hopper)
-    gemv.default_config.cache_clear()
-    yield use_hopper
-    gemv.default_config.cache_clear()
+    if backend == "default":
+        return gemv.mxfp8_gemv(x, weight, block_scales, out=out, config=config)
+
+    rows, k = x.shape
+    n = weight.shape[0] * gemv.TILE_ROWS
+    device = x.device.index
+    if out is None:
+        out = torch.empty((rows, n), dtype=torch.bfloat16, device=x.device)
+    if config is None:
+        sms, smem_limit = gemv._device_limits(device)
+        config = gemv._ampere_default_config(n, k, rows, sms, smem_limit)
+    x_tiles = (rows + gemv.X_TILE - 1) // gemv.X_TILE
+    splits = config.splits(k)
+    counters = gemv._counters(device)
+    partials = (
+        torch.empty(
+            splits * gemv.X_TILE * x_tiles * n,
+            dtype=torch.float32,
+            device=x.device,
+        )
+        if splits > 1
+        else None
+    )
+    gemv._kernel(device, n, k, x_tiles, config, gemv.Mxfp8Gemv)(
+        Int64(weight.data_ptr()),
+        Int64(block_scales.data_ptr()),
+        Int64(x.data_ptr()),
+        Int64(out.data_ptr()),
+        Int64(0 if partials is None else partials.data_ptr()),
+        Int64(counters.data_ptr()),
+        Int32(rows),
+        Int32(x.stride(0)),
+        Int32(out.stride(0)),
+        current_cu_stream(),
+    )
+    return out
 
 
 def _weight(
@@ -100,7 +146,7 @@ def test_decode_bitwise(gemv_backend):
         columns = torch.arange(start, min(start + 48, k), device=DEVICE)
         x = torch.zeros(columns.numel(), k, dtype=torch.bfloat16, device=DEVICE)
         x[torch.arange(columns.numel()), columns] = 1.0
-        got = gemv.mxfp8_gemv(x, weight, block_scales)
+        got = _run_gemv(x, weight, block_scales, backend=gemv_backend)
         assert torch.equal(got.float(), dequantized[:, columns].t().float())
 
 
@@ -114,14 +160,14 @@ def test_shapes(gemv_backend, n: int, k: int, rows: int):
     weight, block_scales = gemv.pack_weight(codes, scales)
     g = torch.Generator(device=DEVICE).manual_seed(rows)
     x = torch.randn(rows, k, device=DEVICE, generator=g).to(torch.bfloat16)
-    got = gemv.mxfp8_gemv(x, weight, block_scales)
+    got = _run_gemv(x, weight, block_scales, backend=gemv_backend)
     want = reference.mxfp8_linear(x, codes, scales)
     dequantized = reference.mxfp8_weight_dequantize(codes, scales)
     bound = _bound(x, dequantized, want)
     assert ((got.double() - want).abs() <= bound).all()
     cublas = torch.nn.functional.linear(x, dequantized)
     assert ((got.double() - cublas.double()).abs() <= 2 * bound).all()
-    again = gemv.mxfp8_gemv(x, weight, block_scales)
+    again = _run_gemv(x, weight, block_scales, backend=gemv_backend)
     assert torch.equal(got, again)
 
 
@@ -149,7 +195,7 @@ def test_splits(gemv_backend, config: tuple[int, int, int]):
     bound = _bound(x, reference.mxfp8_weight_dequantize(codes, scales), want)
     split = gemv.GemvConfig(*config)
     for _ in range(3):
-        got = gemv.mxfp8_gemv(x, weight, block_scales, config=split)
+        got = _run_gemv(x, weight, block_scales, backend=gemv_backend, config=split)
         assert ((got.double() - want).abs() <= bound).all()
     torch.accelerator.synchronize()
     assert not gemv._counters(torch.device(DEVICE).index or 0).any()
@@ -170,15 +216,17 @@ def test_expanded_scales_and_graph(gemv_backend):
 
     x = torch.randn(rows, k, device=DEVICE).to(torch.bfloat16)
     out = torch.empty(rows, n, dtype=torch.bfloat16, device=DEVICE)
-    gemv.mxfp8_gemv(x, weight, block_scales, out=out)
+    _run_gemv(x, weight, block_scales, backend=gemv_backend, out=out)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        gemv.mxfp8_gemv(x, weight, block_scales, out=out)
+        _run_gemv(x, weight, block_scales, backend=gemv_backend, out=out)
     for _ in range(2):
         x.copy_(torch.randn(rows, k, device=DEVICE))
         out.zero_()
         graph.replay()
-        assert torch.equal(out, gemv.mxfp8_gemv(x, weight, block_scales))
+        assert torch.equal(
+            out, _run_gemv(x, weight, block_scales, backend=gemv_backend)
+        )
 
 
 def test_non_pow2_config(gemv_backend):
@@ -189,10 +237,17 @@ def test_non_pow2_config(gemv_backend):
     n, k, rows = 5120, 288, 24
     codes, scales = _weight(n, k, 112, 122, seed=5)
     weight, block_scales = gemv.pack_weight(codes, scales)
-    x = torch.randn(rows, k, device=DEVICE).to(torch.bfloat16)
+    g = torch.Generator(device=DEVICE).manual_seed(6)
+    x = torch.randn(rows, k, device=DEVICE, generator=g).to(torch.bfloat16)
     want = reference.mxfp8_linear(x, codes, scales)
     bound = _bound(x, reference.mxfp8_weight_dequantize(codes, scales), want)
-    got = gemv.mxfp8_gemv(x, weight, block_scales, config=gemv.GemvConfig(5, 3, 3))
+    got = _run_gemv(
+        x,
+        weight,
+        block_scales,
+        backend=gemv_backend,
+        config=gemv.GemvConfig(5, 3, 3),
+    )
     assert ((got.double() - want).abs() <= bound).all()
 
 
@@ -215,3 +270,8 @@ def test_smem_bytes_and_hopper_config():
     # K=288 (9 groups) uses non-power-of-two warps_k=3 on both 78 and 132 SMs.
     assert gemv._hopper_default_config(5120, 288, 1, 78, 232448).warps_k == 3
     assert gemv._hopper_default_config(5120, 288, 1, 132, 232448).warps_k == 3
+    # Public unpatched dispatch selects Hopper on SM90 and Ampere otherwise.
+    device = torch.device(DEVICE)
+    assert gemv._use_hopper_kernel(device.index) == IS_SM90
+    if IS_SM90:
+        assert gemv.default_config(5120, 288, 1, device).warps_k == 3
