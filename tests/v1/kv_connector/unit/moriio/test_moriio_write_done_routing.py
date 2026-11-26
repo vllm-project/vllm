@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     RemoteAllocInfo,
     ReqMeta,
     WriteTask,
+    WriteTransferState,
     get_port_offset,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
@@ -529,7 +530,9 @@ def test_save_kv_layer_ignores_layers_outside_the_transfer_groups():
     """A layer that reads another layer's KV cache (KV sharing) has no cache
     of its own, and a write queued for it would never complete."""
     metadata = MoRIIOConnectorMetadata()
+    # Already bound to the writer, so save_kv_layer needs no MoRIIOWriter.
     metadata.reqs_to_save["req"] = _req_meta()
+    metadata.reqs_to_save["req"].transfer_state = WriteTransferState()
     written_layers: list[str] = []
     connected = _fanout_save_worker({"10.0.0.1:2_dp0"})
     connected._write_blocks_for_req = (  # type: ignore[method-assign]
