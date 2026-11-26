@@ -1063,3 +1063,29 @@ def test_unified_attn_drops_lhbnc_with_kv_connector():
 
     assert layouts
     assert all(layout.is_block_compact for layout in layouts)
+
+
+@pytest.mark.parametrize(
+    "kv_cache_dtype,expected",
+    [
+        ("auto", True),
+        ("fp8", True),
+        ("fp8_e4m3", True),
+        ("bfloat16", False),
+        ("float16", False),
+        ("fp8_e5m2", False),
+    ],
+)
+def test_cdna_custom_paged_attention_gates_on_kv_cache_dtype(kv_cache_dtype, expected):
+    """Only the dtypes csrc/rocm/generate_paged_attn.py dispatches may use it."""
+    from vllm.platforms.rocm import use_rocm_custom_paged_attention
+
+    use_rocm_custom_paged_attention.cache_clear()
+    try:
+        with patch("vllm.platforms.rocm.on_cdna", return_value=True):
+            selected = use_rocm_custom_paged_attention(
+                torch.bfloat16, 128, 16, 8, 4096, 0, kv_cache_dtype
+            )
+    finally:
+        use_rocm_custom_paged_attention.cache_clear()
+    assert selected is expected

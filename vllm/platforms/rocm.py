@@ -488,6 +488,7 @@ def use_rocm_custom_paged_attention(
             and (block_size == 16 or block_size == 32)
             and (gqa_ratio >= 1 and gqa_ratio <= 16)
             and max_seq_len <= 128 * 1024
+            and kv_cache_dtype in ("auto", "fp8", "fp8_e4m3")
             and sinks is None
         )
 

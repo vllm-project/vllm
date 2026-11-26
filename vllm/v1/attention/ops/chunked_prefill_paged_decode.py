@@ -390,6 +390,10 @@ def chunked_prefill_paged_decode(
 
     from vllm.platforms.rocm import on_rdna, use_rocm_custom_paged_attention
 
+    # The HIP dispatch matches the raw string and has no float16/bfloat16 arm.
+    if kv_cache_dtype in ("float16", "bfloat16"):
+        kv_cache_dtype = "auto"
+
     use_custom = use_rocm_custom_paged_attention(
         query.dtype,
         head_size,
