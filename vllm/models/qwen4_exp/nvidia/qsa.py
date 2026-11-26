@@ -986,7 +986,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             num_tokens,
             self.block_topk,
             dtype=torch.int32,
-            device=self.kv_cache.device,
+            device=projected_qk.device,
         )
         if self.index_group is not None:
             self.index_group.prepare_for_batch(0, main_metadata)
