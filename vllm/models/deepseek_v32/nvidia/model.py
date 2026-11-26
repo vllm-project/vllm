@@ -242,6 +242,7 @@ class DeepseekV32Model(torch.nn.Module):
             )
             and not envs.VLLM_BATCH_INVARIANT
         )
+        self.residual_sp_min_tokens = RESIDUAL_SP_MIN_TOKENS
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -271,7 +272,7 @@ class DeepseekV32Model(torch.nn.Module):
         use_sequence_parallel = self.use_sequence_parallel or (
             self.use_residual_sequence_parallel
             and is_sequence_parallel_active(
-                True, full_num_tokens, RESIDUAL_SP_MIN_TOKENS
+                True, full_num_tokens, self.residual_sp_min_tokens
             )
         )
         attn_in = None
