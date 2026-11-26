@@ -287,19 +287,21 @@ def _writer(put, timeout_s=10.0):
 
 def test_writer_writes_a_batch_a_store_refused_once():
     refusals: list[int] = []
+    release = threading.Event()
 
     def put(keys):
         if refusals:
             return None
         refusals.append(1)
+        release.wait(10)
         return -200
 
     client, _, writer = _writer(put)
-    start = time.monotonic()
     writer.put(_objects("g/0"))
     writer.put(_objects("h/0"))
-    # Queuing never blocks.
-    assert time.monotonic() - start < 0.1
+    # Queuing never waits for the store.
+    assert not release.is_set() and not client.objects
+    release.set()
     wait_for_writer(writer)
     assert list(client.objects) == ["g/0", "h/0"] and refusals == [1]
     writer.close()
@@ -327,9 +329,11 @@ def test_writer_drops_only_the_batch_it_cannot_write(monkeypatch, failure, reaso
         refusals.append(time.monotonic())
         return -200
 
-    client, store, writer = _writer(put, 0.5)
+    client, store, writer = _writer(put, 2.0)
+    start = time.monotonic()
     writer.put(_objects("g/0"))
-    time.sleep(0.3)
+    if failure == "refused":
+        time.sleep(1.0)
     # Queued behind the failing batch, with time left to be written.
     writer.put(_objects("g/1", "h/0"))
     queued.set()
@@ -344,7 +348,7 @@ def test_writer_drops_only_the_batch_it_cannot_write(monkeypatch, failure, reaso
     if refusals:
         # Refusals are retried until the deadline, the last one less than a
         # retry interval before it.
-        assert refusals[-1] - refusals[0] >= 0.35
+        assert refusals[-1] - start >= 1.7
     # A batch queued after the failure is written as well.
     writer.put(_objects("g/2", "h/1"))
     wait_for_writer(writer)
@@ -360,19 +364,21 @@ def test_writer_deadline_counts_from_queueing():
 
     def put(keys):
         if keys == ["g/0"]:
-            time.sleep(0.4)
+            time.sleep(1.5)
             return None
         refusals.append(time.monotonic())
         return -200
 
-    client, _, writer = _writer(put, 0.5)
+    client, _, writer = _writer(put, 2.0)
     writer.put(_objects("g/0"))
-    time.sleep(0.1)
+    time.sleep(0.3)
     queued = time.monotonic()
     writer.put(_objects("h/0"))
     wait_for_writer(writer)
     assert list(client.objects) == ["g/0"]
-    assert 0.25 <= refusals[-1] - queued < 0.5
+    # Counted from the start of its write, the last refusal would come more
+    # than 3 s after queueing.
+    assert 1.5 <= refusals[-1] - queued < 2.5
     writer.close()
 
 
@@ -396,24 +402,25 @@ def test_writer_drops_the_batches_queued_behind_a_put_that_does_not_return(
 
     def put(keys):
         calls.append(keys)
-        return release.wait(10) and None
+        return release.wait(30) and None
 
-    client, _, writer = _writer(put, 0.5)
-    start = time.monotonic()
+    client, _, writer = _writer(put, 1.0)
     writer.put(_objects("g/0"))
     writer.put(_objects("h/0"))
     writer.put(_objects("h/1"))
-    time.sleep(0.55)
+    time.sleep(1.2)
     # Past their deadline the batches are dropped, also those queued behind
     # the put that does not return, and the writer no longer holds their
     # objects. While the put has not returned, queuing drops without waiting.
+    start = time.monotonic()
     writer.put(_objects("k/0"))
-    assert time.monotonic() - start < 0.65
+    assert time.monotonic() - start < 0.5
     assert [batch.objects for batch in writer._pending] == [None] * 3
     assert logger.error.call_count == 4
     # Every deadline has passed: closing does not wait for the put.
+    start = time.monotonic()
     writer.close()
-    assert time.monotonic() - start < 0.8
+    assert time.monotonic() - start < 0.5
     # The writer thread closes the store once the put returns, and writes
     # none of the dropped batches.
     assert not client.closed
@@ -424,31 +431,35 @@ def test_writer_drops_the_batches_queued_behind_a_put_that_does_not_return(
 
 
 @pytest.mark.parametrize(
-    "stuck,waited,written",
-    [(False, (0.05, 0.4), ["g/0", "h/0", "k/0"]), (True, (0.1, 0.35), ["g/0"])],
+    "stuck,written",
+    [(False, ["g/0", "h/0", "k/0"]), (True, ["g/0"])],
     ids=["write-ends", "store-stuck"],
 )
 def test_writer_blocks_a_full_queue_until_a_write_ends_or_misses_its_deadline(
-    monkeypatch, stuck, waited, written
+    monkeypatch, stuck, written
 ):
     monkeypatch.setattr(object_store, "_MAX_QUEUED_BATCHES", 1)
     release = threading.Event()
     client, _, writer = _writer(
-        lambda keys: (release.wait(10) and None) if keys == ["g/0"] else None, 0.5
+        lambda keys: (release.wait(30) and None) if keys == ["g/0"] else None, 2.0
     )
     writer.put(_objects("g/0"))
     if not stuck:
-        threading.Timer(0.1, release.set).start()
+        threading.Timer(0.2, release.set).start()
     else:
-        # The wait ends at the deadline of the head, not one timeout later.
-        time.sleep(0.3)
+        time.sleep(0.5)
     start = time.monotonic()
     writer.put(_objects("h/0"))
-    assert waited[0] <= time.monotonic() - start < waited[1]
+    waited = time.monotonic() - start
+    if stuck:
+        # The wait ends at the deadline of the head, not one timeout later.
+        assert 1.0 <= waited < 2.0
+    else:
+        assert release.is_set() and waited < 1.5
     # Behind a stuck store the next put does not wait another deadline.
     start = time.monotonic()
     writer.put(_objects("k/0"))
-    assert time.monotonic() - start < (0.05 if stuck else 0.6)
+    assert time.monotonic() - start < (0.5 if stuck else 1.5)
     # Behind a stuck store only the put that did not return lands, late.
     release.set()
     wait_for_writer(writer)

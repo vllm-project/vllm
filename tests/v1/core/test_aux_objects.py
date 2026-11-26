@@ -859,10 +859,15 @@ def test_request_resubmitted_after_an_abort_lists_the_aborted_objects():
 )
 def test_abort_without_an_output_keeps_no_listing(abort):
     engine = _Engine()
-    _add(engine, "r", 40, 8)
+    request = _add(engine, "r", 40, 8)
     engine.step(engine.schedule())
     abort(_engine_core(engine))
     engine.close()
+    assert engine.listings == {}
+    # Its spans and a tail nobody lists are still written.
+    objects = set(engine.client.objects)
+    assert objects - _tails(objects) == set(_block_keys(request, 2))
+    assert len(_tails(objects)) == 1
 
 
 @pytest.mark.parametrize(
