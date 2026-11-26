@@ -19,7 +19,11 @@ from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.v1.engine import CheckpointState, EngineCoreRequest
+from vllm.v1.engine import (
+    CheckpointState,
+    EngineCoreRequest,
+    KVCacheGroupMetadata,
+)
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.kv_hints import KvHintsEnvelope
@@ -323,10 +327,8 @@ class EngineClient(ABC):
         """Get supported tasks."""
         raise NotImplementedError
 
-    async def get_kv_cache_group_metadata(
-        self,
-    ) -> list[dict[str, int | str | None]]:
-        """Get KV cache group metadata."""
+    async def get_kv_cache_group_metadata(self) -> list[KVCacheGroupMetadata]:
+        """Get the engine's KV cache group layout."""
         raise NotImplementedError
 
     async def init_weight_transfer_engine(

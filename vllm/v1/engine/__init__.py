@@ -4,7 +4,7 @@
 import enum
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
@@ -115,6 +115,18 @@ class PrefixHashConfig:
 
 
 @dataclass(slots=True)
+class KVCacheGroupMetadata:
+    """Layout of one KV cache group after initialization."""
+
+    group_idx: int
+    # `KVCacheSpecKind` value, e.g. "full_attention" or "mamba".
+    kind: str
+    # Tokens per block as the scheduler sees it (scaled under DCP).
+    block_size: int
+    sliding_window: int | None = None
+
+
+@dataclass(slots=True)
 class EngineCoreReadyResponse:
     """Sent from EngineCore to each frontend at the end of engine startup.
 
@@ -178,6 +190,8 @@ class EngineCoreReadyResponse:
     # total, for frontends without a VllmConfig (the Rust frontend). Set
     # without chunked prefill, when they are all encoded in one step.
     max_mm_embeds_per_request: int | None = None
+    # Empty for models without a KV cache.
+    kv_cache_groups: list[KVCacheGroupMetadata] = field(default_factory=list)
 
 
 class EngineCoreRequest(

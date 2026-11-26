@@ -3,8 +3,8 @@
 
 from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 
+import msgspec
 import pytest
 import torch
 
@@ -18,8 +18,9 @@ from vllm.config import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, MambaManager
-from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine import EngineCoreReadyResponse
 from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine.core_client import MPClient
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -154,16 +155,42 @@ def test_kv_cache_group_metadata_uses_effective_dcp_block_sizes() -> None:
     ]
 
 
-@pytest.mark.asyncio
-async def test_async_llm_fetches_kv_cache_group_metadata_once() -> None:
-    """The metadata is static, so the frontend should only ask the engine once."""
+def test_kv_cache_groups_reach_frontend_through_ready_response() -> None:
+    """The frontend learns the group layout from the startup handshake."""
     engine_core, _ = _make_engine_core_with_dcp_manager()
-    expected = engine_core.get_kv_cache_group_metadata()
-    async_llm = object.__new__(AsyncLLM)
-    async_llm.engine_core = MagicMock(
-        get_kv_cache_group_metadata_async=AsyncMock(return_value=expected)
-    )
+    groups = engine_core.get_kv_cache_groups()
 
-    assert await async_llm.get_kv_cache_group_metadata() == expected
-    assert await async_llm.get_kv_cache_group_metadata() == expected
-    async_llm.engine_core.get_kv_cache_group_metadata_async.assert_awaited_once()
+    client = object.__new__(MPClient)
+    client._effective_attention_block_sizes = set()
+    client._kv_cache_groups = []
+    client.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
+        model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
+    )
+    payload = msgspec.msgpack.encode(
+        EngineCoreReadyResponse(
+            max_model_len=8192,
+            num_gpu_blocks=32,
+            block_size=BASE_BLOCK_SIZE,
+            dp_stats_address=None,
+            dtype="bfloat16",
+            vllm_version="test",
+            world_size=1,
+            data_parallel_size=1,
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            decode_context_parallel_size=DCP_WORLD_SIZE,
+            data_parallel_rank=0,
+            max_num_seqs=256,
+            max_num_batched_tokens=8192,
+            instance_id="test-instance",
+            supports_lora=False,
+            max_loras=0,
+            kv_cache_groups=groups,
+        )
+    )
+    client._apply_ready_response(payload)
+
+    assert client.get_kv_cache_group_metadata() == groups
+    assert [g.block_size for g in client.get_kv_cache_group_metadata()] == [12288, 1536]

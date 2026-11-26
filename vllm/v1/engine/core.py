@@ -10,6 +10,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Generator, Sequence, Sized
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
+from dataclasses import asdict
 from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
@@ -91,6 +92,7 @@ from vllm.v1.engine import (
     EngineCoreRequestType,
     EngineHealthState,
     FinishReason,
+    KVCacheGroupMetadata,
     PauseMode,
     PrefixHashConfig,
     ReconfigureDistributedRequest,
@@ -531,31 +533,34 @@ class EngineCore:
 
     def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
         """Return serializable KV cache metadata for external event consumers
-        (e.g., Dynamo) and the frontend.
+        (e.g., Dynamo). This function has no call sites within vLLM but needs to
+        be kept.
         """
+        return [asdict(group) for group in self.get_kv_cache_groups()]
+
+    def get_kv_cache_groups(self) -> list[KVCacheGroupMetadata]:
+        """KV cache group layout, sent to frontends in the ready response."""
         kv_cache_config = getattr(self.scheduler, "kv_cache_config", None)
         if kv_cache_config is None:
             return []
 
         kv_cache_manager = cast(Any, self.scheduler).kv_cache_manager
         managers = kv_cache_manager.coordinator.single_type_managers
-        metadata: list[dict[str, int | str | None]] = []
-        for group_idx, (group, manager) in enumerate(
-            zip(kv_cache_config.kv_cache_groups, managers, strict=True)
-        ):
-            metadata.append(
-                {
-                    "group_idx": group_idx,
-                    "kind": get_kv_cache_kind(
-                        group.manager_config, group.distinct_specs
-                    ).value,
-                    "block_size": manager.block_size,
-                    "sliding_window": getattr(
-                        group.manager_config.params, "sliding_window", None
-                    ),
-                }
+        return [
+            KVCacheGroupMetadata(
+                group_idx=group_idx,
+                kind=get_kv_cache_kind(
+                    group.manager_config, group.distinct_specs
+                ).value,
+                block_size=manager.block_size,
+                sliding_window=getattr(
+                    group.manager_config.params, "sliding_window", None
+                ),
             )
-        return metadata
+            for group_idx, (group, manager) in enumerate(
+                zip(kv_cache_config.kv_cache_groups, managers, strict=True)
+            )
+        ]
 
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
@@ -2232,6 +2237,7 @@ class EngineCoreProc(EngineCore):
             max_mm_embeds_per_request=getattr(
                 self.scheduler, "max_mm_embeds_per_request", None
             ),
+            kv_cache_groups=self.get_kv_cache_groups(),
         )
 
     def process_input_sockets(

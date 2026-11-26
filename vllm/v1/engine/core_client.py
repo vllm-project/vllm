@@ -50,6 +50,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     EngineCoreRequestType,
     EngineHealthState,
+    KVCacheGroupMetadata,
     PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
@@ -195,6 +196,9 @@ class EngineCoreClient(ABC):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         raise NotImplementedError
 
+    def get_kv_cache_group_metadata(self) -> list[KVCacheGroupMetadata]:
+        raise NotImplementedError
+
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
@@ -309,11 +313,6 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
-        raise NotImplementedError
-
-    async def get_kv_cache_group_metadata_async(
-        self,
-    ) -> list[dict[str, int | str | None]]:
         raise NotImplementedError
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
@@ -442,6 +441,9 @@ class InprocClient(EngineCoreClient):
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
+
+    def get_kv_cache_group_metadata(self) -> list[KVCacheGroupMetadata]:
+        return self.engine_core.get_kv_cache_groups()
 
     def add_request(self, request: EngineCoreRequest) -> None:
         req, request_wave = self.engine_core.preprocess_add_request(request)
@@ -664,6 +666,7 @@ class MPClient(EngineCoreClient):
         self._renderer: BaseRenderer | None = renderer
         self._effective_attention_block_sizes: set[int | None] = set()
         self._kv_event_sources: dict[int, KVEventsConfig] = {}
+        self._kv_cache_groups: list[KVCacheGroupMetadata] = []
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -893,6 +896,9 @@ class MPClient(EngineCoreClient):
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
         ).start()
 
+    def get_kv_cache_group_metadata(self) -> list[KVCacheGroupMetadata]:
+        return self._kv_cache_groups
+
     def _apply_ready_response(self, payload: bytes) -> None:
         """Decode an EngineCoreReadyResponse and sync any post-initialization
         config changes (e.g. auto-fitted max_model_len) back to the frontend."""
@@ -911,6 +917,9 @@ class MPClient(EngineCoreClient):
         )
         if response is None:
             return
+        # Identical across DP engines, which all run the same model.
+        if response.kv_cache_groups and not self._kv_cache_groups:
+            self._kv_cache_groups = response.kv_cache_groups
         vllm_config.model_config.max_model_len = min(
             vllm_config.model_config.max_model_len, response.max_model_len
         )
@@ -1382,11 +1391,6 @@ class AsyncMPClient(MPClient):
 
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         return await self.call_utility_async("get_supported_tasks")
-
-    async def get_kv_cache_group_metadata_async(
-        self,
-    ) -> list[dict[str, int | str | None]]:
-        return await self.call_utility_async("get_kv_cache_group_metadata")
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         request.client_index = self.client_index
