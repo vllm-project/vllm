@@ -19,6 +19,7 @@ from vllm.config import (
     replace,
     set_current_vllm_config,
 )
+from vllm.config.quantization import layer_target_spec_scope
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -198,7 +199,7 @@ def process_weights_after_loading(
                 if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
                 else nullcontext()
             )
-            with loading_context, timing_context:
+            with loading_context, timing_context, layer_target_spec_scope(module):
                 # Quantize the staged fused shared experts into their slots.
                 shared_expert_loader = getattr(
                     module, "shared_expert_online_loader", None

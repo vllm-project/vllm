@@ -60,7 +60,16 @@ def _make_eep_experts(
             f"{experts_cls.__name__} experts do not support Elastic EP."
         )
 
-    return experts_cls(**experts_kwargs)
+    experts = experts_cls(**experts_kwargs)
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterMxfp4Experts,
+    )
+
+    if isinstance(experts, AiterMxfp4Experts):
+        assert isinstance(source_experts, AiterMxfp4Experts)
+        # Resolved from the layer's `targets` spec, which is not in scope here.
+        experts.q_dtype_a = source_experts.q_dtype_a
+    return experts
 
 
 def make_eep_staged_quant_method(

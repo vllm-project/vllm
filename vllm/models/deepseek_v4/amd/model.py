@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    aiter_mxfp4_q_dtype_a,
     derive_aiter_quant_type,
     mxfp4_w4a16_extra_kwargs,
     rocm_aiter_fused_experts,
@@ -460,6 +461,7 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
         self._shared_expert_ref = weakref.ref(shared_expert)
         self.shared_expert_id = shared_expert_id
         self._routed_quant_config: FusedMoEQuantConfig | None = None
+        self._q_dtype_a: torch.dtype | None = None
         super().__init__(*args, **kwargs)
         if self.expert_map_manager.num_fused_shared_experts != 1:
             raise ValueError("Heterogeneous fusion requires one appended expert.")
@@ -504,6 +506,15 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
         )
         refill_derived(self, "shared_w2_scale", rocm_aiter_ops.shuffle_scale(shared[3]))
 
+        # Resolved with the weights, where the layer's activation request is visible.
+        self._q_dtype_a = aiter_mxfp4_q_dtype_a(self.moe_config)
+        if self._q_dtype_a == torch.bfloat16:
+            # AITER FHMoE shared-expert dispatch only runs MXFP8 activations here.
+            raise ValueError(
+                "BF16 MoE activations (activation: null, or VLLM_STRICT_QUANT_SCHEME=1 "
+                "for a weight-only checkpoint) are not supported with AITER fused "
+                "shared experts; set VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0."
+            )
         self._ensure_moe_quant_config_init()
         quant_config = self.quant_method.moe_quant_config
         if quant_config is None:
@@ -580,7 +591,9 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
                 shared_w1_scale=self.shared_w1_scale,
                 shared_w2_scale=self.shared_w2_scale,
                 shared_expert_id=self.shared_expert_id,
-                **mxfp4_w4a16_extra_kwargs(quant_config, self.moe_config),
+                **mxfp4_w4a16_extra_kwargs(
+                    quant_config, self.moe_config, self._q_dtype_a
+                ),
             )
 
         shared_expert = self._shared_expert_ref()
@@ -604,7 +617,9 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
             quant_type=derive_aiter_quant_type(self._routed_quant_config),
             output_dtype=x.dtype,
             moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
-            **mxfp4_w4a16_extra_kwargs(self._routed_quant_config, self.moe_config),
+            **mxfp4_w4a16_extra_kwargs(
+                self._routed_quant_config, self.moe_config, self._q_dtype_a
+            ),
         )
         return routed + shared_out
 

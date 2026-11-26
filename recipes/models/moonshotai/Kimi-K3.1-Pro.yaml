@@ -359,7 +359,6 @@ presets:
       # The K3.1 precision policy keeps MoE combine and all-reduce in BF16.
       AITER_FLYDSL_STAGE2_FP8: "0"
       VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "NONE"
-      AITER_BF16_FP8_MOE_BOUND: "0"
       HSA_NO_SCRATCH_RECLAIM: "1"
       # Keep 8 GiB free for DCP prefill transients the memory profile misses.
       VLLM_ROCM_MEM_HEADROOM_GIB: "8"

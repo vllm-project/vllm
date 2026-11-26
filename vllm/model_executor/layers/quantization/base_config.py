@@ -14,6 +14,7 @@ from transformers import PreTrainedConfig
 
 if TYPE_CHECKING:
     from vllm.config.cache import CacheDType
+    from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
@@ -348,11 +349,7 @@ def resolve_quant_method(
     if online_config is not None and is_online_supported_layer:
         online_config.packed_modules_mapping = quant_config.packed_modules_mapping
         online_target = online_config.resolve_quant_method_cls(type(layer), prefix)
-        if online_config.args.targets is not None:
-            target = online_config._resolve_targets_quant_method_metadata(
-                prefix, type(layer)
-            )
-            target_spec = target[3] if target is not None else None
+        target_spec = layer_target_spec(layer, quant_config, prefix)
 
     if online_target is not None:
         current_platform.verify_quantization("online")
@@ -434,3 +431,34 @@ def resolve_quant_method(
 
     # Quantize an unquantized layer with the online method.
     return online_config.get_quant_method(layer, prefix)
+
+
+def layer_target_spec(
+    layer: torch.nn.Module,
+    quant_config: QuantizationConfig | None = None,
+    prefix: str | None = None,
+) -> "QuantSpec | None":
+    """The layer's `quantization_config.targets` spec, if one matches."""
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.layers.linear import LinearBase
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+    # Other layers cannot be online targets (resolving them raises).
+    if not isinstance(layer, (LinearBase, RoutedExperts, ParallelLMHead)):
+        return None
+    if quant_config is None:
+        quant_config = getattr(layer, "quant_config", None)
+    online_config = (
+        quant_config
+        if isinstance(quant_config, OnlineQuantizationConfig)
+        else getattr(quant_config, "online_quantization_config", None)
+    )
+    if prefix is None:
+        prefix = getattr(layer, "layer_name", None) or getattr(layer, "prefix", None)
+    if online_config is None or online_config.args.targets is None or not prefix:
+        return None
+    target = online_config._resolve_targets_quant_method_metadata(prefix, type(layer))
+    return target[3] if target is not None else None

@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config_or_none
+from vllm.config.quantization import user_activation_override, user_quant_spec
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
@@ -29,6 +32,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4Static32,
     kMxfp4Dynamic,
     kMxfp4Static,
+    kMxfp8Dynamic,
 )
 
 if TYPE_CHECKING:
@@ -329,10 +333,48 @@ def derive_aiter_quant_type(quant_config: FusedMoEQuantConfig) -> AiterQuantType
     return AiterQuantType.NO
 
 
+def aiter_mxfp4_q_dtype_a(moe_config: FusedMoEConfig) -> torch.dtype | None:
+    """`quant_dtype_a` honouring the layer's activation request on interleaved
+    AITER MXFP4 MoE, or None for AITER's choice from the token count.
+
+    Call while building the layer's kernel, where `user_activation_override` sees
+    the layer's `targets` spec (`layer_target_spec_scope`).
+    """
+    from vllm.platforms.rocm import on_gfx950
+
+    if (
+        # DSv4 A4W4 passes its own dtype, SiTUv2 selects it from AITER_SITUV2_*.
+        moe_config.use_mxfp4_w4a4_dsv4
+        or moe_config.activation == MoEActivation.SITU
+        # AITER only switches interleaved activations on gfx950.
+        or not on_gfx950()
+    ):
+        return None
+    vllm_config = get_current_vllm_config_or_none()
+    key, requested = user_activation_override("moe", vllm_config)
+    if requested or envs.VLLM_STRICT_QUANT_SCHEME:
+        # The requested activation (BF16 or MXFP8 on interleaved AITER). Strict
+        # mode without a request: the checkpoint's, BF16 as these are weight-only.
+        return torch.bfloat16 if key is None else key.dtype
+    # Without a request, keep main's activations: AITER's choice for gpt-oss
+    # checkpoint weights, MXFP8 otherwise (e.g. online MXFP4 of BF16 gpt-oss).
+    model_config = vllm_config.model_config if vllm_config else None
+    hf_config = getattr(model_config, "hf_config", None)
+    spec = user_quant_spec("moe", vllm_config)
+    if getattr(hf_config, "model_type", None) == "gpt_oss" and (
+        spec is None or "weight" not in spec.fields_set
+    ):
+        return None
+    return kMxfp8Dynamic.dtype
+
+
 def mxfp4_w4a16_extra_kwargs(
-    quant_config: FusedMoEQuantConfig, moe_config: FusedMoEConfig
+    quant_config: FusedMoEQuantConfig,
+    moe_config: FusedMoEConfig,
+    q_dtype_a: torch.dtype | None = None,
 ) -> dict:
-    """`AiterMxfp4Experts._extra_fused_moe_kwargs` for callers that bypass it."""
+    """`AiterMxfp4Experts._extra_fused_moe_kwargs` for callers that bypass it;
+    `q_dtype_a` from `aiter_mxfp4_q_dtype_a`."""
     if not quant_config.use_mxfp4_w4a16:
         return {}
 
@@ -348,11 +390,14 @@ def mxfp4_w4a16_extra_kwargs(
             "bias1": quant_config.w1_bias,
             "bias2": quant_config.w2_bias,
         }
-    return {
+    kwargs = {
         "gate_mode_override": GateMode.INTERLEAVE.value,
         "bias1": quant_config.w1_bias,
         "bias2": quant_config.w2_bias,
     }
+    if q_dtype_a is not None:
+        kwargs["q_dtype_a"] = q_dtype_a
+    return kwargs
 
 
 def rocm_aiter_fused_experts(
@@ -761,6 +806,17 @@ class AiterMxfp4Experts(AiterExperts):
 
     _AITER_QUANT_TYPE = AiterQuantType.BLOCK_1X32
 
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(moe_config, quant_config, max_num_tokens, num_dispatchers)
+        # Built with the layer's weights, where its activation request is visible.
+        self.q_dtype_a = aiter_mxfp4_q_dtype_a(moe_config)
+
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
@@ -779,4 +835,6 @@ class AiterMxfp4Experts(AiterExperts):
         return on_gfx950() and not on_gfx1250()
 
     def _extra_fused_moe_kwargs(self) -> dict:
-        return mxfp4_w4a16_extra_kwargs(self.quant_config, self.moe_config)
+        return mxfp4_w4a16_extra_kwargs(
+            self.quant_config, self.moe_config, self.q_dtype_a
+        )

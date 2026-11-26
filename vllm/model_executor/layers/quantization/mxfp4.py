@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-
 import torch
 
 from vllm.logger import init_logger
@@ -671,13 +669,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 )
             else:
                 logger.info_once("Using AITER_MXFP4_BF16 for Kimi-K3 SiTU MXFP4 MoE.")
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            if rocm_aiter_ops.is_fused_moe_situv2_enabled():
-                # a16w4 does not read this bound. Force 0 so leftover a8w4
-                # config cannot keep bf16 activations.
-                # TODO: Remove once AITER takes this as a kernel argument.
-                os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
         else:
             self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(
                 moe

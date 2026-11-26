@@ -6,7 +6,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import field
-from typing import Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 import regex as re
 from pydantic import (
@@ -19,6 +19,9 @@ from pydantic import (
 from pydantic_core import core_schema
 
 from vllm.config.utils import config
+
+if TYPE_CHECKING:
+    import torch
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -427,8 +430,17 @@ _layer_target_spec: ContextVar[QuantSpec | None] = ContextVar(
 
 
 @contextmanager
-def layer_target_spec_scope(spec: QuantSpec | None) -> Generator[None]:
-    """Apply a layer's `targets` spec to `user_activation_override`."""
+def layer_target_spec_scope(
+    spec: "QuantSpec | torch.nn.Module | None",
+) -> Generator[None]:
+    """Apply a layer's `targets` spec, or the one matching a given layer, to
+    `user_activation_override`."""
+    if spec is not None and not isinstance(spec, QuantSpec):
+        from vllm.model_executor.layers.quantization.base_config import (
+            layer_target_spec,
+        )
+
+        spec = layer_target_spec(spec)
     token = _layer_target_spec.set(spec)
     try:
         yield
@@ -436,17 +448,23 @@ def layer_target_spec_scope(spec: QuantSpec | None) -> Generator[None]:
         _layer_target_spec.reset(token)
 
 
-def user_activation_override(kind: str, config: Any) -> tuple[QuantKey | None, bool]:
-    """The user's activation override for the layer being built, and whether it
-    was set (explicit `null` included): the layer's `targets` spec if any, else
-    `quantization_config.<kind>` in `config` (a `VllmConfig` or None; `kind` is
-    `linear` or `moe`)."""
+def user_quant_spec(kind: str, config: Any) -> QuantSpec | None:
+    """The user's spec for the layer being built: the layer's `targets` spec if
+    any, else `quantization_config.<kind>` in `config` (a `VllmConfig` or None;
+    `kind` is `linear` or `moe`)."""
     spec = _layer_target_spec.get()
     if spec is None:
         model_config = config.model_config if config else None
         args = model_config.quantization_config if model_config else None
         is_args = isinstance(args, QuantizationConfigArgs)
         spec = getattr(args, kind) if is_args else None
+    return spec
+
+
+def user_activation_override(kind: str, config: Any) -> tuple[QuantKey | None, bool]:
+    """The user's activation override for the layer being built, and whether it
+    was set (explicit `null` included), from `user_quant_spec`."""
+    spec = user_quant_spec(kind, config)
     if spec is None:
         return None, False
     return spec.activation, "activation" in spec.fields_set

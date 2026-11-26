@@ -1530,7 +1530,7 @@ presets:
       - **DCP8** (`--decode-context-parallel-size 8`, `--attention-backend ROCM_AITER_MLA`, `--dcp-comm-backend a2a`, `ROCM_AITER_FA` prefill, and the direct DCP ops off) is part of the **AgentX cells** preset; this preset serves without DCP.
       - The **Simple** KV-offload option emits the connector the lane uses (`SimpleCPUOffloadConnector`, `kv_both`, `lazy_offload: false`).
 
-      **MoE environment.** The lane sets `VLLM_ROCM_USE_AITER_MOE_SITUV2=1`, as the AMD profile does, plus `AITER_BF16_FP8_MOE_BOUND=0` and `AITER_FLYDSL_STAGE2_FP8=1`. The SiTUv2 path does not read `AITER_BF16_FP8_MOE_BOUND`. `AITER_FLYDSL_STAGE2_FP8=1` makes the FlyDSL MoE down projection write its per-route outputs as MXFP8 (FP8 values with E8M0 scales) instead of BF16 before they are summed. It affects only the target's MoE layers; the DSpark draft's MLP is dense.
+      **MoE environment.** The lane sets `VLLM_ROCM_USE_AITER_MOE_SITUV2=1`, as the AMD profile does, plus `AITER_FLYDSL_STAGE2_FP8=1`. `AITER_FLYDSL_STAGE2_FP8=1` makes the FlyDSL MoE down projection write its per-route outputs as MXFP8 (FP8 values with E8M0 scales) instead of BF16 before they are summed. It affects only the target's MoE layers; the DSpark draft's MLP is dense.
 
       **QuickReduce.** The lane also enables INT4 QuickReduce (`VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4`) with `VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB=16`, so only tensor-parallel all-reduces of 16 MiB or more use the INT4 codec. INT4 all-reduce is lossy, so it is not in the builder. The DSpark draft's all-reduces carry only its draft-step tokens (at most 600 tokens × 7,168 BF16 values, about 8.2 MiB, at concurrency 60), and its context projection has no all-reduce, so the 16 MiB floor keeps the draft out of the INT4 path in every lane cell.
 
@@ -1781,7 +1781,6 @@ presets:
       export VLLM_ROCM_USE_AITER=1
       export SAFETENSORS_FAST_GPU=1
       export VLLM_ROCM_USE_AITER_MOE_SITUV2=1
-      export AITER_BF16_FP8_MOE_BOUND=0
       export AITER_FLYDSL_STAGE2_FP8=1
       export VLLM_ROCM_AITER_MLA_ASM_PADDING=asm
       export VLLM_ROCM_AITER_MLA_DCP_VERIFY=asm
@@ -2000,7 +1999,7 @@ guide: |
 
   export NCCL_SOCKET_IFNAME="$SOCKET_IFNAME" GLOO_SOCKET_IFNAME="$SOCKET_IFNAME"
   export NCCL_IB_HCA="$RDMA_DEVICES"
-  export VLLM_ROCM_USE_AITER=1 AITER_BF16_FP8_MOE_BOUND=0
+  export VLLM_ROCM_USE_AITER=1
   export AITER_FLYDSL_STAGE2_FP8=1
   export VLLM_ROCM_AITER_MLA_ASM_PADDING=asm VLLM_ROCM_AITER_MLA_DCP_VERIFY=asm
   export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
