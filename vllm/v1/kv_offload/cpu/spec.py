@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import mmap
 from typing import Any
 
+import psutil
 from typing_extensions import override
 
 from vllm.distributed.device_communicators.shm_broadcast import check_shm_free_space
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingCounterMetadata,
@@ -20,7 +23,10 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo, CPUOffloadingMetrics
-from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
+from vllm.v1.kv_offload.cpu.gpu_worker import (
+    MIN_HOST_REGISTER_SAVED_BYTES,
+    CPUOffloadingWorker,
+)
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     REGION_SEGMENTS,
@@ -28,6 +34,32 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import (
 )
 
 logger = init_logger(__name__)
+
+# AMDGPU_RESERVE_MEM_LIMIT in drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd_gpuvm.c
+_KFD_RESERVE_MEM_LIMIT = 3 << 29
+_KFD_NO_SYSTEM_MEM_LIMIT = "/sys/module/amdgpu/parameters/no_system_mem_limit"
+# Left for each worker's other amdkfd-charged host memory. With GLM-5.3 FP8 at TP8 on
+# MI308X, those allocations held about 62 GiB of the limit, or 7.8 GiB per worker.
+_KFD_WORKER_HEADROOM = 10 << 30
+
+
+def _rocm_kfd_system_mem_limit() -> int | None:
+    """The amdkfd node-wide limit on system memory mapped for GPU access, in
+    bytes, or None when `amdgpu.no_system_mem_limit` lifts it.
+
+    Mirrors amdgpu_amdkfd_gpuvm_init_mem_limits(). Every host registration is
+    charged its full length against this one limit, per registering process."""
+    try:
+        with open(_KFD_NO_SYSTEM_MEM_LIMIT) as f:
+            if f.read().strip() in ("Y", "1"):
+                return None
+    except OSError:
+        pass
+    mem = psutil.virtual_memory().total
+    limit = mem - (mem >> 6)
+    if limit < 2 * _KFD_RESERVE_MEM_LIMIT:
+        return limit >> 1
+    return limit - _KFD_RESERVE_MEM_LIMIT
 
 
 def _all_workers_barrier() -> None:
@@ -217,9 +249,77 @@ class CPUOffloadingSpec(OffloadingSpec):
     def _uses_shared_region(self) -> bool:
         """Whether the worker CPU buffer is the shared mmap region (vs a private
         per-rank tensor); replicated-layout dedup is gated on this being True."""
+        if current_platform.is_rocm():
+            # Count every DP engine as if on this node: overcounting only keeps
+            # the private buffers.
+            reason = self._rocm_shared_region_over_kfd_limit(
+                whole_region=False,
+                num_engines=self.config.parallel.data_parallel_size,
+            )
+            if reason is not None and self.config.parallel.rank == 0:
+                logger.warning_once(
+                    "CPU KV offload on ROCm: %s. Falling back to a private "
+                    "buffer per worker, without replicated-layout deduplication.",
+                    reason,
+                )
+            return reason is None
+        return current_platform.is_cuda_alike() or current_platform.is_xpu()
+
+    def _rocm_shared_region_over_kfd_limit(
+        self, whole_region: bool, num_engines: int
+    ) -> str | None:
+        """Why the shared regions of `num_engines` DP engines would exceed the
+        amdkfd system memory limit when host-registered, or None when they fit.
+
+        amdkfd charges each registration, per process, against one node-wide
+        limit, which each worker's other host allocations share; the check
+        leaves _KFD_WORKER_HEADROOM per worker for them. Outside the replicated
+        layout, CPUOffloadingSpec gives each rank
+        its own region. Otherwise each worker registers its slots, or the whole
+        region when `whole_region` is set or slot-only registration saves too
+        little (see pin_mmap_region()); in the replicated layout, a slot is the
+        whole row.
+        Past the limit some registrations fail, and the GPU allocations that
+        later need the same limit fail with them."""
+        config = self.config
+        world_size = config.parallel.world_size
+        if config.worker_kv_bytes_per_block <= 0 or world_size <= 0:
+            return None
+        cpu_bytes_to_use = int(self.extra_config["cpu_bytes_to_use"])
+        # Same sizing as __init__, assuming the shared region.
+        num_copies = 1 if config.replicated_layout else world_size
+        slot = config.worker_kv_bytes_per_block * self.blocks_per_chunk
+        row = round_up(slot * num_copies, self.BLOCK_SIZE_ALIGNMENT)
+        num_rows = cpu_bytes_to_use // row
+        page = mmap.PAGESIZE
+        if self.SHARED_REGION_PER_RANK and not config.replicated_layout:
+            # Each rank registers only its own region.
+            rank_row = round_up(slot, self.BLOCK_SIZE_ALIGNMENT)
+            num_rows = cpu_bytes_to_use // (world_size * rank_row)
+            row_bytes = world_size * rank_row
+        elif whole_region or row - slot < max(page, MIN_HOST_REGISTER_SAVED_BYTES):
+            row_bytes = world_size * row
+        else:
+            row_bytes = sum(
+                round_up(rank * slot % page + slot, page) for rank in range(world_size)
+            )
+        charged = num_rows * row_bytes * num_engines
+        limit = _rocm_kfd_system_mem_limit()
+        if limit is None:
+            return None
+        budget = limit - num_engines * world_size * _KFD_WORKER_HEADROOM
+        if charged <= budget:
+            return None
         return (
-            current_platform.is_cuda_alike() and not current_platform.is_rocm()
-        ) or current_platform.is_xpu()
+            f"host-registering cpu_bytes_to_use={cpu_bytes_to_use / GiB_bytes:.1f} "
+            f"GiB charges {charged / GiB_bytes:.1f} GiB across all workers against "
+            f"the amdkfd system memory limit of {limit / GiB_bytes:.1f} GiB, "
+            f"{budget / GiB_bytes:.1f} GiB after "
+            f"{_KFD_WORKER_HEADROOM / GiB_bytes:.0f} GiB per worker for other host "
+            f"allocations; cpu_bytes_to_use up to about "
+            f"{cpu_bytes_to_use * max(budget, 0) / charged / GiB_bytes:.1f} GiB fits, "
+            "or boot with amdgpu.no_system_mem_limit=1"
+        )
 
     @property
     def _replicated_prefault_shard(self) -> tuple[int, int] | None:

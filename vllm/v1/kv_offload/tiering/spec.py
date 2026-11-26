@@ -57,6 +57,7 @@ from typing import Any
 from typing_extensions import override
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingCounterMetadata,
@@ -334,6 +335,15 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
+        if current_platform.is_rocm():
+            # Tiering has no private-buffer fallback, so fail here rather than
+            # at the first GPU allocation after a failed registration. Count only
+            # this engine, since other DP engines may run on other nodes.
+            reason = self._rocm_shared_region_over_kfd_limit(
+                whole_region=config.canonical_layout, num_engines=1
+            )
+            if reason is not None:
+                raise ValueError(f"TieringOffloadingSpec on ROCm: {reason}.")
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
         if self.async_init:
